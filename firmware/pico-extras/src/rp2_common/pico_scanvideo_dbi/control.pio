@@ -1,0 +1,25 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+.program video_dbi_control
+.define out_delay 1
+.define clk_delay 1
+
+.side_set 1 ; used for WR strobe
+.extern data_run_out
+    out pins, 16         [out_delay]  set 0
+    jmp x-- data_run_out [out_delay]  set 1
+
+.extern entry_point
+.wrap_target
+.extern new_state_wait
+    out exec, 16             set 1
+    out x, 11                set 1
+    out pc, 5                set 1
+.extern clock_run
+    nop                 [clk_delay]  set 0
+    jmp x-- clock_run   [clk_delay]  set 1
+.wrap

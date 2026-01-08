@@ -1,0 +1,58 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+.program pwm_one_bit_dither
+.side_set 1 opt
+; Format:
+; | high len | low len | (dither) * n |
+; OSR level
+; cycle length = 7 + 2 + 127
+
+; 136 clocks/cycle frequency 352941 / 16 = 22058
+delay:
+  nop [2]
+.wrap_target
+  out pins, 1
+loops:
+  mov x, isr        side 1
+loop1:
+  jmp x-- loop1
+  mov x, y          side 0
+loop0:
+  jmp x-- loop0
+  jmp !osre delay
+public entry_point:
+  pull
+  out isr, 7
+  out y, 7
+.wrap
+
+.program pwm_two_bit_dither
+.side_set 1 opt
+; Format:
+; | high len | low len | (dither) * n |
+; OSR level
+
+; this 138 clocks/cycle frequency 347826 / 16 = 21739Hz
+delay:
+  nop [2]
+.wrap_target
+  out pins, 1
+  out pins, 1
+  out pins, 1
+loops:
+  mov x, isr        side 1
+loop1:
+  jmp x-- loop1
+  mov x, y          side 0
+loop0:
+  jmp x-- loop0
+  jmp !osre delay
+entry_point:
+  pull
+  out isr, 7
+  out y, 7
+.wrap

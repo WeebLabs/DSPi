@@ -1,0 +1,5 @@
+add_subdirectory(pico_audio)
+add_subdirectory(pico_scanvideo)
+add_subdirectory(pico_sd_card)
+add_subdirectory(pico_util_buffer)
+add_subdirectory(platypus)

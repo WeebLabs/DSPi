@@ -1,0 +1,34 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+.program video_htiming
+.side_set 1 ; used for clock
+public entry_point:
+    ; todo we can do this with one off setup via pio_exec
+    pull block      side 0
+.wrap_target
+new_state:
+    out exec, 16    side 1 ; this does any per state inline work (or it can be a JMP to entry_point to sleep..
+                          ; note the EXECed instruction should have a side set 0
+    out x, 13       side 1
+    out pins, 3     side 0 ; we want an OUT EXEC above which sets an IRQ to start scanline output
+                          ; to cause this out and the pixel out in the same cycle (this would be positive clk edge latch)
+loop:
+    nop             side 1
+    jmp x-- loop    side 0
+.wrap
+
+; these are the values used in the out exec in video_htiming
+.program video_htiming_states
+.side_set 1
+    ; state 0 = set irq 0
+    irq 0           side 0
+    ; state 1 = set irq 1
+    irq 1           side 0
+    ; state 2 = set irq 4
+    irq 4           side 0
+    ; state 3 = clear irq 4
+    irq clear 4     side 0

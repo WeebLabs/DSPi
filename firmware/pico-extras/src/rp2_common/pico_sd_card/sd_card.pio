@@ -1,0 +1,59 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; NOTE IT IS IMPERATIVE THAT YOU DON"T SCREW UP THE CLOCK EVEN FOR ONE HALF CYCLE, OTHERWISE THE DEVICE WILL LIKELY BE DISPLEASED AND MAY SEND GARBAGE (EVEN IF IT ISN"T DOING ANYTHING IMPORTANT WHEN YOU DO SO)
+
+.define sd_irq_num 7
+
+.program sd_clk
+.side_set 1
+.wrap_target
+    irq sd_irq_num              side 1
+    irq clear sd_irq_num        side 0
+.wrap
+
+.program sd_cmd_or_dat
+.origin 0 ; must load at zero (offsets are hardcoded in instruction stream)
+public no_arg_state_wait_high:      ; this is a no arg state which means it must always appear in the second half of a word
+    ; make sure pins are hi when we set output dir (note if we are 1 bit we'll be configured for 1 pin only, so sending 0b1111 is fine)
+    set pins, 0b1111
+    set pindirs, 0b1111 
+
+public no_arg_state_waiting_for_cmd:
+    out exec, 16                    ; expected to be a jmp to a state
+
+public state_send_bits:
+    out x, 16
+    wait 0 irq sd_irq_num
+send_loop1:
+    out pins, 1
+    jmp x-- send_loop1
+
+public state_inline_instruction:
+    out exec, 16                     ; may be any instruction
+.wrap_target
+    out exec, 16                     ; expected to be a jmp to a state
+
+public state_receive_bits:
+    out x, 16
+    set pindirs, 0
+    wait 1 pin, 0
+    wait 0 pin, 0
+    wait 0 irq sd_irq_num
+    ; note we use wrap setup to configure receive bit/nibble transfers
+public wrap_for_4bit_receive:
+receive_loop1:
+    in pins, 1
+    jmp x-- receive_loop1
+.wrap
+
+; #if INCLUDE_4BIT
+public wrap_target_for_4bit_receive:
+receive_loop4:
+    in pins, 4
+    jmp x-- receive_loop4
+    out exec, 16                      ; expected to be a jmp to a state
+; #endif
