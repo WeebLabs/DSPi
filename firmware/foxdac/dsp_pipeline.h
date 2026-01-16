@@ -1,0 +1,28 @@
+#ifndef DSP_PIPELINE_H
+#define DSP_PIPELINE_H
+
+#include "config.h"
+
+// Filter storage
+extern Biquad filters[NUM_CHANNELS][MAX_BANDS];
+extern EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
+extern float channel_delays_ms[NUM_CHANNELS];
+
+// Delay Lines
+extern int32_t delay_lines[3][MAX_DELAY_SAMPLES];
+extern uint32_t delay_write_idx;
+extern int32_t channel_delay_samples[3];
+
+// API
+void dsp_init_default_filters(void);
+void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate);
+void dsp_recalculate_all_filters(float sample_rate);
+void dsp_update_delay_samples(float sample_rate);
+
+// Optimized processing function
+int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel);
+
+// Math helper
+int32_t fast_mul_q28(int32_t a, int32_t b);
+
+#endif // DSP_PIPELINE_H

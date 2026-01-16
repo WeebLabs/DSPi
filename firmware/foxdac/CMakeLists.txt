@@ -4,7 +4,7 @@ if (TARGET usb_device)
     add_compile_options(-fcommon)
     add_compile_options(-O2)
 
-    add_executable(foxdac usb_spdif.c)
+    add_executable(foxdac config.h dsp_pipeline.c dsp_pipeline.h main.c pdm_generator.c pdm_generator.h usb_audio.c usb_audio.h usb_descriptors.c usb_descriptors.h)
 
     pico_set_binary_type(foxdac copy_to_ram)
 
