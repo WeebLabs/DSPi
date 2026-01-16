@@ -437,6 +437,27 @@ static bool handle_vendor_request(struct usb_setup_packet *setup) {
     }
     
     if (setup->bRequest == REQ_GET_STATUS) {
+        // Combined status: all peaks + CPU in one 12-byte transfer (wValue=9)
+        if (setup->wValue == 9) {
+            struct usb_buffer *buffer = usb_current_in_packet_buffer(&usb_control_in);
+            uint8_t *resp = buffer->data;
+            resp[0] = global_status.peaks[0] & 0xFF;
+            resp[1] = global_status.peaks[0] >> 8;
+            resp[2] = global_status.peaks[1] & 0xFF;
+            resp[3] = global_status.peaks[1] >> 8;
+            resp[4] = global_status.peaks[2] & 0xFF;
+            resp[5] = global_status.peaks[2] >> 8;
+            resp[6] = global_status.peaks[3] & 0xFF;
+            resp[7] = global_status.peaks[3] >> 8;
+            resp[8] = global_status.peaks[4] & 0xFF;
+            resp[9] = global_status.peaks[4] >> 8;
+            resp[10] = global_status.cpu0_load;
+            resp[11] = global_status.cpu1_load;
+            buffer->data_len = 12;
+            usb_start_single_buffer_control_in_transfer();
+            return true;
+        }
+
         uint32_t resp = 0;
         if (setup->wValue == 0) {
             resp = (uint32_t)global_status.peaks[0] | ((uint32_t)global_status.peaks[1] << 16);
@@ -655,7 +676,7 @@ static struct usb_endpoint ep_op_out, ep_op_sync;
 // S/PDIF Config
 struct audio_spdif_config config = { .pin = PICO_AUDIO_SPDIF_PIN, .dma_channel = 0, .pio_sm = 0 };
 struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
-#define AUDIO_BUFFER_COUNT 8
+// AUDIO_BUFFER_COUNT now defined in config.h (reduced from 8 to 4 for lower latency)
 
 static void _audio_reconfigure() {
     rate_change_pending = true;

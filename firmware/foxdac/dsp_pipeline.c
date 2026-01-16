@@ -76,7 +76,9 @@ void dsp_update_delay_samples(float sample_rate) {
     if (samples_r > MAX_DELAY_SAMPLES) samples_r = MAX_DELAY_SAMPLES;
     channel_delay_samples[1] = samples_r;
 
-    float sub_total_ms = channel_delays_ms[CH_OUT_SUB] + SUB_ALIGN_MS;
+    // Sub: add alignment compensation (converts sample difference to ms at current rate)
+    float align_ms = (float)SUB_ALIGN_SAMPLES / sample_rate * 1000.0f;
+    float sub_total_ms = channel_delays_ms[CH_OUT_SUB] + align_ms;
     int32_t samples_sub = (int32_t)(sub_total_ms * sample_rate / 1000.0f);
     if (samples_sub > MAX_DELAY_SAMPLES) samples_sub = MAX_DELAY_SAMPLES;
     channel_delay_samples[2] = samples_sub;

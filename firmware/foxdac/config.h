@@ -47,10 +47,20 @@ extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer 
 // 16 gives ~1.4s time constant at 48kHz, safe for bass
 #define PDM_LEAKAGE_SHIFT 16
 
+// SPDIF Buffer Configuration
+#define AUDIO_BUFFER_COUNT    6   // Reduced from 8, compromise for lower latency
+#define AUDIO_BUFFER_SAMPLES  192
+
 // DELAY CONFIGURATION
 #define MAX_DELAY_SAMPLES 8192
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
-#define SUB_ALIGN_MS      3.83f
+
+// Latency alignment (in samples - automatically adapts to sample rate)
+// SPDIF path: watermark = AUDIO_BUFFER_COUNT/2 buffers
+// PDM path: DMA buffer = PDM_DMA_BUFFER_SIZE/8 PCM samples
+#define SPDIF_BUFFER_SAMPLES  ((AUDIO_BUFFER_COUNT / 2) * AUDIO_BUFFER_SAMPLES)  // 384
+#define PDM_BUFFER_SAMPLES    (PDM_DMA_BUFFER_SIZE / 8)                           // 256
+#define SUB_ALIGN_SAMPLES     (SPDIF_BUFFER_SAMPLES - PDM_BUFFER_SAMPLES)         // 128
 
 // ----------------------------------------------------------------------------
 // VENDOR INTERFACE CONFIGURATION (WinUSB / WCID)
