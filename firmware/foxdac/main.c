@@ -17,8 +17,16 @@
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
 // ----------------------------------------------------------------------------
-volatile int overruns = 0;
+volatile int overruns = 0;  // Legacy - kept for compatibility
 volatile uint32_t pio_samples_dma = 0;
+
+// Buffer monitoring counters
+volatile uint32_t pdm_ring_overruns = 0;   // Core 0 couldn't push (ring full)
+volatile uint32_t pdm_ring_underruns = 0;  // Core 1 needed sample but ring empty
+volatile uint32_t pdm_dma_overruns = 0;    // Core 1 write caught up to DMA read
+volatile uint32_t pdm_dma_underruns = 0;   // Core 1 write fell behind DMA read
+volatile uint32_t spdif_overruns = 0;      // USB callback couldn't get buffer (pool full)
+volatile uint32_t spdif_underruns = 0;     // USB packet gap > 2ms (consumer likely starved)
 static volatile uint8_t clock_176mhz = 0;
 
 static void perform_rate_change(uint32_t new_freq) {

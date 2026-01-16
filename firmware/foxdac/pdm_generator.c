@@ -90,7 +90,7 @@ void pdm_push_sample(int32_t sample, bool reset) {
         pdm_head = next_head;
         __sev();
     } else {
-        overruns++; // Uses the extern from config.h/main.c
+        pdm_ring_overruns++;
     }
 }
 
@@ -114,6 +114,7 @@ void pdm_core1_entry() {
 
         // Underrun recovery - write pointer fell behind read pointer
         if (delta > (PDM_DMA_BUFFER_SIZE / 2)) {
+            pdm_dma_underruns++;
             local_pdm_err = 0;
             local_pdm_err2 = 0;
             local_pdm_write = (current_read_idx + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
@@ -129,6 +130,7 @@ void pdm_core1_entry() {
             sample_value = msg.sample;
         } else if (delta < TARGET_LEAD) {
             // No sample but we need to generate silence to maintain lead
+            pdm_ring_underruns++;
             sample_value = 0;
         } else {
             // We're at target lead with no samples - wait for DMA to catch up or sample to arrive
@@ -182,6 +184,16 @@ void pdm_core1_entry() {
 
             pdm_dma_buffer[local_pdm_write] = pdm_word;
             local_pdm_write = (local_pdm_write + 1) & (PDM_DMA_BUFFER_SIZE - 1);
+        }
+
+        // Check for overrun after writing - if delta is very small, write is catching up to read
+        {
+            uint32_t new_read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
+            uint32_t new_read_idx = (new_read_addr - (uint32_t)pdm_dma_buffer) / 4;
+            int32_t new_delta = (local_pdm_write - new_read_idx) & (PDM_DMA_BUFFER_SIZE - 1);
+            if (new_delta < 32) {  // Less than 4 samples of cushion
+                pdm_dma_overruns++;
+            }
         }
 
         // Leaky integrators - once per audio sample, prevents DC accumulation

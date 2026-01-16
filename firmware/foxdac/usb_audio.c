@@ -89,9 +89,24 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     struct usb_buffer *usb_buffer = usb_current_out_packet_buffer(ep);
     if (!usb_buffer) { usb_start_empty_control_in_transfer_null_completion(); return; }
 
+    // Detect SPDIF underrun: USB packets should arrive every ~1ms
+    // A gap > 2ms means the buffer pool likely ran dry
+    static uint32_t last_packet_time = 0;
+    if (last_packet_time > 0) {
+        uint32_t gap = start_time - last_packet_time;
+        if (gap > 2000) {  // > 2ms gap
+            spdif_underruns++;
+        }
+    }
+    last_packet_time = start_time;
+
     struct audio_buffer* audio_buffer = NULL;
     if (producer_pool) audio_buffer = take_audio_buffer(producer_pool, false);
-    if (audio_buffer) audio_buffer->sample_count = usb_buffer->data_len / 4;
+    if (audio_buffer) {
+        audio_buffer->sample_count = usb_buffer->data_len / 4;
+    } else {
+        spdif_overruns++;
+    }
     
     uint32_t sample_count = usb_buffer->data_len / 4;
     
@@ -428,6 +443,18 @@ static bool handle_vendor_request(struct usb_setup_packet *setup) {
             resp = (uint32_t)global_status.peaks[2] | ((uint32_t)global_status.peaks[3] << 16);
         } else if (setup->wValue == 2) {
             resp = (uint32_t)global_status.peaks[4] | ((uint32_t)global_status.cpu0_load << 16) | ((uint32_t)global_status.cpu1_load << 24);
+        } else if (setup->wValue == 3) {
+            resp = pdm_ring_overruns;
+        } else if (setup->wValue == 4) {
+            resp = pdm_ring_underruns;
+        } else if (setup->wValue == 5) {
+            resp = pdm_dma_overruns;
+        } else if (setup->wValue == 6) {
+            resp = pdm_dma_underruns;
+        } else if (setup->wValue == 7) {
+            resp = spdif_overruns;
+        } else if (setup->wValue == 8) {
+            resp = spdif_underruns;
         }
         usb_start_tiny_control_in_transfer(resp, 4);
         return true;

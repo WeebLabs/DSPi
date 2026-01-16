@@ -11,6 +11,14 @@
 extern volatile int overruns;
 extern volatile uint32_t pio_samples_dma;
 
+// Buffer monitoring counters
+extern volatile uint32_t pdm_ring_overruns;   // Core 0 couldn't push (ring full)
+extern volatile uint32_t pdm_ring_underruns;  // Core 1 needed sample but ring empty
+extern volatile uint32_t pdm_dma_overruns;    // Core 1 write caught up to DMA read
+extern volatile uint32_t pdm_dma_underruns;   // Core 1 write fell behind DMA read
+extern volatile uint32_t spdif_overruns;      // USB callback couldn't get buffer (pool full)
+extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer likely starved)
+
 // ----------------------------------------------------------------------------
 // CONFIGURATION
 // ----------------------------------------------------------------------------
