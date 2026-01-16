@@ -54,6 +54,11 @@
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 #define SUB_ALIGN_MS      3.83f      // Fixed offset to align PDM with S/PDIF
 
+// Standard USB Audio Request Codes
+#define AUDIO_REQ_GetMin 0x82
+#define AUDIO_REQ_GetMax 0x83
+#define AUDIO_REQ_GetRes 0x84
+
 // Vendor Requests
 #define REQ_SET_EQ_PARAM 0x42
 #define REQ_GET_EQ_PARAM 0x43
@@ -743,6 +748,27 @@ static bool do_set_current(struct usb_setup_packet *setup) {
         audio_control_cmd_t.cmd = AUDIO_REQ_SetCurrent; audio_control_cmd_t.type = setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK; audio_control_cmd_t.len = (uint8_t) setup->wLength; audio_control_cmd_t.unit = setup->wIndex >> 8u; audio_control_cmd_t.cs = setup->wValue >> 8u; audio_control_cmd_t.cn = (uint8_t) setup->wValue; usb_start_control_out_transfer(&_audio_cmd_transfer_type); return true;
     } return false;
 }
+
+// Get MIX/MAX/RES volume parameters for Windows (Necessary to init)
+static bool do_get_min_max_res(struct usb_setup_packet *setup) {
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        // Check if the request is for Volume Control
+        if ((setup->wValue >> 8u) == FEATURE_VOLUME_CONTROL) {
+            int16_t val;
+            switch (setup->bRequest) {
+                case AUDIO_REQ_GetMin: val = MIN_VOLUME; break;
+                case AUDIO_REQ_GetMax: val = MAX_VOLUME; break;
+                case AUDIO_REQ_GetRes: val = VOLUME_RESOLUTION; break;
+                default: return false;
+            }
+            // Send the 2-byte volume limit
+            usb_start_tiny_control_in_transfer((uint16_t)val, 2);
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool do_get_current(struct usb_setup_packet *setup) {
     if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
         switch (setup->wValue >> 8u) { case FEATURE_MUTE_CONTROL: usb_start_tiny_control_in_transfer(audio_state.mute, 1); return true; case FEATURE_VOLUME_CONTROL: usb_start_tiny_control_in_transfer(audio_state.volume, 2); return true; }
@@ -797,8 +823,23 @@ static bool ac_setup_request_handler(__unused struct usb_interface *interface, s
             }
         }
     }
-    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) { switch (setup->bRequest) { case AUDIO_REQ_SetCurrent: return do_set_current(setup); case AUDIO_REQ_GetCurrent: return do_get_current(setup); default: break; } } return false;
-}
+    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
+            switch (setup->bRequest) {
+                case AUDIO_REQ_SetCurrent:
+                    return do_set_current(setup);
+                case AUDIO_REQ_GetCurrent:
+                    return do_get_current(setup);
+                
+                // HANDLE WINDOWS MIN/MAX/RES REQUEST
+                case AUDIO_REQ_GetMin:
+                case AUDIO_REQ_GetMax:
+                case AUDIO_REQ_GetRes:
+                    return do_get_min_max_res(setup);
+                default: break;
+            }
+        }
+        return false;
+    }
 
 void usb_sound_card_init() {
     usb_interface_init(&ac_interface, &audio_device_config.ac_interface, NULL, 0, true); ac_interface.setup_request_handler = ac_setup_request_handler;
