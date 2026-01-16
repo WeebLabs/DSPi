@@ -4,6 +4,7 @@
 #include "usb_descriptors.h"
 #include "dsp_pipeline.h"
 #include "pdm_generator.h"
+#include "flash_storage.h"
 #include "pico/audio_spdif.h"
 #include "hardware/timer.h"
 #include "hardware/clocks.h"
@@ -25,8 +26,8 @@ volatile EqParamPacket pending_packet;
 volatile bool rate_change_pending = false;
 volatile uint32_t pending_rate = 48000;
 
-static volatile float global_preamp_db = 0.0f;
-static volatile int32_t global_preamp_mul = 268435456;
+volatile float global_preamp_db = 0.0f;
+volatile int32_t global_preamp_mul = 268435456;
 
 // Sync State
 volatile uint64_t total_samples_produced = 0;
@@ -457,6 +458,31 @@ static bool handle_vendor_request(struct usb_setup_packet *setup) {
             resp = spdif_underruns;
         }
         usb_start_tiny_control_in_transfer(resp, 4);
+        return true;
+    }
+
+    if (setup->bRequest == REQ_SAVE_PARAMS) {
+        int result = flash_save_params();
+        usb_start_tiny_control_in_transfer(result, 1);
+        return true;
+    }
+
+    if (setup->bRequest == REQ_LOAD_PARAMS) {
+        int result = flash_load_params();
+        if (result == FLASH_OK) {
+            // Recalculate all biquad coefficients with loaded recipes
+            dsp_recalculate_all_filters((float)audio_state.freq);
+            dsp_update_delay_samples((float)audio_state.freq);
+        }
+        usb_start_tiny_control_in_transfer(result, 1);
+        return true;
+    }
+
+    if (setup->bRequest == REQ_FACTORY_RESET) {
+        flash_factory_reset();
+        dsp_recalculate_all_filters((float)audio_state.freq);
+        dsp_update_delay_samples((float)audio_state.freq);
+        usb_start_tiny_control_in_transfer(FLASH_OK, 1);
         return true;
     }
 

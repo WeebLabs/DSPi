@@ -10,6 +10,7 @@
 // Local headers
 #include "config.h"
 #include "dsp_pipeline.h"
+#include "flash_storage.h"
 #include "pdm_generator.h"
 #include "usb_audio.h"
 #include "usb_descriptors.h"
@@ -69,6 +70,13 @@ void core0_init() {
     // SPDIF requires DMA Channel 0 (hardcoded in config).
     // If PDM inits first, it steals Ch 0 via dma_claim_unused_channel(), causing SPDIF to panic/crash.
     usb_sound_card_init();
+
+    // Try to load saved parameters from flash
+    // If successful, this overwrites the defaults set by usb_sound_card_init()
+    if (flash_load_params() == FLASH_OK) {
+        dsp_recalculate_all_filters(48000.0f);
+        dsp_update_delay_samples(48000.0f);
+    }
 
 #if ENABLE_SUB
     pdm_setup_hw();

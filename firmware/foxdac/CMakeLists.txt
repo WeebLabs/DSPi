@@ -4,7 +4,7 @@ if (TARGET usb_device)
     add_compile_options(-fcommon)
     add_compile_options(-O2)
 
-    add_executable(foxdac config.h dsp_pipeline.c dsp_pipeline.h main.c pdm_generator.c pdm_generator.h usb_audio.c usb_audio.h usb_descriptors.c usb_descriptors.h)
+    add_executable(foxdac config.h dsp_pipeline.c dsp_pipeline.h flash_storage.c flash_storage.h main.c pdm_generator.c pdm_generator.h usb_audio.c usb_audio.h usb_descriptors.c usb_descriptors.h)
 
     pico_set_binary_type(foxdac copy_to_ram)
 
@@ -25,6 +25,6 @@ if (TARGET usb_device)
             PICO_DEFAULT_UART_TX_PIN=12
     )
 
-    target_link_libraries(foxdac pico_stdlib usb_device hardware_pwm pico_audio_spdif pico_multicore pico_unique_id)
+    target_link_libraries(foxdac pico_stdlib usb_device hardware_pwm hardware_flash pico_audio_spdif pico_multicore pico_unique_id)
     pico_add_extra_outputs(foxdac)
 endif()
