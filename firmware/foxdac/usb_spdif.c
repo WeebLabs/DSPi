@@ -657,7 +657,7 @@ static void __not_in_flash_func(_as_sync_packet)(struct usb_endpoint *ep) {
         int32_t drift = (int32_t)(total_samples_produced - expected_samples);
         
         // Nominal (10.14 fixed point format for USB 1.0)
-        uint32_t nominal = audio_state.freq << 14u / 1000;
+        uint32_t nominal = (audio_state.freq << 14u) / 1000;
         
         // Correction Factor:
         // Gain: 50 seems stable for quick lock.
