@@ -104,8 +104,6 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     int16_t *in = (int16_t *) usb_buffer->data;
     int32_t vol_mul = audio_state.vol_mul;
     int32_t preamp = global_preamp_mul;
-    bool is_silent = true;
-    int32_t silence_threshold = 1 << 20;
     bool is_bypassed = bypass_master_eq;
 
     int32_t peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
@@ -113,9 +111,7 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     for (uint32_t i = 0; i < sample_count; i++) {
         int16_t raw_left_16 = in[i*2];
         int16_t raw_right_16 = in[i*2+1];
-        
-        if (abs(raw_left_16) > (silence_threshold >> 14) || abs(raw_right_16) > (silence_threshold >> 14)) is_silent = false;
-        
+
         int32_t raw_left_32 = (int32_t)raw_left_16 << 14;
         int32_t raw_right_32 = (int32_t)raw_right_16 << 14;
 
@@ -179,7 +175,7 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
         }
 
 #if ENABLE_SUB
-        pdm_push_sample(delayed_sub, is_silent);
+        pdm_push_sample(delayed_sub, false);
 #endif
     }
 

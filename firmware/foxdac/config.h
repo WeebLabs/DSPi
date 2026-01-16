@@ -26,10 +26,18 @@ extern volatile uint32_t pio_samples_dma;
 
 // PDM Configuration
 #define PDM_OVERSAMPLE 256
-#define PDM_DMA_BUFFER_SIZE 1024
+#define PDM_DMA_BUFFER_SIZE 2048  // Doubled for more margin (was 1024)
+#define PDM_DMA_RING_BITS 13      // log2(2048 * 4 bytes) = 13
 #define PDM_PIO pio1
 #define PDM_SM 0
 #define PDM_CLIP_THRESH 26214
+
+// PDM Sigma-Delta Tuning
+// Dither mask: controls TPDF amplitude. Start small (0x1FF), increase if idle tones persist
+#define PDM_DITHER_MASK 0x1FF
+// Leakage shift: higher = less leakage. Applied once per audio sample.
+// 16 gives ~1.4s time constant at 48kHz, safe for bass
+#define PDM_LEAKAGE_SHIFT 16
 
 // DELAY CONFIGURATION
 #define MAX_DELAY_SAMPLES 8192
