@@ -6,8 +6,8 @@
 // DESCRIPTOR STRINGS
 // ----------------------------------------------------------------------------
 
-static char descriptor_str_vendor[] = "H3 & astanoev.com";
-static char descriptor_str_product[] = "Pico DSP 2.1 (WinUSB)";
+static char descriptor_str_vendor[] = "GitHub.com/WeebLabs";
+static char descriptor_str_product[] = "Weeb Labs DSPi";
 
 // Removed 'static' so main.c can write the board ID
 char descriptor_str_serial[17] = "0123456789ABCDEF";
