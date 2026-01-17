@@ -33,6 +33,8 @@ volatile int32_t global_preamp_mul = 268435456;
 volatile uint64_t total_samples_produced = 0;
 volatile uint64_t start_time_us = 0;
 volatile bool sync_started = false;
+static volatile uint64_t last_packet_time_us = 0;
+#define AUDIO_GAP_THRESHOLD_US 50000  // 50ms - reset sync if packets stop this long
 
 // Audio Pool
 struct audio_buffer_pool *producer_pool = NULL;
@@ -91,11 +93,12 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     if (!usb_buffer) { usb_start_empty_control_in_transfer_null_completion(); return; }
 
     // Detect SPDIF underrun: USB packets should arrive every ~1ms
-    // A gap > 2ms means the buffer pool likely ran dry
+    // A gap > 2ms (but < 50ms) means the buffer pool likely ran dry
+    // Gaps > 50ms are pauses/restarts, not underruns
     static uint32_t last_packet_time = 0;
     if (last_packet_time > 0) {
         uint32_t gap = start_time - last_packet_time;
-        if (gap > 2000) {  // > 2ms gap
+        if (gap > 2000 && gap < 50000) {  // 2ms-50ms gap = underrun
             spdif_underruns++;
         }
     }
@@ -110,9 +113,32 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     }
     
     uint32_t sample_count = usb_buffer->data_len / 4;
-    
+    uint64_t now_us = time_us_64();
+
+    // Detect audio restart after gap - reset sync state and pre-fill pool
+    if (sync_started && last_packet_time_us > 0 &&
+        (now_us - last_packet_time_us) > AUDIO_GAP_THRESHOLD_US) {
+        sync_started = false;
+        total_samples_produced = 0;
+
+        // Pre-fill with 2 silent buffers to prevent underrun on restart
+        for (int i = 0; i < 2; i++) {
+            struct audio_buffer *sb = take_audio_buffer(producer_pool, false);
+            if (sb) {
+                int16_t *out = (int16_t *)sb->buffer->bytes;
+                for (uint32_t j = 0; j < 192; j++) {
+                    out[j * 2] = 0;
+                    out[j * 2 + 1] = 0;
+                }
+                sb->sample_count = 192;
+                give_audio_buffer(producer_pool, sb);
+            }
+        }
+    }
+    last_packet_time_us = now_us;
+
     if (!sync_started) {
-        start_time_us = time_us_64();
+        start_time_us = now_us;
         sync_started = true;
     }
     total_samples_produced += sample_count;

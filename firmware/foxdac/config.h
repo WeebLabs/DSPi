@@ -38,7 +38,7 @@ extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer 
 #define PDM_DMA_RING_BITS 13      // log2(2048 * 4 bytes) = 13
 #define PDM_PIO pio1
 #define PDM_SM 0
-#define PDM_CLIP_THRESH 26214
+#define PDM_CLIP_THRESH 29500  // ~90% modulation (was 26214 / 80%)
 
 // PDM Sigma-Delta Tuning
 // Dither mask: controls TPDF amplitude. Start small (0x1FF), increase if idle tones persist
@@ -48,7 +48,7 @@ extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer 
 #define PDM_LEAKAGE_SHIFT 16
 
 // SPDIF Buffer Configuration
-#define AUDIO_BUFFER_COUNT    6   // Reduced from 8, compromise for lower latency
+#define AUDIO_BUFFER_COUNT    8   // Reduced from 8, compromise for lower latency
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION

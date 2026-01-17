@@ -97,12 +97,16 @@ void pdm_push_sample(int32_t sample, bool reset) {
 void pdm_core1_entry() {
     int32_t local_pdm_err = 0;
     int32_t local_pdm_err2 = 0;
-    uint32_t local_pdm_write = 0;
     uint32_t active_us_accumulator = 0;
     uint32_t sample_counter = 0;
 
     // Target lead over DMA: 256 words = 32 samples = ~0.67ms at 48kHz
     const int32_t TARGET_LEAD = 256;
+
+    // Initialize write pointer ahead of DMA read position to avoid cold start underrun
+    uint32_t init_read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
+    uint32_t init_read_idx = (init_read_addr - (uint32_t)pdm_dma_buffer) / 4;
+    uint32_t local_pdm_write = (init_read_idx + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
 
     while (1) {
         int32_t sample_value;
