@@ -80,7 +80,7 @@ The following section details the internal architecture for developers wishing t
 *   **Math Engine:** 32-bit fixed-point (`int32_t`) processing pipeline running natively at 48kHz.
 
 ### USB Control Protocol
-Configuration is performed via **Interface 2** (Vendor Interface) using Control Transfers.
+Configuration is performed via **Interface 2** (Vendor Interface) using Control Transfers under Windows and via **Interface 0** under macOS.
 
 **Request Table (Hex Codes)**
 
