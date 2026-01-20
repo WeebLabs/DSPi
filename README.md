@@ -1,54 +1,64 @@
 # DSPi Firmware
 
-**DSPi** transforms a standard Raspberry Pi Pico (RP2040) into a high-fidelity digital audio processor. It acts as a USB Sound Card with a built-in DSP engine, allowing you to tune your audio system with professional tools like active crossovers, parametric EQ, and time alignment.
+**DSPi** transforms a Raspberry Pi Pico or other RP2040-based board into a very competent and inexpensive little digital audio processor. It acts as a USB sound card with an onboard DSP engine, allowing you to make use of essential tools like room correction, active crossovers, parametric EQ, and time alignment.
 
-Whether you are building a custom speaker system, integrating a subwoofer, or correcting room acoustics, DSPi provides the processing power you need for less than the cost of a cup of coffee.
+It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss army knife of audio for less than a cup of coffee".
 
 ---
 
 ## Key Capabilities
 
-*   **USB Audio Interface:** Plug-and-play operation with macOS, Windows, Linux, and iOS (48kHz / 16-bit).
-*   **10-Band Master EQ:** Apply broad tonal corrections or surgical fixes to the entire audio signal.
+*   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS.
+*   **Parametric Equalization:** Ten PEQ filters per master audio channel (Left/Right) and two filters per output channel (Left/Right/Sub).
 *   **Active Crossover:** Split frequencies between your main speakers and a subwoofer with dedicated output filters.
-*   **Time Alignment:** Delay specific channels (up to 170ms) to ensure sound from all speakers reaches your ears at the exact same moment.
-*   **Subwoofer Output:** Dedicated mono output channel with independent processing.
-*   **Digital Preamp:** High-precision digital volume control with a hardware bypass mode for pure signal testing.
+*   **Time Alignment:** Delay individual channels (up to 170ms) to ensure alignment between subwoofer and main speakers.
+*   **SPDIF Output:** Digital SPDIF output enables the use of any standard DAC.
+*   **Subwoofer Output:** Dedicated mono output channel that enables direct subwoofer output without the need for a second DAC.
 
 ---
 
 ## Audio Signal Flow
 
-DSPi processes audio in a linear pipeline, ensuring low latency and high precision.
+DSPi processes audio in a linear, low latency pipeline.
 
-1.  **Input (USB):** Audio enters from your computer.
-2.  **Preamp & Master EQ:** The signal is volume-adjusted and passed through 10 bands of Parametric EQ (Left/Right).
+1.  **Input (USB):** Audio from your PC or mobile device.
+2.  **Preamp & Master EQ:** The signal is volume-adjusted and passed through 20 bands of PEQ (10 per channel).
 3.  **Crossover Split:**
-    *   **Main Channels:** Passed through to the digital output.
-    *   **Subwoofer Channel:** Created by summing Left and Right audio.
+    *   **Main Channels:** Routed to the digital output after PEQ, becoming Main Outs.
+    *   **Subwoofer Channel:** Created by summing left and right main channels, after PEQ.
 4.  **Output Tuning:**
-    *   **Main Outs:** 2 bands of PEQ per channel (great for baffle step compensation or room correction).
-    *   **Sub Out:** 2 bands of PEQ (typically used for a Low Pass filter).
-5.  **Time Alignment:** Each channel is individually delayed to align speaker drivers.
+    *   **Main Outs:** 2 bands of PEQ per channel (ideal for 12dB/oct or 24dB/oct high pass filter).
+    *   **Sub Out:** 2 bands of PEQ (ideal for 12dB/oct or 24dB/oct low pass filter)
+5.  **Time Alignment:** Delays are applied to each channel, if configured.
 6.  **Hardware Output:**
     *   **S/PDIF (Digital):** Connects to your DAC or Receiver.
-    *   **PDM (DAC):** Connects to a simple RC filter or subwoofer amplifier input.
+    *   **PDM (Analog):** Connects to an active subwoofer's analog input.
 
 ---
 
 ## Hardware Setup
 
-Connecting DSPi to your audio gear is straightforward. You will need a Raspberry Pi Pico.
+### Flashing the Firmware
+1.  Download the latest `dspi.uf2` release.
+2.  Hold the **BOOTSEL** button on your Pico while plugging it into your computer.
+3.  A drive named `RPI-RP2` will appear.
+4.  Drag and drop the `dspi.uf2` file onto this drive.
+5.  The Pico will reboot and appear as a "Weeb Labs DSPi' audio device.
+6.  Download and launch the DSPi Console application to control the DSPi.
 
 ### Wiring Guide
 
+Connecting DSPi to your audio hardware is straightforward.
+
 | Function | Pin | Connection |
 | :--- | :--- | :--- |
-| **Digital Audio Out** (S/PDIF) | `GPIO 20` | Connect to the input of a DAC or Receiver. (Requires a simple optical/coaxial circuit). |
-| **Subwoofer Out** (PDM) | `GPIO 10` | Connect to an active subwoofer amp. (Requires a basic RC Low-Pass filter). |
-| **USB** | `Micro-USB` | Connect to your Host device (PC/Mac). |
+| **Digital Audio Out** (S/PDIF) | `GPIO 20` | Connects to the input of a DAC or Receiver. |
+| **Subwoofer Out** (PDM) | `GPIO 10` | Connects to an active subwoofer. |
+| **USB** | `Micro-USB` | Connects to your Host device (PC/Mac/Mobile Device). |
 
-> **Note:** S/PDIF output requires a Toshiba TX179 (Optical) or a simple resistor divider (Coaxial). PDM output is a 1-bit logic signal that requires a resistor and capacitor to turn into analog audio.
+> **Note:** S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider . PDM output is a 1-bit logic signal that requires a resistor and capacitor to turn into analog audio.
+
+<img src="Images/toslink.jpg" alt="Alt text" width="120"><img src="Images/spdif_converter.jpg" alt="Alt text" width="120">
 
 ### Subwoofer PDM Specifications
 The subwoofer output uses a high-performance software-defined Sigma-Delta modulator running on Core 1.
@@ -105,14 +115,7 @@ struct __attribute__((packed)) {
 
 ---
 
-## Installation
 
-### Flashing the Firmware
-1.  Download the latest `foxdac.uf2` release.
-2.  Hold the **BOOTSEL** button on your Pico while plugging it into your computer.
-3.  A drive named `RPI-RP2` will appear.
-4.  Drag and drop the `foxdac.uf2` file onto this drive.
-5.  The Pico will reboot as a DSPi Audio Device.
 
 ### Building from Source
 If you wish to modify the code:
