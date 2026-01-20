@@ -57,24 +57,7 @@ Connecting DSPi to your audio hardware is straightforward.
 
 > **Note:** S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider . PDM output is a 1-bit logic signal that requires a resistor and capacitor to turn into analog audio.
 
-<style>
-  .image-row {
-    display: flex;       /* Aligns items side-by-side */
-    gap: 10px;           /* Creates the small break in the middle */
-  }
-
-  .image-row img {
-    flex: 1;             /* Each image takes up equal available space */
-    width: 0;            /* Ensures proper resizing in all browsers */
-    min-width: 0;        /* Prevents overflow on smaller screens */
-    height: auto;        /* Maintains aspect ratio */
-  }
-</style>
-
-<div class="image-row">
-  <img src="Images/toslink.jpg" alt="Alt text">
-  <img src="Images/spdif_converter.jpg" alt="Alt text">
-</div>
+<img src="Images/toslink.jpg" alt="Alt text" width="400">     <img src="Images/spdif_converter.jpg" alt="Alt text" width="400">
 
 ### Subwoofer PDM Specifications
 The subwoofer output uses a high-performance software-defined Sigma-Delta modulator running on Core 1.
