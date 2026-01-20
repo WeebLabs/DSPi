@@ -10,7 +10,6 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 
 *   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS.
 *   **Parametric Equalization:** Ten PEQ filters per master audio channel (Left/Right) and two filters per output channel (Left/Right/Sub).
-*   **Active Crossover:** Split frequencies between your main speakers and a subwoofer with dedicated output filters.
 *   **Time Alignment:** Delay individual channels (up to 170ms) to ensure alignment between subwoofer and main speakers.
 *   **SPDIF Output:** Digital SPDIF output enables the use of any standard DAC.
 *   **Subwoofer Output:** Dedicated mono output channel that enables direct subwoofer output without the need for a second DAC.
