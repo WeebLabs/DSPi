@@ -59,16 +59,6 @@ Connecting DSPi to your audio hardware is straightforward.
 
 <img src="Images/toslink.jpg" alt="Alt text" width="49%">  <img src="Images/spdif_converter.jpg" alt="Alt text" width="49%">
 
-### Subwoofer PDM Specifications
-The subwoofer output uses a high-performance software-defined Delta-Sigma modulator running on Core 1.
-
-*   **Modulation:** 2nd-Order Delta-Sigma
-*   **Oversampling Ratio:** 256x (12.288 MHz bit clock)
-*   **Dither:** TPDF (Triangular Probability Density Function)
-*   **DC Protection:** Leaky integrator design preventing DC offset accumulation.
-
-The objective here was to use as much of Core 1 as necessary to produce an output that could be used full-range while sounding perfectly fine, even if will only be used to feed a subwoofer.  This implementation is very stable and without pops, clicks or idle tones.
-
 ---
 
 ## Developer Reference
@@ -80,6 +70,16 @@ The following section details the internal architecture for developers wishing t
 *   **Core 1:** Dedicated to the Delta-Sigma modulator (PDM generation) and buffer management.
 *   **PIO & DMA:** Hardware offloading for S/PDIF encoding and bitstream generation ensures zero CPU overhead for I/O.
 *   **Math Engine:** 32-bit fixed-point (`int32_t`) processing pipeline running natively at 48kHz.
+
+### Subwoofer PDM Specifications
+The subwoofer output uses a high-performance software-defined Delta-Sigma modulator running on Core 1.
+
+*   **Modulation:** 2nd-Order Delta-Sigma
+*   **Oversampling Ratio:** 256x (12.288 MHz bit clock)
+*   **Dither:** TPDF (Triangular Probability Density Function)
+*   **DC Protection:** Leaky integrator design preventing DC offset accumulation.
+
+The objective here was to use as much of Core 1 as necessary to produce an output that could be used full-range while sounding perfectly fine, even if will only be used to feed a subwoofer.  This implementation is very stable and without pops, clicks or idle tones.
 
 ### USB Control Protocol
 Configuration is performed via **Interface 2** (Vendor Interface) using Control Transfers under Windows and via **Interface 0** under macOS.
