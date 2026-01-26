@@ -29,6 +29,11 @@ volatile uint32_t pending_rate = 48000;
 volatile float global_preamp_db = 0.0f;
 volatile int32_t global_preamp_mul = 268435456;
 
+// Per-channel gain and mute (output channels: L=0, R=1, Sub=2)
+volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
+volatile int32_t channel_gain_mul[3] = {32768, 32768, 32768};  // Unity = 2^15
+volatile bool channel_mute[3] = {false, false, false};
+
 // Sync State
 volatile uint64_t total_samples_produced = 0;
 volatile uint64_t start_time_us = 0;
@@ -187,10 +192,16 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
         out_sub_32 = dsp_process_channel(filters[CH_OUT_SUB], sub_in_32, CH_OUT_SUB);
 #endif
 
+        // Per-channel gain and mute
+        out_l_32   = channel_mute[0] ? 0 : (int32_t)(((int64_t)out_l_32 * channel_gain_mul[0]) >> 15);
+        out_r_32   = channel_mute[1] ? 0 : (int32_t)(((int64_t)out_r_32 * channel_gain_mul[1]) >> 15);
+        out_sub_32 = channel_mute[2] ? 0 : (int32_t)(((int64_t)out_sub_32 * channel_gain_mul[2]) >> 15);
+
         if (abs(out_l_32) > peak_ol) peak_ol = abs(out_l_32);
         if (abs(out_r_32) > peak_or) peak_or = abs(out_r_32);
         if (abs(out_sub_32) > peak_sub) peak_sub = abs(out_sub_32);
 
+        // Master volume
         out_l_32   = (int32_t)(((int64_t)out_l_32 * vol_mul) >> 15);
         out_r_32   = (int32_t)(((int64_t)out_r_32 * vol_mul) >> 15);
         out_sub_32 = (int32_t)(((int64_t)out_sub_32 * vol_mul) >> 15);
@@ -312,6 +323,22 @@ static void audio_cmd_packet(struct usb_endpoint *ep) {
     }
     if (audio_control_cmd_t.cmd == REQ_SET_BYPASS && buffer->data_len >= 1) {
         bypass_master_eq = (buffer->data[0] != 0);
+    }
+    if (audio_control_cmd_t.cmd == REQ_SET_CHANNEL_GAIN && buffer->data_len >= 4) {
+        uint8_t ch = audio_control_cmd_t.cn;
+        if (ch < 3) {
+            float db;
+            memcpy(&db, buffer->data, 4);
+            channel_gain_db[ch] = db;
+            float linear = powf(10.0f, db / 20.0f);
+            channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
+        }
+    }
+    if (audio_control_cmd_t.cmd == REQ_SET_CHANNEL_MUTE && buffer->data_len >= 1) {
+        uint8_t ch = audio_control_cmd_t.cn;
+        if (ch < 3) {
+            channel_mute[ch] = (buffer->data[0] != 0);
+        }
     }
 
     // Audio class commands
@@ -461,7 +488,36 @@ static bool handle_vendor_request(struct usb_setup_packet *setup) {
         usb_start_tiny_control_in_transfer(bypass_master_eq ? 1 : 0, 1);
         return true;
     }
-    
+
+    if (setup->bRequest == REQ_SET_CHANNEL_GAIN && setup->wLength == 4) {
+        audio_control_cmd_t.cmd = REQ_SET_CHANNEL_GAIN;
+        audio_control_cmd_t.cn = (uint8_t)setup->wValue;
+        usb_start_control_out_transfer(&_audio_cmd_transfer_type);
+        return true;
+    }
+    if (setup->bRequest == REQ_GET_CHANNEL_GAIN) {
+        uint8_t ch = (uint8_t)setup->wValue;
+        if (ch < 3) {
+            uint32_t val;
+            memcpy(&val, (void*)&channel_gain_db[ch], 4);
+            usb_start_tiny_control_in_transfer(val, 4);
+            return true;
+        }
+    }
+    if (setup->bRequest == REQ_SET_CHANNEL_MUTE && setup->wLength == 1) {
+        audio_control_cmd_t.cmd = REQ_SET_CHANNEL_MUTE;
+        audio_control_cmd_t.cn = (uint8_t)setup->wValue;
+        usb_start_control_out_transfer(&_audio_cmd_transfer_type);
+        return true;
+    }
+    if (setup->bRequest == REQ_GET_CHANNEL_MUTE) {
+        uint8_t ch = (uint8_t)setup->wValue;
+        if (ch < 3) {
+            usb_start_tiny_control_in_transfer(channel_mute[ch] ? 1 : 0, 1);
+            return true;
+        }
+    }
+
     if (setup->bRequest == REQ_GET_STATUS) {
         // Combined status: all peaks + CPU in one 12-byte transfer (wValue=9)
         if (setup->wValue == 9) {

@@ -18,6 +18,11 @@ typedef struct {
 extern volatile AudioState audio_state;
 extern volatile bool bypass_master_eq;
 
+// Per-channel gain and mute (output channels only: L, R, Sub)
+extern volatile float channel_gain_db[3];
+extern volatile int32_t channel_gain_mul[3];
+extern volatile bool channel_mute[3];
+
 // ----------------------------------------------------------------------------
 // EQ UPDATE FLAGS (for main loop to handle)
 // ----------------------------------------------------------------------------

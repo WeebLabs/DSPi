@@ -12,7 +12,7 @@
 // Flash configuration - use last 4KB sector
 #define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 1
+#define FLASH_VERSION 2
 
 // Pointer to read flash via XIP
 #define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
@@ -29,11 +29,18 @@ typedef struct __attribute__((packed)) {
     uint8_t bypass;
     uint8_t padding[3];  // Align to 4 bytes
     float delays_ms[NUM_CHANNELS];
+    // V2: Per-channel gain and mute (output channels only)
+    float channel_gain_db[3];
+    uint8_t channel_mute[3];
+    uint8_t padding2;  // Align to 4 bytes
 } FlashStorage;
 
 // External variables we need to access (defined in usb_audio.c)
 extern volatile float global_preamp_db;
 extern volatile int32_t global_preamp_mul;
+extern volatile float channel_gain_db[3];
+extern volatile int32_t channel_gain_mul[3];
+extern volatile bool channel_mute[3];
 
 // Simple CRC32 implementation (polynomial 0xEDB88320)
 static uint32_t crc32(const uint8_t *data, size_t len) {
@@ -61,6 +68,8 @@ int flash_save_params(void) {
     storage.preamp_db = global_preamp_db;
     storage.bypass = bypass_master_eq ? 1 : 0;
     memcpy(storage.delays_ms, (void*)channel_delays_ms, sizeof(storage.delays_ms));
+    memcpy(storage.channel_gain_db, (void*)channel_gain_db, sizeof(storage.channel_gain_db));
+    for (int i = 0; i < 3; i++) storage.channel_mute[i] = channel_mute[i] ? 1 : 0;
 
     // Compute CRC over data section (everything after the header)
     const uint8_t *data_start = (const uint8_t *)&storage.filter_recipes;
@@ -139,6 +148,25 @@ int flash_load_params(void) {
 
     memcpy((void*)channel_delays_ms, storage->delays_ms, sizeof(channel_delays_ms));
 
+    // V2: Per-channel gain and mute
+    if (storage->version >= 2) {
+        for (int i = 0; i < 3; i++) {
+            channel_gain_db[i] = storage->channel_gain_db[i];
+            // Compute 10^(db/20) using Taylor series (same as preamp above)
+            float linear = 1.0f;
+            float db = storage->channel_gain_db[i];
+            if (db != 0.0f) {
+                if (db < -60.0f) db = -60.0f;
+                if (db > 20.0f) db = 20.0f;
+                float x = db * 0.1151292546f;  // ln(10)/20
+                linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
+                if (linear < 0.0f) linear = 0.0f;
+            }
+            channel_gain_mul[i] = (int32_t)(linear * 32768.0f);
+            channel_mute[i] = (storage->channel_mute[i] != 0);
+        }
+    }
+
     return FLASH_OK;
 }
 
@@ -152,4 +180,11 @@ void flash_factory_reset(void) {
 
     // Reset bypass
     bypass_master_eq = false;
+
+    // Reset per-channel gain and mute
+    for (int i = 0; i < 3; i++) {
+        channel_gain_db[i] = 0.0f;
+        channel_gain_mul[i] = 32768;  // Unity = 2^15
+        channel_mute[i] = false;
+    }
 }

@@ -89,6 +89,10 @@ extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer 
 #define REQ_SAVE_PARAMS     0x51
 #define REQ_LOAD_PARAMS     0x52
 #define REQ_FACTORY_RESET   0x53
+#define REQ_SET_CHANNEL_GAIN 0x54
+#define REQ_GET_CHANNEL_GAIN 0x55
+#define REQ_SET_CHANNEL_MUTE 0x56
+#define REQ_GET_CHANNEL_MUTE 0x57
 
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u

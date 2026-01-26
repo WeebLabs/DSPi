@@ -10,6 +10,7 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 
 *   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS.
 *   **Parametric Equalization:** Ten PEQ filters per master audio channel (Left/Right) and two filters per output channel (Left/Right/Sub).
+*   **Per-Channel Gain & Mute:** Independent gain (-60dB to +10dB) and mute controls for each output channel.
 *   **Time Alignment:** Delay individual channels (up to 170ms) to ensure alignment between subwoofer and main speakers.
 *   **SPDIF Output:** Digital SPDIF output enables the use of any standard DAC.
 *   **Subwoofer Output:** Dedicated mono output channel that enables direct subwoofer output without the need for a second DAC.
@@ -28,8 +29,9 @@ DSPi processes audio in a linear, low latency pipeline.
 4.  **Output Channels:**
     *   **Main Outs:** 2 bands of PEQ per channel (ideal for 12dB/oct or 24dB/oct high pass filter).
     *   **Subwoofer Out:** 2 bands of PEQ (ideal for 12dB/oct or 24dB/oct low pass filter)
-5.  **Time Alignment:** Delays are applied to each channel, if configured.
-6.  **Hardware Outputs:**
+5.  **Per-Channel Gain & Mute:** Each output channel has independent gain and mute controls applied after EQ.
+6.  **Time Alignment:** Delays are applied to each channel, if configured.
+7.  **Hardware Outputs:**
     *   **S/PDIF (Digital):** Connects to your DAC or Receiver.
     *   **PDM (Analog):** Connects to an active subwoofer's analog input.
 
@@ -94,6 +96,8 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | `0x46` | `REQ_SET_BYPASS` | 1 byte | Bypass Master EQ (1=On, 0=Off). |
 | `0x48` | `REQ_SET_DELAY` | 4 bytes | Set channel delay (float ms). |
 | `0x50` | `REQ_GET_STATUS` | 12 bytes | Get live meter levels and CPU load. |
+| `0x54` | `REQ_SET_CHANNEL_GAIN` | 4 bytes | Set output channel gain (float dB). |
+| `0x56` | `REQ_SET_CHANNEL_MUTE` | 1 byte | Mute output channel (1=Muted, 0=Unmuted). |
 | `0x51` | `REQ_SAVE_PARAMS` | 1 byte | Save settings to Flash. |
 | `0x53` | `REQ_FACTORY_RESET` | 1 byte | Reset RAM to defaults. |
 
