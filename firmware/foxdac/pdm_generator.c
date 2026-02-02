@@ -42,6 +42,46 @@ static inline uint32_t fast_rand() {
 }
 
 // ----------------------------------------------------------------------------
+// NOISE-SHAPED DITHER (IIR Error Feedback)
+// ----------------------------------------------------------------------------
+// 2nd-order IIR high-pass filter for noise shaping
+// Pushes dither energy above ~8kHz with 12dB/octave slope
+// Coefficients for Butterworth HP, fc=8kHz at fs=384kHz (8 chunks * 48kHz)
+// Fixed-point Q14 format (divide by 16384)
+#define NS_B0  15778   // 0.9630
+#define NS_B1 -31556   // -1.9260
+#define NS_B2  15778   // 0.9630
+#define NS_A1  31531   // 1.9245 (negated for subtraction)
+#define NS_A2  15580   // 0.9511
+
+typedef struct {
+    int32_t x1, x2;    // Input history
+    int32_t y1, y2;    // Output history
+    int32_t err_acc;   // Error accumulator for feedback
+} noise_shaper_t;
+
+static inline int32_t noise_shaped_dither(noise_shaper_t *ns, int32_t raw_dither, int32_t quant_error) {
+    // Accumulate quantization error with decay (LP filter on error)
+    // Decay factor 0.97 in Q8 = 248
+    ns->err_acc = ((ns->err_acc * 248) >> 8) + (quant_error >> 6);
+
+    // Combine raw dither with error feedback
+    int32_t input = raw_dither - ns->err_acc;
+
+    // Apply 2nd-order Butterworth HP filter
+    int32_t output = (NS_B0 * input + NS_B1 * ns->x1 + NS_B2 * ns->x2
+                    + NS_A1 * ns->y1 - NS_A2 * ns->y2) >> 14;
+
+    // Update filter state
+    ns->x2 = ns->x1;
+    ns->x1 = input;
+    ns->y2 = ns->y1;
+    ns->y1 = output;
+
+    return output;
+}
+
+// ----------------------------------------------------------------------------
 // FUNCTIONS
 // ----------------------------------------------------------------------------
 
@@ -99,6 +139,7 @@ void pdm_core1_entry() {
     int32_t local_pdm_err2 = 0;
     uint32_t active_us_accumulator = 0;
     uint32_t sample_counter = 0;
+    noise_shaper_t ns = {0};  // Noise shaper state
 
     // Target lead over DMA: 256 words = 32 samples = ~0.67ms at 48kHz
     const int32_t TARGET_LEAD = 256;
@@ -174,8 +215,10 @@ void pdm_core1_entry() {
 
         // 256x Oversampling with 2nd-order sigma-delta modulator
         for (int chunk = 0; chunk < 8; chunk++) {
-            // TPDF dither - one value per chunk for efficiency
-            int32_t dither = (int32_t)(fast_rand() & PDM_DITHER_MASK) - (PDM_DITHER_MASK >> 1);
+            // Noise-shaped dither with IIR HP filter and error feedback
+            // Use integrator state as proxy for quantization error
+            int32_t raw_rand = (int32_t)(fast_rand() & PDM_DITHER_MASK) - (PDM_DITHER_MASK >> 1);
+            int32_t dither = noise_shaped_dither(&ns, raw_rand, local_pdm_err2 >> 8);
 
             uint32_t pdm_word = 0;
             for (int k = 0; k < 32; k++) {
