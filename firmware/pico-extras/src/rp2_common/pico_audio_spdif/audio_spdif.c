@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+// RP2350: Force time-critical functions into RAM to avoid XIP cache misses
+#if PICO_RP2350
+#define SPDIF_TIME_CRITICAL __attribute__((noinline, section(".time_critical")))
+#else
+#define SPDIF_TIME_CRITICAL
+#endif
+
 #include <stdio.h>
 #include "pico/audio_spdif.h"
 #include <pico/audio_spdif/sample_encoding.h>
@@ -158,6 +165,12 @@ const audio_format_t *audio_spdif_setup(const audio_format_t *intended_audio_for
                             DREQ_PIOx_TX0 + sm
     );
 
+#if PICO_RP2350
+    // RP2350 requires explicit high priority for DMA to prevent audio underruns
+    // when USB/CPU activity creates bus contention
+    channel_config_set_high_priority(&dma_config, true);
+#endif
+
     dma_channel_configure(dma_channel,
                           &dma_config,
                           &audio_pio->txf[sm],  // dest
@@ -190,7 +203,7 @@ static void update_pio_frequency(uint32_t sample_freq) {
     shared_state.freq = sample_freq;
 }
 
-static audio_buffer_t *wrap_consumer_take(audio_connection_t *connection, bool block) {
+SPDIF_TIME_CRITICAL static audio_buffer_t *wrap_consumer_take(audio_connection_t *connection, bool block) {
     // support dynamic frequency shifting
     if (connection->producer_pool->format->sample_freq != shared_state.freq) {
         update_pio_frequency(connection->producer_pool->format->sample_freq);
@@ -198,7 +211,7 @@ static audio_buffer_t *wrap_consumer_take(audio_connection_t *connection, bool b
     return consumer_pool_take_buffer_default(connection, block);
 }
 
-static void wrap_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
+SPDIF_TIME_CRITICAL static void wrap_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
     if (buffer->format->format->format == AUDIO_BUFFER_FORMAT_PCM_S16) {
 #if PICO_AUDIO_SPDIF_MONO_INPUT
 

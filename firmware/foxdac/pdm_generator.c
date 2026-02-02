@@ -163,7 +163,7 @@ void pdm_core1_entry() {
             }
         }
 
-        uint32_t start_time = timer_hw->timerawl;
+        uint32_t start_time = time_us_32();
 
         // Input Hard Limiter
         int32_t pcm_val = (sample_value >> 14);
@@ -205,7 +205,7 @@ void pdm_core1_entry() {
         local_pdm_err  -= (local_pdm_err >> PDM_LEAKAGE_SHIFT);
         local_pdm_err2 -= (local_pdm_err2 >> PDM_LEAKAGE_SHIFT);
 
-        uint32_t end_time = timer_hw->timerawl;
+        uint32_t end_time = time_us_32();
         active_us_accumulator += (end_time - start_time);
         sample_counter++;
 

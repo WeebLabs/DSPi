@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
+// RP2350: Force time-critical functions into RAM to avoid XIP cache misses
+#if PICO_RP2350
+#define SPDIF_TIME_CRITICAL __attribute__((noinline, section(".time_critical")))
+#else
+#define SPDIF_TIME_CRITICAL
+#endif
+
 #include <cstdio>
 
 #include "pico/sample_conversion.h"
@@ -38,11 +45,11 @@ struct converting_copy<Stereo<FmtSPDIF>, Mono<FromFmt>> {
 };
 
 
-void stereo_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
+SPDIF_TIME_CRITICAL void stereo_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
     producer_pool_blocking_give<Stereo<FmtSPDIF>, Stereo<FmtS16>>(connection, buffer);
 }
 
-void mono_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
+SPDIF_TIME_CRITICAL void mono_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
     producer_pool_blocking_give<Stereo<FmtSPDIF>, Mono<FmtS16>>(connection, buffer);
 }
 

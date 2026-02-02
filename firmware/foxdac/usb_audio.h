@@ -1,8 +1,11 @@
+/*
+ * TinyUSB Audio Interface Header for DSPi
+ */
+
 #ifndef USB_AUDIO_H
 #define USB_AUDIO_H
 
 #include "config.h"
-#include "pico/usb_device.h"
 
 // ----------------------------------------------------------------------------
 // AUDIO STATE (exposed to Main)
@@ -38,6 +41,9 @@ extern volatile uint32_t pending_rate;
 
 void usb_sound_card_init(void);
 void audio_set_volume(int16_t volume);
+
+// Update audio feedback (call from main loop)
+void update_audio_feedback(void);
 
 // ----------------------------------------------------------------------------
 // VENDOR INTERFACE API

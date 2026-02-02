@@ -1,0 +1,1 @@
+cmd='/opt/homebrew/bin/cmake;--no-warn-unused-cli;-DCMAKE_MAKE_PROGRAM:FILEPATH=/usr/bin/make;-DPICO_SDK_PATH:FILEPATH=/Users/weeblabs/pico-sdk;-DPICOTOOL_NO_LIBUSB=1;-DPICOTOOL_FLAT_INSTALL=1;-DCMAKE_INSTALL_PREFIX=/Users/weeblabs/DSPi/build-rp2040/_deps;-DCMAKE_RULE_MESSAGES=OFF;-DCMAKE_INSTALL_MESSAGE=NEVER;-GUnix Makefiles;-S;<SOURCE_DIR><SOURCE_SUBDIR>;-B;<BINARY_DIR>'

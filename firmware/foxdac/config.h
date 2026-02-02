@@ -18,12 +18,16 @@ extern volatile uint32_t pdm_dma_overruns;    // Core 1 write caught up to DMA r
 extern volatile uint32_t pdm_dma_underruns;   // Core 1 write fell behind DMA read
 extern volatile uint32_t spdif_overruns;      // USB callback couldn't get buffer (pool full)
 extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer likely starved)
+extern volatile uint32_t usb_audio_packets;   // Debug: count of USB audio packets received
+extern volatile uint32_t usb_audio_alt_set;   // Debug: last alt setting selected
+extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
+extern volatile uint32_t usb_config_requests; // Debug: config descriptor requests
 
 // ----------------------------------------------------------------------------
 // CONFIGURATION
 // ----------------------------------------------------------------------------
 
-#define ENABLE_SUB 1
+#define ENABLE_SUB 0
 
 #undef PICO_AUDIO_SPDIF_PIN
 #define PICO_AUDIO_SPDIF_PIN 20
@@ -112,10 +116,17 @@ extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer 
 // DATA STRUCTURES
 // ----------------------------------------------------------------------------
 
+#if PICO_RP2350
+typedef struct {
+    float b0, b1, b2, a1, a2;    // float coefficients
+    float s1, s2;                // float state accumulators (Double emulation is too slow on M33)
+} Biquad;
+#else
 typedef struct {
     int32_t b0, b1, b2, a1, a2;
     int32_t s1, s2;
 } Biquad;
+#endif
 
 enum FilterType {
     FILTER_FLAT = 0, FILTER_PEAKING = 1, FILTER_LOWSHELF = 2,
@@ -168,13 +179,20 @@ typedef struct __attribute__((packed)) {
     };
 } VendorRespPacket;
 
-extern const uint8_t channel_band_counts[NUM_CHANNELS];
+extern uint8_t channel_band_counts[NUM_CHANNELS];
 extern volatile SystemStatusPacket global_status;
+
+// ----------------------------------------------------------------------------
+// RP2350-SPECIFIC: Force time-critical functions into RAM
+// RP2350 has different XIP cache behavior that causes audio underruns
+// ----------------------------------------------------------------------------
+#define DSP_TIME_CRITICAL __attribute__((section(".time_critical")))
 
 // ----------------------------------------------------------------------------
 // UTILS
 // ----------------------------------------------------------------------------
 
+#if !PICO_RP2350
 static inline int32_t clip_s32(int32_t x) {
     if (x > INT32_MAX) return INT32_MAX;
     if (x < INT32_MIN) return INT32_MIN;
@@ -186,5 +204,6 @@ static inline int32_t clip_s64_to_s32(int64_t x) {
     if (x < INT32_MIN) return INT32_MIN;
     return (int32_t)x;
 }
+#endif
 
 #endif // CONFIG_H

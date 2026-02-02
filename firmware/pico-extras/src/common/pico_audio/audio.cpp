@@ -9,6 +9,17 @@
 #include "pico/sample_conversion.h"
 
 // ======================
+// == RP2350 RAM PLACEMENT
+// RP2350's XIP cache can cause audio underruns when these functions
+// are called from the DMA IRQ handler. Force them into RAM.
+// ======================
+#if PICO_RP2350
+#define AUDIO_TIME_CRITICAL __attribute__((noinline, section(".time_critical")))
+#else
+#define AUDIO_TIME_CRITICAL
+#endif
+
+// ======================
 // == DEBUGGING =========
 
 #define ENABLE_AUDIO_ASSERTIONS
@@ -74,7 +85,7 @@ inline static void list_append_with_tail(audio_buffer_t **phead, audio_buffer_t 
     }
 }
 
-audio_buffer_t *get_free_audio_buffer(audio_buffer_pool_t *context, bool block) {
+AUDIO_TIME_CRITICAL audio_buffer_t *get_free_audio_buffer(audio_buffer_pool_t *context, bool block) {
     audio_buffer_t *ab;
 
     do {
@@ -87,7 +98,7 @@ audio_buffer_t *get_free_audio_buffer(audio_buffer_pool_t *context, bool block) 
     return ab;
 }
 
-void queue_free_audio_buffer(audio_buffer_pool_t *context, audio_buffer_t *ab) {
+AUDIO_TIME_CRITICAL void queue_free_audio_buffer(audio_buffer_pool_t *context, audio_buffer_t *ab) {
     assert(!ab->next);
     uint32_t save = spin_lock_blocking(context->free_list_spin_lock);
     list_prepend(&context->free_list, ab);
@@ -95,7 +106,7 @@ void queue_free_audio_buffer(audio_buffer_pool_t *context, audio_buffer_t *ab) {
     __sev();
 }
 
-audio_buffer_t *get_full_audio_buffer(audio_buffer_pool_t *context, bool block) {
+AUDIO_TIME_CRITICAL audio_buffer_t *get_full_audio_buffer(audio_buffer_pool_t *context, bool block) {
     audio_buffer_t *ab;
 
     do {
@@ -108,7 +119,7 @@ audio_buffer_t *get_full_audio_buffer(audio_buffer_pool_t *context, bool block) 
     return ab;
 }
 
-void queue_full_audio_buffer(audio_buffer_pool_t *context, audio_buffer_t *ab) {
+AUDIO_TIME_CRITICAL void queue_full_audio_buffer(audio_buffer_pool_t *context, audio_buffer_t *ab) {
     assert(!ab->next);
     uint32_t save = spin_lock_blocking(context->prepared_list_spin_lock);
     list_append_with_tail(&context->prepared_list, &context->prepared_list_tail, ab);
@@ -116,19 +127,19 @@ void queue_full_audio_buffer(audio_buffer_pool_t *context, audio_buffer_t *ab) {
     __sev();
 }
 
-void producer_pool_give_buffer_default(audio_connection_t *connection, audio_buffer_t *buffer) {
+AUDIO_TIME_CRITICAL void producer_pool_give_buffer_default(audio_connection_t *connection, audio_buffer_t *buffer) {
     queue_full_audio_buffer(connection->producer_pool, buffer);
 }
 
-audio_buffer_t *producer_pool_take_buffer_default(audio_connection_t *connection, bool block) {
+AUDIO_TIME_CRITICAL audio_buffer_t *producer_pool_take_buffer_default(audio_connection_t *connection, bool block) {
     return get_free_audio_buffer(connection->producer_pool, block);
 }
 
-void consumer_pool_give_buffer_default(audio_connection_t *connection, audio_buffer_t *buffer) {
+AUDIO_TIME_CRITICAL void consumer_pool_give_buffer_default(audio_connection_t *connection, audio_buffer_t *buffer) {
     queue_free_audio_buffer(connection->consumer_pool, buffer);
 }
 
-audio_buffer_t *consumer_pool_take_buffer_default(audio_connection_t *connection, bool block) {
+AUDIO_TIME_CRITICAL audio_buffer_t *consumer_pool_take_buffer_default(audio_connection_t *connection, bool block) {
     return get_full_audio_buffer(connection->consumer_pool, block);
 }
 
@@ -209,7 +220,7 @@ void audio_complete_connection(audio_connection_t *connection, audio_buffer_pool
     connection->consumer_pool = consumer_pool;
 }
 
-void give_audio_buffer(audio_buffer_pool_t *ac, audio_buffer_t *buffer) {
+AUDIO_TIME_CRITICAL void give_audio_buffer(audio_buffer_pool_t *ac, audio_buffer_t *buffer) {
     buffer->user_data = 0;
     assert(ac->connection);
     if (ac->type == audio_buffer_pool::ac_producer)
@@ -218,7 +229,7 @@ void give_audio_buffer(audio_buffer_pool_t *ac, audio_buffer_t *buffer) {
         ac->connection->consumer_pool_give(ac->connection, buffer);
 }
 
-audio_buffer_t *take_audio_buffer(audio_buffer_pool_t *ac, bool block) {
+AUDIO_TIME_CRITICAL audio_buffer_t *take_audio_buffer(audio_buffer_pool_t *ac, bool block) {
     assert(ac->connection);
     if (ac->type == audio_buffer_pool::ac_producer)
         return ac->connection->producer_pool_take(ac->connection, block);

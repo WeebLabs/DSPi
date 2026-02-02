@@ -7,33 +7,53 @@ EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
 float channel_delays_ms[NUM_CHANNELS] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
 // Delay Line State
+#if PICO_RP2350
+float delay_lines[3][MAX_DELAY_SAMPLES];
+#else
 int32_t delay_lines[3][MAX_DELAY_SAMPLES];
+#endif
 uint32_t delay_write_idx = 0;
 int32_t channel_delay_samples[3] = {0, 0, 0}; 
 
-const uint8_t channel_band_counts[NUM_CHANNELS] = {
+uint8_t channel_band_counts[NUM_CHANNELS] = {
+#if PICO_RP2350
+    10, 10, 8, 8, 8
+#else
     10, 10, 2, 2, 2
+#endif
 };
 
-int32_t fast_mul_q28(int32_t a, int32_t b) {
+#if !PICO_RP2350
+DSP_TIME_CRITICAL int32_t fast_mul_q28(int32_t a, int32_t b) {
     int32_t ah = a >> 16;
     uint32_t al = a & 0xFFFF;
     int32_t bh = b >> 16;
     uint32_t bl = b & 0xFFFF;
 
-    int32_t high = ah * bh; 
-    int32_t mid1 = ah * bl; 
-    int32_t mid2 = al * bh; 
-    
+    int32_t high = ah * bh;
+    int32_t mid1 = ah * bl;
+    int32_t mid2 = al * bh;
+
     return (high << 4) + ((mid1 + mid2) >> 12);
 }
+#endif
 
 void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
+    // Reset state when recalculating
+#if PICO_RP2350
+    bq->s1 = 0.0; bq->s2 = 0.0;
+    if (p->type == FILTER_FLAT || p->freq == 0 || sample_rate == 0) {
+        bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;
+        return;
+    }
+#else
     bq->s1 = 0; bq->s2 = 0; 
     if (p->type == FILTER_FLAT || p->freq == 0 || sample_rate == 0) {
         bq->b0 = 1 << FILTER_SHIFT; bq->b1 = 0; bq->b2 = 0; bq->a1 = 0; bq->a2 = 0;
         return;
     }
+#endif
+
     float omega = 2.0f * 3.1415926535f * p->freq / sample_rate;
     float sn = sinf(omega); float cs = cosf(omega);
     float alpha = sn / (2.0f * p->Q);
@@ -47,12 +67,24 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
         case FILTER_HIGHSHELF: b0_f = A*((A+1)+(A-1)*cs+2*sqrtf(A)*alpha); b1_f = -2*A*((A-1)+(A+1)*cs); b2_f = A*((A+1)+(A-1)*cs-2*sqrtf(A)*alpha); a0_f = (A+1)-(A-1)*cs+2*sqrtf(A)*alpha; a1_f = 2*((A-1)-(A+1)*cs); a2_f = (A+1)-(A-1)*cs-2*sqrtf(A)*alpha; break;
         default: break;
     }
+
+#if PICO_RP2350
+    // Float storage
+    float inv_a0 = 1.0f / a0_f;
+    bq->b0 = b0_f * inv_a0;
+    bq->b1 = b1_f * inv_a0;
+    bq->b2 = b2_f * inv_a0;
+    bq->a1 = a1_f * inv_a0;
+    bq->a2 = a2_f * inv_a0;
+#else
+    // Q28 Fixed Point Storage
     float scale = (float)(1LL << FILTER_SHIFT);
     bq->b0 = (int32_t)((b0_f / a0_f) * scale);
     bq->b1 = (int32_t)((b1_f / a0_f) * scale);
     bq->b2 = (int32_t)((b2_f / a0_f) * scale);
     bq->a1 = (int32_t)((a1_f / a0_f) * scale);
     bq->a2 = (int32_t)((a2_f / a0_f) * scale);
+#endif
 }
 
 void dsp_init_default_filters() {
@@ -93,6 +125,25 @@ void dsp_recalculate_all_filters(float sample_rate) {
     }
 }
 
+DSP_TIME_CRITICAL
+#if PICO_RP2350
+float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t channel) {
+    float sample = input;
+    uint8_t count = channel_band_counts[channel];
+    for (int i = 0; i < count; i++) {
+        Biquad *bq = &biquads[i];
+        // Check for flat/bypassed filter (all 0 coeffs)
+        if (bq->a1 == 0.0f && bq->a2 == 0.0f && bq->b1 == 0.0f) continue;
+
+        float result = bq->b0 * sample + bq->s1;
+        bq->s1 = bq->b1 * sample - bq->a1 * result + bq->s2;
+        bq->s2 = bq->b2 * sample - bq->a2 * result;
+
+        sample = result;
+    }
+    return sample;
+}
+#else
 int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel) {
     int32_t sample = input_32;
     uint8_t count = channel_band_counts[channel];
@@ -103,8 +154,9 @@ int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8
         int32_t result = fast_mul_q28(bq->b0, sample) + bq->s1;
         bq->s1 = fast_mul_q28(bq->b1, sample) - fast_mul_q28(bq->a1, result) + bq->s2;
         bq->s2 = fast_mul_q28(bq->b2, sample) - fast_mul_q28(bq->a2, result);
-        
+
         sample = clip_s32(result);
     }
     return sample;
 }
+#endif
