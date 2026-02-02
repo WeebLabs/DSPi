@@ -126,8 +126,8 @@ void dsp_recalculate_all_filters(float sample_rate) {
     }
 }
 
-DSP_TIME_CRITICAL
 #if PICO_RP2350
+DSP_TIME_CRITICAL
 float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t channel) {
     float sample = input;
     uint8_t count = channel_band_counts[channel];
@@ -153,19 +153,6 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
     return sample;
 }
 #else
-int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel) {
-    int32_t sample = input_32;
-    uint8_t count = channel_band_counts[channel];
-    for (int i = 0; i < count; i++) {
-        Biquad *bq = &biquads[i];
-        if (bq->a1 == 0 && bq->a2 == 0) continue;
-
-        int32_t result = fast_mul_q28(bq->b0, sample) + bq->s1;
-        bq->s1 = fast_mul_q28(bq->b1, sample) - fast_mul_q28(bq->a1, result) + bq->s2;
-        bq->s2 = fast_mul_q28(bq->b2, sample) - fast_mul_q28(bq->a2, result);
-
-        sample = clip_s32(result);
-    }
-    return sample;
-}
+// RP2040: Implemented in dsp_process_rp2040.S for maximum performance
+extern int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel);
 #endif

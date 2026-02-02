@@ -64,12 +64,15 @@ static void perform_rate_change(uint32_t new_freq) {
     }
 #else
     // RP2040: Change system clock for optimal S/PDIF timing
+    // Overclocked to 288MHz / 264.6MHz
     if((new_freq == 48000 || new_freq == 96000) && clock_176mhz) {
-        set_sys_clock_pll(1440000000, 6, 1);
+        // 288MHz (48000 * 6000) -> VCO 1152 MHz
+        set_sys_clock_pll(1152000000, 4, 1);
         clock_176mhz = 0;
     }
     else if(new_freq == 44100 && !clock_176mhz) {
-        set_sys_clock_pll(1236000000, 7, 1);
+        // 264.6MHz (44100 * 6000) -> VCO 1058.4 MHz
+        set_sys_clock_pll(1058400000, 4, 1);
         clock_176mhz = 1;
     }
 #endif
@@ -98,9 +101,10 @@ void core0_init() {
         set_sys_clock_hz(150000000, false);
     }
 #else
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
     busy_wait_ms(10);
-    set_sys_clock_pll(1440000000, 6, 1);
+    // Initial 288MHz
+    set_sys_clock_pll(1152000000, 4, 1);
 #endif
 
     gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);

@@ -5,6 +5,7 @@ add_compile_options(-O2)
 
 add_executable(foxdac
     config.h
+    dcp_inline.h
     dsp_pipeline.c
     dsp_pipeline.h
     flash_storage.c
@@ -18,6 +19,10 @@ add_executable(foxdac
     usb_descriptors.c
     usb_descriptors.h
 )
+
+if (PICO_PLATFORM STREQUAL "rp2040")
+    target_sources(foxdac PRIVATE dsp_process_rp2040.S)
+endif()
 
 pico_set_binary_type(foxdac copy_to_ram)
 

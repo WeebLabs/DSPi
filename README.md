@@ -17,6 +17,21 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 
 ---
 
+## Platform Support
+
+| Feature | RP2040 (Pico) | RP2350 (Pico 2) |
+|---------|---------------|-----------------|
+| **Clock Speed** | 288 MHz (OC) | 288 MHz |
+| **Audio Processing** | Q28 Fixed-Point | Mixed-Precision Float/Double |
+| **Filter Bands** | 26 total | 50 total |
+| **Output EQ** | 2 bands/channel | 10 bands/channel |
+| **Math Engine** | Hand-optimized ARM Assembly | Hardware FPU + DCP Coprocessor |
+| **Status** | ✅ Production | ✅ Production |
+
+Both platforms are fully tested and production-ready. The RP2350 offers significantly more processing headroom thanks to its hardware floating-point unit and Double-precision Coprocessor (DCP), enabling more filter bands and higher-precision audio processing.
+
+---
+
 ## Audio Signal Chain
 
 DSPi processes audio in a linear, low latency pipeline.
@@ -71,7 +86,9 @@ The following section details the internal architecture for developers wishing t
 *   **Core 0:** Handles USB communication (TinyUSB), audio streaming, and control logic.
 *   **Core 1:** Dedicated to the Delta-Sigma modulator (PDM generation) and buffer management.
 *   **PIO & DMA:** Hardware offloading for S/PDIF encoding and bitstream generation ensures zero CPU overhead for I/O.
-*   **Math Engine:** 32-bit fixed-point (`int32_t`) processing pipeline running natively at 48kHz.
+*   **Math Engine:**
+    *   **RP2040:** 32-bit fixed-point (Q28) processing with hand-optimized ARM assembly for the inner DSP loop.
+    *   **RP2350:** Mixed-precision pipeline using single-precision floats for coefficients and double-precision accumulators via the hardware DCP coprocessor.
 
 ### Subwoofer PDM Specifications
 The subwoofer output uses a high-performance software-defined Delta-Sigma modulator running on Core 1.
@@ -82,6 +99,17 @@ The subwoofer output uses a high-performance software-defined Delta-Sigma modula
 *   **DC Protection:** Leaky integrator design preventing DC offset accumulation.
 
 The objective here was to use as much of Core 1 as necessary to produce an output that could be used full-range while sounding perfectly fine, even if will only be used to feed a subwoofer.  This implementation is very stable and without pops, clicks or idle tones.
+
+### Performance Tuning
+
+The firmware dynamically adjusts clock speed based on sample rate to maintain optimal PIO divider ratios for S/PDIF timing accuracy:
+
+| Platform | 44.1 kHz Mode | 48 kHz Mode | Core Voltage |
+|----------|---------------|-------------|--------------|
+| **RP2040** | 264.6 MHz | 288 MHz | 1.20V (overclock) |
+| **RP2350** | 264.6 MHz | 288 MHz | 1.10V (nominal) |
+
+The RP2040 requires a slight voltage bump to reliably reach 288 MHz, while the RP2350 achieves this at its default voltage. Clock switching occurs automatically during sample rate changes with proper sequencing (voltage adjustment before frequency increase).
 
 ### USB Control Protocol
 Configuration is performed via **Interface 2** (Vendor Interface) using Control Transfers under Windows and via **Interface 0** under macOS.
@@ -146,7 +174,7 @@ git submodule update --init --recursive
 ```
 
 #### 3. Build the Firmware
-You can build for either the standard **RP2040** (Raspberry Pi Pico) or the newer **RP2350** (Raspberry Pi Pico 2). The build system uses separate directories to avoid conflicts.
+You can build for either the standard **RP2040** (Raspberry Pi Pico) or the newer **RP2350** (Raspberry Pi Pico 2). The build system uses separate directories to avoid conflicts. Both targets are fully tested and production-ready.
 
 **Option A: Build for RP2040 (Standard Pico)**
 ```bash
