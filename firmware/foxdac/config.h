@@ -27,7 +27,7 @@ extern volatile uint32_t usb_config_requests; // Debug: config descriptor reques
 // CONFIGURATION
 // ----------------------------------------------------------------------------
 
-#define ENABLE_SUB 0
+#define ENABLE_SUB 1
 
 #undef PICO_AUDIO_SPDIF_PIN
 #define PICO_AUDIO_SPDIF_PIN 20

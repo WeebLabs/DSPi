@@ -49,7 +49,20 @@ static void perform_rate_change(uint32_t new_freq) {
     // Update the audio format so pico_audio_spdif can update the PIO divider
     audio_format_48k.sample_freq = new_freq;
 
-#if !PICO_RP2350
+#if PICO_RP2350
+    // RP2350: Dynamic clock switching for optimal performance and integer PIO dividers
+    // 48kHz family -> 288MHz (48000 * 6000)
+    // 44.1kHz family -> 264.6MHz (44100 * 6000)
+    uint32_t target_freq = (new_freq == 44100) ? 264600000 : 288000000;
+    
+    // Only change if needed to avoid glitches
+    if (clock_get_hz(clk_sys) != target_freq) {
+        // User requested 1.1V even for high clock
+        vreg_set_voltage(VREG_VOLTAGE_1_10); 
+        busy_wait_us(100);
+        set_sys_clock_hz(target_freq, false);
+    }
+#else
     // RP2040: Change system clock for optimal S/PDIF timing
     if((new_freq == 48000 || new_freq == 96000) && clock_176mhz) {
         set_sys_clock_pll(1440000000, 6, 1);
@@ -60,8 +73,6 @@ static void perform_rate_change(uint32_t new_freq) {
         clock_176mhz = 1;
     }
 #endif
-    // RP2350: Use fixed 150MHz clock, PIO divider handles sample rate
-
     // Reset sync
     extern volatile bool sync_started;
     extern volatile uint64_t total_samples_produced;
@@ -78,9 +89,12 @@ void core0_init() {
 
 #if PICO_RP2350
     // RP2350: Use set_sys_clock_hz for proper clock tracking
-    // 192MHz works well for 48kHz audio (192MHz / 48kHz = 4000)
-    if (!set_sys_clock_hz(192000000, false)) {
-        // Fall back to 150MHz if 192MHz not achievable
+    vreg_set_voltage(VREG_VOLTAGE_1_10);
+    busy_wait_ms(10);
+
+    // Target 288MHz for 48kHz audio start
+    if (!set_sys_clock_hz(288000000, false)) {
+        // Fall back to 150MHz if 288MHz not achievable
         set_sys_clock_hz(150000000, false);
     }
 #else
