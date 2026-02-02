@@ -123,11 +123,50 @@ struct __attribute__((packed)) {
 
 
 ### Building from Source
-If you wish to modify the code:
 
+To build the firmware yourself, you'll need a standard Raspberry Pi Pico C/C++ development environment.
+
+#### 1. Install Prerequisites
+Ensure you have the following tools installed:
+*   **CMake** (3.13 or newer)
+*   **Arm GNU Toolchain** (`arm-none-eabi-gcc`, etc.)
+*   **Python 3** (for Pico SDK scripts)
+*   **Git**
+
+#### 2. Clone the Repository
+Clone the project recursively to include the Pico SDK and other submodules:
 ```bash
-mkdir build
-cd build
-cmake ..
+git clone --recursive https://github.com/weeblabs/DSPi.git
+cd DSPi
+```
+
+*If you already cloned without `--recursive`, run:*
+```bash
+git submodule update --init --recursive
+```
+
+#### 3. Build the Firmware
+You can build for either the standard **RP2040** (Raspberry Pi Pico) or the newer **RP2350** (Raspberry Pi Pico 2). The build system uses separate directories to avoid conflicts.
+
+**Option A: Build for RP2040 (Standard Pico)**
+```bash
+mkdir build-rp2040
+cd build-rp2040
+cmake -DPICO_BOARD=pico ..
 make
 ```
+*Output:* `foxdac/foxdac.uf2`
+
+**Option B: Build for RP2350 (Pico 2)**
+```bash
+mkdir build-rp2350
+cd build-rp2350
+cmake -DPICO_BOARD=pico2 ..
+make
+```
+*Output:* `foxdac/foxdac.uf2`
+
+#### 4. Flash the Device
+1.  Hold the **BOOTSEL** button on your board while plugging it in.
+2.  Drag and drop the generated `.uf2` file onto the `RPI-RP2` (or `RP2350`) drive.
+
