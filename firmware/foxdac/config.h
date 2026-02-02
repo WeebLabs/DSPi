@@ -119,7 +119,7 @@ extern volatile uint32_t usb_config_requests; // Debug: config descriptor reques
 #if PICO_RP2350
 typedef struct {
     float b0, b1, b2, a1, a2;    // float coefficients
-    float s1, s2;                // float state accumulators (Double emulation is too slow on M33)
+    double s1, s2;               // double state accumulators (Using inline DCP)
 } Biquad;
 #else
 typedef struct {

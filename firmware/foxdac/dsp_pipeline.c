@@ -1,6 +1,7 @@
 #include <math.h>
 #include <string.h>
 #include "dsp_pipeline.h"
+#include "dcp_inline.h"
 
 Biquad filters[NUM_CHANNELS][MAX_BANDS];
 EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
@@ -17,7 +18,7 @@ int32_t channel_delay_samples[3] = {0, 0, 0};
 
 uint8_t channel_band_counts[NUM_CHANNELS] = {
 #if PICO_RP2350
-    10, 10, 8, 8, 8
+    10, 10, 10, 10, 10
 #else
     10, 10, 2, 2, 2
 #endif
@@ -132,14 +133,22 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
     uint8_t count = channel_band_counts[channel];
     for (int i = 0; i < count; i++) {
         Biquad *bq = &biquads[i];
-        // Check for flat/bypassed filter (all 0 coeffs)
         if (bq->a1 == 0.0f && bq->a2 == 0.0f && bq->b1 == 0.0f) continue;
 
-        float result = bq->b0 * sample + bq->s1;
-        bq->s1 = bq->b1 * sample - bq->a1 * result + bq->s2;
-        bq->s2 = bq->b2 * sample - bq->a2 * result;
+        // Mixed Precision: Float Multiplies, Double Accumulation
+        // y[n] = b0*x[n] + s1[n-1]
+        double result_d = dcp_dadd(dcp_f2d(bq->b0 * sample), bq->s1);
+        float result_f = dcp_d2f(result_d);
 
-        sample = result;
+        // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
+        float val1 = bq->b1 * sample - bq->a1 * result_f;
+        bq->s1 = dcp_dadd(dcp_f2d(val1), bq->s2);
+
+        // s2[n] = b2*x[n] - a2*y[n]
+        float val2 = bq->b2 * sample - bq->a2 * result_f;
+        bq->s2 = dcp_f2d(val2);
+
+        sample = result_f;
     }
     return sample;
 }
