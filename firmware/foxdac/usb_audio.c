@@ -1,30 +1,30 @@
 /*
- * TinyUSB Audio Implementation for DSPi
- * UAC2 Audio Streaming with DSP Pipeline
+ * USB Audio Implementation for DSPi
+ * UAC1 Audio Streaming with DSP Pipeline
+ * Uses pico-extras usb_device library with LUFA descriptor types
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
-#include "tusb.h"
+
+#include "pico/stdlib.h"
+#include "pico/usb_device.h"
+#include "pico/usb_device_private.h"
+#include "pico/audio.h"
+#include "pico/audio_spdif.h"
+#include "hardware/sync.h"
+#include "hardware/irq.h"
+#include "hardware/timer.h"
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
 #include "usb_audio.h"
-
-// UAC2 Audio Class Request Codes
-#define AUDIO_CS_REQ_CUR    0x01
-#define AUDIO_CS_REQ_RANGE  0x02
-
-// UAC2 Entity IDs (must match usb_descriptors.c)
-#define UAC2_ENTITY_CLOCK           0x04
-#define UAC2_ENTITY_FEATURE_UNIT    0x02
 #include "usb_descriptors.h"
 #include "dsp_pipeline.h"
 #include "pdm_generator.h"
 #include "flash_storage.h"
-#include "pico/audio_spdif.h"
-#include "hardware/timer.h"
-#include "hardware/clocks.h"
-#include "hardware/irq.h"
-#include "hardware/gpio.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -58,18 +58,14 @@ static volatile uint64_t last_packet_time_us = 0;
 struct audio_buffer_pool *producer_pool = NULL;
 struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S16, .sample_freq = 48000, .channel_count = 2 };
 
-// Audio receive buffer
-static uint8_t audio_rx_buffer[384];  // Max packet size
-
 // ----------------------------------------------------------------------------
-// DELAY LINES (moved from dsp_pipeline.c to here or externed?)
-// Actually delay_lines are defined in dsp_pipeline.c. usb_audio.c uses them?
-// No, usb_audio.c accesses them via extern in dsp_pipeline.h?
-// Let's check dsp_pipeline.h
-// It says: extern int32_t delay_lines[3][MAX_DELAY_SAMPLES];
-// So I need to update dsp_pipeline.h FIRST to conditionalize the type.
-// I missed that. I will cancel this and update dsp_pipeline.h first.
+// USB INTERFACE / ENDPOINT OBJECTS
+// ----------------------------------------------------------------------------
 
+static struct usb_interface ac_interface;
+static struct usb_interface as_op_interface;
+static struct usb_interface vendor_interface;
+static struct usb_endpoint ep_op_out, ep_op_sync;
 
 // ----------------------------------------------------------------------------
 // VOLUME
@@ -99,21 +95,7 @@ void audio_set_volume(int16_t volume) {
 }
 
 // ----------------------------------------------------------------------------
-// VENDOR INTERFACE HELPERS
-// ----------------------------------------------------------------------------
-
-bool vendor_interface_ready(void) {
-    return tud_ready();
-}
-
-bool vendor_queue_response(const VendorRespPacket *resp) {
-    // Deprecated with Control-Only interface
-    (void)resp;
-    return false;
-}
-
-// ----------------------------------------------------------------------------
-// AUDIO PROCESSING (called from TinyUSB audio callback)
+// AUDIO PROCESSING (called from USB audio packet callback)
 // ----------------------------------------------------------------------------
 
 static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
@@ -171,7 +153,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     total_samples_produced += sample_count;
 
     const int16_t *in = (const int16_t *)data;
-    
+
 #if PICO_RP2350
     // ------------------------------------------------------------------------
     // RP2350 FLOAT PIPELINE (Phase 3)
@@ -260,13 +242,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
 
 #if ENABLE_SUB
-        // PDM expects int32 Q28-like range (or at least significant magnitude for dither)
-        // Convert back to int32 scale for PDM generator
-        int32_t pdm_sample = (int32_t)(fmaxf(-1.0f, fminf(1.0f, delayed_sub)) * 32768.0f * 16384.0f); // Scale up to near INT32 range
-        // Wait, PDM generator logic expects "pcm_val >> 14".
-        // Original: out_sub_32 (Q28 approx).
-        // pdm_push_sample(delayed_sub, false);
-        // Let's match original scale: Q28 -> 1.0 = 2^28.
+        // PDM expects int32 Q28-like range
         int32_t pdm_sample_q28 = (int32_t)(delayed_sub * (float)(1<<28));
         pdm_push_sample(pdm_sample_q28, false);
 #endif
@@ -380,227 +356,228 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 }
 
 // ----------------------------------------------------------------------------
-// TINYUSB AUDIO CALLBACKS
+// USB AUDIO PACKET CALLBACKS (pico-extras usb_device)
 // ----------------------------------------------------------------------------
 
-// Invoked when audio class specific set request received for an entity
-bool tud_audio_set_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf) {
-    (void)rhport;
+static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
+    assert(ep->current_transfer);
+    struct usb_buffer *usb_buffer = usb_current_out_packet_buffer(ep);
 
-    uint8_t channelNum = TU_U16_LOW(p_request->wValue);
-    uint8_t ctrlSel = TU_U16_HIGH(p_request->wValue);
-    uint8_t entityId = TU_U16_HIGH(p_request->wIndex);
+    usb_audio_packets++;
+    process_audio_packet(usb_buffer->data, usb_buffer->data_len);
 
-    // Clock Source entity - sample rate control (UAC2)
-    if (entityId == UAC2_ENTITY_CLOCK) {
-        if (ctrlSel == AUDIO_CS_CTRL_SAM_FREQ) {
-            // UAC2 uses 4-byte sample rate
-            uint32_t new_freq;
-            memcpy(&new_freq, buf, 4);
+    // keep on truckin'
+    usb_grow_transfer(ep->current_transfer, 1);
+    usb_packet_done(ep);
+}
 
-            if (audio_state.freq != new_freq) {
-                audio_state.freq = new_freq;
-                rate_change_pending = true;
-                pending_rate = new_freq;
-            }
+static void __not_in_flash_func(_as_sync_packet)(struct usb_endpoint *ep) {
+    assert(ep->current_transfer);
+    struct usb_buffer *buffer = usb_current_in_packet_buffer(ep);
+    assert(buffer->data_max >= 3);
+    buffer->data_len = 3;
+
+    // 10.14 fixed-point feedback: nominal sample rate
+    uint feedback = (audio_state.freq << 14u) / 1000u;
+
+    buffer->data[0] = feedback;
+    buffer->data[1] = feedback >> 8u;
+    buffer->data[2] = feedback >> 16u;
+
+    // keep on truckin'
+    usb_grow_transfer(ep->current_transfer, 1);
+    usb_packet_done(ep);
+}
+
+static const struct usb_transfer_type as_transfer_type = {
+    .on_packet = _as_audio_packet,
+    .initial_packet_count = 1,
+};
+
+static const struct usb_transfer_type as_sync_transfer_type = {
+    .on_packet = _as_sync_packet,
+    .initial_packet_count = 1,
+};
+
+static struct usb_transfer as_transfer;
+static struct usb_transfer as_sync_transfer;
+
+// ----------------------------------------------------------------------------
+// UAC1 AUDIO CONTROL REQUEST HANDLERS
+// ----------------------------------------------------------------------------
+
+static struct audio_control_cmd {
+    uint8_t cmd;
+    uint8_t type;
+    uint8_t cs;
+    uint8_t cn;
+    uint8_t unit;
+    uint8_t len;
+} audio_control_cmd_t;
+
+static void _audio_reconfigure(void) {
+    rate_change_pending = true;
+    pending_rate = audio_state.freq;
+}
+
+static bool do_get_current(struct usb_setup_packet *setup) {
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+        case FEATURE_MUTE_CONTROL:
+            usb_start_tiny_control_in_transfer(audio_state.mute, 1);
+            return true;
+        case FEATURE_VOLUME_CONTROL:
+            usb_start_tiny_control_in_transfer(audio_state.volume, 2);
+            return true;
+        }
+    } else if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_ENDPOINT) {
+        if ((setup->wValue >> 8u) == ENDPOINT_FREQ_CONTROL) {
+            usb_start_tiny_control_in_transfer(audio_state.freq, 3);
             return true;
         }
     }
-
-    // Feature Unit controls
-    if (entityId == UAC2_ENTITY_FEATURE_UNIT) {
-        switch (ctrlSel) {
-            case AUDIO_FU_CTRL_MUTE:
-                audio_state.mute = buf[0];
-                return true;
-
-            case AUDIO_FU_CTRL_VOLUME:
-                if (channelNum == 0) {  // Master channel
-                    int16_t vol;
-                    memcpy(&vol, buf, 2);
-                    audio_set_volume(vol);
-                }
-                return true;
-        }
-    }
-
     return false;
 }
 
-// Invoked when audio class specific get request received for an entity
-bool tud_audio_get_req_entity_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
-    (void)rhport;
+static bool do_get_minimum(struct usb_setup_packet *setup) {
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+        case FEATURE_VOLUME_CONTROL:
+            usb_start_tiny_control_in_transfer(MIN_VOLUME, 2);
+            return true;
+        }
+    }
+    return false;
+}
 
-    uint8_t channelNum = TU_U16_LOW(p_request->wValue);
-    uint8_t ctrlSel = TU_U16_HIGH(p_request->wValue);
-    uint8_t entityId = TU_U16_HIGH(p_request->wIndex);
+static bool do_get_maximum(struct usb_setup_packet *setup) {
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+        case FEATURE_VOLUME_CONTROL:
+            usb_start_tiny_control_in_transfer(MAX_VOLUME, 2);
+            return true;
+        }
+    }
+    return false;
+}
 
-    // Clock Source entity - sample rate control (UAC2)
-    if (entityId == UAC2_ENTITY_CLOCK) {
-        if (ctrlSel == AUDIO_CS_CTRL_SAM_FREQ) {
-            switch (p_request->bRequest) {
-                case AUDIO_CS_REQ_CUR: {
-                    // Return current sample rate (4 bytes for UAC2)
-                    uint32_t freq = audio_state.freq;
-                    return tud_control_xfer(rhport, p_request, &freq, 4);
-                }
-                case AUDIO_CS_REQ_RANGE: {
-                    // UAC2 Range format: wNumSubRanges (2) + array of { dMIN, dMAX, dRES } (12 bytes each)
-                    // We support 2 sample rates: 44100 and 48000
-                    static const uint8_t sample_rate_range[] = {
-                        // wNumSubRanges = 2
-                        0x02, 0x00,
-                        // Subrange 1: 44100 Hz
-                        0x44, 0xAC, 0x00, 0x00,  // dMIN = 44100
-                        0x44, 0xAC, 0x00, 0x00,  // dMAX = 44100
-                        0x00, 0x00, 0x00, 0x00,  // dRES = 0
-                        // Subrange 2: 48000 Hz
-                        0x80, 0xBB, 0x00, 0x00,  // dMIN = 48000
-                        0x80, 0xBB, 0x00, 0x00,  // dMAX = 48000
-                        0x00, 0x00, 0x00, 0x00,  // dRES = 0
-                    };
-                    return tud_control_xfer(rhport, p_request, (void*)sample_rate_range,
-                                            TU_MIN(p_request->wLength, sizeof(sample_rate_range)));
+static bool do_get_resolution(struct usb_setup_packet *setup) {
+    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+        switch (setup->wValue >> 8u) {
+        case FEATURE_VOLUME_CONTROL:
+            usb_start_tiny_control_in_transfer(VOLUME_RESOLUTION, 2);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void audio_cmd_packet(struct usb_endpoint *ep) {
+    assert(audio_control_cmd_t.cmd == AUDIO_REQ_SetCurrent);
+    struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
+    audio_control_cmd_t.cmd = 0;
+    if (buffer->data_len >= audio_control_cmd_t.len) {
+        if (audio_control_cmd_t.type == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
+            switch (audio_control_cmd_t.cs) {
+            case FEATURE_MUTE_CONTROL:
+                audio_state.mute = buffer->data[0];
+                break;
+            case FEATURE_VOLUME_CONTROL:
+                audio_set_volume(*(int16_t *) buffer->data);
+                break;
+            }
+        } else if (audio_control_cmd_t.type == USB_REQ_TYPE_RECIPIENT_ENDPOINT) {
+            if (audio_control_cmd_t.cs == ENDPOINT_FREQ_CONTROL) {
+                uint32_t new_freq = (*(uint32_t *) buffer->data) & 0x00ffffffu;
+                if (audio_state.freq != new_freq) {
+                    audio_state.freq = new_freq;
+                    _audio_reconfigure();
                 }
             }
         }
-        if (ctrlSel == AUDIO_CS_CTRL_CLK_VALID) {
-            // Clock is always valid
-            static const uint8_t clk_valid = 1;
-            return tud_control_xfer(rhport, p_request, (void*)&clk_valid, 1);
-        }
+    }
+    usb_start_empty_control_in_transfer_null_completion();
+}
+
+static const struct usb_transfer_type _audio_cmd_transfer_type = {
+    .on_packet = audio_cmd_packet,
+    .initial_packet_count = 1,
+};
+
+static bool do_set_current(struct usb_setup_packet *setup) {
+    if (setup->wLength && setup->wLength < 64) {
+        audio_control_cmd_t.cmd = AUDIO_REQ_SetCurrent;
+        audio_control_cmd_t.type = setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK;
+        audio_control_cmd_t.len = (uint8_t) setup->wLength;
+        audio_control_cmd_t.unit = setup->wIndex >> 8u;
+        audio_control_cmd_t.cs = setup->wValue >> 8u;
+        audio_control_cmd_t.cn = (uint8_t) setup->wValue;
+        usb_start_control_out_transfer(&_audio_cmd_transfer_type);
+        return true;
+    }
+    return false;
+}
+
+// Forward declaration — Console app sends vendor requests with wIndex=0 (interface recipient),
+// so they arrive here on the AC interface and must be forwarded to the vendor handler.
+static bool vendor_setup_request_handler(struct usb_interface *interface, struct usb_setup_packet *setup);
+
+static bool ac_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
+    setup = __builtin_assume_aligned(setup, 4);
+
+    // Forward vendor-type requests to the vendor handler (Console sends wIndex=0)
+    if (USB_REQ_TYPE_TYPE_VENDOR == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
+        return vendor_setup_request_handler(interface, setup);
     }
 
-    // Feature Unit controls
-    if (entityId == UAC2_ENTITY_FEATURE_UNIT) {
-        switch (ctrlSel) {
-            case AUDIO_FU_CTRL_MUTE:
-                return tud_control_xfer(rhport, p_request, (void*)&audio_state.mute, 1);
-
-            case AUDIO_FU_CTRL_VOLUME:
-                switch (p_request->bRequest) {
-                    case AUDIO_CS_REQ_CUR:
-                        return tud_control_xfer(rhport, p_request, (void*)&audio_state.volume, 2);
-                    case AUDIO_CS_REQ_RANGE: {
-                        // UAC2 Volume Range: wNumSubRanges (2) + { wMIN, wMAX, wRES } (6 bytes each)
-                        static uint8_t vol_range[8];
-                        int16_t min_vol = MIN_VOLUME;
-                        int16_t max_vol = MAX_VOLUME;
-                        int16_t res_vol = VOLUME_RESOLUTION;
-                        vol_range[0] = 0x01; vol_range[1] = 0x00;  // wNumSubRanges = 1
-                        memcpy(&vol_range[2], &min_vol, 2);
-                        memcpy(&vol_range[4], &max_vol, 2);
-                        memcpy(&vol_range[6], &res_vol, 2);
-                        return tud_control_xfer(rhport, p_request, vol_range,
-                                                TU_MIN(p_request->wLength, sizeof(vol_range)));
-                    }
-                }
-                break;
+    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
+        switch (setup->bRequest) {
+        case AUDIO_REQ_SetCurrent:
+            return do_set_current(setup);
+        case AUDIO_REQ_GetCurrent:
+            return do_get_current(setup);
+        case AUDIO_REQ_GetMinimum:
+            return do_get_minimum(setup);
+        case AUDIO_REQ_GetMaximum:
+            return do_get_maximum(setup);
+        case AUDIO_REQ_GetResolution:
+            return do_get_resolution(setup);
+        default:
+            break;
         }
     }
-
-    (void)channelNum;
     return false;
 }
 
-// Invoked when audio class specific set request received for an EP
-// In UAC2, sample rate is handled via Clock Source entity, not endpoint
-bool tud_audio_set_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request, uint8_t *buf) {
-    (void)rhport;
-    (void)p_request;
-    (void)buf;
-    // No endpoint-specific controls needed for UAC2
+static bool _as_setup_request_handler(__unused struct usb_endpoint *ep, struct usb_setup_packet *setup) {
+    setup = __builtin_assume_aligned(setup, 4);
+    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
+        switch (setup->bRequest) {
+        case AUDIO_REQ_SetCurrent:
+            return do_set_current(setup);
+        case AUDIO_REQ_GetCurrent:
+            return do_get_current(setup);
+        case AUDIO_REQ_GetMinimum:
+            return do_get_minimum(setup);
+        case AUDIO_REQ_GetMaximum:
+            return do_get_maximum(setup);
+        case AUDIO_REQ_GetResolution:
+            return do_get_resolution(setup);
+        default:
+            break;
+        }
+    }
     return false;
 }
 
-// Invoked when audio class specific get request received for an EP
-bool tud_audio_get_req_ep_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
-    (void)rhport;
-    (void)p_request;
-    // No endpoint-specific controls needed for UAC2
-    return false;
-}
-
-// Invoked when set interface (alt setting) is called
-bool tud_audio_set_itf_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
-    (void)rhport;
-    // Track alt setting for debug
-    uint8_t alt = (uint8_t)p_request->wValue;
+static bool as_set_alternate(struct usb_interface *interface, uint alt) {
+    assert(interface == &as_op_interface);
     usb_audio_alt_set = alt;
-    return true;
-}
-
-// Invoked when audio streaming interface is closed (alt 0)
-bool tud_audio_set_itf_close_EP_cb(uint8_t rhport, tusb_control_request_t const *p_request) {
-    (void)rhport;
-    (void)p_request;
-    return true;
-}
-
-// Invoked when audio data received from host
-bool tud_audio_rx_done_pre_read_cb(uint8_t rhport, uint16_t n_bytes_received, uint8_t func_id, uint8_t ep_out, uint8_t cur_alt_setting) {
-    (void)rhport;
-    (void)func_id;
-    (void)ep_out;
-    (void)cur_alt_setting;
-
-    if (n_bytes_received > 0 && n_bytes_received <= sizeof(audio_rx_buffer)) {
-        // Read audio data from TinyUSB
-        uint16_t bytes_read = tud_audio_read(audio_rx_buffer, n_bytes_received);
-        if (bytes_read > 0) {
-            usb_audio_packets++;  // Debug counter
-            process_audio_packet(audio_rx_buffer, bytes_read);
-        }
-    }
-
-    return true;
-}
-
-// Invoked for feedback endpoint - configure for manual fixed-point control
-void tud_audio_feedback_params_cb(uint8_t func_id, uint8_t alt_itf, audio_feedback_params_t* feedback_param) {
-    (void)func_id;
-    (void)alt_itf;
-
-    // Use disabled method - we'll set feedback manually via tud_audio_n_fb_set()
-    // This gives us direct control over drift correction
-    feedback_param->method = AUDIO_FEEDBACK_METHOD_DISABLED;
-}
-
-// Update feedback value (called from main loop or timer)
-void update_audio_feedback(void) {
-    usb_audio_mounted = tud_audio_mounted() ? 1 : 0;
-    if (!usb_audio_mounted) return;
-
-    // For full-speed USB, feedback is in 10.14 fixed-point format
-    // Represents samples per frame (1ms at full-speed)
-    // 48000 Hz = 48 samples/frame = 48 << 14 = 786432
-    // 44100 Hz = 44.1 samples/frame = 44.1 * 16384 = 722534
-
-    uint32_t nominal_10_14 = ((uint64_t)audio_state.freq << 14) / 1000;
-
-    if (sync_started && total_samples_produced > audio_state.freq) {
-        uint64_t now_us = time_us_64();
-        uint64_t elapsed_us = now_us - start_time_us;
-        uint64_t expected_samples = ((uint64_t)elapsed_us * audio_state.freq) / 1000000;
-        int64_t drift = (int64_t)total_samples_produced - (int64_t)expected_samples;
-
-        // Apply proportional correction: ~0.1% adjustment per sample of drift
-        // Scale drift to 10.14 fixed point correction
-        int32_t correction = (int32_t)((drift * 16) / 10);  // ~0.1% per sample drift
-        if (correction > 8192) correction = 8192;    // Cap at ~0.5 samples/frame
-        if (correction < -8192) correction = -8192;
-
-        // If we've produced MORE than expected, tell host to send LESS (subtract)
-        // If we've produced LESS than expected, tell host to send MORE (add)
-        uint32_t feedback = nominal_10_14 - (uint32_t)correction;
-        tud_audio_n_fb_set(0, feedback);
-    } else {
-        tud_audio_n_fb_set(0, nominal_10_14);
-    }
+    return alt < 2;
 }
 
 // ----------------------------------------------------------------------------
-// VENDOR CONTROL TRANSFER CALLBACK (for vendor commands and WCID)
+// VENDOR INTERFACE HANDLER (DSPi commands via EP0 control transfers)
 // ----------------------------------------------------------------------------
 
 // Buffer for vendor SET requests
@@ -608,136 +585,151 @@ static uint8_t vendor_rx_buf[64];
 static uint8_t vendor_last_request = 0;
 static uint16_t vendor_last_wValue = 0;
 
-bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *request) {
-    // First check for Microsoft OS descriptor requests
-    if ((request->bmRequestType_bit.type == TUSB_REQ_TYPE_VENDOR) &&
-        (request->bRequest == MS_VENDOR_CODE)) {
-        return handle_ms_vendor_request(rhport, stage, request);
+static void vendor_cmd_packet(struct usb_endpoint *ep) {
+    struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
+
+    if (buffer->data_len > 0 && buffer->data_len <= sizeof(vendor_rx_buf)) {
+        memcpy(vendor_rx_buf, buffer->data, buffer->data_len);
     }
 
-    // Only handle SETUP stage for data-out transfers, DATA stage for data-in
-    if (request->bmRequestType_bit.direction == TUSB_DIR_OUT) {
-        // Host -> Device (SET requests)
+    // Process command based on saved request info
+    switch (vendor_last_request) {
+        case REQ_SET_EQ_PARAM:
+            if (buffer->data_len >= sizeof(EqParamPacket)) {
+                memcpy((void*)&pending_packet, vendor_rx_buf, sizeof(EqParamPacket));
+                eq_update_pending = true;
+            }
+            break;
 
-        if (stage == CONTROL_STAGE_SETUP) {
-            // Save request info for DATA stage
-            vendor_last_request = request->bRequest;
-            vendor_last_wValue = request->wValue;
-            // Prepare to receive data
-            return tud_control_xfer(rhport, request, vendor_rx_buf, request->wLength);
+        case REQ_SET_PREAMP:
+            if (buffer->data_len >= 4) {
+                float db;
+                memcpy(&db, vendor_rx_buf, 4);
+                global_preamp_db = db;
+                float linear = powf(10.0f, db / 20.0f);
+                global_preamp_mul = (int32_t)(linear * (float)(1<<28));
+            }
+            break;
+
+        case REQ_SET_DELAY: {
+            uint8_t ch = vendor_last_wValue & 0xFF;
+            if (ch < NUM_CHANNELS && buffer->data_len >= 4) {
+                float ms;
+                memcpy(&ms, vendor_rx_buf, 4);
+                if (ms < 0) ms = 0;
+                channel_delays_ms[ch] = ms;
+                dsp_update_delay_samples((float)audio_state.freq);
+            }
+            break;
         }
 
-        if (stage == CONTROL_STAGE_DATA) {
-            // Data received, process command
-            switch (vendor_last_request) {
-                case REQ_SET_EQ_PARAM:
-                    if (request->wLength >= sizeof(EqParamPacket)) {
-                        memcpy((void*)&pending_packet, vendor_rx_buf, sizeof(EqParamPacket));
-                        eq_update_pending = true;
-                    }
-                    break;
-
-                case REQ_SET_PREAMP:
-                    if (request->wLength >= 4) {
-                        float db;
-                        memcpy(&db, vendor_rx_buf, 4);
-                        global_preamp_db = db;
-                        float linear = powf(10.0f, db / 20.0f);
-                        global_preamp_mul = (int32_t)(linear * (float)(1<<28));
-                    }
-                    break;
-
-                case REQ_SET_DELAY: {
-                    uint8_t ch = vendor_last_wValue & 0xFF;
-                    if (ch < NUM_CHANNELS && request->wLength >= 4) {
-                        float ms;
-                        memcpy(&ms, vendor_rx_buf, 4);
-                        if (ms < 0) ms = 0;
-                        channel_delays_ms[ch] = ms;
-                        dsp_update_delay_samples((float)audio_state.freq);
-                    }
-                    break;
-                }
-
-                case REQ_SET_BYPASS:
-                    if (request->wLength >= 1) {
-                        bypass_master_eq = (vendor_rx_buf[0] != 0);
-                    }
-                    break;
-
-                case REQ_SET_CHANNEL_GAIN: {
-                    uint8_t ch = vendor_last_wValue & 0xFF;
-                    if (ch < 3 && request->wLength >= 4) {
-                        float db;
-                        memcpy(&db, vendor_rx_buf, 4);
-                        channel_gain_db[ch] = db;
-                        float linear = powf(10.0f, db / 20.0f);
-                        channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
-                    }
-                    break;
-                }
-
-                case REQ_SET_CHANNEL_MUTE: {
-                    uint8_t ch = vendor_last_wValue & 0xFF;
-                    if (ch < 3 && request->wLength >= 1) {
-                        channel_mute[ch] = (vendor_rx_buf[0] != 0);
-                    }
-                    break;
-                }
+        case REQ_SET_BYPASS:
+            if (buffer->data_len >= 1) {
+                bypass_master_eq = (vendor_rx_buf[0] != 0);
             }
+            break;
+
+        case REQ_SET_CHANNEL_GAIN: {
+            uint8_t ch = vendor_last_wValue & 0xFF;
+            if (ch < 3 && buffer->data_len >= 4) {
+                float db;
+                memcpy(&db, vendor_rx_buf, 4);
+                channel_gain_db[ch] = db;
+                float linear = powf(10.0f, db / 20.0f);
+                channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
+            }
+            break;
+        }
+
+        case REQ_SET_CHANNEL_MUTE: {
+            uint8_t ch = vendor_last_wValue & 0xFF;
+            if (ch < 3 && buffer->data_len >= 1) {
+                channel_mute[ch] = (vendor_rx_buf[0] != 0);
+            }
+            break;
+        }
+    }
+
+    usb_start_empty_control_in_transfer_null_completion();
+}
+
+static const struct usb_transfer_type _vendor_cmd_transfer_type = {
+    .on_packet = vendor_cmd_packet,
+    .initial_packet_count = 1,
+};
+
+// Helper: write data into the control IN buffer and send
+static void vendor_send_response(const void *data, uint len) {
+    struct usb_buffer *buffer = usb_current_in_packet_buffer(usb_get_control_in_endpoint());
+    memcpy(buffer->data, data, len);
+    buffer->data_len = len;
+    usb_start_single_buffer_control_in_transfer();
+}
+
+static bool vendor_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
+    setup = __builtin_assume_aligned(setup, 4);
+
+    if (!(setup->bmRequestType & USB_DIR_IN)) {
+        // Host -> Device (SET requests)
+        vendor_last_request = setup->bRequest;
+        vendor_last_wValue = setup->wValue;
+
+        if (setup->wLength && setup->wLength <= sizeof(vendor_rx_buf)) {
+            usb_start_control_out_transfer(&_vendor_cmd_transfer_type);
             return true;
         }
-
-        return true;
+        return false;
 
     } else {
         // Device -> Host (GET requests)
-
-        if (stage != CONTROL_STAGE_SETUP) return true;
-
         static uint8_t resp_buf[64];
 
-        switch (request->bRequest) {
+        switch (setup->bRequest) {
             case REQ_GET_PREAMP: {
                 float current_db = global_preamp_db;
                 memcpy(resp_buf, &current_db, 4);
-                return tud_control_xfer(rhport, request, resp_buf, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
             }
 
             case REQ_GET_DELAY: {
-                uint8_t ch = (uint8_t)request->wValue;
+                uint8_t ch = (uint8_t)setup->wValue;
                 if (ch < NUM_CHANNELS) {
                     memcpy(resp_buf, (void*)&channel_delays_ms[ch], 4);
-                    return tud_control_xfer(rhport, request, resp_buf, 4);
+                    vendor_send_response(resp_buf, 4);
+                    return true;
                 }
                 return false;
             }
 
             case REQ_GET_BYPASS: {
                 resp_buf[0] = bypass_master_eq ? 1 : 0;
-                return tud_control_xfer(rhport, request, resp_buf, 1);
+                vendor_send_response(resp_buf, 1);
+                return true;
             }
 
             case REQ_GET_CHANNEL_GAIN: {
-                uint8_t ch = (uint8_t)request->wValue;
+                uint8_t ch = (uint8_t)setup->wValue;
                 if (ch < 3) {
                     memcpy(resp_buf, (void*)&channel_gain_db[ch], 4);
-                    return tud_control_xfer(rhport, request, resp_buf, 4);
+                    vendor_send_response(resp_buf, 4);
+                    return true;
                 }
                 return false;
             }
 
             case REQ_GET_CHANNEL_MUTE: {
-                uint8_t ch = (uint8_t)request->wValue;
+                uint8_t ch = (uint8_t)setup->wValue;
                 if (ch < 3) {
                     resp_buf[0] = channel_mute[ch] ? 1 : 0;
-                    return tud_control_xfer(rhport, request, resp_buf, 1);
+                    vendor_send_response(resp_buf, 1);
+                    return true;
                 }
                 return false;
             }
 
             case REQ_GET_STATUS: {
-                if (request->wValue == 9) {
+                if (setup->wValue == 9) {
                     // Combined status: all peaks + CPU in one 12-byte transfer
                     resp_buf[0] = global_status.peaks[0] & 0xFF;
                     resp_buf[1] = global_status.peaks[0] >> 8;
@@ -751,11 +743,12 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
                     resp_buf[9] = global_status.peaks[4] >> 8;
                     resp_buf[10] = global_status.cpu0_load;
                     resp_buf[11] = global_status.cpu1_load;
-                    return tud_control_xfer(rhport, request, resp_buf, 12);
+                    vendor_send_response(resp_buf, 12);
+                    return true;
                 }
 
                 uint32_t resp = 0;
-                switch (request->wValue) {
+                switch (setup->wValue) {
                     case 0: resp = (uint32_t)global_status.peaks[0] | ((uint32_t)global_status.peaks[1] << 16); break;
                     case 1: resp = (uint32_t)global_status.peaks[2] | ((uint32_t)global_status.peaks[3] << 16); break;
                     case 2: resp = (uint32_t)global_status.peaks[4] | ((uint32_t)global_status.cpu0_load << 16) | ((uint32_t)global_status.cpu1_load << 24); break;
@@ -765,19 +758,18 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
                     case 6: resp = pdm_dma_underruns; break;
                     case 7: resp = spdif_overruns; break;
                     case 8: resp = spdif_underruns; break;
-                    case 10: resp = usb_audio_packets; break;  // Debug: USB audio packet count
-                    case 11: resp = usb_audio_alt_set; break;  // Debug: last alt setting
-                    case 12: resp = usb_audio_mounted; break;  // Debug: audio mounted state
-                    case 13: resp = usb_config_requests; break; // Debug: config descriptor requests
+                    case 10: resp = usb_audio_packets; break;
+                    case 11: resp = usb_audio_alt_set; break;
+                    case 12: resp = usb_audio_mounted; break;
                 }
-                memcpy(resp_buf, &resp, 4);
-                return tud_control_xfer(rhport, request, resp_buf, 4);
+                usb_start_tiny_control_in_transfer(resp, 4);
+                return true;
             }
 
             case REQ_SAVE_PARAMS: {
                 int result = flash_save_params();
-                resp_buf[0] = result;
-                return tud_control_xfer(rhport, request, resp_buf, 1);
+                usb_start_tiny_control_in_transfer(result, 1);
+                return true;
             }
 
             case REQ_LOAD_PARAMS: {
@@ -786,22 +778,22 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
                     dsp_recalculate_all_filters((float)audio_state.freq);
                     dsp_update_delay_samples((float)audio_state.freq);
                 }
-                resp_buf[0] = result;
-                return tud_control_xfer(rhport, request, resp_buf, 1);
+                usb_start_tiny_control_in_transfer(result, 1);
+                return true;
             }
 
             case REQ_FACTORY_RESET: {
                 flash_factory_reset();
                 dsp_recalculate_all_filters((float)audio_state.freq);
                 dsp_update_delay_samples((float)audio_state.freq);
-                resp_buf[0] = FLASH_OK;
-                return tud_control_xfer(rhport, request, resp_buf, 1);
+                usb_start_tiny_control_in_transfer(FLASH_OK, 1);
+                return true;
             }
 
             case REQ_GET_EQ_PARAM: {
-                uint8_t channel = (request->wValue >> 8) & 0xFF;
-                uint8_t band = (request->wValue >> 4) & 0x0F;
-                uint8_t param = request->wValue & 0x0F;
+                uint8_t channel = (setup->wValue >> 8) & 0xFF;
+                uint8_t band = (setup->wValue >> 4) & 0x0F;
+                uint8_t param = setup->wValue & 0x0F;
                 if (channel < NUM_CHANNELS && band < channel_band_counts[channel]) {
                     uint32_t val_to_send = 0;
                     EqParamPacket *p = &filter_recipes[channel][band];
@@ -811,8 +803,8 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
                         case 2: memcpy(&val_to_send, &p->Q, 4); break;
                         case 3: memcpy(&val_to_send, &p->gain_db, 4); break;
                     }
-                    memcpy(resp_buf, &val_to_send, 4);
-                    return tud_control_xfer(rhport, request, resp_buf, 4);
+                    usb_start_tiny_control_in_transfer(val_to_send, 4);
+                    return true;
                 }
                 return false;
             }
@@ -823,6 +815,50 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 }
 
 // ----------------------------------------------------------------------------
+// DEVICE-LEVEL SETUP REQUEST HANDLER (WCID / MS OS descriptors)
+// ----------------------------------------------------------------------------
+
+static bool device_setup_request_handler(struct usb_device *dev, struct usb_setup_packet *setup) {
+    (void)dev;
+    setup = __builtin_assume_aligned(setup, 4);
+
+    // Handle Microsoft OS vendor requests (WCID compat ID and ext props)
+    if ((setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK) == USB_REQ_TYPE_TYPE_VENDOR &&
+        setup->bRequest == MS_VENDOR_CODE) {
+        switch (setup->wIndex) {
+            case 0x0004: {
+                uint16_t len = setup->wLength < MS_COMPAT_ID_DESC_LEN ? setup->wLength : MS_COMPAT_ID_DESC_LEN;
+                vendor_send_response(ms_compat_id_descriptor, len);
+                return true;
+            }
+            case 0x0005: {
+                uint16_t len = setup->wLength < MS_EXT_PROP_DESC_LEN ? setup->wLength : MS_EXT_PROP_DESC_LEN;
+                vendor_send_response(ms_ext_prop_descriptor, len);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// STRING DESCRIPTOR CALLBACK (with MS OS string at index 0xEE)
+// ----------------------------------------------------------------------------
+
+static const char *_get_descriptor_string(uint index) {
+    if (index == 0xEE) {
+        // Return NULL — we handle MS OS string via the device setup handler
+        // Actually, we need to handle string 0xEE specially
+        return NULL;
+    }
+    if (index >= 1 && index <= count_of(descriptor_strings)) {
+        return descriptor_strings[index - 1];
+    }
+    return "";
+}
+
+// ----------------------------------------------------------------------------
 // INIT
 // ----------------------------------------------------------------------------
 
@@ -830,13 +866,8 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_requ
 struct audio_spdif_config config = { .pin = PICO_AUDIO_SPDIF_PIN, .dma_channel = 0, .pio_sm = 0 };
 struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
 
-static void _audio_reconfigure(void) {
-    rate_change_pending = true;
-    pending_rate = audio_state.freq;
-}
-
 void usb_sound_card_init(void) {
-    // S/PDIF Setup (this must happen before TinyUSB init to claim DMA channel 0)
+    // S/PDIF Setup (this must happen before USB init to claim DMA channel 0)
     producer_pool = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
 
     audio_spdif_setup(&audio_format_48k, &config);
@@ -845,12 +876,45 @@ void usb_sound_card_init(void) {
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
     audio_spdif_set_enabled(true);
 
-    // Initialize TinyUSB
-    tud_init(BOARD_TUD_RHPORT);
+    // Initialize pico-extras USB device with 3 interfaces: AC, AS, Vendor
+
+    // Audio Control interface
+    usb_interface_init(&ac_interface, &audio_device_config.ac_interface, NULL, 0, true);
+    ac_interface.setup_request_handler = ac_setup_request_handler;
+
+    // Audio Streaming interface with OUT + sync endpoints
+    static struct usb_endpoint *const op_endpoints[] = {
+        &ep_op_out, &ep_op_sync
+    };
+    usb_interface_init(&as_op_interface, &audio_device_config.as_op_interface, op_endpoints, count_of(op_endpoints), true);
+    as_op_interface.set_alternate_handler = as_set_alternate;
+    ep_op_out.setup_request_handler = _as_setup_request_handler;
+    as_transfer.type = &as_transfer_type;
+    usb_set_default_transfer(&ep_op_out, &as_transfer);
+    as_sync_transfer.type = &as_sync_transfer_type;
+    usb_set_default_transfer(&ep_op_sync, &as_sync_transfer);
+
+    // Vendor interface (control-only, no endpoints)
+    usb_interface_init(&vendor_interface, &audio_device_config.vendor_interface, NULL, 0, true);
+    vendor_interface.setup_request_handler = vendor_setup_request_handler;
+
+    // Initialize USB device
+    static struct usb_interface *const boot_device_interfaces[] = {
+        &ac_interface,
+        &as_op_interface,
+        &vendor_interface,
+    };
+    struct usb_device *device = usb_device_init(&boot_device_descriptor, &audio_device_config.descriptor,
+        boot_device_interfaces, count_of(boot_device_interfaces),
+        _get_descriptor_string);
+    assert(device);
+    device->setup_request_handler = device_setup_request_handler;
 
     // Initialize DSP
     dsp_init_default_filters();
     dsp_recalculate_all_filters(48000.0f);
     audio_set_volume(DEFAULT_VOLUME);
     _audio_reconfigure();
+
+    usb_device_start();
 }

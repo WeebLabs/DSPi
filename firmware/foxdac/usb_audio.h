@@ -1,5 +1,6 @@
 /*
- * TinyUSB Audio Interface Header for DSPi
+ * USB Audio Interface Header for DSPi
+ * pico-extras usb_device UAC1 implementation
  */
 
 #ifndef USB_AUDIO_H
@@ -42,18 +43,7 @@ extern volatile uint32_t pending_rate;
 void usb_sound_card_init(void);
 void audio_set_volume(int16_t volume);
 
-// Update audio feedback (call from main loop)
-void update_audio_feedback(void);
-
-// ----------------------------------------------------------------------------
-// VENDOR INTERFACE API
-// ----------------------------------------------------------------------------
-
-// Queue a response packet to be sent on the vendor IN endpoint
-// Returns true if queued successfully, false if queue full
-bool vendor_queue_response(const VendorRespPacket *resp);
-
-// Check if vendor interface is connected and ready
-bool vendor_interface_ready(void);
+// Expose serial string buffer for main.c to write unique board ID
+extern char *usb_descriptor_str_serial;
 
 #endif // USB_AUDIO_H

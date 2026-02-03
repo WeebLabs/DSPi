@@ -13,7 +13,6 @@ add_executable(foxdac
     main.c
     pdm_generator.c
     pdm_generator.h
-    tusb_config.h
     usb_audio.c
     usb_audio.h
     usb_descriptors.c
@@ -28,6 +27,7 @@ pico_set_binary_type(foxdac copy_to_ram)
 
 target_include_directories(foxdac PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/lufa
 )
 
 target_compile_definitions(foxdac PRIVATE
@@ -38,7 +38,10 @@ target_compile_definitions(foxdac PRIVATE
 
     PICO_DEFAULT_UART_TX_PIN=12
 
-    # CFG_TUSB_MCU is set automatically by pico-sdk based on target board
+    # pico-extras usb_device configuration
+    PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1
+    PICO_USBDEV_MAX_DESCRIPTOR_SIZE=256
+    PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=2
 )
 
 target_link_libraries(foxdac
@@ -48,8 +51,7 @@ target_link_libraries(foxdac
     hardware_pwm
     hardware_flash
     pico_audio_spdif
-    tinyusb_device
-    tinyusb_board
+    usb_device
 )
 
 pico_add_extra_outputs(foxdac)

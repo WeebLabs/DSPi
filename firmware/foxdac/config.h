@@ -21,7 +21,6 @@ extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer 
 extern volatile uint32_t usb_audio_packets;   // Debug: count of USB audio packets received
 extern volatile uint32_t usb_audio_alt_set;   // Debug: last alt setting selected
 extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
-extern volatile uint32_t usb_config_requests; // Debug: config descriptor requests
 
 // ----------------------------------------------------------------------------
 // CONFIGURATION

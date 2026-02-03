@@ -1,5 +1,5 @@
 /*
- * DSPi Main - TinyUSB Audio Device
+ * DSPi Main - USB Audio Device
  * USB Audio with DSP processing and S/PDIF output
  */
 
@@ -12,7 +12,6 @@
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/clocks.h"
 #include "hardware/timer.h"
-#include "tusb.h"
 
 // Local headers
 #include "config.h"
@@ -20,7 +19,6 @@
 #include "flash_storage.h"
 #include "pdm_generator.h"
 #include "usb_audio.h"
-#include "usb_descriptors.h"
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
@@ -109,7 +107,7 @@ void core0_init() {
 
     gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);
 
-    pico_get_unique_board_id_string(descriptor_str_serial, 17);
+    pico_get_unique_board_id_string(usb_descriptor_str_serial, 17);
 
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
 
@@ -152,14 +150,8 @@ int main(void) {
     watchdog_enable(8000, 1);
 
     while (1) {
-        // TinyUSB task - must be called regularly
-        tud_task();
-
         // Update watchdog
         watchdog_update();
-
-        // Update audio feedback for drift correction
-        update_audio_feedback();
 
         // Handle EQ parameter updates from USB
         if (eq_update_pending) {
