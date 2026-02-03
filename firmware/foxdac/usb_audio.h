@@ -25,7 +25,11 @@ extern volatile bool bypass_master_eq;
 // Per-channel gain and mute (output channels only: L, R, Sub)
 extern volatile float channel_gain_db[3];
 extern volatile int32_t channel_gain_mul[3];
+extern volatile float channel_gain_linear[3];
 extern volatile bool channel_mute[3];
+
+// Preamp
+extern volatile float global_preamp_linear;
 
 // ----------------------------------------------------------------------------
 // EQ UPDATE FLAGS (for main loop to handle)

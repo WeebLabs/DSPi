@@ -120,8 +120,10 @@ void core0_init() {
     // Try to load saved parameters from flash
     // If successful, this overwrites the defaults set by usb_sound_card_init()
     if (flash_load_params() == FLASH_OK) {
+        uint32_t flags = save_and_disable_interrupts();
         dsp_recalculate_all_filters(48000.0f);
         dsp_update_delay_samples(48000.0f);
+        restore_interrupts(flags);
     }
 
 #if ENABLE_SUB

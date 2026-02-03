@@ -40,15 +40,12 @@ DSP_TIME_CRITICAL int32_t fast_mul_q28(int32_t a, int32_t b) {
 #endif
 
 void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
-    // Reset state when recalculating
 #if PICO_RP2350
-    bq->s1 = 0.0; bq->s2 = 0.0;
     if (p->type == FILTER_FLAT || p->freq == 0 || sample_rate == 0) {
         bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;
         return;
     }
 #else
-    bq->s1 = 0; bq->s2 = 0; 
     if (p->type == FILTER_FLAT || p->freq == 0 || sample_rate == 0) {
         bq->b0 = 1 << FILTER_SHIFT; bq->b1 = 0; bq->b2 = 0; bq->a1 = 0; bq->a2 = 0;
         return;
@@ -89,6 +86,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
 }
 
 void dsp_init_default_filters() {
+    memset(filters, 0, sizeof(filters));
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         for (int b = 0; b < MAX_BANDS; b++) {
              filter_recipes[ch][b].type = FILTER_FLAT; filter_recipes[ch][b].freq = 1000.0f; filter_recipes[ch][b].Q = 0.707f; filter_recipes[ch][b].gain_db = 0.0f;

@@ -41,10 +41,12 @@ volatile uint32_t pending_rate = 48000;
 
 volatile float global_preamp_db = 0.0f;
 volatile int32_t global_preamp_mul = 268435456;
+volatile float global_preamp_linear = 1.0f;
 
 // Per-channel gain and mute (output channels: L=0, R=1, Sub=2)
 volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
 volatile int32_t channel_gain_mul[3] = {32768, 32768, 32768};  // Unity = 2^15
+volatile float channel_gain_linear[3] = {1.0f, 1.0f, 1.0f};
 volatile bool channel_mute[3] = {false, false, false};
 
 // Sync State
@@ -159,8 +161,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // RP2350 FLOAT PIPELINE (Phase 3)
     // ------------------------------------------------------------------------
     float vol_mul = (float)audio_state.vol_mul / 32768.0f; // Q15 -> float
-    float preamp = global_preamp_db == 0.0f ? 1.0f : powf(10.0f, global_preamp_db / 20.0f);
+    float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
+
+    float gain_l = channel_gain_linear[0];
+    float gain_r = channel_gain_linear[1];
+    float gain_sub = channel_gain_linear[2];
+    bool mute_l = channel_mute[0];
+    bool mute_r = channel_mute[1];
+    bool mute_sub = channel_mute[2];
 
     float peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
 
@@ -187,8 +196,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
         }
 
-        if (fabsf(master_l) > peak_ml) peak_ml = fabsf(master_l);
-        if (fabsf(master_r) > peak_mr) peak_mr = fabsf(master_r);
+        float abs_ml = fabsf(master_l); if (abs_ml > peak_ml) peak_ml = abs_ml;
+        float abs_mr = fabsf(master_r); if (abs_mr > peak_mr) peak_mr = abs_mr;
 
         // Subwoofer Mix
         float sub_in = (master_l + master_r) * 0.5f;
@@ -203,17 +212,13 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 #endif
 
         // Per-channel Gain & Mute
-        float gain_l = powf(10.0f, channel_gain_db[0] / 20.0f);
-        float gain_r = powf(10.0f, channel_gain_db[1] / 20.0f);
-        float gain_sub = powf(10.0f, channel_gain_db[2] / 20.0f);
+        out_l   = mute_l ? 0.0f : (out_l * gain_l);
+        out_r   = mute_r ? 0.0f : (out_r * gain_r);
+        out_sub = mute_sub ? 0.0f : (out_sub * gain_sub);
 
-        out_l   = channel_mute[0] ? 0.0f : (out_l * gain_l);
-        out_r   = channel_mute[1] ? 0.0f : (out_r * gain_r);
-        out_sub = channel_mute[2] ? 0.0f : (out_sub * gain_sub);
-
-        if (fabsf(out_l) > peak_ol) peak_ol = fabsf(out_l);
-        if (fabsf(out_r) > peak_or) peak_or = fabsf(out_r);
-        if (fabsf(out_sub) > peak_sub) peak_sub = fabsf(out_sub);
+        float abs_ol = fabsf(out_l); if (abs_ol > peak_ol) peak_ol = abs_ol;
+        float abs_or = fabsf(out_r); if (abs_or > peak_or) peak_or = abs_or;
+        float abs_sub = fabsf(out_sub); if (abs_sub > peak_sub) peak_sub = abs_sub;
 
         // Master Volume
         out_l   *= vol_mul;
@@ -608,6 +613,7 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
                 global_preamp_db = db;
                 float linear = powf(10.0f, db / 20.0f);
                 global_preamp_mul = (int32_t)(linear * (float)(1<<28));
+                global_preamp_linear = linear;
             }
             break;
 
@@ -637,6 +643,7 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
                 channel_gain_db[ch] = db;
                 float linear = powf(10.0f, db / 20.0f);
                 channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
+                channel_gain_linear[ch] = linear;
             }
             break;
         }

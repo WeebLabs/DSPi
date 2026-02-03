@@ -18,3 +18,7 @@ firmware/eclipse_build/*
 pico-sdk
 build
 .vscode
+
+# Ignore all markdown files except README.md
+*.md
+!README.md
