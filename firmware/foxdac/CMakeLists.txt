@@ -50,6 +50,7 @@ target_link_libraries(foxdac
     pico_unique_id
     hardware_pwm
     hardware_flash
+    hardware_adc
     pico_audio_spdif
     usb_device
 )

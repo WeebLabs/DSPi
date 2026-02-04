@@ -123,13 +123,39 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | `0x44` | `REQ_SET_PREAMP` | 4 bytes | Set global gain (float dB). |
 | `0x46` | `REQ_SET_BYPASS` | 1 byte | Bypass Master EQ (1=On, 0=Off). |
 | `0x48` | `REQ_SET_DELAY` | 4 bytes | Set channel delay (float ms). |
-| `0x50` | `REQ_GET_STATUS` | 12 bytes | Get live meter levels and CPU load. |
+| `0x50` | `REQ_GET_STATUS` | 4 bytes | Get system statistics (see wValue table below). |
 | `0x54` | `REQ_SET_CHANNEL_GAIN` | 4 bytes | Set output channel gain (float dB). |
 | `0x56` | `REQ_SET_CHANNEL_MUTE` | 1 byte | Mute output channel (1=Muted, 0=Unmuted). |
 | `0x51` | `REQ_SAVE_PARAMS` | 1 byte | Save settings to Flash. |
 | `0x53` | `REQ_FACTORY_RESET` | 1 byte | Reset RAM to defaults. |
 
 *(Full list of requests available in `config.h`)*
+
+### REQ_GET_STATUS (0x50) - System Statistics
+
+The `REQ_GET_STATUS` request returns a 4-byte value based on the `wValue` field in the control transfer:
+
+| wValue | Returns | Description |
+| :--- | :--- | :--- |
+| `0` | uint32 | Peaks for channels 0-1 (packed 16-bit values) |
+| `1` | uint32 | Peaks for channels 2-3 (packed 16-bit values) |
+| `2` | uint32 | Peak for channel 4 + CPU0/CPU1 load (packed) |
+| `3` | uint32 | PDM ring buffer overruns |
+| `4` | uint32 | PDM ring buffer underruns |
+| `5` | uint32 | PDM DMA overruns |
+| `6` | uint32 | PDM DMA underruns |
+| `7` | uint32 | SPDIF overruns |
+| `8` | uint32 | SPDIF underruns |
+| `9` | 12 bytes | Combined: all 5 peaks + CPU loads (12-byte transfer) |
+| `10` | uint32 | USB audio packet count |
+| `11` | uint32 | USB alt setting |
+| `12` | uint32 | USB audio mounted state |
+| `13` | uint32 | **System clock frequency (Hz)** |
+| `14` | uint32 | **Core voltage (millivolts)** |
+| `15` | uint32 | **Sample rate (Hz)** |
+| `16` | int32 | **System temperature (centi-degrees C)** |
+
+**Example:** To get the current clock frequency, send `REQ_GET_STATUS` with `wValue=13`. The device will return the system clock frequency in Hz as a 32-bit integer.
 
 ### Data Structures
 
