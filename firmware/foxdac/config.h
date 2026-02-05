@@ -96,6 +96,12 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define REQ_GET_CHANNEL_GAIN 0x55
 #define REQ_SET_CHANNEL_MUTE 0x56
 #define REQ_GET_CHANNEL_MUTE 0x57
+#define REQ_SET_LOUDNESS            0x58
+#define REQ_GET_LOUDNESS            0x59
+#define REQ_SET_LOUDNESS_REF        0x5A
+#define REQ_GET_LOUDNESS_REF        0x5B
+#define REQ_SET_LOUDNESS_INTENSITY  0x5C
+#define REQ_GET_LOUDNESS_INTENSITY  0x5D
 
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u

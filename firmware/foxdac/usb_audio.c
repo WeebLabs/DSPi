@@ -25,8 +25,10 @@
 #include "usb_audio.h"
 #include "usb_descriptors.h"
 #include "dsp_pipeline.h"
+#include "dcp_inline.h"
 #include "pdm_generator.h"
 #include "flash_storage.h"
+#include "loudness.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -50,6 +52,15 @@ volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
 volatile int32_t channel_gain_mul[3] = {32768, 32768, 32768};  // Unity = 2^15
 volatile float channel_gain_linear[3] = {1.0f, 1.0f, 1.0f};
 volatile bool channel_mute[3] = {false, false, false};
+
+// Loudness compensation state
+volatile bool loudness_enabled = false;
+volatile float loudness_ref_spl = 83.0f;
+volatile float loudness_intensity_pct = 100.0f;
+volatile bool loudness_recompute_pending = false;
+
+static Biquad loudness_biquads[2][LOUDNESS_BIQUAD_COUNT];  // [0]=Left, [1]=Right
+static const LoudnessCoeffs *current_loudness_coeffs = NULL;
 
 // Sync State
 volatile uint64_t total_samples_produced = 0;
@@ -172,7 +183,13 @@ void audio_set_volume(int16_t volume) {
     volume += CENTER_VOLUME_INDEX * 256;
     if (volume < 0) volume = 0;
     if (volume >= 91 * 256) volume = 91 * 256 - 1;
-    audio_state.vol_mul = db_to_vol[((uint16_t)volume) >> 8u];
+    uint8_t vol_index = ((uint16_t)volume) >> 8u;
+    audio_state.vol_mul = db_to_vol[vol_index];
+
+    // Update loudness compensation coefficients for this volume step
+    if (loudness_enabled && loudness_active_table) {
+        current_loudness_coeffs = loudness_active_table[vol_index];
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -250,6 +267,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     bool mute_r = channel_mute[1];
     bool mute_sub = channel_mute[2];
 
+    // Snapshot loudness state for this packet
+    bool loud_on = loudness_enabled;
+    const LoudnessCoeffs *loud_coeffs = current_loudness_coeffs;
+
     float peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
 
     for (uint32_t i = 0; i < sample_count; i++) {
@@ -260,6 +281,32 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         // Preamp
         raw_left *= preamp;
         raw_right *= preamp;
+
+        // Loudness compensation (after preamp, before master EQ)
+        if (loud_on && loud_coeffs) {
+            for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
+                const LoudnessCoeffs *lc = &loud_coeffs[j];
+                if (lc->a1 == 0.0f && lc->a2 == 0.0f && lc->b1 == 0.0f) continue;
+                Biquad *bq = &loudness_biquads[0][j];
+                double rd = dcp_dadd(dcp_f2d(lc->b0 * raw_left), bq->s1);
+                float rf = dcp_d2f(rd);
+                float v1 = lc->b1 * raw_left - lc->a1 * rf;
+                bq->s1 = dcp_dadd(dcp_f2d(v1), bq->s2);
+                bq->s2 = dcp_f2d(lc->b2 * raw_left - lc->a2 * rf);
+                raw_left = rf;
+            }
+            for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
+                const LoudnessCoeffs *lc = &loud_coeffs[j];
+                if (lc->a1 == 0.0f && lc->a2 == 0.0f && lc->b1 == 0.0f) continue;
+                Biquad *bq = &loudness_biquads[1][j];
+                double rd = dcp_dadd(dcp_f2d(lc->b0 * raw_right), bq->s1);
+                float rf = dcp_d2f(rd);
+                float v1 = lc->b1 * raw_right - lc->a1 * rf;
+                bq->s1 = dcp_dadd(dcp_f2d(v1), bq->s2);
+                bq->s2 = dcp_f2d(lc->b2 * raw_right - lc->a2 * rf);
+                raw_right = rf;
+            }
+        }
 
         // Master EQ
         float master_l, master_r;
@@ -347,6 +394,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     int32_t preamp = global_preamp_mul;
     bool is_bypassed = bypass_master_eq;
 
+    // Snapshot loudness state for this packet
+    bool loud_on = loudness_enabled;
+    const LoudnessCoeffs *loud_coeffs = current_loudness_coeffs;
+
     int32_t peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
 
     for (uint32_t i = 0; i < sample_count; i++) {
@@ -358,6 +409,32 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
         raw_left_32  = clip_s64_to_s32(((int64_t)raw_left_32 * preamp) >> 28);
         raw_right_32 = clip_s64_to_s32(((int64_t)raw_right_32 * preamp) >> 28);
+
+        // Loudness compensation (after preamp, before master EQ)
+        if (loud_on && loud_coeffs) {
+            for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
+                const LoudnessCoeffs *lc = &loud_coeffs[j];
+                if (lc->a1 == 0 && lc->a2 == 0 && lc->b1 == 0) continue;
+                Biquad *bq = &loudness_biquads[0][j];
+                int32_t result = (int32_t)(((int64_t)lc->b0 * raw_left_32) >> 28) + bq->s1;
+                bq->s1 = (int32_t)(((int64_t)lc->b1 * raw_left_32) >> 28)
+                        - (int32_t)(((int64_t)lc->a1 * result) >> 28) + bq->s2;
+                bq->s2 = (int32_t)(((int64_t)lc->b2 * raw_left_32) >> 28)
+                        - (int32_t)(((int64_t)lc->a2 * result) >> 28);
+                raw_left_32 = result;
+            }
+            for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
+                const LoudnessCoeffs *lc = &loud_coeffs[j];
+                if (lc->a1 == 0 && lc->a2 == 0 && lc->b1 == 0) continue;
+                Biquad *bq = &loudness_biquads[1][j];
+                int32_t result = (int32_t)(((int64_t)lc->b0 * raw_right_32) >> 28) + bq->s1;
+                bq->s1 = (int32_t)(((int64_t)lc->b1 * raw_right_32) >> 28)
+                        - (int32_t)(((int64_t)lc->a1 * result) >> 28) + bq->s2;
+                bq->s2 = (int32_t)(((int64_t)lc->b2 * raw_right_32) >> 28)
+                        - (int32_t)(((int64_t)lc->a2 * result) >> 28);
+                raw_right_32 = result;
+            }
+        }
 
         int32_t master_l_32, master_r_32;
         if (is_bypassed) {
@@ -734,6 +811,43 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             }
             break;
         }
+
+        case REQ_SET_LOUDNESS:
+            if (buffer->data_len >= 1) {
+                loudness_enabled = (vendor_rx_buf[0] != 0);
+                if (loudness_enabled && loudness_active_table) {
+                    // Re-select coefficients for current volume
+                    int16_t vol = audio_state.volume + CENTER_VOLUME_INDEX * 256;
+                    if (vol < 0) vol = 0;
+                    if (vol >= 91 * 256) vol = 91 * 256 - 1;
+                    current_loudness_coeffs = loudness_active_table[((uint16_t)vol) >> 8u];
+                } else {
+                    current_loudness_coeffs = NULL;
+                }
+            }
+            break;
+
+        case REQ_SET_LOUDNESS_REF:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < 40.0f) val = 40.0f;
+                if (val > 100.0f) val = 100.0f;
+                loudness_ref_spl = val;
+                loudness_recompute_pending = true;
+            }
+            break;
+
+        case REQ_SET_LOUDNESS_INTENSITY:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < 0.0f) val = 0.0f;
+                if (val > 200.0f) val = 200.0f;
+                loudness_intensity_pct = val;
+                loudness_recompute_pending = true;
+            }
+            break;
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -814,6 +928,26 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 return false;
             }
 
+            case REQ_GET_LOUDNESS: {
+                resp_buf[0] = loudness_enabled ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_LOUDNESS_REF: {
+                float val = loudness_ref_spl;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_LOUDNESS_INTENSITY: {
+                float val = loudness_intensity_pct;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
             case REQ_GET_STATUS: {
                 if (setup->wValue == 9) {
                     // Combined status: all peaks + CPU in one 12-byte transfer
@@ -867,6 +1001,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 if (result == FLASH_OK) {
                     dsp_recalculate_all_filters((float)audio_state.freq);
                     dsp_update_delay_samples((float)audio_state.freq);
+                    loudness_recompute_pending = true;
                 }
                 usb_start_tiny_control_in_transfer(result, 1);
                 return true;
@@ -876,6 +1011,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 flash_factory_reset();
                 dsp_recalculate_all_filters((float)audio_state.freq);
                 dsp_update_delay_samples((float)audio_state.freq);
+                loudness_recompute_pending = true;
                 usb_start_tiny_control_in_transfer(FLASH_OK, 1);
                 return true;
             }

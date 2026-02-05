@@ -31,6 +31,12 @@ extern volatile bool channel_mute[3];
 // Preamp
 extern volatile float global_preamp_linear;
 
+// Loudness compensation
+extern volatile bool loudness_enabled;
+extern volatile float loudness_ref_spl;
+extern volatile float loudness_intensity_pct;
+extern volatile bool loudness_recompute_pending;
+
 // ----------------------------------------------------------------------------
 // EQ UPDATE FLAGS (for main loop to handle)
 // ----------------------------------------------------------------------------

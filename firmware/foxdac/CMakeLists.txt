@@ -10,6 +10,8 @@ add_executable(foxdac
     dsp_pipeline.h
     flash_storage.c
     flash_storage.h
+    loudness.c
+    loudness.h
     main.c
     pdm_generator.c
     pdm_generator.h

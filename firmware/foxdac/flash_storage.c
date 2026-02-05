@@ -12,7 +12,7 @@
 // Flash configuration - use last 4KB sector
 #define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 2
+#define FLASH_VERSION 3
 
 // Pointer to read flash via XIP
 #define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
@@ -33,6 +33,11 @@ typedef struct __attribute__((packed)) {
     float channel_gain_db[3];
     uint8_t channel_mute[3];
     uint8_t padding2;  // Align to 4 bytes
+    // V3: Loudness compensation
+    uint8_t loudness_enabled;
+    uint8_t padding3[3];
+    float loudness_ref_spl;
+    float loudness_intensity_pct;
 } FlashStorage;
 
 // External variables we need to access (defined in usb_audio.c)
@@ -41,6 +46,10 @@ extern volatile int32_t global_preamp_mul;
 extern volatile float channel_gain_db[3];
 extern volatile int32_t channel_gain_mul[3];
 extern volatile bool channel_mute[3];
+extern volatile bool loudness_enabled;
+extern volatile float loudness_ref_spl;
+extern volatile float loudness_intensity_pct;
+extern volatile bool loudness_recompute_pending;
 
 // Simple CRC32 implementation (polynomial 0xEDB88320)
 static uint32_t crc32(const uint8_t *data, size_t len) {
@@ -70,6 +79,9 @@ int flash_save_params(void) {
     memcpy(storage.delays_ms, (void*)channel_delays_ms, sizeof(storage.delays_ms));
     memcpy(storage.channel_gain_db, (void*)channel_gain_db, sizeof(storage.channel_gain_db));
     for (int i = 0; i < 3; i++) storage.channel_mute[i] = channel_mute[i] ? 1 : 0;
+    storage.loudness_enabled = loudness_enabled ? 1 : 0;
+    storage.loudness_ref_spl = loudness_ref_spl;
+    storage.loudness_intensity_pct = loudness_intensity_pct;
 
     // Compute CRC over data section (everything after the header)
     const uint8_t *data_start = (const uint8_t *)&storage.filter_recipes;
@@ -167,6 +179,14 @@ int flash_load_params(void) {
         }
     }
 
+    // V3: Loudness compensation
+    if (storage->version >= 3) {
+        loudness_enabled = (storage->loudness_enabled != 0);
+        loudness_ref_spl = storage->loudness_ref_spl;
+        loudness_intensity_pct = storage->loudness_intensity_pct;
+        loudness_recompute_pending = true;
+    }
+
     return FLASH_OK;
 }
 
@@ -187,4 +207,10 @@ void flash_factory_reset(void) {
         channel_gain_mul[i] = 32768;  // Unity = 2^15
         channel_mute[i] = false;
     }
+
+    // Reset loudness compensation
+    loudness_enabled = false;
+    loudness_ref_spl = 83.0f;
+    loudness_intensity_pct = 100.0f;
+    loudness_recompute_pending = true;
 }

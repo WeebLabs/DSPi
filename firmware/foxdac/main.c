@@ -19,6 +19,7 @@
 #include "flash_storage.h"
 #include "pdm_generator.h"
 #include "usb_audio.h"
+#include "loudness.h"
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
@@ -81,6 +82,7 @@ static void perform_rate_change(uint32_t new_freq) {
     total_samples_produced = 0;
 
     dsp_recalculate_all_filters((float)new_freq);
+    loudness_recompute_pending = true;
     pdm_update_clock(new_freq);
 }
 
@@ -124,6 +126,12 @@ void core0_init() {
         dsp_recalculate_all_filters(48000.0f);
         dsp_update_delay_samples(48000.0f);
         restore_interrupts(flags);
+    }
+
+    // Initial loudness table computation (uses loaded or default params)
+    loudness_recompute_table(loudness_ref_spl, loudness_intensity_pct, 48000.0f);
+    if (loudness_enabled && loudness_active_table) {
+        audio_set_volume(audio_state.volume);  // Re-select loudness coefficients
     }
 
 #if ENABLE_SUB
@@ -171,6 +179,16 @@ int main(void) {
             uint32_t r = pending_rate;
             rate_change_pending = false;
             perform_rate_change(r);
+        }
+
+        // Handle loudness table recomputation
+        if (loudness_recompute_pending) {
+            loudness_recompute_pending = false;
+            loudness_recompute_table(loudness_ref_spl, loudness_intensity_pct, (float)audio_state.freq);
+            // Update coefficient pointer for current volume
+            if (loudness_enabled && loudness_active_table) {
+                audio_set_volume(audio_state.volume);
+            }
         }
 
         // LED heartbeat - toggle every ~1000 iterations
