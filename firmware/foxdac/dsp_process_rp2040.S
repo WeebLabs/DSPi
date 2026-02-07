@@ -11,7 +11,7 @@
 // r1: input sample (x)
 // r2: channel index
 
-// Offsets
+// Offsets (struct has bool bypass at end, padded to 32 bytes)
 #define OFF_B0 0
 #define OFF_B1 4
 #define OFF_B2 8
@@ -19,7 +19,8 @@
 #define OFF_A2 16
 #define OFF_S1 20
 #define OFF_S2 24
-#define SIZE_BQ 28
+#define OFF_BYPASS 28
+#define SIZE_BQ 32
 
 dsp_process_channel:
     push {r4-r7, lr}
@@ -40,11 +41,10 @@ dsp_process_channel:
     // We use r9, r10, r11 for s1, s2, result storage to free low regs for math.
 
 .Lloop:
-    // Bypass check
-    ldr r2, [r0, #OFF_A1]
-    ldr r3, [r0, #OFF_A2]
-    orrs r2, r3
-    beq .Lskip
+    // Bypass check - load single byte flag
+    ldrb r2, [r0, #OFF_BYPASS]
+    cmp r2, #0
+    bne .Lskip
 
     // Load s1, s2 to high regs to free r0-r7
     ldr r2, [r0, #OFF_S1]

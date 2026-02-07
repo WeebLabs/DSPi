@@ -3,9 +3,23 @@
 #include "dsp_pipeline.h"
 #include "dcp_inline.h"
 
+static inline bool is_filter_flat(const EqParamPacket *p) {
+    if (p->type == FILTER_FLAT) return true;
+    if (p->freq <= 0.0f) return true;
+
+    // Peaking/shelf with ~0dB gain is effectively flat
+    if (p->type == FILTER_PEAKING ||
+        p->type == FILTER_LOWSHELF ||
+        p->type == FILTER_HIGHSHELF) {
+        if (fabsf(p->gain_db) < 0.01f) return true;
+    }
+    return false;
+}
+
 Biquad filters[NUM_CHANNELS][MAX_BANDS];
 EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
 float channel_delays_ms[NUM_CHANNELS] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+bool channel_bypassed[NUM_CHANNELS];
 
 // Delay Line State
 #if PICO_RP2350
@@ -40,17 +54,17 @@ DSP_TIME_CRITICAL int32_t fast_mul_q28(int32_t a, int32_t b) {
 #endif
 
 void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
+    if (is_filter_flat(p) || sample_rate == 0) {
+        bq->bypass = true;
 #if PICO_RP2350
-    if (p->type == FILTER_FLAT || p->freq == 0 || sample_rate == 0) {
         bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;
-        return;
-    }
 #else
-    if (p->type == FILTER_FLAT || p->freq == 0 || sample_rate == 0) {
         bq->b0 = 1 << FILTER_SHIFT; bq->b1 = 0; bq->b2 = 0; bq->a1 = 0; bq->a2 = 0;
+#endif
         return;
     }
-#endif
+
+    bq->bypass = false;
 
     float omega = 2.0f * 3.1415926535f * p->freq / sample_rate;
     float sn = sinf(omega); float cs = cosf(omega);
@@ -88,8 +102,18 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
 void dsp_init_default_filters() {
     memset(filters, 0, sizeof(filters));
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        channel_bypassed[ch] = true;
         for (int b = 0; b < MAX_BANDS; b++) {
-             filter_recipes[ch][b].type = FILTER_FLAT; filter_recipes[ch][b].freq = 1000.0f; filter_recipes[ch][b].Q = 0.707f; filter_recipes[ch][b].gain_db = 0.0f;
+            filters[ch][b].bypass = true;
+#if PICO_RP2350
+            filters[ch][b].b0 = 1.0f;
+#else
+            filters[ch][b].b0 = 1 << FILTER_SHIFT;
+#endif
+            filter_recipes[ch][b].type = FILTER_FLAT;
+            filter_recipes[ch][b].freq = 1000.0f;
+            filter_recipes[ch][b].Q = 0.707f;
+            filter_recipes[ch][b].gain_db = 0.0f;
         }
     }
     EqParamPacket hp = { .type = FILTER_HIGHPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
@@ -118,9 +142,14 @@ void dsp_update_delay_samples(float sample_rate) {
 void dsp_recalculate_all_filters(float sample_rate) {
     dsp_update_delay_samples(sample_rate);
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        bool all_bypassed = true;
         for (int b = 0; b < channel_band_counts[ch]; b++) {
             dsp_compute_coefficients(&filter_recipes[ch][b], &filters[ch][b], sample_rate);
+            if (!filters[ch][b].bypass) {
+                all_bypassed = false;
+            }
         }
+        channel_bypassed[ch] = all_bypassed;
     }
 }
 
@@ -131,7 +160,7 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
     uint8_t count = channel_band_counts[channel];
     for (int i = 0; i < count; i++) {
         Biquad *bq = &biquads[i];
-        if (bq->a1 == 0.0f && bq->a2 == 0.0f && bq->b1 == 0.0f) continue;
+        if (bq->bypass) continue;
 
         // Mixed Precision: Float Multiplies, Double Accumulation
         // y[n] = b0*x[n] + s1[n-1]

@@ -171,6 +171,17 @@ int main(void) {
 
             uint32_t flags = save_and_disable_interrupts();
             dsp_compute_coefficients(&p, &filters[p.channel][p.band], (float)audio_state.freq);
+
+            // Recalculate channel bypass flag
+            bool all_bypassed = true;
+            for (int b = 0; b < channel_band_counts[p.channel]; b++) {
+                if (!filters[p.channel][b].bypass) {
+                    all_bypassed = false;
+                    break;
+                }
+            }
+            channel_bypassed[p.channel] = all_bypassed;
+
             restore_interrupts(flags);
         }
 

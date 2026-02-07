@@ -315,8 +315,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             master_r = raw_right;
         } else {
             if (audio_buffer) {
-                master_l = dsp_process_channel(filters[CH_MASTER_LEFT], raw_left, CH_MASTER_LEFT);
-                master_r = dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right, CH_MASTER_RIGHT);
+                master_l = channel_bypassed[CH_MASTER_LEFT] ? raw_left :
+                           dsp_process_channel(filters[CH_MASTER_LEFT], raw_left, CH_MASTER_LEFT);
+                master_r = channel_bypassed[CH_MASTER_RIGHT] ? raw_right :
+                           dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right, CH_MASTER_RIGHT);
             } else {
                 master_l = 0.0f; master_r = 0.0f;
             }
@@ -330,11 +332,14 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         float out_l = 0.0f, out_r = 0.0f, out_sub = 0.0f;
 
         if (audio_buffer) {
-            out_l = dsp_process_channel(filters[CH_OUT_LEFT], master_l, CH_OUT_LEFT);
-            out_r = dsp_process_channel(filters[CH_OUT_RIGHT], master_r, CH_OUT_RIGHT);
+            out_l = channel_bypassed[CH_OUT_LEFT] ? master_l :
+                    dsp_process_channel(filters[CH_OUT_LEFT], master_l, CH_OUT_LEFT);
+            out_r = channel_bypassed[CH_OUT_RIGHT] ? master_r :
+                    dsp_process_channel(filters[CH_OUT_RIGHT], master_r, CH_OUT_RIGHT);
         }
 #if ENABLE_SUB
-        out_sub = dsp_process_channel(filters[CH_OUT_SUB], sub_in, CH_OUT_SUB);
+        out_sub = channel_bypassed[CH_OUT_SUB] ? sub_in :
+                  dsp_process_channel(filters[CH_OUT_SUB], sub_in, CH_OUT_SUB);
 #endif
 
         // Per-channel Gain & Mute
@@ -442,8 +447,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             master_r_32 = raw_right_32;
         } else {
             if (audio_buffer) {
-                master_l_32 = dsp_process_channel(filters[CH_MASTER_LEFT], raw_left_32, CH_MASTER_LEFT);
-                master_r_32 = dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right_32, CH_MASTER_RIGHT);
+                master_l_32 = channel_bypassed[CH_MASTER_LEFT] ? raw_left_32 :
+                              dsp_process_channel(filters[CH_MASTER_LEFT], raw_left_32, CH_MASTER_LEFT);
+                master_r_32 = channel_bypassed[CH_MASTER_RIGHT] ? raw_right_32 :
+                              dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right_32, CH_MASTER_RIGHT);
             } else {
                 master_l_32 = 0; master_r_32 = 0;
             }
@@ -456,11 +463,14 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         int32_t out_l_32 = 0, out_r_32 = 0, out_sub_32 = 0;
 
         if (audio_buffer) {
-            out_l_32 = dsp_process_channel(filters[CH_OUT_LEFT], master_l_32, CH_OUT_LEFT);
-            out_r_32 = dsp_process_channel(filters[CH_OUT_RIGHT], master_r_32, CH_OUT_RIGHT);
+            out_l_32 = channel_bypassed[CH_OUT_LEFT] ? master_l_32 :
+                       dsp_process_channel(filters[CH_OUT_LEFT], master_l_32, CH_OUT_LEFT);
+            out_r_32 = channel_bypassed[CH_OUT_RIGHT] ? master_r_32 :
+                       dsp_process_channel(filters[CH_OUT_RIGHT], master_r_32, CH_OUT_RIGHT);
         }
 #if ENABLE_SUB
-        out_sub_32 = dsp_process_channel(filters[CH_OUT_SUB], sub_in_32, CH_OUT_SUB);
+        out_sub_32 = channel_bypassed[CH_OUT_SUB] ? sub_in_32 :
+                     dsp_process_channel(filters[CH_OUT_SUB], sub_in_32, CH_OUT_SUB);
 #endif
 
         // Per-channel gain and mute

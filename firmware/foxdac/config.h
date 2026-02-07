@@ -125,11 +125,13 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 typedef struct {
     float b0, b1, b2, a1, a2;    // float coefficients
     double s1, s2;               // double state accumulators (Using inline DCP)
+    bool bypass;                 // skip processing if true
 } Biquad;
 #else
 typedef struct {
     int32_t b0, b1, b2, a1, a2;
     int32_t s1, s2;
+    bool bypass;
 } Biquad;
 #endif
 

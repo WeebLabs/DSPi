@@ -7,6 +7,7 @@
 extern Biquad filters[NUM_CHANNELS][MAX_BANDS];
 extern EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
 extern float channel_delays_ms[NUM_CHANNELS];
+extern bool channel_bypassed[NUM_CHANNELS];  // true if all bands in channel are flat
 
 // Delay Lines
 #if PICO_RP2350
