@@ -186,7 +186,7 @@ const struct audio_device_config audio_device_config = {
 const struct usb_device_descriptor boot_device_descriptor = {
     .bLength            = 18,
     .bDescriptorType    = 0x01,
-    .bcdUSB             = 0x0110,
+    .bcdUSB             = 0x0200,
     .bDeviceClass       = 0x00,
     .bDeviceSubClass    = 0x00,
     .bDeviceProtocol    = 0x00,
@@ -221,7 +221,7 @@ const uint8_t ms_compat_id_descriptor[MS_COMPAT_ID_DESC_LEN] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // reserved
     // Function section
     ITF_NUM_VENDOR,         // bFirstInterfaceNumber
-    0x01,                   // reserved
+    0x01,                   // reserved (must be 0x01 per MS spec)
     'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00, // compatibleID
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // subCompatibleID
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // reserved
