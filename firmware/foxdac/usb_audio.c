@@ -256,7 +256,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // ------------------------------------------------------------------------
     // RP2350 FLOAT PIPELINE (Phase 3)
     // ------------------------------------------------------------------------
-    float vol_mul = (float)audio_state.vol_mul / 32768.0f; // Q15 -> float
+    const float inv_32768 = 1.0f / 32768.0f;  // Multiply instead of divide
+
+    float vol_mul = (float)audio_state.vol_mul * inv_32768;
     float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
 
@@ -275,8 +277,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     for (uint32_t i = 0; i < sample_count; i++) {
         // Input: 16-bit PCM -> Float Normalized (-1.0 to 1.0)
-        float raw_left = (float)in[i*2] / 32768.0f;
-        float raw_right = (float)in[i*2+1] / 32768.0f;
+        float raw_left = (float)in[i*2] * inv_32768;
+        float raw_right = (float)in[i*2+1] * inv_32768;
 
         // Preamp
         raw_left *= preamp;
@@ -286,7 +288,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         if (loud_on && loud_coeffs) {
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
-                if (lc->a1 == 0.0f && lc->a2 == 0.0f && lc->b1 == 0.0f) continue;
+                if (lc->bypass) continue;
                 Biquad *bq = &loudness_biquads[0][j];
                 double rd = dcp_dadd(dcp_f2d(lc->b0 * raw_left), bq->s1);
                 float rf = dcp_d2f(rd);
@@ -297,7 +299,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
-                if (lc->a1 == 0.0f && lc->a2 == 0.0f && lc->b1 == 0.0f) continue;
+                if (lc->bypass) continue;
                 Biquad *bq = &loudness_biquads[1][j];
                 double rd = dcp_dadd(dcp_f2d(lc->b0 * raw_right), bq->s1);
                 float rf = dcp_d2f(rd);
@@ -419,7 +421,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         if (loud_on && loud_coeffs) {
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
-                if (lc->a1 == 0 && lc->a2 == 0 && lc->b1 == 0) continue;
+                if (lc->bypass) continue;
                 Biquad *bq = &loudness_biquads[0][j];
                 int32_t result = (int32_t)(((int64_t)lc->b0 * raw_left_32) >> 28) + bq->s1;
                 bq->s1 = (int32_t)(((int64_t)lc->b1 * raw_left_32) >> 28)
@@ -430,7 +432,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
-                if (lc->a1 == 0 && lc->a2 == 0 && lc->b1 == 0) continue;
+                if (lc->bypass) continue;
                 Biquad *bq = &loudness_biquads[1][j];
                 int32_t result = (int32_t)(((int64_t)lc->b0 * raw_right_32) >> 28) + bq->s1;
                 bq->s1 = (int32_t)(((int64_t)lc->b1 * raw_right_32) >> 28)

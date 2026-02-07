@@ -8,9 +8,9 @@
 
 // Coefficients-only struct (state lives separately per channel)
 #if PICO_RP2350
-typedef struct { float b0, b1, b2, a1, a2; } LoudnessCoeffs;
+typedef struct { float b0, b1, b2, a1, a2; bool bypass; } LoudnessCoeffs;
 #else
-typedef struct { int32_t b0, b1, b2, a1, a2; } LoudnessCoeffs;
+typedef struct { int32_t b0, b1, b2, a1, a2; bool bypass; } LoudnessCoeffs;
 #endif
 
 // Double-buffered RAM tables: compute into inactive, then swap pointer
