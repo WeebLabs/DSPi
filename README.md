@@ -6,6 +6,28 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 
 ---
 
+## Table of Contents
+
+- [Key Capabilities](#key-capabilities)
+- [Platform Support](#platform-support)
+- [Audio Signal Chain](#audio-signal-chain)
+- [Hardware Setup](#hardware-setup)
+- [DSP Features](#dsp-features)
+  - [Parametric Equalization](#parametric-equalization)
+  - [Loudness Compensation](#loudness-compensation)
+  - [Headphone Crossfeed](#headphone-crossfeed)
+  - [Subwoofer PDM Output](#subwoofer-pdm-output)
+- [Developer Reference](#developer-reference)
+  - [System Architecture](#system-architecture)
+  - [Performance Tuning](#performance-tuning)
+  - [USB Control Protocol](#usb-control-protocol)
+  - [System Telemetry](#reqgetstatus-0x50---system-telemetry)
+  - [Data Structures](#data-structures)
+- [Building from Source](#building-from-source)
+- [License](#license)
+
+---
+
 ## Key Capabilities
 
 *   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS.
