@@ -2,6 +2,7 @@
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
+#include "crossfeed.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -12,7 +13,7 @@
 // Flash configuration - use last 4KB sector
 #define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 3
+#define FLASH_VERSION 4
 
 // Pointer to read flash via XIP
 #define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
@@ -38,6 +39,12 @@ typedef struct __attribute__((packed)) {
     uint8_t padding3[3];
     float loudness_ref_spl;
     float loudness_intensity_pct;
+    // V4: Crossfeed
+    uint8_t crossfeed_enabled;
+    uint8_t crossfeed_preset;
+    uint8_t padding4[2];  // Align to 4 bytes
+    float crossfeed_custom_fc;
+    float crossfeed_custom_feed_db;
 } FlashStorage;
 
 // External variables we need to access (defined in usb_audio.c)
@@ -50,6 +57,8 @@ extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
+extern volatile CrossfeedConfig crossfeed_config;
+extern volatile bool crossfeed_update_pending;
 
 // Simple CRC32 implementation (polynomial 0xEDB88320)
 static uint32_t crc32(const uint8_t *data, size_t len) {
@@ -82,6 +91,10 @@ int flash_save_params(void) {
     storage.loudness_enabled = loudness_enabled ? 1 : 0;
     storage.loudness_ref_spl = loudness_ref_spl;
     storage.loudness_intensity_pct = loudness_intensity_pct;
+    storage.crossfeed_enabled = crossfeed_config.enabled ? 1 : 0;
+    storage.crossfeed_preset = crossfeed_config.preset;
+    storage.crossfeed_custom_fc = crossfeed_config.custom_fc;
+    storage.crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
 
     // Compute CRC over data section (everything after the header)
     const uint8_t *data_start = (const uint8_t *)&storage.filter_recipes;
@@ -187,6 +200,15 @@ int flash_load_params(void) {
         loudness_recompute_pending = true;
     }
 
+    // V4: Crossfeed
+    if (storage->version >= 4) {
+        crossfeed_config.enabled = (storage->crossfeed_enabled != 0);
+        crossfeed_config.preset = storage->crossfeed_preset;
+        crossfeed_config.custom_fc = storage->crossfeed_custom_fc;
+        crossfeed_config.custom_feed_db = storage->crossfeed_custom_feed_db;
+        crossfeed_update_pending = true;
+    }
+
     return FLASH_OK;
 }
 
@@ -213,4 +235,11 @@ void flash_factory_reset(void) {
     loudness_ref_spl = 83.0f;
     loudness_intensity_pct = 100.0f;
     loudness_recompute_pending = true;
+
+    // Reset crossfeed
+    crossfeed_config.enabled = false;
+    crossfeed_config.preset = CROSSFEED_PRESET_DEFAULT;
+    crossfeed_config.custom_fc = 700.0f;
+    crossfeed_config.custom_feed_db = 4.5f;
+    crossfeed_update_pending = true;
 }

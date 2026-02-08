@@ -20,6 +20,7 @@
 #include "pdm_generator.h"
 #include "usb_audio.h"
 #include "loudness.h"
+#include "crossfeed.h"
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
@@ -83,6 +84,7 @@ static void perform_rate_change(uint32_t new_freq) {
 
     dsp_recalculate_all_filters((float)new_freq);
     loudness_recompute_pending = true;
+    crossfeed_update_pending = true;  // Recalculate crossfeed coefficients for new sample rate
     pdm_update_clock(new_freq);
 }
 
@@ -200,6 +202,14 @@ int main(void) {
             if (loudness_enabled && loudness_active_table) {
                 audio_set_volume(audio_state.volume);
             }
+        }
+
+        // Handle crossfeed coefficient updates
+        if (crossfeed_update_pending) {
+            crossfeed_update_pending = false;
+            crossfeed_compute_coefficients(&crossfeed_state, (const CrossfeedConfig *)&crossfeed_config, (float)audio_state.freq);
+            // Update bypass flag atomically
+            crossfeed_bypassed = !crossfeed_config.enabled;
         }
 
         // LED heartbeat - toggle every ~1000 iterations

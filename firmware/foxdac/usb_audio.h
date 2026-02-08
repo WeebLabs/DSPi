@@ -37,6 +37,13 @@ extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
 
+// Crossfeed
+#include "crossfeed.h"
+extern volatile CrossfeedConfig crossfeed_config;
+extern volatile bool crossfeed_update_pending;
+extern volatile bool crossfeed_bypassed;
+extern CrossfeedState crossfeed_state;
+
 // ----------------------------------------------------------------------------
 // EQ UPDATE FLAGS (for main loop to handle)
 // ----------------------------------------------------------------------------

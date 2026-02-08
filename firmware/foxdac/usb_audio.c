@@ -29,6 +29,7 @@
 #include "pdm_generator.h"
 #include "flash_storage.h"
 #include "loudness.h"
+#include "crossfeed.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -61,6 +62,17 @@ volatile bool loudness_recompute_pending = false;
 
 static Biquad loudness_biquads[2][LOUDNESS_BIQUAD_COUNT];  // [0]=Left, [1]=Right
 static const LoudnessCoeffs *current_loudness_coeffs = NULL;
+
+// Crossfeed state
+volatile CrossfeedConfig crossfeed_config = {
+    .enabled = false,
+    .preset = CROSSFEED_PRESET_DEFAULT,
+    .custom_fc = 700.0f,
+    .custom_feed_db = 4.5f
+};
+volatile bool crossfeed_update_pending = false;
+volatile bool crossfeed_bypassed = true;  // Fast bypass flag for audio callback
+CrossfeedState crossfeed_state;
 
 // Sync State
 volatile uint64_t total_samples_produced = 0;
@@ -329,6 +341,11 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         float abs_ml = fabsf(master_l); if (abs_ml > peak_ml) peak_ml = abs_ml;
         float abs_mr = fabsf(master_r); if (abs_mr > peak_mr) peak_mr = abs_mr;
 
+        // Crossfeed (after Master EQ, before Output EQ)
+        if (!crossfeed_bypassed) {
+            crossfeed_process_stereo(&crossfeed_state, &master_l, &master_r);
+        }
+
         // Subwoofer Mix
         float sub_in = (master_l + master_r) * 0.5f;
         float out_l = 0.0f, out_r = 0.0f, out_sub = 0.0f;
@@ -460,6 +477,11 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
         if (abs(master_l_32) > peak_ml) peak_ml = abs(master_l_32);
         if (abs(master_r_32) > peak_mr) peak_mr = abs(master_r_32);
+
+        // Crossfeed (after Master EQ, before Output EQ)
+        if (!crossfeed_bypassed) {
+            crossfeed_process_stereo(&crossfeed_state, &master_l_32, &master_r_32);
+        }
 
         int32_t sub_in_32 = (master_l_32 + master_r_32) >> 1;
         int32_t out_l_32 = 0, out_r_32 = 0, out_sub_32 = 0;
@@ -860,6 +882,49 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
                 loudness_recompute_pending = true;
             }
             break;
+
+        case REQ_SET_CROSSFEED:
+            if (buffer->data_len >= 1) {
+                crossfeed_config.enabled = (vendor_rx_buf[0] != 0);
+                crossfeed_update_pending = true;
+            }
+            break;
+
+        case REQ_SET_CROSSFEED_PRESET:
+            if (buffer->data_len >= 1) {
+                uint8_t preset = vendor_rx_buf[0];
+                if (preset <= CROSSFEED_PRESET_CUSTOM) {
+                    crossfeed_config.preset = preset;
+                    crossfeed_update_pending = true;
+                }
+            }
+            break;
+
+        case REQ_SET_CROSSFEED_FREQ:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < CROSSFEED_FREQ_MIN) val = CROSSFEED_FREQ_MIN;
+                if (val > CROSSFEED_FREQ_MAX) val = CROSSFEED_FREQ_MAX;
+                crossfeed_config.custom_fc = val;
+                if (crossfeed_config.preset == CROSSFEED_PRESET_CUSTOM) {
+                    crossfeed_update_pending = true;
+                }
+            }
+            break;
+
+        case REQ_SET_CROSSFEED_FEED:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < CROSSFEED_FEED_MIN) val = CROSSFEED_FEED_MIN;
+                if (val > CROSSFEED_FEED_MAX) val = CROSSFEED_FEED_MAX;
+                crossfeed_config.custom_feed_db = val;
+                if (crossfeed_config.preset == CROSSFEED_PRESET_CUSTOM) {
+                    crossfeed_update_pending = true;
+                }
+            }
+            break;
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -955,6 +1020,32 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
 
             case REQ_GET_LOUDNESS_INTENSITY: {
                 float val = loudness_intensity_pct;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_CROSSFEED: {
+                resp_buf[0] = crossfeed_config.enabled ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_CROSSFEED_PRESET: {
+                resp_buf[0] = crossfeed_config.preset;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_CROSSFEED_FREQ: {
+                float val = crossfeed_config.custom_fc;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_CROSSFEED_FEED: {
+                float val = crossfeed_config.custom_feed_db;
                 memcpy(resp_buf, &val, 4);
                 vendor_send_response(resp_buf, 4);
                 return true;

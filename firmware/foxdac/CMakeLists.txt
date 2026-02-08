@@ -5,6 +5,8 @@ add_compile_options(-O2)
 
 add_executable(foxdac
     config.h
+    crossfeed.c
+    crossfeed.h
     dcp_inline.h
     dsp_pipeline.c
     dsp_pipeline.h
