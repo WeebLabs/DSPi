@@ -793,7 +793,10 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
         case REQ_SET_EQ_PARAM:
             if (buffer->data_len >= sizeof(EqParamPacket)) {
                 memcpy((void*)&pending_packet, vendor_rx_buf, sizeof(EqParamPacket));
-                eq_update_pending = true;
+                if (pending_packet.channel < NUM_CHANNELS &&
+                    pending_packet.band < channel_band_counts[pending_packet.channel]) {
+                    eq_update_pending = true;
+                }
             }
             break;
 
