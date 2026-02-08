@@ -66,6 +66,7 @@ static const LoudnessCoeffs *current_loudness_coeffs = NULL;
 // Crossfeed state
 volatile CrossfeedConfig crossfeed_config = {
     .enabled = false,
+    .itd_enabled = true,
     .preset = CROSSFEED_PRESET_DEFAULT,
     .custom_fc = 700.0f,
     .custom_feed_db = 4.5f
@@ -925,6 +926,13 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
                 }
             }
             break;
+
+        case REQ_SET_CROSSFEED_ITD:
+            if (buffer->data_len >= 1) {
+                crossfeed_config.itd_enabled = (vendor_rx_buf[0] != 0);
+                crossfeed_update_pending = true;
+            }
+            break;
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -1048,6 +1056,12 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 float val = crossfeed_config.custom_feed_db;
                 memcpy(resp_buf, &val, 4);
                 vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_CROSSFEED_ITD: {
+                resp_buf[0] = crossfeed_config.itd_enabled ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
                 return true;
             }
 

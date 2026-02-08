@@ -42,7 +42,8 @@ typedef struct __attribute__((packed)) {
     // V4: Crossfeed
     uint8_t crossfeed_enabled;
     uint8_t crossfeed_preset;
-    uint8_t padding4[2];  // Align to 4 bytes
+    uint8_t crossfeed_itd_enabled;
+    uint8_t padding4;  // Align to 4 bytes
     float crossfeed_custom_fc;
     float crossfeed_custom_feed_db;
 } FlashStorage;
@@ -93,6 +94,7 @@ int flash_save_params(void) {
     storage.loudness_intensity_pct = loudness_intensity_pct;
     storage.crossfeed_enabled = crossfeed_config.enabled ? 1 : 0;
     storage.crossfeed_preset = crossfeed_config.preset;
+    storage.crossfeed_itd_enabled = crossfeed_config.itd_enabled ? 1 : 0;
     storage.crossfeed_custom_fc = crossfeed_config.custom_fc;
     storage.crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
 
@@ -204,6 +206,7 @@ int flash_load_params(void) {
     if (storage->version >= 4) {
         crossfeed_config.enabled = (storage->crossfeed_enabled != 0);
         crossfeed_config.preset = storage->crossfeed_preset;
+        crossfeed_config.itd_enabled = (storage->crossfeed_itd_enabled != 0);
         crossfeed_config.custom_fc = storage->crossfeed_custom_fc;
         crossfeed_config.custom_feed_db = storage->crossfeed_custom_feed_db;
         crossfeed_update_pending = true;
@@ -238,6 +241,7 @@ void flash_factory_reset(void) {
 
     // Reset crossfeed
     crossfeed_config.enabled = false;
+    crossfeed_config.itd_enabled = true;
     crossfeed_config.preset = CROSSFEED_PRESET_DEFAULT;
     crossfeed_config.custom_fc = 700.0f;
     crossfeed_config.custom_feed_db = 4.5f;

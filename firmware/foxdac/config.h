@@ -110,6 +110,8 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define REQ_GET_CROSSFEED_FREQ      0x63
 #define REQ_SET_CROSSFEED_FEED      0x64
 #define REQ_GET_CROSSFEED_FEED      0x65
+#define REQ_SET_CROSSFEED_ITD       0x66
+#define REQ_GET_CROSSFEED_ITD       0x67
 
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u
