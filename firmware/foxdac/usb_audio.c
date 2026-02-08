@@ -84,6 +84,7 @@ static volatile uint64_t last_packet_time_us = 0;
 
 // Audio Pool
 struct audio_buffer_pool *producer_pool = NULL;
+struct audio_buffer_pool *sub_producer_pool = NULL;
 struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S16, .sample_freq = 48000, .channel_count = 2 };
 
 // ----------------------------------------------------------------------------
@@ -225,12 +226,18 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     struct audio_buffer* audio_buffer = NULL;
     if (producer_pool) audio_buffer = take_audio_buffer(producer_pool, false);
 
+    struct audio_buffer* sub_audio_buffer = NULL;
+    if (sub_producer_pool) sub_audio_buffer = take_audio_buffer(sub_producer_pool, false);
+
     uint32_t sample_count = data_len / 4;  // 2 channels * 2 bytes per sample
 
     if (audio_buffer) {
         audio_buffer->sample_count = sample_count;
     } else {
         spdif_overruns++;
+    }
+    if (sub_audio_buffer) {
+        sub_audio_buffer->sample_count = sample_count;
     }
 
     uint64_t now_us = time_us_64();
@@ -401,6 +408,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         // PDM expects int32 Q28-like range
         int32_t pdm_sample_q28 = (int32_t)(delayed_sub * (float)(1<<28));
         pdm_push_sample(pdm_sample_q28, false);
+
+        // Sub S/PDIF output: mono sub duplicated to both channels
+        if (sub_audio_buffer) {
+            int16_t *sub_out = (int16_t *) sub_audio_buffer->buffer->bytes;
+            float ds = fmaxf(-1.0f, fminf(1.0f, delayed_sub));
+            int16_t sub_s16 = (int16_t)(ds * 32767.0f);
+            sub_out[i*2]     = sub_s16;
+            sub_out[i*2+1]   = sub_s16;
+        }
 #endif
     }
 
@@ -535,6 +551,14 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
 #if ENABLE_SUB
         pdm_push_sample(delayed_sub, false);
+
+        // Sub S/PDIF output: mono sub duplicated to both channels
+        if (sub_audio_buffer) {
+            int16_t *sub_out = (int16_t *) sub_audio_buffer->buffer->bytes;
+            int16_t sub_s16 = (int16_t)(clip_s32(delayed_sub + (1<<13)) >> 14);
+            sub_out[i*2]     = sub_s16;
+            sub_out[i*2+1]   = sub_s16;
+        }
 #endif
     }
 
@@ -546,6 +570,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 #endif
 
     if (audio_buffer) give_audio_buffer(producer_pool, audio_buffer);
+    if (sub_audio_buffer) give_audio_buffer(sub_producer_pool, sub_audio_buffer);
 
     uint32_t end_time = time_us_32();
     global_status.cpu0_load = (uint8_t)((end_time - start_time) / 10);
@@ -1208,7 +1233,7 @@ static const char *_get_descriptor_string(uint index) {
 // INIT
 // ----------------------------------------------------------------------------
 
-// S/PDIF Config
+// S/PDIF Config -- Main (L/R stereo)
 static audio_spdif_instance_t spdif_instance = {0};
 struct audio_spdif_config config = {
     .pin = PICO_AUDIO_SPDIF_PIN,
@@ -1219,15 +1244,33 @@ struct audio_spdif_config config = {
 };
 struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
 
+// S/PDIF Config -- Subwoofer (mono duplicated to stereo)
+static audio_spdif_instance_t spdif_sub_instance = {0};
+struct audio_spdif_config sub_config = {
+    .pin = PICO_SPDIF_SUB_PIN,
+    .dma_channel = 1,
+    .pio_sm = 1,
+    .pio = PICO_AUDIO_SPDIF_PIO,
+    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
+};
+struct audio_buffer_format sub_producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
+
 void usb_sound_card_init(void) {
-    // S/PDIF Setup (this must happen before USB init to claim DMA channel 0)
+    // S/PDIF Setup (this must happen before USB init to claim DMA channels)
     producer_pool = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
+    sub_producer_pool = audio_new_producer_pool(&sub_producer_format, AUDIO_BUFFER_COUNT, 192);
 
     audio_spdif_setup(&spdif_instance, &audio_format_48k, &config);
     audio_spdif_connect_extra(&spdif_instance, producer_pool, false, AUDIO_BUFFER_COUNT / 2, NULL);
 
+    audio_spdif_setup(&spdif_sub_instance, &audio_format_48k, &sub_config);
+    audio_spdif_connect_extra(&spdif_sub_instance, sub_producer_pool, false, AUDIO_BUFFER_COUNT / 2, NULL);
+
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
-    audio_spdif_set_enabled(&spdif_instance, true);
+
+    // Synchronized start -- both outputs begin on the same clock cycle
+    audio_spdif_instance_t *spdif_all[] = { &spdif_instance, &spdif_sub_instance };
+    audio_spdif_enable_sync(spdif_all, 2);
 
     // Initialize pico-extras USB device with 3 interfaces: AC, AS, Vendor
 

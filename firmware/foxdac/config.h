@@ -31,7 +31,8 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #undef PICO_AUDIO_SPDIF_PIN
 #define PICO_AUDIO_SPDIF_PIN 20
 
-#define PICO_AUDIO_SPDIF_SUB_PIN 10
+#define PICO_AUDIO_SPDIF_SUB_PIN 21   // PDM sub output pin (PIO1)
+#define PICO_SPDIF_SUB_PIN       22   // S/PDIF sub output pin (PIO0) — must differ from PDM pin
 
 #define FILTER_SHIFT 28
 
