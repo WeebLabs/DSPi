@@ -13,4 +13,7 @@ set(CMAKE_CXX_STANDARD 17)
 # Initialize the Pico SDK
 pico_sdk_init()
 
+# Local multi-instance S/PDIF library (replaces system pico_audio_spdif)
+add_subdirectory(pico-extras/src/rp2_common/pico_audio_spdif_multi)
+
 add_subdirectory(foxdac)

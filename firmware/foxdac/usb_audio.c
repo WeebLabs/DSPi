@@ -1209,18 +1209,25 @@ static const char *_get_descriptor_string(uint index) {
 // ----------------------------------------------------------------------------
 
 // S/PDIF Config
-struct audio_spdif_config config = { .pin = PICO_AUDIO_SPDIF_PIN, .dma_channel = 0, .pio_sm = 0 };
+static audio_spdif_instance_t spdif_instance = {0};
+struct audio_spdif_config config = {
+    .pin = PICO_AUDIO_SPDIF_PIN,
+    .dma_channel = 0,
+    .pio_sm = 0,
+    .pio = PICO_AUDIO_SPDIF_PIO,
+    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
+};
 struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
 
 void usb_sound_card_init(void) {
     // S/PDIF Setup (this must happen before USB init to claim DMA channel 0)
     producer_pool = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
 
-    audio_spdif_setup(&audio_format_48k, &config);
-    audio_spdif_connect_extra(producer_pool, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    audio_spdif_setup(&spdif_instance, &audio_format_48k, &config);
+    audio_spdif_connect_extra(&spdif_instance, producer_pool, false, AUDIO_BUFFER_COUNT / 2, NULL);
 
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
-    audio_spdif_set_enabled(true);
+    audio_spdif_set_enabled(&spdif_instance, true);
 
     // Initialize pico-extras USB device with 3 interfaces: AC, AS, Vendor
 

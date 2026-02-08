@@ -1,0 +1,29 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+// Strictly this is NRZI decoder
+.program audio_spdif
+.side_set 1
+public output_low:
+    out x, 1            side 0
+    jmp !x, output_low  side 0
+output_high:
+    out x, 1            side 1
+    jmp !x, output_high side 1
+
+% c-sdk {
+void spdif_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_config sm_config = audio_spdif_program_get_default_config(offset);
+    sm_config_set_out_shift(&sm_config, true, true, 32);
+    sm_config_set_sideset(&sm_config, 1, false, false);
+    sm_config_set_sideset_pins(&sm_config, pin);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+    pio_sm_init(pio, sm, offset, &sm_config);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+    pio_sm_set_pins(pio, sm, 0);
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_spdif_offset_output_low));
+}
+%}
