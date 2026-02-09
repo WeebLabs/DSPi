@@ -274,7 +274,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
 #if PICO_RP2350
     // ------------------------------------------------------------------------
-    // RP2350 FLOAT PIPELINE (Phase 3)
+    // RP2350 FLOAT PIPELINE (Block-Based Processing)
     // ------------------------------------------------------------------------
     const float inv_32768 = 1.0f / 32768.0f;  // Multiply instead of divide
 
@@ -282,12 +282,14 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
 
-    float gain_l = channel_gain_linear[0];
-    float gain_r = channel_gain_linear[1];
-    float gain_sub = channel_gain_linear[2];
     bool mute_l = channel_mute[0];
     bool mute_r = channel_mute[1];
     bool mute_sub = channel_mute[2];
+
+    // Pre-combine gain and volume to eliminate per-sample multiplies
+    float combined_l = mute_l ? 0.0f : (channel_gain_linear[0] * vol_mul);
+    float combined_r = mute_r ? 0.0f : (channel_gain_linear[1] * vol_mul);
+    float combined_sub = mute_sub ? 0.0f : (channel_gain_linear[2] * vol_mul);
 
     // Snapshot loudness state for this packet
     bool loud_on = loudness_enabled;
@@ -295,17 +297,24 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     float peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
 
+    // Pre-compute PDM scale factor (avoid computing 1<<28 every sample)
+    const float pdm_scale = (float)(1 << 28);
+
+    // Scratch buffers for block-based processing (on stack, ~768 bytes)
+    float buf_l[192], buf_r[192], buf_sub[192];
+
+    // ========== PASS 1: Input conversion + Preamp + Loudness ==========
     for (uint32_t i = 0; i < sample_count; i++) {
-        // Input: 16-bit PCM -> Float Normalized (-1.0 to 1.0)
-        float raw_left = (float)in[i*2] * inv_32768;
-        float raw_right = (float)in[i*2+1] * inv_32768;
+        // Input: 16-bit PCM -> Float Normalized (-1.0 to 1.0) + Preamp
+        buf_l[i] = (float)in[i*2] * inv_32768 * preamp;
+        buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp;
+    }
 
-        // Preamp
-        raw_left *= preamp;
-        raw_right *= preamp;
-
-        // Loudness compensation (after preamp, before master EQ)
-        if (loud_on && loud_coeffs) {
+    // Loudness compensation (sample-by-sample, coefficients vary per volume step)
+    if (loud_on && loud_coeffs) {
+        for (uint32_t i = 0; i < sample_count; i++) {
+            float raw_left = buf_l[i];
+            float raw_right = buf_r[i];
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
                 if (lc->bypass) continue;
@@ -328,71 +337,93 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 bq->s2 = dcp_f2d(lc->b2 * raw_right - lc->a2 * rf);
                 raw_right = rf;
             }
+            buf_l[i] = raw_left;
+            buf_r[i] = raw_right;
         }
+    }
 
-        // Master EQ
-        float master_l, master_r;
-        if (is_bypassed) {
-            master_l = raw_left;
-            master_r = raw_right;
-        } else {
-            if (audio_buffer) {
-                master_l = channel_bypassed[CH_MASTER_LEFT] ? raw_left :
-                           dsp_process_channel(filters[CH_MASTER_LEFT], raw_left, CH_MASTER_LEFT);
-                master_r = channel_bypassed[CH_MASTER_RIGHT] ? raw_right :
-                           dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right, CH_MASTER_RIGHT);
-            } else {
-                master_l = 0.0f; master_r = 0.0f;
-            }
+    // ========== PASS 2: Master EQ (Block-Based) ==========
+    if (!is_bypassed && audio_buffer) {
+        if (!channel_bypassed[CH_MASTER_LEFT]) {
+            dsp_process_channel_block(filters[CH_MASTER_LEFT], buf_l, sample_count, CH_MASTER_LEFT);
         }
+        if (!channel_bypassed[CH_MASTER_RIGHT]) {
+            dsp_process_channel_block(filters[CH_MASTER_RIGHT], buf_r, sample_count, CH_MASTER_RIGHT);
+        }
+    }
 
+    // ========== PASS 3: Crossfeed + Sub Mix + Output EQ (Block-Based) ==========
+    // Crossfeed must be sample-by-sample (has internal state)
+    bool do_crossfeed = !crossfeed_bypassed;
+    for (uint32_t i = 0; i < sample_count; i++) {
+        float master_l = buf_l[i];
+        float master_r = buf_r[i];
+
+        // Track master peaks
         float abs_ml = fabsf(master_l); if (abs_ml > peak_ml) peak_ml = abs_ml;
         float abs_mr = fabsf(master_r); if (abs_mr > peak_mr) peak_mr = abs_mr;
 
         // Crossfeed (after Master EQ, before Output EQ)
-        if (!crossfeed_bypassed) {
+        if (do_crossfeed) {
             crossfeed_process_stereo(&crossfeed_state, &master_l, &master_r);
         }
 
-        // Subwoofer Mix
-        float sub_in = (master_l + master_r) * 0.5f;
-        float out_l = 0.0f, out_r = 0.0f, out_sub = 0.0f;
+        // Store back for output EQ
+        buf_l[i] = master_l;
+        buf_r[i] = master_r;
 
-        if (audio_buffer) {
-            out_l = channel_bypassed[CH_OUT_LEFT] ? master_l :
-                    dsp_process_channel(filters[CH_OUT_LEFT], master_l, CH_OUT_LEFT);
-            out_r = channel_bypassed[CH_OUT_RIGHT] ? master_r :
-                    dsp_process_channel(filters[CH_OUT_RIGHT], master_r, CH_OUT_RIGHT);
+        // Subwoofer mix (before output EQ)
+        buf_sub[i] = (master_l + master_r) * 0.5f;
+    }
+
+    // Output EQ (Block-Based, skip for muted channels)
+    if (audio_buffer) {
+        if (!mute_l && !channel_bypassed[CH_OUT_LEFT]) {
+            dsp_process_channel_block(filters[CH_OUT_LEFT], buf_l, sample_count, CH_OUT_LEFT);
         }
+        if (!mute_r && !channel_bypassed[CH_OUT_RIGHT]) {
+            dsp_process_channel_block(filters[CH_OUT_RIGHT], buf_r, sample_count, CH_OUT_RIGHT);
+        }
+    }
 #if ENABLE_SUB
-        out_sub = channel_bypassed[CH_OUT_SUB] ? sub_in :
-                  dsp_process_channel(filters[CH_OUT_SUB], sub_in, CH_OUT_SUB);
+    if (!mute_sub && !channel_bypassed[CH_OUT_SUB]) {
+        dsp_process_channel_block(filters[CH_OUT_SUB], buf_sub, sample_count, CH_OUT_SUB);
+    }
 #endif
 
-        // Per-channel Gain & Mute
-        out_l   = mute_l ? 0.0f : (out_l * gain_l);
-        out_r   = mute_r ? 0.0f : (out_r * gain_r);
-        out_sub = mute_sub ? 0.0f : (out_sub * gain_sub);
+    // ========== PASS 4: Gain/Volume + Delay + Output ==========
+    for (uint32_t i = 0; i < sample_count; i++) {
+        float out_l = mute_l ? 0.0f : buf_l[i];
+        float out_r = mute_r ? 0.0f : buf_r[i];
+        float out_sub = mute_sub ? 0.0f : buf_sub[i];
 
+        // Track output peaks before volume (for metering)
         float abs_ol = fabsf(out_l); if (abs_ol > peak_ol) peak_ol = abs_ol;
         float abs_or = fabsf(out_r); if (abs_or > peak_or) peak_or = abs_or;
         float abs_sub = fabsf(out_sub); if (abs_sub > peak_sub) peak_sub = abs_sub;
 
-        // Master Volume
-        out_l   *= vol_mul;
-        out_r   *= vol_mul;
-        out_sub *= vol_mul;
+        // Combined Gain + Volume (pre-computed before loop)
+        out_l   *= combined_l;
+        out_r   *= combined_r;
+        out_sub *= combined_sub;
 
-        // Delay
-        delay_lines[0][delay_write_idx] = out_l;
-        delay_lines[1][delay_write_idx] = out_r;
-        delay_lines[2][delay_write_idx] = out_sub;
+        // Delay (bypass when no delay is configured)
+        float delayed_l, delayed_r, delayed_sub;
+        if (any_delay_active) {
+            delay_lines[0][delay_write_idx] = out_l;
+            delay_lines[1][delay_write_idx] = out_r;
+            delay_lines[2][delay_write_idx] = out_sub;
 
-        float delayed_l   = delay_lines[0][(delay_write_idx - channel_delay_samples[0]) & MAX_DELAY_MASK];
-        float delayed_r   = delay_lines[1][(delay_write_idx - channel_delay_samples[1]) & MAX_DELAY_MASK];
-        float delayed_sub = delay_lines[2][(delay_write_idx - channel_delay_samples[2]) & MAX_DELAY_MASK];
+            delayed_l   = delay_lines[0][(delay_write_idx - channel_delay_samples[0]) & MAX_DELAY_MASK];
+            delayed_r   = delay_lines[1][(delay_write_idx - channel_delay_samples[1]) & MAX_DELAY_MASK];
+            delayed_sub = delay_lines[2][(delay_write_idx - channel_delay_samples[2]) & MAX_DELAY_MASK];
 
-        delay_write_idx = (delay_write_idx + 1) & MAX_DELAY_MASK;
+            delay_write_idx = (delay_write_idx + 1) & MAX_DELAY_MASK;
+        } else {
+            delayed_l = out_l;
+            delayed_r = out_r;
+            delayed_sub = out_sub;
+        }
 
         // Output: Float -> 16-bit PCM (S/PDIF)
         if (audio_buffer) {
@@ -406,7 +437,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
 #if ENABLE_SUB
         // PDM expects int32 Q28-like range
-        int32_t pdm_sample_q28 = (int32_t)(delayed_sub * (float)(1<<28));
+        int32_t pdm_sample_q28 = (int32_t)(delayed_sub * pdm_scale);
         pdm_push_sample(pdm_sample_q28, false);
 
         // Sub S/PDIF output: mono sub duplicated to both channels

@@ -3,6 +3,12 @@ PROJECT(foxdac)
 add_compile_options(-fcommon)
 add_compile_options(-O2)
 
+# Use -O3 for DSP-critical files
+set_source_files_properties(
+    dsp_pipeline.c usb_audio.c crossfeed.c loudness.c
+    PROPERTIES COMPILE_FLAGS "-O3"
+)
+
 add_executable(foxdac
     config.h
     crossfeed.c

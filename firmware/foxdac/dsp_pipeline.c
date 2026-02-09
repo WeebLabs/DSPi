@@ -28,7 +28,8 @@ float delay_lines[3][MAX_DELAY_SAMPLES];
 int32_t delay_lines[3][MAX_DELAY_SAMPLES];
 #endif
 uint32_t delay_write_idx = 0;
-int32_t channel_delay_samples[3] = {0, 0, 0}; 
+int32_t channel_delay_samples[3] = {0, 0, 0};
+bool any_delay_active = false; 
 
 uint8_t channel_band_counts[NUM_CHANNELS] = {
 #if PICO_RP2350
@@ -137,6 +138,9 @@ void dsp_update_delay_samples(float sample_rate) {
     int32_t samples_sub = (int32_t)(sub_total_ms * sample_rate / 1000.0f);
     if (samples_sub > MAX_DELAY_SAMPLES) samples_sub = MAX_DELAY_SAMPLES;
     channel_delay_samples[2] = samples_sub;
+
+    // Fast bypass flag: true if any channel has non-zero delay
+    any_delay_active = (channel_delay_samples[0] | channel_delay_samples[1] | channel_delay_samples[2]) != 0;
 }
 
 void dsp_recalculate_all_filters(float sample_rate) {
@@ -178,6 +182,49 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
         sample = result_f;
     }
     return sample;
+}
+
+DSP_TIME_CRITICAL
+void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict samples,
+                               uint32_t count, uint8_t channel) {
+    uint8_t num_bands = channel_band_counts[channel];
+
+    // Process each biquad across all samples (coefficients loaded once per filter)
+    for (int band = 0; band < num_bands; band++) {
+        Biquad *bq = &biquads[band];
+        if (bq->bypass) continue;
+
+        // Load coefficients once for all samples
+        float b0 = bq->b0;
+        float b1 = bq->b1;
+        float b2 = bq->b2;
+        float a1 = bq->a1;
+        float a2 = bq->a2;
+        double s1 = bq->s1;
+        double s2 = bq->s2;
+
+        // Process all samples with this biquad
+        for (uint32_t i = 0; i < count; i++) {
+            float sample = samples[i];
+
+            // y[n] = b0*x[n] + s1[n-1]
+            double result_d = dcp_dadd(dcp_f2d(b0 * sample), s1);
+            float result_f = dcp_d2f(result_d);
+
+            // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
+            float val1 = b1 * sample - a1 * result_f;
+            s1 = dcp_dadd(dcp_f2d(val1), s2);
+
+            // s2[n] = b2*x[n] - a2*y[n]
+            s2 = dcp_f2d(b2 * sample - a2 * result_f);
+
+            samples[i] = result_f;
+        }
+
+        // Store state back
+        bq->s1 = s1;
+        bq->s2 = s2;
+    }
 }
 #else
 // RP2040: Implemented in dsp_process_rp2040.S for maximum performance
