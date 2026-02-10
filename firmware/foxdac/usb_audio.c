@@ -224,6 +224,7 @@ void audio_set_volume(int16_t volume) {
 
 static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
     uint32_t start_time = time_us_32();
+    uint32_t core1_wait_us = 0;
 
     // Detect SPDIF underrun: USB packets should arrive every ~1ms
     static uint32_t last_packet_time = 0;
@@ -448,10 +449,12 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
 
         // Wait for Core 1 to finish outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT
+        uint32_t wait_start = time_us_32();
         while (!core1_eq_work.work_done) {
             __wfe();
         }
         __dmb();
+        core1_wait_us = time_us_32() - wait_start;
     } else {
         // Single-core: process all outputs on Core 0
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
@@ -688,7 +691,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     }
 
     uint32_t end_time = time_us_32();
-    global_status.cpu0_load = (uint8_t)((end_time - start_time) / 10);
+    global_status.cpu0_load = (uint8_t)((end_time - start_time - core1_wait_us) / 10);
 }
 
 // ----------------------------------------------------------------------------
