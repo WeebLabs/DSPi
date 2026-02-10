@@ -78,6 +78,9 @@ volatile bool crossfeed_update_pending = false;
 volatile bool crossfeed_bypassed = true;  // Fast bypass flag for audio callback
 CrossfeedState crossfeed_state;
 
+// Shared output buffer — file scope so Core 1 can access via pointer
+static float buf_out[NUM_OUTPUT_CHANNELS][192];
+
 // Sync State
 volatile uint64_t total_samples_produced = 0;
 volatile uint64_t start_time_us = 0;
@@ -302,7 +305,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     // Static buffers to avoid stack overflow (~8KB would be too much for stack)
     static float buf_l[192], buf_r[192];
-    static float buf_out[NUM_OUTPUT_CHANNELS][192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
     for (uint32_t i = 0; i < sample_count; i++) {
@@ -393,27 +395,82 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
     }
 
-    // ========== PASS 5: Per-Output EQ + Gain (block-based) ==========
-    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-        if (!matrix_mixer.outputs[out].enabled) continue;
+    // ========== PASS 5: Per-Output EQ + Gain (block-based, dual-core) ==========
+    if (core1_mode == CORE1_MODE_EQ_WORKER) {
+        // Dispatch outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT to Core 1
+        core1_eq_work.sample_count = sample_count;
+        core1_eq_work.vol_mul = vol_mul;
+        core1_eq_work.work_done = false;
+        __dmb();
+        core1_eq_work.work_ready = true;
+        __sev();
 
-        // Output EQ
-        if (!matrix_mixer.outputs[out].mute) {
-            uint8_t eq_ch = CH_OUT_1 + out;
-            if (!channel_bypassed[eq_ch]) {
-                dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+        // Core 0: process outputs 0..CORE1_EQ_FIRST_OUTPUT-1
+        for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
+            if (!matrix_mixer.outputs[out].enabled) continue;
+            if (!matrix_mixer.outputs[out].mute) {
+                uint8_t eq_ch = CH_OUT_1 + out;
+                if (!channel_bypassed[eq_ch]) {
+                    dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+                }
+            }
+            float gain = matrix_mixer.outputs[out].mute ? 0.0f
+                         : matrix_mixer.outputs[out].gain_linear * vol_mul;
+            if (gain == 0.0f) {
+                memset(buf_out[out], 0, sample_count * sizeof(float));
+            } else if (gain != 1.0f) {
+                float *dst = buf_out[out];
+                for (uint32_t i = 0; i < sample_count; i++)
+                    dst[i] *= gain;
             }
         }
 
-        // Combined gain + volume (skip if unity, zero if muted)
-        float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                     : matrix_mixer.outputs[out].gain_linear * vol_mul;
-        if (gain == 0.0f) {
-            memset(buf_out[out], 0, sample_count * sizeof(float));
-        } else if (gain != 1.0f) {
-            float *dst = buf_out[out];
-            for (uint32_t i = 0; i < sample_count; i++)
-                dst[i] *= gain;
+        // Also process PDM output (last) on Core 0 if enabled
+        {
+            int out = NUM_OUTPUT_CHANNELS - 1;
+            if (matrix_mixer.outputs[out].enabled) {
+                if (!matrix_mixer.outputs[out].mute) {
+                    uint8_t eq_ch = CH_OUT_1 + out;
+                    if (!channel_bypassed[eq_ch]) {
+                        dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+                    }
+                }
+                float gain = matrix_mixer.outputs[out].mute ? 0.0f
+                             : matrix_mixer.outputs[out].gain_linear * vol_mul;
+                if (gain == 0.0f) {
+                    memset(buf_out[out], 0, sample_count * sizeof(float));
+                } else if (gain != 1.0f) {
+                    float *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] *= gain;
+                }
+            }
+        }
+
+        // Wait for Core 1 to finish outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT
+        while (!core1_eq_work.work_done) {
+            __wfe();
+        }
+        __dmb();
+    } else {
+        // Single-core: process all outputs on Core 0
+        for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+            if (!matrix_mixer.outputs[out].enabled) continue;
+            if (!matrix_mixer.outputs[out].mute) {
+                uint8_t eq_ch = CH_OUT_1 + out;
+                if (!channel_bypassed[eq_ch]) {
+                    dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+                }
+            }
+            float gain = matrix_mixer.outputs[out].mute ? 0.0f
+                         : matrix_mixer.outputs[out].gain_linear * vol_mul;
+            if (gain == 0.0f) {
+                memset(buf_out[out], 0, sample_count * sizeof(float));
+            } else if (gain != 1.0f) {
+                float *dst = buf_out[out];
+                for (uint32_t i = 0; i < sample_count; i++)
+                    dst[i] *= gain;
+            }
         }
     }
 
@@ -864,6 +921,19 @@ static uint8_t vendor_rx_buf[64];
 static uint8_t vendor_last_request = 0;
 static uint16_t vendor_last_wValue = 0;
 
+// Derive Core 1 mode from current output enable state
+static Core1Mode derive_core1_mode(void) {
+    // PDM output (last) takes priority — checked first
+    if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled)
+        return CORE1_MODE_PDM;
+    // Any of outputs 2-7 enabled → EQ worker
+    for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+        if (matrix_mixer.outputs[out].enabled)
+            return CORE1_MODE_EQ_WORKER;
+    }
+    return CORE1_MODE_IDLE;
+}
+
 static void vendor_cmd_packet(struct usb_endpoint *ep) {
     struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
 
@@ -1039,12 +1109,37 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
         case REQ_SET_OUTPUT_ENABLE: {
             uint8_t out = vendor_last_wValue & 0xFF;
             if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 1) {
-                matrix_mixer.outputs[out].enabled = vendor_rx_buf[0];
+                bool want_enable = (vendor_rx_buf[0] != 0);
+
+                // Mutual exclusion interlock: PDM vs outputs 2-7
+                if (want_enable) {
+                    bool is_pdm = (out == NUM_OUTPUT_CHANNELS - 1);
+                    bool is_core1_eq = (out >= CORE1_EQ_FIRST_OUTPUT && out <= CORE1_EQ_LAST_OUTPUT);
+
+                    if (is_pdm) {
+                        // Refuse PDM if any output 2-7 is enabled
+                        for (int i = CORE1_EQ_FIRST_OUTPUT; i <= CORE1_EQ_LAST_OUTPUT; i++) {
+                            if (matrix_mixer.outputs[i].enabled) goto skip_enable;
+                        }
+                    } else if (is_core1_eq) {
+                        // Refuse output 2-7 if PDM is enabled
+                        if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled) goto skip_enable;
+                    }
+                }
+
+                matrix_mixer.outputs[out].enabled = want_enable ? 1 : 0;
+
+                // Determine new Core 1 mode and transition
+                Core1Mode new_mode = derive_core1_mode();
+                if (new_mode != core1_mode) {
+                    core1_mode = new_mode;
 #if ENABLE_SUB
-                if (out == NUM_OUTPUT_CHANNELS - 1)
-                    pdm_set_enabled(vendor_rx_buf[0]);
+                    pdm_set_enabled(new_mode == CORE1_MODE_PDM);
 #endif
+                    __sev();  // Wake Core 1 to pick up mode change
+                }
             }
+            skip_enable:
             break;
         }
 
@@ -1359,6 +1454,33 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 }
                 return false;
             }
+
+            case REQ_GET_CORE1_MODE: {
+                resp_buf[0] = (uint8_t)core1_mode;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_CORE1_CONFLICT: {
+                // wValue = proposed output index to enable
+                // Returns 1 if enabling it would conflict, 0 if OK
+                uint8_t out = (uint8_t)setup->wValue;
+                uint8_t conflict = 0;
+                if (out < NUM_OUTPUT_CHANNELS) {
+                    bool is_pdm = (out == NUM_OUTPUT_CHANNELS - 1);
+                    bool is_core1_eq = (out >= CORE1_EQ_FIRST_OUTPUT && out <= CORE1_EQ_LAST_OUTPUT);
+                    if (is_pdm) {
+                        for (int i = CORE1_EQ_FIRST_OUTPUT; i <= CORE1_EQ_LAST_OUTPUT; i++) {
+                            if (matrix_mixer.outputs[i].enabled) { conflict = 1; break; }
+                        }
+                    } else if (is_core1_eq) {
+                        if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled) conflict = 1;
+                    }
+                }
+                resp_buf[0] = conflict;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
         }
 
         return false;
@@ -1555,6 +1677,9 @@ void usb_sound_card_init(void) {
     dsp_recalculate_all_filters(48000.0f);
     audio_set_volume(DEFAULT_VOLUME);
     _audio_reconfigure();
+
+    // Initialize Core 1 EQ worker pointer to shared output buffer
+    core1_eq_work.buf_out = buf_out;
 
     // Initialize ADC for temperature sensor
     adc_init();

@@ -1,4 +1,6 @@
+#include <string.h>
 #include "pdm_generator.h"
+#include "dsp_pipeline.h"
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -26,6 +28,10 @@ static int pdm_dma_chan = -1;
 
 // Enable/disable flag — set by Core 0 via pdm_set_enabled(), read by Core 1
 volatile bool pdm_enabled = false;
+
+// Core 1 mode and EQ worker handshake
+volatile Core1Mode core1_mode = CORE1_MODE_IDLE;
+Core1EqWork core1_eq_work = {0};
 
 // ----------------------------------------------------------------------------
 // RAW PIO PROGRAM
@@ -142,14 +148,17 @@ void pdm_push_sample(int32_t sample, bool reset) {
     }
 }
 
-void pdm_core1_entry() {
+// ----------------------------------------------------------------------------
+// PDM PROCESSING LOOP (extracted from former pdm_core1_entry)
+// Runs sigma-delta modulation when core1_mode == CORE1_MODE_PDM
+// ----------------------------------------------------------------------------
+static void pdm_processing_loop() {
     int32_t local_pdm_err = 0;
     int32_t local_pdm_err2 = 0;
     uint32_t active_us_accumulator = 0;
     uint32_t sample_counter = 0;
-    noise_shaper_t ns = {0};  // Noise shaper state
+    noise_shaper_t ns = {0};
 
-    // Target lead over DMA: 256 words = 32 samples = ~0.67ms at 48kHz
     const int32_t TARGET_LEAD = 256;
 
     uint32_t local_pdm_write = 0;
@@ -162,7 +171,7 @@ void pdm_core1_entry() {
         local_pdm_write = (init_read_idx + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
     }
 
-    while (1) {
+    while (core1_mode == CORE1_MODE_PDM) {
         // ---- Enable/disable state machine ----
         if (!pdm_enabled) {
             if (hw_running) {
@@ -223,32 +232,25 @@ void pdm_core1_entry() {
         bool have_sample = (pdm_head != pdm_tail);
 
         if (have_sample) {
-            // Real audio sample available
             pdm_msg_t msg = pdm_ring[pdm_tail];
             pdm_tail++;
             sample_value = msg.sample;
         } else if (delta < TARGET_LEAD) {
-            // No sample but we need to generate silence to maintain lead
             pdm_ring_underruns++;
             sample_value = 0;
         } else {
-            // We're at target lead with no samples - wait for DMA to catch up or sample to arrive
             while (pdm_head == pdm_tail) {
-                // Recheck delta
                 read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
                 current_read_idx = (read_addr - (uint32_t)pdm_dma_buffer) / 4;
                 delta = (local_pdm_write - current_read_idx) & (PDM_DMA_BUFFER_SIZE - 1);
 
-                // Break if we need to generate (delta dropped) or underrun detected
                 if (delta < TARGET_LEAD || delta > (PDM_DMA_BUFFER_SIZE / 2)) break;
 
-                // If we have lots of cushion, safe to sleep briefly
                 if (delta > TARGET_LEAD + 128) {
                     __wfe();
                 }
             }
 
-            // Check what woke us
             if (pdm_head != pdm_tail) {
                 pdm_msg_t msg = pdm_ring[pdm_tail];
                 pdm_tail++;
@@ -269,8 +271,6 @@ void pdm_core1_entry() {
 
         // 256x Oversampling with 2nd-order sigma-delta modulator
         for (int chunk = 0; chunk < 8; chunk++) {
-            // Noise-shaped dither with IIR HP filter and error feedback
-            // Use integrator state as proxy for quantization error
             int32_t raw_rand = (int32_t)(fast_rand() & PDM_DITHER_MASK) - (PDM_DITHER_MASK >> 1);
             int32_t dither = noise_shaped_dither(&ns, raw_rand, local_pdm_err2 >> 8);
 
@@ -287,18 +287,17 @@ void pdm_core1_entry() {
             local_pdm_write = (local_pdm_write + 1) & (PDM_DMA_BUFFER_SIZE - 1);
         }
 
-        // Check for overrun after writing - if delta is very small, write is catching up to read
+        // Check for overrun after writing
         {
             uint32_t new_read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
             uint32_t new_read_idx = (new_read_addr - (uint32_t)pdm_dma_buffer) / 4;
             int32_t new_delta = (local_pdm_write - new_read_idx) & (PDM_DMA_BUFFER_SIZE - 1);
-            if (new_delta < 32) {  // Less than 4 samples of cushion
+            if (new_delta < 32) {
                 pdm_dma_overruns++;
             }
         }
 
-        // Leaky integrators - once per audio sample, prevents DC accumulation
-        // At 48kHz with shift 14: time constant ~0.34 seconds
+        // Leaky integrators
         local_pdm_err  -= (local_pdm_err >> PDM_LEAKAGE_SHIFT);
         local_pdm_err2 -= (local_pdm_err2 >> PDM_LEAKAGE_SHIFT);
 
@@ -307,10 +306,113 @@ void pdm_core1_entry() {
         sample_counter++;
 
         if (sample_counter >= 48) {
-            // Approximate division by 10: x/10 ≈ (x * 205) >> 11
             global_status.cpu1_load = (uint8_t)((active_us_accumulator * 205) >> 11);
             active_us_accumulator = 0;
             sample_counter = 0;
+        }
+    }
+
+    // Exiting PDM mode — clean up hardware
+    if (pdm_enabled) {
+        pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
+        dma_channel_abort(pdm_dma_chan);
+        pdm_enabled = false;
+    }
+    global_status.cpu1_load = 0;
+}
+
+// ----------------------------------------------------------------------------
+// EQ WORKER LOOP (RP2350 only — requires DCP and block-based EQ)
+// Processes EQ + gain for outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT
+// in parallel with Core 0 processing outputs 0-1
+// ----------------------------------------------------------------------------
+#if PICO_RP2350
+static void __not_in_flash_func(eq_worker_loop)() {
+    uint32_t active_us_accumulator = 0;
+    uint32_t block_counter = 0;
+
+    while (core1_mode == CORE1_MODE_EQ_WORKER) {
+        // Wait for work from Core 0
+        while (!core1_eq_work.work_ready) {
+            if (core1_mode != CORE1_MODE_EQ_WORKER) return;
+            __wfe();
+        }
+        __dmb();
+
+        uint32_t start_time = time_us_32();
+
+        // Read work descriptor
+        float (*buf_out)[192] = core1_eq_work.buf_out;
+        uint32_t sample_count = core1_eq_work.sample_count;
+        float vol_mul = core1_eq_work.vol_mul;
+
+        // Process EQ + gain for outputs assigned to Core 1
+        for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+            extern MatrixMixer matrix_mixer;
+            if (!matrix_mixer.outputs[out].enabled) continue;
+
+            // Output EQ
+            if (!matrix_mixer.outputs[out].mute) {
+                uint8_t eq_ch = CH_OUT_1 + out;
+                if (!channel_bypassed[eq_ch]) {
+                    dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+                }
+            }
+
+            // Combined gain + volume
+            float gain = matrix_mixer.outputs[out].mute ? 0.0f
+                         : matrix_mixer.outputs[out].gain_linear * vol_mul;
+            if (gain == 0.0f) {
+                memset(buf_out[out], 0, sample_count * sizeof(float));
+            } else if (gain != 1.0f) {
+                float *dst = buf_out[out];
+                for (uint32_t i = 0; i < sample_count; i++)
+                    dst[i] *= gain;
+            }
+        }
+
+        uint32_t end_time = time_us_32();
+        active_us_accumulator += (end_time - start_time);
+        block_counter++;
+
+        // Update CPU1 load every ~48 blocks (~1ms each = ~48ms window)
+        // Window is 48ms = 48000us, so 100% = 48000us
+        // x/480 ≈ (x * 137) >> 16
+        if (block_counter >= 48) {
+            global_status.cpu1_load = (uint8_t)((active_us_accumulator * 137) >> 16);
+            active_us_accumulator = 0;
+            block_counter = 0;
+        }
+
+        // Signal completion to Core 0
+        core1_eq_work.work_ready = false;
+        __dmb();
+        core1_eq_work.work_done = true;
+        __sev();
+    }
+
+    global_status.cpu1_load = 0;
+}
+#endif // PICO_RP2350
+
+// ----------------------------------------------------------------------------
+// CORE 1 ENTRY — mode dispatcher
+// ----------------------------------------------------------------------------
+void pdm_core1_entry() {
+    while (1) {
+        switch (core1_mode) {
+            case CORE1_MODE_PDM:
+                pdm_processing_loop();
+                break;
+#if PICO_RP2350
+            case CORE1_MODE_EQ_WORKER:
+                eq_worker_loop();
+                break;
+#endif
+            default:
+                global_status.cpu1_load = 0;
+                __wfe();
+                break;
         }
     }
 }

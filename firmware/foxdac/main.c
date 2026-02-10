@@ -145,7 +145,21 @@ void core0_init() {
 
 #if ENABLE_SUB
     pdm_setup_hw();
-    pdm_set_enabled(matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled);
+
+    // Determine initial Core 1 mode from output enables (may have been loaded from flash)
+    if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled) {
+        core1_mode = CORE1_MODE_PDM;
+        pdm_set_enabled(true);
+    } else {
+        // Check if any outputs 2-7 are enabled for EQ worker
+        bool any_eq_output = false;
+        for (int i = CORE1_EQ_FIRST_OUTPUT; i <= CORE1_EQ_LAST_OUTPUT; i++) {
+            if (matrix_mixer.outputs[i].enabled) { any_eq_output = true; break; }
+        }
+        core1_mode = any_eq_output ? CORE1_MODE_EQ_WORKER : CORE1_MODE_IDLE;
+        pdm_set_enabled(false);
+    }
+
     multicore_launch_core1(pdm_core1_entry);
 #endif
 }
@@ -173,6 +187,18 @@ int main(void) {
             EqParamPacket p = pending_packet;
             eq_update_pending = false;
             filter_recipes[p.channel][p.band] = p;
+
+            // If updating a Core 1 EQ channel, wait for Core 1 to finish
+            // current work before modifying coefficients
+            bool is_core1_channel = (p.channel >= (CH_OUT_1 + CORE1_EQ_FIRST_OUTPUT) &&
+                                     p.channel <= (CH_OUT_1 + CORE1_EQ_LAST_OUTPUT));
+            if (is_core1_channel && core1_mode == CORE1_MODE_EQ_WORKER) {
+                // Spin-wait until Core 1 is idle (work_done or no work dispatched)
+                while (core1_eq_work.work_ready && !core1_eq_work.work_done) {
+                    tight_loop_contents();
+                }
+                __dmb();
+            }
 
             uint32_t flags = save_and_disable_interrupts();
             dsp_compute_coefficients(&p, &filters[p.channel][p.band], (float)audio_state.freq);

@@ -139,6 +139,10 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define REQ_SET_OUTPUT_DELAY        0x78
 #define REQ_GET_OUTPUT_DELAY        0x79
 
+// Core 1 Mode Query Commands
+#define REQ_GET_CORE1_MODE          0x7A
+#define REQ_GET_CORE1_CONFLICT      0x7B
+
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u
 #define FEATURE_VOLUME_CONTROL 2u
@@ -167,6 +171,26 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 // Matrix Mixer Configuration
 #define NUM_INPUT_CHANNELS   2   // USB L/R (expandable to 4 for S/PDIF input)
 #define NUM_OUTPUT_CHANNELS  9   // Out 1-8 S/PDIF + Out 9 PDM
+
+// Core 1 Operating Mode
+typedef enum {
+    CORE1_MODE_IDLE      = 0,
+    CORE1_MODE_PDM       = 1,
+    CORE1_MODE_EQ_WORKER = 2,
+} Core1Mode;
+
+// Outputs assigned to Core 1 EQ worker (S/PDIF pairs 2-4 = outputs 2-7)
+#define CORE1_EQ_FIRST_OUTPUT  2
+#define CORE1_EQ_LAST_OUTPUT   7
+
+// Core 1 EQ Worker Handshake
+typedef struct {
+    volatile bool     work_ready;
+    volatile bool     work_done;
+    float           (*buf_out)[192];   // Pointer to buf_out array, set once at init
+    uint32_t          sample_count;
+    float             vol_mul;
+} Core1EqWork;
 
 // ----------------------------------------------------------------------------
 // DATA STRUCTURES
