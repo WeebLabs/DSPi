@@ -28,11 +28,18 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 
 #define ENABLE_SUB 1
 
+// S/PDIF Output Pins (4 outputs on PIO0)
 #undef PICO_AUDIO_SPDIF_PIN
-#define PICO_AUDIO_SPDIF_PIN 20
+#define PICO_AUDIO_SPDIF_PIN   6    // S/PDIF 1 (Out 1-2)
+#define PICO_SPDIF_PIN_2       7    // S/PDIF 2 (Out 3-4)
+#define PICO_SPDIF_PIN_3       8    // S/PDIF 3 (Out 5-6)
+#define PICO_SPDIF_PIN_4       9    // S/PDIF 4 (Out 7-8)
 
-#define PICO_AUDIO_SPDIF_SUB_PIN 21   // PDM sub output pin (PIO1)
-#define PICO_SPDIF_SUB_PIN       22   // S/PDIF sub output pin (PIO0) — must differ from PDM pin
+// PDM Subwoofer Output Pin (PIO1)
+#define PICO_PDM_PIN           10   // PDM sub (Out 9)
+
+// Legacy aliases
+#define PICO_AUDIO_SPDIF_SUB_PIN PICO_PDM_PIN
 
 #define FILTER_SHIFT 28
 
@@ -56,7 +63,13 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
+// RP2350: 170ms max delay (8192 samples at 48kHz)
+// RP2040: 85ms max delay (4096 samples) to fit 9 channels in RAM
+#if PICO_RP2350
 #define MAX_DELAY_SAMPLES 8192
+#else
+#define MAX_DELAY_SAMPLES 4096
+#endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
 // Latency alignment (in samples - automatically adapts to sample rate)
@@ -114,23 +127,85 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define REQ_SET_CROSSFEED_ITD       0x66
 #define REQ_GET_CROSSFEED_ITD       0x67
 
+// Matrix Mixer Commands
+#define REQ_SET_MATRIX_ROUTE        0x70
+#define REQ_GET_MATRIX_ROUTE        0x71
+#define REQ_SET_OUTPUT_ENABLE       0x72
+#define REQ_GET_OUTPUT_ENABLE       0x73
+#define REQ_SET_OUTPUT_GAIN         0x74
+#define REQ_GET_OUTPUT_GAIN         0x75
+#define REQ_SET_OUTPUT_MUTE         0x76
+#define REQ_GET_OUTPUT_MUTE         0x77
+#define REQ_SET_OUTPUT_DELAY        0x78
+#define REQ_GET_OUTPUT_DELAY        0x79
+
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u
 #define FEATURE_VOLUME_CONTROL 2u
 #define ENDPOINT_FREQ_CONTROL 1u
 
-// Channel Definitions
-#define CH_MASTER_LEFT  0
-#define CH_MASTER_RIGHT 1
-#define CH_OUT_LEFT     2
-#define CH_OUT_RIGHT    3
-#define CH_OUT_SUB      4
-#define NUM_CHANNELS    5
-#define MAX_BANDS       12
+// Channel Definitions (11 total: 2 master + 9 outputs)
+#define CH_MASTER_LEFT   0
+#define CH_MASTER_RIGHT  1
+#define CH_OUT_1         2   // S/PDIF 1 L (GPIO 20)
+#define CH_OUT_2         3   // S/PDIF 1 R (GPIO 20)
+#define CH_OUT_3         4   // S/PDIF 2 L (GPIO 21)
+#define CH_OUT_4         5   // S/PDIF 2 R (GPIO 21)
+#define CH_OUT_5         6   // S/PDIF 3 L (GPIO 22)
+#define CH_OUT_6         7   // S/PDIF 3 R (GPIO 22)
+#define CH_OUT_7         8   // S/PDIF 4 L (GPIO 23)
+#define CH_OUT_8         9   // S/PDIF 4 R (GPIO 23)
+#define CH_OUT_9_PDM     10  // PDM sub (GPIO 10)
+#define NUM_CHANNELS     11
+#define MAX_BANDS        12
+
+// Legacy aliases for backward compatibility
+#define CH_OUT_LEFT      CH_OUT_1
+#define CH_OUT_RIGHT     CH_OUT_2
+#define CH_OUT_SUB       CH_OUT_9_PDM
+
+// Matrix Mixer Configuration
+#define NUM_INPUT_CHANNELS   2   // USB L/R (expandable to 4 for S/PDIF input)
+#define NUM_OUTPUT_CHANNELS  9   // Out 1-8 S/PDIF + Out 9 PDM
 
 // ----------------------------------------------------------------------------
 // DATA STRUCTURES
 // ----------------------------------------------------------------------------
+
+// Matrix Mixer Crosspoint
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;        // Route active
+    uint8_t phase_invert;   // Polarity flip
+    uint8_t reserved[2];
+    float gain_db;          // -inf to +12dB
+    float gain_linear;      // Pre-computed multiplier
+} MatrixCrosspoint;
+
+// Output Channel State
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;        // Output active (saves CPU when disabled)
+    uint8_t mute;           // Soft mute
+    uint8_t reserved[2];
+    float gain_db;          // Per-output gain (-inf to +12dB)
+    float gain_linear;      // Pre-computed
+    float delay_ms;         // Per-output delay
+    int32_t delay_samples;  // Pre-computed from sample rate
+} OutputChannel;
+
+// Matrix Mixer
+typedef struct {
+    MatrixCrosspoint crosspoints[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
+    OutputChannel outputs[NUM_OUTPUT_CHANNELS];
+} MatrixMixer;
+
+// Matrix Route Packet (for vendor commands)
+typedef struct __attribute__((packed)) {
+    uint8_t input;          // 0-1 (USB L/R)
+    uint8_t output;         // 0-8
+    uint8_t enabled;        // 0 or 1
+    uint8_t phase_invert;   // 0 or 1
+    float gain_db;          // -inf to +12dB
+} MatrixRoutePacket;
 
 #if PICO_RP2350
 typedef struct {

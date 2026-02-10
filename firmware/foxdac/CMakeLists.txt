@@ -43,7 +43,8 @@ target_include_directories(foxdac PRIVATE
 target_compile_definitions(foxdac PRIVATE
     AUDIO_FREQ_MAX=48000
 
-    PICO_AUDIO_SPDIF_PIN=15 # 14 for v1 ; 15 for v2
+    # S/PDIF output configuration (pins defined in config.h)
+    PICO_AUDIO_SPDIF_PIO=0
     PICO_AUDIO_SPDIF_DMA_IRQ=1
 
     PICO_DEFAULT_UART_TX_PIN=12

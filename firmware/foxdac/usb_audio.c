@@ -48,11 +48,14 @@ volatile float global_preamp_db = 0.0f;
 volatile int32_t global_preamp_mul = 268435456;
 volatile float global_preamp_linear = 1.0f;
 
-// Per-channel gain and mute (output channels: L=0, R=1, Sub=2)
+// Per-channel gain and mute (legacy 3-channel interface for flash compatibility)
 volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
 volatile int32_t channel_gain_mul[3] = {32768, 32768, 32768};  // Unity = 2^15
 volatile float channel_gain_linear[3] = {1.0f, 1.0f, 1.0f};
 volatile bool channel_mute[3] = {false, false, false};
+
+// Matrix Mixer State
+MatrixMixer matrix_mixer = {0};
 
 // Loudness compensation state
 volatile bool loudness_enabled = false;
@@ -82,10 +85,16 @@ volatile bool sync_started = false;
 static volatile uint64_t last_packet_time_us = 0;
 #define AUDIO_GAP_THRESHOLD_US 50000  // 50ms - reset sync if packets stop this long
 
-// Audio Pool
-struct audio_buffer_pool *producer_pool = NULL;
-struct audio_buffer_pool *sub_producer_pool = NULL;
+// Audio Pools (4 S/PDIF stereo pairs)
+struct audio_buffer_pool *producer_pool_1 = NULL;  // S/PDIF 1 (Out 1-2)
+struct audio_buffer_pool *producer_pool_2 = NULL;  // S/PDIF 2 (Out 3-4)
+struct audio_buffer_pool *producer_pool_3 = NULL;  // S/PDIF 3 (Out 5-6)
+struct audio_buffer_pool *producer_pool_4 = NULL;  // S/PDIF 4 (Out 7-8)
 struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S16, .sample_freq = 48000, .channel_count = 2 };
+
+// Legacy aliases
+#define producer_pool producer_pool_1
+#define sub_producer_pool producer_pool_2
 
 // ----------------------------------------------------------------------------
 // USB INTERFACE / ENDPOINT OBJECTS
@@ -223,21 +232,21 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     }
     last_packet_time = start_time;
 
-    struct audio_buffer* audio_buffer = NULL;
-    if (producer_pool) audio_buffer = take_audio_buffer(producer_pool, false);
-
-    struct audio_buffer* sub_audio_buffer = NULL;
-    if (sub_producer_pool) sub_audio_buffer = take_audio_buffer(sub_producer_pool, false);
+    // Get audio buffers for all 4 S/PDIF outputs
+    struct audio_buffer* audio_buf[4] = {NULL, NULL, NULL, NULL};
+    if (producer_pool_1) audio_buf[0] = take_audio_buffer(producer_pool_1, false);
+    if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
+    if (producer_pool_3) audio_buf[2] = take_audio_buffer(producer_pool_3, false);
+    if (producer_pool_4) audio_buf[3] = take_audio_buffer(producer_pool_4, false);
 
     uint32_t sample_count = data_len / 4;  // 2 channels * 2 bytes per sample
 
-    if (audio_buffer) {
-        audio_buffer->sample_count = sample_count;
-    } else {
-        spdif_overruns++;
-    }
-    if (sub_audio_buffer) {
-        sub_audio_buffer->sample_count = sample_count;
+    for (int b = 0; b < 4; b++) {
+        if (audio_buf[b]) {
+            audio_buf[b]->sample_count = sample_count;
+        } else if (matrix_mixer.outputs[b*2].enabled || matrix_mixer.outputs[b*2+1].enabled) {
+            spdif_overruns++;
+        }
     }
 
     uint64_t now_us = time_us_64();
@@ -250,7 +259,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
         // Pre-fill with 2 silent buffers to prevent underrun on restart
         for (int i = 0; i < 2; i++) {
-            struct audio_buffer *sb = take_audio_buffer(producer_pool, false);
+            struct audio_buffer *sb = take_audio_buffer(producer_pool_1, false);
             if (sb) {
                 int16_t *out = (int16_t *)sb->buffer->bytes;
                 for (uint32_t j = 0; j < 192; j++) {
@@ -258,7 +267,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     out[j * 2 + 1] = 0;
                 }
                 sb->sample_count = 192;
-                give_audio_buffer(producer_pool, sb);
+                give_audio_buffer(producer_pool_1, sb);
             }
         }
     }
@@ -274,22 +283,13 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
 #if PICO_RP2350
     // ------------------------------------------------------------------------
-    // RP2350 FLOAT PIPELINE (Block-Based Processing)
+    // RP2350 FLOAT PIPELINE WITH MATRIX MIXER
     // ------------------------------------------------------------------------
-    const float inv_32768 = 1.0f / 32768.0f;  // Multiply instead of divide
+    const float inv_32768 = 1.0f / 32768.0f;
 
     float vol_mul = (float)audio_state.vol_mul * inv_32768;
     float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
-
-    bool mute_l = channel_mute[0];
-    bool mute_r = channel_mute[1];
-    bool mute_sub = channel_mute[2];
-
-    // Pre-combine gain and volume to eliminate per-sample multiplies
-    float combined_l = mute_l ? 0.0f : (channel_gain_linear[0] * vol_mul);
-    float combined_r = mute_r ? 0.0f : (channel_gain_linear[1] * vol_mul);
-    float combined_sub = mute_sub ? 0.0f : (channel_gain_linear[2] * vol_mul);
 
     // Snapshot loudness state for this packet
     bool loud_on = loudness_enabled;
@@ -297,20 +297,20 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     float peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
 
-    // Pre-compute PDM scale factor (avoid computing 1<<28 every sample)
+    // Pre-compute PDM scale factor
     const float pdm_scale = (float)(1 << 28);
 
-    // Scratch buffers for block-based processing (on stack, ~768 bytes)
-    float buf_l[192], buf_r[192], buf_sub[192];
+    // Static buffers to avoid stack overflow (~8KB would be too much for stack)
+    static float buf_l[192], buf_r[192];
+    static float buf_out[NUM_OUTPUT_CHANNELS][192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
     for (uint32_t i = 0; i < sample_count; i++) {
-        // Input: 16-bit PCM -> Float Normalized (-1.0 to 1.0) + Preamp
         buf_l[i] = (float)in[i*2] * inv_32768 * preamp;
         buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp;
     }
 
-    // Loudness compensation (sample-by-sample, coefficients vary per volume step)
+    // Loudness compensation
     if (loud_on && loud_coeffs) {
         for (uint32_t i = 0; i < sample_count; i++) {
             float raw_left = buf_l[i];
@@ -343,7 +343,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     }
 
     // ========== PASS 2: Master EQ (Block-Based) ==========
-    if (!is_bypassed && audio_buffer) {
+    if (!is_bypassed) {
         if (!channel_bypassed[CH_MASTER_LEFT]) {
             dsp_process_channel_block(filters[CH_MASTER_LEFT], buf_l, sample_count, CH_MASTER_LEFT);
         }
@@ -352,104 +352,126 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
     }
 
-    // ========== PASS 3: Crossfeed + Sub Mix + Output EQ (Block-Based) ==========
-    // Crossfeed must be sample-by-sample (has internal state)
+    // ========== PASS 3: Crossfeed + Master Peaks ==========
     bool do_crossfeed = !crossfeed_bypassed;
+
+    // Crossfeed is sample-by-sample (internal state), combined with peak tracking
     for (uint32_t i = 0; i < sample_count; i++) {
-        float master_l = buf_l[i];
-        float master_r = buf_r[i];
-
-        // Track master peaks
-        float abs_ml = fabsf(master_l); if (abs_ml > peak_ml) peak_ml = abs_ml;
-        float abs_mr = fabsf(master_r); if (abs_mr > peak_mr) peak_mr = abs_mr;
-
-        // Crossfeed (after Master EQ, before Output EQ)
+        float ml = buf_l[i], mr = buf_r[i];
+        float abs_ml = fabsf(ml); if (abs_ml > peak_ml) peak_ml = abs_ml;
+        float abs_mr = fabsf(mr); if (abs_mr > peak_mr) peak_mr = abs_mr;
         if (do_crossfeed) {
-            crossfeed_process_stereo(&crossfeed_state, &master_l, &master_r);
-        }
-
-        // Store back for output EQ
-        buf_l[i] = master_l;
-        buf_r[i] = master_r;
-
-        // Subwoofer mix (before output EQ)
-        buf_sub[i] = (master_l + master_r) * 0.5f;
-    }
-
-    // Output EQ (Block-Based, skip for muted channels)
-    if (audio_buffer) {
-        if (!mute_l && !channel_bypassed[CH_OUT_LEFT]) {
-            dsp_process_channel_block(filters[CH_OUT_LEFT], buf_l, sample_count, CH_OUT_LEFT);
-        }
-        if (!mute_r && !channel_bypassed[CH_OUT_RIGHT]) {
-            dsp_process_channel_block(filters[CH_OUT_RIGHT], buf_r, sample_count, CH_OUT_RIGHT);
+            crossfeed_process_stereo(&crossfeed_state, &ml, &mr);
+            buf_l[i] = ml; buf_r[i] = mr;
         }
     }
-#if ENABLE_SUB
-    if (!mute_sub && !channel_bypassed[CH_OUT_SUB]) {
-        dsp_process_channel_block(filters[CH_OUT_SUB], buf_sub, sample_count, CH_OUT_SUB);
-    }
-#endif
 
-    // ========== PASS 4: Gain/Volume + Delay + Output ==========
-    for (uint32_t i = 0; i < sample_count; i++) {
-        float out_l = mute_l ? 0.0f : buf_l[i];
-        float out_r = mute_r ? 0.0f : buf_r[i];
-        float out_sub = mute_sub ? 0.0f : buf_sub[i];
+    // ========== PASS 4: Matrix Mixing (block-based, output-major) ==========
+    // Snapshot crosspoint coefficients and process one output at a time
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+        if (!matrix_mixer.outputs[out].enabled) continue;
 
-        // Track output peaks before volume (for metering)
-        float abs_ol = fabsf(out_l); if (abs_ol > peak_ol) peak_ol = abs_ol;
-        float abs_or = fabsf(out_r); if (abs_or > peak_or) peak_or = abs_or;
-        float abs_sub = fabsf(out_sub); if (abs_sub > peak_sub) peak_sub = abs_sub;
+        // Load crosspoint config once per output (not per sample)
+        float gain_l = 0.0f, gain_r = 0.0f;
+        MatrixCrosspoint *xp_l = &matrix_mixer.crosspoints[0][out];
+        MatrixCrosspoint *xp_r = &matrix_mixer.crosspoints[1][out];
+        if (xp_l->enabled) gain_l = xp_l->phase_invert ? -xp_l->gain_linear : xp_l->gain_linear;
+        if (xp_r->enabled) gain_r = xp_r->phase_invert ? -xp_r->gain_linear : xp_r->gain_linear;
 
-        // Combined Gain + Volume (pre-computed before loop)
-        out_l   *= combined_l;
-        out_r   *= combined_r;
-        out_sub *= combined_sub;
-
-        // Delay (bypass when no delay is configured)
-        float delayed_l, delayed_r, delayed_sub;
-        if (any_delay_active) {
-            delay_lines[0][delay_write_idx] = out_l;
-            delay_lines[1][delay_write_idx] = out_r;
-            delay_lines[2][delay_write_idx] = out_sub;
-
-            delayed_l   = delay_lines[0][(delay_write_idx - channel_delay_samples[0]) & MAX_DELAY_MASK];
-            delayed_r   = delay_lines[1][(delay_write_idx - channel_delay_samples[1]) & MAX_DELAY_MASK];
-            delayed_sub = delay_lines[2][(delay_write_idx - channel_delay_samples[2]) & MAX_DELAY_MASK];
-
-            delay_write_idx = (delay_write_idx + 1) & MAX_DELAY_MASK;
+        float *dst = buf_out[out];
+        if (gain_l != 0.0f && gain_r != 0.0f) {
+            for (uint32_t i = 0; i < sample_count; i++)
+                dst[i] = buf_l[i] * gain_l + buf_r[i] * gain_r;
+        } else if (gain_l != 0.0f) {
+            for (uint32_t i = 0; i < sample_count; i++)
+                dst[i] = buf_l[i] * gain_l;
+        } else if (gain_r != 0.0f) {
+            for (uint32_t i = 0; i < sample_count; i++)
+                dst[i] = buf_r[i] * gain_r;
         } else {
-            delayed_l = out_l;
-            delayed_r = out_r;
-            delayed_sub = out_sub;
+            memset(dst, 0, sample_count * sizeof(float));
+        }
+    }
+
+    // ========== PASS 5: Per-Output EQ + Gain (block-based) ==========
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+        if (!matrix_mixer.outputs[out].enabled) continue;
+
+        // Output EQ
+        if (!matrix_mixer.outputs[out].mute) {
+            uint8_t eq_ch = CH_OUT_1 + out;
+            if (!channel_bypassed[eq_ch]) {
+                dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+            }
         }
 
-        // Output: Float -> 16-bit PCM (S/PDIF)
-        if (audio_buffer) {
-            int16_t *out = (int16_t *) audio_buffer->buffer->bytes;
-            // Hard clip to [-1.0, 1.0] then scale
-            float dl = fmaxf(-1.0f, fminf(1.0f, delayed_l));
-            float dr = fmaxf(-1.0f, fminf(1.0f, delayed_r));
-            out[i*2]     = (int16_t)(dl * 32767.0f);
-            out[i*2+1]   = (int16_t)(dr * 32767.0f);
+        // Combined gain + volume (skip if unity, zero if muted)
+        float gain = matrix_mixer.outputs[out].mute ? 0.0f
+                     : matrix_mixer.outputs[out].gain_linear * vol_mul;
+        if (gain == 0.0f) {
+            memset(buf_out[out], 0, sample_count * sizeof(float));
+        } else if (gain != 1.0f) {
+            float *dst = buf_out[out];
+            for (uint32_t i = 0; i < sample_count; i++)
+                dst[i] *= gain;
         }
+    }
+
+    // ========== PASS 6: Delay (only outputs with non-zero delay) ==========
+    if (any_delay_active) {
+        for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+            int32_t dly = channel_delay_samples[out];
+            if (dly <= 0) continue;
+            float *dst = buf_out[out];
+            float *dline = delay_lines[out];
+            uint32_t widx = delay_write_idx;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                dline[widx] = dst[i];
+                dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
+                widx = (widx + 1) & MAX_DELAY_MASK;
+            }
+        }
+        delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
+    }
+
+    // ========== PASS 7: Output to S/PDIF + PDM ==========
+    // Peaks (first stereo pair only)
+    for (uint32_t i = 0; i < sample_count; i++) {
+        float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
+        float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
+    }
+
+    // S/PDIF conversion — skip pairs where neither output is enabled
+    for (int pair = 0; pair < 4; pair++) {
+        if (!audio_buf[pair]) continue;
+        int left_ch = pair * 2;
+        int right_ch = pair * 2 + 1;
+        if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
+            // Pair disabled — write silence so S/PDIF DMA has valid data
+            memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 4);
+            continue;
+        }
+        int16_t *out_ptr = (int16_t *)audio_buf[pair]->buffer->bytes;
+        for (uint32_t i = 0; i < sample_count; i++) {
+            float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[left_ch][i]));
+            float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[right_ch][i]));
+            out_ptr[i*2]     = (int16_t)(dl * 32767.0f);
+            out_ptr[i*2+1]   = (int16_t)(dr * 32767.0f);
+        }
+    }
 
 #if ENABLE_SUB
-        // PDM expects int32 Q28-like range
-        int32_t pdm_sample_q28 = (int32_t)(delayed_sub * pdm_scale);
-        pdm_push_sample(pdm_sample_q28, false);
-
-        // Sub S/PDIF output: mono sub duplicated to both channels
-        if (sub_audio_buffer) {
-            int16_t *sub_out = (int16_t *) sub_audio_buffer->buffer->bytes;
-            float ds = fmaxf(-1.0f, fminf(1.0f, delayed_sub));
-            int16_t sub_s16 = (int16_t)(ds * 32767.0f);
-            sub_out[i*2]     = sub_s16;
-            sub_out[i*2+1]   = sub_s16;
+    if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled) {
+        for (uint32_t i = 0; i < sample_count; i++) {
+            float abs_sub = fabsf(buf_out[NUM_OUTPUT_CHANNELS-1][i]);
+            if (abs_sub > peak_sub) peak_sub = abs_sub;
         }
-#endif
+        for (uint32_t i = 0; i < sample_count; i++) {
+            int32_t pdm_sample_q28 = (int32_t)(buf_out[NUM_OUTPUT_CHANNELS-1][i] * pdm_scale);
+            pdm_push_sample(pdm_sample_q28, false);
+        }
     }
+#endif
 
     // Convert peaks 0.0-1.0 to Q15-ish uint16 for status report
     global_status.peaks[0] = (uint16_t)(fminf(1.0f, peak_ml) * 32767.0f);
@@ -460,7 +482,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
 #else
     // ------------------------------------------------------------------------
-    // RP2040 FIXED-POINT PIPELINE (Legacy)
+    // RP2040 FIXED-POINT PIPELINE WITH MATRIX MIXER
+    // Note: Matrix mixer on RP2040 only supports first 3 outputs (L/R/Sub)
+    // due to CPU constraints. Full 9-output matrix requires RP2350.
     // ------------------------------------------------------------------------
     int32_t vol_mul = audio_state.vol_mul;
     int32_t preamp = global_preamp_mul;
@@ -482,7 +506,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         raw_left_32  = clip_s64_to_s32(((int64_t)raw_left_32 * preamp) >> 28);
         raw_right_32 = clip_s64_to_s32(((int64_t)raw_right_32 * preamp) >> 28);
 
-        // Loudness compensation (after preamp, before master EQ)
+        // Loudness compensation
         if (loud_on && loud_coeffs) {
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
@@ -513,39 +537,34 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             master_l_32 = raw_left_32;
             master_r_32 = raw_right_32;
         } else {
-            if (audio_buffer) {
-                master_l_32 = channel_bypassed[CH_MASTER_LEFT] ? raw_left_32 :
-                              dsp_process_channel(filters[CH_MASTER_LEFT], raw_left_32, CH_MASTER_LEFT);
-                master_r_32 = channel_bypassed[CH_MASTER_RIGHT] ? raw_right_32 :
-                              dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right_32, CH_MASTER_RIGHT);
-            } else {
-                master_l_32 = 0; master_r_32 = 0;
-            }
+            master_l_32 = channel_bypassed[CH_MASTER_LEFT] ? raw_left_32 :
+                          dsp_process_channel(filters[CH_MASTER_LEFT], raw_left_32, CH_MASTER_LEFT);
+            master_r_32 = channel_bypassed[CH_MASTER_RIGHT] ? raw_right_32 :
+                          dsp_process_channel(filters[CH_MASTER_RIGHT], raw_right_32, CH_MASTER_RIGHT);
         }
 
         if (abs(master_l_32) > peak_ml) peak_ml = abs(master_l_32);
         if (abs(master_r_32) > peak_mr) peak_mr = abs(master_r_32);
 
-        // Crossfeed (after Master EQ, before Output EQ)
+        // Crossfeed
         if (!crossfeed_bypassed) {
             crossfeed_process_stereo(&crossfeed_state, &master_l_32, &master_r_32);
         }
 
+        // RP2040: Simple 3-output routing (L/R/Sub) using legacy gain/mute arrays
         int32_t sub_in_32 = (master_l_32 + master_r_32) >> 1;
         int32_t out_l_32 = 0, out_r_32 = 0, out_sub_32 = 0;
 
-        if (audio_buffer) {
-            out_l_32 = channel_bypassed[CH_OUT_LEFT] ? master_l_32 :
-                       dsp_process_channel(filters[CH_OUT_LEFT], master_l_32, CH_OUT_LEFT);
-            out_r_32 = channel_bypassed[CH_OUT_RIGHT] ? master_r_32 :
-                       dsp_process_channel(filters[CH_OUT_RIGHT], master_r_32, CH_OUT_RIGHT);
-        }
+        out_l_32 = channel_bypassed[CH_OUT_LEFT] ? master_l_32 :
+                   dsp_process_channel(filters[CH_OUT_LEFT], master_l_32, CH_OUT_LEFT);
+        out_r_32 = channel_bypassed[CH_OUT_RIGHT] ? master_r_32 :
+                   dsp_process_channel(filters[CH_OUT_RIGHT], master_r_32, CH_OUT_RIGHT);
 #if ENABLE_SUB
         out_sub_32 = channel_bypassed[CH_OUT_SUB] ? sub_in_32 :
                      dsp_process_channel(filters[CH_OUT_SUB], sub_in_32, CH_OUT_SUB);
 #endif
 
-        // Per-channel gain and mute
+        // Per-channel gain and mute (legacy 3-channel)
         out_l_32   = channel_mute[0] ? 0 : (int32_t)(((int64_t)out_l_32 * channel_gain_mul[0]) >> 15);
         out_r_32   = channel_mute[1] ? 0 : (int32_t)(((int64_t)out_r_32 * channel_gain_mul[1]) >> 15);
         out_sub_32 = channel_mute[2] ? 0 : (int32_t)(((int64_t)out_sub_32 * channel_gain_mul[2]) >> 15);
@@ -563,7 +582,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         out_r_32 = clip_s32(out_r_32);
         out_sub_32 = clip_s32(out_sub_32);
 
-        // DELAY
+        // Delay (only first 3 channels on RP2040)
         delay_lines[0][delay_write_idx] = out_l_32;
         delay_lines[1][delay_write_idx] = out_r_32;
         delay_lines[2][delay_write_idx] = out_sub_32;
@@ -574,8 +593,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
         delay_write_idx = (delay_write_idx + 1) & MAX_DELAY_MASK;
 
-        if (audio_buffer) {
-            int16_t *out = (int16_t *) audio_buffer->buffer->bytes;
+        // Output to first S/PDIF pair
+        if (audio_buf[0]) {
+            int16_t *out = (int16_t *) audio_buf[0]->buffer->bytes;
             out[i*2]     = (int16_t)(clip_s32(delayed_l + (1<<13)) >> 14);
             out[i*2+1]   = (int16_t)(clip_s32(delayed_r + (1<<13)) >> 14);
         }
@@ -583,9 +603,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 #if ENABLE_SUB
         pdm_push_sample(delayed_sub, false);
 
-        // Sub S/PDIF output: mono sub duplicated to both channels
-        if (sub_audio_buffer) {
-            int16_t *sub_out = (int16_t *) sub_audio_buffer->buffer->bytes;
+        // Sub S/PDIF output (second pair, mono duplicated)
+        if (audio_buf[1]) {
+            int16_t *sub_out = (int16_t *) audio_buf[1]->buffer->bytes;
             int16_t sub_s16 = (int16_t)(clip_s32(delayed_sub + (1<<13)) >> 14);
             sub_out[i*2]     = sub_s16;
             sub_out[i*2+1]   = sub_s16;
@@ -600,8 +620,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     global_status.peaks[4] = (uint16_t)(peak_sub >> 13);
 #endif
 
-    if (audio_buffer) give_audio_buffer(producer_pool, audio_buffer);
-    if (sub_audio_buffer) give_audio_buffer(sub_producer_pool, sub_audio_buffer);
+    // Return all buffers
+    for (int b = 0; b < 4; b++) {
+        if (audio_buf[b]) {
+            struct audio_buffer_pool *pool = (b == 0) ? producer_pool_1 :
+                                              (b == 1) ? producer_pool_2 :
+                                              (b == 2) ? producer_pool_3 : producer_pool_4;
+            give_audio_buffer(pool, audio_buf[b]);
+        }
+    }
 
     uint32_t end_time = time_us_32();
     global_status.cpu0_load = (uint8_t)((end_time - start_time) / 10);
@@ -992,6 +1019,63 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
                 crossfeed_update_pending = true;
             }
             break;
+
+        // Matrix Mixer Commands
+        case REQ_SET_MATRIX_ROUTE:
+            if (buffer->data_len >= sizeof(MatrixRoutePacket)) {
+                MatrixRoutePacket pkt;
+                memcpy(&pkt, vendor_rx_buf, sizeof(pkt));
+                if (pkt.input < NUM_INPUT_CHANNELS && pkt.output < NUM_OUTPUT_CHANNELS) {
+                    MatrixCrosspoint *xp = &matrix_mixer.crosspoints[pkt.input][pkt.output];
+                    xp->enabled = pkt.enabled;
+                    xp->phase_invert = pkt.phase_invert;
+                    xp->gain_db = pkt.gain_db;
+                    // Compute linear gain
+                    xp->gain_linear = powf(10.0f, pkt.gain_db / 20.0f);
+                }
+            }
+            break;
+
+        case REQ_SET_OUTPUT_ENABLE: {
+            uint8_t out = vendor_last_wValue & 0xFF;
+            if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 1) {
+                matrix_mixer.outputs[out].enabled = vendor_rx_buf[0];
+            }
+            break;
+        }
+
+        case REQ_SET_OUTPUT_GAIN: {
+            uint8_t out = vendor_last_wValue & 0xFF;
+            if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 4) {
+                float db;
+                memcpy(&db, vendor_rx_buf, 4);
+                matrix_mixer.outputs[out].gain_db = db;
+                matrix_mixer.outputs[out].gain_linear = powf(10.0f, db / 20.0f);
+            }
+            break;
+        }
+
+        case REQ_SET_OUTPUT_MUTE: {
+            uint8_t out = vendor_last_wValue & 0xFF;
+            if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 1) {
+                matrix_mixer.outputs[out].mute = vendor_rx_buf[0];
+            }
+            break;
+        }
+
+        case REQ_SET_OUTPUT_DELAY: {
+            uint8_t out = vendor_last_wValue & 0xFF;
+            if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 4) {
+                float ms;
+                memcpy(&ms, vendor_rx_buf, 4);
+                if (ms < 0) ms = 0;
+                matrix_mixer.outputs[out].delay_ms = ms;
+                // Update the channel delay used by DSP pipeline
+                channel_delays_ms[CH_OUT_1 + out] = ms;
+                dsp_update_delay_samples((float)audio_state.freq);
+            }
+            break;
+        }
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -1210,6 +1294,67 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 }
                 return false;
             }
+
+            // Matrix Mixer GET commands
+            case REQ_GET_MATRIX_ROUTE: {
+                // wValue = (input << 8) | output
+                uint8_t input = (setup->wValue >> 8) & 0xFF;
+                uint8_t output = setup->wValue & 0xFF;
+                if (input < NUM_INPUT_CHANNELS && output < NUM_OUTPUT_CHANNELS) {
+                    MatrixCrosspoint *xp = &matrix_mixer.crosspoints[input][output];
+                    MatrixRoutePacket pkt = {
+                        .input = input,
+                        .output = output,
+                        .enabled = xp->enabled,
+                        .phase_invert = xp->phase_invert,
+                        .gain_db = xp->gain_db
+                    };
+                    memcpy(resp_buf, &pkt, sizeof(pkt));
+                    vendor_send_response(resp_buf, sizeof(pkt));
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_GET_OUTPUT_ENABLE: {
+                uint8_t out = (uint8_t)setup->wValue;
+                if (out < NUM_OUTPUT_CHANNELS) {
+                    resp_buf[0] = matrix_mixer.outputs[out].enabled;
+                    vendor_send_response(resp_buf, 1);
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_GET_OUTPUT_GAIN: {
+                uint8_t out = (uint8_t)setup->wValue;
+                if (out < NUM_OUTPUT_CHANNELS) {
+                    memcpy(resp_buf, &matrix_mixer.outputs[out].gain_db, 4);
+                    vendor_send_response(resp_buf, 4);
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_GET_OUTPUT_MUTE: {
+                uint8_t out = (uint8_t)setup->wValue;
+                if (out < NUM_OUTPUT_CHANNELS) {
+                    resp_buf[0] = matrix_mixer.outputs[out].mute;
+                    vendor_send_response(resp_buf, 1);
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_GET_OUTPUT_DELAY: {
+                uint8_t out = (uint8_t)setup->wValue;
+                if (out < NUM_OUTPUT_CHANNELS) {
+                    memcpy(resp_buf, &matrix_mixer.outputs[out].delay_ms, 4);
+                    vendor_send_response(resp_buf, 4);
+                    return true;
+                }
+                return false;
+            }
         }
 
         return false;
@@ -1264,44 +1409,108 @@ static const char *_get_descriptor_string(uint index) {
 // INIT
 // ----------------------------------------------------------------------------
 
-// S/PDIF Config -- Main (L/R stereo)
-static audio_spdif_instance_t spdif_instance = {0};
-struct audio_spdif_config config = {
-    .pin = PICO_AUDIO_SPDIF_PIN,
+// S/PDIF Instances (4 stereo pairs on PIO0 SM0-3)
+static audio_spdif_instance_t spdif_instance_1 = {0};  // Out 1-2, GPIO 6
+static audio_spdif_instance_t spdif_instance_2 = {0};  // Out 3-4, GPIO 7
+static audio_spdif_instance_t spdif_instance_3 = {0};  // Out 5-6, GPIO 8
+static audio_spdif_instance_t spdif_instance_4 = {0};  // Out 7-8, GPIO 9
+
+struct audio_spdif_config spdif_config_1 = {
+    .pin = PICO_AUDIO_SPDIF_PIN,  // GPIO 6
     .dma_channel = 0,
     .pio_sm = 0,
     .pio = PICO_AUDIO_SPDIF_PIO,
     .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
 };
-struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
 
-// S/PDIF Config -- Subwoofer (mono duplicated to stereo)
-static audio_spdif_instance_t spdif_sub_instance = {0};
-struct audio_spdif_config sub_config = {
-    .pin = PICO_SPDIF_SUB_PIN,
+struct audio_spdif_config spdif_config_2 = {
+    .pin = PICO_SPDIF_PIN_2,  // GPIO 7
     .dma_channel = 1,
     .pio_sm = 1,
     .pio = PICO_AUDIO_SPDIF_PIO,
     .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
 };
-struct audio_buffer_format sub_producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
+
+struct audio_spdif_config spdif_config_3 = {
+    .pin = PICO_SPDIF_PIN_3,  // GPIO 8
+    .dma_channel = 2,
+    .pio_sm = 2,
+    .pio = PICO_AUDIO_SPDIF_PIO,
+    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
+};
+
+struct audio_spdif_config spdif_config_4 = {
+    .pin = PICO_SPDIF_PIN_4,  // GPIO 9
+    .dma_channel = 3,
+    .pio_sm = 3,
+    .pio = PICO_AUDIO_SPDIF_PIO,
+    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
+};
+
+struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
+
+// Legacy aliases
+#define spdif_instance spdif_instance_1
+#define spdif_sub_instance spdif_instance_2
+#define config spdif_config_1
+#define sub_config spdif_config_2
+
+// Initialize matrix mixer with default stereo pass-through
+static void matrix_init_defaults(void) {
+    memset(&matrix_mixer, 0, sizeof(matrix_mixer));
+
+    // Stereo pass-through on first S/PDIF pair (Out 1-2)
+    matrix_mixer.crosspoints[0][0].enabled = 1;     // L→Out1
+    matrix_mixer.crosspoints[0][0].gain_db = 0.0f;
+    matrix_mixer.crosspoints[0][0].gain_linear = 1.0f;
+
+    matrix_mixer.crosspoints[1][1].enabled = 1;     // R→Out2
+    matrix_mixer.crosspoints[1][1].gain_db = 0.0f;
+    matrix_mixer.crosspoints[1][1].gain_linear = 1.0f;
+
+    // Enable first stereo pair only by default
+    matrix_mixer.outputs[0].enabled = 1;
+    matrix_mixer.outputs[0].gain_linear = 1.0f;
+    matrix_mixer.outputs[1].enabled = 1;
+    matrix_mixer.outputs[1].gain_linear = 1.0f;
+
+    // All other outputs disabled by default (saves CPU)
+    for (int out = 2; out < NUM_OUTPUT_CHANNELS; out++) {
+        matrix_mixer.outputs[out].enabled = 0;
+        matrix_mixer.outputs[out].gain_linear = 1.0f;
+    }
+}
 
 void usb_sound_card_init(void) {
+    // Initialize matrix mixer defaults
+    matrix_init_defaults();
+
     // S/PDIF Setup (this must happen before USB init to claim DMA channels)
-    producer_pool = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
-    sub_producer_pool = audio_new_producer_pool(&sub_producer_format, AUDIO_BUFFER_COUNT, 192);
+    producer_pool_1 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
+    producer_pool_2 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
+    producer_pool_3 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
+    producer_pool_4 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
 
-    audio_spdif_setup(&spdif_instance, &audio_format_48k, &config);
-    audio_spdif_connect_extra(&spdif_instance, producer_pool, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    // Setup 4 S/PDIF instances on PIO0 SM0-3
+    audio_spdif_setup(&spdif_instance_1, &audio_format_48k, &spdif_config_1);
+    audio_spdif_connect_extra(&spdif_instance_1, producer_pool_1, false, AUDIO_BUFFER_COUNT / 2, NULL);
 
-    audio_spdif_setup(&spdif_sub_instance, &audio_format_48k, &sub_config);
-    audio_spdif_connect_extra(&spdif_sub_instance, sub_producer_pool, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    audio_spdif_setup(&spdif_instance_2, &audio_format_48k, &spdif_config_2);
+    audio_spdif_connect_extra(&spdif_instance_2, producer_pool_2, false, AUDIO_BUFFER_COUNT / 2, NULL);
+
+    audio_spdif_setup(&spdif_instance_3, &audio_format_48k, &spdif_config_3);
+    audio_spdif_connect_extra(&spdif_instance_3, producer_pool_3, false, AUDIO_BUFFER_COUNT / 2, NULL);
+
+    audio_spdif_setup(&spdif_instance_4, &audio_format_48k, &spdif_config_4);
+    audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, AUDIO_BUFFER_COUNT / 2, NULL);
 
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
 
-    // Synchronized start -- both outputs begin on the same clock cycle
-    audio_spdif_instance_t *spdif_all[] = { &spdif_instance, &spdif_sub_instance };
-    audio_spdif_enable_sync(spdif_all, 2);
+    // Start all 4 outputs synchronized
+    audio_spdif_instance_t *spdif_all[] = {
+        &spdif_instance_1, &spdif_instance_2, &spdif_instance_3, &spdif_instance_4
+    };
+    audio_spdif_enable_sync(spdif_all, 4);
 
     // Initialize pico-extras USB device with 3 interfaces: AC, AS, Vendor
 

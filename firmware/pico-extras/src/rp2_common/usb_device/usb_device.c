@@ -1000,13 +1000,6 @@ static void _usb_handle_buffer() {
 }
 
 void __isr __used isr_usbctrl(void) {
-    // Diagnostic: toggle LED on each USB interrupt
-    static uint32_t irq_count = 0;
-    if (++irq_count >= 100) {
-        irq_count = 0;
-        gpio_xor_mask(1u << 25);
-    }
-
     uint32_t status = usb_hw->ints;
     DEBUG_PINS_SET(usb_irq, 1);
 
@@ -1235,69 +1228,46 @@ void usb_clear_halt_condition(struct usb_endpoint *ep) {
     }
 }
 
-// Diagnostic helper for usb_device_start
-static void usb_diag(int n) {
-    for (int i = 0; i < n; i++) {
-        gpio_put(25, 1); busy_wait_ms(200);
-        gpio_put(25, 0); busy_wait_ms(200);
-    }
-    busy_wait_ms(1000);
-}
-
 void usb_device_start() {
-    usb_diag(1);  // 12.1: entered
-
-    // Reset USB controller first (required for RP2350 compatibility)
+    // Reset USB controller (required for RP2350 compatibility)
     reset_block(RESETS_RESET_USBCTRL_BITS);
     unreset_block_wait(RESETS_RESET_USBCTRL_BITS);
-    usb_diag(2);  // 12.2: reset done
 
-    // Clear USB DPRAM (TinyUSB does this, not usb_hw registers)
+    // Clear USB DPRAM
     memset(usb_dpram, 0, sizeof(*usb_dpram));
-    usb_diag(3);  // 12.3: dpram cleared
+
+    // Re-initialize endpoint DPRAM configuration (wiped by memset above)
+    _device.next_buffer_offset = 0x100;
+    _usb_endpoint_hw_init(&usb_control_in, 0);
+    _device.next_buffer_offset = 0x100;
+    _usb_endpoint_hw_init(&usb_control_out, 0);
+    _device.next_buffer_offset = 0x180;
+    _usb_for_each_endpoint(_usb_endpoint_hw_init, false, 0);
 
 #if PICO_USBDEV_ENABLE_DEBUG_TRACE
     trace_i = 0;
 #endif
 
-    // Mux to onboard USB PHY (same as TinyUSB rp2040_usb_init)
     usb_hw->muxing = USB_USB_MUXING_TO_PHY_BITS | USB_USB_MUXING_SOFTCON_BITS;
-    usb_diag(4);  // 12.4: muxing set
-
-    // Force VBUS detect
     usb_hw->pwr = USB_USB_PWR_VBUS_DETECT_BITS | USB_USB_PWR_VBUS_DETECT_OVERRIDE_EN_BITS;
-    usb_diag(5);  // 12.5: pwr set
-
-    // Enable controller (this also clears PHY_ISO on RP2350)
     usb_hw->main_ctrl = USB_MAIN_CTRL_CONTROLLER_EN_BITS;
-    usb_diag(6);  // 12.6: main_ctrl set
 
-    // Explicitly register IRQ handler early (like TinyUSB)
+    // Explicitly register IRQ handler (required for RP2350)
     irq_set_exclusive_handler(USBCTRL_IRQ, isr_usbctrl);
-    usb_diag(7);  // 12.7: IRQ handler registered
 
-    // Reset various things to default state
     _usb_handle_bus_reset();
-    usb_diag(8);  // 12.8: bus reset done
 
-    // Set sie_ctrl WITHOUT pullup first (like TinyUSB)
+    // Enable interrupts, then pullup to signal device presence
     usb_hw->sie_ctrl = USB_SIE_CTRL_EP0_INT_1BUF_BITS;
     usb_hw->inte = USB_INTS_BUFF_STATUS_BITS | USB_INTS_BUS_RESET_BITS | USB_INTS_SETUP_REQ_BITS |
                    USB_INTS_ERROR_BITS | USB_INTS_DEV_SOF_BITS;
-    usb_diag(9);  // 12.9: sie/inte set
 
-    // Clear any pending USB interrupts before enabling IRQ
     usb_hw_clear->sie_status = 0xFFFFFFFF;
     irq_clear(USBCTRL_IRQ);
-    usb_diag(10);  // 12.10: pending interrupts cleared
-
-    // Enable IRQ
     irq_set_enabled(USBCTRL_IRQ, true);
-    usb_diag(11);  // 12.11: IRQ enabled
 
-    // Now enable pullup to signal device presence to host
+    // Enable pullup last to signal device presence to host
     usb_hw->sie_ctrl = USB_SIE_CTRL_EP0_INT_1BUF_BITS | USB_SIE_CTRL_PULLUP_EN_BITS;
-    usb_diag(12);  // 12.12: pullup enabled - done
 }
 
 void usb_device_stop(__unused struct usb_device *device) {

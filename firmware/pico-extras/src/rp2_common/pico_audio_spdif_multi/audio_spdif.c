@@ -340,8 +340,6 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
 
         extern int overruns;
         overruns++;
-    } else {
-        gpio_put(18, 0);
     }
 
     dma_channel_transfer_from_buffer_now(inst->dma_channel, ab->buffer->bytes, ab->sample_count * 4);

@@ -9,14 +9,17 @@ extern EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
 extern float channel_delays_ms[NUM_CHANNELS];
 extern bool channel_bypassed[NUM_CHANNELS];  // true if all bands in channel are flat
 
-// Delay Lines
+// Delay Lines (9 output channels on both platforms)
+// RP2350: float, 170ms max delay
+// RP2040: int32_t, 85ms max delay
+#define NUM_DELAY_CHANNELS NUM_OUTPUT_CHANNELS
 #if PICO_RP2350
-extern float delay_lines[3][MAX_DELAY_SAMPLES];
+extern float delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #else
-extern int32_t delay_lines[3][MAX_DELAY_SAMPLES];
+extern int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #endif
 extern uint32_t delay_write_idx;
-extern int32_t channel_delay_samples[3];
+extern int32_t channel_delay_samples[NUM_DELAY_CHANNELS];
 extern bool any_delay_active;  // True if any channel has non-zero delay
 
 // API

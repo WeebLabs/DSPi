@@ -18,24 +18,28 @@ static inline bool is_filter_flat(const EqParamPacket *p) {
 
 Biquad filters[NUM_CHANNELS][MAX_BANDS];
 EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
-float channel_delays_ms[NUM_CHANNELS] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+float channel_delays_ms[NUM_CHANNELS] = {0};  // All 11 channels initialized to 0
 bool channel_bypassed[NUM_CHANNELS];
 
-// Delay Line State
+// Delay Line State (9 output channels)
+// RP2350: float, 170ms max delay
+// RP2040: int32_t, 85ms max delay
 #if PICO_RP2350
-float delay_lines[3][MAX_DELAY_SAMPLES];
+float delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #else
-int32_t delay_lines[3][MAX_DELAY_SAMPLES];
+int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #endif
 uint32_t delay_write_idx = 0;
-int32_t channel_delay_samples[3] = {0, 0, 0};
-bool any_delay_active = false; 
+int32_t channel_delay_samples[NUM_DELAY_CHANNELS] = {0};
+bool any_delay_active = false;
 
 uint8_t channel_band_counts[NUM_CHANNELS] = {
 #if PICO_RP2350
-    10, 10, 10, 10, 10
+    // Master L, Master R, Out1-9 (11 channels total)
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10
 #else
-    10, 10, 2, 2, 2
+    // RP2040: fewer bands on output channels due to CPU constraints
+    10, 10, 2, 2, 2, 2, 2, 2, 2, 2, 2
 #endif
 };
 
@@ -102,6 +106,8 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
 
 void dsp_init_default_filters() {
     memset(filters, 0, sizeof(filters));
+    memset(channel_delays_ms, 0, sizeof(channel_delays_ms));
+
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         channel_bypassed[ch] = true;
         for (int b = 0; b < MAX_BANDS; b++) {
@@ -117,30 +123,42 @@ void dsp_init_default_filters() {
             filter_recipes[ch][b].gain_db = 0.0f;
         }
     }
+
+    // Default: highpass on S/PDIF outputs 1-8 (main speakers)
     EqParamPacket hp = { .type = FILTER_HIGHPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
-    filter_recipes[CH_OUT_LEFT][0] = hp; filter_recipes[CH_OUT_RIGHT][0] = hp;
+    for (int out = CH_OUT_1; out <= CH_OUT_8; out++) {
+        filter_recipes[out][0] = hp;
+    }
+
+    // Default: lowpass on PDM sub output
     EqParamPacket lp = { .type = FILTER_LOWPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
-    filter_recipes[CH_OUT_SUB][0] = lp;
+    filter_recipes[CH_OUT_9_PDM][0] = lp;
 }
 
 void dsp_update_delay_samples(float sample_rate) {
-    int32_t samples_l = (int32_t)(channel_delays_ms[CH_OUT_LEFT] * sample_rate / 1000.0f);
-    if (samples_l > MAX_DELAY_SAMPLES) samples_l = MAX_DELAY_SAMPLES;
-    channel_delay_samples[0] = samples_l;
+    // Update delay samples for output channels
+    // RP2350: 9 outputs, RP2040: 3 outputs (L/R/Sub)
+    // Delay values come from the matrix mixer OutputChannel.delay_ms
+    // This function is called when sample rate changes or delays are updated
 
-    int32_t samples_r = (int32_t)(channel_delays_ms[CH_OUT_RIGHT] * sample_rate / 1000.0f);
-    if (samples_r > MAX_DELAY_SAMPLES) samples_r = MAX_DELAY_SAMPLES;
-    channel_delay_samples[1] = samples_r;
+    any_delay_active = false;
+    for (int out = 0; out < NUM_DELAY_CHANNELS; out++) {
+        // Get delay_ms from the corresponding EQ channel (CH_OUT_1 + out)
+        float delay_ms = channel_delays_ms[CH_OUT_1 + out];
 
-    // Sub: add alignment compensation (converts sample difference to ms at current rate)
-    float align_ms = (float)SUB_ALIGN_SAMPLES / sample_rate * 1000.0f;
-    float sub_total_ms = channel_delays_ms[CH_OUT_SUB] + align_ms;
-    int32_t samples_sub = (int32_t)(sub_total_ms * sample_rate / 1000.0f);
-    if (samples_sub > MAX_DELAY_SAMPLES) samples_sub = MAX_DELAY_SAMPLES;
-    channel_delay_samples[2] = samples_sub;
+        // PDM sub needs alignment compensation (last delay channel)
+        if (out == NUM_DELAY_CHANNELS - 1) {
+            float align_ms = (float)SUB_ALIGN_SAMPLES / sample_rate * 1000.0f;
+            delay_ms += align_ms;
+        }
 
-    // Fast bypass flag: true if any channel has non-zero delay
-    any_delay_active = (channel_delay_samples[0] | channel_delay_samples[1] | channel_delay_samples[2]) != 0;
+        int32_t samples = (int32_t)(delay_ms * sample_rate / 1000.0f);
+        if (samples > MAX_DELAY_SAMPLES) samples = MAX_DELAY_SAMPLES;
+        if (samples < 0) samples = 0;
+        channel_delay_samples[out] = samples;
+
+        if (samples > 0) any_delay_active = true;
+    }
 }
 
 void dsp_recalculate_all_filters(float sample_rate) {

@@ -25,6 +25,12 @@
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
 // ----------------------------------------------------------------------------
+
+// USB SOF IRQ stub (required by pico-extras usb_device library)
+void __not_in_flash_func(usb_sof_irq)(void) {
+    // Called on USB Start of Frame - not used by this application
+}
+
 volatile int overruns = 0;  // Legacy - kept for compatibility
 volatile uint32_t pio_samples_dma = 0;
 
@@ -153,10 +159,6 @@ int main(void) {
 #endif
 
     core0_init();
-
-    // Brief LED indication that init is complete
-    gpio_put(25, 1);
-    busy_wait_ms(500);
 
     // Enable watchdog
     watchdog_enable(8000, 1);

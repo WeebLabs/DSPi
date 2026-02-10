@@ -99,12 +99,12 @@ void pdm_setup_hw(void) {
     uint offset = pio_add_program(PDM_PIO, &pio_pdm_program);
     pio_sm_config c = pio_get_default_sm_config();
     sm_config_set_wrap(&c, offset, offset + (pio_pdm_program.length - 1));
-    sm_config_set_out_pins(&c, PICO_AUDIO_SPDIF_SUB_PIN, 1);
+    sm_config_set_out_pins(&c, PICO_PDM_PIN, 1);
     sm_config_set_out_shift(&c, true, true, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
 
-    pio_gpio_init(PDM_PIO, PICO_AUDIO_SPDIF_SUB_PIN);
-    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, PICO_AUDIO_SPDIF_SUB_PIN, 1, true);
+    pio_gpio_init(PDM_PIO, PICO_PDM_PIN);
+    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, PICO_PDM_PIN, 1, true);
     pio_sm_init(PDM_PIO, PDM_SM, offset, &c);
 
     pdm_update_clock(48000);

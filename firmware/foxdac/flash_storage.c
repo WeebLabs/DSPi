@@ -13,10 +13,27 @@
 // Flash configuration - use last 4KB sector
 #define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 4
+#define FLASH_VERSION 5
 
 // Pointer to read flash via XIP
 #define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
+
+// Storage structure for matrix crosspoint (matches MatrixCrosspoint but packed for flash)
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;
+    uint8_t phase_invert;
+    uint8_t reserved[2];
+    float gain_db;
+} FlashMatrixCrosspoint;
+
+// Storage structure for output channel (matches OutputChannel but packed for flash)
+typedef struct __attribute__((packed)) {
+    uint8_t enabled;
+    uint8_t mute;
+    uint8_t reserved[2];
+    float gain_db;
+    float delay_ms;
+} FlashOutputChannel;
 
 // Storage structure
 typedef struct __attribute__((packed)) {
@@ -30,7 +47,7 @@ typedef struct __attribute__((packed)) {
     uint8_t bypass;
     uint8_t padding[3];  // Align to 4 bytes
     float delays_ms[NUM_CHANNELS];
-    // V2: Per-channel gain and mute (output channels only)
+    // V2: Per-channel gain and mute (output channels only) - legacy, kept for compatibility
     float channel_gain_db[3];
     uint8_t channel_mute[3];
     uint8_t padding2;  // Align to 4 bytes
@@ -46,6 +63,9 @@ typedef struct __attribute__((packed)) {
     uint8_t padding4;  // Align to 4 bytes
     float crossfeed_custom_fc;
     float crossfeed_custom_feed_db;
+    // V5: Matrix Mixer
+    FlashMatrixCrosspoint matrix_crosspoints[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
+    FlashOutputChannel matrix_outputs[NUM_OUTPUT_CHANNELS];
 } FlashStorage;
 
 // External variables we need to access (defined in usb_audio.c)
@@ -60,6 +80,7 @@ extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
 extern volatile CrossfeedConfig crossfeed_config;
 extern volatile bool crossfeed_update_pending;
+extern MatrixMixer matrix_mixer;
 
 // Simple CRC32 implementation (polynomial 0xEDB88320)
 static uint32_t crc32(const uint8_t *data, size_t len) {
@@ -97,6 +118,21 @@ int flash_save_params(void) {
     storage.crossfeed_itd_enabled = crossfeed_config.itd_enabled ? 1 : 0;
     storage.crossfeed_custom_fc = crossfeed_config.custom_fc;
     storage.crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
+
+    // V5: Matrix Mixer state
+    for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
+        for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+            storage.matrix_crosspoints[in][out].enabled = matrix_mixer.crosspoints[in][out].enabled;
+            storage.matrix_crosspoints[in][out].phase_invert = matrix_mixer.crosspoints[in][out].phase_invert;
+            storage.matrix_crosspoints[in][out].gain_db = matrix_mixer.crosspoints[in][out].gain_db;
+        }
+    }
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+        storage.matrix_outputs[out].enabled = matrix_mixer.outputs[out].enabled;
+        storage.matrix_outputs[out].mute = matrix_mixer.outputs[out].mute;
+        storage.matrix_outputs[out].gain_db = matrix_mixer.outputs[out].gain_db;
+        storage.matrix_outputs[out].delay_ms = matrix_mixer.outputs[out].delay_ms;
+    }
 
     // Compute CRC over data section (everything after the header)
     const uint8_t *data_start = (const uint8_t *)&storage.filter_recipes;
@@ -212,6 +248,47 @@ int flash_load_params(void) {
         crossfeed_update_pending = true;
     }
 
+    // V5: Matrix Mixer
+    if (storage->version >= 5) {
+        for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
+            for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+                matrix_mixer.crosspoints[in][out].enabled = storage->matrix_crosspoints[in][out].enabled;
+                matrix_mixer.crosspoints[in][out].phase_invert = storage->matrix_crosspoints[in][out].phase_invert;
+                matrix_mixer.crosspoints[in][out].gain_db = storage->matrix_crosspoints[in][out].gain_db;
+                // Compute linear gain
+                float db = storage->matrix_crosspoints[in][out].gain_db;
+                float linear = 1.0f;
+                if (db != 0.0f) {
+                    if (db < -60.0f) db = -60.0f;
+                    if (db > 20.0f) db = 20.0f;
+                    float x = db * 0.1151292546f;
+                    linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
+                    if (linear < 0.0f) linear = 0.0f;
+                }
+                matrix_mixer.crosspoints[in][out].gain_linear = linear;
+            }
+        }
+        for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+            matrix_mixer.outputs[out].enabled = storage->matrix_outputs[out].enabled;
+            matrix_mixer.outputs[out].mute = storage->matrix_outputs[out].mute;
+            matrix_mixer.outputs[out].gain_db = storage->matrix_outputs[out].gain_db;
+            matrix_mixer.outputs[out].delay_ms = storage->matrix_outputs[out].delay_ms;
+            // Compute linear gain
+            float db = storage->matrix_outputs[out].gain_db;
+            float linear = 1.0f;
+            if (db != 0.0f) {
+                if (db < -60.0f) db = -60.0f;
+                if (db > 20.0f) db = 20.0f;
+                float x = db * 0.1151292546f;
+                linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
+                if (linear < 0.0f) linear = 0.0f;
+            }
+            matrix_mixer.outputs[out].gain_linear = linear;
+            // Update channel delays
+            channel_delays_ms[CH_OUT_1 + out] = storage->matrix_outputs[out].delay_ms;
+        }
+    }
+
     return FLASH_OK;
 }
 
@@ -246,4 +323,28 @@ void flash_factory_reset(void) {
     crossfeed_config.custom_fc = 700.0f;
     crossfeed_config.custom_feed_db = 4.5f;
     crossfeed_update_pending = true;
+
+    // Reset matrix mixer to stereo pass-through on first pair
+    memset(&matrix_mixer, 0, sizeof(matrix_mixer));
+
+    // Stereo pass-through on first S/PDIF pair
+    matrix_mixer.crosspoints[0][0].enabled = 1;     // L→Out1
+    matrix_mixer.crosspoints[0][0].gain_db = 0.0f;
+    matrix_mixer.crosspoints[0][0].gain_linear = 1.0f;
+
+    matrix_mixer.crosspoints[1][1].enabled = 1;     // R→Out2
+    matrix_mixer.crosspoints[1][1].gain_db = 0.0f;
+    matrix_mixer.crosspoints[1][1].gain_linear = 1.0f;
+
+    // Enable first stereo pair only
+    matrix_mixer.outputs[0].enabled = 1;
+    matrix_mixer.outputs[0].gain_linear = 1.0f;
+    matrix_mixer.outputs[1].enabled = 1;
+    matrix_mixer.outputs[1].gain_linear = 1.0f;
+
+    // All other outputs disabled
+    for (int out = 2; out < NUM_OUTPUT_CHANNELS; out++) {
+        matrix_mixer.outputs[out].enabled = 0;
+        matrix_mixer.outputs[out].gain_linear = 1.0f;
+    }
 }
