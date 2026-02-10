@@ -48,6 +48,7 @@ static volatile uint8_t clock_176mhz = 0;
 
 #include "pico/audio.h"
 extern struct audio_format audio_format_48k;
+extern MatrixMixer matrix_mixer;
 
 static void perform_rate_change(uint32_t new_freq) {
     switch (new_freq) { case 44100: case 48000: case 96000: break; default: new_freq = 44100; }
@@ -144,7 +145,7 @@ void core0_init() {
 
 #if ENABLE_SUB
     pdm_setup_hw();
-
+    pdm_set_enabled(matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled);
     multicore_launch_core1(pdm_core1_entry);
 #endif
 }

@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include "config.h"
 
+// Enable/disable PDM hardware (PIO + DMA) from Core 0
+void pdm_set_enabled(bool enabled);
+
 // Functions exposed to main.c
 void pdm_setup_hw(void);
 void pdm_core1_entry(void);

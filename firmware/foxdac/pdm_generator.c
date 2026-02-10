@@ -24,6 +24,9 @@ static volatile uint8_t pdm_tail = 0;
 static uint32_t __attribute__((aligned(PDM_DMA_BUFFER_SIZE * 4))) pdm_dma_buffer[PDM_DMA_BUFFER_SIZE];
 static int pdm_dma_chan = -1;
 
+// Enable/disable flag — set by Core 0 via pdm_set_enabled(), read by Core 1
+volatile bool pdm_enabled = false;
+
 // ----------------------------------------------------------------------------
 // RAW PIO PROGRAM
 // ----------------------------------------------------------------------------
@@ -85,6 +88,11 @@ static inline int32_t noise_shaped_dither(noise_shaper_t *ns, int32_t raw_dither
 // FUNCTIONS
 // ----------------------------------------------------------------------------
 
+void pdm_set_enabled(bool enabled) {
+    pdm_enabled = enabled;
+    __sev();  // Wake Core 1 if sleeping
+}
+
 void pdm_update_clock(uint32_t freq) {
     float div = (float)clock_get_hz(clk_sys) / (float)(freq * PDM_OVERSAMPLE);
     pio_sm_set_clkdiv(PDM_PIO, PDM_SM, div);
@@ -144,12 +152,58 @@ void pdm_core1_entry() {
     // Target lead over DMA: 256 words = 32 samples = ~0.67ms at 48kHz
     const int32_t TARGET_LEAD = 256;
 
-    // Initialize write pointer ahead of DMA read position to avoid cold start underrun
-    uint32_t init_read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
-    uint32_t init_read_idx = (init_read_addr - (uint32_t)pdm_dma_buffer) / 4;
-    uint32_t local_pdm_write = (init_read_idx + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
+    uint32_t local_pdm_write = 0;
+    bool hw_running = true;  // pdm_setup_hw() already started PIO+DMA
+
+    // Initialize write pointer ahead of DMA read position
+    {
+        uint32_t init_read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
+        uint32_t init_read_idx = (init_read_addr - (uint32_t)pdm_dma_buffer) / 4;
+        local_pdm_write = (init_read_idx + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
+    }
 
     while (1) {
+        // ---- Enable/disable state machine ----
+        if (!pdm_enabled) {
+            if (hw_running) {
+                pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
+                dma_channel_abort(pdm_dma_chan);
+                hw_running = false;
+                global_status.cpu1_load = 0;
+            }
+            __wfe();
+            continue;
+        }
+
+        if (!hw_running) {
+            // Re-enable: reset state, refill silence, restart hardware
+            for (int i = 0; i < PDM_DMA_BUFFER_SIZE; i++)
+                pdm_dma_buffer[i] = 0xAAAAAAAA;
+            pdm_tail = pdm_head;  // drain ring buffer
+            local_pdm_err = 0;
+            local_pdm_err2 = 0;
+            ns = (noise_shaper_t){0};
+            active_us_accumulator = 0;
+            sample_counter = 0;
+
+            pio_sm_set_enabled(PDM_PIO, PDM_SM, true);
+
+            dma_channel_config dmac = dma_channel_get_default_config(pdm_dma_chan);
+            channel_config_set_transfer_data_size(&dmac, DMA_SIZE_32);
+            channel_config_set_read_increment(&dmac, true);
+            channel_config_set_write_increment(&dmac, false);
+            channel_config_set_dreq(&dmac, pio_get_dreq(PDM_PIO, PDM_SM, true));
+            channel_config_set_ring(&dmac, false, PDM_DMA_RING_BITS);
+            dma_channel_configure(pdm_dma_chan, &dmac, &PDM_PIO->txf[PDM_SM],
+                                  pdm_dma_buffer, 0xFFFFFFFF, true);
+
+            uint32_t ra = dma_hw->ch[pdm_dma_chan].read_addr;
+            uint32_t ri = (ra - (uint32_t)pdm_dma_buffer) / 4;
+            local_pdm_write = (ri + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
+
+            hw_running = true;
+        }
+
         int32_t sample_value;
 
         // Check buffer position relative to DMA read pointer

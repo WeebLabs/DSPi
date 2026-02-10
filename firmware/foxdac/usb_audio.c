@@ -1040,6 +1040,10 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             uint8_t out = vendor_last_wValue & 0xFF;
             if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 1) {
                 matrix_mixer.outputs[out].enabled = vendor_rx_buf[0];
+#if ENABLE_SUB
+                if (out == NUM_OUTPUT_CHANNELS - 1)
+                    pdm_set_enabled(vendor_rx_buf[0]);
+#endif
             }
             break;
         }
