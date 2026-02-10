@@ -396,17 +396,23 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
     }
 
-    // ========== PASS 5: Per-Output EQ + Gain (block-based, dual-core) ==========
+    // ========== PASS 5-7: Per-Output EQ + Gain + Delay + Output ==========
     if (core1_mode == CORE1_MODE_EQ_WORKER) {
-        // Dispatch outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT to Core 1
+        // --- Dual-core path: Core 1 handles EQ+delay+SPDIF for outputs 2-7 ---
+
+        // Dispatch to Core 1
         core1_eq_work.sample_count = sample_count;
         core1_eq_work.vol_mul = vol_mul;
+        core1_eq_work.delay_write_idx = delay_write_idx;
+        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int16_t *)audio_buf[1]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[1] = audio_buf[2] ? (int16_t *)audio_buf[2]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[2] = audio_buf[3] ? (int16_t *)audio_buf[3]->buffer->bytes : NULL;
         core1_eq_work.work_done = false;
         __dmb();
         core1_eq_work.work_ready = true;
         __sev();
 
-        // Core 0: process outputs 0..CORE1_EQ_FIRST_OUTPUT-1
+        // Core 0: EQ + gain for outputs 0-1
         for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -426,37 +432,58 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
         }
 
-        // Also process PDM output (last) on Core 0 if enabled
-        {
-            int out = NUM_OUTPUT_CHANNELS - 1;
-            if (matrix_mixer.outputs[out].enabled) {
-                if (!matrix_mixer.outputs[out].mute) {
-                    uint8_t eq_ch = CH_OUT_1 + out;
-                    if (!channel_bypassed[eq_ch]) {
-                        dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
-                    }
-                }
-                float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                             : matrix_mixer.outputs[out].gain_linear * vol_mul;
-                if (gain == 0.0f) {
-                    memset(buf_out[out], 0, sample_count * sizeof(float));
-                } else if (gain != 1.0f) {
-                    float *dst = buf_out[out];
-                    for (uint32_t i = 0; i < sample_count; i++)
-                        dst[i] *= gain;
+        // Core 0: Delay for outputs 0-1
+        if (any_delay_active) {
+            for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
+                int32_t dly = channel_delay_samples[out];
+                if (dly <= 0) continue;
+                float *dst = buf_out[out];
+                float *dline = delay_lines[out];
+                uint32_t widx = delay_write_idx;
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    dline[widx] = dst[i];
+                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
+                    widx = (widx + 1) & MAX_DELAY_MASK;
                 }
             }
         }
 
-        // Wait for Core 1 to finish outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT
+        // Core 0: Peaks + S/PDIF for pair 0
+        for (uint32_t i = 0; i < sample_count; i++) {
+            float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
+            float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
+        }
+        if (audio_buf[0]) {
+            int left_ch = 0, right_ch = 1;
+            if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
+                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 4);
+            } else {
+                int16_t *out_ptr = (int16_t *)audio_buf[0]->buffer->bytes;
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[0][i]));
+                    float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[1][i]));
+                    out_ptr[i*2]   = (int16_t)(dl * 32767.0f);
+                    out_ptr[i*2+1] = (int16_t)(dr * 32767.0f);
+                }
+            }
+        }
+
+        // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-7)
         uint32_t wait_start = time_us_32();
         while (!core1_eq_work.work_done) {
             __wfe();
         }
         __dmb();
         core1_wait_us = time_us_32() - wait_start;
+
+        // Update shared delay write index (both cores used same base)
+        if (any_delay_active) {
+            delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
+        }
     } else {
-        // Single-core: process all outputs on Core 0
+        // --- Single-core path: all outputs on Core 0 ---
+
+        // EQ + gain
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -475,63 +502,61 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dst[i] *= gain;
             }
         }
-    }
 
-    // ========== PASS 6: Delay (only outputs with non-zero delay) ==========
-    if (any_delay_active) {
-        for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-            int32_t dly = channel_delay_samples[out];
-            if (dly <= 0) continue;
-            float *dst = buf_out[out];
-            float *dline = delay_lines[out];
-            uint32_t widx = delay_write_idx;
+        // Delay
+        if (any_delay_active) {
+            for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+                int32_t dly = channel_delay_samples[out];
+                if (dly <= 0) continue;
+                float *dst = buf_out[out];
+                float *dline = delay_lines[out];
+                uint32_t widx = delay_write_idx;
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    dline[widx] = dst[i];
+                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
+                    widx = (widx + 1) & MAX_DELAY_MASK;
+                }
+            }
+            delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
+        }
+
+        // Peaks (first stereo pair only)
+        for (uint32_t i = 0; i < sample_count; i++) {
+            float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
+            float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
+        }
+
+        // S/PDIF conversion
+        for (int pair = 0; pair < 4; pair++) {
+            if (!audio_buf[pair]) continue;
+            int left_ch = pair * 2;
+            int right_ch = pair * 2 + 1;
+            if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
+                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 4);
+                continue;
+            }
+            int16_t *out_ptr = (int16_t *)audio_buf[pair]->buffer->bytes;
             for (uint32_t i = 0; i < sample_count; i++) {
-                dline[widx] = dst[i];
-                dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
-                widx = (widx + 1) & MAX_DELAY_MASK;
+                float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[left_ch][i]));
+                float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[right_ch][i]));
+                out_ptr[i*2]     = (int16_t)(dl * 32767.0f);
+                out_ptr[i*2+1]   = (int16_t)(dr * 32767.0f);
             }
         }
-        delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
-    }
-
-    // ========== PASS 7: Output to S/PDIF + PDM ==========
-    // Peaks (first stereo pair only)
-    for (uint32_t i = 0; i < sample_count; i++) {
-        float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
-        float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
-    }
-
-    // S/PDIF conversion — skip pairs where neither output is enabled
-    for (int pair = 0; pair < 4; pair++) {
-        if (!audio_buf[pair]) continue;
-        int left_ch = pair * 2;
-        int right_ch = pair * 2 + 1;
-        if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-            // Pair disabled — write silence so S/PDIF DMA has valid data
-            memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 4);
-            continue;
-        }
-        int16_t *out_ptr = (int16_t *)audio_buf[pair]->buffer->bytes;
-        for (uint32_t i = 0; i < sample_count; i++) {
-            float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[left_ch][i]));
-            float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[right_ch][i]));
-            out_ptr[i*2]     = (int16_t)(dl * 32767.0f);
-            out_ptr[i*2+1]   = (int16_t)(dr * 32767.0f);
-        }
-    }
 
 #if ENABLE_SUB
-    if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled) {
-        for (uint32_t i = 0; i < sample_count; i++) {
-            float abs_sub = fabsf(buf_out[NUM_OUTPUT_CHANNELS-1][i]);
-            if (abs_sub > peak_sub) peak_sub = abs_sub;
+        if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled) {
+            for (uint32_t i = 0; i < sample_count; i++) {
+                float abs_sub = fabsf(buf_out[NUM_OUTPUT_CHANNELS-1][i]);
+                if (abs_sub > peak_sub) peak_sub = abs_sub;
+            }
+            for (uint32_t i = 0; i < sample_count; i++) {
+                int32_t pdm_sample_q28 = (int32_t)(buf_out[NUM_OUTPUT_CHANNELS-1][i] * pdm_scale);
+                pdm_push_sample(pdm_sample_q28, false);
+            }
         }
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int32_t pdm_sample_q28 = (int32_t)(buf_out[NUM_OUTPUT_CHANNELS-1][i] * pdm_scale);
-            pdm_push_sample(pdm_sample_q28, false);
-        }
-    }
 #endif
+    }
 
     // Convert peaks 0.0-1.0 to Q15-ish uint16 for status report
     global_status.peaks[0] = (uint16_t)(fminf(1.0f, peak_ml) * 32767.0f);

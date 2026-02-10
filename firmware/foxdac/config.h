@@ -190,6 +190,8 @@ typedef struct {
     float           (*buf_out)[192];   // Pointer to buf_out array, set once at init
     uint32_t          sample_count;
     float             vol_mul;
+    uint32_t          delay_write_idx;  // Snapshot for Core 1 delay processing
+    int16_t          *spdif_out[3];     // Pairs 1-3 output buffers (NULL = skip)
 } Core1EqWork;
 
 // ----------------------------------------------------------------------------

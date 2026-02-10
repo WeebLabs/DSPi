@@ -1,4 +1,5 @@
 #include <string.h>
+#include <math.h>
 #include "pdm_generator.h"
 #include "dsp_pipeline.h"
 #include "pico/stdlib.h"
@@ -347,8 +348,8 @@ static void __not_in_flash_func(eq_worker_loop)() {
         float vol_mul = core1_eq_work.vol_mul;
 
         // Process EQ + gain for outputs assigned to Core 1
+        extern MatrixMixer matrix_mixer;
         for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
-            extern MatrixMixer matrix_mixer;
             if (!matrix_mixer.outputs[out].enabled) continue;
 
             // Output EQ
@@ -368,6 +369,41 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 float *dst = buf_out[out];
                 for (uint32_t i = 0; i < sample_count; i++)
                     dst[i] *= gain;
+            }
+        }
+
+        // Delay for Core 1 outputs
+        if (any_delay_active) {
+            for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+                int32_t dly = channel_delay_samples[out];
+                if (dly <= 0) continue;
+                float *dst = buf_out[out];
+                float *dline = delay_lines[out];
+                uint32_t widx = core1_eq_work.delay_write_idx;
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    dline[widx] = dst[i];
+                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
+                    widx = (widx + 1) & MAX_DELAY_MASK;
+                }
+            }
+        }
+
+        // S/PDIF conversion for pairs 1-3
+        for (int p = 0; p < 3; p++) {
+            int16_t *out_ptr = core1_eq_work.spdif_out[p];
+            if (!out_ptr) continue;
+            int left_out = CORE1_EQ_FIRST_OUTPUT + p * 2;
+            int right_out = left_out + 1;
+            if (!matrix_mixer.outputs[left_out].enabled &&
+                !matrix_mixer.outputs[right_out].enabled) {
+                memset(out_ptr, 0, sample_count * 4);
+                continue;
+            }
+            for (uint32_t i = 0; i < sample_count; i++) {
+                float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[left_out][i]));
+                float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[right_out][i]));
+                out_ptr[i*2]   = (int16_t)(dl * 32767.0f);
+                out_ptr[i*2+1] = (int16_t)(dr * 32767.0f);
             }
         }
 
