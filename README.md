@@ -298,7 +298,7 @@ Ensure you have the following tools installed:
 ### 2. Clone the Repository
 Clone the project recursively to include the Pico SDK and other submodules:
 ```bash
-git clone --recursive https://github.com/AmpedStudio/DSPi.git
+git clone --recursive https://github.com/WeebLabs/DSPi.git
 cd DSPi
 ```
 
@@ -314,7 +314,7 @@ You can build for either the standard **RP2040** (Raspberry Pi Pico) or the newe
 ```bash
 mkdir build-rp2040
 cd build-rp2040
-cmake -DPICO_BOARD=pico ..
+cmake -DPICO_BOARD=pico -DPICO_EXTRAS_PATH=../firmware/pico-extras ../firmware
 make
 ```
 *Output:* `foxdac/foxdac.uf2`
@@ -323,7 +323,7 @@ make
 ```bash
 mkdir build-rp2350
 cd build-rp2350
-cmake -DPICO_BOARD=pico2 ..
+cmake -DPICO_BOARD=pico2 -DPICO_EXTRAS_PATH=../firmware/pico-extras ../firmware
 make
 ```
 *Output:* `foxdac/foxdac.uf2`
