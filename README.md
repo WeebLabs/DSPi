@@ -13,6 +13,7 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 - [Audio Signal Chain](#audio-signal-chain)
 - [Hardware Setup](#hardware-setup)
 - [DSP Features](#dsp-features)
+  - [Matrix Mixer](#matrix-mixer)
   - [Parametric Equalization](#parametric-equalization)
   - [Loudness Compensation](#loudness-compensation)
   - [Headphone Crossfeed](#headphone-crossfeed)
@@ -31,13 +32,15 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 ## Key Capabilities
 
 *   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS.
-*   **Parametric Equalization:** Up to 10 PEQ bands per master channel (Left/Right) and up to 10 bands per output channel (Left/Right/Sub), with 6 filter types.
+*   **4 S/PDIF Outputs:** Four independent stereo S/PDIF outputs (8 channels) for multi-way active speaker systems, enabling use of any standard DAC.
+*   **2x9 Matrix Mixer:** Route either or both USB input channels to any of the 9 outputs with independent gain and phase invert per crosspoint.
+*   **Parametric Equalization:** Up to 10 PEQ bands per channel (2 master + 9 output = 11 channels), with 6 filter types. Up to 110 total filter bands on RP2350.
 *   **Loudness Compensation:** Volume-dependent EQ based on the ISO 226:2003 equal-loudness contour standard. Automatically boosts bass and treble at low listening levels to maintain perceived tonal balance.
 *   **Headphone Crossfeed:** BS2B-based crossfeed with interaural time delay (ITD) reduces unnatural stereo separation for headphone listening. Three classic presets plus fully custom parameters.
-*   **Per-Channel Gain & Mute:** Independent gain and mute controls for each output channel.
-*   **Time Alignment:** Delay individual channels (up to 170ms) to ensure alignment between subwoofer and main speakers.
-*   **S/PDIF Output:** Digital S/PDIF output enables the use of any standard DAC.
-*   **Subwoofer Output:** Dedicated mono PDM output channel with a high-performance delta-sigma modulator, enabling direct subwoofer output without the need for a second DAC.
+*   **Per-Output Gain & Mute:** Independent gain and mute controls for each of the 9 output channels.
+*   **Time Alignment:** Per-output delay (up to 170ms on RP2350, 85ms on RP2040) for speaker/subwoofer alignment with automatic latency compensation between S/PDIF and PDM output paths.
+*   **Subwoofer Output:** Dedicated mono PDM output channel with a high-performance 2nd-order delta-sigma modulator, enabling direct subwoofer output without the need for a second DAC.
+*   **Dual-Core DSP (RP2350):** EQ processing is split across both cores for maximum throughput when multiple outputs are active.
 *   **Flash Persistence:** All settings are saved to flash and restored automatically at boot.
 
 ---
@@ -48,12 +51,17 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 |---------|---------------|-----------------|
 | **Clock Speed** | 288 MHz (OC) | 288 MHz |
 | **Audio Processing** | Q28 Fixed-Point | Mixed-Precision Float/Double |
-| **Filter Bands** | 26 total | 50 total |
-| **Output EQ** | 2 bands/channel | 10 bands/channel |
+| **Master EQ Bands** | 10 per channel (20 total) | 10 per channel (20 total) |
+| **Output EQ Bands** | 2 per channel (18 total) | 10 per channel (90 total) |
+| **Total Filter Bands** | 38 | 110 |
+| **S/PDIF Outputs** | 4 stereo pairs (8 channels) | 4 stereo pairs (8 channels) |
+| **PDM Output** | 1 (subwoofer) | 1 (subwoofer) |
+| **Max Delay** | 85ms per output | 170ms per output |
 | **Math Engine** | Hand-optimized ARM Assembly | Hardware FPU + DCP Coprocessor |
+| **Dual-Core EQ** | No | Yes (Core 1 processes outputs 3-8) |
 | **Status** | Production | Production |
 
-Both platforms are fully tested and production-ready. The RP2350 offers significantly more processing headroom thanks to its hardware floating-point unit and Double-precision Coprocessor (DCP), enabling more filter bands and higher-precision audio processing.
+Both platforms are fully tested and production-ready. The RP2350 offers significantly more processing headroom thanks to its hardware floating-point unit and Double-precision Coprocessor (DCP), enabling more filter bands, longer delays, and dual-core EQ processing.
 
 ---
 
@@ -72,19 +80,13 @@ Master EQ (10 bands per channel, Left/Right)
     |
 Headphone Crossfeed (BS2B + ITD, optional)
     |
-+-- Main L/R --> Output EQ (up to 10 bands per channel)
-|
-+-- L+R Sum ---> Subwoofer EQ (up to 10 bands)
+Matrix Mixer (2 inputs x 9 outputs, per-crosspoint gain & phase)
     |
-Per-Channel Gain & Mute
-    |
-Master Volume
-    |
-Time Alignment (per-channel delay)
-    |
-+-- S/PDIF Output (L/R digital audio)
-|
-+-- PDM Output (subwoofer, delta-sigma modulated)
+    +-- Out 1-2 --> Output EQ --> Gain/Mute --> Delay --> S/PDIF 1 (GPIO 6)
+    +-- Out 3-4 --> Output EQ --> Gain/Mute --> Delay --> S/PDIF 2 (GPIO 7)
+    +-- Out 5-6 --> Output EQ --> Gain/Mute --> Delay --> S/PDIF 3 (GPIO 8)
+    +-- Out 7-8 --> Output EQ --> Gain/Mute --> Delay --> S/PDIF 4 (GPIO 9)
+    +-- Out 9   --> Output EQ --> Gain/Mute --> Delay --> PDM Sub  (GPIO 10)
 ```
 
 ### Signal Chain Details
@@ -94,12 +96,12 @@ Time Alignment (per-channel delay)
 3.  **Loudness Compensation:** Optional ISO 226:2003 equal-loudness EQ that adapts to the current volume level. At low volumes, bass and treble are boosted to compensate for the ear's reduced sensitivity. Configurable reference SPL and intensity.
 4.  **Master EQ:** Up to 10 bands of parametric EQ per channel (Left/Right). Supports peaking, low shelf, high shelf, low pass, and high pass filter types.
 5.  **Headphone Crossfeed:** Optional BS2B crossfeed that mixes a filtered, delayed portion of each channel into the opposite channel. Uses a complementary filter design with interaural time delay (ITD) via an all-pass filter. Three presets (Default, Chu Moy, Jan Meier) plus custom frequency and feed level. ITD can be independently toggled.
-6.  **Subwoofer Mix:** Left and right channels are summed to create the subwoofer input.
-7.  **Output EQ:** Independent EQ per output channel (Left, Right, Sub). Ideal for crossover filters.
-8.  **Per-Channel Gain & Mute:** Independent gain (-60 to +10 dB) and mute for each output channel (Left, Right, Sub).
+6.  **Matrix Mixer:** A 2x9 routing matrix maps the two USB input channels (Left/Right) to 9 output channels. Each crosspoint has independent enable, gain (-inf to +12dB), and phase invert. Outputs can be individually enabled/disabled to save CPU. Typical configurations include stereo (L→Out1, R→Out2), mono sub (L+R→Out9), and multi-way active crossovers.
+7.  **Output EQ:** Independent EQ per output channel (up to 10 bands on RP2350, 2 on RP2040). Ideal for crossover filters and per-driver correction.
+8.  **Per-Output Gain & Mute:** Independent gain (-inf to +12dB) and mute for each of the 9 output channels.
 9.  **Master Volume:** USB audio class volume control (-91 to 0 dB).
-10. **Time Alignment:** Per-channel delays for speaker/subwoofer alignment (up to 170ms). Automatic latency compensation between S/PDIF and PDM output paths.
-11. **Outputs:** S/PDIF digital stereo (Left/Right) and PDM analog mono (Subwoofer).
+10. **Time Alignment:** Per-output delay for speaker alignment. RP2350 supports up to 170ms (8192 samples at 48kHz), RP2040 supports up to 85ms (4096 samples). Automatic latency compensation between S/PDIF and PDM output paths.
+11. **Outputs:** Four S/PDIF stereo digital outputs (8 channels) on GPIO 6-9, plus one PDM mono output (subwoofer) on GPIO 10.
 
 ---
 
@@ -117,9 +119,12 @@ Time Alignment (per-channel delay)
 
 | Function | Pin | Connection |
 | :--- | :--- | :--- |
-| **Digital Audio Out** (S/PDIF) | `GPIO 20` | Connects to the input of a DAC or Receiver. |
-| **Subwoofer Out** (PDM) | `GPIO 10` | Connects to an active subwoofer. |
-| **USB** | `Micro-USB` | Connects to your Host device (PC/Mac/Mobile Device). |
+| **S/PDIF Output 1** (Out 1-2) | `GPIO 6` | DAC or receiver for main L/R or multi-way pair 1 |
+| **S/PDIF Output 2** (Out 3-4) | `GPIO 7` | DAC or receiver for multi-way pair 2 |
+| **S/PDIF Output 3** (Out 5-6) | `GPIO 8` | DAC or receiver for multi-way pair 3 |
+| **S/PDIF Output 4** (Out 7-8) | `GPIO 9` | DAC or receiver for multi-way pair 4 |
+| **Subwoofer Out** (PDM, Out 9) | `GPIO 10` | Active subwoofer or PDM-to-analog filter |
+| **USB** | `Micro-USB` | Host device (PC/Mac/Mobile Device) |
 
 > **Note:** S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider. PDM output is a 1-bit logic signal that requires a resistor and capacitor to form a low-pass filter for conversion to analog audio.
 
@@ -128,6 +133,30 @@ Time Alignment (per-channel delay)
 ---
 
 ## DSP Features
+
+### Matrix Mixer
+
+A 2x9 routing matrix connects the USB stereo input to the 9 output channels. Each crosspoint (input/output pair) has:
+
+*   **Enable/Disable:** Route active or inactive.
+*   **Gain:** -inf to +12 dB per crosspoint.
+*   **Phase Invert:** Polarity flip for driver alignment.
+
+Each output channel also has:
+
+*   **Enable:** Disabled outputs skip all processing (EQ, delay, conversion) to save CPU.
+*   **Gain:** Per-output gain (-inf to +12 dB).
+*   **Mute:** Soft mute per output.
+*   **Delay:** Per-output time alignment.
+
+**Common Configurations:**
+
+| Use Case | Routing |
+|----------|---------|
+| Stereo + Sub | L→Out1, R→Out2, L+R→Out9 |
+| 2-Way Active | L→Out1(tweeter), L→Out3(woofer), R→Out2(tweeter), R→Out4(woofer) |
+| 3-Way Active | As above, plus mid-range on Out5-6 |
+| Multi-Sub | L+R→Out7, L+R→Out8, L+R→Out9 with per-output delay for alignment |
 
 ### Parametric Equalization
 
@@ -143,6 +172,15 @@ Each filter band supports 6 types:
 | High Pass | High-pass filter |
 
 All filters are biquad IIR with configurable frequency, Q factor, and gain. Flat filters are automatically bypassed for zero CPU overhead.
+
+**Channel Layout (11 channels):**
+
+| Channel | Index | EQ Bands (RP2350 / RP2040) |
+|---------|-------|----------------------------|
+| Master Left | 0 | 10 / 10 |
+| Master Right | 1 | 10 / 10 |
+| Output 1-8 (S/PDIF) | 2-9 | 10 / 2 each |
+| Output 9 (PDM Sub) | 10 | 10 / 2 |
 
 ### Loudness Compensation
 
@@ -184,12 +222,17 @@ The objective was to use as much of Core 1 as necessary to produce an output tha
 
 ### System Architecture
 
-*   **Core 0:** USB communication, audio streaming, DSP processing, and control logic.
-*   **Core 1:** Dedicated to the delta-sigma modulator (PDM generation) and buffer management.
-*   **PIO & DMA:** Hardware offloading for S/PDIF encoding and PDM bitstream generation ensures zero CPU overhead for I/O.
+*   **Core 0:** USB communication, audio streaming, DSP processing (master EQ, crossfeed, loudness, matrix mixing, output EQ for S/PDIF pair 1), and control logic.
+*   **Core 1 (three modes):**
+    *   **PDM Mode:** Delta-sigma modulator for subwoofer output (when output 9 is enabled).
+    *   **EQ Worker Mode (RP2350):** Processes output EQ, delay, and S/PDIF conversion for outputs 3-8 in parallel with Core 0. Activated when any of outputs 3-8 are enabled and output 9 (PDM) is disabled.
+    *   **Idle Mode:** When no outputs requiring Core 1 are enabled.
+*   **PIO & DMA:** Hardware offloading for S/PDIF encoding (PIO0, 4 state machines) and PDM bitstream generation (PIO1) ensures zero CPU overhead for I/O.
 *   **Math Engine:**
     *   **RP2040:** 32-bit fixed-point (Q28) processing with hand-optimized ARM assembly for the inner DSP loop.
-    *   **RP2350:** Mixed-precision pipeline using single-precision floats for coefficients and double-precision accumulators via the hardware DCP coprocessor.
+    *   **RP2350:** Mixed-precision pipeline using single-precision floats for coefficients and multiplication, with double-precision accumulators via the hardware DCP coprocessor for IIR filter state variables.
+
+> **Note:** PDM mode and EQ Worker mode are mutually exclusive on Core 1. When output 9 (PDM sub) is enabled, Core 0 handles all S/PDIF output EQ processing. When output 9 is disabled and outputs 3-8 are active, Core 1 runs as an EQ worker for those outputs.
 
 ### Performance Tuning
 
@@ -211,7 +254,7 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | Code | Name | Direction | Payload | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `0x42` | `REQ_SET_EQ_PARAM` | OUT | 16 bytes | Upload filter parameters |
-| `0x43` | `REQ_GET_EQ_PARAM` | IN | 4 bytes | Read filter parameters |
+| `0x43` | `REQ_GET_EQ_PARAM` | IN | 16 bytes | Read filter parameters |
 | `0x44` | `REQ_SET_PREAMP` | OUT | 4 bytes | Set global gain (float dB) |
 | `0x45` | `REQ_GET_PREAMP` | IN | 4 bytes | Get global gain |
 | `0x46` | `REQ_SET_BYPASS` | OUT | 1 byte | Bypass Master EQ (1=On, 0=Off) |
@@ -242,6 +285,18 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | `0x65` | `REQ_GET_CROSSFEED_FEED` | IN | 4 bytes | Get custom feed level |
 | `0x66` | `REQ_SET_CROSSFEED_ITD` | OUT | 1 byte | Enable/disable ITD (1=On) |
 | `0x67` | `REQ_GET_CROSSFEED_ITD` | IN | 1 byte | Get ITD state |
+| `0x70` | `REQ_SET_MATRIX_ROUTE` | OUT | 8 bytes | Set matrix crosspoint (MatrixRoutePacket) |
+| `0x71` | `REQ_GET_MATRIX_ROUTE` | IN | 8 bytes | Get matrix crosspoint |
+| `0x72` | `REQ_SET_OUTPUT_ENABLE` | OUT | 1 byte | Enable/disable output channel |
+| `0x73` | `REQ_GET_OUTPUT_ENABLE` | IN | 1 byte | Get output enable state |
+| `0x74` | `REQ_SET_OUTPUT_GAIN` | OUT | 4 bytes | Set per-output gain (float dB) |
+| `0x75` | `REQ_GET_OUTPUT_GAIN` | IN | 4 bytes | Get per-output gain |
+| `0x76` | `REQ_SET_OUTPUT_MUTE` | OUT | 1 byte | Mute output (1=Muted) |
+| `0x77` | `REQ_GET_OUTPUT_MUTE` | IN | 1 byte | Get output mute state |
+| `0x78` | `REQ_SET_OUTPUT_DELAY` | OUT | 4 bytes | Set per-output delay (float ms) |
+| `0x79` | `REQ_GET_OUTPUT_DELAY` | IN | 4 bytes | Get per-output delay |
+| `0x7A` | `REQ_GET_CORE1_MODE` | IN | 1 byte | Get Core 1 mode (0=Idle, 1=PDM, 2=EQ Worker) |
+| `0x7B` | `REQ_GET_CORE1_CONFLICT` | IN | 1 byte | Check if PDM vs EQ Worker conflict exists |
 
 ### REQ_GET_STATUS (0x50) - System Telemetry
 
@@ -272,13 +327,24 @@ The `REQ_GET_STATUS` request returns data based on the `wValue` field:
 **Filter Packet (16 bytes):**
 ```c
 struct __attribute__((packed)) {
-    uint8_t channel;  // 0-4
-    uint8_t band;     // 0-9
+    uint8_t channel;  // 0-10 (0-1 master, 2-9 S/PDIF, 10 PDM sub)
+    uint8_t band;     // 0-9 (RP2350), 0-9 master / 0-1 output (RP2040)
     uint8_t type;     // 0=Flat, 1=Peak, 2=LS, 3=HS, 4=LP, 5=HP
     uint8_t reserved;
     float freq;       // Hz
     float Q;
     float gain_db;
+}
+```
+
+**Matrix Route Packet (8 bytes):**
+```c
+struct __attribute__((packed)) {
+    uint8_t input;          // 0-1 (USB L/R)
+    uint8_t output;         // 0-8 (9 outputs)
+    uint8_t enabled;        // 0 or 1
+    uint8_t phase_invert;   // 0 or 1
+    float gain_db;          // -inf to +12dB
 }
 ```
 
