@@ -149,14 +149,23 @@ Each output channel also has:
 *   **Mute:** Soft mute per output.
 *   **Delay:** Per-output time alignment.
 
+**Output Availability:** Not all 9 outputs are available simultaneously. Core 1 is shared between the PDM subwoofer modulator and the EQ worker that processes S/PDIF outputs 3-8:
+
+| Mode | Available Outputs | Core 1 Usage |
+|------|-------------------|--------------|
+| **PDM enabled** (Out 9 on) | Out 1-2 (S/PDIF 1) + Out 9 (PDM) | Delta-sigma modulator |
+| **PDM disabled** (Out 9 off) | Out 1-8 (S/PDIF 1-4) | EQ worker for Out 3-8 |
+
+When the PDM subwoofer is active, Core 1 is fully dedicated to the delta-sigma modulator, so outputs 3-8 are unavailable. When PDM is off, Core 1 runs as an EQ worker processing outputs 3-8 in parallel with Core 0.
+
 **Common Configurations:**
 
-| Use Case | Routing |
-|----------|---------|
-| Stereo + Sub | L→Out1, R→Out2, L+R→Out9 |
-| 2-Way Active | L→Out1(tweeter), L→Out3(woofer), R→Out2(tweeter), R→Out4(woofer) |
-| 3-Way Active | As above, plus mid-range on Out5-6 |
-| Multi-Sub | L+R→Out7, L+R→Out8, L+R→Out9 with per-output delay for alignment |
+| Use Case | Routing | Mode |
+|----------|---------|------|
+| Stereo + Sub | L→Out1, R→Out2, L+R→Out9 | PDM on (3 outputs) |
+| 2-Way Active | L→Out1(tweeter), L→Out3(woofer), R→Out2(tweeter), R→Out4(woofer) | PDM off (4 outputs) |
+| 3-Way Active | As above, plus mid-range on Out5-6 | PDM off (6 outputs) |
+| 4-Way Active | As above, plus super-tweeter on Out7-8 | PDM off (8 outputs) |
 
 ### Parametric Equalization
 
