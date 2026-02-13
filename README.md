@@ -41,7 +41,8 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 *   **Time Alignment:** Per-output delay (up to 170ms on RP2350, 85ms on RP2040) for speaker/subwoofer alignment with automatic latency compensation between S/PDIF and PDM output paths.
 *   **Subwoofer Output:** Dedicated mono PDM output channel with a high-performance 2nd-order delta-sigma modulator, enabling direct subwoofer output without the need for a second DAC.
 *   **Dual-Core DSP (RP2350):** EQ processing is split across both cores for maximum throughput when multiple outputs are active.
-*   **Flash Persistence:** All settings are saved to flash and restored automatically at boot.
+*   **Configurable Output Pins:** All output GPIO pins can be reassigned at runtime to suit custom PCB layouts, no reflashing required.
+*   **Flash Persistence:** All settings — including pin assignments — are saved to flash and restored automatically at boot.
 
 ---
 
@@ -127,8 +128,12 @@ Matrix Mixer (2 inputs x 9 outputs, per-crosspoint gain & phase)
 | **USB** | `Micro-USB` | Host device (PC/Mac/Mobile Device) |
 
 > **Note:** S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider. PDM output is a 1-bit logic signal that requires a resistor and capacitor to form a low-pass filter for conversion to analog audio.
->
-> **Pin Reassignment:** All output pins can be reassigned at runtime via USB vendor commands (`REQ_SET_OUTPUT_PIN` / `REQ_GET_OUTPUT_PIN`). Pin assignments are saved to flash and restored at boot. GPIO 12 (UART TX) and GPIOs 23-25 (power/LED) are reserved and cannot be used.
+
+### Custom Pin Assignments
+
+The default pin assignments above work out of the box, but all five output pins can be reassigned at runtime through the DSPi Console application — no reflashing required. This is useful when designing custom PCBs or adapting to boards where the default GPIOs are inconvenient.
+
+Pin assignments are saved to flash and restored automatically at boot. A few GPIOs are reserved and unavailable for output use: GPIO 12 (UART TX) and GPIOs 23-25 (power control and LED).
 
 <img src="Images/toslink.jpg" alt="Alt text" width="49%">  <img src="Images/spdif_converter.jpg" alt="Alt text" width="49%">
 
