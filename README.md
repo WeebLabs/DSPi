@@ -119,14 +119,16 @@ Matrix Mixer (2 inputs x 9 outputs, per-crosspoint gain & phase)
 
 | Function | Pin | Connection |
 | :--- | :--- | :--- |
-| **S/PDIF Output 1** (Out 1-2) | `GPIO 6` | DAC or receiver for main L/R or multi-way pair 1 |
-| **S/PDIF Output 2** (Out 3-4) | `GPIO 7` | DAC or receiver for multi-way pair 2 |
-| **S/PDIF Output 3** (Out 5-6) | `GPIO 8` | DAC or receiver for multi-way pair 3 |
-| **S/PDIF Output 4** (Out 7-8) | `GPIO 9` | DAC or receiver for multi-way pair 4 |
-| **Subwoofer Out** (PDM, Out 9) | `GPIO 10` | Active subwoofer or PDM-to-analog filter |
+| **S/PDIF Output 1** (Out 1-2) | `GPIO 6` (default) | DAC or receiver for main L/R or multi-way pair 1 |
+| **S/PDIF Output 2** (Out 3-4) | `GPIO 7` (default) | DAC or receiver for multi-way pair 2 |
+| **S/PDIF Output 3** (Out 5-6) | `GPIO 8` (default) | DAC or receiver for multi-way pair 3 |
+| **S/PDIF Output 4** (Out 7-8) | `GPIO 9` (default) | DAC or receiver for multi-way pair 4 |
+| **Subwoofer Out** (PDM, Out 9) | `GPIO 10` (default) | Active subwoofer or PDM-to-analog filter |
 | **USB** | `Micro-USB` | Host device (PC/Mac/Mobile Device) |
 
 > **Note:** S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider. PDM output is a 1-bit logic signal that requires a resistor and capacitor to form a low-pass filter for conversion to analog audio.
+>
+> **Pin Reassignment:** All output pins can be reassigned at runtime via USB vendor commands (`REQ_SET_OUTPUT_PIN` / `REQ_GET_OUTPUT_PIN`). Pin assignments are saved to flash and restored at boot. GPIO 12 (UART TX) and GPIOs 23-25 (power/LED) are reserved and cannot be used.
 
 <img src="Images/toslink.jpg" alt="Alt text" width="49%">  <img src="Images/spdif_converter.jpg" alt="Alt text" width="49%">
 
@@ -306,6 +308,8 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | `0x79` | `REQ_GET_OUTPUT_DELAY` | IN | 4 bytes | Get per-output delay |
 | `0x7A` | `REQ_GET_CORE1_MODE` | IN | 1 byte | Get Core 1 mode (0=Idle, 1=PDM, 2=EQ Worker) |
 | `0x7B` | `REQ_GET_CORE1_CONFLICT` | IN | 1 byte | Check if PDM vs EQ Worker conflict exists |
+| `0x7C` | `REQ_SET_OUTPUT_PIN` | IN | 1 byte | Change output GPIO pin (returns status) |
+| `0x7D` | `REQ_GET_OUTPUT_PIN` | IN | 1 byte | Get current GPIO pin for an output |
 
 ### REQ_GET_STATUS (0x50) - System Telemetry
 
@@ -356,6 +360,30 @@ struct __attribute__((packed)) {
     float gain_db;          // -inf to +12dB
 }
 ```
+
+### Runtime Pin Configuration
+
+Output GPIO pins can be reassigned at runtime without reflashing. This is useful for custom PCB layouts or when the default pin assignments conflict with other hardware.
+
+**`REQ_SET_OUTPUT_PIN` (0x7C)** — IN transfer, returns 1-byte status:
+*   `wValue` = `(new_pin << 8) | output_index`
+*   `output_index`: 0-3 for S/PDIF outputs 1-4, 4 for PDM subwoofer
+*   S/PDIF outputs are automatically disabled and re-enabled during the pin change (~1ms audio dropout on that output only)
+*   PDM output must be disabled first (disable output 9 via `REQ_SET_OUTPUT_ENABLE`), otherwise returns `PIN_CONFIG_OUTPUT_ACTIVE`
+
+| Status Code | Value | Meaning |
+|-------------|-------|---------|
+| `PIN_CONFIG_SUCCESS` | 0x00 | Pin changed successfully |
+| `PIN_CONFIG_INVALID_PIN` | 0x01 | Pin out of range or reserved (GPIO 12, 23-25) |
+| `PIN_CONFIG_PIN_IN_USE` | 0x02 | Pin already assigned to another output |
+| `PIN_CONFIG_INVALID_OUTPUT` | 0x03 | Output index out of range (must be 0-4) |
+| `PIN_CONFIG_OUTPUT_ACTIVE` | 0x04 | PDM output must be disabled before changing its pin |
+
+**`REQ_GET_OUTPUT_PIN` (0x7D)** — IN transfer, returns 1 byte:
+*   `wValue` = output_index (0-4)
+*   Returns the current GPIO pin number for that output
+
+Pin assignments are persisted across power cycles when saved to flash via `REQ_SAVE_PARAMS`.
 
 ---
 
