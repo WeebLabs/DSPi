@@ -15,8 +15,8 @@ firmware/build-rp2350/*
 firmware/build-rp2040/*
 firmware/build_release/*
 firmware/eclipse_build/*
-pico-sdk
-build
+/pico-sdk
+/build
 .vscode
 
 # Ignore all markdown files except README.md

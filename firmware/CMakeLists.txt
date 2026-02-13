@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.12)
 
+# Default SDK path to submodule location if not set via environment
+if (NOT PICO_SDK_PATH AND NOT DEFINED ENV{PICO_SDK_PATH})
+    set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-sdk)
+endif()
+
+# Always use local pico-extras (contains modified libraries)
+set(PICO_EXTRAS_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-extras CACHE PATH "" FORCE)
+
 # Pull in PICO SDK (must be before project)
 include(pico_sdk_import.cmake)
 
