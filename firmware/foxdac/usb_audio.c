@@ -1523,6 +1523,18 @@ static bool device_setup_request_handler(struct usb_device *dev, struct usb_setu
     (void)dev;
     setup = __builtin_assume_aligned(setup, 4);
 
+    // Intercept GET_DESCRIPTOR(String, 0xEE) — MS OS String Descriptor
+    // The default string handler only converts ASCII→UTF-16, but the MS OS
+    // string descriptor is a fixed 18-byte binary blob that must be returned raw.
+    if (!(setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK) &&
+        (setup->bmRequestType & USB_DIR_IN) &&
+        setup->bRequest == USB_REQUEST_GET_DESCRIPTOR &&
+        setup->wValue == 0x03EE) {
+        uint16_t len = setup->wLength < MS_OS_STRING_DESC_LEN ? setup->wLength : MS_OS_STRING_DESC_LEN;
+        vendor_send_response(ms_os_string_descriptor, len);
+        return true;
+    }
+
     // Handle Microsoft OS vendor requests (WCID compat ID and ext props)
     if ((setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK) == USB_REQ_TYPE_TYPE_VENDOR &&
         setup->bRequest == MS_VENDOR_CODE) {
@@ -1548,11 +1560,6 @@ static bool device_setup_request_handler(struct usb_device *dev, struct usb_setu
 // ----------------------------------------------------------------------------
 
 static const char *_get_descriptor_string(uint index) {
-    if (index == 0xEE) {
-        // Return NULL — we handle MS OS string via the device setup handler
-        // Actually, we need to handle string 0xEE specially
-        return NULL;
-    }
     if (index >= 1 && index <= count_of(descriptor_strings)) {
         return descriptor_strings[index - 1];
     }
