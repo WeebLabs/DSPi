@@ -1221,6 +1221,33 @@ static void vendor_send_response(const void *data, uint len) {
     usb_start_single_buffer_control_in_transfer();
 }
 
+// Runtime pin configuration (4 SPDIF + 1 PDM)
+uint8_t output_pins[NUM_PIN_OUTPUTS] = {
+    PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
+    PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
+};
+
+audio_spdif_instance_t *spdif_instance_ptrs[4];
+
+// Pin validation helpers
+static bool is_valid_gpio_pin(uint8_t pin) {
+    if (pin == 12) return false;                // UART TX
+    if (pin >= 23 && pin <= 25) return false;   // Power/LED
+#if PICO_RP2350
+    return pin <= 29;
+#else
+    return pin <= 28;
+#endif
+}
+
+static bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
+    for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
+        if (i == exclude) continue;
+        if (output_pins[i] == pin) return true;
+    }
+    return false;
+}
+
 static bool vendor_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
     setup = __builtin_assume_aligned(setup, 4);
 
@@ -1509,6 +1536,55 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
+
+            case REQ_SET_OUTPUT_PIN: {
+                // wValue = (new_pin << 8) | output_index
+                uint8_t out_idx = setup->wValue & 0xFF;
+                uint8_t new_pin = (setup->wValue >> 8) & 0xFF;
+                uint8_t status;
+
+                if (out_idx >= NUM_PIN_OUTPUTS) {
+                    status = PIN_CONFIG_INVALID_OUTPUT;
+                } else if (!is_valid_gpio_pin(new_pin)) {
+                    status = PIN_CONFIG_INVALID_PIN;
+                } else if (is_pin_in_use(new_pin, out_idx)) {
+                    status = PIN_CONFIG_PIN_IN_USE;
+                } else if (new_pin == output_pins[out_idx]) {
+                    // No-op: pin unchanged
+                    status = PIN_CONFIG_SUCCESS;
+                } else if (out_idx < 4) {
+                    // SPDIF output: disable → change pin → re-enable
+                    audio_spdif_instance_t *inst = spdif_instance_ptrs[out_idx];
+                    audio_spdif_set_enabled(inst, false);
+                    audio_spdif_change_pin(inst, new_pin);
+                    audio_spdif_set_enabled(inst, true);
+                    output_pins[out_idx] = new_pin;
+                    status = PIN_CONFIG_SUCCESS;
+                } else {
+                    // PDM output (out_idx == 4): must be disabled first
+                    if (pdm_enabled || core1_mode == CORE1_MODE_PDM) {
+                        status = PIN_CONFIG_OUTPUT_ACTIVE;
+                    } else {
+                        pdm_change_pin(new_pin);
+                        output_pins[out_idx] = new_pin;
+                        status = PIN_CONFIG_SUCCESS;
+                    }
+                }
+
+                resp_buf[0] = status;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_OUTPUT_PIN: {
+                uint8_t out_idx = (uint8_t)setup->wValue;
+                if (out_idx < NUM_PIN_OUTPUTS) {
+                    resp_buf[0] = output_pins[out_idx];
+                    vendor_send_response(resp_buf, 1);
+                    return true;
+                }
+                return false;
+            }
         }
 
         return false;
@@ -1664,6 +1740,12 @@ void usb_sound_card_init(void) {
 
     audio_spdif_setup(&spdif_instance_4, &audio_format_48k, &spdif_config_4);
     audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, AUDIO_BUFFER_COUNT / 2, NULL);
+
+    // Populate instance pointer array for pin config commands
+    spdif_instance_ptrs[0] = &spdif_instance_1;
+    spdif_instance_ptrs[1] = &spdif_instance_2;
+    spdif_instance_ptrs[2] = &spdif_instance_3;
+    spdif_instance_ptrs[3] = &spdif_instance_4;
 
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
 

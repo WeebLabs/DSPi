@@ -162,6 +162,18 @@ bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
  */
 void audio_spdif_set_enabled(audio_spdif_instance_t *inst, bool enabled);
 
+/** \brief Change the GPIO pin of an S/PDIF output instance
+ * \ingroup audio_spdif
+ *
+ * The instance must be disabled before calling this function.
+ * Aborts any stale DMA, releases the old pin to high-Z, reinitializes the
+ * PIO state machine with the new pin, and restores the clock divider.
+ *
+ * \param inst The S/PDIF instance (must be disabled)
+ * \param new_pin The new GPIO pin number
+ */
+void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin);
+
 /** \brief Enable multiple S/PDIF instances with synchronized PIO start
  * \ingroup audio_spdif
  *

@@ -374,6 +374,43 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
 }
 
 // ---------------------------------------------------------------------------
+// audio_spdif_change_pin
+// ---------------------------------------------------------------------------
+
+void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin) {
+    assert(!inst->enabled);
+
+    // Abort any stale DMA transfer
+    dma_channel_abort(inst->dma_channel);
+
+    // Return in-flight buffer to consumer pool
+    if (inst->playing_buffer != NULL) {
+        give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+        inst->playing_buffer = NULL;
+    }
+
+    // Release old pin from PIO mux → high-Z
+    gpio_set_function(inst->pin, GPIO_FUNC_NULL);
+    gpio_set_dir(inst->pin, GPIO_IN);
+
+    // Claim new pin for PIO
+    pio_gpio_init(inst->pio, new_pin);
+
+    // Reinitialize SM with new pin using cached program offset
+    uint pio_idx = pio_get_index(inst->pio);
+    assert(pio_program_offset[pio_idx] >= 0);
+    uint offset = (uint)pio_program_offset[pio_idx];
+    spdif_program_init(inst->pio, inst->pio_sm, offset, new_pin);
+
+    // Restore clock divider (pio_sm_init resets it to default)
+    if (inst->freq != 0) {
+        update_pio_frequency(inst, inst->freq);
+    }
+
+    inst->pin = new_pin;
+}
+
+// ---------------------------------------------------------------------------
 // audio_spdif_set_enabled
 // ---------------------------------------------------------------------------
 

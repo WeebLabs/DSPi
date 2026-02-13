@@ -143,6 +143,20 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define REQ_GET_CORE1_MODE          0x7A
 #define REQ_GET_CORE1_CONFLICT      0x7B
 
+// Pin Configuration Commands
+#define REQ_SET_OUTPUT_PIN          0x7C
+#define REQ_GET_OUTPUT_PIN          0x7D
+
+// Pin config status codes
+#define PIN_CONFIG_SUCCESS          0x00
+#define PIN_CONFIG_INVALID_PIN      0x01
+#define PIN_CONFIG_PIN_IN_USE       0x02
+#define PIN_CONFIG_INVALID_OUTPUT   0x03
+#define PIN_CONFIG_OUTPUT_ACTIVE    0x04
+
+// Number of configurable outputs (4 SPDIF + 1 PDM)
+#define NUM_PIN_OUTPUTS             5
+
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u
 #define FEATURE_VOLUME_CONTROL 2u

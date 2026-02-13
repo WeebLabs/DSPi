@@ -21,6 +21,7 @@
 #include "usb_audio.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "pico/audio_spdif.h"
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
@@ -135,6 +136,17 @@ void core0_init() {
         dsp_recalculate_all_filters(48000.0f);
         dsp_update_delay_samples(48000.0f);
         restore_interrupts(flags);
+
+        // Apply saved SPDIF pin configuration (before Core 1 starts)
+        extern uint8_t output_pins[];
+        extern audio_spdif_instance_t *spdif_instance_ptrs[];
+        for (int i = 0; i < 4; i++) {
+            if (output_pins[i] != spdif_instance_ptrs[i]->pin) {
+                audio_spdif_set_enabled(spdif_instance_ptrs[i], false);
+                audio_spdif_change_pin(spdif_instance_ptrs[i], output_pins[i]);
+                audio_spdif_set_enabled(spdif_instance_ptrs[i], true);
+            }
+        }
     }
 
     // Initial loudness table computation (uses loaded or default params)
@@ -144,7 +156,10 @@ void core0_init() {
     }
 
 #if ENABLE_SUB
-    pdm_setup_hw();
+    {
+        extern uint8_t output_pins[];
+        pdm_setup_hw(output_pins[4]);
+    }
 
     // Determine initial Core 1 mode from output enables (may have been loaded from flash)
     if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled) {

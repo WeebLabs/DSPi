@@ -13,7 +13,7 @@
 // Flash configuration - use last 4KB sector
 #define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 5
+#define FLASH_VERSION 6
 
 // Pointer to read flash via XIP
 #define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
@@ -66,6 +66,9 @@ typedef struct __attribute__((packed)) {
     // V5: Matrix Mixer
     FlashMatrixCrosspoint matrix_crosspoints[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
     FlashOutputChannel matrix_outputs[NUM_OUTPUT_CHANNELS];
+    // V6: Output pin configuration
+    uint8_t output_pins[5];  // SPDIF 1-4 + PDM GPIO pins
+    uint8_t pin_padding[3];  // Alignment
 } FlashStorage;
 
 // External variables we need to access (defined in usb_audio.c)
@@ -81,6 +84,7 @@ extern volatile bool loudness_recompute_pending;
 extern volatile CrossfeedConfig crossfeed_config;
 extern volatile bool crossfeed_update_pending;
 extern MatrixMixer matrix_mixer;
+extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 
 // Simple CRC32 implementation (polynomial 0xEDB88320)
 static uint32_t crc32(const uint8_t *data, size_t len) {
@@ -133,6 +137,9 @@ int flash_save_params(void) {
         storage.matrix_outputs[out].gain_db = matrix_mixer.outputs[out].gain_db;
         storage.matrix_outputs[out].delay_ms = matrix_mixer.outputs[out].delay_ms;
     }
+
+    // V6: Output pin configuration
+    memcpy(storage.output_pins, output_pins, sizeof(storage.output_pins));
 
     // Compute CRC over data section (everything after the header)
     const uint8_t *data_start = (const uint8_t *)&storage.filter_recipes;
@@ -289,6 +296,24 @@ int flash_load_params(void) {
         }
     }
 
+    // V6: Output pin configuration
+    if (storage->version >= 6) {
+        // Default pins used as reference for validation
+        static const uint8_t default_pins[5] = {
+            PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
+            PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
+        };
+        for (int i = 0; i < 5; i++) {
+            uint8_t pin = storage->output_pins[i];
+            // Validate: pin must be in valid range and not reserved
+            bool valid = (pin <= 29) && (pin != 12) && !(pin >= 23 && pin <= 25);
+#if !PICO_RP2350
+            if (pin > 28) valid = false;
+#endif
+            output_pins[i] = valid ? pin : default_pins[i];
+        }
+    }
+
     return FLASH_OK;
 }
 
@@ -347,4 +372,11 @@ void flash_factory_reset(void) {
         matrix_mixer.outputs[out].enabled = 0;
         matrix_mixer.outputs[out].gain_linear = 1.0f;
     }
+
+    // Reset pin configuration to defaults
+    output_pins[0] = PICO_AUDIO_SPDIF_PIN;
+    output_pins[1] = PICO_SPDIF_PIN_2;
+    output_pins[2] = PICO_SPDIF_PIN_3;
+    output_pins[3] = PICO_SPDIF_PIN_4;
+    output_pins[4] = PICO_PDM_PIN;
 }

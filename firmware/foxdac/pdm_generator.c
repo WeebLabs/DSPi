@@ -27,6 +27,10 @@ static volatile uint8_t pdm_tail = 0;
 static uint32_t __attribute__((aligned(PDM_DMA_BUFFER_SIZE * 4))) pdm_dma_buffer[PDM_DMA_BUFFER_SIZE];
 static int pdm_dma_chan = -1;
 
+// PIO program offset and current pin (needed for pdm_change_pin)
+static uint pdm_pio_offset;
+static uint8_t pdm_current_pin = PICO_PDM_PIN;
+
 // Enable/disable flag — set by Core 0 via pdm_set_enabled(), read by Core 1
 volatile bool pdm_enabled = false;
 
@@ -105,22 +109,24 @@ void pdm_update_clock(uint32_t freq) {
     pio_sm_set_clkdiv(PDM_PIO, PDM_SM, div);
 }
 
-void pdm_setup_hw(void) {
+void pdm_setup_hw(uint8_t pin) {
+    pdm_current_pin = pin;
+
     // Pre-fill buffer with 50% duty cycle silence before DMA starts
     for (int i = 0; i < PDM_DMA_BUFFER_SIZE; i++) {
         pdm_dma_buffer[i] = 0xAAAAAAAA;
     }
 
-    uint offset = pio_add_program(PDM_PIO, &pio_pdm_program);
+    pdm_pio_offset = pio_add_program(PDM_PIO, &pio_pdm_program);
     pio_sm_config c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c, offset, offset + (pio_pdm_program.length - 1));
-    sm_config_set_out_pins(&c, PICO_PDM_PIN, 1);
+    sm_config_set_wrap(&c, pdm_pio_offset, pdm_pio_offset + (pio_pdm_program.length - 1));
+    sm_config_set_out_pins(&c, pdm_current_pin, 1);
     sm_config_set_out_shift(&c, true, true, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
 
-    pio_gpio_init(PDM_PIO, PICO_PDM_PIN);
-    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, PICO_PDM_PIN, 1, true);
-    pio_sm_init(PDM_PIO, PDM_SM, offset, &c);
+    pio_gpio_init(PDM_PIO, pdm_current_pin);
+    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, pdm_current_pin, 1, true);
+    pio_sm_init(PDM_PIO, PDM_SM, pdm_pio_offset, &c);
 
     pdm_update_clock(48000);
     pio_sm_set_enabled(PDM_PIO, PDM_SM, true);
@@ -133,6 +139,36 @@ void pdm_setup_hw(void) {
     channel_config_set_dreq(&dmac, pio_get_dreq(PDM_PIO, PDM_SM, true));
     channel_config_set_ring(&dmac, false, PDM_DMA_RING_BITS);
     dma_channel_configure(pdm_dma_chan, &dmac, &PDM_PIO->txf[PDM_SM], pdm_dma_buffer, 0xFFFFFFFF, true);
+}
+
+void pdm_change_pin(uint8_t new_pin) {
+    assert(!pdm_enabled);
+    assert(core1_mode != CORE1_MODE_PDM);
+
+    // Safety: stop SM and abort DMA (should already be stopped)
+    pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
+    dma_channel_abort(pdm_dma_chan);
+
+    // Release old pin → high-Z
+    gpio_set_function(pdm_current_pin, GPIO_FUNC_NULL);
+    gpio_set_dir(pdm_current_pin, GPIO_IN);
+
+    // Init new pin for PIO
+    pio_gpio_init(PDM_PIO, new_pin);
+    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, new_pin, 1, true);
+
+    // Rebuild SM config with new pin
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_wrap(&c, pdm_pio_offset, pdm_pio_offset + (pio_pdm_program.length - 1));
+    sm_config_set_out_pins(&c, new_pin, 1);
+    sm_config_set_out_shift(&c, true, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    pio_sm_init(PDM_PIO, PDM_SM, pdm_pio_offset, &c);
+
+    // Restore clock divider (pio_sm_init resets it)
+    pdm_update_clock(48000);
+
+    pdm_current_pin = new_pin;
 }
 
 void pdm_push_sample(int32_t sample, bool reset) {
