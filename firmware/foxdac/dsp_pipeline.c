@@ -186,8 +186,7 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
 
         // Mixed Precision: Float Multiplies, Double Accumulation
         // y[n] = b0*x[n] + s1[n-1]
-        double result_d = dcp_dadd(dcp_f2d(bq->b0 * sample), bq->s1);
-        float result_f = dcp_d2f(result_d);
+        float result_f = dcp_dadd_d2f(dcp_f2d(bq->b0 * sample), bq->s1);
 
         // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
         float val1 = bq->b1 * sample - bq->a1 * result_f;
@@ -226,8 +225,7 @@ void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict s
             float sample = samples[i];
 
             // y[n] = b0*x[n] + s1[n-1]
-            double result_d = dcp_dadd(dcp_f2d(b0 * sample), s1);
-            float result_f = dcp_d2f(result_d);
+            float result_f = dcp_dadd_d2f(dcp_f2d(b0 * sample), s1);
 
             // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
             float val1 = b1 * sample - a1 * result_f;
