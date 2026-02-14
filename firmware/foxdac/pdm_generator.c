@@ -38,6 +38,14 @@ volatile bool pdm_enabled = false;
 volatile Core1Mode core1_mode = CORE1_MODE_IDLE;
 Core1EqWork core1_eq_work = {0};
 
+// Idle-time CPU load metering (Core 1)
+#if PICO_RP2350
+static uint32_t c1eq_last_work_end = 0;
+static uint32_t c1eq_load_q8 = 0;
+static bool c1eq_load_primed = false;
+#endif
+static uint32_t pdm_load_q8 = 0;
+
 // ----------------------------------------------------------------------------
 // RAW PIO PROGRAM
 // ----------------------------------------------------------------------------
@@ -231,6 +239,7 @@ static void pdm_processing_loop() {
             ns = (noise_shaper_t){0};
             active_us_accumulator = 0;
             sample_counter = 0;
+            pdm_load_q8 = 0;
 
             pio_sm_set_enabled(PDM_PIO, PDM_SM, true);
 
@@ -343,7 +352,10 @@ static void pdm_processing_loop() {
         sample_counter++;
 
         if (sample_counter >= 48) {
-            global_status.cpu1_load = (uint8_t)((active_us_accumulator * 205) >> 11);
+            uint32_t inst_q8 = (active_us_accumulator * 26);  // ~25.6, +1.5% conservative
+            if (inst_q8 > 25600) inst_q8 = 25600;
+            pdm_load_q8 = pdm_load_q8 - (pdm_load_q8 >> 3) + (inst_q8 >> 3);
+            global_status.cpu1_load = (uint8_t)((pdm_load_q8 + 128) >> 8);
             active_us_accumulator = 0;
             sample_counter = 0;
         }
@@ -365,8 +377,8 @@ static void pdm_processing_loop() {
 // ----------------------------------------------------------------------------
 #if PICO_RP2350
 static void __not_in_flash_func(eq_worker_loop)() {
-    uint32_t active_us_accumulator = 0;
-    uint32_t block_counter = 0;
+    c1eq_load_primed = false;
+    c1eq_load_q8 = 0;
 
     while (core1_mode == CORE1_MODE_EQ_WORKER) {
         // Wait for work from Core 0
@@ -376,7 +388,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
         }
         __dmb();
 
-        uint32_t start_time = time_us_32();
+        uint32_t work_start = time_us_32();
 
         // Read work descriptor
         float (*buf_out)[192] = core1_eq_work.buf_out;
@@ -443,18 +455,23 @@ static void __not_in_flash_func(eq_worker_loop)() {
             }
         }
 
-        uint32_t end_time = time_us_32();
-        active_us_accumulator += (end_time - start_time);
-        block_counter++;
+        uint32_t work_end = time_us_32();
 
-        // Update CPU1 load every ~48 blocks (~1ms each = ~48ms window)
-        // Window is 48ms = 48000us, so 100% = 48000us
-        // x/480 ≈ (x * 137) >> 16
-        if (block_counter >= 48) {
-            global_status.cpu1_load = (uint8_t)((active_us_accumulator * 137) >> 16);
-            active_us_accumulator = 0;
-            block_counter = 0;
+        if (c1eq_load_primed) {
+            uint32_t busy_us = work_end - work_start;
+            uint32_t idle_us = work_start - c1eq_last_work_end;
+            if (idle_us > 2000) idle_us = 0;
+
+            uint32_t total_us = busy_us + idle_us;
+            if (total_us > 0) {
+                uint32_t inst_q8 = (busy_us * 25600) / total_us;
+                c1eq_load_q8 = c1eq_load_q8 - (c1eq_load_q8 >> 3) + (inst_q8 >> 3);
+            }
+            global_status.cpu1_load = (uint8_t)((c1eq_load_q8 + 128) >> 8);
+        } else {
+            c1eq_load_primed = true;
         }
+        c1eq_last_work_end = work_end;
 
         // Signal completion to Core 0
         core1_eq_work.work_ready = false;

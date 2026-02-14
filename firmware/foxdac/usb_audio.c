@@ -88,6 +88,11 @@ volatile bool sync_started = false;
 static volatile uint64_t last_packet_time_us = 0;
 #define AUDIO_GAP_THRESHOLD_US 50000  // 50ms - reset sync if packets stop this long
 
+// Idle-time CPU load metering (Core 0)
+static uint32_t cpu0_last_packet_end = 0;
+static uint32_t cpu0_load_q8 = 0;         // EMA in Q8 fixed point (0-25600 = 0-100%)
+static bool cpu0_load_primed = false;
+
 // Audio Pools (4 S/PDIF stereo pairs)
 struct audio_buffer_pool *producer_pool_1 = NULL;  // S/PDIF 1 (Out 1-2)
 struct audio_buffer_pool *producer_pool_2 = NULL;  // S/PDIF 2 (Out 3-4)
@@ -223,18 +228,17 @@ void audio_set_volume(int16_t volume) {
 // ----------------------------------------------------------------------------
 
 static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
-    uint32_t start_time = time_us_32();
-    uint32_t core1_wait_us = 0;
+    uint32_t packet_start = time_us_32();
 
     // Detect SPDIF underrun: USB packets should arrive every ~1ms
     static uint32_t last_packet_time = 0;
     if (last_packet_time > 0) {
-        uint32_t gap = start_time - last_packet_time;
+        uint32_t gap = packet_start - last_packet_time;
         if (gap > 2000 && gap < 50000) {  // 2ms-50ms gap = underrun
             spdif_underruns++;
         }
     }
-    last_packet_time = start_time;
+    last_packet_time = packet_start;
 
     // Get audio buffers for all 4 S/PDIF outputs
     struct audio_buffer* audio_buf[4] = {NULL, NULL, NULL, NULL};
@@ -260,6 +264,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         (now_us - last_packet_time_us) > AUDIO_GAP_THRESHOLD_US) {
         sync_started = false;
         total_samples_produced = 0;
+        cpu0_load_primed = false;
+        cpu0_load_q8 = 0;
 
         // Pre-fill with 2 silent buffers to prevent underrun on restart
         for (int i = 0; i < 2; i++) {
@@ -469,12 +475,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
 
         // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-7)
-        uint32_t wait_start = time_us_32();
         while (!core1_eq_work.work_done) {
             __wfe();
         }
         __dmb();
-        core1_wait_us = time_us_32() - wait_start;
 
         // Update shared delay write index (both cores used same base)
         if (any_delay_active) {
@@ -715,8 +719,23 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
     }
 
-    uint32_t end_time = time_us_32();
-    global_status.cpu0_load = (uint8_t)((end_time - start_time - core1_wait_us) / 10);
+    uint32_t packet_end = time_us_32();
+
+    if (cpu0_load_primed) {
+        uint32_t busy_us = packet_end - packet_start;
+        uint32_t idle_us = packet_start - cpu0_last_packet_end;
+        if (idle_us > 2000) idle_us = 0;   // clamp during USB gaps
+
+        uint32_t total_us = busy_us + idle_us;
+        if (total_us > 0) {
+            uint32_t inst_q8 = (busy_us * 25600) / total_us;
+            cpu0_load_q8 = cpu0_load_q8 - (cpu0_load_q8 >> 3) + (inst_q8 >> 3);
+        }
+        global_status.cpu0_load = (uint8_t)((cpu0_load_q8 + 128) >> 8);
+    } else {
+        cpu0_load_primed = true;
+    }
+    cpu0_last_packet_end = packet_end;
 }
 
 // ----------------------------------------------------------------------------
