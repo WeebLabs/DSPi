@@ -208,6 +208,21 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
     return sample;
 }
 
+#define BIQUAD(I)\
+  sample_##I = *sample;\
+\
+  /* y[n] = b0*x[n] + s1[n-1] */\
+  result_f = dcp_dadd_d2f(dcp_f2d(b0 * sample_##I), s1);\
+\
+  /* s1[n] = b1*x[n] - a1*y[n] + s2[n-1] */\
+  val1 = b1 * sample_##I - a1 * result_f;\
+  s1 = dcp_dadd(dcp_f2d(val1), s2);\
+\
+  /* s2[n] = b2*x[n] - a2*y[n] */\
+  s2 = dcp_f2d(b2 * sample_##I - a2 * result_f);\
+\
+  *sample++ = result_f;
+
 DSP_TIME_CRITICAL
 void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict samples,
                                uint32_t count, uint8_t channel) {
@@ -227,21 +242,25 @@ void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict s
         double s1 = bq->s1;
         double s2 = bq->s2;
 
-        // Process all samples with this biquad
-        for (uint32_t i = 0; i < count; i++) {
-            float sample = samples[i];
+        float *sample = samples;
+        float result_f, val1;
 
-            // y[n] = b0*x[n] + s1[n-1]
-            float result_f = dcp_dadd_d2f(dcp_f2d(b0 * sample), s1);
+        // Unrolled samples being processed
+        // Letters used to not imply an ordering
+        float sample_a, sample_b, sample_c, sample_d;
+        float sample_e, sample_f, sample_g, sample_h;
 
-            // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
-            float val1 = b1 * sample - a1 * result_f;
-            s1 = dcp_dadd(dcp_f2d(val1), s2);
-
-            // s2[n] = b2*x[n] - a2*y[n]
-            s2 = dcp_f2d(b2 * sample - a2 * result_f);
-
-            samples[i] = result_f;
+        uint32_t n = (count + 7) / 8;
+        switch (count % 8) {
+            case 0: do { BIQUAD(a);
+            case 7:      BIQUAD(h);
+            case 6:      BIQUAD(g);
+            case 5:      BIQUAD(f);
+            case 4:      BIQUAD(e);
+            case 3:      BIQUAD(d);
+            case 2:      BIQUAD(c);
+            case 1:      BIQUAD(b);
+            } while (--n > 0);
         }
 
         // Store state back
