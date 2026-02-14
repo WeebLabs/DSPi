@@ -21,9 +21,9 @@ EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
 float channel_delays_ms[NUM_CHANNELS] = {0};  // All 11 channels initialized to 0
 bool channel_bypassed[NUM_CHANNELS];
 
-// Delay Line State (9 output channels)
-// RP2350: float, 170ms max delay
-// RP2040: int32_t, 85ms max delay
+// Delay Line State (all 9 output channels on both platforms)
+// RP2350: float, 170ms max delay (8192 samples)
+// RP2040: int32_t, 42ms max delay (2048 samples)
 #if PICO_RP2350
 float delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #else
@@ -136,8 +136,7 @@ void dsp_init_default_filters() {
 }
 
 void dsp_update_delay_samples(float sample_rate) {
-    // Update delay samples for output channels
-    // RP2350: 9 outputs, RP2040: 3 outputs (L/R/Sub)
+    // Update delay samples for all 9 output channels
     // Delay values come from the matrix mixer OutputChannel.delay_ms
     // This function is called when sample rate changes or delays are updated
 

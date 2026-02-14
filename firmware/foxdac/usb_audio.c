@@ -78,8 +78,10 @@ volatile bool crossfeed_update_pending = false;
 volatile bool crossfeed_bypassed = true;  // Fast bypass flag for audio callback
 CrossfeedState crossfeed_state;
 
-// Shared output buffer — file scope so Core 1 can access via pointer
+// Shared output buffer — file scope so Core 1 can access via pointer (RP2350 only)
+#if PICO_RP2350
 static float buf_out[NUM_OUTPUT_CHANNELS][192];
+#endif
 
 // Sync State
 volatile uint64_t total_samples_produced = 0;
@@ -572,8 +574,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 #else
     // ------------------------------------------------------------------------
     // RP2040 FIXED-POINT PIPELINE WITH MATRIX MIXER
-    // Note: Matrix mixer on RP2040 only supports first 3 outputs (L/R/Sub)
-    // due to CPU constraints. Full 9-output matrix requires RP2350.
+    // Full 9-output matrix mixer: 4 SPDIF stereo pairs + PDM sub
     // ------------------------------------------------------------------------
     int32_t vol_mul = audio_state.vol_mul;
     int32_t preamp = global_preamp_mul;
@@ -584,6 +585,19 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     const LoudnessCoeffs *loud_coeffs = current_loudness_coeffs;
 
     int32_t peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
+
+    // Pre-compute Q15 gains from matrix mixer (avoid per-sample float ops)
+    int32_t xp_gain_q15[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
+    int32_t out_vol_q15[NUM_OUTPUT_CHANNELS];
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+        for (int inp = 0; inp < NUM_INPUT_CHANNELS; inp++) {
+            MatrixCrosspoint *xp = &matrix_mixer.crosspoints[inp][out];
+            float g = xp->enabled ? (xp->phase_invert ? -xp->gain_linear : xp->gain_linear) : 0.0f;
+            xp_gain_q15[inp][out] = (int32_t)(g * 32768.0f);
+        }
+        float og = matrix_mixer.outputs[out].mute ? 0.0f : matrix_mixer.outputs[out].gain_linear;
+        out_vol_q15[out] = (int32_t)(og * (float)vol_mul);
+    }
 
     for (uint32_t i = 0; i < sample_count; i++) {
         int16_t raw_left_16 = in[i*2];
@@ -640,65 +654,54 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             crossfeed_process_stereo(&crossfeed_state, &master_l_32, &master_r_32);
         }
 
-        // RP2040: Simple 3-output routing (L/R/Sub) using legacy gain/mute arrays
-        int32_t sub_in_32 = (master_l_32 + master_r_32) >> 1;
-        int32_t out_l_32 = 0, out_r_32 = 0, out_sub_32 = 0;
+        // Matrix mixing -> per-output EQ -> gain/volume -> delay -> output
+        int32_t out_vals[NUM_OUTPUT_CHANNELS];
+        for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+            if (!matrix_mixer.outputs[out].enabled) {
+                out_vals[out] = 0;
+                continue;
+            }
+            // Matrix mix
+            int64_t mixed = (int64_t)master_l_32 * xp_gain_q15[0][out]
+                          + (int64_t)master_r_32 * xp_gain_q15[1][out];
+            int32_t sample = (int32_t)(mixed >> 15);
 
-        out_l_32 = channel_bypassed[CH_OUT_LEFT] ? master_l_32 :
-                   dsp_process_channel(filters[CH_OUT_LEFT], master_l_32, CH_OUT_LEFT);
-        out_r_32 = channel_bypassed[CH_OUT_RIGHT] ? master_r_32 :
-                   dsp_process_channel(filters[CH_OUT_RIGHT], master_r_32, CH_OUT_RIGHT);
-#if ENABLE_SUB
-        out_sub_32 = channel_bypassed[CH_OUT_SUB] ? sub_in_32 :
-                     dsp_process_channel(filters[CH_OUT_SUB], sub_in_32, CH_OUT_SUB);
-#endif
+            // Per-output EQ
+            uint8_t eq_ch = CH_OUT_1 + out;
+            if (!is_bypassed && !channel_bypassed[eq_ch])
+                sample = dsp_process_channel(filters[eq_ch], sample, eq_ch);
 
-        // Per-channel gain and mute (legacy 3-channel)
-        out_l_32   = channel_mute[0] ? 0 : (int32_t)(((int64_t)out_l_32 * channel_gain_mul[0]) >> 15);
-        out_r_32   = channel_mute[1] ? 0 : (int32_t)(((int64_t)out_r_32 * channel_gain_mul[1]) >> 15);
-        out_sub_32 = channel_mute[2] ? 0 : (int32_t)(((int64_t)out_sub_32 * channel_gain_mul[2]) >> 15);
+            // Output gain + master volume (combined Q15)
+            sample = (int32_t)(((int64_t)sample * out_vol_q15[out]) >> 15);
+            out_vals[out] = clip_s32(sample);
+        }
 
-        if (abs(out_l_32) > peak_ol) peak_ol = abs(out_l_32);
-        if (abs(out_r_32) > peak_or) peak_or = abs(out_r_32);
-        if (abs(out_sub_32) > peak_sub) peak_sub = abs(out_sub_32);
+        // Output peaks (first stereo pair + sub)
+        if (abs(out_vals[0]) > peak_ol) peak_ol = abs(out_vals[0]);
+        if (abs(out_vals[1]) > peak_or) peak_or = abs(out_vals[1]);
+        if (abs(out_vals[NUM_OUTPUT_CHANNELS-1]) > peak_sub)
+            peak_sub = abs(out_vals[NUM_OUTPUT_CHANNELS-1]);
 
-        // Master volume
-        out_l_32   = (int32_t)(((int64_t)out_l_32 * vol_mul) >> 15);
-        out_r_32   = (int32_t)(((int64_t)out_r_32 * vol_mul) >> 15);
-        out_sub_32 = (int32_t)(((int64_t)out_sub_32 * vol_mul) >> 15);
-
-        out_l_32 = clip_s32(out_l_32);
-        out_r_32 = clip_s32(out_r_32);
-        out_sub_32 = clip_s32(out_sub_32);
-
-        // Delay (only first 3 channels on RP2040)
-        delay_lines[0][delay_write_idx] = out_l_32;
-        delay_lines[1][delay_write_idx] = out_r_32;
-        delay_lines[2][delay_write_idx] = out_sub_32;
-
-        int32_t delayed_l   = delay_lines[0][(delay_write_idx - channel_delay_samples[0]) & MAX_DELAY_MASK];
-        int32_t delayed_r   = delay_lines[1][(delay_write_idx - channel_delay_samples[1]) & MAX_DELAY_MASK];
-        int32_t delayed_sub = delay_lines[2][(delay_write_idx - channel_delay_samples[2]) & MAX_DELAY_MASK];
-
+        // Delay lines (all 9 channels)
+        for (int out = 0; out < NUM_DELAY_CHANNELS; out++) {
+            delay_lines[out][delay_write_idx] = out_vals[out];
+            out_vals[out] = delay_lines[out][(delay_write_idx - channel_delay_samples[out]) & MAX_DELAY_MASK];
+        }
         delay_write_idx = (delay_write_idx + 1) & MAX_DELAY_MASK;
 
-        // Output to first S/PDIF pair
-        if (audio_buf[0]) {
-            int16_t *out = (int16_t *) audio_buf[0]->buffer->bytes;
-            out[i*2]     = (int16_t)(clip_s32(delayed_l + (1<<13)) >> 14);
-            out[i*2+1]   = (int16_t)(clip_s32(delayed_r + (1<<13)) >> 14);
+        // S/PDIF output (4 stereo pairs)
+        for (int pair = 0; pair < 4; pair++) {
+            if (!audio_buf[pair]) continue;
+            int lch = pair * 2, rch = pair * 2 + 1;
+            int16_t *spdif = (int16_t *)audio_buf[pair]->buffer->bytes;
+            spdif[i*2]   = (int16_t)(clip_s32(out_vals[lch] + (1<<13)) >> 14);
+            spdif[i*2+1] = (int16_t)(clip_s32(out_vals[rch] + (1<<13)) >> 14);
         }
 
+        // PDM sub output (output 8)
 #if ENABLE_SUB
-        pdm_push_sample(delayed_sub, false);
-
-        // Sub S/PDIF output (second pair, mono duplicated)
-        if (audio_buf[1]) {
-            int16_t *sub_out = (int16_t *) audio_buf[1]->buffer->bytes;
-            int16_t sub_s16 = (int16_t)(clip_s32(delayed_sub + (1<<13)) >> 14);
-            sub_out[i*2]     = sub_s16;
-            sub_out[i*2+1]   = sub_s16;
-        }
+        if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled)
+            pdm_push_sample(out_vals[NUM_OUTPUT_CHANNELS-1], false);
 #endif
     }
 
@@ -1604,6 +1607,24 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 }
                 return false;
             }
+
+            case REQ_GET_SERIAL: {
+                memcpy(resp_buf, usb_descriptor_str_serial, 16);
+                vendor_send_response(resp_buf, 16);
+                return true;
+            }
+
+            case REQ_GET_PLATFORM: {
+                resp_buf[0] = PLATFORM_RP2040;
+#if PICO_RP2350
+                resp_buf[0] = PLATFORM_RP2350;
+#endif
+                resp_buf[1] = (uint8_t)(FW_VERSION_BCD >> 8);    // major
+                resp_buf[2] = (uint8_t)(FW_VERSION_BCD & 0xFF);  // minor.patch BCD
+                resp_buf[3] = NUM_OUTPUT_CHANNELS;
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
         }
 
         return false;
@@ -1814,8 +1835,10 @@ void usb_sound_card_init(void) {
     audio_set_volume(DEFAULT_VOLUME);
     _audio_reconfigure();
 
-    // Initialize Core 1 EQ worker pointer to shared output buffer
+    // Initialize Core 1 EQ worker pointer to shared output buffer (RP2350 only)
+#if PICO_RP2350
     core1_eq_work.buf_out = buf_out;
+#endif
 
     // Initialize ADC for temperature sensor
     adc_init();

@@ -64,11 +64,11 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 
 // DELAY CONFIGURATION
 // RP2350: 170ms max delay (8192 samples at 48kHz)
-// RP2040: 85ms max delay (4096 samples) to fit 9 channels in RAM
+// RP2040: 42ms max delay (2048 samples) — 9 channels × 2048 × 4 = 72 KB RAM
 #if PICO_RP2350
 #define MAX_DELAY_SAMPLES 8192
 #else
-#define MAX_DELAY_SAMPLES 4096
+#define MAX_DELAY_SAMPLES 2048
 #endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
@@ -146,6 +146,20 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 // Pin Configuration Commands
 #define REQ_SET_OUTPUT_PIN          0x7C
 #define REQ_GET_OUTPUT_PIN          0x7D
+
+// Device Identification Commands
+#define REQ_GET_SERIAL              0x7E
+#define REQ_GET_PLATFORM            0x7F
+
+// Platform IDs
+#define PLATFORM_RP2040             0
+#define PLATFORM_RP2350             1
+
+// Firmware version (BCD encoded: major in high byte, minor.patch in low byte)
+#define FW_VERSION_MAJOR            1
+#define FW_VERSION_MINOR            0
+#define FW_VERSION_PATCH            9
+#define FW_VERSION_BCD              ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
 
 // Pin config status codes
 #define PIN_CONFIG_SUCCESS          0x00
