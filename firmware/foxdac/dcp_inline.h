@@ -25,6 +25,23 @@ static inline double dcp_dadd(double a, double b) {
     double r; memcpy(&r, &ur, 8); return r;
 }
 
+static inline float dcp_dadd_d2f(double a, double b) {
+    uint64_t ua, ub;
+    uint32_t ur;
+    memcpy(&ua, &a, 8); memcpy(&ub, &b, 8);
+    __asm__ volatile (
+        "mcrr p4, #1, %Q1, %R1, c0\n\t" // WXUP a
+        "mcrr p4, #1, %Q2, %R2, c1\n\t" // WYUP b
+        "cdp p4, #0, c0, c0, c1, #0\n\t" // ADD0
+        "cdp p4, #1, c0, c0, c1, #0\n\t" // ADD1
+        "cdp p4, #8, c0, c0, c2, #1\n\t" // NRDF
+        "mrc p4, #0, %0, c0, c2, #0\n\t" // RDFA result
+        : "=r" (ur)
+        : "r" (ua), "r" (ub)
+    );
+    float r; memcpy(&r, &ur, 4); return r;
+}
+
 static inline double dcp_dsub(double a, double b) {
     uint64_t ua, ub, ur;
     memcpy(&ua, &a, 8); memcpy(&ub, &b, 8);
