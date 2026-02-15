@@ -380,6 +380,11 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
 void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin) {
     assert(!inst->enabled);
 
+    // Mask DMA IRQ for this channel so the handler can't restart transfers
+    // during reinit (abort can set the completion flag on RP2040, which would
+    // cause the handler to start a new DMA while the SM is being reconfigured)
+    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+
     // Abort any stale DMA transfer
     dma_channel_abort(inst->dma_channel);
 
@@ -406,6 +411,10 @@ void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin) {
     if (inst->freq != 0) {
         update_pio_frequency(inst, inst->freq);
     }
+
+    // Clear any stale DMA completion flag (from abort), then unmask
+    dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
 
     inst->pin = new_pin;
 }

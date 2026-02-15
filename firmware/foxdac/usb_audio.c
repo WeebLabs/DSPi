@@ -390,7 +390,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // ========== PASS 4: Matrix Mixing (block-based, output-major) ==========
     // Snapshot crosspoint coefficients and process one output at a time
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-        if (!matrix_mixer.outputs[out].enabled) continue;
+        if (!matrix_mixer.outputs[out].enabled) {
+            memset(buf_out[out], 0, sample_count * sizeof(float));
+            continue;
+        }
 
         // Load crosspoint config once per output (not per sample)
         float gain_l = 0.0f, gain_r = 0.0f;
@@ -660,7 +663,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     // ========== PASS 4: Matrix Mixing (block-based, output-major) ==========
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-        if (!matrix_mixer.outputs[out].enabled) continue;
+        if (!matrix_mixer.outputs[out].enabled) {
+            memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+            continue;
+        }
 
         MatrixCrosspoint *xp_l = &matrix_mixer.crosspoints[0][out];
         MatrixCrosspoint *xp_r = &matrix_mixer.crosspoints[1][out];
