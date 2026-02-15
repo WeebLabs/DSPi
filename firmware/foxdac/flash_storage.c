@@ -13,7 +13,7 @@
 // Flash configuration - use last 4KB sector
 #define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
 #define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 6
+#define FLASH_VERSION 7
 
 // Pointer to read flash via XIP
 #define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
@@ -67,8 +67,8 @@ typedef struct __attribute__((packed)) {
     FlashMatrixCrosspoint matrix_crosspoints[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
     FlashOutputChannel matrix_outputs[NUM_OUTPUT_CHANNELS];
     // V6: Output pin configuration
-    uint8_t output_pins[5];  // SPDIF 1-4 + PDM GPIO pins
-    uint8_t pin_padding[3];  // Alignment
+    uint8_t output_pins[NUM_PIN_OUTPUTS];
+    uint8_t pin_padding[8 - NUM_PIN_OUTPUTS];  // Alignment to 8 bytes
 } FlashStorage;
 
 // External variables we need to access (defined in usb_audio.c)
@@ -299,11 +299,17 @@ int flash_load_params(void) {
     // V6: Output pin configuration
     if (storage->version >= 6) {
         // Default pins used as reference for validation
-        static const uint8_t default_pins[5] = {
+#if PICO_RP2350
+        static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
             PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
             PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
         };
-        for (int i = 0; i < 5; i++) {
+#else
+        static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
+            PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_PDM_PIN
+        };
+#endif
+        for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
             uint8_t pin = storage->output_pins[i];
             // Validate: pin must be in valid range and not reserved
             bool valid = (pin <= 29) && (pin != 12) && !(pin >= 23 && pin <= 25);
@@ -376,7 +382,11 @@ void flash_factory_reset(void) {
     // Reset pin configuration to defaults
     output_pins[0] = PICO_AUDIO_SPDIF_PIN;
     output_pins[1] = PICO_SPDIF_PIN_2;
+#if PICO_RP2350
     output_pins[2] = PICO_SPDIF_PIN_3;
     output_pins[3] = PICO_SPDIF_PIN_4;
     output_pins[4] = PICO_PDM_PIN;
+#else
+    output_pins[2] = PICO_PDM_PIN;
+#endif
 }

@@ -140,7 +140,7 @@ void core0_init() {
         // Apply saved SPDIF pin configuration (before Core 1 starts)
         extern uint8_t output_pins[];
         extern audio_spdif_instance_t *spdif_instance_ptrs[];
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
             if (output_pins[i] != spdif_instance_ptrs[i]->pin) {
                 audio_spdif_set_enabled(spdif_instance_ptrs[i], false);
                 audio_spdif_change_pin(spdif_instance_ptrs[i], output_pins[i]);
@@ -158,7 +158,7 @@ void core0_init() {
 #if ENABLE_SUB
     {
         extern uint8_t output_pins[];
-        pdm_setup_hw(output_pins[4]);
+        pdm_setup_hw(output_pins[NUM_PIN_OUTPUTS - 1]);
     }
 
     // Determine initial Core 1 mode from output enables (may have been loaded from flash)

@@ -2,6 +2,7 @@
 #include <math.h>
 #include "pdm_generator.h"
 #include "dsp_pipeline.h"
+#include "usb_audio.h"
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -39,11 +40,9 @@ volatile Core1Mode core1_mode = CORE1_MODE_IDLE;
 Core1EqWork core1_eq_work = {0};
 
 // Idle-time CPU load metering (Core 1)
-#if PICO_RP2350
 static uint32_t c1eq_last_work_end = 0;
 static uint32_t c1eq_load_q8 = 0;
 static bool c1eq_load_primed = false;
-#endif
 static uint32_t pdm_load_q8 = 0;
 
 // ----------------------------------------------------------------------------
@@ -482,7 +481,119 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
     global_status.cpu1_load = 0;
 }
-#endif // PICO_RP2350
+#else
+// ----------------------------------------------------------------------------
+// EQ WORKER LOOP (RP2040 — block-based Q28 fixed-point)
+// Processes EQ + gain + delay + SPDIF for outputs CORE1_EQ_FIRST_OUTPUT..CORE1_EQ_LAST_OUTPUT
+// in parallel with Core 0 processing outputs 0-1
+// ----------------------------------------------------------------------------
+static void __not_in_flash_func(eq_worker_loop)() {
+    c1eq_load_primed = false;
+    c1eq_load_q8 = 0;
+
+    while (core1_mode == CORE1_MODE_EQ_WORKER) {
+        // Wait for work from Core 0
+        while (!core1_eq_work.work_ready) {
+            if (core1_mode != CORE1_MODE_EQ_WORKER) return;
+            __wfe();
+        }
+        __dmb();
+
+        uint32_t work_start = time_us_32();
+
+        // Read work descriptor
+        int32_t (*buf_out)[192] = core1_eq_work.buf_out;
+        uint32_t sample_count = core1_eq_work.sample_count;
+        int32_t vol_mul = core1_eq_work.vol_mul;
+        bool is_bypassed = bypass_master_eq;
+
+        // Process EQ + gain for outputs assigned to Core 1
+        extern MatrixMixer matrix_mixer;
+        for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+            if (!matrix_mixer.outputs[out].enabled) continue;
+
+            // Output EQ (block-based)
+            if (!matrix_mixer.outputs[out].mute) {
+                uint8_t eq_ch = CH_OUT_1 + out;
+                if (!is_bypassed && !channel_bypassed[eq_ch]) {
+                    dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
+                }
+            }
+
+            // Combined gain + volume (Q15)
+            int32_t gain = matrix_mixer.outputs[out].mute ? 0
+                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul);
+            if (gain == 0) {
+                memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+            } else {
+                int32_t *dst = buf_out[out];
+                for (uint32_t i = 0; i < sample_count; i++)
+                    dst[i] = fast_mul_q15(dst[i], gain);
+            }
+        }
+
+        // Delay for Core 1 outputs
+        if (any_delay_active) {
+            for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+                int32_t dly = channel_delay_samples[out];
+                if (dly <= 0) continue;
+                int32_t *dst = buf_out[out];
+                int32_t *dline = delay_lines[out];
+                uint32_t widx = core1_eq_work.delay_write_idx;
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    dline[widx] = dst[i];
+                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
+                    widx = (widx + 1) & MAX_DELAY_MASK;
+                }
+            }
+        }
+
+        // S/PDIF conversion for Core 1's pair (outputs 2-3 → int16)
+        {
+            int16_t *out_ptr = core1_eq_work.spdif_out[0];
+            if (out_ptr) {
+                int left_out = CORE1_EQ_FIRST_OUTPUT;
+                int right_out = CORE1_EQ_FIRST_OUTPUT + 1;
+                if (!matrix_mixer.outputs[left_out].enabled &&
+                    !matrix_mixer.outputs[right_out].enabled) {
+                    memset(out_ptr, 0, sample_count * 4);
+                } else {
+                    for (uint32_t i = 0; i < sample_count; i++) {
+                        out_ptr[i*2]   = (int16_t)(clip_s32(buf_out[left_out][i] + (1<<13)) >> 14);
+                        out_ptr[i*2+1] = (int16_t)(clip_s32(buf_out[right_out][i] + (1<<13)) >> 14);
+                    }
+                }
+            }
+        }
+
+        uint32_t work_end = time_us_32();
+
+        if (c1eq_load_primed) {
+            uint32_t busy_us = work_end - work_start;
+            uint32_t idle_us = work_start - c1eq_last_work_end;
+            if (idle_us > 2000) idle_us = 0;
+
+            uint32_t total_us = busy_us + idle_us;
+            if (total_us > 0) {
+                uint32_t inst_q8 = (busy_us * 25600) / total_us;
+                c1eq_load_q8 = c1eq_load_q8 - (c1eq_load_q8 >> 3) + (inst_q8 >> 3);
+            }
+            global_status.cpu1_load = (uint8_t)((c1eq_load_q8 + 128) >> 8);
+        } else {
+            c1eq_load_primed = true;
+        }
+        c1eq_last_work_end = work_end;
+
+        // Signal completion to Core 0
+        core1_eq_work.work_ready = false;
+        __dmb();
+        core1_eq_work.work_done = true;
+        __sev();
+    }
+
+    global_status.cpu1_load = 0;
+}
+#endif
 
 // ----------------------------------------------------------------------------
 // CORE 1 ENTRY — mode dispatcher
@@ -493,11 +604,9 @@ void pdm_core1_entry() {
             case CORE1_MODE_PDM:
                 pdm_processing_loop();
                 break;
-#if PICO_RP2350
             case CORE1_MODE_EQ_WORKER:
                 eq_worker_loop();
                 break;
-#endif
             default:
                 global_status.cpu1_load = 0;
                 __wfe();

@@ -18,6 +18,7 @@
 #include <math.h>
 #include <string.h>
 #include "crossfeed.h"
+#include "dsp_pipeline.h"
 
 // Preset definitions: {cutoff_hz, feed_db}
 // feed_db = level difference between direct and crossfeed at DC
@@ -162,18 +163,16 @@ void crossfeed_process_stereo(CrossfeedState *state, int32_t *left, int32_t *rig
     int32_t in_R = *right;
 
     // Lowpass filter both channels
-    int64_t lp_acc_L = (int64_t)state->lp_a0 * in_L + (int64_t)state->lp_b1 * state->lp_state_L;
-    int64_t lp_acc_R = (int64_t)state->lp_a0 * in_R + (int64_t)state->lp_b1 * state->lp_state_R;
-    int32_t lp_out_L = (int32_t)(lp_acc_L >> 28);
-    int32_t lp_out_R = (int32_t)(lp_acc_R >> 28);
+    int32_t lp_out_L = fast_mul_q28(state->lp_a0, in_L) + fast_mul_q28(state->lp_b1, state->lp_state_L);
+    int32_t lp_out_R = fast_mul_q28(state->lp_a0, in_R) + fast_mul_q28(state->lp_b1, state->lp_state_R);
     state->lp_state_L = lp_out_L;
     state->lp_state_R = lp_out_R;
 
     // All-pass filter on crossfeed signals for ITD (Q28)
-    int32_t ap_out_L = (int32_t)(((int64_t)state->ap_a * lp_out_L) >> 28) + state->ap_state_L;
-    state->ap_state_L = lp_out_L - (int32_t)(((int64_t)state->ap_a * ap_out_L) >> 28);
-    int32_t ap_out_R = (int32_t)(((int64_t)state->ap_a * lp_out_R) >> 28) + state->ap_state_R;
-    state->ap_state_R = lp_out_R - (int32_t)(((int64_t)state->ap_a * ap_out_R) >> 28);
+    int32_t ap_out_L = fast_mul_q28(state->ap_a, lp_out_L) + state->ap_state_L;
+    state->ap_state_L = lp_out_L - fast_mul_q28(state->ap_a, ap_out_L);
+    int32_t ap_out_R = fast_mul_q28(state->ap_a, lp_out_R) + state->ap_state_R;
+    state->ap_state_R = lp_out_R - fast_mul_q28(state->ap_a, ap_out_R);
 
     // Complementary mixing with ITD
     *left  = (in_L - lp_out_L) + ap_out_R;

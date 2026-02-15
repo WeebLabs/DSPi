@@ -28,12 +28,14 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 
 #define ENABLE_SUB 1
 
-// S/PDIF Output Pins (4 outputs on PIO0)
+// S/PDIF Output Pins
 #undef PICO_AUDIO_SPDIF_PIN
 #define PICO_AUDIO_SPDIF_PIN   6    // S/PDIF 1 (Out 1-2)
 #define PICO_SPDIF_PIN_2       7    // S/PDIF 2 (Out 3-4)
-#define PICO_SPDIF_PIN_3       8    // S/PDIF 3 (Out 5-6)
-#define PICO_SPDIF_PIN_4       9    // S/PDIF 4 (Out 7-8)
+#if PICO_RP2350
+#define PICO_SPDIF_PIN_3       8    // S/PDIF 3 (Out 5-6) — RP2350 only
+#define PICO_SPDIF_PIN_4       9    // S/PDIF 4 (Out 7-8) — RP2350 only
+#endif
 
 // PDM Subwoofer Output Pin (PIO1)
 #define PICO_PDM_PIN           10   // PDM sub (Out 9)
@@ -64,11 +66,12 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 
 // DELAY CONFIGURATION
 // RP2350: 170ms max delay (8192 samples at 48kHz)
-// RP2040: 42ms max delay (2048 samples) — 9 channels × 2048 × 4 = 72 KB RAM
+// RP2040: 85ms hardware max (4096 samples), software-capped at 50ms
 #if PICO_RP2350
 #define MAX_DELAY_SAMPLES 8192
 #else
-#define MAX_DELAY_SAMPLES 2048
+#define MAX_DELAY_SAMPLES 4096
+#define MAX_DELAY_MS_CAP  50.0f
 #endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
@@ -168,37 +171,55 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 #define PIN_CONFIG_INVALID_OUTPUT   0x03
 #define PIN_CONFIG_OUTPUT_ACTIVE    0x04
 
-// Number of configurable outputs (4 SPDIF + 1 PDM)
-#define NUM_PIN_OUTPUTS             5
+// Number of configurable outputs (SPDIF + PDM)
+#if PICO_RP2350
+#define NUM_SPDIF_INSTANCES         4
+#define NUM_PIN_OUTPUTS             5   // 4 SPDIF + 1 PDM
+#else
+#define NUM_SPDIF_INSTANCES         2
+#define NUM_PIN_OUTPUTS             3   // 2 SPDIF + 1 PDM
+#endif
 
 // USB Audio Feature Unit IDs
 #define FEATURE_MUTE_CONTROL 1u
 #define FEATURE_VOLUME_CONTROL 2u
 #define ENDPOINT_FREQ_CONTROL 1u
 
-// Channel Definitions (11 total: 2 master + 9 outputs)
+// Channel Definitions
 #define CH_MASTER_LEFT   0
 #define CH_MASTER_RIGHT  1
-#define CH_OUT_1         2   // S/PDIF 1 L (GPIO 20)
-#define CH_OUT_2         3   // S/PDIF 1 R (GPIO 20)
-#define CH_OUT_3         4   // S/PDIF 2 L (GPIO 21)
-#define CH_OUT_4         5   // S/PDIF 2 R (GPIO 21)
-#define CH_OUT_5         6   // S/PDIF 3 L (GPIO 22)
-#define CH_OUT_6         7   // S/PDIF 3 R (GPIO 22)
-#define CH_OUT_7         8   // S/PDIF 4 L (GPIO 23)
-#define CH_OUT_8         9   // S/PDIF 4 R (GPIO 23)
-#define CH_OUT_9_PDM     10  // PDM sub (GPIO 10)
+#define CH_OUT_1         2   // S/PDIF 1 L
+#define CH_OUT_2         3   // S/PDIF 1 R
+#define CH_OUT_3         4   // S/PDIF 2 L
+#define CH_OUT_4         5   // S/PDIF 2 R
+#if PICO_RP2350
+// RP2350: 11 channels (2 master + 8 SPDIF + 1 PDM)
+#define CH_OUT_5         6   // S/PDIF 3 L
+#define CH_OUT_6         7   // S/PDIF 3 R
+#define CH_OUT_7         8   // S/PDIF 4 L
+#define CH_OUT_8         9   // S/PDIF 4 R
+#define CH_OUT_9_PDM     10  // PDM sub
+#define NUM_OUTPUT_CHANNELS  9
 #define NUM_CHANNELS     11
+#else
+// RP2040: 7 channels (2 master + 4 SPDIF + 1 PDM)
+#define CH_OUT_5_PDM     6   // PDM sub
+#define NUM_OUTPUT_CHANNELS  5
+#define NUM_CHANNELS     7
+#endif
 #define MAX_BANDS        12
 
 // Legacy aliases for backward compatibility
 #define CH_OUT_LEFT      CH_OUT_1
 #define CH_OUT_RIGHT     CH_OUT_2
+#if PICO_RP2350
 #define CH_OUT_SUB       CH_OUT_9_PDM
+#else
+#define CH_OUT_SUB       CH_OUT_5_PDM
+#endif
 
 // Matrix Mixer Configuration
 #define NUM_INPUT_CHANNELS   2   // USB L/R (expandable to 4 for S/PDIF input)
-#define NUM_OUTPUT_CHANNELS  9   // Out 1-8 S/PDIF + Out 9 PDM
 
 // Core 1 Operating Mode
 typedef enum {
@@ -207,19 +228,32 @@ typedef enum {
     CORE1_MODE_EQ_WORKER = 2,
 } Core1Mode;
 
-// Outputs assigned to Core 1 EQ worker (S/PDIF pairs 2-4 = outputs 2-7)
+// Outputs assigned to Core 1 EQ worker
+#if PICO_RP2350
 #define CORE1_EQ_FIRST_OUTPUT  2
-#define CORE1_EQ_LAST_OUTPUT   7
+#define CORE1_EQ_LAST_OUTPUT   7   // S/PDIF pairs 2-4 = outputs 2-7
+#else
+#define CORE1_EQ_FIRST_OUTPUT  2
+#define CORE1_EQ_LAST_OUTPUT   3   // S/PDIF pair 2 = outputs 2-3
+#endif
 
 // Core 1 EQ Worker Handshake
 typedef struct {
     volatile bool     work_ready;
     volatile bool     work_done;
+#if PICO_RP2350
     float           (*buf_out)[192];   // Pointer to buf_out array, set once at init
     uint32_t          sample_count;
     float             vol_mul;
     uint32_t          delay_write_idx;  // Snapshot for Core 1 delay processing
     int16_t          *spdif_out[3];     // Pairs 1-3 output buffers (NULL = skip)
+#else
+    int32_t         (*buf_out)[192];   // Pointer to buf_out array (Q28), set once at init
+    uint32_t          sample_count;
+    int32_t           vol_mul;         // Q15 master volume
+    uint32_t          delay_write_idx;
+    int16_t          *spdif_out[1];    // SPDIF pair 2 output buffer (NULL = skip)
+#endif
 } Core1EqWork;
 
 // ----------------------------------------------------------------------------
@@ -350,6 +384,22 @@ static inline int32_t clip_s64_to_s32(int64_t x) {
     if (x > INT32_MAX) return INT32_MAX;
     if (x < INT32_MIN) return INT32_MIN;
     return (int32_t)x;
+}
+
+// Q15 fixed-point multiply using 16-bit partial products.
+// Computes (sample * gain) >> 15 without 64-bit library call.
+// Exact when the final result fits in int32 (always true for valid audio).
+static inline int32_t fast_mul_q15(int32_t sample, int32_t gain) {
+    int32_t sh = sample >> 16;
+    uint32_t sl = (uint16_t)sample;
+    int32_t gh = gain >> 16;
+    uint32_t gl = (uint16_t)gain;
+
+    int32_t hh = sh * gh;
+    int32_t mid = sh * (int32_t)gl + (int32_t)sl * gh;
+    uint32_t ll = sl * gl;
+
+    return (int32_t)(((uint32_t)hh << 17) + ((uint32_t)mid << 1) + (ll >> 15));
 }
 #endif
 

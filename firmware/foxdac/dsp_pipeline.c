@@ -21,9 +21,9 @@ EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
 float channel_delays_ms[NUM_CHANNELS] = {0};  // All 11 channels initialized to 0
 bool channel_bypassed[NUM_CHANNELS];
 
-// Delay Line State (all 9 output channels on both platforms)
-// RP2350: float, 170ms max delay (8192 samples)
-// RP2040: int32_t, 42ms max delay (2048 samples)
+// Delay Line State (all output channels on both platforms)
+// RP2350: float, 170ms max delay (8192 samples), 9 channels
+// RP2040: int32_t, 50ms software cap (4096 samples hardware), 5 channels
 #if PICO_RP2350
 float delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #else
@@ -38,8 +38,8 @@ uint8_t channel_band_counts[NUM_CHANNELS] = {
     // Master L, Master R, Out1-9 (11 channels total)
     10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10
 #else
-    // RP2040: fewer bands on output channels due to CPU constraints
-    10, 10, 2, 2, 2, 2, 2, 2, 2, 2, 2
+    // RP2040: 7 channels (2 master + 4 SPDIF + 1 PDM)
+    10, 10, 10, 10, 10, 10, 10
 #endif
 };
 
@@ -124,15 +124,19 @@ void dsp_init_default_filters() {
         }
     }
 
-    // Default: highpass on S/PDIF outputs 1-8 (main speakers)
+    // Default: highpass on S/PDIF outputs (main speakers)
     EqParamPacket hp = { .type = FILTER_HIGHPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
+#if PICO_RP2350
     for (int out = CH_OUT_1; out <= CH_OUT_8; out++) {
+#else
+    for (int out = CH_OUT_1; out <= CH_OUT_4; out++) {
+#endif
         filter_recipes[out][0] = hp;
     }
 
     // Default: lowpass on PDM sub output
     EqParamPacket lp = { .type = FILTER_LOWPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
-    filter_recipes[CH_OUT_9_PDM][0] = lp;
+    filter_recipes[CH_OUT_SUB][0] = lp;
 }
 
 void dsp_update_delay_samples(float sample_rate) {
@@ -152,6 +156,10 @@ void dsp_update_delay_samples(float sample_rate) {
         }
 
         int32_t samples = (int32_t)(delay_ms * sample_rate / 1000.0f);
+#if !PICO_RP2350
+        int32_t max_cap = (int32_t)(MAX_DELAY_MS_CAP * sample_rate / 1000.0f);
+        if (samples > max_cap) samples = max_cap;
+#endif
         if (samples > MAX_DELAY_SAMPLES) samples = MAX_DELAY_SAMPLES;
         if (samples < 0) samples = 0;
         channel_delay_samples[out] = samples;
@@ -242,6 +250,10 @@ void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict s
     }
 }
 #else
-// RP2040: Implemented in dsp_process_rp2040.S for maximum performance
+// RP2040: Per-sample implemented in dsp_process_rp2040.S
 extern int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel);
+
+// RP2040: Block-based biquad implemented in dsp_process_rp2040.S (assembly)
+extern void dsp_process_channel_block(Biquad * __restrict biquads, int32_t * __restrict samples,
+                                      uint32_t count, uint8_t channel);
 #endif
