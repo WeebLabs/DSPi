@@ -160,8 +160,8 @@ extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 
 // Firmware version (BCD encoded: major in high byte, minor.patch in low byte)
 #define FW_VERSION_MAJOR            1
-#define FW_VERSION_MINOR            0
-#define FW_VERSION_PATCH            9
+#define FW_VERSION_MINOR            1
+#define FW_VERSION_PATCH            0
 #define FW_VERSION_BCD              ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
 
 // Pin config status codes
