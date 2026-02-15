@@ -309,7 +309,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // ------------------------------------------------------------------------
     const float inv_32768 = 1.0f / 32768.0f;
 
-    float vol_mul = (float)audio_state.vol_mul * inv_32768;
+    float vol_mul = audio_state.mute ? 0.0f : (float)audio_state.vol_mul * inv_32768;
     float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
 
@@ -589,7 +589,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // RP2040 BLOCK-BASED FIXED-POINT PIPELINE WITH MATRIX MIXER
     // 2 SPDIF stereo pairs + PDM sub, dual-core EQ worker
     // ------------------------------------------------------------------------
-    int32_t vol_mul = audio_state.vol_mul;
+    int32_t vol_mul = audio_state.mute ? 0 : audio_state.vol_mul;
     int32_t preamp = global_preamp_mul;
     bool is_bypassed = bypass_master_eq;
 
