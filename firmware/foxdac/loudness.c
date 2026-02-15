@@ -162,8 +162,8 @@ void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_r
     static const float shelf_Q = 0.707f;
 
     for (int vol_idx = 0; vol_idx < LOUDNESS_VOL_STEPS; vol_idx++) {
-        // Volume in dB: index 0 = -90 dB, index 90 = 0 dB
-        float vol_db = (float)(vol_idx - 90);
+        // Volume in dB: index 0 = -60 dB (silent), index 60 = 0 dB
+        float vol_db = (float)(vol_idx - 60);
 
         // Effective phon = ref_spl + vol_db, clamped to [20, ref_spl]
         float effective_phon = ref_spl + vol_db;

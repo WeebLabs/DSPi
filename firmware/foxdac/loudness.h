@@ -4,7 +4,7 @@
 #include "config.h"
 
 #define LOUDNESS_BIQUAD_COUNT 2
-#define LOUDNESS_VOL_STEPS    91
+#define LOUDNESS_VOL_STEPS    61
 
 // Coefficients-only struct (state lives separately per channel)
 #if PICO_RP2350
