@@ -206,14 +206,7 @@ static void pdm_processing_loop() {
     const int32_t TARGET_LEAD = 256;
 
     uint32_t local_pdm_write = 0;
-    bool hw_running = true;  // pdm_setup_hw() already started PIO+DMA
-
-    // Initialize write pointer ahead of DMA read position
-    {
-        uint32_t init_read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
-        uint32_t init_read_idx = (init_read_addr - (uint32_t)pdm_dma_buffer) / 4;
-        local_pdm_write = (init_read_idx + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
-    }
+    bool hw_running = false;  // Always go through restart path on fresh entry
 
     while (core1_mode == CORE1_MODE_PDM) {
         // ---- Enable/disable state machine ----
