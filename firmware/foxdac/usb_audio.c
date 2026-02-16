@@ -110,6 +110,16 @@ struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S16, 
 #define producer_pool producer_pool_1
 #define sub_producer_pool producer_pool_2
 
+// Systick counters
+volatile uint32_t systick_input_convert = 0;
+volatile uint32_t systick_loudness = 0;
+volatile uint32_t systick_master_eq = 0;
+volatile uint32_t systick_crossfeed_master_peaks = 0;
+volatile uint32_t systick_matrix_mixer = 0;
+volatile uint32_t systick_output_eq = 0;
+volatile uint32_t systick_delay = 0;
+volatile uint32_t systick_peaks_spdif = 0;
+
 // ----------------------------------------------------------------------------
 // USB INTERFACE / ENDPOINT OBJECTS
 // ----------------------------------------------------------------------------
@@ -329,12 +339,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static float buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
+    start_systick();
     for (uint32_t i = 0; i < sample_count; i++) {
         buf_l[i] = (float)in[i*2] * inv_32768 * preamp;
         buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp;
     }
+    systick_input_convert = stop_systick();
 
     // Loudness compensation
+    start_systick();
     if (loud_on && loud_coeffs) {
         for (uint32_t i = 0; i < sample_count; i++) {
             float raw_left = buf_l[i];
@@ -365,8 +378,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             buf_r[i] = raw_right;
         }
     }
+    systick_loudness = stop_systick();
 
     // ========== PASS 2: Master EQ (Block-Based) ==========
+    start_systick();
     if (!is_bypassed) {
         if (!channel_bypassed[CH_MASTER_LEFT]) {
             dsp_process_channel_block(filters[CH_MASTER_LEFT], buf_l, sample_count, CH_MASTER_LEFT);
@@ -375,8 +390,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             dsp_process_channel_block(filters[CH_MASTER_RIGHT], buf_r, sample_count, CH_MASTER_RIGHT);
         }
     }
+    systick_master_eq = stop_systick();
 
     // ========== PASS 3: Crossfeed + Master Peaks ==========
+    start_systick();
     bool do_crossfeed = !crossfeed_bypassed;
 
     // Crossfeed is sample-by-sample (internal state), combined with peak tracking
@@ -389,9 +406,11 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             buf_l[i] = ml; buf_r[i] = mr;
         }
     }
+    systick_crossfeed_master_peaks = stop_systick();
 
     // ========== PASS 4: Matrix Mixing (block-based, output-major) ==========
     // Snapshot crosspoint coefficients and process one output at a time
+    start_systick();
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
         if (!matrix_mixer.outputs[out].enabled) {
             memset(buf_out[out], 0, sample_count * sizeof(float));
@@ -419,6 +438,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             memset(dst, 0, sample_count * sizeof(float));
         }
     }
+    systick_matrix_mixer = stop_systick();
 
     // ========== PASS 5-7: Per-Output EQ + Gain + Delay + Output ==========
     if (core1_mode == CORE1_MODE_EQ_WORKER) {
@@ -437,6 +457,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         __sev();
 
         // Core 0: EQ + gain for outputs 0-1
+        start_systick();
         for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -455,8 +476,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dst[i] *= gain;
             }
         }
+        systick_output_eq = stop_systick();
 
         // Core 0: Delay for outputs 0-1
+        start_systick();
         if (any_delay_active) {
             for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
                 int32_t dly = channel_delay_samples[out];
@@ -471,8 +494,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 }
             }
         }
+        systick_delay = stop_systick();
 
         // Core 0: Peaks + S/PDIF for pair 0
+        start_systick();
         for (uint32_t i = 0; i < sample_count; i++) {
             float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
             float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
@@ -491,6 +516,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 }
             }
         }
+        systick_peaks_spdif = stop_systick();
 
         // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-7)
         while (!core1_eq_work.work_done) {
@@ -506,6 +532,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         // --- Single-core path: all outputs on Core 0 ---
 
         // EQ + gain
+        start_systick();
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -524,8 +551,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dst[i] *= gain;
             }
         }
+        systick_output_eq = stop_systick();
 
         // Delay
+        start_systick();
         if (any_delay_active) {
             for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
                 int32_t dly = channel_delay_samples[out];
@@ -541,8 +570,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
             delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
+        systick_delay = stop_systick();
 
         // Peaks (first stereo pair only)
+        start_systick();
         for (uint32_t i = 0; i < sample_count; i++) {
             float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
             float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
@@ -565,6 +596,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 out_ptr[i*2+1]   = (int16_t)(dr * 32767.0f);
             }
         }
+        systick_peaks_spdif = stop_systick();
 
 #if ENABLE_SUB
         if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled) {
@@ -606,14 +638,17 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static int32_t buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
+    start_systick();
     for (uint32_t i = 0; i < sample_count; i++) {
         int32_t raw_left_32 = (int32_t)in[i*2] << 14;
         int32_t raw_right_32 = (int32_t)in[i*2+1] << 14;
         buf_l[i] = fast_mul_q28(raw_left_32, preamp);
         buf_r[i] = fast_mul_q28(raw_right_32, preamp);
     }
+    systick_input_convert = stop_systick();
 
     // Loudness compensation (per-sample — biquad state coupling)
+    start_systick();
     if (loud_on && loud_coeffs) {
         for (uint32_t i = 0; i < sample_count; i++) {
             int32_t raw_left_32 = buf_l[i];
@@ -644,16 +679,20 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             buf_r[i] = raw_right_32;
         }
     }
+    systick_loudness = stop_systick();
 
     // ========== PASS 2: Master EQ (Block-Based) ==========
+    start_systick()
     if (!is_bypassed) {
         if (!channel_bypassed[CH_MASTER_LEFT])
             dsp_process_channel_block(filters[CH_MASTER_LEFT], buf_l, sample_count, CH_MASTER_LEFT);
         if (!channel_bypassed[CH_MASTER_RIGHT])
             dsp_process_channel_block(filters[CH_MASTER_RIGHT], buf_r, sample_count, CH_MASTER_RIGHT);
     }
+    systick_master_eq = stop_systick();
 
     // ========== PASS 3: Crossfeed + Master Peaks ==========
+    start_systick();
     for (uint32_t i = 0; i < sample_count; i++) {
         int32_t ml = buf_l[i], mr = buf_r[i];
         if (abs(ml) > peak_ml) peak_ml = abs(ml);
@@ -663,8 +702,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             buf_l[i] = ml; buf_r[i] = mr;
         }
     }
+    systick_crossfeed_master_peaks = stop_systick();
 
     // ========== PASS 4: Matrix Mixing (block-based, output-major) ==========
+    start_systick();
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
         if (!matrix_mixer.outputs[out].enabled) {
             memset(buf_out[out], 0, sample_count * sizeof(int32_t));
@@ -690,6 +731,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             memset(dst, 0, sample_count * sizeof(int32_t));
         }
     }
+    systick_matrix_mixer = stop_systick();
 
     // ========== PASS 5-7: Per-Output EQ + Gain + Delay + Output ==========
     // PDM output index
@@ -709,6 +751,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         __sev();
 
         // Core 0: EQ + gain for outputs 0-1 (SPDIF pair 1)
+        start_systick();
         for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -726,8 +769,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dst[i] = fast_mul_q15(dst[i], gain);
             }
         }
+        systick_output_eq = stop_systick();
 
         // Core 0: Delay for outputs 0-1
+        start_systick();
         if (any_delay_active) {
             for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
                 int32_t dly = channel_delay_samples[out];
@@ -742,8 +787,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 }
             }
         }
+        systick_delay = stop_systick();
 
         // Core 0: Peaks + S/PDIF conversion for pair 1
+        start_systick();
         for (uint32_t i = 0; i < sample_count; i++) {
             if (abs(buf_out[0][i]) > peak_ol) peak_ol = abs(buf_out[0][i]);
             if (abs(buf_out[1][i]) > peak_or) peak_or = abs(buf_out[1][i]);
@@ -759,6 +806,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 }
             }
         }
+        systick_peaks_spdif = stop_systick();
 
         // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-3)
         while (!core1_eq_work.work_done) {
@@ -775,6 +823,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         uint32_t saved_delay_write_idx = delay_write_idx;
 
         // EQ + gain (block-based)
+        start_systick();
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -792,8 +841,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dst[i] = fast_mul_q15(dst[i], gain);
             }
         }
+        systick_output_eq = stop_systick();
 
         // Delay (all outputs use same base write index)
+        start_systick();
         if (any_delay_active) {
             for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
                 int32_t dly = channel_delay_samples[out];
@@ -809,8 +860,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
             delay_write_idx = (saved_delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
+        systick_delay = stop_systick();
 
         // Peaks (first stereo pair + sub)
+        start_systick();
         for (uint32_t i = 0; i < sample_count; i++) {
             if (abs(buf_out[0][i]) > peak_ol) peak_ol = abs(buf_out[0][i]);
             if (abs(buf_out[1][i]) > peak_or) peak_or = abs(buf_out[1][i]);
@@ -831,6 +884,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 out_ptr[i*2+1] = (int16_t)(clip_s32(buf_out[right_ch][i] + (1<<13)) >> 14);
             }
         }
+        systick_peaks_spdif = stop_systick();
 
 #if ENABLE_SUB
         // PDM sub output

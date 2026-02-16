@@ -244,6 +244,8 @@ int main(void) {
 
     core0_init();
 
+    stdio_init_all();
+
     // Enable watchdog
     watchdog_enable(8000, 1);
 
@@ -315,6 +317,20 @@ int main(void) {
         if (++loop_counter >= 1000) {
             loop_counter = 0;
             gpio_xor_mask(1u << 25);
+        }
+
+        static uint32_t systick_print_counter = 0;
+        if(systick_print_counter++ > 10000000) {
+            printf("systick input convert      %u\n", systick_input_convert);
+            printf("systick loudness           %u\n", systick_loudness);
+            printf("systick master eq          %u\n", systick_master_eq);
+            printf("systick xfeed master peaks %u\n", systick_crossfeed_master_peaks);
+            printf("systick matrix mixer       %u\n", systick_matrix_mixer);
+            printf("systick output eq          %u\n", systick_output_eq);
+            printf("systick delay              %u\n", systick_delay);
+            printf("systick output peaks spdif %u\n", systick_peaks_spdif);
+            printf("\n");
+            systick_print_counter=0;
         }
     }
 }

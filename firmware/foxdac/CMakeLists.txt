@@ -23,6 +23,8 @@ add_executable(foxdac
     main.c
     pdm_generator.c
     pdm_generator.h
+    systick.c
+    systick.h
     usb_audio.c
     usb_audio.h
     usb_descriptors.c
