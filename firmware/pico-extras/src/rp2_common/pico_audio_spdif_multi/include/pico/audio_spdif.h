@@ -96,6 +96,10 @@ typedef struct audio_spdif_instance {
     uint32_t freq;
     bool enabled;
 
+    // DMA word tracking for USB feedback endpoint
+    volatile uint32_t words_consumed;       // Total DMA words consumed (incremented in DMA IRQ)
+    uint32_t current_transfer_words;        // DMA word count of current transfer
+
     // Per-instance audio pipeline
     audio_format_t consumer_format;
     audio_buffer_format_t consumer_buffer_format;

@@ -11,6 +11,7 @@
 #include "hardware/vreg.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/clocks.h"
+#include "hardware/dma.h"
 #include "hardware/timer.h"
 
 // Local headers
@@ -27,9 +28,53 @@
 // GLOBAL DEFINITIONS
 // ----------------------------------------------------------------------------
 
-// USB SOF IRQ stub (required by pico-extras usb_device library)
+// USB audio feedback (SOF-measured, 10.14 fixed-point)
+volatile uint32_t feedback_10_14 = 0;
+volatile uint32_t nominal_feedback_10_14 = 0;
+
+// SOF handler state for feedback measurement
+static uint32_t sof_count = 0;
+static uint32_t fb_last_total = 0;
+static uint32_t fb_accum = 0;
+static volatile uint32_t feedback_reset_value = 0;
+
+// USB SOF IRQ — measures device clock vs host clock for async feedback
 void __not_in_flash_func(usb_sof_irq)(void) {
-    // Called on USB Start of Frame - not used by this application
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
+
+    // Read total DMA words consumed by instance 0 (sub-buffer precision)
+    uint32_t remaining = dma_channel_hw_addr(inst->dma_channel)->transfer_count;
+    uint32_t current_total = inst->words_consumed
+                           + (inst->current_transfer_words - remaining);
+
+    // Handle reset request from rate change
+    if (feedback_reset_value) {
+        fb_accum = feedback_reset_value;
+        feedback_reset_value = 0;
+        fb_last_total = current_total;
+        sof_count = 0;
+    }
+
+    sof_count++;
+    if ((sof_count & 0x3) == 0) {  // Every 4 SOFs (bRefresh=2 → 2^2=4)
+        uint32_t delta_words = current_total - fb_last_total;
+        fb_last_total = current_total;
+
+        if (delta_words > 0) {
+            // 10.14 format: delta_words / 4_SOFs / 4_words_per_sample * 2^14
+            //             = delta_words * (2^14 / 16) = delta_words << 10
+            uint32_t raw = delta_words << 10;
+
+            if (fb_accum == 0) {
+                fb_accum = raw;
+            } else {
+                int32_t error = (int32_t)raw - (int32_t)fb_accum;
+                fb_accum += error >> 3;  // IIR α≈0.125, τ≈32ms
+            }
+            feedback_10_14 = fb_accum;
+        }
+    }
 }
 
 volatile int overruns = 0;  // Legacy - kept for compatibility
@@ -90,6 +135,11 @@ static void perform_rate_change(uint32_t new_freq) {
     sync_started = false;
     total_samples_produced = 0;
 
+    // Pre-compute nominal feedback and reset SOF measurement
+    nominal_feedback_10_14 = ((uint64_t)new_freq << 14) / 1000;
+    feedback_10_14 = nominal_feedback_10_14;
+    feedback_reset_value = nominal_feedback_10_14;
+
     dsp_recalculate_all_filters((float)new_freq);
     loudness_recompute_pending = true;
     crossfeed_update_pending = true;  // Recalculate crossfeed coefficients for new sample rate
@@ -128,6 +178,10 @@ void core0_init() {
     // SPDIF requires DMA Channel 0 (hardcoded in config).
     // If PDM inits first, it steals Ch 0 via dma_claim_unused_channel(), causing SPDIF to panic/crash.
     usb_sound_card_init();
+
+    // Initialize nominal feedback for default sample rate
+    nominal_feedback_10_14 = ((uint64_t)audio_state.freq << 14) / 1000;
+    feedback_10_14 = nominal_feedback_10_14;
 
     // Try to load saved parameters from flash
     // If successful, this overwrites the defaults set by usb_sound_card_init()

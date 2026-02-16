@@ -909,14 +909,14 @@ static void __not_in_flash_func(_as_sync_packet)(struct usb_endpoint *ep) {
     assert(buffer->data_max >= 3);
     buffer->data_len = 3;
 
-    // 10.14 fixed-point feedback: nominal sample rate
-    uint feedback = (audio_state.freq << 14u) / 1000u;
+    // Use SOF-measured feedback; fall back to pre-computed nominal
+    uint32_t fb = feedback_10_14;
+    if (fb == 0) fb = nominal_feedback_10_14;
 
-    buffer->data[0] = feedback;
-    buffer->data[1] = feedback >> 8u;
-    buffer->data[2] = feedback >> 16u;
+    buffer->data[0] = fb;
+    buffer->data[1] = fb >> 8u;
+    buffer->data[2] = fb >> 16u;
 
-    // keep on truckin'
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }

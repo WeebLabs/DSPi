@@ -342,7 +342,9 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
         overruns++;
     }
 
-    dma_channel_transfer_from_buffer_now(inst->dma_channel, ab->buffer->bytes, ab->sample_count * 4);
+    uint32_t transfer_words = ab->sample_count * 4;
+    inst->current_transfer_words = transfer_words;
+    dma_channel_transfer_from_buffer_now(inst->dma_channel, ab->buffer->bytes, transfer_words);
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +360,8 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
         if (dma_irqn_get_channel_status(inst->dma_irq, inst->dma_channel)) {
             dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
             DEBUG_PINS_SET(audio_timing, 4);
+            // Track total DMA words consumed (for USB feedback endpoint)
+            inst->words_consumed += inst->current_transfer_words;
             // free the buffer we just finished
             if (inst->playing_buffer) {
                 extern volatile uint32_t pio_samples_dma;

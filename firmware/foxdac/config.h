@@ -22,6 +22,10 @@ extern volatile uint32_t usb_audio_packets;   // Debug: count of USB audio packe
 extern volatile uint32_t usb_audio_alt_set;   // Debug: last alt setting selected
 extern volatile uint32_t usb_audio_mounted;   // Debug: audio mounted state
 
+// USB audio feedback (SOF-measured, 10.14 fixed-point)
+extern volatile uint32_t feedback_10_14;
+extern volatile uint32_t nominal_feedback_10_14;
+
 // ----------------------------------------------------------------------------
 // CONFIGURATION
 // ----------------------------------------------------------------------------
