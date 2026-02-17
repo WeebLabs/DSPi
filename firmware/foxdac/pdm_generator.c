@@ -208,17 +208,27 @@ static void pdm_processing_loop() {
     uint32_t local_pdm_write = 0;
     bool hw_running = false;  // Always go through restart path on fresh entry
 
-    while (core1_mode == CORE1_MODE_PDM) {
+    // Fade state
+    uint32_t fade_in_pos = 0;
+    uint32_t fade_out_pos = 0;
+    int32_t fade_base_pcm = 0;  // Last pcm_val before fade-out
+
+    while (core1_mode == CORE1_MODE_PDM || fade_out_pos > 0) {
         // ---- Enable/disable state machine ----
-        if (!pdm_enabled) {
+        if (!pdm_enabled && fade_out_pos == 0) {
             if (hw_running) {
-                pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
-                dma_channel_abort(pdm_dma_chan);
-                hw_running = false;
-                global_status.cpu1_load = 0;
+                // Start fade-out instead of immediate stop
+                fade_out_pos = PDM_FADE_IN_SAMPLES;
+                continue;
             }
             __wfe();
             continue;
+        }
+
+        // Cancel fade-out if re-enabled
+        if (pdm_enabled && fade_out_pos > 0) {
+            fade_in_pos = PDM_FADE_IN_SAMPLES - fade_out_pos;
+            fade_out_pos = 0;
         }
 
         if (!hw_running) {
@@ -232,6 +242,9 @@ static void pdm_processing_loop() {
             active_us_accumulator = 0;
             sample_counter = 0;
             pdm_load_q8 = 0;
+            fade_in_pos = 0;
+            fade_out_pos = 0;
+            fade_base_pcm = 0;
 
             pio_sm_set_enabled(PDM_PIO, PDM_SM, true);
 
@@ -300,12 +313,50 @@ static void pdm_processing_loop() {
 
         uint32_t start_time = time_us_32();
 
-        // Input Hard Limiter
-        int32_t pcm_val = (sample_value >> 14);
-        if (pcm_val > PDM_CLIP_THRESH) pcm_val = PDM_CLIP_THRESH;
-        if (pcm_val < -PDM_CLIP_THRESH) pcm_val = -PDM_CLIP_THRESH;
+        int32_t target;
 
-        int32_t target = pcm_val + 32768;
+        if (fade_out_pos > 0) {
+            // Audio fade-out: ramp held audio level to silence
+            pdm_tail = pdm_head;  // drain ring buffer (Core 0 stopped pushing)
+            fade_out_pos--;
+            target = ((fade_base_pcm * (int32_t)fade_out_pos) >> PDM_FADE_IN_SHIFT) + 32768;
+
+            if (fade_out_pos == 0) {
+                // Fade-out complete — stop hardware
+                pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
+                dma_channel_abort(pdm_dma_chan);
+                hw_running = false;
+                global_status.cpu1_load = 0;
+                continue;
+            }
+
+            // DMA throttle — no ring buffer pacing during fade
+            while (1) {
+                uint32_t ra = dma_hw->ch[pdm_dma_chan].read_addr;
+                uint32_t ri = (ra - (uint32_t)pdm_dma_buffer) / 4;
+                int32_t d = (local_pdm_write - ri) & (PDM_DMA_BUFFER_SIZE - 1);
+                if (d > (PDM_DMA_BUFFER_SIZE / 2)) {
+                    local_pdm_write = (ri + TARGET_LEAD) & (PDM_DMA_BUFFER_SIZE - 1);
+                    break;
+                }
+                if (d < TARGET_LEAD + 16) break;
+            }
+        } else {
+            // Normal operation (including audio fade-in)
+            // Input Hard Limiter
+            int32_t pcm_val = (sample_value >> 14);
+            if (pcm_val > PDM_CLIP_THRESH) pcm_val = PDM_CLIP_THRESH;
+            if (pcm_val < -PDM_CLIP_THRESH) pcm_val = -PDM_CLIP_THRESH;
+
+            // Audio fade-in
+            if (fade_in_pos < PDM_FADE_IN_SAMPLES) {
+                pcm_val = (pcm_val * (int32_t)fade_in_pos) >> PDM_FADE_IN_SHIFT;
+                fade_in_pos++;
+            }
+
+            fade_base_pcm = pcm_val;
+            target = pcm_val + 32768;
+        }
 
         // 256x Oversampling with 2nd-order sigma-delta modulator
         for (int chunk = 0; chunk < 8; chunk++) {
@@ -354,10 +405,10 @@ static void pdm_processing_loop() {
     }
 
     // Exiting PDM mode — clean up hardware
-    if (pdm_enabled) {
+    if (hw_running) {
         pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
         dma_channel_abort(pdm_dma_chan);
-        pdm_enabled = false;
+        hw_running = false;
     }
     global_status.cpu1_load = 0;
 }

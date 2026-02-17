@@ -64,6 +64,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 // 16 gives ~1.4s time constant at 48kHz, safe for bass
 #define PDM_LEAKAGE_SHIFT 16
 
+// PDM Soft Start/Stop
+#define PDM_FADE_IN_SHIFT   10                        // 2^10 = 1024 samples
+#define PDM_FADE_IN_SAMPLES (1u << PDM_FADE_IN_SHIFT) // ~21ms at 48kHz
+
 // SPDIF Buffer Configuration
 #define AUDIO_BUFFER_COUNT    8   // Reduced from 8, compromise for lower latency
 #define AUDIO_BUFFER_SAMPLES  192
