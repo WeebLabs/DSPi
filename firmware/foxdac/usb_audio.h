@@ -7,6 +7,7 @@
 #define USB_AUDIO_H
 
 #include "config.h"
+#include "systick.h"
 
 // ----------------------------------------------------------------------------
 // AUDIO STATE (exposed to Main)
@@ -52,6 +53,20 @@ extern volatile bool eq_update_pending;
 extern volatile EqParamPacket pending_packet;
 extern volatile bool rate_change_pending;
 extern volatile uint32_t pending_rate;
+
+// ----------------------------------------------------------------------------
+// Systick counters
+// ----------------------------------------------------------------------------
+
+extern volatile uint32_t systick_input_convert;
+extern volatile uint32_t systick_loudness;
+extern volatile uint32_t systick_master_eq;
+extern volatile uint32_t systick_crossfeed_master_peaks;
+extern volatile uint32_t systick_matrix_mixer;
+extern volatile uint32_t systick_output_eq;
+extern volatile uint32_t systick_delay;
+extern volatile uint32_t systick_peaks_spdif;
+
 
 // ----------------------------------------------------------------------------
 // API
