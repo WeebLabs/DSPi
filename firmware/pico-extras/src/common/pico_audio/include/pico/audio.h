@@ -42,6 +42,7 @@ extern "C" {
 #define AUDIO_BUFFER_FORMAT_PCM_S8 2           ///< signed 8bit PCM
 #define AUDIO_BUFFER_FORMAT_PCM_U16 3          ///< unsigned 16bit PCM
 #define AUDIO_BUFFER_FORMAT_PCM_U8 4           ///< unsigned 16bit PCM
+#define AUDIO_BUFFER_FORMAT_PCM_S32 5          ///< signed 32bit PCM (24-bit data in lower 24 bits)
 
 /** \brief Audio format definition
  */

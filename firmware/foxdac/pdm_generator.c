@@ -481,20 +481,20 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         // S/PDIF conversion for pairs 1-3
         for (int p = 0; p < 3; p++) {
-            int16_t *out_ptr = core1_eq_work.spdif_out[p];
+            int32_t *out_ptr = core1_eq_work.spdif_out[p];
             if (!out_ptr) continue;
             int left_out = CORE1_EQ_FIRST_OUTPUT + p * 2;
             int right_out = left_out + 1;
             if (!matrix_mixer.outputs[left_out].enabled &&
                 !matrix_mixer.outputs[right_out].enabled) {
-                memset(out_ptr, 0, sample_count * 4);
+                memset(out_ptr, 0, sample_count * 8);
                 continue;
             }
             for (uint32_t i = 0; i < sample_count; i++) {
                 float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[left_out][i]));
                 float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[right_out][i]));
-                out_ptr[i*2]   = (int16_t)(dl * 32767.0f);
-                out_ptr[i*2+1] = (int16_t)(dr * 32767.0f);
+                out_ptr[i*2]   = (int32_t)(dl * 8388607.0f);
+                out_ptr[i*2+1] = (int32_t)(dr * 8388607.0f);
             }
         }
 
@@ -592,19 +592,19 @@ static void __not_in_flash_func(eq_worker_loop)() {
             }
         }
 
-        // S/PDIF conversion for Core 1's pair (outputs 2-3 → int16)
+        // S/PDIF conversion for Core 1's pair (outputs 2-3 → int32 24-bit)
         {
-            int16_t *out_ptr = core1_eq_work.spdif_out[0];
+            int32_t *out_ptr = core1_eq_work.spdif_out[0];
             if (out_ptr) {
                 int left_out = CORE1_EQ_FIRST_OUTPUT;
                 int right_out = CORE1_EQ_FIRST_OUTPUT + 1;
                 if (!matrix_mixer.outputs[left_out].enabled &&
                     !matrix_mixer.outputs[right_out].enabled) {
-                    memset(out_ptr, 0, sample_count * 4);
+                    memset(out_ptr, 0, sample_count * 8);
                 } else {
                     for (uint32_t i = 0; i < sample_count; i++) {
-                        out_ptr[i*2]   = (int16_t)(clip_s32(buf_out[left_out][i] + (1<<13)) >> 14);
-                        out_ptr[i*2+1] = (int16_t)(clip_s32(buf_out[right_out][i] + (1<<13)) >> 14);
+                        out_ptr[i*2]   = clip_s24((buf_out[left_out][i] + (1 << 5)) >> 6);
+                        out_ptr[i*2+1] = clip_s24((buf_out[right_out][i] + (1 << 5)) >> 6);
                     }
                 }
             }

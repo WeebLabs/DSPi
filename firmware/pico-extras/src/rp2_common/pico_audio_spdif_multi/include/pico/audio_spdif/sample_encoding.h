@@ -15,6 +15,7 @@ extern "C" {
 
 void mono_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer);
 void stereo_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer);
+void stereo_to_spdif_producer_give_s32(audio_connection_t *connection, audio_buffer_t *buffer);
 
 typedef struct {
     uint32_t l;
@@ -23,18 +24,26 @@ typedef struct {
 
 extern uint32_t spdif_lookup[256];
 
-static inline void spdif_update_subframe(spdif_subframe_t *subframe, int16_t sample) {
-    // the subframe is partially initialized, so we need to insert the sample
-    // bits and update the parity
-    uint32_t sl = spdif_lookup[(uint8_t)sample];
-    uint32_t sh = spdif_lookup[(uint8_t)(sample>>8u)];
-    subframe->l = (subframe->l & 0xffffffu) | (sl << 24u);
+static inline void spdif_update_subframe(spdif_subframe_t *subframe, int32_t sample) {
+    // Encode 24-bit audio (bits [23:0] of sample) into SPDIF subframe.
+    // 3 lookup accesses — one per byte of 24-bit sample.
+    uint32_t s0 = spdif_lookup[(uint8_t)sample];           // byte 0 → subframe bits 4-11
+    uint32_t s1 = spdif_lookup[(uint8_t)(sample >> 8u)];   // byte 1 → subframe bits 12-19
+    uint32_t s2 = spdif_lookup[(uint8_t)(sample >> 16u)];  // byte 2 → subframe bits 20-27
+
+    // l[7:0]=preamble preserved, l[23:8]=s0 BMC, l[31:24]=s1 low BMC
+    subframe->l = (subframe->l & 0xffu)
+               | (((uint16_t)s0) << 8u)
+               | (s1 << 24u);
+
     uint32_t ph = subframe->h >> 24u;
-    uint32_t h = (((uint16_t)sh) << 8u) |
-                 (((uint16_t)sl) >> 8u);
-    uint32_t p = (sl>>16u)^(sh>>16u);
-    p = p ^ ((__mul_instruction(ph&0x2a,0x2a) >> 6u) & 1u);
-    subframe->h = h | ((ph&0x7f) << 24u) | (p << 31u);
+    // h[7:0]=s1 high BMC, h[23:8]=s2 BMC
+    uint32_t h = (((uint16_t)s1) >> 8u)
+              | (((uint16_t)s2) << 8u);
+
+    uint32_t p = (s0 >> 16u) ^ (s1 >> 16u) ^ (s2 >> 16u);
+    p = p ^ ((__mul_instruction(ph & 0x2a, 0x2a) >> 6u) & 1u);
+    subframe->h = h | ((ph & 0x7f) << 24u) | (p << 31u);
 }
 
 #ifdef __cplusplus

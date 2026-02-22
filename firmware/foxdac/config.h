@@ -254,13 +254,13 @@ typedef struct {
     uint32_t          sample_count;
     float             vol_mul;
     uint32_t          delay_write_idx;  // Snapshot for Core 1 delay processing
-    int16_t          *spdif_out[3];     // Pairs 1-3 output buffers (NULL = skip)
+    int32_t          *spdif_out[3];     // Pairs 1-3 output buffers (NULL = skip)
 #else
     int32_t         (*buf_out)[192];   // Pointer to buf_out array (Q28), set once at init
     uint32_t          sample_count;
     int32_t           vol_mul;         // Q15 master volume
     uint32_t          delay_write_idx;
-    int16_t          *spdif_out[1];    // SPDIF pair 2 output buffer (NULL = skip)
+    int32_t          *spdif_out[1];    // SPDIF pair 2 output buffer (NULL = skip)
 #endif
 } Core1EqWork;
 
@@ -392,6 +392,12 @@ static inline int32_t clip_s64_to_s32(int64_t x) {
     if (x > INT32_MAX) return INT32_MAX;
     if (x < INT32_MIN) return INT32_MIN;
     return (int32_t)x;
+}
+
+static inline int32_t clip_s24(int32_t x) {
+    if (x > 0x7FFFFF) return 0x7FFFFF;
+    if (x < -0x800000) return -0x800000;
+    return x;
 }
 
 // Q15 fixed-point multiply using 16-bit partial products.

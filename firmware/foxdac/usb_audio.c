@@ -104,7 +104,7 @@ struct audio_buffer_pool *producer_pool_2 = NULL;  // S/PDIF 2 (Out 3-4)
 struct audio_buffer_pool *producer_pool_3 = NULL;  // S/PDIF 3 (Out 5-6)
 struct audio_buffer_pool *producer_pool_4 = NULL;  // S/PDIF 4 (Out 7-8)
 #endif
-struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S16, .sample_freq = 48000, .channel_count = 2 };
+struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S32, .sample_freq = 48000, .channel_count = 2 };
 
 // Legacy aliases
 #define producer_pool producer_pool_1
@@ -286,11 +286,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         for (int i = 0; i < 2; i++) {
             struct audio_buffer *sb = take_audio_buffer(producer_pool_1, false);
             if (sb) {
-                int16_t *out = (int16_t *)sb->buffer->bytes;
-                for (uint32_t j = 0; j < 192; j++) {
-                    out[j * 2] = 0;
-                    out[j * 2 + 1] = 0;
-                }
+                memset(sb->buffer->bytes, 0, 192 * 8);
                 sb->sample_count = 192;
                 give_audio_buffer(producer_pool_1, sb);
             }
@@ -428,9 +424,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         core1_eq_work.sample_count = sample_count;
         core1_eq_work.vol_mul = vol_mul;
         core1_eq_work.delay_write_idx = delay_write_idx;
-        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int16_t *)audio_buf[1]->buffer->bytes : NULL;
-        core1_eq_work.spdif_out[1] = audio_buf[2] ? (int16_t *)audio_buf[2]->buffer->bytes : NULL;
-        core1_eq_work.spdif_out[2] = audio_buf[3] ? (int16_t *)audio_buf[3]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[1] = audio_buf[2] ? (int32_t *)audio_buf[2]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[2] = audio_buf[3] ? (int32_t *)audio_buf[3]->buffer->bytes : NULL;
         core1_eq_work.work_done = false;
         __dmb();
         core1_eq_work.work_ready = true;
@@ -480,14 +476,14 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         if (audio_buf[0]) {
             int left_ch = 0, right_ch = 1;
             if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 4);
+                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 8);
             } else {
-                int16_t *out_ptr = (int16_t *)audio_buf[0]->buffer->bytes;
+                int32_t *out_ptr = (int32_t *)audio_buf[0]->buffer->bytes;
                 for (uint32_t i = 0; i < sample_count; i++) {
                     float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[0][i]));
                     float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[1][i]));
-                    out_ptr[i*2]   = (int16_t)(dl * 32767.0f);
-                    out_ptr[i*2+1] = (int16_t)(dr * 32767.0f);
+                    out_ptr[i*2]   = (int32_t)(dl * 8388607.0f);
+                    out_ptr[i*2+1] = (int32_t)(dr * 8388607.0f);
                 }
             }
         }
@@ -554,15 +550,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             int left_ch = pair * 2;
             int right_ch = pair * 2 + 1;
             if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 4);
+                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 8);
                 continue;
             }
-            int16_t *out_ptr = (int16_t *)audio_buf[pair]->buffer->bytes;
+            int32_t *out_ptr = (int32_t *)audio_buf[pair]->buffer->bytes;
             for (uint32_t i = 0; i < sample_count; i++) {
                 float dl = fmaxf(-1.0f, fminf(1.0f, buf_out[left_ch][i]));
                 float dr = fmaxf(-1.0f, fminf(1.0f, buf_out[right_ch][i]));
-                out_ptr[i*2]     = (int16_t)(dl * 32767.0f);
-                out_ptr[i*2+1]   = (int16_t)(dr * 32767.0f);
+                out_ptr[i*2]     = (int32_t)(dl * 8388607.0f);
+                out_ptr[i*2+1]   = (int32_t)(dr * 8388607.0f);
             }
         }
 
@@ -702,7 +698,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         core1_eq_work.sample_count = sample_count;
         core1_eq_work.vol_mul = vol_mul;
         core1_eq_work.delay_write_idx = delay_write_idx;
-        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int16_t *)audio_buf[1]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
         core1_eq_work.work_done = false;
         __dmb();
         core1_eq_work.work_ready = true;
@@ -750,12 +746,12 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
         if (audio_buf[0]) {
             if (!matrix_mixer.outputs[0].enabled && !matrix_mixer.outputs[1].enabled) {
-                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 4);
+                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 8);
             } else {
-                int16_t *out_ptr = (int16_t *)audio_buf[0]->buffer->bytes;
+                int32_t *out_ptr = (int32_t *)audio_buf[0]->buffer->bytes;
                 for (uint32_t i = 0; i < sample_count; i++) {
-                    out_ptr[i*2]   = (int16_t)(clip_s32(buf_out[0][i] + (1<<13)) >> 14);
-                    out_ptr[i*2+1] = (int16_t)(clip_s32(buf_out[1][i] + (1<<13)) >> 14);
+                    out_ptr[i*2]   = clip_s24((buf_out[0][i] + (1 << 5)) >> 6);
+                    out_ptr[i*2+1] = clip_s24((buf_out[1][i] + (1 << 5)) >> 6);
                 }
             }
         }
@@ -822,13 +818,13 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             int left_ch = pair * 2;
             int right_ch = pair * 2 + 1;
             if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 4);
+                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 8);
                 continue;
             }
-            int16_t *out_ptr = (int16_t *)audio_buf[pair]->buffer->bytes;
+            int32_t *out_ptr = (int32_t *)audio_buf[pair]->buffer->bytes;
             for (uint32_t i = 0; i < sample_count; i++) {
-                out_ptr[i*2]   = (int16_t)(clip_s32(buf_out[left_ch][i] + (1<<13)) >> 14);
-                out_ptr[i*2+1] = (int16_t)(clip_s32(buf_out[right_ch][i] + (1<<13)) >> 14);
+                out_ptr[i*2]   = clip_s24((buf_out[left_ch][i] + (1 << 5)) >> 6);
+                out_ptr[i*2+1] = clip_s24((buf_out[right_ch][i] + (1 << 5)) >> 6);
             }
         }
 
@@ -1879,7 +1875,7 @@ struct audio_spdif_config spdif_config_4 = {
 };
 #endif
 
-struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 4 };
+struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 8 };
 
 // Legacy aliases
 #define spdif_instance spdif_instance_1

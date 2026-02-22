@@ -66,36 +66,41 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
 // S/PDIF constants
 // ---------------------------------------------------------------------------
 
-#define SR_44100 0
-#define SR_48000 1
-
 #define PREAMBLE_X 0b11001001
 #define PREAMBLE_Y 0b01101001
 #define PREAMBLE_Z 0b00111001
 
-#define SPDIF_CONTROL_WORD (\
-    0x4 | /* copying allowed */ \
-    0x20 | /* PCM encoder/decoder */ \
-    (SR_44100 << 24) /* todo is this required */ \
-    )
+// IEC 60958-3 consumer channel status (5 bytes = 40 bits)
+// Byte values verified against Linux kernel include/sound/asoundef.h
+static uint8_t spdif_channel_status[5] = {
+    0x04,  // Byte 0: consumer, PCM, copy permitted
+    0x00,  // Byte 1: general category
+    0x00,  // Byte 2: source/channel
+    0x00,  // Byte 3: sample rate (set dynamically via update_pio_frequency)
+    0x0B,  // Byte 4: max=24bit, word length=24bit (0x01 | 0x0A)
+};
+
+static inline uint get_channel_status_bit(uint subframe_idx) {
+    if (subframe_idx >= 40) return 0;
+    return (spdif_channel_status[subframe_idx / 8] >> (subframe_idx % 8)) & 1u;
+}
 
 // ---------------------------------------------------------------------------
 // Buffer initialization
 // ---------------------------------------------------------------------------
 
-// each buffer is pre-filled with data
+// each buffer is pre-filled with preambles, channel status, and silence
 static void init_spdif_buffer(audio_buffer_t *buffer) {
     assert(buffer->max_sample_count == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
     spdif_subframe_t *p = (spdif_subframe_t *)buffer->buffer->bytes;
-    for(uint i=0;i<PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;i++) {
-        uint c_bit = i < 32 ? (SPDIF_CONTROL_WORD >> i) & 1u: 0;
-
-        p->l = (i ? PREAMBLE_X : PREAMBLE_Z) | 0b10101010101010100000000; // 0-7 preamble, 8-15 aux samp, 16 - 56 sample
-        p->h = 0x55000000u | (c_bit << 29u);                              // 0-24 sample low, 25 26 valid, 27 28 user data, 29 30 status
-        p++;
-        p->l = PREAMBLE_Y | 0b10101010101010100000000;
-        p->h = 0x55000000u | (c_bit << 29u); // 25 -> 29
-        p++;
+    for (uint i = 0; i < PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT; i++) {
+        uint c_bit = get_channel_status_bit(i);
+        p->l = (i ? PREAMBLE_X : PREAMBLE_Z);
+        p->h = 0x55000000u | (c_bit << 29u);
+        spdif_update_subframe(p++, 0);
+        p->l = PREAMBLE_Y;
+        p->h = 0x55000000u | (c_bit << 29u);
+        spdif_update_subframe(p++, 0);
     }
 }
 
@@ -176,11 +181,6 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
 
     inst->silence_buffer.buffer = pico_buffer_alloc(PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT * 2 * sizeof(spdif_subframe_t));
     init_spdif_buffer(&inst->silence_buffer);
-    spdif_subframe_t *sf = (spdif_subframe_t *)inst->silence_buffer.buffer->bytes;
-    for(uint i=0;i<inst->silence_buffer.sample_count;i++) {
-        spdif_update_subframe(sf++, 0);
-        spdif_update_subframe(sf++, 0);
-    }
 
     __mem_fence_release();
 
@@ -235,6 +235,14 @@ static void update_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_f
     assert(divider < 0x1000000);
     pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm, divider >> 8u, divider & 0xffu);
     inst->freq = sample_freq;
+
+    // Update IEC 60958-3 channel status byte 3 (sample rate)
+    switch (sample_freq) {
+        case 44100: spdif_channel_status[3] = 0x00; break;  // IEC958_AES3_CON_FS_44100
+        case 48000: spdif_channel_status[3] = 0x02; break;  // IEC958_AES3_CON_FS_48000
+        case 96000: spdif_channel_status[3] = 0x0A; break;  // IEC958_AES3_CON_FS_96000
+        default:    spdif_channel_status[3] = 0x01; break;  // not indicated
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +263,9 @@ SPDIF_TIME_CRITICAL static audio_buffer_t *wrap_consumer_take(audio_connection_t
 }
 
 SPDIF_TIME_CRITICAL static void wrap_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
-    if (buffer->format->format->format == AUDIO_BUFFER_FORMAT_PCM_S16) {
+    if (buffer->format->format->format == AUDIO_BUFFER_FORMAT_PCM_S32) {
+        stereo_to_spdif_producer_give_s32(connection, buffer);
+    } else if (buffer->format->format->format == AUDIO_BUFFER_FORMAT_PCM_S16) {
 #if PICO_AUDIO_SPDIF_MONO_INPUT
         mono_to_spdif_producer_give(connection, buffer);
 #else
@@ -286,7 +296,8 @@ bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
                                audio_connection_t *connection) {
     printf("Connecting PIO S/PDIF audio\n");
 
-    assert(producer->format->format == AUDIO_BUFFER_FORMAT_PCM_S16);
+    assert(producer->format->format == AUDIO_BUFFER_FORMAT_PCM_S16 ||
+           producer->format->format == AUDIO_BUFFER_FORMAT_PCM_S32);
     inst->consumer_format.format = AUDIO_BUFFER_FORMAT_PIO_SPDIF;
     inst->consumer_format.sample_freq = producer->format->sample_freq;
     inst->consumer_format.channel_count = 2;

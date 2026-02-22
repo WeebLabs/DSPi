@@ -370,7 +370,7 @@ Each output: `sample = L * gain_L + R * gain_R` (with phase invert option)
 ---
 
 ## SPDIF Output System
-*Last updated: 2026-02-15*
+*Last updated: 2026-02-22*
 
 ### Multi-Instance Architecture
 
@@ -411,9 +411,33 @@ typedef struct audio_spdif_instance {
 
 ### Buffer Configuration
 
-- Producer pool: 8 buffers × 192 samples × 2ch × 2 bytes = 6144 bytes per pool
+- Producer pool: 8 buffers × 192 samples × 2ch × 4 bytes = 12,288 bytes per pool
+- Producer format: `AUDIO_BUFFER_FORMAT_PCM_S32` (24-bit audio in lower 24 bits of int32)
 - Consumer pool: 4 buffers (half watermark)
-- Format: `AUDIO_BUFFER_FORMAT_PIO_SPDIF` (pre-encoded NRZI subframes)
+- Consumer format: `AUDIO_BUFFER_FORMAT_PIO_SPDIF` (pre-encoded NRZI subframes)
+
+### 24-bit Output Encoding
+
+The DSP pipeline operates at >16-bit precision internally (float on RP2350, Q28 fixed-point on RP2040). The SPDIF output stage captures this precision by encoding 24-bit audio into the SPDIF subframe (protocol bits 4-27). USB input remains 16-bit; the additional 8 bits carry DSP-generated precision from gain, EQ, crossfeed, and delay processing.
+
+- **RP2350:** `float → int32_t` via `(int32_t)(sample * 8388607.0f)` (24-bit full-scale)
+- **RP2040:** `Q28 → int24` via `clip_s24((sample + (1 << 5)) >> 6)` (shift right 6 with rounding)
+- **Encoding:** `spdif_update_subframe()` encodes 3 bytes through the NRZI lookup table (was 2 for 16-bit)
+- **PIO/DMA:** Unchanged — BMC encoding is bit-width agnostic, subframe size is the same
+
+### Channel Status (IEC 60958-3)
+
+Channel status is encoded as a 5-byte array (40 bits) per IEC 60958-3 consumer format:
+
+| Byte | Value | Meaning |
+|------|-------|---------|
+| 0 | 0x04 | Consumer, PCM, copy permitted |
+| 1 | 0x00 | General category |
+| 2 | 0x00 | Source/channel unspecified |
+| 3 | Dynamic | Sample rate (0x00=44.1k, 0x02=48k, 0x0A=96k) |
+| 4 | 0x0B | Word length: max 24-bit, actual 24-bit |
+
+Byte 3 is updated dynamically in `update_pio_frequency()` when sample rate changes.
 
 ### IRQ Handling
 
@@ -695,7 +719,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-02-15*
+*Last updated: 2026-02-22*
 
 ### Hardware
 
@@ -720,6 +744,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Max biquads | 70 | 110 |
 | Matrix outputs | 5 | 9 |
 | S/PDIF outputs | 2 pairs | 4 pairs |
+| S/PDIF bit depth | 24-bit | 24-bit |
+| S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
 | EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |
 
 ### Delay Lines
@@ -760,7 +786,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-02-15*
+*Last updated: 2026-02-22*
 
 ### RP2040 (264 KB SRAM)
 
@@ -771,9 +797,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Filters + recipes (7 channels) | ~8 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~119 KB** |
+| **Total BSS** | **~116 KB** |
 | Code in RAM (.text copy_to_ram) | ~64 KB |
-| Stack + heap | ~81 KB |
+| SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
+| Stack + remaining heap | ~60 KB |
 
 ### RP2350 (520 KB SRAM)
 
@@ -783,9 +810,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Filters + recipes | ~15 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Other BSS | ~30 KB |
-| **Total BSS** | **~340 KB** |
+| **Total BSS** | **~337 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~63 KB |
-| Stack + heap | ~117 KB |
+| SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
+| Stack + remaining heap | ~72 KB |
 
 ---
 

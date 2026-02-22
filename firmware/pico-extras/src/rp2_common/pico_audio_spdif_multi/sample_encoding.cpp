@@ -28,7 +28,17 @@ template<typename FromFmt>
 struct converting_copy<Stereo<FmtSPDIF>, Stereo<FromFmt>> {
     static void copy(FmtSPDIF::sample_t *dest, const typename FromFmt::sample_t *src, uint sample_count) {
         for (uint i = 0; i < sample_count * 2; i++) {
-            spdif_update_subframe(dest++, sample_converter<FmtS16 , FromFmt>::convert_sample(*src++));
+            spdif_update_subframe(dest++, (int32_t)sample_converter<FmtS16 , FromFmt>::convert_sample(*src++) << 8);
+        }
+    }
+};
+
+// S32 stereo: samples already contain 24-bit data in lower 24 bits
+template<>
+struct converting_copy<Stereo<FmtSPDIF>, Stereo<FmtS32>> {
+    static void copy(FmtSPDIF::sample_t *dest, const int32_t *src, uint sample_count) {
+        for (uint i = 0; i < sample_count * 2; i++) {
+            spdif_update_subframe(dest++, *src++);
         }
     }
 };
@@ -37,7 +47,7 @@ template<typename FromFmt>
 struct converting_copy<Stereo<FmtSPDIF>, Mono<FromFmt>> {
     static void copy(FmtSPDIF::sample_t *dest, const typename FromFmt::sample_t *src, uint sample_count) {
         for (uint i = 0; i < sample_count; i++) {
-            int16_t sample = sample_converter<FmtS16 ,FromFmt>::convert_sample(*src++);
+            int32_t sample = (int32_t)sample_converter<FmtS16 ,FromFmt>::convert_sample(*src++) << 8;
             spdif_update_subframe(dest++, sample);
             spdif_update_subframe(dest++, sample);
         }
@@ -47,6 +57,10 @@ struct converting_copy<Stereo<FmtSPDIF>, Mono<FromFmt>> {
 
 SPDIF_TIME_CRITICAL void stereo_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
     producer_pool_blocking_give<Stereo<FmtSPDIF>, Stereo<FmtS16>>(connection, buffer);
+}
+
+SPDIF_TIME_CRITICAL void stereo_to_spdif_producer_give_s32(audio_connection_t *connection, audio_buffer_t *buffer) {
+    producer_pool_blocking_give<Stereo<FmtSPDIF>, Stereo<FmtS32>>(connection, buffer);
 }
 
 SPDIF_TIME_CRITICAL void mono_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
