@@ -63,6 +63,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
         bq->bypass = true;
 #if PICO_RP2350
         bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;
+        bq->sva1 = 0.0f; bq->sva2 = 0.0f; bq->sva3 = 0.0f; bq->svm0 = 0.0f; bq->svm1 = 0.0f; bq->svm2 = 0.0f;
 #else
         bq->b0 = 1 << FILTER_SHIFT; bq->b1 = 0; bq->b2 = 0; bq->a1 = 0; bq->a2 = 0;
 #endif
@@ -71,6 +72,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
 
     bq->bypass = false;
 
+    //biquad coefficients
     float omega = 2.0f * 3.1415926535f * p->freq / sample_rate;
     float sn = sinf(omega); float cs = cosf(omega);
     float alpha = sn / (2.0f * p->Q);
@@ -85,8 +87,33 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
         default: break;
     }
 
+    //state variable filter coefficients
+    float svm0_f = 0.0f, svm1_f = 0.0f, svm2_f = 0.0f;
+    float sva1_f = 0.0f, sva2_f = 0.0f, sva3_f = 0.0f;
+
+    //A is the value as used in the biquad previously
+    float g = tanf((p->freq / sample_rate) * 3.1415926535f);
+    float k = (p->type == FILTER_PEAKING) ? 1.0f / (p->Q*A) : 1.0f / p->Q;
+
+    switch (p->type) {
+        case FILTER_LOWPASS:   svm0_f = 0.0f; svm1_f =  0.0f;     svm2_f =  1.0f;   sva1_f = 1.0f/(1.0f + g*(g + k)); sva2_f = g * sva1_f; sva3_f = g * sva2_f; break;
+        case FILTER_HIGHPASS:  svm0_f = 1.0f; svm1_f = -k;        svm2_f = -1.0f;   sva1_f = 1.0f/(1.0f + g*(g + k)); sva2_f = g * sva1_f; sva3_f = g * sva2_f; break;
+        case FILTER_PEAKING:   svm0_f = 1.0f; svm1_f = k*(A*A-1); svm2_f = 0.0f;    sva1_f = 1.0f/(1.0f + g*(g + k)); sva2_f = g * sva1_f; sva3_f = g * sva2_f; break;
+        case FILTER_LOWSHELF:  svm0_f = 1.0f; svm1_f = k*(A-1);   svm2_f = A*A - 1; sva1_f = 1.0f/(1.0f + g*(g + k)); sva2_f = g * sva1_f; sva3_f = g * sva2_f; break;
+        case FILTER_HIGHSHELF: svm0_f = A*A;  svm1_f = k*(1-A)*A; svm2_f = 1 - A*A; sva1_f = 1.0f/(1.0f + g*(g + k)); sva2_f = g * sva1_f; sva3_f = g * sva2_f; break;
+        default: break;
+    }
+
 #if PICO_RP2350
-    // Float storage
+    // Float storage for state variable filter coefficients
+    bq->sva1 = sva1_f;
+    bq->sva2 = sva2_f;
+    bq->sva3 = sva3_f;
+    bq->svm0 = svm0_f;
+    bq->svm1 = svm1_f;
+    bq->svm2 = svm2_f;
+
+    // Float storage for biquad coefficients
     float inv_a0 = 1.0f / a0_f;
     bq->b0 = b0_f * inv_a0;
     bq->b1 = b1_f * inv_a0;
@@ -249,6 +276,53 @@ void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict s
         bq->s2 = s2;
     }
 }
+
+// See https://www.cytomic.com/files/dsp/SvfLinearTrapOptimised2.pdf
+DSP_TIME_CRITICAL
+void dsp_process_channel_block_svf(Biquad * __restrict biquads, float * __restrict samples,
+                               uint32_t count, uint8_t channel) {
+    uint8_t num_bands = channel_band_counts[channel];
+
+    // vars for all svf filters
+    register float two_f = 2.0f;  // compiler not putting this in its own register otherwise
+    float v1, v2, v3;
+
+    // Process each filter across all samples (coefficients loaded once per filter)
+    for (int band = 0; band < num_bands; band++) {
+        Biquad *bq = &biquads[band];
+        if (bq->bypass) continue;
+
+        //state variable filter coefficients
+        float a1 = bq->sva1;
+        float a2 = bq->sva2;
+        float a3 = bq->sva3;
+        float m0 = bq->svm0;
+        float m1 = bq->svm1;
+        float m2 = bq->svm2;
+
+        //state variable filter internal state
+        float ic1eq = bq->svic1eq;
+        float ic2eq = bq->svic2eq;
+
+        float *sample = samples;
+
+        // Process all samples with this state variable filter
+        for (uint32_t i = 0; i < count; i++) {
+           float s = *sample;
+           v3 = s - ic2eq;
+           v1 = a1 * ic1eq + a2 * v3;
+           v2 = ic2eq + a2 * ic1eq + a3 * v3;
+           ic1eq = two_f * v1 - ic1eq;
+           ic2eq = two_f * v2 - ic2eq;
+           *sample++ = m0 * s + m1 * v1 + m2 * v2;
+        }
+
+        // Store state back
+        bq->svic1eq = ic1eq;
+        bq->svic2eq = ic2eq;
+    }
+}
+
 #else
 // RP2040: Per-sample implemented in dsp_process_rp2040.S
 extern int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel);
