@@ -90,6 +90,7 @@ volatile uint64_t total_samples_produced = 0;
 volatile uint64_t start_time_us = 0;
 volatile bool sync_started = false;
 static volatile uint64_t last_packet_time_us = 0;
+static volatile uint8_t usb_input_bit_depth = 16;
 #define AUDIO_GAP_THRESHOLD_US 50000  // 50ms - reset sync if packets stop this long
 
 // Idle-time CPU load metering (Core 0)
@@ -262,7 +263,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
 #endif
 
-    uint32_t sample_count = data_len / 4;  // 2 channels * 2 bytes per sample
+    uint32_t bytes_per_frame = (usb_input_bit_depth == 24) ? 6 : 4;
+    uint32_t sample_count = data_len / bytes_per_frame;
 
     for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
         if (audio_buf[b]) {
@@ -300,8 +302,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     }
     total_samples_produced += sample_count;
 
-    const int16_t *in = (const int16_t *)data;
-
 #if PICO_RP2350
     // ------------------------------------------------------------------------
     // RP2350 FLOAT PIPELINE WITH MATRIX MIXER
@@ -325,9 +325,22 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static float buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    for (uint32_t i = 0; i < sample_count; i++) {
-        buf_l[i] = (float)in[i*2] * inv_32768 * preamp;
-        buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp;
+    if (usb_input_bit_depth == 24) {
+        const uint8_t *p = (const uint8_t *)data;
+        const float inv_8388608 = 1.0f / 8388608.0f;
+        for (uint32_t i = 0; i < sample_count; i++) {
+            int32_t left  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 8;
+            int32_t right = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 8;
+            buf_l[i] = (float)left * inv_8388608 * preamp;
+            buf_r[i] = (float)right * inv_8388608 * preamp;
+            p += 6;
+        }
+    } else {
+        const int16_t *in = (const int16_t *)data;
+        for (uint32_t i = 0; i < sample_count; i++) {
+            buf_l[i] = (float)in[i*2] * inv_32768 * preamp;
+            buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp;
+        }
     }
 
     // Loudness compensation
@@ -602,11 +615,24 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static int32_t buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    for (uint32_t i = 0; i < sample_count; i++) {
-        int32_t raw_left_32 = (int32_t)in[i*2] << 14;
-        int32_t raw_right_32 = (int32_t)in[i*2+1] << 14;
-        buf_l[i] = fast_mul_q28(raw_left_32, preamp);
-        buf_r[i] = fast_mul_q28(raw_right_32, preamp);
+    if (usb_input_bit_depth == 24) {
+        const uint8_t *p = (const uint8_t *)data;
+        for (uint32_t i = 0; i < sample_count; i++) {
+            // 24-bit -> Q28: left-justify to [31:8] then >>2 = net <<6
+            int32_t raw_left_32  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 2;
+            int32_t raw_right_32 = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 2;
+            buf_l[i] = fast_mul_q28(raw_left_32, preamp);
+            buf_r[i] = fast_mul_q28(raw_right_32, preamp);
+            p += 6;
+        }
+    } else {
+        const int16_t *in = (const int16_t *)data;
+        for (uint32_t i = 0; i < sample_count; i++) {
+            int32_t raw_left_32 = (int32_t)in[i*2] << 14;
+            int32_t raw_right_32 = (int32_t)in[i*2+1] << 14;
+            buf_l[i] = fast_mul_q28(raw_left_32, preamp);
+            buf_r[i] = fast_mul_q28(raw_right_32, preamp);
+        }
     }
 
     // Loudness compensation (per-sample — biquad state coupling)
@@ -1101,7 +1127,12 @@ static bool _as_setup_request_handler(__unused struct usb_endpoint *ep, struct u
 static bool as_set_alternate(struct usb_interface *interface, uint alt) {
     assert(interface == &as_op_interface);
     usb_audio_alt_set = alt;
-    return alt < 2;
+    if (alt == 2) {
+        usb_input_bit_depth = 24;
+    } else {
+        usb_input_bit_depth = 16;
+    }
+    return alt < 3;
 }
 
 // ----------------------------------------------------------------------------

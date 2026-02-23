@@ -144,7 +144,7 @@ Defined in `main.c`, function `core0_init()`:
 ---
 
 ## USB Audio Pipeline
-*Last updated: 2026-02-16*
+*Last updated: 2026-02-22*
 
 ### USB Stack
 
@@ -153,6 +153,9 @@ Defined in `main.c`, function `core0_init()`:
 **Interfaces:**
 1. **Audio Control (AC)** — Interface 0
 2. **Audio Streaming (AS)** — Interface 1
+   - Alt 0: Zero-bandwidth (idle)
+   - Alt 1: 16-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=384
+   - Alt 2: 24-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=576
    - EP OUT (isochronous): Audio data (44-49 samples/packet at 48 kHz)
    - EP IN (isochronous): Feedback (10.14 fixed-point rate)
 3. **Vendor (WinUSB/WCID)** — Interface 2 (EP0 control transfers only)
@@ -418,7 +421,11 @@ typedef struct audio_spdif_instance {
 
 ### 24-bit Output Encoding
 
-The DSP pipeline operates at >16-bit precision internally (float on RP2350, Q28 fixed-point on RP2040). The SPDIF output stage captures this precision by encoding 24-bit audio into the SPDIF subframe (protocol bits 4-27). USB input remains 16-bit; the additional 8 bits carry DSP-generated precision from gain, EQ, crossfeed, and delay processing.
+The USB input supports both 16-bit and 24-bit PCM via two alternate settings on the Audio Streaming interface. The host OS selects the desired bit depth; a runtime variable (`usb_input_bit_depth`) tracks the active format and branches the input conversion accordingly. With 24-bit input and 24-bit SPDIF output, the full precision signal path is maintained end-to-end. The DSP pipeline operates at >16-bit precision internally (float on RP2350, Q28 fixed-point on RP2040).
+
+**Input conversion (24-bit):**
+- **RP2350:** 3-byte little-endian → sign-extended int32 → float via `÷ 8388608.0f`
+- **RP2040:** 3-byte little-endian → Q28 via left-justify and `>> 2` (net `<< 6`); same full-scale as 16-bit (`<< 14`)
 
 - **RP2350:** `float → int32_t` via `(int32_t)(sample * 8388607.0f)` (24-bit full-scale)
 - **RP2040:** `Q28 → int24` via `clip_s24((sample + (1 << 5)) >> 6)` (shift right 6 with rounding)
@@ -744,6 +751,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Max biquads | 70 | 110 |
 | Matrix outputs | 5 | 9 |
 | S/PDIF outputs | 2 pairs | 4 pairs |
+| USB input bit depth | 16-bit or 24-bit (alt setting) | 16-bit or 24-bit (alt setting) |
 | S/PDIF bit depth | 24-bit | 24-bit |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
 | EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |

@@ -67,6 +67,22 @@ struct audio_device_config {
         USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
     } ep1;
     struct usb_endpoint_descriptor_long ep2;
+
+    // Alt setting 2: 24-bit audio
+    struct usb_interface_descriptor as_op_interface_24;
+    struct __packed {
+        USB_Audio_StdDescriptor_Interface_AS_t streaming;
+        struct __packed {
+            USB_Audio_StdDescriptor_Format_t core;
+            USB_Audio_SampleFreq_t freqs[3];
+        } format;
+    } as_audio_24;
+    struct __packed {
+        struct usb_endpoint_descriptor_long core;
+        USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
+    } ep1_24;
+    struct usb_endpoint_descriptor_long ep2_24;
+
     struct usb_interface_descriptor vendor_interface;
 };
 

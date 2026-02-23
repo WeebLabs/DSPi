@@ -166,6 +166,75 @@ const struct audio_device_config audio_device_config = {
         .bRefresh         = 2,
         .bSyncAddr        = 0,
     },
+    // Alt setting 2: 24-bit audio
+    .as_op_interface_24 = {
+        .bLength            = sizeof(audio_device_config.as_op_interface_24),
+        .bDescriptorType    = DTYPE_Interface,
+        .bInterfaceNumber   = ITF_NUM_AUDIO_STREAMING,
+        .bAlternateSetting  = 0x02,
+        .bNumEndpoints      = 0x02,
+        .bInterfaceClass    = AUDIO_CSCP_AudioClass,
+        .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
+        .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
+        .iInterface         = 0x00,
+    },
+    .as_audio_24 = {
+        .streaming = {
+            .bLength = sizeof(audio_device_config.as_audio_24.streaming),
+            .bDescriptorType = AUDIO_DTYPE_CSInterface,
+            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_General,
+            .bTerminalLink = 1,
+            .bDelay = 1,
+            .wFormatTag = 1, // PCM
+        },
+        .format = {
+            .core = {
+                .bLength = sizeof(audio_device_config.as_audio_24.format),
+                .bDescriptorType = AUDIO_DTYPE_CSInterface,
+                .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_FormatType,
+                .bFormatType = 1,
+                .bNrChannels = 2,
+                .bSubFrameSize = 3,
+                .bBitResolution = 24,
+                .bSampleFrequencyType = count_of(audio_device_config.as_audio_24.format.freqs),
+            },
+            .freqs = {
+                AUDIO_SAMPLE_FREQ(44100),
+                AUDIO_SAMPLE_FREQ(48000),
+                AUDIO_SAMPLE_FREQ(96000),
+            },
+        },
+    },
+    .ep1_24 = {
+        .core = {
+            .bLength          = sizeof(audio_device_config.ep1_24.core),
+            .bDescriptorType  = DTYPE_Endpoint,
+            .bEndpointAddress = AUDIO_OUT_ENDPOINT,
+            .bmAttributes     = 5,        // Isochronous, async
+            .wMaxPacketSize   = 576,      // 96kHz * 2ch * 3bytes / 1000
+            .bInterval        = 1,
+            .bRefresh         = 0,
+            .bSyncAddr        = AUDIO_IN_ENDPOINT,
+        },
+        .audio = {
+            .bLength = sizeof(audio_device_config.ep1_24.audio),
+            .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
+            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
+            .bmAttributes = 1,            // Sampling frequency control
+            .bLockDelayUnits = 0,
+            .wLockDelay = 0,
+        },
+    },
+    .ep2_24 = {
+        .bLength          = sizeof(audio_device_config.ep2_24),
+        .bDescriptorType  = 0x05,
+        .bEndpointAddress = AUDIO_IN_ENDPOINT,
+        .bmAttributes     = 0x11,         // Isochronous, feedback
+        .wMaxPacketSize   = 3,
+        .bInterval        = 0x01,
+        .bRefresh         = 2,
+        .bSyncAddr        = 0,
+    },
     .vendor_interface = {
         .bLength            = sizeof(audio_device_config.vendor_interface),
         .bDescriptorType    = DTYPE_Interface,
