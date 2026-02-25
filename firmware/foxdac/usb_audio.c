@@ -210,7 +210,7 @@ static uint16_t db_to_vol[CENTER_VOLUME_INDEX + 1] = {
     0x0519, 0x05b8, 0x066a, 0x0733, 0x0814, 0x0910, 0x0a2b, 0x0b68,
     0x0ccd, 0x0e5d, 0x101d, 0x1215, 0x1449, 0x16c3, 0x198a, 0x1ca8,
     0x2027, 0x2413, 0x287a, 0x2d6b, 0x32f5, 0x392d, 0x4027, 0x47fb,
-    0x50c3, 0x5a9e, 0x65ad, 0x7215, 0x7fff
+    0x50c3, 0x5a9e, 0x65ad, 0x7215, 0x8000
 };
 
 #define ENCODE_DB(x) ((int16_t)((x)*256))
@@ -263,7 +263,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
 #endif
 
-    uint32_t bytes_per_frame = (usb_input_bit_depth == 24) ? 6 : 4;
+    const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
+    uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
     uint32_t sample_count = data_len / bytes_per_frame;
 
     for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
@@ -325,7 +326,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static float buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    if (usb_input_bit_depth == 24) {
+    if (bit_depth == 24) {
         const uint8_t *p = (const uint8_t *)data;
         const float inv_8388608 = 1.0f / 8388608.0f;
         for (uint32_t i = 0; i < sample_count; i++) {
@@ -615,7 +616,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static int32_t buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    if (usb_input_bit_depth == 24) {
+    if (bit_depth == 24) {
         const uint8_t *p = (const uint8_t *)data;
         for (uint32_t i = 0; i < sample_count; i++) {
             // 24-bit -> Q28: left-justify to [31:8] then >>2 = net <<6
