@@ -729,9 +729,15 @@ static void _usb_default_handle_device_setup_request(struct usb_setup_packet *se
                     len = _usb_handle_get_descriptor(descriptor_buf, sizeof(descriptor_buf), setup);
                     if (len != -1)
                     {
+                        // ZLP needed when descriptor is shorter than wLength AND
+                        // a multiple of max packet size (host can't detect end-of-transfer)
+                        bool need_zlp = (len < setup->wLength) && (len > 0) && ((len & 63u) == 0);
                         len = MIN(len, setup->wLength);
                         usb_stream_setup_transfer(&_control_in_stream_transfer, &control_stream_funcs, descriptor_buf,
                                                   sizeof(descriptor_buf), len, _tf_send_control_in_ack);
+                        if (need_zlp) {
+                            usb_grow_transfer(&_control_in_stream_transfer.core, 1);
+                        }
 
                         _control_in_stream_transfer.ep = &usb_control_in;
                         return usb_start_transfer(&usb_control_in, &_control_in_stream_transfer.core);
