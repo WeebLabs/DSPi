@@ -323,6 +323,51 @@ void dsp_process_channel_block_svf(Biquad * __restrict biquads, float * __restri
     }
 }
 
+DSP_TIME_CRITICAL
+void dsp_process_channel_block_single(Biquad * __restrict biquads, float * __restrict samples,
+                               uint32_t count, uint8_t channel) {
+    uint8_t num_bands = channel_band_counts[channel];
+
+    // Process each biquad across all samples (coefficients loaded once per filter)
+    for (int band = 0; band < num_bands; band++) {
+        Biquad *bq = &biquads[band];
+        if (bq->bypass) continue;
+
+        // Load coefficients once for all samples
+        float b0 = bq->b0;
+        float b1 = bq->b1;
+        float b2 = bq->b2;
+        float a1 = bq->a1;
+        float a2 = bq->a2;
+        float s1 = dcp_d2f(bq->s1);     //TODO - if the single precision filter is
+        float s2 = dcp_d2f(bq->s2);     //good enough, change these state vars to floats
+
+        float *sample = samples;
+        float result_f, val1;
+
+        // Process all samples with this biquad
+        for (uint32_t i = 0; i < count; i++) {
+            float sample = samples[i];
+
+            /* y[n] = b0*x[n] + s1[n-1] */
+            result_f = b0 * sample + s1;
+
+            /* s1[n] = b1*x[n] - a1*y[n] + s2[n-1] */
+            val1 = b1 * sample - a1 * result_f;
+            s1 = val1 + s2;
+
+            /* s2[n] = b2*x[n] - a2*y[n] */
+            s2 = b2 * sample - a2 * result_f;
+
+            samples[i] = result_f;
+        }
+
+        // Store state back
+        bq->s1 = dcp_f2d(s1);
+        bq->s2 = dcp_f2d(s2);
+    }
+}
+
 #else
 // RP2040: Per-sample implemented in dsp_process_rp2040.S
 extern int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel);
