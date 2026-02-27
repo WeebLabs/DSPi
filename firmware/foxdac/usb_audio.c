@@ -30,6 +30,9 @@
 #include "flash_storage.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#if PICO_RP2350
+#include "spdif_input.h"
+#endif
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -237,14 +240,18 @@ void audio_set_volume(int16_t volume) {
 // AUDIO PROCESSING (called from USB audio packet callback)
 // ----------------------------------------------------------------------------
 
-static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
+void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
     uint32_t packet_start = time_us_32();
 
     // Detect SPDIF underrun: USB packets should arrive every ~1ms
     static uint32_t last_packet_time = 0;
     if (last_packet_time > 0) {
         uint32_t gap = packet_start - last_packet_time;
-        if (gap > 2000 && gap < 50000) {  // 2ms-50ms gap = underrun
+        uint32_t gap_threshold = 2000;
+#if PICO_RP2350
+        if (spdif_input_get_source() == AUDIO_SOURCE_SPDIF) gap_threshold = 6000;
+#endif
+        if (gap > gap_threshold && gap < 50000) {
             spdif_underruns++;
         }
     }
@@ -267,6 +274,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
     uint32_t sample_count = data_len / bytes_per_frame;
 
+#if PICO_RP2350
+    // SPDIF input mode: data==NULL from repeating timer, sample_count comes from FIFO
+    if (data == NULL) {
+        uint32_t fifo_pairs = spdif_input_get_fifo_count() / 2;
+        sample_count = (fifo_pairs > 192) ? 192 : fifo_pairs;
+        if (sample_count == 0) sample_count = 192;  // Will output silence
+    }
+#endif
+
     for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
         if (audio_buf[b]) {
             audio_buf[b]->sample_count = sample_count;
@@ -277,8 +293,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     uint64_t now_us = time_us_64();
 
-    // Detect audio restart after gap - reset sync state and pre-fill pool
-    if (sync_started && last_packet_time_us > 0 &&
+    // Detect audio restart after gap - reset sync state and pre-fill pool (USB only)
+    if (data != NULL && sync_started && last_packet_time_us > 0 &&
         (now_us - last_packet_time_us) > AUDIO_GAP_THRESHOLD_US) {
         sync_started = false;
         total_samples_produced = 0;
@@ -326,7 +342,22 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     static float buf_l[192], buf_r[192];
 
     // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    if (bit_depth == 24) {
+    if (data == NULL) {
+        // SPDIF input path: read from RX FIFO
+        uint32_t actual = spdif_input_read_samples(buf_l, buf_r, sample_count);
+        // Zero-fill remainder (silence on FIFO underrun)
+        for (uint32_t i = actual; i < sample_count; i++) {
+            buf_l[i] = 0.0f;
+            buf_r[i] = 0.0f;
+        }
+        // Apply preamp
+        for (uint32_t i = 0; i < sample_count; i++) {
+            buf_l[i] *= preamp;
+            buf_r[i] *= preamp;
+        }
+        // TX clock feedback
+        spdif_input_adjust_tx_clock();
+    } else if (bit_depth == 24) {
         const uint8_t *p = (const uint8_t *)data;
         const float inv_8388608 = 1.0f / 8388608.0f;
         for (uint32_t i = 0; i < sample_count; i++) {
@@ -1398,6 +1429,15 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             }
             break;
         }
+
+#if PICO_RP2350
+        case REQ_SET_AUDIO_SOURCE:
+            if (buffer->data_len >= 1) {
+                AudioSource src = (AudioSource)vendor_rx_buf[0];
+                spdif_input_switch_source(src);
+            }
+            break;
+#endif
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -1804,6 +1844,22 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 vendor_send_response(resp_buf, 4);
                 return true;
             }
+
+#if PICO_RP2350
+            case REQ_GET_AUDIO_SOURCE: {
+                resp_buf[0] = (uint8_t)spdif_input_get_source();
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_SPDIF_IN_STATUS: {
+                SpdifInStatus status;
+                spdif_input_get_status(&status);
+                memcpy(resp_buf, &status, sizeof(status));
+                vendor_send_response(resp_buf, sizeof(status));
+                return true;
+            }
+#endif
         }
 
         return false;

@@ -23,6 +23,9 @@
 #include "loudness.h"
 #include "crossfeed.h"
 #include "pico/audio_spdif.h"
+#if PICO_RP2350
+#include "spdif_input.h"
+#endif
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
@@ -96,7 +99,7 @@ static volatile uint8_t clock_176mhz = 0;
 extern struct audio_format audio_format_48k;
 extern MatrixMixer matrix_mixer;
 
-static void perform_rate_change(uint32_t new_freq) {
+void perform_rate_change(uint32_t new_freq) {
     switch (new_freq) { case 44100: case 48000: case 96000: break; default: new_freq = 44100; }
 
     // Update the audio format so pico_audio_spdif can update the PIO divider
@@ -178,6 +181,11 @@ void core0_init() {
     // SPDIF requires DMA Channel 0 (hardcoded in config).
     // If PDM inits first, it steals Ch 0 via dma_claim_unused_channel(), causing SPDIF to panic/crash.
     usb_sound_card_init();
+
+#if PICO_RP2350
+    // Initialize SPDIF receiver — starts scanning for signal immediately
+    spdif_input_init(SPDIF_RX_PIN);
+#endif
 
     // Initialize nominal feedback for default sample rate
     nominal_feedback_10_14 = ((uint64_t)audio_state.freq << 14) / 1000;
@@ -291,6 +299,11 @@ int main(void) {
             rate_change_pending = false;
             perform_rate_change(r);
         }
+
+#if PICO_RP2350
+        // SPDIF receiver: handle deferred state transitions from IRQ context
+        spdif_input_poll();
+#endif
 
         // Handle loudness table recomputation
         if (loudness_recompute_pending) {

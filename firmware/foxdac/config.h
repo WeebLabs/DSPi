@@ -44,6 +44,20 @@ extern volatile uint32_t nominal_feedback_10_14;
 // PDM Subwoofer Output Pin (PIO1)
 #define PICO_PDM_PIN           10   // PDM sub (Out 9)
 
+// S/PDIF Input (RP2350 only, PIO2)
+#if PICO_RP2350
+#define SPDIF_RX_PIN           11   // S/PDIF RX data input
+#define SPDIF_RX_PIO           2    // PIO block for RX
+#define SPDIF_RX_SM_CAPTURE    0    // SM for capture/rate detect
+#define SPDIF_RX_SM_DECODE     1    // SM for BMC decode
+#define SPDIF_RX_DMA_CH0       6    // First DMA channel (ping)
+#define SPDIF_RX_DMA_CH1       7    // Second DMA channel (pong)
+#define SPDIF_RX_DMA_IRQ       0    // DMA IRQ index (separate from TX on IRQ1)
+#define SPDIF_RX_FIFO_BLOCKS   8    // Number of SPDIF blocks in ring buffer
+#define SPDIF_BLOCK_SUBFRAMES  384  // Subframes per block (192 frames × 2 ch)
+#define SPDIF_RX_FIFO_SIZE     (SPDIF_RX_FIFO_BLOCKS * SPDIF_BLOCK_SUBFRAMES)  // 3072 subframes
+#endif
+
 // Legacy aliases
 #define PICO_AUDIO_SPDIF_SUB_PIN PICO_PDM_PIN
 
@@ -73,10 +87,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
-// RP2350: 170ms max delay (8192 samples at 48kHz)
+// RP2350: 85ms max delay (4096 samples at 48kHz) — reduced from 170ms to free RAM for SPDIF RX
 // RP2040: 85ms hardware max (4096 samples), software-capped at 50ms
 #if PICO_RP2350
-#define MAX_DELAY_SAMPLES 8192
+#define MAX_DELAY_SAMPLES 4096
+#define MAX_DELAY_MS_CAP  85.0f
 #else
 #define MAX_DELAY_SAMPLES 4096
 #define MAX_DELAY_MS_CAP  50.0f
@@ -153,6 +168,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Core 1 Mode Query Commands
 #define REQ_GET_CORE1_MODE          0x7A
 #define REQ_GET_CORE1_CONFLICT      0x7B
+
+// S/PDIF Input Commands (RP2350 only — RP2040 will STALL on unknown requests)
+#define REQ_SET_AUDIO_SOURCE        0x80
+#define REQ_GET_AUDIO_SOURCE        0x81
+#define REQ_GET_SPDIF_IN_STATUS     0x82
 
 // Pin Configuration Commands
 #define REQ_SET_OUTPUT_PIN          0x7C

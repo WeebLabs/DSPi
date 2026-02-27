@@ -12,24 +12,25 @@
 6. [DSP Processing Engine](#dsp-processing-engine)
 7. [Matrix Mixer](#matrix-mixer)
 8. [SPDIF Output System](#spdif-output-system)
-9. [PDM Subsystem](#pdm-subsystem)
-10. [Crossfeed](#crossfeed)
-11. [Loudness Compensation](#loudness-compensation)
-12. [Flash Storage](#flash-storage)
-13. [Pin Configuration](#pin-configuration)
-14. [Core 1 Architecture](#core-1-architecture)
-15. [RP2040 vs RP2350 Comparison](#rp2040-vs-rp2350-comparison)
-16. [Memory Layout](#memory-layout)
-17. [Performance Characteristics](#performance-characteristics)
+9. [SPDIF Input System](#spdif-input-system)
+10. [PDM Subsystem](#pdm-subsystem)
+11. [Crossfeed](#crossfeed)
+12. [Loudness Compensation](#loudness-compensation)
+13. [Flash Storage](#flash-storage)
+14. [Pin Configuration](#pin-configuration)
+15. [Core 1 Architecture](#core-1-architecture)
+16. [RP2040 vs RP2350 Comparison](#rp2040-vs-rp2350-comparison)
+17. [Memory Layout](#memory-layout)
+18. [Performance Characteristics](#performance-characteristics)
 
 ---
 
 ## System Overview
-*Last updated: 2026-02-15*
+*Last updated: 2026-02-27*
 
-DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350). It receives stereo PCM audio over USB and routes it through a configurable DSP pipeline to multiple output channels via PIO-based S/PDIF and PDM.
+DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350). It receives stereo PCM audio over USB (or S/PDIF input on RP2350) and routes it through a configurable DSP pipeline to multiple output channels via PIO-based S/PDIF and PDM.
 
-- **RP2350:** 9 output channels — 4 S/PDIF stereo pairs (8 channels) + 1 PDM sub
+- **RP2350:** 9 output channels — 4 S/PDIF stereo pairs (8 channels) + 1 PDM sub; switchable USB/SPDIF input
 - **RP2040:** 5 output channels — 2 S/PDIF stereo pairs (4 channels) + 1 PDM sub
 
 **Key capabilities:**
@@ -47,7 +48,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-02-14*
+*Last updated: 2026-02-27*
 
 ### Core Firmware (`firmware/foxdac/`)
 
@@ -61,6 +62,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |
 | `pdm_generator.c` | 2nd-order sigma-delta PDM modulator, Core 1 PDM mode |
 | `pdm_generator.h` | PDM API, ring buffer communication |
+| `spdif_input.c` | S/PDIF RX receiver (RP2350 only) — PIO capture/decode, DMA, rate detection, FIFO |
+| `spdif_input.h` | S/PDIF RX API — state queries, source switching, FIFO read |
 | `crossfeed.c` | BS2B crossfeed filter (lowpass + allpass for ILD/ITD) |
 | `crossfeed.h` | Crossfeed API, presets, state structs |
 | `loudness.c` | ISO 226:2003 loudness curve computation, double-buffered tables |
@@ -86,7 +89,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 ---
 
 ## Build System
-*Last updated: 2026-02-14*
+*Last updated: 2026-02-27*
 
 ### CMake Configuration
 
@@ -96,7 +99,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 
 **Optimization levels:**
 - General code: `-O2`
-- DSP-critical files (`dsp_pipeline.c`, `usb_audio.c`, `crossfeed.c`, `loudness.c`): `-O3`
+- DSP-critical files (`dsp_pipeline.c`, `usb_audio.c`, `crossfeed.c`, `loudness.c`, `spdif_input.c`): `-O3`
 
 **Platform-specific sources:**
 - RP2040: Includes `dsp_process_rp2040.S` (hand-coded biquad assembly)
@@ -117,7 +120,7 @@ cmake --build build-rp2350 --clean-first   # RP2350 build
 ---
 
 ## Initialization Flow
-*Last updated: 2026-02-14*
+*Last updated: 2026-02-27*
 
 Defined in `main.c`, function `core0_init()`:
 
@@ -126,8 +129,9 @@ Defined in `main.c`, function `core0_init()`:
    - RP2350: `set_sys_clock_hz()`, VREG 1.10V
    - RP2040: Manual PLL (`set_sys_clock_pll()`), VREG 1.20V (overclock)
 3. **Bus priority** — DMA gets highest system bus priority
-4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
-5. **Flash parameter load** — Restore saved EQ, delays, pin config from last 4KB flash sector
+4. **USB + SPDIF output init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
+5. **SPDIF RX init** (RP2350 only) — `spdif_input_init(SPDIF_RX_PIN)` starts receiver scanning immediately
+6. **Flash parameter load** — Restore saved EQ, delays, pin config from last 4KB flash sector
 6. **Loudness table computation** — Pre-compute ISO 226 curves for all 61 volume steps
 7. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
 8. **Core 1 launch** — `multicore_launch_core1(pdm_core1_entry)`
@@ -139,6 +143,7 @@ Defined in `main.c`, function `core0_init()`:
 - Sample rate change handling (PLL reclocking + filter recalculation)
 - Loudness table recomputation (background, double-buffered)
 - Crossfeed coefficient updates
+- SPDIF receiver poll (RP2350) — handles deferred state transitions from IRQ context
 - LED heartbeat toggle
 
 ---
@@ -456,6 +461,99 @@ All instances share DMA IRQ 1 via `irq_add_shared_handler()`. Reference-counted 
 
 ---
 
+## SPDIF Input System
+*Last updated: 2026-02-27*
+
+**RP2350 only** — all code guarded with `#if PICO_RP2350`; RP2040 build completely unaffected.
+
+### Overview
+
+Switchable USB/SPDIF stereo input. The SPDIF receiver starts at boot and runs continuously in the background, scanning for signal. Status (lock state, sample rate, channel status bits) is always queryable via vendor commands regardless of active audio source. When the user switches to SPDIF input, audio from the RX FIFO feeds through the same DSP pipeline as USB audio.
+
+### Hardware Resources
+
+| Resource | Assignment |
+|----------|-----------|
+| PIO2 SM0 | SPDIF RX (capture + decode, single SM with program swapping) |
+| DMA CH6 | RX DMA ping buffer |
+| DMA CH7 | RX DMA pong buffer |
+| DMA IRQ0 | RX DMA completion (separate from TX on DMA IRQ1) |
+| GPIO 11 | SPDIF RX data input (default) |
+
+### State Machine
+
+```
+NO_SIGNAL → ACQUIRING → LOCKED
+    ↑            |          |
+    |            v          v
+    +--- timeout/loss ------+
+```
+
+- **NO_SIGNAL:** Capture PIO program samples raw GPIO transitions. DMA collects 160 words, then rate detection analyzes min/max edge intervals to determine sample rate family and polarity.
+- **ACQUIRING:** Rate-specific BMC decode PIO program loaded. DMA double-buffered ping-pong collects SPDIF blocks (384 subframes each). Block validation checks sync patterns (B/M/W preambles). After 16 consecutive valid blocks with stable frequency → LOCKED.
+- **LOCKED:** Audio data flows through ring buffer FIFO. C bits accumulated, parity checked. 100ms watchdog detects signal loss.
+
+### PIO Programs
+
+Three rate-family decode programs at 96 MHz PIO clock (sys_clk / 3):
+
+| Family | Sample Rates | Cycle Count (cy) | Loop Count (lp) |
+|--------|-------------|-------------------|------------------|
+| 48k | 44.1k, 48k | 16 | 8 |
+| 96k | 88.2k, 96k | 8 | 4 |
+| 192k | 176.4k, 192k | 4 | 2 |
+
+Decode output format per 32-bit word: `[31]=P [30]=C [29]=U [28]=V [27:4]=24-bit audio [3:0]=sync`
+
+### Ring Buffer FIFO
+
+- Capacity: 8 blocks × 384 subframes = 3072 words (~12 KB)
+- Write: DMA IRQ handler pushes decoded SPDIF blocks
+- Read: `spdif_input_read_samples()` extracts 24-bit audio, applies hold concealment for validity bit, converts to float
+- Fill-level target: 50% (1536 pairs) for TX clock feedback
+- On FIFO full: oldest block discarded (write pointer advances read pointer)
+
+### TX Clock Feedback
+
+Output PIO clock dividers track the input clock rate via ±1 fractional LSB nudging:
+
+- FIFO level > target + deadband → speed up TX (nudge -1)
+- FIFO level < target - deadband → slow down TX (nudge +1)
+- Within deadband → restore nominal divider
+
+One fractional LSB ≈ 50 ppm resolution, sufficient for crystal drift tracking.
+
+### Source Switching
+
+`spdif_input_switch_source()` handles USB↔SPDIF transitions:
+
+- **USB → SPDIF:** Check receiver locked → mute outputs (5ms) → flush FIFO → reconfigure TX clocks → start 4ms repeating timer → unmute. Fast if already locked (<10ms).
+- **SPDIF → USB:** Mute → cancel timer → restore TX clocks → unmute (<10ms). Receiver continues scanning.
+
+In SPDIF mode, a 4ms repeating timer calls `process_audio_packet(NULL, 0)`. The NULL data pointer signals the SPDIF path, which reads from the RX FIFO instead of USB data.
+
+### Audio Pipeline Integration
+
+When `data == NULL` in `process_audio_packet()` (SPDIF mode):
+1. `sample_count` derived from FIFO fill level (up to 192 samples)
+2. `spdif_input_read_samples()` reads from FIFO into `buf_l`/`buf_r` as float [-1.0, 1.0]
+3. Preamp applied
+4. Loudness, Master EQ, crossfeed, matrix mixer, per-output EQ — all apply identically
+5. Gap detection skipped (USB-specific)
+6. Underrun threshold widened to 6000µs (vs 2000µs for USB)
+
+### Vendor Commands
+
+| Command | Code | Direction | Payload | Description |
+|---------|------|-----------|---------|-------------|
+| REQ_SET_AUDIO_SOURCE | 0x80 | OUT | 1 byte (0=USB, 1=SPDIF) | Switch input source |
+| REQ_GET_AUDIO_SOURCE | 0x81 | IN | 1 byte | Get current input source |
+| REQ_GET_SPDIF_IN_STATUS | 0x82 | IN | 20 bytes (SpdifInStatus) | Get receiver state, sample rate, parity errors, C bits |
+
+RP2040 STALLs on commands 0x80-0x82 (unhandled).
+
+---
+
 ## PDM Subsystem
 *Last updated: 2026-02-14*
 
@@ -726,7 +824,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-02-22*
+*Last updated: 2026-02-27*
 
 ### Hardware
 
@@ -751,6 +849,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Max biquads | 70 | 110 |
 | Matrix outputs | 5 | 9 |
 | S/PDIF outputs | 2 pairs | 4 pairs |
+| S/PDIF input | None | Switchable USB/SPDIF (PIO2) |
 | USB input bit depth | 16-bit or 24-bit (alt setting) | 16-bit or 24-bit (alt setting) |
 | S/PDIF bit depth | 24-bit | 24-bit |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
@@ -762,9 +861,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 |---------|--------|--------|
 | Channels | 5 | 9 |
 | Type | int32_t | float |
-| Max samples | 4096 | 8192 |
-| Max delay (48kHz) | 50 ms (software cap) | 170 ms |
-| RAM usage | 80 KB | 288 KB |
+| Max samples | 4096 | 4096 |
+| Max delay (48kHz) | 50 ms (software cap) | 85 ms (software cap) |
+| RAM usage | 80 KB | 144 KB |
 
 ### Core 1 Usage
 
@@ -780,7 +879,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
 | Priority | Global bus priority bits | Per-channel high-priority flag |
-| SPDIF channels | 0-1 (hardcoded) | 0-3 (hardcoded) |
+| SPDIF TX channels | 0-1 (hardcoded) | 0-3 (hardcoded) |
+| SPDIF RX channels | N/A | 6-7 (hardcoded, DMA IRQ0) |
 | PDM channel | Dynamic (claim) | Dynamic (claim) |
 
 ### Clock Configuration
@@ -794,7 +894,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-02-22*
+*Last updated: 2026-02-27*
 
 ### RP2040 (264 KB SRAM)
 
@@ -814,14 +914,16 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 
 | Section | Size (approx) |
 |---------|---------------|
-| Delay lines (9 × 8192 × 4) | 288 KB |
+| Delay lines (9 × 4096 × 4) | 144 KB |
+| SPDIF RX FIFO (3072 × 4) | 12 KB |
+| SPDIF RX DMA buffers + state | ~5 KB |
 | Filters + recipes | ~15 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
-| Other BSS | ~30 KB |
-| **Total BSS** | **~337 KB** |
-| Code in RAM (.time_critical + copy_to_ram) | ~63 KB |
+| Other BSS | ~20 KB |
+| **Total BSS** | **~202 KB** |
+| Code in RAM (.time_critical + copy_to_ram) | ~70 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
-| Stack + remaining heap | ~72 KB |
+| Stack + remaining heap | ~200 KB |
 
 ---
 
@@ -862,7 +964,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-02-14*
+*Last updated: 2026-02-27*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -914,3 +1016,6 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | REQ_GET_OUTPUT_PIN | 0x7D | IN | Get output GPIO pin |
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID (0=RP2040, 1=RP2350) |
+| REQ_SET_AUDIO_SOURCE | 0x80 | OUT | Set input source (0=USB, 1=SPDIF) — RP2350 only |
+| REQ_GET_AUDIO_SOURCE | 0x81 | IN | Get input source — RP2350 only |
+| REQ_GET_SPDIF_IN_STATUS | 0x82 | IN | Get SPDIF RX status (20 bytes) — RP2350 only |

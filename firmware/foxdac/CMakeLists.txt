@@ -5,7 +5,7 @@ add_compile_options(-O2)
 
 # Use -O3 for DSP-critical files
 set_source_files_properties(
-    dsp_pipeline.c usb_audio.c crossfeed.c loudness.c
+    dsp_pipeline.c usb_audio.c crossfeed.c loudness.c spdif_input.c
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
@@ -23,6 +23,8 @@ add_executable(foxdac
     main.c
     pdm_generator.c
     pdm_generator.h
+    spdif_input.c
+    spdif_input.h
     usb_audio.c
     usb_audio.h
     usb_descriptors.c
