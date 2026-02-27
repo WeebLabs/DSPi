@@ -956,6 +956,18 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     struct usb_buffer *usb_buffer = usb_current_out_packet_buffer(ep);
 
     usb_audio_packets++;
+
+#if PICO_RP2350
+    // Don't process USB audio data when using SPDIF input — the 4ms timer
+    // drives the DSP pipeline instead. Processing both would double CPU
+    // usage and produce garbled output.
+    if (spdif_input_get_source() == AUDIO_SOURCE_SPDIF) {
+        usb_grow_transfer(ep->current_transfer, 1);
+        usb_packet_done(ep);
+        return;
+    }
+#endif
+
     process_audio_packet(usb_buffer->data, usb_buffer->data_len);
 
     // keep on truckin'
