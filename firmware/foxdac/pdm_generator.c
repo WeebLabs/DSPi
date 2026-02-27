@@ -643,6 +643,14 @@ static void __not_in_flash_func(eq_worker_loop)() {
 // CORE 1 ENTRY — mode dispatcher
 // ----------------------------------------------------------------------------
 void pdm_core1_entry() {
+#if PICO_RP2350
+    // Enable FTZ+DN in FPDSCR for Core 1 IRQ handlers (same reason as Core 0)
+    {
+        volatile uint32_t *fpdscr = (volatile uint32_t *)0xE000EF3C;
+        *fpdscr |= (1u << 24) | (1u << 25);  // FZ (bit 24) + DN (bit 25)
+    }
+#endif
+
     while (1) {
         switch (core1_mode) {
             case CORE1_MODE_PDM:

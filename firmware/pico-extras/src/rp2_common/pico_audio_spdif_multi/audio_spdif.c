@@ -55,6 +55,9 @@ static bool irq_handler_installed[2] = {false, false};
 // Reference count for DMA IRQ enable/disable
 static uint8_t irq_enable_count[2] = {0, 0};
 
+// Optional callback invoked after DMA IRQ services any instance
+static void (*spdif_dma_done_callback)(void) = NULL;
+
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
@@ -366,9 +369,11 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
 #if PICO_AUDIO_SPDIF_NOOP
     assert(false);
 #else
+    bool any_serviced = false;
     for (uint i = 0; i < spdif_instance_count; i++) {
         audio_spdif_instance_t *inst = spdif_instances[i];
         if (dma_irqn_get_channel_status(inst->dma_irq, inst->dma_channel)) {
+            any_serviced = true;
             dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
             DEBUG_PINS_SET(audio_timing, 4);
             // Track total DMA words consumed (for USB feedback endpoint)
@@ -384,6 +389,9 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
             audio_start_dma_transfer(inst);
             DEBUG_PINS_CLR(audio_timing, 4);
         }
+    }
+    if (any_serviced && spdif_dma_done_callback) {
+        spdif_dma_done_callback();
     }
 #endif
 }
@@ -501,4 +509,12 @@ void audio_spdif_enable_sync(audio_spdif_instance_t *instances[], uint count) {
     for (uint i = 0; i < count; i++) {
         instances[i]->enabled = true;
     }
+}
+
+// ---------------------------------------------------------------------------
+// DMA done callback registration
+// ---------------------------------------------------------------------------
+
+void audio_spdif_set_dma_callback(void (*cb)(void)) {
+    spdif_dma_done_callback = cb;
 }

@@ -47,8 +47,11 @@ void spdif_input_get_status(SpdifInStatus *out);
 uint32_t spdif_input_read_samples(float *buf_l, float *buf_r, uint32_t max_samples);
 uint32_t spdif_input_get_fifo_count(void);
 
-// TX clock feedback (called from process_audio_packet in SPDIF mode)
-void spdif_input_adjust_tx_clock(void);
+// PI servo + pull model (TX DMA drives audio processing)
+void spdif_input_servo_update(void);
+bool spdif_input_is_pull_active(void);
+bool spdif_input_pull_process_needed(void);
+void spdif_input_recompute_servo(uint32_t sample_rate);
 
 // Source switching (called from vendor command handler)
 bool spdif_input_switch_source(AudioSource new_source);

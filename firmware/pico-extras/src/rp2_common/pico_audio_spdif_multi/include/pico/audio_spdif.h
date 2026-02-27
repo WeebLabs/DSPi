@@ -190,6 +190,15 @@ void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin);
  */
 void audio_spdif_enable_sync(audio_spdif_instance_t *instances[], uint count);
 
+/** \brief Register a callback invoked after TX DMA IRQ services any instance
+ * \ingroup audio_spdif
+ *
+ * The callback runs in DMA IRQ context. Pass NULL to unregister.
+ *
+ * \param cb Callback function pointer (or NULL)
+ */
+void audio_spdif_set_dma_callback(void (*cb)(void));
+
 #ifdef __cplusplus
 }
 #endif

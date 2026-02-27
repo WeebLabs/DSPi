@@ -59,6 +59,8 @@ extern volatile uint32_t pending_rate;
 
 void usb_sound_card_init(void);
 void audio_set_volume(int16_t volume);
+void process_audio_packet(const uint8_t *data, uint16_t data_len);
+void cpu0_metering_reset(void);
 
 // Expose serial string buffer for main.c to write unique board ID
 extern char *usb_descriptor_str_serial;

@@ -154,6 +154,16 @@ void core0_init() {
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
 
 #if PICO_RP2350
+    // Enable Flush-to-Zero and Default-NaN in FPDSCR (Floating-Point Default Status
+    // Control Register). Exception/IRQ handlers load their FPSCR from FPDSCR, so
+    // setting FPSCR alone doesn't affect code running in timer/DMA IRQ context.
+    // This prevents denormal float results in the DSP pipeline from causing ~20
+    // extra FPU cycles per operation, which otherwise causes progressive CPU creep.
+    {
+        volatile uint32_t *fpdscr = (volatile uint32_t *)0xE000EF3C;
+        *fpdscr |= (1u << 24) | (1u << 25);  // FZ (bit 24) + DN (bit 25)
+    }
+
     // RP2350: Use set_sys_clock_hz for proper clock tracking
     vreg_set_voltage(VREG_VOLTAGE_1_10);
     busy_wait_ms(10);
@@ -298,11 +308,22 @@ int main(void) {
             uint32_t r = pending_rate;
             rate_change_pending = false;
             perform_rate_change(r);
+#if PICO_RP2350
+            if (spdif_input_is_pull_active()) {
+                spdif_input_recompute_servo(r);
+            }
+#endif
         }
 
 #if PICO_RP2350
         // SPDIF receiver: handle deferred state transitions from IRQ context
         spdif_input_poll();
+
+        // Pull model: TX DMA completion drives SPDIF audio processing
+        if (spdif_input_is_pull_active() && spdif_input_pull_process_needed()) {
+            spdif_input_servo_update();
+            process_audio_packet(NULL, 0);
+        }
 #endif
 
         // Handle loudness table recomputation

@@ -101,6 +101,11 @@ static uint32_t cpu0_last_packet_end = 0;
 static uint32_t cpu0_load_q8 = 0;         // EMA in Q8 fixed point (0-25600 = 0-100%)
 static bool cpu0_load_primed = false;
 
+void cpu0_metering_reset(void) {
+    cpu0_load_primed = false;
+    cpu0_load_q8 = 0;
+}
+
 // Audio Pools (S/PDIF stereo pairs)
 struct audio_buffer_pool *producer_pool_1 = NULL;  // S/PDIF 1 (Out 1-2)
 struct audio_buffer_pool *producer_pool_2 = NULL;  // S/PDIF 2 (Out 3-4)
@@ -243,13 +248,14 @@ void audio_set_volume(int16_t volume) {
 void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
     uint32_t packet_start = time_us_32();
 
-    // Detect SPDIF underrun: USB packets should arrive every ~1ms
+    // Detect SPDIF underrun: USB packets arrive every ~1ms, SPDIF pull model ~4ms.
+    // Main loop jitter (EQ/loudness/crossfeed recompute) can add several ms.
     static uint32_t last_packet_time = 0;
     if (last_packet_time > 0) {
         uint32_t gap = packet_start - last_packet_time;
         uint32_t gap_threshold = 2000;
 #if PICO_RP2350
-        if (spdif_input_get_source() == AUDIO_SOURCE_SPDIF) gap_threshold = 6000;
+        if (spdif_input_is_pull_active()) gap_threshold = 12000;
 #endif
         if (gap > gap_threshold && gap < 50000) {
             spdif_underruns++;
@@ -275,11 +281,10 @@ void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t dat
     uint32_t sample_count = data_len / bytes_per_frame;
 
 #if PICO_RP2350
-    // SPDIF input mode: data==NULL from repeating timer, sample_count comes from FIFO
+    // SPDIF input: always process exactly 192 samples.
+    // Clock matching handled by PI servo on TX PIO divider.
     if (data == NULL) {
-        uint32_t fifo_pairs = spdif_input_get_fifo_count() / 2;
-        sample_count = (fifo_pairs > 192) ? 192 : fifo_pairs;
-        if (sample_count == 0) sample_count = 192;  // Will output silence
+        sample_count = 192;
     }
 #endif
 
@@ -355,8 +360,7 @@ void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t dat
             buf_l[i] *= preamp;
             buf_r[i] *= preamp;
         }
-        // TX clock feedback
-        spdif_input_adjust_tx_clock();
+        // TX clock matching handled by PI servo (spdif_input_servo_update)
     } else if (bit_depth == 24) {
         const uint8_t *p = (const uint8_t *)data;
         const float inv_8388608 = 1.0f / 8388608.0f;
@@ -926,20 +930,27 @@ void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t dat
 
     if (cpu0_load_primed) {
         uint32_t busy_us = packet_end - packet_start;
-        uint32_t idle_us = packet_start - cpu0_last_packet_end;
-        // Clamp idle during genuine USB gaps (stream stop/restart)
-        // SPDIF mode uses 4ms timer so needs wider threshold
-        uint32_t idle_clamp = 2000;
-#if PICO_RP2350
-        if (spdif_input_get_source() == AUDIO_SOURCE_SPDIF) idle_clamp = 6000;
-#endif
-        if (idle_us > idle_clamp) idle_us = 0;
+        uint32_t inst_q8;
 
-        uint32_t total_us = busy_us + idle_us;
-        if (total_us > 0) {
-            uint32_t inst_q8 = (busy_us * 25600) / total_us;
-            cpu0_load_q8 = cpu0_load_q8 - (cpu0_load_q8 >> 3) + (inst_q8 >> 3);
+#if PICO_RP2350
+        if (spdif_input_is_pull_active()) {
+            // Pull model: DMA period is known (192 samples / freq).
+            // Measure load as busy / period — immune to blocking in give,
+            // main loop jitter, and source-switch transients.
+            uint32_t period_us = (192u * 1000000u) / audio_state.freq;
+            inst_q8 = (busy_us * 25600u) / period_us;
+            if (inst_q8 > 25600) inst_q8 = 25600;
+        } else
+#endif
+        {
+            // USB mode: measure busy / (busy + idle), clamp gaps > 2ms
+            uint32_t idle_us = packet_start - cpu0_last_packet_end;
+            if (idle_us > 2000) idle_us = 0;
+            uint32_t total_us = busy_us + idle_us;
+            inst_q8 = (total_us > 0) ? (busy_us * 25600u) / total_us : 0;
         }
+
+        cpu0_load_q8 = cpu0_load_q8 - (cpu0_load_q8 >> 3) + (inst_q8 >> 3);
         global_status.cpu0_load = (uint8_t)((cpu0_load_q8 + 128) >> 8);
     } else {
         cpu0_load_primed = true;

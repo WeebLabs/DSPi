@@ -209,8 +209,11 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 5. **Buffer return** — Give completed buffers to S/PDIF consumer pools for DMA
 
 ### RP2350 Float Pipeline
+*Last updated: 2026-02-27*
 
 All processing in IEEE 754 float with DCP double-precision accumulators.
+
+**FPU configuration:** FPDSCR register (`0xE000EF3C`) has FZ (flush-to-zero, bit 24) and DN (default-NaN, bit 25) enabled on both cores at startup. This ensures all exception/IRQ handlers flush denormal float results to zero, preventing progressive CPU creep from ~20 extra FPU cycles per denormal operation in the DSP biquad filters.
 
 | Stage | Description |
 |-------|-------------|
@@ -513,34 +516,61 @@ Decode output format per 32-bit word: `[31]=P [30]=C [29]=U [28]=V [27:4]=24-bit
 - Fill-level target: 50% (1536 pairs) for TX clock feedback
 - On FIFO full: oldest block discarded (write pointer advances read pointer)
 
-### TX Clock Feedback
+### PI Servo with Sigma-Delta Dithering
+*Last updated: 2026-02-27*
 
-Output PIO clock dividers track the input clock rate via ±1 fractional LSB nudging:
+A pull model eliminates the repeating timer as a clock domain. Only two clock domains remain: RX (external S/PDIF source) and TX (local crystal, servo'd to match RX).
 
-- FIFO level > target + deadband → speed up TX (nudge -1)
-- FIFO level < target - deadband → slow down TX (nudge +1)
-- Within deadband → restore nominal divider
+**Architecture:**
+```
+RX PIO decode → DMA → FIFO ring buffer (3072 subframes ≈ 32ms)
+                           ↓
+           PI servo ← FIFO fill level (target: 50%)
+                           ↓
+           TX PIO divider (sigma-delta dithered, 0.65 ppm resolution)
+                           ↓
+TX DMA completes → callback → flag + __sev()
+                           ↓
+Main loop wakes → servo update → process_audio_packet(NULL, 0)
+  → read 192 from FIFO → DSP → give to producer pools → consumer pools → TX DMA
+```
 
-One fractional LSB ≈ 50 ppm resolution, sufficient for crystal drift tracking.
+**PI controller** (runs in main loop, ~once per 4ms at 48 kHz):
+- Error = (FIFO level - 1536) / 2 (in stereo pairs)
+- P term: `KP_Q8 * error >> 8` (KP_Q8 = 32, gain = 0.125)
+- I term: accumulates `KI * error` (KI = 4), clamped to ±256
+- Correction applied to fine-resolution divider target (frac << 8)
+- Positive correction (FIFO overfull) decreases divider → speeds up TX
+
+**Sigma-delta dithering** (runs in DMA ISR, ~40 cycles):
+- PIO 8-bit fractional divider has 166 ppm per step — too coarse for continuous servo
+- First-order sigma-delta dithers the frac LSB using an 8-bit sub-fractional accumulator
+- Effective resolution: 166/256 ≈ **0.65 ppm** — sufficient for ±50 ppm crystal drift
+- Dither noise (±83 ppm amplitude, ~1 Hz spectral) is far below TOSLINK jitter tolerance
+
+**Emergency backstop:** Sample-slip at 85%/15% FIFO thresholds — drops or repeats one stereo pair if servo can't converge (extreme crystal mismatch).
+
+**DMA callback:** `audio_spdif_set_dma_callback()` registers a function called at end of the TX DMA IRQ handler when any SPDIF instance is serviced. In SPDIF input mode, this runs the sigma-delta update and sets `tx_buffer_needed` flag.
 
 ### Source Switching
 
 `spdif_input_switch_source()` handles USB↔SPDIF transitions:
 
-- **USB → SPDIF:** Check receiver locked → mute outputs (5ms) → flush FIFO → reconfigure TX clocks → start 4ms repeating timer → unmute. Fast if already locked (<10ms).
-- **SPDIF → USB:** Mute → cancel timer → restore TX clocks → unmute (<10ms). Receiver continues scanning.
+- **USB → SPDIF:** Check receiver locked → mute outputs (5ms) → flush FIFO → rate change if needed → compute servo nominal → wait for FIFO to reach 50% fill (100ms timeout) → pre-fill 3 consumer buffers → enable servo + DMA callback → unmute.
+- **SPDIF → USB:** Mute (5ms) → disable DMA callback + servo → restore nominal TX dividers → reset PI state → set USB source → unmute. Receiver continues scanning.
 
-In SPDIF mode, a 4ms repeating timer calls `process_audio_packet(NULL, 0)`. The NULL data pointer signals the SPDIF path, which reads from the RX FIFO instead of USB data.
+In SPDIF mode, TX DMA completion drives audio processing (pull model). Each DMA completion signals the main loop via `tx_buffer_needed` flag + `__sev()`. The main loop calls `spdif_input_servo_update()` then `process_audio_packet(NULL, 0)`. No repeating timer is used. USB isochronous packets during SPDIF mode are discarded in `_as_audio_packet()`.
 
 ### Audio Pipeline Integration
 
 When `data == NULL` in `process_audio_packet()` (SPDIF mode):
-1. `sample_count` derived from FIFO fill level (up to 192 samples)
+1. `sample_count` fixed at 192 (one SPDIF block, matching TX DMA transfer size)
 2. `spdif_input_read_samples()` reads from FIFO into `buf_l`/`buf_r` as float [-1.0, 1.0]
 3. Preamp applied
-4. Loudness, Master EQ, crossfeed, matrix mixer, per-output EQ — all apply identically
-5. Gap detection skipped (USB-specific)
-6. Underrun threshold widened to 6000µs (vs 2000µs for USB)
+4. TX clock matching handled by PI servo (`spdif_input_servo_update()`)
+5. Loudness, Master EQ, crossfeed, matrix mixer, per-output EQ — all apply identically
+6. Gap detection skipped (USB-specific)
+7. Underrun threshold widened to 6000µs (vs 2000µs for USB)
 
 ### Vendor Commands
 

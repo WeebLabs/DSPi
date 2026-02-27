@@ -225,13 +225,21 @@ static uint64_t prev_block_time_us = 0;
 static float actual_freq = 0.0f;
 static uint32_t matched_rate = 0;
 
-// Repeating timer for SPDIF audio processing
-static struct repeating_timer spdif_process_timer;
-static volatile bool spdif_timer_active = false;
+// PI servo state
+static int32_t servo_pi_integral = 0;
+static uint8_t sd_sub_accum = 0;            // sigma-delta sub-frac accumulator
+static uint16_t servo_nominal_div_int = 0;  // PIO divider integer part
+static uint32_t servo_nominal_fine = 0;     // nominal frac in fine units (frac << 8)
+static volatile uint32_t servo_fine_target = 0; // current target (nominal ± correction)
+static volatile bool servo_active = false;
+static volatile bool tx_buffer_needed = false;
 
-// TX clock feedback state
-static uint32_t tx_nominal_divider = 0;
-static int32_t tx_clkdiv_nudge = 0;
+#define SERVO_KP_Q8          32   // proportional gain (Q8): 0.125 fine_units per sample-pair error
+#define SERVO_KI               4   // integral gain: per update
+#define SERVO_FIFO_TARGET     (SPDIF_RX_FIFO_SIZE / 2)  // 1536 subframes
+#define SERVO_INTEGRAL_CLAMP  256  // ±167 ppm max integral
+#define SERVO_HIGH_MARK       ((SPDIF_RX_FIFO_SIZE * 85) / 100)
+#define SERVO_LOW_MARK        ((SPDIF_RX_FIFO_SIZE * 15) / 100)
 
 // Hold concealment (last good samples)
 static int32_t last_good_l = 0, last_good_r = 0;
@@ -758,65 +766,104 @@ static void __isr __time_critical_func(rx_dma_irq_handler)(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Repeating timer callback for SPDIF audio processing
+// PI Servo + Sigma-Delta Dithering
 // ---------------------------------------------------------------------------
 
-static bool spdif_timer_callback(struct repeating_timer *t) {
-    (void)t;
-    if (current_source == AUDIO_SOURCE_SPDIF) {
-        process_audio_packet(NULL, 0);
-    }
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-// TX Clock Feedback
-// ---------------------------------------------------------------------------
-
-static void compute_tx_nominal_divider(uint32_t sample_rate) {
+static void compute_servo_nominal(uint32_t sample_rate) {
     uint32_t sys_clk = clock_get_hz(clk_sys);
-    tx_nominal_divider = sys_clk / sample_rate +
-                         (sys_clk % sample_rate != 0 ? 1 : 0);
-    tx_clkdiv_nudge = 0;
+    uint32_t divider_raw = sys_clk / sample_rate +
+                           (sys_clk % sample_rate != 0 ? 1 : 0);
+    servo_nominal_div_int = (uint16_t)(divider_raw >> 8);
+    uint8_t nominal_frac = (uint8_t)(divider_raw & 0xFF);
+    servo_nominal_fine = (uint32_t)nominal_frac << 8;
+    servo_fine_target = servo_nominal_fine;
+    servo_pi_integral = 0;
+    sd_sub_accum = 0;
 }
 
-static void set_all_tx_clkdiv(uint32_t divider) {
-    uint16_t div_int = divider >> 8;
-    uint8_t div_frac = divider & 0xFF;
+// Sigma-delta dithered TX PIO divider update (runs in DMA IRQ context)
+static void __time_critical_func(apply_tx_clkdiv_sd)(void) {
+    uint32_t ft = servo_fine_target;  // snapshot volatile
+    uint8_t base_frac = (uint8_t)(ft >> 8);
+    uint8_t sub_frac  = (uint8_t)(ft & 0xFF);
+    uint8_t prev = sd_sub_accum;
+    sd_sub_accum += sub_frac;
+    uint8_t carry = (sd_sub_accum < prev) ? 1 : 0;
+    uint8_t frac_out = base_frac + carry;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (spdif_instance_ptrs[i]) {
+        if (spdif_instance_ptrs[i])
+            pio_sm_set_clkdiv_int_frac(spdif_instance_ptrs[i]->pio,
+                                        spdif_instance_ptrs[i]->pio_sm,
+                                        servo_nominal_div_int, frac_out);
+    }
+}
+
+// DMA completion callback — sets flag for main loop (runs in DMA IRQ context)
+static void __isr __time_critical_func(tx_dma_done_handler)(void) {
+    if (servo_active) apply_tx_clkdiv_sd();
+    tx_buffer_needed = true;
+    __sev();
+}
+
+// PI controller — called from main loop when tx_buffer_needed is set
+void spdif_input_servo_update(void) {
+    if (!servo_active || rx_state != SPDIF_IN_LOCKED) return;
+
+    uint32_t level = spdif_input_get_fifo_count();
+
+    // Emergency backstop: sample-slip at extreme thresholds
+    if (level > SERVO_HIGH_MARK) {
+        fifo_rd = fifo_ptr_inc(fifo_rd, 2);
+    } else if (level < SERVO_LOW_MARK && level >= 2) {
+        fifo_rd = (fifo_rd + FIFO_WRAP - 2) % FIFO_WRAP;
+    }
+
+    int32_t error_pairs = ((int32_t)level - (int32_t)SERVO_FIFO_TARGET) / 2;
+
+    int32_t p_term = (SERVO_KP_Q8 * error_pairs) >> 8;
+
+    servo_pi_integral += SERVO_KI * error_pairs;
+    if (servo_pi_integral >  SERVO_INTEGRAL_CLAMP) servo_pi_integral =  SERVO_INTEGRAL_CLAMP;
+    if (servo_pi_integral < -SERVO_INTEGRAL_CLAMP) servo_pi_integral = -SERVO_INTEGRAL_CLAMP;
+
+    int32_t correction = p_term + servo_pi_integral;
+    // FIFO overfull → positive correction → decrease divider → speed up TX
+    int32_t new_fine = (int32_t)servo_nominal_fine - correction;
+    if (new_fine < 0) new_fine = 0;
+    if (new_fine > 65535) new_fine = 65535;
+    servo_fine_target = (uint32_t)new_fine;
+}
+
+bool spdif_input_is_pull_active(void) {
+    return servo_active;
+}
+
+bool spdif_input_pull_process_needed(void) {
+    if (tx_buffer_needed) {
+        tx_buffer_needed = false;
+        return true;
+    }
+    return false;
+}
+
+void spdif_input_recompute_servo(uint32_t sample_rate) {
+    if (servo_active) compute_servo_nominal(sample_rate);
+}
+
+// Restore TX PIO dividers to nominal (used when switching back to USB)
+static void restore_tx_nominal_divider(void) {
+    uint32_t sys_clk = clock_get_hz(clk_sys);
+    // Recalculate from current audio frequency
+    extern volatile AudioState audio_state;
+    uint32_t divider_raw = sys_clk / audio_state.freq +
+                           (sys_clk % audio_state.freq != 0 ? 1 : 0);
+    uint16_t div_int = (uint16_t)(divider_raw >> 8);
+    uint8_t div_frac = (uint8_t)(divider_raw & 0xFF);
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (spdif_instance_ptrs[i])
             pio_sm_set_clkdiv_int_frac(spdif_instance_ptrs[i]->pio,
                                         spdif_instance_ptrs[i]->pio_sm,
                                         div_int, div_frac);
-        }
-    }
-}
-
-void spdif_input_adjust_tx_clock(void) {
-    if (current_source != AUDIO_SOURCE_SPDIF || tx_nominal_divider == 0) return;
-
-    uint32_t fifo_level = spdif_input_get_fifo_count();
-    uint32_t target = SPDIF_RX_FIFO_SIZE / 2;
-    int32_t deadband = SPDIF_BLOCK_SUBFRAMES;
-
-    if (fifo_level > target + deadband) {
-        // RX faster than TX — speed up TX
-        if (tx_clkdiv_nudge >= 0) {
-            tx_clkdiv_nudge = -1;
-            set_all_tx_clkdiv(tx_nominal_divider - 1);
-        }
-    } else if (fifo_level < target - deadband) {
-        // RX slower than TX — slow down TX
-        if (tx_clkdiv_nudge <= 0) {
-            tx_clkdiv_nudge = 1;
-            set_all_tx_clkdiv(tx_nominal_divider + 1);
-        }
-    } else {
-        // Within deadband — restore nominal
-        if (tx_clkdiv_nudge != 0) {
-            tx_clkdiv_nudge = 0;
-            set_all_tx_clkdiv(tx_nominal_divider);
-        }
     }
 }
 
@@ -957,21 +1004,35 @@ bool spdif_input_switch_source(AudioSource new_source) {
         // Reconfigure TX clocks to match RX rate
         extern void perform_rate_change(uint32_t);
         if (audio_state.freq != detected_rate) {
-            // This sets sys_clk and recalculates DSP filters
             current_source = AUDIO_SOURCE_SPDIF;  // Set before rate change
             perform_rate_change(detected_rate);
         } else {
             current_source = AUDIO_SOURCE_SPDIF;
         }
 
-        // Compute nominal TX divider for clock feedback
-        compute_tx_nominal_divider(detected_rate);
+        // Compute servo nominal for detected rate
+        compute_servo_nominal(detected_rate);
 
-        // Start repeating timer (4ms) for SPDIF audio processing
-        if (!spdif_timer_active) {
-            add_repeating_timer_ms(-4, spdif_timer_callback, NULL, &spdif_process_timer);
-            spdif_timer_active = true;
+        // Wait for FIFO to reach ~50% fill (100ms timeout)
+        uint32_t timeout_ms = to_ms_since_boot(get_absolute_time()) + 100;
+        while (spdif_input_get_fifo_count() < SERVO_FIFO_TARGET) {
+            if (to_ms_since_boot(get_absolute_time()) > timeout_ms) break;
+            tight_loop_contents();
         }
+
+        // Reset CPU metering so pre-fill calls don't contaminate EMA
+        cpu0_metering_reset();
+
+        // Pre-fill consumer pools: call process_audio_packet 3 times
+        // to prime the TX DMA pipeline with audio data
+        for (int i = 0; i < 3; i++) {
+            process_audio_packet(NULL, 0);
+        }
+
+        // Enable servo and DMA callback
+        servo_active = true;
+        tx_buffer_needed = false;
+        audio_spdif_set_dma_callback(tx_dma_done_handler);
 
         // Unmute
         audio_state.mute = was_muted;
@@ -984,19 +1045,22 @@ bool spdif_input_switch_source(AudioSource new_source) {
         audio_state.mute = true;
         busy_wait_ms(5);
 
-        // Cancel repeating timer
-        if (spdif_timer_active) {
-            cancel_repeating_timer(&spdif_process_timer);
-            spdif_timer_active = false;
-        }
+        // Disable DMA callback and servo
+        audio_spdif_set_dma_callback(NULL);
+        servo_active = false;
 
-        // Restore TX clock to nominal
-        if (tx_clkdiv_nudge != 0 && tx_nominal_divider != 0) {
-            set_all_tx_clkdiv(tx_nominal_divider);
-            tx_clkdiv_nudge = 0;
-        }
+        // Restore TX PIO dividers to nominal
+        restore_tx_nominal_divider();
+
+        // Reset PI state
+        servo_pi_integral = 0;
+        sd_sub_accum = 0;
+        servo_fine_target = servo_nominal_fine;
 
         current_source = AUDIO_SOURCE_USB;
+
+        // Reset CPU metering for clean USB-mode baseline
+        cpu0_metering_reset();
 
         // Unmute
         audio_state.mute = was_muted;
