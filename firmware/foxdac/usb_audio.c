@@ -927,7 +927,13 @@ void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t dat
     if (cpu0_load_primed) {
         uint32_t busy_us = packet_end - packet_start;
         uint32_t idle_us = packet_start - cpu0_last_packet_end;
-        if (idle_us > 2000) idle_us = 0;   // clamp during USB gaps
+        // Clamp idle during genuine USB gaps (stream stop/restart)
+        // SPDIF mode uses 4ms timer so needs wider threshold
+        uint32_t idle_clamp = 2000;
+#if PICO_RP2350
+        if (spdif_input_get_source() == AUDIO_SOURCE_SPDIF) idle_clamp = 6000;
+#endif
+        if (idle_us > idle_clamp) idle_us = 0;
 
         uint32_t total_us = busy_us + idle_us;
         if (total_us > 0) {
