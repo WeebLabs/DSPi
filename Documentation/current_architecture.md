@@ -49,7 +49,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ## Source File Map
 *Last updated: 2026-02-14*
 
-### Core Firmware (`firmware/foxdac/`)
+### Core Firmware (`firmware/DSPi/`)
 
 | File | Purpose |
 |------|---------|
@@ -72,7 +72,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `usb_descriptors.h` | Descriptor declarations |
 | `dcp_inline.h` | RP2350 DCP (Double Coprocessor) inline assembly wrappers |
 
-### LUFA Compatibility (`firmware/foxdac/lufa/`)
+### LUFA Compatibility (`firmware/DSPi/lufa/`)
 
 | File | Purpose |
 |------|---------|
@@ -90,7 +90,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 
 ### CMake Configuration
 
-**Build file:** `firmware/foxdac/CMakeLists.txt`
+**Build file:** `firmware/DSPi/CMakeLists.txt`
 
 **Binary type:** `copy_to_ram` (entire firmware in SRAM)
 
