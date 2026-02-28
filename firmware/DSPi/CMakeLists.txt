@@ -1,4 +1,4 @@
-PROJECT(foxdac)
+PROJECT(DSPi)
 
 add_compile_options(-fcommon)
 add_compile_options(-O2)
@@ -9,7 +9,7 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
-add_executable(foxdac
+add_executable(DSPi
     config.h
     crossfeed.c
     crossfeed.h
@@ -30,17 +30,17 @@ add_executable(foxdac
 )
 
 if (PICO_PLATFORM STREQUAL "rp2040")
-    target_sources(foxdac PRIVATE dsp_process_rp2040.S)
+    target_sources(DSPi PRIVATE dsp_process_rp2040.S)
 endif()
 
-pico_set_binary_type(foxdac copy_to_ram)
+pico_set_binary_type(DSPi copy_to_ram)
 
-target_include_directories(foxdac PRIVATE
+target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/lufa
 )
 
-target_compile_definitions(foxdac PRIVATE
+target_compile_definitions(DSPi PRIVATE
     AUDIO_FREQ_MAX=48000
 
     # S/PDIF output configuration (pins defined in config.h)
@@ -55,7 +55,7 @@ target_compile_definitions(foxdac PRIVATE
     PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=2
 )
 
-target_link_libraries(foxdac
+target_link_libraries(DSPi
     pico_stdlib
     pico_multicore
     pico_unique_id
@@ -66,4 +66,4 @@ target_link_libraries(foxdac
     usb_device
 )
 
-pico_add_extra_outputs(foxdac)
+pico_add_extra_outputs(DSPi)

@@ -109,7 +109,7 @@ Matrix Mixer (2 inputs x 9 outputs, per-crosspoint gain & phase)
 ## Hardware Setup
 
 ### Flashing the Firmware
-1.  Download the latest `foxdac.uf2` release for your board.
+1.  Download the latest `DSPi.uf2` release for your board.
 2.  Hold the **BOOTSEL** button on your Pico while plugging it into your computer.
 3.  A drive named `RPI-RP2` will appear.
 4.  Drag and drop the `.uf2` file onto this drive.
@@ -425,7 +425,7 @@ cd build-rp2040
 cmake -DPICO_BOARD=pico -DPICO_EXTRAS_PATH=../firmware/pico-extras ../firmware
 make
 ```
-*Output:* `foxdac/foxdac.uf2`
+*Output:* `DSPi/DSPi.uf2`
 
 **Option B: Build for RP2350 (Pico 2)**
 ```bash
@@ -434,7 +434,7 @@ cd build-rp2350
 cmake -DPICO_BOARD=pico2 -DPICO_EXTRAS_PATH=../firmware/pico-extras ../firmware
 make
 ```
-*Output:* `foxdac/foxdac.uf2`
+*Output:* `DSPi/DSPi.uf2`
 
 ### 4. Flash the Device
 1.  Hold the **BOOTSEL** button on your board while plugging it in.

@@ -33,6 +33,10 @@ void dsp_update_delay_samples(float sample_rate);
 float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t channel);
 void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict samples,
                                uint32_t count, uint8_t channel);
+void dsp_process_channel_block_svf(Biquad * __restrict biquads, float * __restrict samples,
+                               uint32_t count, uint8_t channel);
+void dsp_process_channel_block_single(Biquad * __restrict biquads, float * __restrict samples,
+                               uint32_t count, uint8_t channel);
 #else
 int32_t dsp_process_channel(Biquad * __restrict biquads, int32_t input_32, uint8_t channel);
 void dsp_process_channel_block(Biquad * __restrict biquads, int32_t * __restrict samples,
