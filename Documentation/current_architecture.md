@@ -861,8 +861,75 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 
 ---
 
+## Channel Metering
+*Last updated: 2026-03-01*
+
+Full peak metering for all input and output channels. Peak values are `uint16_t` in Q15 format (0–32767 maps to 0.0–1.0 full scale). Per-channel clip detection via sticky `clip_flags` bitmask.
+
+### Peak Array Layout (`global_status.peaks[NUM_CHANNELS]`)
+
+| Index | RP2350 (11 channels) | RP2040 (7 channels) |
+|-------|----------------------|---------------------|
+| 0 | Input L | Input L |
+| 1 | Input R | Input R |
+| 2 | SPDIF 1 L | SPDIF 1 L |
+| 3 | SPDIF 1 R | SPDIF 1 R |
+| 4 | SPDIF 2 L | SPDIF 2 L |
+| 5 | SPDIF 2 R | SPDIF 2 R |
+| 6 | SPDIF 3 L | PDM Sub |
+| 7 | SPDIF 3 R | — |
+| 8 | SPDIF 4 L | — |
+| 9 | SPDIF 4 R | — |
+| 10 | PDM Sub | — |
+
+### Dual-Core Peak Tracking
+
+In EQ_WORKER mode, each core meters only the outputs it processes:
+
+- **Core 0:** Input L/R peaks (always), SPDIF outputs 0 to `CORE1_EQ_FIRST_OUTPUT-1`, PDM peak zeroed (PDM inactive in this mode)
+- **Core 1:** SPDIF outputs `CORE1_EQ_FIRST_OUTPUT` to `CORE1_EQ_LAST_OUTPUT`, written before `work_done` handshake
+
+In single-core mode, Core 0 meters all outputs including PDM.
+
+**Thread safety:** No race — Core 1 writes its channel peaks before `work_done`; Core 0 writes its channel peaks after `work_done`. The `__dmb()` + handshake guarantees memory visibility. Each core only OR's its own non-overlapping channel bits in `clip_flags`, so no torn-write risk.
+
+### Clip Detection (OVER Indicator)
+*Last updated: 2026-03-01*
+
+`global_status.clip_flags` is a `uint16_t` bitmask — one bit per channel (bit position = channel index). A bit is **set** when the block peak exceeds the clip threshold (`CLIP_THRESH_F` = 1.001f on RP2350, `CLIP_THRESH_Q28` = (1<<28)+268 on RP2040). The threshold includes ~+0.01 dB headroom above unity to avoid false positives from float precision noise when 0 dBFS signals pass through biquad filters. Bits are **sticky**: once set, they remain set until explicitly cleared by the host via `REQ_CLEAR_CLIPS` (0x83). The firmware never autonomously clears clip flags.
+
+This matches the industry-standard sticky OVER indicator pattern (IEC 60268-18). Since DSPi is a DSP processor (not an ADC), any sample exceeding the threshold in `buf_out` is a genuine clip event — single-sample detection is correct.
+
+**Detection cost:** One compare + conditional OR per channel per block on the already-computed peak value. Zero measurable overhead.
+
+### Status Protocol (`REQ_GET_STATUS`, wValue=9)
+
+Variable-size response: `NUM_CHANNELS * 2 + 4` bytes.
+
+- RP2350: 26 bytes (11 peaks × 2 bytes + 2 CPU load bytes + 2 clip_flags bytes)
+- RP2040: 18 bytes (7 peaks × 2 bytes + 2 CPU load bytes + 2 clip_flags bytes)
+
+Format: peaks as little-endian `uint16_t` in channel index order, followed by `cpu0_load` and `cpu1_load` (each `uint8_t`, 0–100%), followed by `clip_flags` as little-endian `uint16_t`.
+
+### REQ_CLEAR_CLIPS (0x83) — Clear Clip Flags
+*Last updated: 2026-03-01*
+
+Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-endian `uint16_t`) and resets it to 0. This gives the host an acknowledgment of which channels had clipped since the last clear.
+
+| Field | Value |
+|-------|-------|
+| `bmRequestType` | `0xC1` |
+| `bRequest` | `0x83` |
+| `wValue` | 0 |
+| `wIndex` | 0 |
+| `wLength` | 2 |
+
+**Response (2 bytes):** The `clip_flags` value that was just cleared (little-endian `uint16_t`).
+
+---
+
 ## Vendor Command Reference
-*Last updated: 2026-02-14*
+*Last updated: 2026-03-01*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -874,7 +941,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | REQ_GET_BYPASS | 0x47 | IN | Get master EQ bypass state |
 | REQ_SET_DELAY | 0x48 | OUT | Set channel delay |
 | REQ_GET_DELAY | 0x49 | IN | Get channel delay |
-| REQ_GET_STATUS | 0x50 | IN | Get peaks + CPU load |
+| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
 | REQ_LOAD_PARAMS | 0x52 | OUT | Load params from flash |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
@@ -914,3 +981,4 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | REQ_GET_OUTPUT_PIN | 0x7D | IN | Get output GPIO pin |
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID (0=RP2040, 1=RP2350) |
+| REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |

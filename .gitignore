@@ -19,6 +19,8 @@ firmware/eclipse_build/*
 /build
 .vscode
 
-# Ignore all markdown files except README.md
+# Ignore all markdown files except key docs
 *.md
 !README.md
+!Documentation/current_architecture.md
+!Documentation/Features/*.md

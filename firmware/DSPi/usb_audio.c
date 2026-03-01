@@ -317,7 +317,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     bool loud_on = loudness_enabled;
     const LoudnessCoeffs *loud_coeffs = current_loudness_coeffs;
 
-    float peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
+    float peak_ml = 0, peak_mr = 0;
 
     // Pre-compute PDM scale factor
     const float pdm_scale = (float)(1 << 28);
@@ -482,11 +482,20 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
         }
 
-        // Core 0: Peaks + S/PDIF for pair 0
-        for (uint32_t i = 0; i < sample_count; i++) {
-            float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
-            float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
+        // Core 0: Peaks for outputs 0..CORE1_EQ_FIRST_OUTPUT-1
+        for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
+            float peak = 0;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                float a = fabsf(buf_out[out][i]);
+                if (a > peak) peak = a;
+            }
+            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
+            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
         }
+        // PDM is inactive in EQ_WORKER mode
+        global_status.peaks[CH_OUT_SUB] = 0;
+
+        // Core 0: S/PDIF for pair 0
         if (audio_buf[0]) {
             int left_ch = 0, right_ch = 1;
             if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
@@ -552,10 +561,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
 
-        // Peaks (first stereo pair only)
-        for (uint32_t i = 0; i < sample_count; i++) {
-            float abs_ol = fabsf(buf_out[0][i]); if (abs_ol > peak_ol) peak_ol = abs_ol;
-            float abs_or = fabsf(buf_out[1][i]); if (abs_or > peak_or) peak_or = abs_or;
+        // Peaks for all SPDIF outputs
+        for (int out = 0; out < NUM_SPDIF_INSTANCES * 2; out++) {
+            float peak = 0;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                float a = fabsf(buf_out[out][i]);
+                if (a > peak) peak = a;
+            }
+            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
+            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
         }
 
         // S/PDIF conversion
@@ -578,24 +592,28 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
 #if ENABLE_SUB
         if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled) {
+            float peak_sub = 0;
             for (uint32_t i = 0; i < sample_count; i++) {
                 float abs_sub = fabsf(buf_out[NUM_OUTPUT_CHANNELS-1][i]);
                 if (abs_sub > peak_sub) peak_sub = abs_sub;
             }
+            global_status.peaks[CH_OUT_SUB] = (uint16_t)(fminf(1.0f, peak_sub) * 32767.0f);
+            if (peak_sub > CLIP_THRESH_F) global_status.clip_flags |= (1u << CH_OUT_SUB);
             for (uint32_t i = 0; i < sample_count; i++) {
                 int32_t pdm_sample_q28 = (int32_t)(buf_out[NUM_OUTPUT_CHANNELS-1][i] * pdm_scale);
                 pdm_push_sample(pdm_sample_q28, false);
             }
+        } else {
+            global_status.peaks[CH_OUT_SUB] = 0;
         }
 #endif
     }
 
-    // Convert peaks 0.0-1.0 to Q15-ish uint16 for status report
+    // Write input peaks
     global_status.peaks[0] = (uint16_t)(fminf(1.0f, peak_ml) * 32767.0f);
     global_status.peaks[1] = (uint16_t)(fminf(1.0f, peak_mr) * 32767.0f);
-    global_status.peaks[2] = (uint16_t)(fminf(1.0f, peak_ol) * 32767.0f);
-    global_status.peaks[3] = (uint16_t)(fminf(1.0f, peak_or) * 32767.0f);
-    global_status.peaks[4] = (uint16_t)(fminf(1.0f, peak_sub) * 32767.0f);
+    if (peak_ml > CLIP_THRESH_F) global_status.clip_flags |= (1u << CH_MASTER_LEFT);
+    if (peak_mr > CLIP_THRESH_F) global_status.clip_flags |= (1u << CH_MASTER_RIGHT);
 
 #else
     // ------------------------------------------------------------------------
@@ -610,7 +628,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     bool loud_on = loudness_enabled;
     const LoudnessCoeffs *loud_coeffs = current_loudness_coeffs;
 
-    int32_t peak_ml = 0, peak_mr = 0, peak_ol = 0, peak_or = 0, peak_sub = 0;
+    int32_t peak_ml = 0, peak_mr = 0;
 
     // Static buffers for block processing
     static int32_t buf_l[192], buf_r[192];
@@ -766,11 +784,20 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             }
         }
 
-        // Core 0: Peaks + S/PDIF conversion for pair 1
-        for (uint32_t i = 0; i < sample_count; i++) {
-            if (abs(buf_out[0][i]) > peak_ol) peak_ol = abs(buf_out[0][i]);
-            if (abs(buf_out[1][i]) > peak_or) peak_or = abs(buf_out[1][i]);
+        // Core 0: Peaks for outputs 0..CORE1_EQ_FIRST_OUTPUT-1
+        for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
+            int32_t peak = 0;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                int32_t a = abs(buf_out[out][i]);
+                if (a > peak) peak = a;
+            }
+            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(peak >> 13);
+            if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
         }
+        // PDM is inactive in EQ_WORKER mode
+        global_status.peaks[CH_OUT_SUB] = 0;
+
+        // Core 0: S/PDIF conversion for pair 1
         if (audio_buf[0]) {
             if (!matrix_mixer.outputs[0].enabled && !matrix_mixer.outputs[1].enabled) {
                 memset(audio_buf[0]->buffer->bytes, 0, sample_count * 8);
@@ -833,10 +860,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             delay_write_idx = (saved_delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
 
-        // Peaks (first stereo pair + sub)
-        for (uint32_t i = 0; i < sample_count; i++) {
-            if (abs(buf_out[0][i]) > peak_ol) peak_ol = abs(buf_out[0][i]);
-            if (abs(buf_out[1][i]) > peak_or) peak_or = abs(buf_out[1][i]);
+        // Peaks for all SPDIF outputs
+        for (int out = 0; out < NUM_SPDIF_INSTANCES * 2; out++) {
+            int32_t peak = 0;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                int32_t a = abs(buf_out[out][i]);
+                if (a > peak) peak = a;
+            }
+            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(peak >> 13);
+            if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
         }
 
         // S/PDIF conversion (2 stereo pairs)
@@ -858,22 +890,27 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 #if ENABLE_SUB
         // PDM sub output
         if (matrix_mixer.outputs[pdm_out].enabled) {
+            int32_t peak_sub = 0;
             for (uint32_t i = 0; i < sample_count; i++) {
                 int32_t abs_sub = abs(buf_out[pdm_out][i]);
                 if (abs_sub > peak_sub) peak_sub = abs_sub;
             }
+            global_status.peaks[CH_OUT_SUB] = (uint16_t)(peak_sub >> 13);
+            if (peak_sub > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << CH_OUT_SUB);
             for (uint32_t i = 0; i < sample_count; i++) {
                 pdm_push_sample(buf_out[pdm_out][i], false);
             }
+        } else {
+            global_status.peaks[CH_OUT_SUB] = 0;
         }
 #endif
     }
 
+    // Write input peaks
     global_status.peaks[0] = (uint16_t)(peak_ml >> 13);
     global_status.peaks[1] = (uint16_t)(peak_mr >> 13);
-    global_status.peaks[2] = (uint16_t)(peak_ol >> 13);
-    global_status.peaks[3] = (uint16_t)(peak_or >> 13);
-    global_status.peaks[4] = (uint16_t)(peak_sub >> 13);
+    if (peak_ml > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << CH_MASTER_LEFT);
+    if (peak_mr > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << CH_MASTER_RIGHT);
 #endif
 
     // Return all buffers
@@ -1565,20 +1602,18 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
 
             case REQ_GET_STATUS: {
                 if (setup->wValue == 9) {
-                    // Combined status: all peaks + CPU in one 12-byte transfer
-                    resp_buf[0] = global_status.peaks[0] & 0xFF;
-                    resp_buf[1] = global_status.peaks[0] >> 8;
-                    resp_buf[2] = global_status.peaks[1] & 0xFF;
-                    resp_buf[3] = global_status.peaks[1] >> 8;
-                    resp_buf[4] = global_status.peaks[2] & 0xFF;
-                    resp_buf[5] = global_status.peaks[2] >> 8;
-                    resp_buf[6] = global_status.peaks[3] & 0xFF;
-                    resp_buf[7] = global_status.peaks[3] >> 8;
-                    resp_buf[8] = global_status.peaks[4] & 0xFF;
-                    resp_buf[9] = global_status.peaks[4] >> 8;
-                    resp_buf[10] = global_status.cpu0_load;
-                    resp_buf[11] = global_status.cpu1_load;
-                    vendor_send_response(resp_buf, 12);
+                    // Combined status: all peaks + CPU load + clip flags
+                    // RP2350: 26 bytes (11 peaks × 2 + 2 CPU + 2 clip)
+                    // RP2040: 18 bytes (7 peaks × 2 + 2 CPU + 2 clip)
+                    for (int i = 0; i < NUM_CHANNELS; i++) {
+                        resp_buf[i*2]     = global_status.peaks[i] & 0xFF;
+                        resp_buf[i*2 + 1] = global_status.peaks[i] >> 8;
+                    }
+                    resp_buf[NUM_CHANNELS * 2]     = global_status.cpu0_load;
+                    resp_buf[NUM_CHANNELS * 2 + 1] = global_status.cpu1_load;
+                    resp_buf[NUM_CHANNELS * 2 + 2] = global_status.clip_flags & 0xFF;
+                    resp_buf[NUM_CHANNELS * 2 + 3] = global_status.clip_flags >> 8;
+                    vendor_send_response(resp_buf, NUM_CHANNELS * 2 + 4);
                     return true;
                 }
 
@@ -1802,6 +1837,14 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 resp_buf[2] = (uint8_t)(FW_VERSION_BCD & 0xFF);  // minor.patch BCD
                 resp_buf[3] = NUM_OUTPUT_CHANNELS;
                 vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_CLEAR_CLIPS: {
+                // Read-then-clear: return the clip flags that were set, then reset
+                uint16_t flags = global_status.clip_flags;
+                global_status.clip_flags = 0;
+                usb_start_tiny_control_in_transfer(flags, 2);
                 return true;
             }
         }

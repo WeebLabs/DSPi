@@ -47,6 +47,12 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Legacy aliases
 #define PICO_AUDIO_SPDIF_SUB_PIN PICO_PDM_PIN
 
+// Clip detection threshold — slightly above 1.0 to avoid false positives
+// from float precision noise when 0 dBFS signals pass through biquad filters.
+// +0.01 dB headroom: catches audible clipping, ignores float rounding artifacts.
+#define CLIP_THRESH_F   1.001f              // RP2350 float path
+#define CLIP_THRESH_Q28 ((1 << 28) + 268)   // RP2040 Q28 path (~0.001 in Q28)
+
 #define FILTER_SHIFT 28
 
 // PDM Configuration
@@ -161,6 +167,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Device Identification Commands
 #define REQ_GET_SERIAL              0x7E
 #define REQ_GET_PLATFORM            0x7F
+
+// Clip Detection Commands
+#define REQ_CLEAR_CLIPS             0x83
 
 // Platform IDs
 #define PLATFORM_RP2040             0
@@ -333,9 +342,10 @@ typedef struct __attribute__((packed)) {
 } EqParamPacket;
 
 typedef struct {
-    uint16_t peaks[5];
+    uint16_t peaks[NUM_CHANNELS];
     uint8_t cpu0_load;
     uint8_t cpu1_load;
+    uint16_t clip_flags;         // Per-channel clip latch bitmask (sticky, cleared by REQ_CLEAR_CLIPS)
 } SystemStatusPacket;
 
 // ----------------------------------------------------------------------------
@@ -356,7 +366,7 @@ typedef struct __attribute__((packed)) {
     uint8_t reserved[2];
     union {
         struct __attribute__((packed)) {
-            uint16_t peaks[5];
+            uint16_t peaks[NUM_CHANNELS];
             uint8_t cpu0_load;
             uint8_t cpu1_load;
         } status;

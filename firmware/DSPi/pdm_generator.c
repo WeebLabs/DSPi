@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdlib.h>
 #include <math.h>
 #include "pdm_generator.h"
 #include "dsp_pipeline.h"
@@ -479,6 +480,17 @@ static void __not_in_flash_func(eq_worker_loop)() {
             }
         }
 
+        // Peak metering for Core 1 outputs
+        for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+            float peak = 0;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                float a = fabsf(buf_out[out][i]);
+                if (a > peak) peak = a;
+            }
+            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
+            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+        }
+
         // S/PDIF conversion for pairs 1-3
         for (int p = 0; p < 3; p++) {
             int32_t *out_ptr = core1_eq_work.spdif_out[p];
@@ -590,6 +602,17 @@ static void __not_in_flash_func(eq_worker_loop)() {
                     widx = (widx + 1) & MAX_DELAY_MASK;
                 }
             }
+        }
+
+        // Peak metering for Core 1 outputs
+        for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+            int32_t peak = 0;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                int32_t a = abs(buf_out[out][i]);
+                if (a > peak) peak = a;
+            }
+            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(peak >> 13);
+            if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
         }
 
         // S/PDIF conversion for Core 1's pair (outputs 2-3 → int32 24-bit)
