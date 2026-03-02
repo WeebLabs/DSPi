@@ -89,8 +89,8 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
     if (fabsf(gain_db) < 0.01f) {
         out->bypass = true;
 #if PICO_RP2350
-        out->b0 = 1.0f; out->b1 = 0.0f; out->b2 = 0.0f;
-        out->a1 = 0.0f; out->a2 = 0.0f;
+        out->sva1 = 0.0f; out->sva2 = 0.0f; out->sva3 = 0.0f;
+        out->svm0 = 0.0f; out->svm1 = 0.0f; out->svm2 = 0.0f;
 #else
         out->b0 = 1 << FILTER_SHIFT; out->b1 = 0; out->b2 = 0;
         out->a1 = 0; out->a2 = 0;
@@ -100,11 +100,38 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
 
     out->bypass = false;
 
+    float A = powf(10.0f, gain_db / 40.0f);
+
+#if PICO_RP2350
+    // Cytomic SVF coefficients for shelf filters
+    float g = tanf(3.1415926535f * freq / sample_rate);
+    float sqrtA = sqrtf(A);
+
+    if (is_high_shelf) {
+        g = g * sqrtA;
+    } else {
+        g = g / sqrtA;
+    }
+    float k = 1.0f / (Q * sqrtA);
+
+    out->sva1 = 1.0f / (1.0f + g * (g + k));
+    out->sva2 = g * out->sva1;
+    out->sva3 = g * out->sva2;
+
+    if (is_high_shelf) {
+        out->svm0 = A * A;
+        out->svm1 = k * (1.0f - A) * A;
+        out->svm2 = 1.0f - A * A;
+    } else {
+        out->svm0 = 1.0f;
+        out->svm1 = k * (A - 1.0f);
+        out->svm2 = A * A - 1.0f;
+    }
+#else
     float omega = 2.0f * 3.1415926535f * freq / sample_rate;
     float sn = sinf(omega);
     float cs = cosf(omega);
     float alpha = sn / (2.0f * Q);
-    float A = powf(10.0f, gain_db / 40.0f);
     float sqrtA = sqrtf(A);
 
     float a0_f, a1_f, a2_f, b0_f, b1_f, b2_f;
@@ -125,14 +152,6 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
         a2_f = (A + 1) + (A - 1) * cs - 2 * sqrtA * alpha;
     }
 
-#if PICO_RP2350
-    float inv_a0 = 1.0f / a0_f;
-    out->b0 = b0_f * inv_a0;
-    out->b1 = b1_f * inv_a0;
-    out->b2 = b2_f * inv_a0;
-    out->a1 = a1_f * inv_a0;
-    out->a2 = a2_f * inv_a0;
-#else
     float scale = (float)(1LL << FILTER_SHIFT);
     out->b0 = (int32_t)((b0_f / a0_f) * scale);
     out->b1 = (int32_t)((b1_f / a0_f) * scale);

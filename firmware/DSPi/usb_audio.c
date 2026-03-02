@@ -63,7 +63,11 @@ volatile float loudness_ref_spl = 83.0f;
 volatile float loudness_intensity_pct = 100.0f;
 volatile bool loudness_recompute_pending = false;
 
+#if PICO_RP2350
+static LoudnessSvfState loudness_state[2][LOUDNESS_BIQUAD_COUNT];  // [0]=Left, [1]=Right
+#else
 static Biquad loudness_biquads[2][LOUDNESS_BIQUAD_COUNT];  // [0]=Left, [1]=Right
+#endif
 static const LoudnessCoeffs *current_loudness_coeffs = NULL;
 
 // Crossfeed state
@@ -344,7 +348,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
     }
 
-    // Loudness compensation
+    // Loudness compensation (SVF shelf filters)
     if (loud_on && loud_coeffs) {
         for (uint32_t i = 0; i < sample_count; i++) {
             float raw_left = buf_l[i];
@@ -352,24 +356,24 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
                 if (lc->bypass) continue;
-                Biquad *bq = &loudness_biquads[0][j];
-                double rd = dcp_dadd(dcp_f2d(lc->b0 * raw_left), bq->s1);
-                float rf = dcp_d2f(rd);
-                float v1 = lc->b1 * raw_left - lc->a1 * rf;
-                bq->s1 = dcp_dadd(dcp_f2d(v1), bq->s2);
-                bq->s2 = dcp_f2d(lc->b2 * raw_left - lc->a2 * rf);
-                raw_left = rf;
+                LoudnessSvfState *st = &loudness_state[0][j];
+                float v3 = raw_left - st->ic2eq;
+                float v1 = lc->sva1 * st->ic1eq + lc->sva2 * v3;
+                float v2 = st->ic2eq + lc->sva2 * st->ic1eq + lc->sva3 * v3;
+                st->ic1eq = 2.0f * v1 - st->ic1eq;
+                st->ic2eq = 2.0f * v2 - st->ic2eq;
+                raw_left = lc->svm0 * raw_left + lc->svm1 * v1 + lc->svm2 * v2;
             }
             for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
                 const LoudnessCoeffs *lc = &loud_coeffs[j];
                 if (lc->bypass) continue;
-                Biquad *bq = &loudness_biquads[1][j];
-                double rd = dcp_dadd(dcp_f2d(lc->b0 * raw_right), bq->s1);
-                float rf = dcp_d2f(rd);
-                float v1 = lc->b1 * raw_right - lc->a1 * rf;
-                bq->s1 = dcp_dadd(dcp_f2d(v1), bq->s2);
-                bq->s2 = dcp_f2d(lc->b2 * raw_right - lc->a2 * rf);
-                raw_right = rf;
+                LoudnessSvfState *st = &loudness_state[1][j];
+                float v3 = raw_right - st->ic2eq;
+                float v1 = lc->sva1 * st->ic1eq + lc->sva2 * v3;
+                float v2 = st->ic2eq + lc->sva2 * st->ic1eq + lc->sva3 * v3;
+                st->ic1eq = 2.0f * v1 - st->ic1eq;
+                st->ic2eq = 2.0f * v2 - st->ic2eq;
+                raw_right = lc->svm0 * raw_right + lc->svm1 * v1 + lc->svm2 * v2;
             }
             buf_l[i] = raw_left;
             buf_r[i] = raw_right;

@@ -314,9 +314,18 @@ typedef struct __attribute__((packed)) {
 
 #if PICO_RP2350
 typedef struct {
-    float b0, b1, b2, a1, a2;    // float coefficients
-    double s1, s2;               // double state accumulators (Using inline DCP)
-    bool bypass;                 // skip processing if true
+    // Biquad coefficients
+    float b0, b1, b2, a1, a2;
+    float s1, s2;                              // single-precision state (was double)
+
+    // SVF coefficients and state
+    float sva1, sva2, sva3;                    // integrator coefficients
+    float svm0, svm1, svm2;                    // output mix coefficients
+    float svic1eq, svic2eq;                    // integrator state
+    uint32_t svf_type;                         // FilterType enum for inner loop specialization
+
+    bool use_svf;                              // true = SVF path, false = biquad path
+    bool bypass;
 } Biquad;
 #else
 typedef struct {

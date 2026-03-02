@@ -63,6 +63,9 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
         bq->bypass = true;
 #if PICO_RP2350
         bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;
+        bq->sva1 = 0.0f; bq->sva2 = 0.0f; bq->sva3 = 0.0f;
+        bq->svm0 = 0.0f; bq->svm1 = 0.0f; bq->svm2 = 0.0f;
+        bq->use_svf = false;
 #else
         bq->b0 = 1 << FILTER_SHIFT; bq->b1 = 0; bq->b2 = 0; bq->a1 = 0; bq->a2 = 0;
 #endif
@@ -71,10 +74,78 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
 
     bq->bypass = false;
 
+    // Input validation
+    if (p->Q < 0.1f) p->Q = 0.1f;
+    if (p->Q > 20.0f) p->Q = 20.0f;
+    if (p->freq < 10.0f) p->freq = 10.0f;
+    if (p->freq > sample_rate * 0.45f) p->freq = sample_rate * 0.45f;
+
+    float A = powf(10.0f, p->gain_db / 40.0f);
+
+#if PICO_RP2350
+    // SVF/biquad crossover decision + state reset on path change
+    bool was_svf = bq->use_svf;
+    bq->use_svf = (p->freq < (sample_rate / 7.5f));
+    if (was_svf != bq->use_svf) {
+        bq->s1 = 0.0f; bq->s2 = 0.0f;
+        bq->svic1eq = 0.0f; bq->svic2eq = 0.0f;
+    }
+
+    if (bq->use_svf) {
+        // Cytomic SVF coefficients (Simper, "SvfLinearTrapOptimised2", 2013)
+        float g = tanf(3.1415926535f * p->freq / sample_rate);
+        float k = 1.0f / p->Q;
+
+        switch (p->type) {
+            case FILTER_PEAKING:
+                k = 1.0f / (p->Q * A);
+                break;
+            case FILTER_LOWSHELF: {
+                float sqrtA = sqrtf(A);
+                g = g / sqrtA;
+                k = 1.0f / (p->Q * sqrtA);
+                break;
+            }
+            case FILTER_HIGHSHELF: {
+                float sqrtA = sqrtf(A);
+                g = g * sqrtA;
+                k = 1.0f / (p->Q * sqrtA);
+                break;
+            }
+            default: break;
+        }
+
+        float sva1_f = 1.0f / (1.0f + g * (g + k));
+        float sva2_f = g * sva1_f;
+        float sva3_f = g * sva2_f;
+
+        float svm0_f = 0.0f, svm1_f = 0.0f, svm2_f = 0.0f;
+        switch (p->type) {
+            case FILTER_LOWPASS:   svm0_f = 0.0f; svm1_f = 0.0f;            svm2_f = 1.0f;       break;
+            case FILTER_HIGHPASS:  svm0_f = 1.0f; svm1_f = -k;              svm2_f = -1.0f;      break;
+            case FILTER_PEAKING:   svm0_f = 1.0f; svm1_f = k*(A*A - 1.0f);  svm2_f = 0.0f;       break;
+            case FILTER_LOWSHELF:  svm0_f = 1.0f; svm1_f = k*(A - 1.0f);    svm2_f = A*A - 1.0f; break;
+            case FILTER_HIGHSHELF: svm0_f = A*A;  svm1_f = k*(1.0f-A)*A;    svm2_f = 1.0f - A*A; break;
+            default: break;
+        }
+
+        bq->sva1 = sva1_f; bq->sva2 = sva2_f; bq->sva3 = sva3_f;
+        bq->svm0 = svm0_f; bq->svm1 = svm1_f; bq->svm2 = svm2_f;
+        bq->svf_type = p->type;
+
+        // Also compute biquad coefficients as fallback (not used in SVF path)
+        bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;
+        return;
+    }
+
+    // Clear SVF coefficients for biquad path
+    bq->sva1 = 0.0f; bq->sva2 = 0.0f; bq->sva3 = 0.0f;
+    bq->svm0 = 0.0f; bq->svm1 = 0.0f; bq->svm2 = 0.0f;
+#endif
+
     float omega = 2.0f * 3.1415926535f * p->freq / sample_rate;
     float sn = sinf(omega); float cs = cosf(omega);
     float alpha = sn / (2.0f * p->Q);
-    float A = powf(10.0f, p->gain_db / 40.0f);
     float a0_f = 1.0f, a1_f = 0.0f, a2_f = 0.0f, b0_f = 1.0f, b1_f = 0.0f, b2_f = 0.0f;
     switch (p->type) {
         case FILTER_LOWPASS: b0_f = (1-cs)/2; b1_f = 1-cs; b2_f = (1-cs)/2; a0_f = 1+alpha; a1_f = -2*cs; a2_f = 1-alpha; break;
@@ -114,6 +185,10 @@ void dsp_init_default_filters() {
             filters[ch][b].bypass = true;
 #if PICO_RP2350
             filters[ch][b].b0 = 1.0f;
+            filters[ch][b].use_svf = false;
+            filters[ch][b].svf_type = FILTER_FLAT;
+            filters[ch][b].svic1eq = 0.0f;
+            filters[ch][b].svic2eq = 0.0f;
 #else
             filters[ch][b].b0 = 1 << FILTER_SHIFT;
 #endif
@@ -191,19 +266,19 @@ float dsp_process_channel(Biquad * __restrict biquads, float input, uint8_t chan
         Biquad *bq = &biquads[i];
         if (bq->bypass) continue;
 
-        // Mixed Precision: Float Multiplies, Double Accumulation
-        // y[n] = b0*x[n] + s1[n-1]
-        float result_f = dcp_dadd_d2f(dcp_f2d(bq->b0 * sample), bq->s1);
-
-        // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
-        float val1 = bq->b1 * sample - bq->a1 * result_f;
-        bq->s1 = dcp_dadd(dcp_f2d(val1), bq->s2);
-
-        // s2[n] = b2*x[n] - a2*y[n]
-        float val2 = bq->b2 * sample - bq->a2 * result_f;
-        bq->s2 = dcp_f2d(val2);
-
-        sample = result_f;
+        if (bq->use_svf) {
+            float v3 = sample - bq->svic2eq;
+            float v1 = bq->sva1 * bq->svic1eq + bq->sva2 * v3;
+            float v2 = bq->svic2eq + bq->sva2 * bq->svic1eq + bq->sva3 * v3;
+            bq->svic1eq = 2.0f * v1 - bq->svic1eq;
+            bq->svic2eq = 2.0f * v2 - bq->svic2eq;
+            sample = bq->svm0 * sample + bq->svm1 * v1 + bq->svm2 * v2;
+        } else {
+            float out = bq->b0 * sample + bq->s1;
+            bq->s1 = bq->b1 * sample - bq->a1 * out + bq->s2;
+            bq->s2 = bq->b2 * sample - bq->a2 * out;
+            sample = out;
+        }
     }
     return sample;
 }
@@ -213,40 +288,84 @@ void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict s
                                uint32_t count, uint8_t channel) {
     uint8_t num_bands = channel_band_counts[channel];
 
-    // Process each biquad across all samples (coefficients loaded once per filter)
     for (int band = 0; band < num_bands; band++) {
         Biquad *bq = &biquads[band];
         if (bq->bypass) continue;
 
-        // Load coefficients once for all samples
-        float b0 = bq->b0;
-        float b1 = bq->b1;
-        float b2 = bq->b2;
-        float a1 = bq->a1;
-        float a2 = bq->a2;
-        double s1 = bq->s1;
-        double s2 = bq->s2;
+        if (bq->use_svf) {
+            // Load SVF coefficients
+            float a1 = bq->sva1, a2 = bq->sva2, a3 = bq->sva3;
+            float m0 = bq->svm0, m1 = bq->svm1, m2 = bq->svm2;
+            float ic1eq = bq->svic1eq, ic2eq = bq->svic2eq;
+            float *sp = samples;
 
-        // Process all samples with this biquad
-        for (uint32_t i = 0; i < count; i++) {
-            float sample = samples[i];
+            // Per-type specialization: eliminates zero-multiplies in inner loop
+            switch (bq->svf_type) {
+                case FILTER_LOWPASS:
+                    for (uint32_t i = 0; i < count; i++) {
+                        float in = *sp;
+                        float v3 = in - ic2eq;
+                        float v1 = a1 * ic1eq + a2 * v3;
+                        float v2 = ic2eq + a2 * ic1eq + a3 * v3;
+                        ic1eq = 2.0f * v1 - ic1eq;
+                        ic2eq = 2.0f * v2 - ic2eq;
+                        *sp++ = v2;
+                    }
+                    break;
+                case FILTER_HIGHPASS:
+                    for (uint32_t i = 0; i < count; i++) {
+                        float in = *sp;
+                        float v3 = in - ic2eq;
+                        float v1 = a1 * ic1eq + a2 * v3;
+                        float v2 = ic2eq + a2 * ic1eq + a3 * v3;
+                        ic1eq = 2.0f * v1 - ic1eq;
+                        ic2eq = 2.0f * v2 - ic2eq;
+                        *sp++ = in + m1 * v1 - v2;
+                    }
+                    break;
+                case FILTER_PEAKING:
+                    for (uint32_t i = 0; i < count; i++) {
+                        float in = *sp;
+                        float v3 = in - ic2eq;
+                        float v1 = a1 * ic1eq + a2 * v3;
+                        float v2 = ic2eq + a2 * ic1eq + a3 * v3;
+                        ic1eq = 2.0f * v1 - ic1eq;
+                        ic2eq = 2.0f * v2 - ic2eq;
+                        *sp++ = in + m1 * v1;
+                    }
+                    break;
+                default: // FILTER_LOWSHELF, FILTER_HIGHSHELF
+                    for (uint32_t i = 0; i < count; i++) {
+                        float in = *sp;
+                        float v3 = in - ic2eq;
+                        float v1 = a1 * ic1eq + a2 * v3;
+                        float v2 = ic2eq + a2 * ic1eq + a3 * v3;
+                        ic1eq = 2.0f * v1 - ic1eq;
+                        ic2eq = 2.0f * v2 - ic2eq;
+                        *sp++ = m0 * in + m1 * v1 + m2 * v2;
+                    }
+                    break;
+            }
+            bq->svic1eq = ic1eq;
+            bq->svic2eq = ic2eq;
 
-            // y[n] = b0*x[n] + s1[n-1]
-            float result_f = dcp_dadd_d2f(dcp_f2d(b0 * sample), s1);
+        } else {
+            // Single-precision TDF2 biquad
+            float b0 = bq->b0, b1 = bq->b1, b2 = bq->b2;
+            float a1 = bq->a1, a2 = bq->a2;
+            float s1 = bq->s1, s2 = bq->s2;
+            float *sp = samples;
 
-            // s1[n] = b1*x[n] - a1*y[n] + s2[n-1]
-            float val1 = b1 * sample - a1 * result_f;
-            s1 = dcp_dadd(dcp_f2d(val1), s2);
-
-            // s2[n] = b2*x[n] - a2*y[n]
-            s2 = dcp_f2d(b2 * sample - a2 * result_f);
-
-            samples[i] = result_f;
+            for (uint32_t i = 0; i < count; i++) {
+                float in = *sp;
+                float out = b0 * in + s1;
+                s1 = b1 * in - a1 * out + s2;
+                s2 = b2 * in - a2 * out;
+                *sp++ = out;
+            }
+            bq->s1 = s1;
+            bq->s2 = s2;
         }
-
-        // Store state back
-        bq->s1 = s1;
-        bq->s2 = s2;
     }
 }
 #else

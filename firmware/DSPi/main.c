@@ -151,6 +151,15 @@ void core0_init() {
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
 
 #if PICO_RP2350
+    // Enable flush-to-zero and default-NaN for audio processing.
+    // Prevents denormal performance penalty in SVF/biquad state decay.
+    {
+        uint32_t fpscr;
+        __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr));
+        fpscr |= (1 << 24) | (1 << 25);  // FZ + DN bits
+        __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
+    }
+
     // RP2350: Use set_sys_clock_hz for proper clock tracking
     vreg_set_voltage(VREG_VOLTAGE_1_10);
     busy_wait_ms(10);

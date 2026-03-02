@@ -666,6 +666,17 @@ static void __not_in_flash_func(eq_worker_loop)() {
 // CORE 1 ENTRY — mode dispatcher
 // ----------------------------------------------------------------------------
 void pdm_core1_entry() {
+#if PICO_RP2350
+    // Enable flush-to-zero and default-NaN on Core 1 (each core has its own FPSCR).
+    // Prevents denormal performance penalty in SVF/biquad state decay.
+    {
+        uint32_t fpscr;
+        __asm__ volatile("vmrs %0, fpscr" : "=r"(fpscr));
+        fpscr |= (1 << 24) | (1 << 25);  // FZ + DN bits
+        __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
+    }
+#endif
+
     while (1) {
         switch (core1_mode) {
             case CORE1_MODE_PDM:

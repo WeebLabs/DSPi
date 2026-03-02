@@ -8,7 +8,16 @@
 
 // Coefficients-only struct (state lives separately per channel)
 #if PICO_RP2350
-typedef struct { float b0, b1, b2, a1, a2; bool bypass; } LoudnessCoeffs;
+typedef struct {
+    float sva1, sva2, sva3;    // SVF integrator coefficients
+    float svm0, svm1, svm2;    // SVF output mix coefficients (shelf: general formula)
+    bool bypass;
+} LoudnessCoeffs;
+
+// Minimal SVF state for loudness filters (separate from main EQ Biquad struct)
+typedef struct {
+    float ic1eq, ic2eq;
+} LoudnessSvfState;
 #else
 typedef struct { int32_t b0, b1, b2, a1, a2; bool bypass; } LoudnessCoeffs;
 #endif

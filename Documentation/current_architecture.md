@@ -204,14 +204,15 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 5. **Buffer return** — Give completed buffers to S/PDIF consumer pools for DMA
 
 ### RP2350 Float Pipeline
+*Last updated: 2026-03-02*
 
-All processing in IEEE 754 float with DCP double-precision accumulators.
+All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
 | Stage | Description |
 |-------|-------------|
 | Input conversion | int16 → float, preamp gain |
-| Loudness | 2 biquads (low shelf + high shelf), volume-dependent |
-| Master EQ | Block-based `dsp_process_channel_block()`, 10 bands per channel |
+| Loudness | 2 SVF shelf filters (low shelf + high shelf), volume-dependent |
+| Master EQ | Block-based `dsp_process_channel_block()`, 10 bands per channel, hybrid SVF/biquad |
 | Crossfeed | BS2B lowpass + allpass (ILD + ITD) |
 | Matrix mixing | Block-based: 2 inputs × 9 outputs with gain/phase |
 | Output EQ | Block-based, 10 bands per output (Core 0: outputs 0-1, Core 1: outputs 2-7) |
@@ -252,7 +253,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 ---
 
 ## DSP Processing Engine
-*Last updated: 2026-02-15*
+*Last updated: 2026-03-02*
 
 ### Channel Layout
 
@@ -288,19 +289,58 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 
 **Types:** Flat (bypass), Peaking, Low Shelf, High Shelf, Low Pass, High Pass
 
-**Coefficient computation:** RBJ Audio-EQ-Cookbook formulas in `dsp_compute_coefficients()`
+**Coefficient computation:** RBJ Audio-EQ-Cookbook formulas for biquad path, Cytomic SVF equations for SVF path (RP2350 only), both in `dsp_compute_coefficients()`
 
-**RP2350 biquad:**
+**RP2350 biquad (hybrid SVF/biquad):**
 ```c
-{ float b0, b1, b2, a1, a2; double s1, s2; bool bypass; }
+{ float b0, b1, b2, a1, a2; float s1, s2;
+  float sva1, sva2, sva3; float svm0, svm1, svm2;
+  float svic1eq, svic2eq; uint32_t svf_type;
+  bool use_svf; bool bypass; }
 ```
-Mixed precision: float multiplies, double accumulation via DCP inline assembly.
+Single-precision throughout. Per-band SVF or TDF2 biquad path selected at coefficient computation time. See [Hybrid SVF/Biquad Filtering](#hybrid-svfbiquad-filtering-rp2350) for details.
 
 **RP2040 biquad:**
 ```c
 { int32_t b0, b1, b2, a1, a2, s1, s2; bool bypass; }
 ```
 Q28 fixed-point. Both per-sample and block-based biquad processing implemented in hand-optimized ARM assembly (`dsp_process_rp2040.S`). Block-based `dsp_process_channel_block()` keeps s1/s2 state in high registers across the entire sample loop, shares operand decompositions across multiply groups, and uses r12 for intermediate saves — eliminating per-sample struct access, function call overhead, and redundant decompositions vs the C `fast_mul_q28()` version.
+
+### Hybrid SVF/Biquad Filtering (RP2350)
+*Last updated: 2026-03-02*
+
+The RP2350 uses a hybrid filter architecture that selects between a State Variable Filter (SVF) and a Transposed Direct Form II (TDF2) biquad on a per-band basis. This provides better numerical stability at low frequencies (where single-precision biquad pole quantization is worst) while retaining the efficiency of biquads at higher frequencies.
+
+**Crossover frequency:** `Fs / 7.5` (e.g. ~6400 Hz at 48 kHz). Bands below this use SVF; bands at or above use TDF2 biquad. The crossover is evaluated at coefficient computation time and stored in `bq->use_svf`.
+
+**SVF implementation:** Based on Andrew Simper's "SvfLinearTrapOptimised2" (Cytomic, 2013). The linear trapezoidal integrator SVF is unconditionally stable and has zero delay-free loops.
+
+**SVF coefficient equations (Cytomic):**
+
+| Filter Type | g adjustment | k adjustment |
+|-------------|-------------|--------------|
+| Lowpass / Highpass | none | `1/Q` |
+| Peaking | none | `1/(Q*A)` |
+| Low Shelf | `g / sqrt(A)` | `1/(Q*sqrt(A))` |
+| High Shelf | `g * sqrt(A)` | `1/(Q*sqrt(A))` |
+
+Where `g = tan(pi * freq / Fs)` and `A = 10^(gain_dB/40)`.
+
+**Per-type inner loop specialization:** The block-based `dsp_process_channel_block()` uses `switch(bq->svf_type)` to select a specialized inner loop for each filter type, eliminating zero-multiplies:
+- **Lowpass:** output = v2 (no multiply for m0=0, m1=0)
+- **Highpass:** output = in + m1*v1 - v2 (m0=1, m2=-1 folded)
+- **Peaking:** output = in + m1*v1 (m0=1, m2=0 folded)
+- **Shelf (default):** output = m0*in + m1*v1 + m2*v2 (general form)
+
+**State reset:** When a band crosses the SVF/biquad boundary (e.g. due to sample rate change), both biquad state (`s1`, `s2`) and SVF state (`svic1eq`, `svic2eq`) are reset to zero to prevent transients.
+
+**Input validation:** Frequency clamped to [10 Hz, 0.45×Fs], Q clamped to [0.1, 20].
+
+**FPU configuration (RP2350):** Both cores set FPSCR flush-to-zero (FZ) and default-NaN (DN) bits at startup. This prevents denormalized floats from causing performance penalties as SVF integrator and biquad states decay toward zero after silence.
+
+**Memory impact:** Biquad struct grows from ~48 to ~68 bytes on RP2350. With 114 total biquads (110 EQ + 4 loudness): ~3 KB additional BSS.
+
+**RP2040:** Completely unaffected. All SVF code is inside `#if PICO_RP2350` blocks.
 
 ### Band Counts
 
@@ -552,7 +592,7 @@ output  = direct + ap_opposite     // Mix with opposite channel's crossfeed
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-02-15*
+*Last updated: 2026-03-02*
 
 ### Purpose
 
@@ -560,9 +600,13 @@ ISO 226:2003 equal-loudness contour compensation to maintain perceived frequency
 
 ### Filter Architecture
 
-2 biquad filters per stereo channel:
+2 shelf filters per stereo channel:
 1. Low shelf (200 Hz, Q=0.707) — bass boost at low volume
 2. High shelf (6000 Hz, Q=0.707) — treble boost at low volume
+
+**RP2350:** Cytomic SVF shelf filters (same topology as the main hybrid EQ pipeline). Both loudness filters are always below the SVF crossover frequency at all supported sample rates, so SVF is used unconditionally. Coefficients are SVF integrator + mix coefficients (`sva1-3`, `svm0-2`); state is minimal `LoudnessSvfState` (`ic1eq`, `ic2eq`).
+
+**RP2040:** Q28 fixed-point RBJ biquad coefficients with `fast_mul_q28()` processing.
 
 ### Parameters
 
@@ -711,7 +755,7 @@ typedef struct {
 Uses `__dmb()` memory barriers + `__sev()` / `__wfe()` for low-latency synchronization.
 
 **Platform differences in EQ worker:**
-- RP2350: float pipeline, block-based EQ via `dsp_process_channel_block()` (DCP double accumulators)
+- RP2350: float pipeline, block-based hybrid SVF/biquad EQ via `dsp_process_channel_block()` (single-precision)
 - RP2040: int32_t Q28 pipeline, **block-based** EQ via `dsp_process_channel_block()` (assembly in `dsp_process_rp2040.S`)
 
 ### PDM Mode (Both Platforms)
@@ -726,7 +770,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-02-22*
+*Last updated: 2026-03-02*
 
 ### Hardware
 
@@ -743,8 +787,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
 | Data type | Q28 fixed-point | IEEE 754 float |
-| Accumulator | int32/int64 | double (via DCP) |
-| Biquad impl | Block-based assembly (`dsp_process_rp2040.S`) | C with DCP inline asm |
+| Accumulator | int32/int64 | float (single-precision) |
+| Filter architecture | TDF2 biquad only | Hybrid SVF/biquad (SVF below Fs/7.5, TDF2 above) |
+| Biquad impl | Block-based assembly (`dsp_process_rp2040.S`) | C, per-type SVF specialization |
 | Processing mode | Block-based (two-phase) | Block-based |
 | EQ bands (master) | 10 | 10 |
 | EQ bands (output) | 10 | 10 |
@@ -773,7 +818,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | PDM mode | Yes | Yes |
 | EQ worker mode | Yes (outputs 2-3) | Yes (outputs 2-7) |
 | Parallel EQ | Core 0: input + 0-1, Core 1: 2-3 | Core 0: input + 0-1, Core 1: 2-7 |
-| EQ worker data type | int32_t Q28, block-based | float, block-based |
+| EQ worker data type | int32_t Q28, block-based | float, block-based, hybrid SVF/biquad |
 
 ### DMA
 
@@ -794,7 +839,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-02-22*
+*Last updated: 2026-03-02*
 
 ### RP2040 (264 KB SRAM)
 
@@ -815,10 +860,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Section | Size (approx) |
 |---------|---------------|
 | Delay lines (9 × 8192 × 4) | 288 KB |
-| Filters + recipes | ~15 KB |
+| Filters + recipes | ~18 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Other BSS | ~30 KB |
-| **Total BSS** | **~337 KB** |
+| **Total BSS** | **~341 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~63 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | Stack + remaining heap | ~72 KB |
