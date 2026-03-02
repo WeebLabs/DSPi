@@ -103,7 +103,8 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
     float A = powf(10.0f, gain_db / 40.0f);
 
 #if PICO_RP2350
-    // Cytomic SVF coefficients for shelf filters
+    // SVF shelf coefficients (Simper, "SvfLinearTrapAllOutputs", Cytomic 2021)
+    // k = 1/Q matches RBJ Audio-EQ-Cookbook shelf response exactly.
     float g = tanf(3.1415926535f * freq / sample_rate);
     float sqrtA = sqrtf(A);
 
@@ -112,7 +113,7 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
     } else {
         g = g / sqrtA;
     }
-    float k = 1.0f / (Q * sqrtA);
+    float k = 1.0f / Q;
 
     out->sva1 = 1.0f / (1.0f + g * (g + k));
     out->sva2 = g * out->sva1;

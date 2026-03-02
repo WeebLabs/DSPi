@@ -313,16 +313,18 @@ The RP2350 uses a hybrid filter architecture that selects between a State Variab
 
 **Crossover frequency:** `Fs / 7.5` (e.g. ~6400 Hz at 48 kHz). Bands below this use SVF; bands at or above use TDF2 biquad. The crossover is evaluated at coefficient computation time and stored in `bq->use_svf`.
 
-**SVF implementation:** Based on Andrew Simper's "SvfLinearTrapOptimised2" (Cytomic, 2013). The linear trapezoidal integrator SVF is unconditionally stable and has zero delay-free loops.
+**SVF implementation:** Based on Andrew Simper's "SvfLinearTrapAllOutputs" (Cytomic, 2021). The linear trapezoidal integrator SVF is unconditionally stable and has zero delay-free loops. Shelf filters use `k = 1/Q` (not `1/(Q*sqrt(A))`), which produces an exact match with the RBJ Audio-EQ-Cookbook shelf response — eliminating any discontinuity when bands cross the SVF/biquad crossover boundary.
 
-**SVF coefficient equations (Cytomic):**
+*Last updated: 2026-03-02*
+
+**SVF coefficient equations:**
 
 | Filter Type | g adjustment | k adjustment |
 |-------------|-------------|--------------|
 | Lowpass / Highpass | none | `1/Q` |
 | Peaking | none | `1/(Q*A)` |
-| Low Shelf | `g / sqrt(A)` | `1/(Q*sqrt(A))` |
-| High Shelf | `g * sqrt(A)` | `1/(Q*sqrt(A))` |
+| Low Shelf | `g / sqrt(A)` | `1/Q` |
+| High Shelf | `g * sqrt(A)` | `1/Q` |
 
 Where `g = tan(pi * freq / Fs)` and `A = 10^(gain_dB/40)`.
 
@@ -604,7 +606,7 @@ ISO 226:2003 equal-loudness contour compensation to maintain perceived frequency
 1. Low shelf (200 Hz, Q=0.707) — bass boost at low volume
 2. High shelf (6000 Hz, Q=0.707) — treble boost at low volume
 
-**RP2350:** Cytomic SVF shelf filters (same topology as the main hybrid EQ pipeline). Both loudness filters are always below the SVF crossover frequency at all supported sample rates, so SVF is used unconditionally. Coefficients are SVF integrator + mix coefficients (`sva1-3`, `svm0-2`); state is minimal `LoudnessSvfState` (`ic1eq`, `ic2eq`).
+**RP2350:** SVF shelf filters (Cytomic "SvfLinearTrapAllOutputs" with `k = 1/Q` for exact RBJ matching). Both loudness filters are always below the SVF crossover frequency at all supported sample rates, so SVF is used unconditionally. Coefficients are SVF integrator + mix coefficients (`sva1-3`, `svm0-2`); state is minimal `LoudnessSvfState` (`ic1eq`, `ic2eq`).
 
 **RP2040:** Q28 fixed-point RBJ biquad coefficients with `fast_mul_q28()` processing.
 

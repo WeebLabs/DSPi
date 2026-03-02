@@ -92,7 +92,8 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
     }
 
     if (bq->use_svf) {
-        // Cytomic SVF coefficients (Simper, "SvfLinearTrapOptimised2", 2013)
+        // SVF coefficients (Simper, "SvfLinearTrapAllOutputs", Cytomic 2021)
+        // Shelf k = 1/Q matches RBJ Audio-EQ-Cookbook response exactly.
         float g = tanf(3.1415926535f * p->freq / sample_rate);
         float k = 1.0f / p->Q;
 
@@ -103,13 +104,11 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
             case FILTER_LOWSHELF: {
                 float sqrtA = sqrtf(A);
                 g = g / sqrtA;
-                k = 1.0f / (p->Q * sqrtA);
                 break;
             }
             case FILTER_HIGHSHELF: {
                 float sqrtA = sqrtf(A);
                 g = g * sqrtA;
-                k = 1.0f / (p->Q * sqrtA);
                 break;
             }
             default: break;
