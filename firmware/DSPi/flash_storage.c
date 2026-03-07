@@ -74,6 +74,7 @@ typedef struct __attribute__((packed)) {
 // External variables we need to access (defined in usb_audio.c)
 extern volatile float global_preamp_db;
 extern volatile int32_t global_preamp_mul;
+extern volatile float global_preamp_linear;
 extern volatile float channel_gain_db[3];
 extern volatile int32_t channel_gain_mul[3];
 extern volatile bool channel_mute[3];
@@ -213,6 +214,7 @@ int flash_load_params(void) {
         if (linear < 0.0f) linear = 0.0f;
     }
     global_preamp_mul = (int32_t)(linear * (float)(1 << 28));
+    global_preamp_linear = linear;
 
     bypass_master_eq = (storage->bypass != 0);
 
@@ -330,6 +332,7 @@ void flash_factory_reset(void) {
     // Reset preamp to 0 dB
     global_preamp_db = 0.0f;
     global_preamp_mul = (1 << 28);  // Unity gain
+    global_preamp_linear = 1.0f;
 
     // Reset bypass
     bypass_master_eq = false;

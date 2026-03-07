@@ -127,7 +127,8 @@ Defined in `main.c`, function `core0_init()`:
    - RP2040: Manual PLL (`set_sys_clock_pll()`), VREG 1.20V (overclock)
 3. **Bus priority** — DMA gets highest system bus priority
 4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
-5. **Flash parameter load** — Restore saved EQ, delays, pin config from last 4KB flash sector
+5. **Flash parameter load** — Restore saved EQ, delays, preamp (all three globals: `global_preamp_db`, `global_preamp_mul`, `global_preamp_linear`), pin config from last 4KB flash sector
+   *Last updated: 2026-03-07*
 6. **Loudness table computation** — Pre-compute ISO 226 curves for all 61 volume steps
 7. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
 8. **Core 1 launch** — `multicore_launch_core1(pdm_core1_entry)`
