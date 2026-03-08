@@ -61,7 +61,7 @@ uint8_t preset_set_name(uint8_t slot, const char *name);
 //   - slot_occupied: 16-bit bitmask (bit N = slot N occupied)
 //   - startup_mode:  PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
 //   - default_slot:  slot loaded in SPECIFIED mode (0-9)
-//   - last_active:   last slot that was loaded/saved (0-9, 0xFF = none)
+//   - last_active:   last slot that was loaded/saved (always 0-9)
 //   - include_pins:  whether preset load restores pin config (0/1)
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,

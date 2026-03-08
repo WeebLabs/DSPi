@@ -704,7 +704,7 @@ When a preset is loaded, the firmware mutes audio output for ~5 ms (256 samples 
 
 **Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → update active slot
 
-**Delete:** Erase slot sector → clear occupied bit (active slot selection unchanged)
+**Delete:** Erase slot sector → clear occupied bit → if active slot: mute + apply factory defaults + recalculate filters/delays (active slot selection unchanged)
 
 ---
 
@@ -1094,4 +1094,4 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_PRESET_GET_STARTUP | 0x97 | IN | Get startup config (3 bytes) |
 | REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
 | REQ_PRESET_GET_INCLUDE_PINS | 0x99 | IN | Get include-pins flag (1 byte) |
-| REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, 0xFF=none) |
+| REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, always 0-9) |

@@ -95,7 +95,7 @@ typedef struct __attribute__((packed)) {
     // Startup configuration
     uint8_t  startup_mode;                   // PRESET_STARTUP_SPECIFIED or _LAST_ACTIVE
     uint8_t  default_slot;                   // Slot to load in SPECIFIED mode (0-9)
-    uint8_t  last_active_slot;               // Last loaded/saved slot (0-9, 0xFF = none)
+    uint8_t  last_active_slot;               // Last loaded/saved slot (always 0-9)
     uint8_t  include_pins;                   // Whether preset load restores pin config
 
     // Slot metadata
@@ -568,6 +568,20 @@ uint8_t preset_delete(uint8_t slot) {
     // Update directory — clear occupied bit but keep slot selected if active
     dir_cache.slot_occupied &= ~(1u << slot);
     dir_flush();
+
+    // If deleting the active slot, apply factory defaults to live state
+    if (slot == dir_cache.last_active_slot) {
+        preset_mute_counter = PRESET_MUTE_SAMPLES;
+        preset_loading = true;
+        __dmb();
+
+        apply_factory_defaults();
+
+        extern volatile AudioState audio_state;
+        float rate = (float)audio_state.freq;
+        dsp_recalculate_all_filters(rate);
+        dsp_update_delay_samples(rate);
+    }
 
     return PRESET_OK;
 }
