@@ -314,6 +314,19 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     const float inv_32768 = 1.0f / 32768.0f;
 
     float vol_mul = audio_state.mute ? 0.0f : (float)audio_state.vol_mul * inv_32768;
+
+    // Preset-switch mute: output silence while new parameters are being applied.
+    // The counter is decremented each packet; audio resumes when it reaches zero.
+    if (preset_loading) {
+        vol_mul = 0.0f;
+        if (preset_mute_counter > sample_count) {
+            preset_mute_counter -= sample_count;
+        } else {
+            preset_mute_counter = 0;
+            preset_loading = false;
+        }
+    }
+
     float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
 
@@ -625,6 +638,18 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // 2 SPDIF stereo pairs + PDM sub, dual-core EQ worker
     // ------------------------------------------------------------------------
     int32_t vol_mul = audio_state.mute ? 0 : audio_state.vol_mul;
+
+    // Preset-switch mute: output silence while new parameters are being applied.
+    if (preset_loading) {
+        vol_mul = 0;
+        if (preset_mute_counter > sample_count) {
+            preset_mute_counter -= sample_count;
+        } else {
+            preset_mute_counter = 0;
+            preset_loading = false;
+        }
+    }
+
     int32_t preamp = global_preamp_mul;
     bool is_bypassed = bypass_master_eq;
 
@@ -1439,6 +1464,39 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             }
             break;
         }
+
+        // --- Preset SET commands ---
+
+        case REQ_PRESET_SET_NAME: {
+            // wValue = slot index, payload = up to 32 bytes of name
+            uint8_t slot = vendor_last_wValue & 0xFF;
+            if (buffer->data_len > 0) {
+                // Ensure NUL termination
+                char name[PRESET_NAME_LEN];
+                memset(name, 0, sizeof(name));
+                size_t copy_len = buffer->data_len < (PRESET_NAME_LEN - 1)
+                                ? buffer->data_len : (PRESET_NAME_LEN - 1);
+                memcpy(name, vendor_rx_buf, copy_len);
+                preset_set_name(slot, name);
+            }
+            break;
+        }
+
+        case REQ_PRESET_SET_STARTUP: {
+            // payload: byte 0 = startup_mode, byte 1 = default_slot
+            if (buffer->data_len >= 2) {
+                preset_set_startup(vendor_rx_buf[0], vendor_rx_buf[1]);
+            }
+            break;
+        }
+
+        case REQ_PRESET_SET_INCLUDE_PINS: {
+            // payload: byte 0 = include_pins (0 or 1)
+            if (buffer->data_len >= 1) {
+                preset_set_include_pins(vendor_rx_buf[0]);
+            }
+            break;
+        }
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -1651,12 +1709,10 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             }
 
             case REQ_LOAD_PARAMS: {
+                // flash_load_params() routes through preset_load(), which
+                // handles filter recalculation, delay updates, and mute
+                // internally — no need to duplicate here.
                 int result = flash_load_params();
-                if (result == FLASH_OK) {
-                    dsp_recalculate_all_filters((float)audio_state.freq);
-                    dsp_update_delay_samples((float)audio_state.freq);
-                    loudness_recompute_pending = true;
-                }
                 usb_start_tiny_control_in_transfer(result, 1);
                 return true;
             }
@@ -1849,6 +1905,98 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 uint16_t flags = global_status.clip_flags;
                 global_status.clip_flags = 0;
                 usb_start_tiny_control_in_transfer(flags, 2);
+                return true;
+            }
+
+            // --- Preset Commands ---
+
+            case REQ_PRESET_SAVE: {
+                // wValue = slot index (0-9).  Saves current live state.
+                uint8_t slot = (uint8_t)setup->wValue;
+                uint8_t result = preset_save(slot);
+                resp_buf[0] = result;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_PRESET_LOAD: {
+                // wValue = slot index (0-9).  Loads slot into live state.
+                uint8_t slot = (uint8_t)setup->wValue;
+                uint8_t result = preset_load(slot);
+                resp_buf[0] = result;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_PRESET_DELETE: {
+                // wValue = slot index (0-9).  Erases the slot.
+                uint8_t slot = (uint8_t)setup->wValue;
+                uint8_t result = preset_delete(slot);
+                resp_buf[0] = result;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_PRESET_GET_NAME: {
+                // wValue = slot index.  Returns 32-byte NUL-terminated name.
+                uint8_t slot = (uint8_t)setup->wValue;
+                char name[PRESET_NAME_LEN];
+                uint8_t result = preset_get_name(slot, name);
+                if (result == PRESET_OK) {
+                    memcpy(resp_buf, name, PRESET_NAME_LEN);
+                    vendor_send_response(resp_buf, PRESET_NAME_LEN);
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_PRESET_GET_DIR: {
+                // Returns 6-byte directory summary:
+                //   [0-1] slot_occupied bitmask (little-endian u16)
+                //   [2]   startup_mode
+                //   [3]   default_slot
+                //   [4]   last_active_slot
+                //   [5]   include_pins
+                uint16_t occupied;
+                uint8_t mode, def_slot, last_active, inc_pins;
+                preset_get_directory(&occupied, &mode, &def_slot,
+                                     &last_active, &inc_pins);
+                resp_buf[0] = occupied & 0xFF;
+                resp_buf[1] = occupied >> 8;
+                resp_buf[2] = mode;
+                resp_buf[3] = def_slot;
+                resp_buf[4] = last_active;
+                resp_buf[5] = inc_pins;
+                vendor_send_response(resp_buf, 6);
+                return true;
+            }
+
+            case REQ_PRESET_GET_STARTUP: {
+                // Returns 3 bytes: startup_mode, default_slot, last_active
+                uint16_t occupied;
+                uint8_t mode, def_slot, last_active, inc_pins;
+                preset_get_directory(&occupied, &mode, &def_slot,
+                                     &last_active, &inc_pins);
+                resp_buf[0] = mode;
+                resp_buf[1] = def_slot;
+                resp_buf[2] = last_active;
+                vendor_send_response(resp_buf, 3);
+                return true;
+            }
+
+            case REQ_PRESET_GET_INCLUDE_PINS: {
+                uint16_t occupied;
+                uint8_t mode, def_slot, last_active, inc_pins;
+                preset_get_directory(&occupied, &mode, &def_slot,
+                                     &last_active, &inc_pins);
+                resp_buf[0] = inc_pins;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_PRESET_GET_ACTIVE: {
+                resp_buf[0] = preset_get_active();
+                vendor_send_response(resp_buf, 1);
                 return true;
             }
         }

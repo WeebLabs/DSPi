@@ -1,3 +1,30 @@
+/*
+ * flash_storage.c — Preset-based parameter persistence for DSPi
+ *
+ * Flash Layout (from end of flash, working backwards):
+ *
+ *   Sector 0  (-48 KB):  Preset Directory  (metadata, slot names, startup config)
+ *   Sector 1  (-44 KB):  Preset Slot 0     (full DSP state snapshot)
+ *   Sector 2  (-40 KB):  Preset Slot 1
+ *   ...
+ *   Sector 10 ( -8 KB):  Preset Slot 9
+ *   Sector 11 ( -4 KB):  Legacy sector     (old single-preset format, kept for
+ *                                            backward compat / migration)
+ *
+ * Each sector is 4 KB (FLASH_SECTOR_SIZE).  A preset slot stores the complete
+ * user-configurable DSP state: EQ bands, preamp, delays, loudness, crossfeed,
+ * matrix mixer, channel gains/mutes, and optionally pin assignments.
+ *
+ * The directory sector holds a 10-bit occupancy bitmask, 10 x 32-byte slot
+ * names, startup configuration (which slot to load on boot), and the index
+ * of the last-active slot.
+ *
+ * On boot, preset_boot_load() reads the directory and loads the appropriate
+ * slot based on the startup policy.  If no directory exists (first boot after
+ * firmware upgrade), it attempts to migrate the legacy single-sector data
+ * into slot 0.
+ */
+
 #include "flash_storage.h"
 #include "config.h"
 #include "dsp_pipeline.h"
@@ -10,15 +37,38 @@
 
 #include <string.h>
 
-// Flash configuration - use last 4KB sector
-#define FLASH_STORAGE_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
-#define FLASH_MAGIC 0x44535031  // "DSP1"
-#define FLASH_VERSION 7
+// ============================================================================
+// FLASH GEOMETRY
+// ============================================================================
 
-// Pointer to read flash via XIP
-#define FLASH_STORAGE_ADDR (XIP_BASE + FLASH_STORAGE_OFFSET)
+// Total reservation: 12 sectors (48 KB) at the end of flash.
+// Sector 0 = directory, sectors 1-10 = preset slots, sector 11 = legacy.
+#define PRESET_TOTAL_SECTORS    12
+#define PRESET_BASE_OFFSET      (PICO_FLASH_SIZE_BYTES - (PRESET_TOTAL_SECTORS * FLASH_SECTOR_SIZE))
 
-// Storage structure for matrix crosspoint (matches MatrixCrosspoint but packed for flash)
+// Individual sector offsets (byte offset from start of flash)
+#define DIR_SECTOR_OFFSET       (PRESET_BASE_OFFSET)
+#define SLOT_SECTOR_OFFSET(n)   (PRESET_BASE_OFFSET + ((1 + (n)) * FLASH_SECTOR_SIZE))
+#define LEGACY_SECTOR_OFFSET    (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+
+// XIP read pointers (memory-mapped flash)
+#define DIR_ADDR                ((const PresetDirectory *)(XIP_BASE + DIR_SECTOR_OFFSET))
+#define SLOT_ADDR(n)            ((const PresetSlot *)(XIP_BASE + SLOT_SECTOR_OFFSET(n)))
+#define LEGACY_ADDR             ((const LegacyFlashStorage *)(XIP_BASE + LEGACY_SECTOR_OFFSET))
+
+// Magic numbers — each distinct so we can tell sector types apart
+#define DIR_MAGIC               0x44535032  // "DSP2"
+#define SLOT_MAGIC              0x44535033  // "DSP3"
+#define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
+
+// Current data version for preset slot contents
+#define SLOT_DATA_VERSION       7
+
+// ============================================================================
+// ON-FLASH STRUCTURES
+// ============================================================================
+
+// Storage structure for matrix crosspoint (packed for flash)
 typedef struct __attribute__((packed)) {
     uint8_t enabled;
     uint8_t phase_invert;
@@ -26,7 +76,7 @@ typedef struct __attribute__((packed)) {
     float gain_db;
 } FlashMatrixCrosspoint;
 
-// Storage structure for output channel (matches OutputChannel but packed for flash)
+// Storage structure for output channel (packed for flash)
 typedef struct __attribute__((packed)) {
     uint8_t enabled;
     uint8_t mute;
@@ -35,43 +85,96 @@ typedef struct __attribute__((packed)) {
     float delay_ms;
 } FlashOutputChannel;
 
-// Storage structure
+// --- Preset Directory (sector 0) ---
+typedef struct __attribute__((packed)) {
+    uint32_t magic;                          // DIR_MAGIC
+    uint16_t version;                        // Directory format version (1)
+    uint16_t reserved;
+    uint32_t crc32;                          // CRC over everything after this 12-byte header
+
+    // Startup configuration
+    uint8_t  startup_mode;                   // PRESET_STARTUP_SPECIFIED or _LAST_ACTIVE
+    uint8_t  default_slot;                   // Slot to load in SPECIFIED mode (0-9)
+    uint8_t  last_active_slot;               // Last loaded/saved slot (0-9, 0xFF = none)
+    uint8_t  include_pins;                   // Whether preset load restores pin config
+
+    // Slot metadata
+    uint16_t slot_occupied;                  // Bitmask: bit N = slot N has valid data
+    uint8_t  padding[2];
+    char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
+} PresetDirectory;
+
+// --- Preset Slot (sectors 1-10) ---
+typedef struct __attribute__((packed)) {
+    uint32_t magic;                          // SLOT_MAGIC
+    uint16_t version;                        // Data format version (matches SLOT_DATA_VERSION)
+    uint16_t slot_index;                     // Which slot this is (sanity check)
+    uint32_t crc32;                          // CRC over data section
+
+    // ====== DSP State (same fields as legacy FlashStorage, same order) ======
+    EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
+    float preamp_db;
+    uint8_t bypass;
+    uint8_t padding[3];
+    float delays_ms[NUM_CHANNELS];
+    // Legacy per-channel gain/mute (V2)
+    float channel_gain_db[3];
+    uint8_t channel_mute[3];
+    uint8_t padding2;
+    // Loudness (V3)
+    uint8_t loudness_enabled;
+    uint8_t padding3[3];
+    float loudness_ref_spl;
+    float loudness_intensity_pct;
+    // Crossfeed (V4)
+    uint8_t crossfeed_enabled;
+    uint8_t crossfeed_preset;
+    uint8_t crossfeed_itd_enabled;
+    uint8_t padding4;
+    float crossfeed_custom_fc;
+    float crossfeed_custom_feed_db;
+    // Matrix mixer (V5)
+    FlashMatrixCrosspoint matrix_crosspoints[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
+    FlashOutputChannel matrix_outputs[NUM_OUTPUT_CHANNELS];
+    // Pin configuration (V6) — always stored, conditionally loaded
+    uint8_t output_pins[NUM_PIN_OUTPUTS];
+    uint8_t pin_padding[8 - NUM_PIN_OUTPUTS];
+} PresetSlot;
+
+// --- Legacy single-sector format (for migration) ---
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint16_t version;
     uint16_t reserved;
     uint32_t crc32;
-    // Data section
     EqParamPacket filter_recipes[NUM_CHANNELS][MAX_BANDS];
     float preamp_db;
     uint8_t bypass;
-    uint8_t padding[3];  // Align to 4 bytes
+    uint8_t padding[3];
     float delays_ms[NUM_CHANNELS];
-    // V2: Per-channel gain and mute (output channels only) - legacy, kept for compatibility
     float channel_gain_db[3];
     uint8_t channel_mute[3];
-    uint8_t padding2;  // Align to 4 bytes
-    // V3: Loudness compensation
+    uint8_t padding2;
     uint8_t loudness_enabled;
     uint8_t padding3[3];
     float loudness_ref_spl;
     float loudness_intensity_pct;
-    // V4: Crossfeed
     uint8_t crossfeed_enabled;
     uint8_t crossfeed_preset;
     uint8_t crossfeed_itd_enabled;
-    uint8_t padding4;  // Align to 4 bytes
+    uint8_t padding4;
     float crossfeed_custom_fc;
     float crossfeed_custom_feed_db;
-    // V5: Matrix Mixer
     FlashMatrixCrosspoint matrix_crosspoints[NUM_INPUT_CHANNELS][NUM_OUTPUT_CHANNELS];
     FlashOutputChannel matrix_outputs[NUM_OUTPUT_CHANNELS];
-    // V6: Output pin configuration
     uint8_t output_pins[NUM_PIN_OUTPUTS];
-    uint8_t pin_padding[8 - NUM_PIN_OUTPUTS];  // Alignment to 8 bytes
-} FlashStorage;
+    uint8_t pin_padding[8 - NUM_PIN_OUTPUTS];
+} LegacyFlashStorage;
 
-// External variables we need to access (defined in usb_audio.c)
+// ============================================================================
+// EXTERNAL VARIABLES (defined in usb_audio.c / dsp_pipeline.c)
+// ============================================================================
+
 extern volatile float global_preamp_db;
 extern volatile int32_t global_preamp_mul;
 extern volatile float global_preamp_linear;
@@ -87,7 +190,26 @@ extern volatile bool crossfeed_update_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 
-// Simple CRC32 implementation (polynomial 0xEDB88320)
+// ============================================================================
+// MODULE STATE
+// ============================================================================
+
+// Audio mute flag for glitch-free preset switching
+volatile bool preset_loading = false;
+volatile uint32_t preset_mute_counter = 0;
+
+// Forward declaration — defined in LEGACY API section
+static void apply_factory_defaults(void);
+
+// RAM-cached copy of the directory — updated on every directory write and
+// loaded once at boot.  Avoids repeated flash reads for queries.
+static PresetDirectory dir_cache;
+static bool dir_cache_valid = false;
+
+// ============================================================================
+// CRC32 (polynomial 0xEDB88320, same as legacy implementation)
+// ============================================================================
+
 static uint32_t crc32(const uint8_t *data, size_t len) {
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < len; i++) {
@@ -99,208 +221,238 @@ static uint32_t crc32(const uint8_t *data, size_t len) {
     return ~crc;
 }
 
-int flash_save_params(void) {
-    // Build storage structure in RAM
-    static FlashStorage storage;
-    memset(&storage, 0, sizeof(storage));
+// ============================================================================
+// dB-TO-LINEAR CONVERSION (no powf dependency in flash context)
+// ============================================================================
 
-    storage.magic = FLASH_MAGIC;
-    storage.version = FLASH_VERSION;
-    storage.reserved = 0;
+// Compute 10^(db/20) using Taylor-series approximation of exp().
+// Accurate to <0.1 dB across the [-60, +20] dB range.
+static float db_to_linear(float db) {
+    if (db == 0.0f) return 1.0f;
+    if (db < -60.0f) db = -60.0f;
+    if (db > 20.0f) db = 20.0f;
+    // 10^(db/20) = e^(db * ln(10)/20)
+    float x = db * 0.1151292546f;  // ln(10)/20
+    float linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
+    return (linear < 0.0f) ? 0.0f : linear;
+}
 
-    // Copy parameters
-    memcpy(storage.filter_recipes, (void*)filter_recipes, sizeof(storage.filter_recipes));
-    storage.preamp_db = global_preamp_db;
-    storage.bypass = bypass_master_eq ? 1 : 0;
-    memcpy(storage.delays_ms, (void*)channel_delays_ms, sizeof(storage.delays_ms));
-    memcpy(storage.channel_gain_db, (void*)channel_gain_db, sizeof(storage.channel_gain_db));
-    for (int i = 0; i < 3; i++) storage.channel_mute[i] = channel_mute[i] ? 1 : 0;
-    storage.loudness_enabled = loudness_enabled ? 1 : 0;
-    storage.loudness_ref_spl = loudness_ref_spl;
-    storage.loudness_intensity_pct = loudness_intensity_pct;
-    storage.crossfeed_enabled = crossfeed_config.enabled ? 1 : 0;
-    storage.crossfeed_preset = crossfeed_config.preset;
-    storage.crossfeed_itd_enabled = crossfeed_config.itd_enabled ? 1 : 0;
-    storage.crossfeed_custom_fc = crossfeed_config.custom_fc;
-    storage.crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
+// ============================================================================
+// LOW-LEVEL FLASH HELPERS
+// ============================================================================
 
-    // V5: Matrix Mixer state
+// Erase one sector and write data into it.
+// `offset` is the byte offset from the start of flash (not XIP address).
+// `data` and `len` specify the payload; it is zero-padded up to page alignment.
+static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
+    // Round up to page boundary
+    size_t write_size = (len + FLASH_PAGE_SIZE - 1) & ~(FLASH_PAGE_SIZE - 1);
+
+    // Use a page-aligned scratch buffer (static to avoid large stack allocs)
+    static uint8_t __attribute__((aligned(256))) write_buf[FLASH_SECTOR_SIZE];
+    memset(write_buf, 0xFF, sizeof(write_buf));
+    memcpy(write_buf, data, len);
+
+    uint32_t flags = save_and_disable_interrupts();
+    flash_range_erase(offset, FLASH_SECTOR_SIZE);
+    flash_range_program(offset, write_buf, write_size);
+    restore_interrupts(flags);
+
+    // Verify magic survived the write
+    const uint32_t *verify = (const uint32_t *)(XIP_BASE + offset);
+    const uint32_t *expected = (const uint32_t *)data;
+    if (*verify != *expected) {
+        return -1;  // Write verification failed
+    }
+    return 0;
+}
+
+// ============================================================================
+// DIRECTORY MANAGEMENT
+// ============================================================================
+
+// Load the directory from flash into the RAM cache.
+// Returns true if a valid directory was found.
+static bool dir_load_cache(void) {
+    const PresetDirectory *flash_dir = DIR_ADDR;
+    if (flash_dir->magic != DIR_MAGIC) {
+        dir_cache_valid = false;
+        return false;
+    }
+    // Verify CRC (covers everything after the 12-byte header)
+    const uint8_t *data_start = (const uint8_t *)&flash_dir->startup_mode;
+    size_t data_len = sizeof(PresetDirectory) - offsetof(PresetDirectory, startup_mode);
+    if (crc32(data_start, data_len) != flash_dir->crc32) {
+        dir_cache_valid = false;
+        return false;
+    }
+    memcpy(&dir_cache, flash_dir, sizeof(dir_cache));
+    dir_cache_valid = true;
+    return true;
+}
+
+// Write the RAM-cached directory back to flash.
+// Recomputes the CRC before writing.
+static int dir_flush(void) {
+    dir_cache.magic = DIR_MAGIC;
+    dir_cache.version = 1;
+    dir_cache.reserved = 0;
+    // CRC covers everything after the 12-byte header (magic + version + reserved + crc32)
+    const uint8_t *data_start = (const uint8_t *)&dir_cache.startup_mode;
+    size_t data_len = sizeof(PresetDirectory) - offsetof(PresetDirectory, startup_mode);
+    dir_cache.crc32 = crc32(data_start, data_len);
+
+    if (flash_write_sector(DIR_SECTOR_OFFSET, &dir_cache, sizeof(dir_cache)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+// Ensure the directory cache is populated.  If no directory exists on flash,
+// initialize a fresh one with factory-default settings.
+static void dir_ensure(void) {
+    if (dir_cache_valid) return;
+    if (dir_load_cache()) return;
+
+    // No valid directory — create a fresh one
+    memset(&dir_cache, 0, sizeof(dir_cache));
+    dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
+    dir_cache.default_slot = 0;
+    dir_cache.last_active_slot = 0;     // Default to slot 0
+    dir_cache.include_pins = 0;         // Don't include pins by default
+    dir_cache.slot_occupied = 0;        // All slots empty
+    // Slot 0 gets a default name; others are empty (already zeroed by memset)
+    strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
+    dir_cache_valid = true;
+    // Don't flush yet — will be flushed on first preset save
+}
+
+// ============================================================================
+// COLLECT / APPLY DSP STATE
+// ============================================================================
+
+// Snapshot the current live DSP state into a PresetSlot structure.
+static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
+    memset(slot, 0, sizeof(*slot));
+
+    slot->magic = SLOT_MAGIC;
+    slot->version = SLOT_DATA_VERSION;
+    slot->slot_index = slot_index;
+
+    // EQ
+    memcpy(slot->filter_recipes, (void *)filter_recipes, sizeof(slot->filter_recipes));
+
+    // Preamp
+    slot->preamp_db = global_preamp_db;
+
+    // Bypass
+    slot->bypass = bypass_master_eq ? 1 : 0;
+
+    // Delays
+    memcpy(slot->delays_ms, (void *)channel_delays_ms, sizeof(slot->delays_ms));
+
+    // Legacy per-channel gain/mute
+    memcpy(slot->channel_gain_db, (void *)channel_gain_db, sizeof(slot->channel_gain_db));
+    for (int i = 0; i < 3; i++)
+        slot->channel_mute[i] = channel_mute[i] ? 1 : 0;
+
+    // Loudness
+    slot->loudness_enabled = loudness_enabled ? 1 : 0;
+    slot->loudness_ref_spl = loudness_ref_spl;
+    slot->loudness_intensity_pct = loudness_intensity_pct;
+
+    // Crossfeed
+    slot->crossfeed_enabled = crossfeed_config.enabled ? 1 : 0;
+    slot->crossfeed_preset = crossfeed_config.preset;
+    slot->crossfeed_itd_enabled = crossfeed_config.itd_enabled ? 1 : 0;
+    slot->crossfeed_custom_fc = crossfeed_config.custom_fc;
+    slot->crossfeed_custom_feed_db = crossfeed_config.custom_feed_db;
+
+    // Matrix mixer
     for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-            storage.matrix_crosspoints[in][out].enabled = matrix_mixer.crosspoints[in][out].enabled;
-            storage.matrix_crosspoints[in][out].phase_invert = matrix_mixer.crosspoints[in][out].phase_invert;
-            storage.matrix_crosspoints[in][out].gain_db = matrix_mixer.crosspoints[in][out].gain_db;
+            slot->matrix_crosspoints[in][out].enabled = matrix_mixer.crosspoints[in][out].enabled;
+            slot->matrix_crosspoints[in][out].phase_invert = matrix_mixer.crosspoints[in][out].phase_invert;
+            slot->matrix_crosspoints[in][out].gain_db = matrix_mixer.crosspoints[in][out].gain_db;
         }
     }
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-        storage.matrix_outputs[out].enabled = matrix_mixer.outputs[out].enabled;
-        storage.matrix_outputs[out].mute = matrix_mixer.outputs[out].mute;
-        storage.matrix_outputs[out].gain_db = matrix_mixer.outputs[out].gain_db;
-        storage.matrix_outputs[out].delay_ms = matrix_mixer.outputs[out].delay_ms;
+        slot->matrix_outputs[out].enabled = matrix_mixer.outputs[out].enabled;
+        slot->matrix_outputs[out].mute = matrix_mixer.outputs[out].mute;
+        slot->matrix_outputs[out].gain_db = matrix_mixer.outputs[out].gain_db;
+        slot->matrix_outputs[out].delay_ms = matrix_mixer.outputs[out].delay_ms;
     }
 
-    // V6: Output pin configuration
-    memcpy(storage.output_pins, output_pins, sizeof(storage.output_pins));
+    // Pin configuration (always stored, conditionally loaded)
+    memcpy(slot->output_pins, output_pins, sizeof(slot->output_pins));
 
-    // Compute CRC over data section (everything after the header)
-    const uint8_t *data_start = (const uint8_t *)&storage.filter_recipes;
-    size_t data_len = sizeof(storage) - offsetof(FlashStorage, filter_recipes);
-    storage.crc32 = crc32(data_start, data_len);
-
-    // Round up to page size for writing
-    size_t write_size = (sizeof(storage) + FLASH_PAGE_SIZE - 1) & ~(FLASH_PAGE_SIZE - 1);
-
-    // Disable interrupts during flash operations
-    uint32_t flags = save_and_disable_interrupts();
-
-    // Erase the sector (required before writing)
-    flash_range_erase(FLASH_STORAGE_OFFSET, FLASH_SECTOR_SIZE);
-
-    // Program the data
-    flash_range_program(FLASH_STORAGE_OFFSET, (const uint8_t *)&storage, write_size);
-
-    // Restore interrupts
-    restore_interrupts(flags);
-
-    // Verify write by reading back and checking magic
-    const FlashStorage *verify = (const FlashStorage *)FLASH_STORAGE_ADDR;
-    if (verify->magic != FLASH_MAGIC) {
-        return FLASH_ERR_WRITE;
-    }
-
-    return FLASH_OK;
+    // Compute CRC over the data section (everything after the 12-byte header)
+    const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
+    size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
+    slot->crc32 = crc32(data_start, data_len);
 }
 
-int flash_load_params(void) {
-    // Read from flash via XIP pointer
-    const FlashStorage *storage = (const FlashStorage *)FLASH_STORAGE_ADDR;
+// Apply a validated PresetSlot to the live DSP state.
+// `include_pins` controls whether pin config is restored.
+// Does NOT trigger filter recalculation — caller must do that.
+static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
+    // EQ
+    memcpy((void *)filter_recipes, slot->filter_recipes, sizeof(filter_recipes));
 
-    // Check magic number
-    if (storage->magic != FLASH_MAGIC) {
-        return FLASH_ERR_NO_DATA;
-    }
-
-    // Check version (for future compatibility)
-    if (storage->version > FLASH_VERSION) {
-        return FLASH_ERR_NO_DATA;  // Newer version, can't load
-    }
-
-    // Verify CRC
-    const uint8_t *data_start = (const uint8_t *)&storage->filter_recipes;
-    size_t data_len = sizeof(FlashStorage) - offsetof(FlashStorage, filter_recipes);
-    uint32_t computed_crc = crc32(data_start, data_len);
-    if (computed_crc != storage->crc32) {
-        return FLASH_ERR_CRC;
-    }
-
-    // Load parameters into global variables
-    memcpy((void*)filter_recipes, storage->filter_recipes, sizeof(filter_recipes));
-
-    // Set preamp (need to compute multiplier too)
-    global_preamp_db = storage->preamp_db;
-    float linear = 1.0f;
-    // Compute 10^(db/20) manually to avoid powf dependency issues
-    if (storage->preamp_db != 0.0f) {
-        // Use exp approximation: 10^x = e^(x * ln(10))
-        // For small values, use simple approximation
-        float db = storage->preamp_db;
-        // Clamp to reasonable range
-        if (db < -60.0f) db = -60.0f;
-        if (db > 20.0f) db = 20.0f;
-        // 10^(db/20) = e^(db * ln(10) / 20) = e^(db * 0.1151)
-        float x = db * 0.1151292546f;  // ln(10)/20
-        // Taylor series for e^x (good enough for our range)
-        linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-        if (linear < 0.0f) linear = 0.0f;
-    }
+    // Preamp
+    global_preamp_db = slot->preamp_db;
+    float linear = db_to_linear(slot->preamp_db);
     global_preamp_mul = (int32_t)(linear * (float)(1 << 28));
     global_preamp_linear = linear;
 
-    bypass_master_eq = (storage->bypass != 0);
+    // Bypass
+    bypass_master_eq = (slot->bypass != 0);
 
-    memcpy((void*)channel_delays_ms, storage->delays_ms, sizeof(channel_delays_ms));
+    // Delays
+    memcpy((void *)channel_delays_ms, slot->delays_ms, sizeof(channel_delays_ms));
 
-    // V2: Per-channel gain and mute
-    if (storage->version >= 2) {
-        for (int i = 0; i < 3; i++) {
-            channel_gain_db[i] = storage->channel_gain_db[i];
-            // Compute 10^(db/20) using Taylor series (same as preamp above)
-            float linear = 1.0f;
-            float db = storage->channel_gain_db[i];
-            if (db != 0.0f) {
-                if (db < -60.0f) db = -60.0f;
-                if (db > 20.0f) db = 20.0f;
-                float x = db * 0.1151292546f;  // ln(10)/20
-                linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-                if (linear < 0.0f) linear = 0.0f;
-            }
-            channel_gain_mul[i] = (int32_t)(linear * 32768.0f);
-            channel_mute[i] = (storage->channel_mute[i] != 0);
-        }
+    // Legacy per-channel gain/mute
+    for (int i = 0; i < 3; i++) {
+        channel_gain_db[i] = slot->channel_gain_db[i];
+        float g = db_to_linear(slot->channel_gain_db[i]);
+        channel_gain_mul[i] = (int32_t)(g * 32768.0f);
+        channel_mute[i] = (slot->channel_mute[i] != 0);
     }
 
-    // V3: Loudness compensation
-    if (storage->version >= 3) {
-        loudness_enabled = (storage->loudness_enabled != 0);
-        loudness_ref_spl = storage->loudness_ref_spl;
-        loudness_intensity_pct = storage->loudness_intensity_pct;
-        loudness_recompute_pending = true;
-    }
+    // Loudness
+    loudness_enabled = (slot->loudness_enabled != 0);
+    loudness_ref_spl = slot->loudness_ref_spl;
+    loudness_intensity_pct = slot->loudness_intensity_pct;
+    loudness_recompute_pending = true;
 
-    // V4: Crossfeed
-    if (storage->version >= 4) {
-        crossfeed_config.enabled = (storage->crossfeed_enabled != 0);
-        crossfeed_config.preset = storage->crossfeed_preset;
-        crossfeed_config.itd_enabled = (storage->crossfeed_itd_enabled != 0);
-        crossfeed_config.custom_fc = storage->crossfeed_custom_fc;
-        crossfeed_config.custom_feed_db = storage->crossfeed_custom_feed_db;
-        crossfeed_update_pending = true;
-    }
+    // Crossfeed
+    crossfeed_config.enabled = (slot->crossfeed_enabled != 0);
+    crossfeed_config.preset = slot->crossfeed_preset;
+    crossfeed_config.itd_enabled = (slot->crossfeed_itd_enabled != 0);
+    crossfeed_config.custom_fc = slot->crossfeed_custom_fc;
+    crossfeed_config.custom_feed_db = slot->crossfeed_custom_feed_db;
+    crossfeed_update_pending = true;
 
-    // V5: Matrix Mixer
-    if (storage->version >= 5) {
-        for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
-            for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-                matrix_mixer.crosspoints[in][out].enabled = storage->matrix_crosspoints[in][out].enabled;
-                matrix_mixer.crosspoints[in][out].phase_invert = storage->matrix_crosspoints[in][out].phase_invert;
-                matrix_mixer.crosspoints[in][out].gain_db = storage->matrix_crosspoints[in][out].gain_db;
-                // Compute linear gain
-                float db = storage->matrix_crosspoints[in][out].gain_db;
-                float linear = 1.0f;
-                if (db != 0.0f) {
-                    if (db < -60.0f) db = -60.0f;
-                    if (db > 20.0f) db = 20.0f;
-                    float x = db * 0.1151292546f;
-                    linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-                    if (linear < 0.0f) linear = 0.0f;
-                }
-                matrix_mixer.crosspoints[in][out].gain_linear = linear;
-            }
-        }
+    // Matrix mixer
+    for (int in = 0; in < NUM_INPUT_CHANNELS; in++) {
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-            matrix_mixer.outputs[out].enabled = storage->matrix_outputs[out].enabled;
-            matrix_mixer.outputs[out].mute = storage->matrix_outputs[out].mute;
-            matrix_mixer.outputs[out].gain_db = storage->matrix_outputs[out].gain_db;
-            matrix_mixer.outputs[out].delay_ms = storage->matrix_outputs[out].delay_ms;
-            // Compute linear gain
-            float db = storage->matrix_outputs[out].gain_db;
-            float linear = 1.0f;
-            if (db != 0.0f) {
-                if (db < -60.0f) db = -60.0f;
-                if (db > 20.0f) db = 20.0f;
-                float x = db * 0.1151292546f;
-                linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-                if (linear < 0.0f) linear = 0.0f;
-            }
-            matrix_mixer.outputs[out].gain_linear = linear;
-            // Update channel delays
-            channel_delays_ms[CH_OUT_1 + out] = storage->matrix_outputs[out].delay_ms;
+            matrix_mixer.crosspoints[in][out].enabled = slot->matrix_crosspoints[in][out].enabled;
+            matrix_mixer.crosspoints[in][out].phase_invert = slot->matrix_crosspoints[in][out].phase_invert;
+            matrix_mixer.crosspoints[in][out].gain_db = slot->matrix_crosspoints[in][out].gain_db;
+            matrix_mixer.crosspoints[in][out].gain_linear = db_to_linear(slot->matrix_crosspoints[in][out].gain_db);
         }
     }
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+        matrix_mixer.outputs[out].enabled = slot->matrix_outputs[out].enabled;
+        matrix_mixer.outputs[out].mute = slot->matrix_outputs[out].mute;
+        matrix_mixer.outputs[out].gain_db = slot->matrix_outputs[out].gain_db;
+        matrix_mixer.outputs[out].gain_linear = db_to_linear(slot->matrix_outputs[out].gain_db);
+        matrix_mixer.outputs[out].delay_ms = slot->matrix_outputs[out].delay_ms;
+        channel_delays_ms[CH_OUT_1 + out] = slot->matrix_outputs[out].delay_ms;
+    }
 
-    // V6: Output pin configuration
-    if (storage->version >= 6) {
-        // Default pins used as reference for validation
+    // Pin configuration (conditional)
+    if (include_pins) {
 #if PICO_RP2350
         static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
             PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
@@ -312,8 +464,7 @@ int flash_load_params(void) {
         };
 #endif
         for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
-            uint8_t pin = storage->output_pins[i];
-            // Validate: pin must be in valid range and not reserved
+            uint8_t pin = slot->output_pins[i];
             bool valid = (pin <= 29) && (pin != 12) && !(pin >= 23 && pin <= 25);
 #if !PICO_RP2350
             if (pin > 28) valid = false;
@@ -321,36 +472,336 @@ int flash_load_params(void) {
             output_pins[i] = valid ? pin : default_pins[i];
         }
     }
+}
 
+// ============================================================================
+// SLOT VALIDATION
+// ============================================================================
+
+// Read and validate a preset slot from flash.
+// Returns a pointer to the flash-mapped slot if valid, NULL otherwise.
+static const PresetSlot *validate_slot(uint8_t slot) {
+    const PresetSlot *s = SLOT_ADDR(slot);
+    if (s->magic != SLOT_MAGIC) return NULL;
+    if (s->slot_index != slot) return NULL;
+    // CRC check
+    const uint8_t *data_start = (const uint8_t *)&s->filter_recipes;
+    size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
+    if (crc32(data_start, data_len) != s->crc32) return NULL;
+    return s;
+}
+
+// ============================================================================
+// PUBLIC PRESET API
+// ============================================================================
+
+uint8_t preset_save(uint8_t slot) {
+    if (slot >= PRESET_SLOTS) return PRESET_ERR_INVALID_SLOT;
+
+    dir_ensure();
+
+    // Build the slot data from current live state
+    static PresetSlot slot_buf;
+    collect_live_state(&slot_buf, slot);
+
+    // Write slot to flash
+    if (flash_write_sector(SLOT_SECTOR_OFFSET(slot), &slot_buf, sizeof(slot_buf)) != 0) {
+        return PRESET_ERR_FLASH_WRITE;
+    }
+
+    // Update directory: mark occupied, set last active
+    dir_cache.slot_occupied |= (1u << slot);
+    dir_cache.last_active_slot = slot;
+    if (dir_flush() != 0) {
+        return PRESET_ERR_FLASH_WRITE;
+    }
+
+    return PRESET_OK;
+}
+
+uint8_t preset_load(uint8_t slot) {
+    if (slot >= PRESET_SLOTS) return PRESET_ERR_INVALID_SLOT;
+
+    dir_ensure();
+
+    // Engage mute to prevent audio glitches during parameter swap
+    preset_mute_counter = PRESET_MUTE_SAMPLES;
+    preset_loading = true;
+    __dmb();
+
+    if (dir_cache.slot_occupied & (1u << slot)) {
+        // Slot has user data — validate and load it
+        const PresetSlot *s = validate_slot(slot);
+        if (!s) {
+            preset_loading = false;
+            return PRESET_ERR_CRC;
+        }
+        apply_slot_to_live(s, dir_cache.include_pins != 0);
+    } else {
+        // Slot not configured — apply factory defaults
+        apply_factory_defaults();
+    }
+
+    // Recalculate filters and delays for the current sample rate
+    extern volatile AudioState audio_state;
+    float rate = (float)audio_state.freq;
+    dsp_recalculate_all_filters(rate);
+    dsp_update_delay_samples(rate);
+
+    // Update directory: set last active
+    dir_cache.last_active_slot = slot;
+    dir_flush();  // Best-effort; preset is already loaded even if dir write fails
+
+    return PRESET_OK;
+}
+
+uint8_t preset_delete(uint8_t slot) {
+    if (slot >= PRESET_SLOTS) return PRESET_ERR_INVALID_SLOT;
+
+    dir_ensure();
+
+    // Erase the slot's flash sector
+    uint32_t flags = save_and_disable_interrupts();
+    flash_range_erase(SLOT_SECTOR_OFFSET(slot), FLASH_SECTOR_SIZE);
+    restore_interrupts(flags);
+
+    // Update directory — clear occupied bit but keep slot selected if active
+    dir_cache.slot_occupied &= ~(1u << slot);
+    dir_flush();
+
+    return PRESET_OK;
+}
+
+uint8_t preset_get_name(uint8_t slot, char *name_out) {
+    if (slot >= PRESET_SLOTS) return PRESET_ERR_INVALID_SLOT;
+    dir_ensure();
+    memcpy(name_out, dir_cache.slot_names[slot], PRESET_NAME_LEN);
+    return PRESET_OK;
+}
+
+uint8_t preset_set_name(uint8_t slot, const char *name) {
+    if (slot >= PRESET_SLOTS) return PRESET_ERR_INVALID_SLOT;
+    dir_ensure();
+
+    // Copy name with guaranteed NUL termination
+    memset(dir_cache.slot_names[slot], 0, PRESET_NAME_LEN);
+    strncpy(dir_cache.slot_names[slot], name, PRESET_NAME_LEN - 1);
+
+    if (dir_flush() != 0) {
+        return PRESET_ERR_FLASH_WRITE;
+    }
+    return PRESET_OK;
+}
+
+void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
+                          uint8_t *default_slot, uint8_t *last_active,
+                          uint8_t *include_pins) {
+    dir_ensure();
+    *slot_occupied = dir_cache.slot_occupied;
+    *startup_mode = dir_cache.startup_mode;
+    *default_slot = dir_cache.default_slot;
+    *last_active = dir_cache.last_active_slot;
+    *include_pins = dir_cache.include_pins;
+}
+
+uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot) {
+    if (mode > PRESET_STARTUP_LAST_ACTIVE) return PRESET_ERR_INVALID_SLOT;
+    if (default_slot >= PRESET_SLOTS) return PRESET_ERR_INVALID_SLOT;
+    dir_ensure();
+
+    dir_cache.startup_mode = mode;
+    dir_cache.default_slot = default_slot;
+    if (dir_flush() != 0) {
+        return PRESET_ERR_FLASH_WRITE;
+    }
+    return PRESET_OK;
+}
+
+void preset_set_include_pins(uint8_t include) {
+    dir_ensure();
+    dir_cache.include_pins = include ? 1 : 0;
+    dir_flush();
+}
+
+uint8_t preset_get_active(void) {
+    dir_ensure();
+    return dir_cache.last_active_slot;
+}
+
+// ============================================================================
+// BOOT / MIGRATION
+// ============================================================================
+
+// Attempt to migrate legacy single-sector data (pre-preset firmware) into
+// preset slot 0.  Called when no preset directory exists on flash.
+static bool migrate_legacy(void) {
+    const LegacyFlashStorage *legacy = LEGACY_ADDR;
+    if (legacy->magic != LEGACY_MAGIC) return false;
+
+    // Verify legacy CRC
+    const uint8_t *data_start = (const uint8_t *)&legacy->filter_recipes;
+    size_t data_len = sizeof(LegacyFlashStorage) - offsetof(LegacyFlashStorage, filter_recipes);
+    if (crc32(data_start, data_len) != legacy->crc32) return false;
+
+    // Build a PresetSlot from the legacy data.
+    // The data section layout is identical, so we can memcpy the data portion.
+    static PresetSlot slot_buf;
+    memset(&slot_buf, 0, sizeof(slot_buf));
+    slot_buf.magic = SLOT_MAGIC;
+    slot_buf.version = legacy->version;
+    slot_buf.slot_index = 0;
+
+    // Copy data fields (identical layout from filter_recipes onward)
+    memcpy(&slot_buf.filter_recipes, &legacy->filter_recipes,
+           sizeof(LegacyFlashStorage) - offsetof(LegacyFlashStorage, filter_recipes));
+
+    // Recompute CRC for the slot format
+    const uint8_t *slot_data = (const uint8_t *)&slot_buf.filter_recipes;
+    size_t slot_data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
+    slot_buf.crc32 = crc32(slot_data, slot_data_len);
+
+    // Write slot 0
+    if (flash_write_sector(SLOT_SECTOR_OFFSET(0), &slot_buf, sizeof(slot_buf)) != 0) {
+        return false;
+    }
+
+    // Create a fresh directory with slot 0 occupied and set as default
+    memset(&dir_cache, 0, sizeof(dir_cache));
+    dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
+    dir_cache.default_slot = 0;
+    dir_cache.last_active_slot = 0;
+    dir_cache.include_pins = 0;
+    dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
+    strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
+    dir_cache_valid = true;
+
+    if (dir_flush() != 0) {
+        return false;
+    }
+
+    return true;
+}
+
+int preset_boot_load(void) {
+    // Try to load the preset directory from flash
+    if (dir_load_cache()) {
+        // Directory exists — determine which slot to load
+        uint8_t target_slot;
+
+        if (dir_cache.startup_mode == PRESET_STARTUP_LAST_ACTIVE) {
+            target_slot = dir_cache.last_active_slot;
+        } else {
+            // PRESET_STARTUP_SPECIFIED (default)
+            target_slot = dir_cache.default_slot;
+        }
+
+        // Clamp to valid range
+        if (target_slot >= PRESET_SLOTS) {
+            target_slot = dir_cache.default_slot;
+            if (target_slot >= PRESET_SLOTS) target_slot = 0;
+        }
+
+        // Load the slot: user data if occupied, factory defaults if empty
+        if ((dir_cache.slot_occupied & (1u << target_slot))) {
+            const PresetSlot *s = validate_slot(target_slot);
+            if (s) {
+                apply_slot_to_live(s, dir_cache.include_pins != 0);
+            } else {
+                // Corrupt data — fall back to factory defaults
+                apply_factory_defaults();
+            }
+        } else {
+            apply_factory_defaults();
+        }
+
+        dir_cache.last_active_slot = target_slot;
+        return FLASH_OK;
+    }
+
+    // No directory — try legacy migration
+    if (migrate_legacy()) {
+        // Migration succeeded; slot 0 is now populated.  Load it.
+        const PresetSlot *s = validate_slot(0);
+        if (s) {
+            apply_slot_to_live(s, false);
+        } else {
+            apply_factory_defaults();
+        }
+        return FLASH_OK;
+    }
+
+    // First boot, no legacy data — initialize directory and use slot 0
+    dir_ensure();
+    dir_flush();
+    apply_factory_defaults();
     return FLASH_OK;
 }
 
-void flash_factory_reset(void) {
-    // Simply reinitialize to defaults - does NOT erase flash
+// ============================================================================
+// LEGACY API (redirects through preset system)
+// ============================================================================
+
+int flash_save_params(void) {
+    dir_ensure();
+
+    // Determine which slot to save into
+    uint8_t slot = dir_cache.last_active_slot;
+    if (slot >= PRESET_SLOTS) {
+        // No active slot — use slot 0
+        slot = 0;
+    }
+
+    uint8_t result = preset_save(slot);
+    switch (result) {
+        case PRESET_OK:             return FLASH_OK;
+        case PRESET_ERR_FLASH_WRITE: return FLASH_ERR_WRITE;
+        default:                    return FLASH_ERR_WRITE;
+    }
+}
+
+int flash_load_params(void) {
+    dir_ensure();
+
+    uint8_t slot = dir_cache.last_active_slot;
+    if (slot >= PRESET_SLOTS) {
+        slot = 0;
+    }
+
+    uint8_t result = preset_load(slot);
+    switch (result) {
+        case PRESET_OK:            return FLASH_OK;
+        case PRESET_ERR_CRC:       return FLASH_ERR_CRC;
+        default:                   return FLASH_ERR_WRITE;
+    }
+}
+
+// Reset the live DSP state to factory defaults.
+// Does NOT modify the directory or active slot tracking.
+static void apply_factory_defaults(void) {
     dsp_init_default_filters();
 
-    // Reset preamp to 0 dB
+    // Preamp
     global_preamp_db = 0.0f;
-    global_preamp_mul = (1 << 28);  // Unity gain
+    global_preamp_mul = (1 << 28);
     global_preamp_linear = 1.0f;
 
-    // Reset bypass
+    // Bypass
     bypass_master_eq = false;
 
-    // Reset per-channel gain and mute
+    // Per-channel gain and mute
     for (int i = 0; i < 3; i++) {
         channel_gain_db[i] = 0.0f;
-        channel_gain_mul[i] = 32768;  // Unity = 2^15
+        channel_gain_mul[i] = 32768;
         channel_mute[i] = false;
     }
 
-    // Reset loudness compensation
+    // Loudness
     loudness_enabled = false;
     loudness_ref_spl = 83.0f;
     loudness_intensity_pct = 100.0f;
     loudness_recompute_pending = true;
 
-    // Reset crossfeed
+    // Crossfeed
     crossfeed_config.enabled = false;
     crossfeed_config.itd_enabled = true;
     crossfeed_config.preset = CROSSFEED_PRESET_DEFAULT;
@@ -358,31 +809,24 @@ void flash_factory_reset(void) {
     crossfeed_config.custom_feed_db = 4.5f;
     crossfeed_update_pending = true;
 
-    // Reset matrix mixer to stereo pass-through on first pair
+    // Matrix mixer: stereo pass-through on first pair
     memset(&matrix_mixer, 0, sizeof(matrix_mixer));
-
-    // Stereo pass-through on first S/PDIF pair
-    matrix_mixer.crosspoints[0][0].enabled = 1;     // L→Out1
+    matrix_mixer.crosspoints[0][0].enabled = 1;
     matrix_mixer.crosspoints[0][0].gain_db = 0.0f;
     matrix_mixer.crosspoints[0][0].gain_linear = 1.0f;
-
-    matrix_mixer.crosspoints[1][1].enabled = 1;     // R→Out2
+    matrix_mixer.crosspoints[1][1].enabled = 1;
     matrix_mixer.crosspoints[1][1].gain_db = 0.0f;
     matrix_mixer.crosspoints[1][1].gain_linear = 1.0f;
-
-    // Enable first stereo pair only
     matrix_mixer.outputs[0].enabled = 1;
     matrix_mixer.outputs[0].gain_linear = 1.0f;
     matrix_mixer.outputs[1].enabled = 1;
     matrix_mixer.outputs[1].gain_linear = 1.0f;
-
-    // All other outputs disabled
     for (int out = 2; out < NUM_OUTPUT_CHANNELS; out++) {
         matrix_mixer.outputs[out].enabled = 0;
         matrix_mixer.outputs[out].gain_linear = 1.0f;
     }
 
-    // Reset pin configuration to defaults
+    // Reset pin configuration
     output_pins[0] = PICO_AUDIO_SPDIF_PIN;
     output_pins[1] = PICO_SPDIF_PIN_2;
 #if PICO_RP2350
@@ -392,4 +836,8 @@ void flash_factory_reset(void) {
 #else
     output_pins[2] = PICO_PDM_PIN;
 #endif
+}
+
+void flash_factory_reset(void) {
+    apply_factory_defaults();
 }

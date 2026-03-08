@@ -127,7 +127,7 @@ Defined in `main.c`, function `core0_init()`:
    - RP2040: Manual PLL (`set_sys_clock_pll()`), VREG 1.20V (overclock)
 3. **Bus priority** — DMA gets highest system bus priority
 4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
-5. **Flash parameter load** — Restore saved EQ, delays, preamp (all three globals: `global_preamp_db`, `global_preamp_mul`, `global_preamp_linear`), pin config from last 4KB flash sector
+5. **Preset boot load** — `preset_boot_load()` always selects a preset. Reads preset directory, loads appropriate slot based on startup policy (specified default or last active). If the target slot is empty, applies factory defaults while keeping the slot selected. On first boot after upgrade, migrates legacy single-sector data into preset slot 0. A preset is always active — there is no "no preset" state.
    *Last updated: 2026-03-07*
 6. **Loudness table computation** — Pre-compute ISO 226 curves for all 61 volume steps
 7. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
@@ -629,38 +629,82 @@ LoudnessCoeffs loudness_tables[2][61][2];  // [buffer][volume_step][biquad]
 ---
 
 ## Flash Storage
-*Last updated: 2026-02-15*
+*Last updated: 2026-03-07*
 
-### Location
+### Preset System (replaces single-sector storage)
 
-Last 4 KB sector of flash: `FLASH_SIZE - 4096`
+The firmware uses a 10-slot preset system. A preset is always active — there is no "no preset" state. Each slot can be either configured (has user data in flash) or unconfigured (loads factory defaults). Presets are stored in individual 4 KB flash sectors with a separate directory sector for metadata. Slot 0 has the default name "Default".
+*Last updated: 2026-03-07*
 
-### Format (Version 7)
+### Flash Layout
+
+Last 12 sectors (48 KB) of flash:
+
+| Sector | Offset from end | Magic | Purpose |
+|--------|-----------------|-------|---------|
+| 0 | -48 KB | `0x44535032` ("DSP2") | Preset Directory (metadata, names, startup config) |
+| 1-10 | -44 KB to -8 KB | `0x44535033` ("DSP3") | Preset Slots 0-9 (full DSP state) |
+| 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
+
+### Preset Directory Fields
 
 | Field | Description |
 |-------|-------------|
-| Magic | 0x44535031 ("DSP1") |
+| startup_mode | 0 = load specified default, 1 = load last active |
+| default_slot | Slot to load in "specified default" mode (0-9) |
+| last_active_slot | Last slot loaded/saved (always 0-9) |
+| include_pins | Whether preset load/save includes pin config (0/1, default 0) |
+| slot_occupied | 16-bit bitmask (bit N = slot N has valid data) |
+| slot_names[10][32] | 32-byte NUL-terminated names per slot |
+
+### Preset Slot Data (Version 7)
+
+| Field | Description |
+|-------|-------------|
+| Magic | 0x44535033 ("DSP3") |
 | Version | 7 |
-| CRC32 | Integrity check over data |
-| EQ recipes | NUM_CHANNELS × 12 bands |
+| slot_index | Sanity-check slot number |
+| CRC32 | Integrity check over data section |
+| EQ recipes | NUM_CHANNELS x 12 bands |
 | Preamp | gain_db |
 | Bypass | master bypass flag |
 | Delays | NUM_CHANNELS delay values |
 | Legacy gain/mute | 3 channels (backward compatibility) |
 | Loudness | enabled, reference SPL, intensity |
 | Crossfeed | enabled, preset, ITD, custom fc/feed |
-| Matrix mixer | V5: crosspoints + output channels |
-| Pin config | V6/V7: NUM_PIN_OUTPUTS pin assignments (3 on RP2040, 5 on RP2350) |
+| Matrix mixer | crosspoints + output channels |
+| Pin config | NUM_PIN_OUTPUTS pin assignments (always stored, conditionally loaded) |
 
-**Note:** V7 uses platform-dependent array sizes. Existing V6 flash data will fail the version check and trigger factory reset (acceptable for this major refactor).
+### Boot Sequence
+
+1. Read Preset Directory from flash
+2. If valid: load slot based on startup_mode (specified default or last active)
+3. If target slot empty/corrupt: apply factory defaults, keep slot selected
+4. If no directory: attempt legacy migration (copy old single-sector data into slot 0)
+5. If no legacy data: create fresh directory, select slot 0 with factory defaults
+6. Always results in an active preset (never "no preset")
+
+### Legacy Migration
+
+On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is found in the last sector but no preset directory exists, the firmware automatically migrates the old data into preset slot 0 (named "Migrated") and sets it as the default.
+
+### Legacy API Redirect
+
+- `REQ_SAVE_PARAMS` (0x51): saves to the active preset slot
+- `REQ_LOAD_PARAMS` (0x52): reloads the active preset slot
+- `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
+
+### Preset-Switch Mute
+
+When a preset is loaded, the firmware mutes audio output for ~5 ms (256 samples at 48 kHz) to prevent audible glitches from sudden coefficient changes. The `preset_loading` flag is checked in the audio callback on both platforms.
 
 ### Operations
 
-**Save:** Build struct → CRC32 → disable interrupts → erase sector → program → verify
+**Save:** Collect live state → build PresetSlot → CRC32 → erase sector → program → update directory
 
-**Load:** Read via XIP → check magic + version → verify CRC → copy to globals → recompute derived values
+**Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → update active slot
 
-**Factory reset:** Erase sector → restore default filters (80 Hz HP on outputs 1-8, LP on PDM sub)
+**Delete:** Erase slot sector → clear occupied bit (active slot selection unchanged)
 
 ---
 
@@ -842,7 +886,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-02*
+*Last updated: 2026-03-07*
 
 ### RP2040 (264 KB SRAM)
 
@@ -852,11 +896,12 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Output buffers (5 × 192 × 4 + 2 × 192 × 4) | ~5.25 KB |
 | Filters + recipes (7 channels) | ~8 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
+| Preset system (dir_cache + slot_buf + write_buf) | ~6 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~116 KB** |
-| Code in RAM (.text copy_to_ram) | ~64 KB |
+| **Total BSS** | **~122 KB** |
+| Code in RAM (.text copy_to_ram) | ~68 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
-| Stack + remaining heap | ~60 KB |
+| Stack + remaining heap | ~50 KB |
 
 ### RP2350 (520 KB SRAM)
 
@@ -865,11 +910,20 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Delay lines (9 × 8192 × 4) | 288 KB |
 | Filters + recipes | ~18 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
-| Other BSS | ~30 KB |
-| **Total BSS** | **~341 KB** |
-| Code in RAM (.time_critical + copy_to_ram) | ~63 KB |
+| Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |
+| Other BSS | ~28 KB |
+| **Total BSS** | **~348 KB** |
+| Code in RAM (.time_critical + copy_to_ram) | ~66 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
-| Stack + remaining heap | ~72 KB |
+| Stack + remaining heap | ~62 KB |
+
+### Flash Layout
+
+| Region | RP2040 (2 MB) | RP2350 (4 MB) |
+|--------|---------------|---------------|
+| Firmware code | ~68 KB | ~66 KB |
+| Preset storage (12 sectors) | 48 KB | 48 KB |
+| Free flash | ~1.9 MB | ~3.9 MB |
 
 ---
 
@@ -977,7 +1031,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-03-01*
+*Last updated: 2026-03-07*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -1030,3 +1084,14 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID (0=RP2040, 1=RP2350) |
 | REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
+| REQ_PRESET_SAVE | 0x90 | IN | Save live state to preset slot (wValue=slot) |
+| REQ_PRESET_LOAD | 0x91 | IN | Load preset slot to live state (wValue=slot) |
+| REQ_PRESET_DELETE | 0x92 | IN | Delete preset slot (wValue=slot) |
+| REQ_PRESET_GET_NAME | 0x93 | IN | Get 32-byte preset name (wValue=slot) |
+| REQ_PRESET_SET_NAME | 0x94 | OUT | Set preset name (wValue=slot, payload=32 bytes) |
+| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (6 bytes) |
+| REQ_PRESET_SET_STARTUP | 0x96 | OUT | Set startup mode + default slot (2 bytes) |
+| REQ_PRESET_GET_STARTUP | 0x97 | IN | Get startup config (3 bytes) |
+| REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
+| REQ_PRESET_GET_INCLUDE_PINS | 0x99 | IN | Get include-pins flag (1 byte) |
+| REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, 0xFF=none) |

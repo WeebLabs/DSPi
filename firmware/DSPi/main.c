@@ -192,15 +192,16 @@ void core0_init() {
     nominal_feedback_10_14 = ((uint64_t)audio_state.freq << 14) / 1000;
     feedback_10_14 = nominal_feedback_10_14;
 
-    // Try to load saved parameters from flash
-    // If successful, this overwrites the defaults set by usb_sound_card_init()
-    if (flash_load_params() == FLASH_OK) {
+    // Load preset from flash.  Always selects a preset (factory defaults if
+    // the target slot is empty).  Migrates legacy data on first boot.
+    preset_boot_load();
+    {
         uint32_t flags = save_and_disable_interrupts();
         dsp_recalculate_all_filters(48000.0f);
         dsp_update_delay_samples(48000.0f);
         restore_interrupts(flags);
 
-        // Apply saved SPDIF pin configuration (before Core 1 starts)
+        // Apply SPDIF pin configuration (before Core 1 starts)
         extern uint8_t output_pins[];
         extern audio_spdif_instance_t *spdif_instance_ptrs[];
         for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {

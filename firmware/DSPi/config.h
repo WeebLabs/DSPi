@@ -171,6 +171,34 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Clip Detection Commands
 #define REQ_CLEAR_CLIPS             0x83
 
+// Preset System Commands
+#define REQ_PRESET_SAVE             0x90
+#define REQ_PRESET_LOAD             0x91
+#define REQ_PRESET_DELETE           0x92
+#define REQ_PRESET_GET_NAME         0x93
+#define REQ_PRESET_SET_NAME         0x94
+#define REQ_PRESET_GET_DIR          0x95
+#define REQ_PRESET_SET_STARTUP      0x96
+#define REQ_PRESET_GET_STARTUP      0x97
+#define REQ_PRESET_SET_INCLUDE_PINS 0x98
+#define REQ_PRESET_GET_INCLUDE_PINS 0x99
+#define REQ_PRESET_GET_ACTIVE       0x9A
+
+// Preset configuration
+#define PRESET_SLOTS                10
+#define PRESET_NAME_LEN             32
+
+// Preset startup modes
+#define PRESET_STARTUP_SPECIFIED    0   // Load a specific default slot
+#define PRESET_STARTUP_LAST_ACTIVE  1   // Load whichever slot was last active
+
+// Preset status codes
+#define PRESET_OK                   0x00
+#define PRESET_ERR_INVALID_SLOT     0x01
+#define PRESET_ERR_SLOT_EMPTY       0x02
+#define PRESET_ERR_CRC              0x03
+#define PRESET_ERR_FLASH_WRITE      0x04
+
 // Platform IDs
 #define PLATFORM_RP2040             0
 #define PLATFORM_RP2350             1
