@@ -47,7 +47,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-02-14*
+*Last updated: 2026-03-08*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -67,6 +67,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `loudness.h` | Loudness API, coefficient structs |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
 | `flash_storage.h` | Flash storage API |
+| `bulk_params.c` | Bulk parameter collect/apply (wire format ↔ live state) |
+| `bulk_params.h` | Wire format structs (`WireBulkParams`), buffer size defines |
 | `config.h` | Global config, data structures, vendor command IDs, channel defs |
 | `usb_descriptors.c` | USB device/config/interface/endpoint descriptors (UAC1 + vendor) |
 | `usb_descriptors.h` | Descriptor declarations |
@@ -817,7 +819,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-03-02*
+*Last updated: 2026-03-08*
 
 ### Hardware
 
@@ -854,9 +856,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 |---------|--------|--------|
 | Channels | 5 | 9 |
 | Type | int32_t | float |
-| Max samples | 4096 | 8192 |
-| Max delay (48kHz) | 50 ms (software cap) | 170 ms |
-| RAM usage | 80 KB | 288 KB |
+| Max samples | 4096 | 4096 |
+| Max delay (48kHz) | 50 ms (software cap) | 85 ms |
+| RAM usage | 80 KB | 144 KB |
 
 ### Core 1 Usage
 
@@ -886,7 +888,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-07*
+*Last updated: 2026-03-08*
 
 ### RP2040 (264 KB SRAM)
 
@@ -897,25 +899,27 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Filters + recipes (7 channels) | ~8 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~6 KB |
+| Bulk param buffer (4 KB aligned) | ~4 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~122 KB** |
-| Code in RAM (.text copy_to_ram) | ~68 KB |
+| **Total BSS** | **~126 KB** |
+| Code in RAM (.text copy_to_ram) | ~72 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
-| Stack + remaining heap | ~50 KB |
+| Stack + remaining heap | ~42 KB |
 
 ### RP2350 (520 KB SRAM)
 
 | Section | Size (approx) |
 |---------|---------------|
-| Delay lines (9 × 8192 × 4) | 288 KB |
+| Delay lines (9 × 4096 × 4) | 144 KB |
 | Filters + recipes | ~18 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |
-| Other BSS | ~28 KB |
-| **Total BSS** | **~348 KB** |
-| Code in RAM (.time_critical + copy_to_ram) | ~66 KB |
+| Bulk param buffer (4 KB aligned) | ~4 KB |
+| Other BSS | ~24 KB |
+| **Total BSS** | **~204 KB** |
+| Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
-| Stack + remaining heap | ~62 KB |
+| Stack + remaining heap | ~200 KB |
 
 ### Flash Layout
 
@@ -1095,3 +1099,20 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
 | REQ_PRESET_GET_INCLUDE_PINS | 0x99 | IN | Get include-pins flag (1 byte) |
 | REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, always 0-9) |
+| REQ_GET_ALL_PARAMS | 0xA0 | IN | Get complete DSP state (~2480 bytes, multi-packet control transfer) |
+| REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (~2480 bytes, multi-packet control transfer) |
+
+### Bulk Parameter Transfer
+*Last updated: 2026-03-08*
+
+Transfers the complete DSP state in a single USB control transfer (~2480 bytes), replacing dozens of individual vendor requests.
+
+**Wire format:** `WireBulkParams` (`bulk_params.h`) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, and EQ bands. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+
+**Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
+
+**GET (0xA0):** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, then streams it out in 64-byte packets via `usb_stream_transfer`. ZLP appended if total length is a multiple of 64.
+
+**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, then recalculates all filters and delays.
+
+**Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.

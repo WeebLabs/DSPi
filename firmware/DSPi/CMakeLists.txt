@@ -10,6 +10,8 @@ set_source_files_properties(
 )
 
 add_executable(DSPi
+    bulk_params.c
+    bulk_params.h
     config.h
     crossfeed.c
     crossfeed.h

@@ -52,6 +52,8 @@ extern volatile bool eq_update_pending;
 extern volatile EqParamPacket pending_packet;
 extern volatile bool rate_change_pending;
 extern volatile uint32_t pending_rate;
+extern volatile bool bulk_params_pending;
+extern uint8_t bulk_param_buf[];
 
 // ----------------------------------------------------------------------------
 // API

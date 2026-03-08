@@ -79,10 +79,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
-// RP2350: 170ms max delay (8192 samples at 48kHz)
-// RP2040: 85ms hardware max (4096 samples), software-capped at 50ms
+// Both platforms: 85ms max delay (4096 samples at 48kHz)
+// RP2040: software-capped at 50ms
 #if PICO_RP2350
-#define MAX_DELAY_SAMPLES 8192
+#define MAX_DELAY_SAMPLES 4096
 #else
 #define MAX_DELAY_SAMPLES 4096
 #define MAX_DELAY_MS_CAP  50.0f
@@ -183,6 +183,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_PRESET_SET_INCLUDE_PINS 0x98
 #define REQ_PRESET_GET_INCLUDE_PINS 0x99
 #define REQ_PRESET_GET_ACTIVE       0x9A
+
+// Bulk parameter transfer
+#define REQ_GET_ALL_PARAMS          0xA0
+#define REQ_SET_ALL_PARAMS          0xA1
 
 // Preset configuration
 #define PRESET_SLOTS                10

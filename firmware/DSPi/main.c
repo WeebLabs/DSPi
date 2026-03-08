@@ -22,6 +22,7 @@
 #include "usb_audio.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "bulk_params.h"
 #include "pico/audio_spdif.h"
 
 // ----------------------------------------------------------------------------
@@ -318,6 +319,34 @@ int main(void) {
             crossfeed_compute_coefficients(&crossfeed_state, (const CrossfeedConfig *)&crossfeed_config, (float)audio_state.freq);
             // Update bypass flag atomically
             crossfeed_bypassed = !crossfeed_config.enabled;
+        }
+
+        // Handle bulk parameter SET (deferred from USB IRQ)
+        if (bulk_params_pending) {
+            bulk_params_pending = false;
+
+            // Wait for Core 1 to finish current work
+            if (core1_mode == CORE1_MODE_EQ_WORKER) {
+                while (core1_eq_work.work_ready && !core1_eq_work.work_done) {
+                    tight_loop_contents();
+                }
+                __dmb();
+            }
+
+            // Mute audio during parameter swap
+            preset_mute_counter = PRESET_MUTE_SAMPLES;
+            preset_loading = true;
+            __dmb();
+
+            // Apply the received parameters (pin config gated by include_pins setting)
+            uint16_t _occ; uint8_t _m, _d, _la, inc_pins;
+            preset_get_directory(&_occ, &_m, &_d, &_la, &inc_pins);
+            int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf, inc_pins != 0);
+            if (err == 0) {
+                float rate = (float)audio_state.freq;
+                dsp_recalculate_all_filters(rate);
+                dsp_update_delay_samples(rate);
+            }
         }
 
         // LED heartbeat - toggle every ~1000 iterations

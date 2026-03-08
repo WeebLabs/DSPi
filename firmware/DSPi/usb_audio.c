@@ -30,6 +30,8 @@
 #include "flash_storage.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "bulk_params.h"
+#include "pico/usb_stream_helper.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -43,6 +45,38 @@ volatile bool eq_update_pending = false;
 volatile EqParamPacket pending_packet;
 volatile bool rate_change_pending = false;
 volatile uint32_t pending_rate = 48000;
+volatile bool bulk_params_pending = false;
+
+// 4 KB aligned buffer shared between GET and SET bulk param transfers.
+uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
+
+// Stream transfer state for multi-packet vendor control transfers.
+static struct usb_stream_transfer _vendor_stream;
+static struct usb_transfer _vendor_ack_transfer;
+
+static struct usb_stream_transfer_funcs _vendor_stream_funcs = {
+    .on_chunk = usb_stream_noop_on_chunk,
+    .on_packet_complete = usb_stream_noop_on_packet_complete
+};
+
+// GET completion: data sent -> receive status-stage OUT ZLP from host
+static void _vendor_get_complete(__unused struct usb_endpoint *ep,
+                                 __unused struct usb_transfer *t) {
+    usb_start_empty_transfer(usb_get_control_out_endpoint(), &_vendor_ack_transfer, NULL);
+}
+
+// SET status-stage ACK sent -> signal main loop to apply params
+static void _vendor_set_ack_done(__unused struct usb_endpoint *ep,
+                                 __unused struct usb_transfer *t) {
+    bulk_params_pending = true;
+}
+
+// SET completion: data received -> send status-stage IN ZLP, then signal main loop
+static void _vendor_set_complete(__unused struct usb_endpoint *ep,
+                                 __unused struct usb_transfer *t) {
+    usb_start_empty_transfer(usb_get_control_in_endpoint(), &_vendor_ack_transfer,
+                             _vendor_set_ack_done);
+}
 
 volatile float global_preamp_db = 0.0f;
 volatile int32_t global_preamp_mul = 268435456;
@@ -1556,6 +1590,17 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
         vendor_last_request = setup->bRequest;
         vendor_last_wValue = setup->wValue;
 
+        // Large control OUT: bulk parameter SET
+        if (setup->bRequest == REQ_SET_ALL_PARAMS &&
+            setup->wLength == sizeof(WireBulkParams)) {
+            usb_stream_setup_transfer(&_vendor_stream, &_vendor_stream_funcs,
+                                      bulk_param_buf, WIRE_BULK_BUF_SIZE,
+                                      sizeof(WireBulkParams), _vendor_set_complete);
+            _vendor_stream.ep = usb_get_control_out_endpoint();
+            usb_start_transfer(usb_get_control_out_endpoint(), &_vendor_stream.core);
+            return true;
+        }
+
         if (setup->wLength && setup->wLength <= sizeof(vendor_rx_buf)) {
             usb_start_control_out_transfer(&_vendor_cmd_transfer_type);
             return true;
@@ -1997,6 +2042,20 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             case REQ_PRESET_GET_ACTIVE: {
                 resp_buf[0] = preset_get_active();
                 vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_ALL_PARAMS: {
+                bulk_params_collect((WireBulkParams *)bulk_param_buf);
+                uint32_t len = sizeof(WireBulkParams);
+                if (setup->wLength < len) len = setup->wLength;
+                usb_stream_setup_transfer(&_vendor_stream, &_vendor_stream_funcs,
+                                          bulk_param_buf, WIRE_BULK_BUF_SIZE, len,
+                                          _vendor_get_complete);
+                bool need_zlp = (len > 0) && ((len & 63u) == 0);
+                if (need_zlp) usb_grow_transfer(&_vendor_stream.core, 1);
+                _vendor_stream.ep = usb_get_control_in_endpoint();
+                usb_start_transfer(usb_get_control_in_endpoint(), &_vendor_stream.core);
                 return true;
             }
         }

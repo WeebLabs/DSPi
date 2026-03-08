@@ -59,7 +59,7 @@ Each preset stores the following parameters:
 
 ## Vendor Commands
 
-All preset commands use USB EP0 control transfers on the vendor interface (interface 2). Commands use request codes `0x90`-`0x9A`.
+All preset commands use USB EP0 control transfers on the vendor interface (interface 2). Preset management commands use request codes `0x90`-`0x9A`. Bulk parameter transfer commands (`0xA0`-`0xA1`) are also documented here as they are closely related to the preset workflow.
 
 ### Command Summary
 
@@ -76,6 +76,8 @@ All preset commands use USB EP0 control transfers on the vendor interface (inter
 | `REQ_PRESET_SET_INCLUDE_PINS` | `0x98` | OUT | 0 | 1 | Set pin-inclusion flag |
 | `REQ_PRESET_GET_INCLUDE_PINS` | `0x99` | IN | 0 | 1 | Get pin-inclusion flag |
 | `REQ_PRESET_GET_ACTIVE` | `0x9A` | IN | 0 | 1 | Get active slot index |
+| `REQ_GET_ALL_PARAMS` | `0xA0` | IN | 0 | 2480 | Get complete DSP state (multi-packet) |
+| `REQ_SET_ALL_PARAMS` | `0xA1` | OUT | 0 | 2480 | Set complete DSP state (multi-packet) |
 
 ### Status Codes (returned by SAVE, LOAD, DELETE)
 
@@ -383,6 +385,7 @@ Set whether preset load/save operations include GPIO pin configuration.
 **Notes:**
 - When disabled (default), pin configuration is a device-level setting independent of presets
 - Pin data is always stored in the preset for completeness, but only restored on load when this flag is set
+- This flag also gates pin application during `REQ_SET_ALL_PARAMS` (0xA1) bulk parameter transfers
 - Enabling this is useful when the same device is used with different physical output configurations
 - The flag is persisted in the directory (survives power cycles)
 
@@ -423,6 +426,110 @@ Get the index of the currently active preset slot.
 
 ---
 
+### REQ_GET_ALL_PARAMS (0xA0)
+
+Read the complete live DSP state in a single transfer (~2480 bytes). This is a multi-packet USB control transfer on EP0 (NOT a bulk endpoint transfer).
+
+**Transfer type:** Control IN (multi-packet, ~39 packets of 64 bytes)
+**bmRequestType:** `0xC1` (Device-to-Host, Vendor, Interface)
+**bRequest:** `0xA0`
+**wValue:** 0
+**wIndex:** 2
+**wLength:** `sizeof(WireBulkParams)` (2480)
+
+**Response:** `WireBulkParams` structure (defined in `bulk_params.h`):
+
+| Offset | Size | Section | Content |
+|--------|------|---------|---------|
+| 0 | 16 | Header | Format version, platform ID, channel counts, payload length, FW version |
+| 16 | 16 | Global | Preamp gain, bypass, loudness enabled/ref SPL/intensity |
+| 32 | 16 | Crossfeed | Enabled, preset, ITD, custom freq/feed level |
+| 48 | 16 | Legacy channels | Per-channel gain (3) and mute (3) |
+| 64 | 44 | Delays | Per-channel delay in ms (up to 11 channels, zero-padded) |
+| 108 | 144 | Matrix crosspoints | 2 inputs × 9 outputs × 8 bytes (enabled, phase, gain) |
+| 252 | 108 | Matrix outputs | 9 outputs × 12 bytes (enabled, mute, gain, delay) |
+| 360 | 8 | Pin config | Number of pins + GPIO assignments (always included) |
+| 368 | 2112 | EQ bands | 11 channels × 12 bands × 16 bytes (type, freq, Q, gain) |
+
+**Notes:**
+- All multi-byte fields are little-endian. All float fields are IEEE 754 single-precision at 4-byte-aligned offsets.
+- Arrays are sized at platform maximums (RP2350: 11 channels, 9 outputs). Entries beyond the platform's actual count are zero-padded. Use `header.num_channels` and `header.num_output_channels` to determine valid entries.
+- Pin configuration is always included in GET regardless of the `include_pins` setting.
+- This is the preferred method for reading back parameters after a preset load or on app startup.
+
+**Example (C/libusb):**
+```c
+uint8_t buf[2480];
+int ret = libusb_control_transfer(handle,
+    0xC1,       // bmRequestType: IN, Vendor, Interface
+    0xA0,       // bRequest: REQ_GET_ALL_PARAMS
+    0,          // wValue
+    2,          // wIndex: vendor interface
+    buf,        // data
+    2480,       // wLength
+    5000);      // timeout ms (longer for multi-packet)
+if (ret == 2480) {
+    WireBulkParams *params = (WireBulkParams *)buf;
+    // Parse params->header, params->global, params->eq, etc.
+}
+```
+
+---
+
+### REQ_SET_ALL_PARAMS (0xA1)
+
+Apply a complete DSP state in a single transfer (~2480 bytes). This is a multi-packet USB control transfer on EP0 (NOT a bulk endpoint transfer).
+
+**Transfer type:** Control OUT (multi-packet, ~39 packets of 64 bytes)
+**bmRequestType:** `0x41` (Host-to-Device, Vendor, Interface)
+**bRequest:** `0xA1`
+**wValue:** 0
+**wIndex:** 2
+**wLength:** `sizeof(WireBulkParams)` (2480, must match exactly)
+
+**Payload:** `WireBulkParams` structure (same layout as GET response above).
+
+**Behavior:**
+1. Firmware receives all packets into a 4 KB buffer via `usb_stream_transfer`
+2. After the status phase completes, `bulk_params_pending` is set
+3. Main loop processes the request (deferred from USB IRQ):
+   a. Waits for Core 1 EQ worker to finish current work (if active)
+   b. Engages audio mute (~5 ms / 256 samples at 48 kHz)
+   c. Validates the header: `format_version`, `platform_id`, `num_channels`, `payload_length`
+   d. Applies all parameters to live state
+   e. If `include_pins` is set in the preset directory, applies pin configuration (with validation)
+   f. Recalculates all filter coefficients for the current sample rate
+   g. Updates delay sample counts
+   h. Triggers loudness and crossfeed recomputation
+
+**Validation errors:** If the header fails validation (wrong platform, wrong channel count, etc.), the parameters are silently not applied. There is no error response — the transfer itself succeeds at the USB level.
+
+**Notes:**
+- `wLength` must exactly equal `sizeof(WireBulkParams)` (2480 bytes); other values are rejected (STALL)
+- The `platform_id` field must match the device's platform (RP2040=0, RP2350=1)
+- The `num_channels` and `num_output_channels` fields must match the device's configuration
+- Pin application is gated by the preset directory's `include_pins` flag (same as preset load)
+- This command does NOT save to flash. To persist, follow with `REQ_PRESET_SAVE` or `REQ_SAVE_PARAMS`.
+- This command does NOT change the active preset slot
+
+**Example (C/libusb):**
+```c
+// Assume 'params' is a previously captured WireBulkParams
+int ret = libusb_control_transfer(handle,
+    0x41,                       // bmRequestType: OUT, Vendor, Interface
+    0xA1,                       // bRequest: REQ_SET_ALL_PARAMS
+    0,                          // wValue
+    2,                          // wIndex: vendor interface
+    (uint8_t*)&params,          // data
+    sizeof(WireBulkParams),     // wLength: must be exactly 2480
+    5000);                      // timeout ms
+if (ret == sizeof(WireBulkParams)) {
+    // Transfer accepted; parameters will be applied within ~5 ms
+}
+```
+
+---
+
 ## Legacy Command Compatibility
 
 The existing flash storage commands continue to work and redirect through the preset system:
@@ -459,7 +566,8 @@ When a host application connects to the device:
 2. For each occupied slot:
    REQ_PRESET_GET_NAME         -> Get the slot's name
 3. REQ_PRESET_GET_ACTIVE       -> Determine which slot is currently loaded
-4. Display the preset list with the active slot highlighted
+4. REQ_GET_ALL_PARAMS (0xA0)   -> Read all DSP parameters in one transfer (~2480 bytes)
+5. Display the preset list with the active slot highlighted
 ```
 
 ### Saving the Current Configuration
@@ -476,6 +584,8 @@ When a host application connects to the device:
 1. REQ_PRESET_LOAD                 -> Load the slot (firmware handles mute)
 2. Wait ~10 ms for the mute period to complete
 3. Read back all parameter values to update UI:
+   - REQ_GET_ALL_PARAMS (0xA0)     -> Single transfer, ~2480 bytes (preferred)
+   OR read individually:
    - REQ_GET_PREAMP
    - REQ_GET_BYPASS
    - REQ_GET_EQ_PARAM (for each channel/band)
