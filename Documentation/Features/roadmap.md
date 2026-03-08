@@ -12,11 +12,11 @@
 - USB communication optimizations
 - User-configurable GPIO for parameter control (volume, tone, crossfeed, etc.)
 
-## v1.1.3b
-- Automatic Console and Firmware update function with DSPi parameter preservation
-
 ## v1.1.4
+- Automatic Console and Firmware update function with DSPi parameter preservation
 - Expanded filter types (Butterworth, Linkwitz–Riley, etc.)
+
+## v1.1.4b
 - Stabilized total device latency
 - I²C control over all parameters
 - I²S output with pin assignment
