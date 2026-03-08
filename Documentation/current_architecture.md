@@ -857,7 +857,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Channels | 5 | 9 |
 | Type | int32_t | float |
 | Max samples | 4096 | 4096 |
-| Max delay (48kHz) | 50 ms (software cap) | 85 ms |
+| Max delay (48kHz) | 85 ms | 85 ms |
 | RAM usage | 80 KB | 144 KB |
 
 ### Core 1 Usage

@@ -230,10 +230,6 @@ void dsp_update_delay_samples(float sample_rate) {
         }
 
         int32_t samples = (int32_t)(delay_ms * sample_rate / 1000.0f);
-#if !PICO_RP2350
-        int32_t max_cap = (int32_t)(MAX_DELAY_MS_CAP * sample_rate / 1000.0f);
-        if (samples > max_cap) samples = max_cap;
-#endif
         if (samples > MAX_DELAY_SAMPLES) samples = MAX_DELAY_SAMPLES;
         if (samples < 0) samples = 0;
         channel_delay_samples[out] = samples;
