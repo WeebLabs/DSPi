@@ -28,7 +28,7 @@
 #define WIRE_MAX_BANDS           12   // Same on both
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 
-#define WIRE_FORMAT_VERSION       2
+#define WIRE_FORMAT_VERSION       1
 
 // Platform IDs
 #define WIRE_PLATFORM_RP2040      0
@@ -135,15 +135,6 @@ typedef struct __attribute__((packed)) {
 } WireBandParams;                    // 16 bytes
 
 // ============================================================================
-// Section 10: Channel Names (352 bytes)
-// ============================================================================
-#define WIRE_CHANNEL_NAME_LEN    32   // Matches PRESET_NAME_LEN
-
-typedef struct __attribute__((packed)) {
-    char names[WIRE_MAX_CHANNELS][WIRE_CHANNEL_NAME_LEN];  // 352 bytes
-} WireChannelNames;
-
-// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -156,8 +147,7 @@ typedef struct __attribute__((packed)) {
     WireOutputChannel   outputs[WIRE_MAX_OUTPUT_CHANNELS];               //  108
     WirePinConfig       pins;                                             //    8
     WireBandParams      eq[WIRE_MAX_CHANNELS][WIRE_MAX_BANDS];           // 2112
-    WireChannelNames    channel_names;                                    //  352
-} WireBulkParams;                    // Total: 2832 bytes
+} WireBulkParams;                    // Total: 2480 bytes
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 
