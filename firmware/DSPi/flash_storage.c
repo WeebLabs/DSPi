@@ -62,7 +62,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       7
+#define SLOT_DATA_VERSION       8
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -139,6 +139,8 @@ typedef struct __attribute__((packed)) {
     // Pin configuration (V6) — always stored, conditionally loaded
     uint8_t output_pins[NUM_PIN_OUTPUTS];
     uint8_t pin_padding[8 - NUM_PIN_OUTPUTS];
+    // Channel names (V8)
+    char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -189,6 +191,7 @@ extern volatile CrossfeedConfig crossfeed_config;
 extern volatile bool crossfeed_update_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
+extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 
 // ============================================================================
 // MODULE STATE
@@ -386,6 +389,9 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // Pin configuration (always stored, conditionally loaded)
     memcpy(slot->output_pins, output_pins, sizeof(slot->output_pins));
 
+    // Channel names
+    memcpy(slot->channel_names, channel_names, sizeof(slot->channel_names));
+
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
     size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
@@ -471,6 +477,14 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
 #endif
             output_pins[i] = valid ? pin : default_pins[i];
         }
+    }
+
+    // Channel names (V8+)
+    if (slot->version >= 8) {
+        memcpy(channel_names, slot->channel_names, sizeof(channel_names));
+    } else {
+        for (int ch = 0; ch < NUM_CHANNELS; ch++)
+            get_default_channel_name(ch, channel_names[ch]);
     }
 }
 
@@ -850,6 +864,10 @@ static void apply_factory_defaults(void) {
 #else
     output_pins[2] = PICO_PDM_PIN;
 #endif
+
+    // Reset channel names to defaults
+    for (int ch = 0; ch < NUM_CHANNELS; ch++)
+        get_default_channel_name(ch, channel_names[ch]);
 }
 
 void flash_factory_reset(void) {

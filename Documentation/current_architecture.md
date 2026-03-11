@@ -659,12 +659,13 @@ Last 12 sectors (48 KB) of flash:
 | slot_occupied | 16-bit bitmask (bit N = slot N has valid data) |
 | slot_names[10][32] | 32-byte NUL-terminated names per slot |
 
-### Preset Slot Data (Version 7)
+### Preset Slot Data (Version 8)
+*Last updated: 2026-03-10*
 
 | Field | Description |
 |-------|-------------|
 | Magic | 0x44535033 ("DSP3") |
-| Version | 7 |
+| Version | 8 |
 | slot_index | Sanity-check slot number |
 | CRC32 | Integrity check over data section |
 | EQ recipes | NUM_CHANNELS x 12 bands |
@@ -676,6 +677,7 @@ Last 12 sectors (48 KB) of flash:
 | Crossfeed | enabled, preset, ITD, custom fc/feed |
 | Matrix mixer | crosspoints + output channels |
 | Pin config | NUM_PIN_OUTPUTS pin assignments (always stored, conditionally loaded) |
+| Channel names | NUM_CHANNELS × 32-byte NUL-terminated names (V8, default names for V<8) |
 
 ### Boot Sequence
 
@@ -888,7 +890,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-08*
+*Last updated: 2026-03-10*
 
 ### RP2040 (264 KB SRAM)
 
@@ -900,8 +902,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~6 KB |
 | Bulk param buffer (4 KB aligned) | ~4 KB |
+| Channel names (7 × 32) | ~224 B |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~126 KB** |
+| **Total BSS** | **~127 KB** |
 | Code in RAM (.text copy_to_ram) | ~72 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | Stack + remaining heap | ~42 KB |
@@ -915,8 +918,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |
 | Bulk param buffer (4 KB aligned) | ~4 KB |
+| Channel names (11 × 32) | ~352 B |
 | Other BSS | ~24 KB |
-| **Total BSS** | **~204 KB** |
+| **Total BSS** | **~205 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | Stack + remaining heap | ~200 KB |
@@ -1035,7 +1039,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-03-07*
+*Last updated: 2026-03-10*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -1099,15 +1103,17 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
 | REQ_PRESET_GET_INCLUDE_PINS | 0x99 | IN | Get include-pins flag (1 byte) |
 | REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, always 0-9) |
-| REQ_GET_ALL_PARAMS | 0xA0 | IN | Get complete DSP state (~2480 bytes, multi-packet control transfer) |
-| REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (~2480 bytes, multi-packet control transfer) |
+| REQ_SET_CHANNEL_NAME | 0x9B | OUT | Set channel name (wValue=channel, payload=1-32 bytes) |
+| REQ_GET_CHANNEL_NAME | 0x9C | IN | Get channel name (wValue=channel, returns 32 bytes) |
+| REQ_GET_ALL_PARAMS | 0xA0 | IN | Get complete DSP state (~2832 bytes, multi-packet control transfer) |
+| REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (~2832 bytes, multi-packet control transfer) |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-03-08*
+*Last updated: 2026-03-10*
 
-Transfers the complete DSP state in a single USB control transfer (~2480 bytes), replacing dozens of individual vendor requests.
+Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, and EQ bands. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 2) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, and channel names. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
 
 **Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
 

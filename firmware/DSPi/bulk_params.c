@@ -127,6 +127,10 @@ void bulk_params_collect(WireBulkParams *out) {
         }
     }
 
+    // Channel names
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        memcpy(out->channel_names.names[ch], channel_names[ch], PRESET_NAME_LEN);
+    }
 }
 
 // ============================================================================
@@ -240,6 +244,12 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             filter_recipes[ch][b].Q = in->eq[ch][b].q;
             filter_recipes[ch][b].gain_db = in->eq[ch][b].gain_db;
         }
+    }
+
+    // Channel names
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        memcpy(channel_names[ch], in->channel_names.names[ch], PRESET_NAME_LEN);
+        channel_names[ch][PRESET_NAME_LEN - 1] = '\0';  // Enforce NUL termination
     }
 
     return 0;

@@ -116,6 +116,30 @@ volatile bool crossfeed_update_pending = false;
 volatile bool crossfeed_bypassed = true;  // Fast bypass flag for audio callback
 CrossfeedState crossfeed_state;
 
+// Per-channel user-configurable names
+char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
+
+void get_default_channel_name(int ch, char *buf) {
+    memset(buf, 0, PRESET_NAME_LEN);
+#if PICO_RP2350
+    static const char *defaults[] = {
+        "USB L", "USB R",
+        "SPDIF 1 L", "SPDIF 1 R", "SPDIF 2 L", "SPDIF 2 R",
+        "SPDIF 3 L", "SPDIF 3 R", "SPDIF 4 L", "SPDIF 4 R",
+        "PDM"
+    };
+#else
+    static const char *defaults[] = {
+        "USB L", "USB R",
+        "SPDIF 1 L", "SPDIF 1 R", "SPDIF 2 L", "SPDIF 2 R",
+        "PDM"
+    };
+#endif
+    if (ch >= 0 && ch < NUM_CHANNELS) {
+        strncpy(buf, defaults[ch], PRESET_NAME_LEN - 1);
+    }
+}
+
 // Shared output buffer — file scope so Core 1 can access via pointer
 #if PICO_RP2350
 static float buf_out[NUM_OUTPUT_CHANNELS][192];
@@ -1531,6 +1555,18 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             }
             break;
         }
+
+        case REQ_SET_CHANNEL_NAME: {
+            // wValue = channel index, payload = 1-32 bytes of name
+            uint8_t ch = vendor_last_wValue & 0xFF;
+            if (ch < NUM_CHANNELS && buffer->data_len > 0) {
+                memset(channel_names[ch], 0, PRESET_NAME_LEN);
+                size_t copy_len = buffer->data_len < (PRESET_NAME_LEN - 1)
+                                ? buffer->data_len : (PRESET_NAME_LEN - 1);
+                memcpy(channel_names[ch], vendor_rx_buf, copy_len);
+            }
+            break;
+        }
     }
 
     usb_start_empty_control_in_transfer_null_completion();
@@ -2043,6 +2079,15 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 resp_buf[0] = preset_get_active();
                 vendor_send_response(resp_buf, 1);
                 return true;
+            }
+
+            case REQ_GET_CHANNEL_NAME: {
+                uint8_t ch = setup->wValue & 0xFF;
+                if (ch < NUM_CHANNELS) {
+                    vendor_send_response(channel_names[ch], PRESET_NAME_LEN);
+                    return true;
+                }
+                return false;
             }
 
             case REQ_GET_ALL_PARAMS: {

@@ -177,6 +177,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_PRESET_SET_INCLUDE_PINS 0x98
 #define REQ_PRESET_GET_INCLUDE_PINS 0x99
 #define REQ_PRESET_GET_ACTIVE       0x9A
+#define REQ_SET_CHANNEL_NAME        0x9B
+#define REQ_GET_CHANNEL_NAME        0x9C
 
 // Bulk parameter transfer
 #define REQ_GET_ALL_PARAMS          0xA0
