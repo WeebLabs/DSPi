@@ -346,6 +346,16 @@ int main(void) {
                 float rate = (float)audio_state.freq;
                 dsp_recalculate_all_filters(rate);
                 dsp_update_delay_samples(rate);
+
+                // Transition Core 1 mode to match new output enable state
+                Core1Mode new_mode = derive_core1_mode();
+                if (new_mode != core1_mode) {
+                    core1_mode = new_mode;
+#if ENABLE_SUB
+                    pdm_set_enabled(new_mode == CORE1_MODE_PDM);
+#endif
+                    __sev();
+                }
             }
         }
 

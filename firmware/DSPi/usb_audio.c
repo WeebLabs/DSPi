@@ -1270,7 +1270,7 @@ static uint8_t vendor_last_request = 0;
 static uint16_t vendor_last_wValue = 0;
 
 // Derive Core 1 mode from current output enable state
-static Core1Mode derive_core1_mode(void) {
+Core1Mode derive_core1_mode(void) {
     // PDM output (last) takes priority — checked first
     if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled)
         return CORE1_MODE_PDM;

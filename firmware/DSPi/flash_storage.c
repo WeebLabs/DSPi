@@ -30,6 +30,7 @@
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "crossfeed.h"
+#include "pdm_generator.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -562,6 +563,16 @@ uint8_t preset_load(uint8_t slot) {
     dsp_recalculate_all_filters(rate);
     dsp_update_delay_samples(rate);
 
+    // Transition Core 1 mode to match the new output enable state
+    Core1Mode new_mode = derive_core1_mode();
+    if (new_mode != core1_mode) {
+        core1_mode = new_mode;
+#if ENABLE_SUB
+        pdm_set_enabled(new_mode == CORE1_MODE_PDM);
+#endif
+        __sev();  // Wake Core 1 to pick up mode change
+    }
+
     // Update directory: set last active
     dir_cache.last_active_slot = slot;
     dir_flush();  // Best-effort; preset is already loaded even if dir write fails
@@ -595,6 +606,16 @@ uint8_t preset_delete(uint8_t slot) {
         float rate = (float)audio_state.freq;
         dsp_recalculate_all_filters(rate);
         dsp_update_delay_samples(rate);
+
+        // Transition Core 1 mode (factory defaults disable outputs 2+)
+        Core1Mode new_mode = derive_core1_mode();
+        if (new_mode != core1_mode) {
+            core1_mode = new_mode;
+#if ENABLE_SUB
+            pdm_set_enabled(new_mode == CORE1_MODE_PDM);
+#endif
+            __sev();
+        }
     }
 
     return PRESET_OK;

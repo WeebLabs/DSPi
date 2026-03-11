@@ -57,6 +57,9 @@ extern uint8_t bulk_param_buf[];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 void get_default_channel_name(int ch, char *buf);
 
+// Core 1 mode derivation (used by preset load and bulk params)
+Core1Mode derive_core1_mode(void);
+
 // ----------------------------------------------------------------------------
 // API
 // ----------------------------------------------------------------------------
