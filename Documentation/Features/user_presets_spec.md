@@ -131,14 +131,14 @@ All preset commands use USB EP0 control transfers on the vendor interface (inter
 | `REQ_PRESET_LOAD` | `0x91` | IN | slot (0-9) | 1 | Load slot into live state |
 | `REQ_PRESET_DELETE` | `0x92` | IN | slot (0-9) | 1 | Delete (erase) a preset slot |
 | `REQ_PRESET_GET_NAME` | `0x93` | IN | slot (0-9) | 32 | Get slot name |
-| `REQ_PRESET_SET_NAME` | `0x94` | OUT | slot (0-9) | 1-32 | Set slot name |
+| `REQ_PRESET_SET_NAME` | `0x94` | OUT | slot (0-9) | 32 | Set slot name (fixed-size) |
 | `REQ_PRESET_GET_DIR` | `0x95` | IN | 0 | 6 | Get directory summary |
 | `REQ_PRESET_SET_STARTUP` | `0x96` | OUT | 0 | 2 | Set startup configuration |
 | `REQ_PRESET_GET_STARTUP` | `0x97` | IN | 0 | 3 | Get startup configuration |
 | `REQ_PRESET_SET_INCLUDE_PINS` | `0x98` | OUT | 0 | 1 | Set pin-inclusion flag |
 | `REQ_PRESET_GET_INCLUDE_PINS` | `0x99` | IN | 0 | 1 | Get pin-inclusion flag |
 | `REQ_PRESET_GET_ACTIVE` | `0x9A` | IN | 0 | 1 | Get active slot index |
-| `REQ_SET_CHANNEL_NAME` | `0x9B` | OUT | channel index | 1-32 | Set channel name |
+| `REQ_SET_CHANNEL_NAME` | `0x9B` | OUT | channel index | 32 | Set channel name (fixed-size) |
 | `REQ_GET_CHANNEL_NAME` | `0x9C` | IN | channel index | 32 | Get channel name |
 | `REQ_GET_ALL_PARAMS` | `0xA0` | IN | 0 | 2832 | Get complete DSP state (multi-packet) |
 | `REQ_SET_ALL_PARAMS` | `0xA1` | OUT | 0 | 2832 | Set complete DSP state (multi-packet) |
@@ -307,9 +307,11 @@ Set the name of a preset slot.
 **bRequest:** `0x94`
 **wValue:** Slot index (0-9)
 **wIndex:** 2
-**wLength:** 1-32
+**wLength:** 32
 
-**Payload:** Up to 32 bytes of ASCII name data. The firmware copies up to 31 characters and ensures NUL termination.
+**Payload:** Exactly 32 bytes — a NUL-terminated ASCII string zero-padded to `PRESET_NAME_LEN` (32 bytes). The firmware copies up to 31 characters and ensures NUL termination.
+
+> **Important:** The host MUST always send exactly 32 bytes with `wLength = 32`. Short transfers cause USB disconnect and device reset on some host controllers. Zero-pad the buffer after the NUL terminator.
 
 **Behavior:**
 1. Copies the name into the directory cache
@@ -317,20 +319,21 @@ Set the name of a preset slot.
 3. The slot does not need to be occupied
 
 **Notes:**
-- To clear a name, send a single NUL byte (or any empty payload)
+- To clear a name, send a 32-byte buffer containing a single NUL byte followed by 31 zero bytes
 - Names are stored in the directory sector, not in the preset slot itself
 - Setting a name triggers a directory flash write
 
 **Example (C/libusb):**
 ```c
-const char *name = "Living Room EQ";
+char buf[32] = {0};
+strncpy(buf, "Living Room EQ", 31);
 libusb_control_transfer(handle,
     0x41,                      // bmRequestType: OUT, Vendor, Interface
     0x94,                      // bRequest: REQ_PRESET_SET_NAME
     slot,                      // wValue: slot index
     2,                         // wIndex: vendor interface
-    (uint8_t*)name,            // data
-    strlen(name) + 1,          // wLength: include NUL terminator
+    (uint8_t*)buf,             // data: 32-byte zero-padded name
+    32,                        // wLength: MUST be 32 (PRESET_NAME_LEN)
     1000);
 ```
 
@@ -499,9 +502,11 @@ Set the user-configurable name of a channel.
 **bRequest:** `0x9B`
 **wValue:** Channel index (0 to NUM_CHANNELS-1)
 **wIndex:** 2
-**wLength:** 1-32
+**wLength:** 32
 
-**Payload:** Up to 32 bytes of ASCII name data. The firmware copies up to 31 characters and ensures NUL termination.
+**Payload:** Exactly 32 bytes — a NUL-terminated ASCII string zero-padded to the full `PRESET_NAME_LEN` (32 bytes). The firmware copies up to 31 characters and ensures NUL termination.
+
+> **Important:** The host MUST always send exactly 32 bytes with `wLength = 32`. Short transfers (e.g., sending only `strlen(name) + 1` bytes) cause USB disconnect and device reset on some host controllers (particularly certain xHCI implementations). Zero-pad the buffer after the NUL terminator. This matches the fixed-size convention used by `REQ_PRESET_SET_NAME` and the `WireChannelNames` section in bulk transfers.
 
 **Behavior:**
 1. Validates the channel index
@@ -517,14 +522,16 @@ Set the user-configurable name of a channel.
 
 **Example (C/libusb):**
 ```c
-const char *name = "Front Left";
+// Always send a fixed 32-byte zero-padded buffer
+char buf[32] = {0};
+strncpy(buf, "Front Left", 31);
 libusb_control_transfer(handle,
     0x41,                      // bmRequestType: OUT, Vendor, Interface
     0x9B,                      // bRequest: REQ_SET_CHANNEL_NAME
     channel,                   // wValue: channel index
     2,                         // wIndex: vendor interface
-    (uint8_t*)name,            // data
-    strlen(name) + 1,          // wLength: include NUL terminator
+    (uint8_t*)buf,             // data: 32-byte zero-padded name
+    32,                        // wLength: MUST be 32 (PRESET_NAME_LEN)
     1000);
 ```
 
@@ -776,7 +783,7 @@ REQ_PRESET_SET_NAME with slot index and new name
 ### Renaming a Channel
 
 ```
-1. REQ_SET_CHANNEL_NAME with channel index and new name (1-31 bytes + NUL)
+1. REQ_SET_CHANNEL_NAME with channel index and 32-byte zero-padded name
 2. Update channel label in UI
 3. (Optional) REQ_PRESET_SAVE to persist the name change in the active slot
 ```
@@ -808,10 +815,11 @@ ret = libusb_control_transfer(handle, 0xC1, 0x9C, /*channel=*/2, 2,
                                (uint8_t*)name, 32, 1000);
 // name now contains "SPDIF 1 L" (or user-set name)
 
-// === 3. Rename a channel ===
-const char *new_name = "Front Left";
+// === 3. Rename a channel (always send fixed 32-byte buffer) ===
+char new_name[32] = {0};
+strncpy(new_name, "Front Left", 31);
 libusb_control_transfer(handle, 0x41, 0x9B, /*channel=*/2, 2,
-                         (uint8_t*)new_name, strlen(new_name) + 1, 1000);
+                         (uint8_t*)new_name, 32, 1000);
 // Name is now live but NOT persisted to flash
 
 // === 4. Persist by saving to the active preset ===
