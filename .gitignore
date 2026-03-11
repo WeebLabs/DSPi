@@ -23,4 +23,5 @@ firmware/eclipse_build/*
 *.md
 !README.md
 !Documentation/current_architecture.md
+!Documentation/Roadmap.md
 !Documentation/Features/*.md
