@@ -631,7 +631,7 @@ LoudnessCoeffs loudness_tables[2][61][2];  // [buffer][volume_step][biquad]
 ---
 
 ## Flash Storage
-*Last updated: 2026-03-07*
+*Last updated: 2026-03-11*
 
 ### Preset System (replaces single-sector storage)
 
@@ -706,9 +706,9 @@ When a preset is loaded, the firmware mutes audio output for ~5 ms (256 samples 
 
 **Save:** Collect live state → build PresetSlot → CRC32 → erase sector → program → update directory
 
-**Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → update active slot
+**Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → transition Core 1 mode (`derive_core1_mode()` + `pdm_set_enabled()`) → update active slot
 
-**Delete:** Erase slot sector → clear occupied bit → if active slot: mute + apply factory defaults + recalculate filters/delays (active slot selection unchanged)
+**Delete:** Erase slot sector → clear occupied bit → if active slot: mute + apply factory defaults + recalculate filters/delays + transition Core 1 mode (active slot selection unchanged)
 
 ---
 
@@ -1109,7 +1109,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (~2832 bytes, multi-packet control transfer) |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-03-10*
+*Last updated: 2026-03-11*
 
 Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
@@ -1119,6 +1119,6 @@ Transfers the complete DSP state in a single USB control transfer (~2832 bytes),
 
 **GET (0xA0):** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, then streams it out in 64-byte packets via `usb_stream_transfer`. ZLP appended if total length is a multiple of 64.
 
-**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, then recalculates all filters and delays.
+**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, recalculates all filters and delays, then transitions Core 1 mode to match the new output enable state.
 
 **Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.

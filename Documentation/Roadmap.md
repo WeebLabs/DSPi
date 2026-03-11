@@ -1,5 +1,5 @@
 # DSPi Roadmap (Q1-Q2 2026)
-This roadmap is updated frequently.  Features may become available much sooner than anticipated or in a different order.  This purpose of this document is simply to furnish users with a general guide as to the planned functionality.
+This roadmap is updated frequently.  Features may become available much sooner than anticipated or in a different order.  The purpose of this document is simply to furnish users with a general guide as to the planned functionality.
 
 ## v1.1.2b
 - Feature parity update for DSPi Console for Windows
@@ -8,7 +8,8 @@ This roadmap is updated frequently.  Features may become available much sooner t
 ## v1.1.3
 - Three-channel stereo (mid/side)
 - USB communication optimizations
-- User-configurable GPIO for parameter control (volume, tone, crossfeed, etc.)
+- User-configurable GPIO for parameter control (volume, tone, crossfeed, etc)
+- Device selection within DSPi Console
 
 ## v1.1.4
 - Automatic Console and Firmware update function with DSPi parameter preservation
