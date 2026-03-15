@@ -347,13 +347,22 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         cpu0_load_primed = false;
         cpu0_load_q8 = 0;
 
-        // Pre-fill with 2 silent buffers to prevent underrun on restart
-        for (int i = 0; i < 2; i++) {
-            struct audio_buffer *sb = take_audio_buffer(producer_pool_1, false);
-            if (sb) {
-                memset(sb->buffer->bytes, 0, 192 * 8);
-                sb->sample_count = 192;
-                give_audio_buffer(producer_pool_1, sb);
+        // Pre-fill all SPDIF producer pools to 50% to prevent underrun on restart
+        struct audio_buffer_pool *pools[] = {
+            producer_pool_1, producer_pool_2,
+#if PICO_RP2350
+            producer_pool_3, producer_pool_4,
+#endif
+        };
+        for (int p = 0; p < NUM_SPDIF_INSTANCES; p++) {
+            if (!pools[p]) continue;
+            for (int i = 0; i < AUDIO_BUFFER_COUNT / 2; i++) {
+                struct audio_buffer *sb = take_audio_buffer(pools[p], false);
+                if (sb) {
+                    memset(sb->buffer->bytes, 0, AUDIO_BUFFER_SAMPLES * 8);
+                    sb->sample_count = AUDIO_BUFFER_SAMPLES;
+                    give_audio_buffer(pools[p], sb);
+                }
             }
         }
     }
