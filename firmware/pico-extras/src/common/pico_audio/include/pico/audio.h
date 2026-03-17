@@ -177,6 +177,22 @@ static inline void release_audio_buffer(audio_buffer_pool_t *ac, audio_buffer_t 
     give_audio_buffer(ac, buffer);
 }
 
+/*! \brief Count the number of buffers in a linked list
+ *  \ingroup pico_audio
+ *
+ *  Read-only list traversal. Caller must hold the appropriate spinlock
+ *  (free_list_spin_lock or prepared_list_spin_lock).
+ *
+ * \param list Head of the audio_buffer linked list
+ * \return Number of buffers in the list
+ */
+static inline uint audio_buffer_list_count(audio_buffer_t *list) {
+    uint count = 0;
+    for (audio_buffer_t *b = list; b != NULL; b = b->next)
+        count++;
+    return count;
+}
+
 /*! \brief \todo
  *  \ingroup pico_audio
  *

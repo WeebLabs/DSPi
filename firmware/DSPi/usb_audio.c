@@ -160,6 +160,17 @@ static uint32_t cpu0_last_packet_end = 0;
 static uint32_t cpu0_load_q8 = 0;         // EMA in Q8 fixed point (0-25600 = 0-100%)
 static bool cpu0_load_primed = false;
 
+// Buffer statistics watermark tracking
+static void update_buffer_watermarks(void);
+static void reset_buffer_watermarks(void);
+static uint16_t buffer_stats_sequence = 0;
+static uint8_t spdif_consumer_min_fill_pct[NUM_SPDIF_INSTANCES];
+static uint8_t spdif_consumer_max_fill_pct[NUM_SPDIF_INSTANCES];
+static uint8_t pdm_dma_min_fill_pct = 100;
+static uint8_t pdm_dma_max_fill_pct = 0;
+static uint8_t pdm_ring_min_fill_pct = 100;
+static uint8_t pdm_ring_max_fill_pct = 0;
+
 // Audio Pools (S/PDIF stereo pairs)
 struct audio_buffer_pool *producer_pool_1 = NULL;  // S/PDIF 1 (Out 1-2)
 struct audio_buffer_pool *producer_pool_2 = NULL;  // S/PDIF 2 (Out 3-4)
@@ -325,6 +336,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
 #endif
 
+    update_buffer_watermarks();
+
     const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
     uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
     uint32_t sample_count = data_len / bytes_per_frame;
@@ -346,25 +359,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         total_samples_produced = 0;
         cpu0_load_primed = false;
         cpu0_load_q8 = 0;
-
-        // Pre-fill all SPDIF producer pools to 50% to prevent underrun on restart
-        struct audio_buffer_pool *pools[] = {
-            producer_pool_1, producer_pool_2,
-#if PICO_RP2350
-            producer_pool_3, producer_pool_4,
-#endif
-        };
-        for (int p = 0; p < NUM_SPDIF_INSTANCES; p++) {
-            if (!pools[p]) continue;
-            for (int i = 0; i < AUDIO_BUFFER_COUNT / 2; i++) {
-                struct audio_buffer *sb = take_audio_buffer(pools[p], false);
-                if (sb) {
-                    memset(sb->buffer->bytes, 0, AUDIO_BUFFER_SAMPLES * 8);
-                    sb->sample_count = AUDIO_BUFFER_SAMPLES;
-                    give_audio_buffer(pools[p], sb);
-                }
-            }
-        }
     }
     last_packet_time_us = now_us;
 
@@ -1627,6 +1621,58 @@ static bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
     return false;
 }
 
+// ----------------------------------------------------------------------------
+// BUFFER STATISTICS HELPERS
+// ----------------------------------------------------------------------------
+
+static uint count_pool_free(audio_buffer_pool_t *pool) {
+    uint32_t save = spin_lock_blocking(pool->free_list_spin_lock);
+    uint count = audio_buffer_list_count(pool->free_list);
+    spin_unlock(pool->free_list_spin_lock, save);
+    return count;
+}
+
+static uint count_pool_prepared(audio_buffer_pool_t *pool) {
+    uint32_t save = spin_lock_blocking(pool->prepared_list_spin_lock);
+    uint count = audio_buffer_list_count(pool->prepared_list);
+    spin_unlock(pool->prepared_list_spin_lock, save);
+    return count;
+}
+
+static void reset_buffer_watermarks(void) {
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        spdif_consumer_min_fill_pct[i] = 100;
+        spdif_consumer_max_fill_pct[i] = 0;
+    }
+    pdm_dma_min_fill_pct = 100;
+    pdm_dma_max_fill_pct = 0;
+    pdm_ring_min_fill_pct = 100;
+    pdm_ring_max_fill_pct = 0;
+}
+
+static void update_buffer_watermarks(void) {
+    uint consumer_capacity = AUDIO_BUFFER_COUNT / 2;
+
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+        uint cons_prepared = count_pool_prepared(inst->consumer_pool);
+        uint playing = (inst->playing_buffer != NULL) ? 1 : 0;
+        uint8_t cons_pct = (uint8_t)((cons_prepared + playing) * 100 / consumer_capacity);
+        if (cons_pct < spdif_consumer_min_fill_pct[i]) spdif_consumer_min_fill_pct[i] = cons_pct;
+        if (cons_pct > spdif_consumer_max_fill_pct[i]) spdif_consumer_max_fill_pct[i] = cons_pct;
+    }
+
+    if (pdm_enabled) {
+        uint8_t dma_pct = pdm_get_dma_fill_pct();
+        if (dma_pct < pdm_dma_min_fill_pct) pdm_dma_min_fill_pct = dma_pct;
+        if (dma_pct > pdm_dma_max_fill_pct) pdm_dma_max_fill_pct = dma_pct;
+
+        uint8_t ring_pct = pdm_get_ring_fill_pct();
+        if (ring_pct < pdm_ring_min_fill_pct) pdm_ring_min_fill_pct = ring_pct;
+        if (ring_pct > pdm_ring_max_fill_pct) pdm_ring_max_fill_pct = ring_pct;
+    }
+}
+
 static bool vendor_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
     setup = __builtin_assume_aligned(setup, 4);
 
@@ -2112,6 +2158,50 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 usb_start_transfer(usb_get_control_in_endpoint(), &_vendor_stream.core);
                 return true;
             }
+
+            case REQ_GET_BUFFER_STATS: {
+                BufferStatsPacket pkt;
+                memset(&pkt, 0, sizeof(pkt));
+                pkt.num_spdif = NUM_SPDIF_INSTANCES;
+                pkt.flags = (pdm_enabled ? 0x01 : 0) | (sync_started ? 0x02 : 0);
+                pkt.sequence = buffer_stats_sequence++;
+
+                uint consumer_capacity = AUDIO_BUFFER_COUNT / 2;
+
+                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                    audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+                    pkt.spdif[i].consumer_free = count_pool_free(inst->consumer_pool);
+                    pkt.spdif[i].consumer_prepared = count_pool_prepared(inst->consumer_pool);
+                    pkt.spdif[i].consumer_playing = (inst->playing_buffer != NULL) ? 1 : 0;
+                    uint cons_fill = pkt.spdif[i].consumer_prepared + pkt.spdif[i].consumer_playing;
+                    pkt.spdif[i].consumer_fill_pct = (uint8_t)(cons_fill * 100 / consumer_capacity);
+                    pkt.spdif[i].consumer_min_fill_pct = spdif_consumer_min_fill_pct[i];
+                    pkt.spdif[i].consumer_max_fill_pct = spdif_consumer_max_fill_pct[i];
+                }
+
+                if (pdm_enabled) {
+                    pkt.pdm.dma_fill_pct = pdm_get_dma_fill_pct();
+                    pkt.pdm.dma_min_fill_pct = pdm_dma_min_fill_pct;
+                    pkt.pdm.dma_max_fill_pct = pdm_dma_max_fill_pct;
+                    pkt.pdm.ring_fill_pct = pdm_get_ring_fill_pct();
+                    pkt.pdm.ring_min_fill_pct = pdm_ring_min_fill_pct;
+                    pkt.pdm.ring_max_fill_pct = pdm_ring_max_fill_pct;
+                }
+
+                memcpy(resp_buf, &pkt, sizeof(pkt));
+                vendor_send_response(resp_buf, sizeof(pkt));
+                return true;
+            }
+
+            case REQ_RESET_BUFFER_STATS: {
+                uint16_t flags = setup->wValue;
+                if (flags & 0x01) {
+                    reset_buffer_watermarks();
+                }
+                resp_buf[0] = 1;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
         }
 
         return false;
@@ -2252,6 +2342,7 @@ static void matrix_init_defaults(void) {
 void usb_sound_card_init(void) {
     // Initialize matrix mixer defaults
     matrix_init_defaults();
+    reset_buffer_watermarks();
 
     // S/PDIF Setup (this must happen before USB init to claim DMA channels)
     producer_pool_1 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);

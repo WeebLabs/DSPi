@@ -40,6 +40,9 @@ volatile bool pdm_enabled = false;
 volatile Core1Mode core1_mode = CORE1_MODE_IDLE;
 Core1EqWork core1_eq_work = {0};
 
+// DMA write index snapshot for buffer stats (written by Core 1, read by Core 0)
+static volatile uint32_t pdm_stats_write_idx = 0;
+
 // Idle-time CPU load metering (Core 1)
 static uint32_t c1eq_last_work_end = 0;
 static uint32_t c1eq_load_q8 = 0;
@@ -376,6 +379,7 @@ static void pdm_processing_loop() {
             pdm_dma_buffer[local_pdm_write] = pdm_word;
             local_pdm_write = (local_pdm_write + 1) & (PDM_DMA_BUFFER_SIZE - 1);
         }
+        pdm_stats_write_idx = local_pdm_write;
 
         // Check for overrun after writing
         {
@@ -661,6 +665,24 @@ static void __not_in_flash_func(eq_worker_loop)() {
     global_status.cpu1_load = 0;
 }
 #endif
+
+// ----------------------------------------------------------------------------
+// BUFFER FILL LEVEL ACCESSORS (called from Core 0)
+// ----------------------------------------------------------------------------
+
+uint8_t pdm_get_dma_fill_pct(void) {
+    if (!pdm_enabled || pdm_dma_chan < 0) return 0;
+    uint32_t write_idx = pdm_stats_write_idx;
+    uint32_t read_addr = dma_hw->ch[pdm_dma_chan].read_addr;
+    uint32_t read_idx = (read_addr - (uint32_t)pdm_dma_buffer) / 4;
+    uint32_t delta = (write_idx - read_idx) & (PDM_DMA_BUFFER_SIZE - 1);
+    return (uint8_t)(delta * 100 / PDM_DMA_BUFFER_SIZE);
+}
+
+uint8_t pdm_get_ring_fill_pct(void) {
+    uint8_t count = (uint8_t)(pdm_head - pdm_tail);
+    return (uint8_t)(count * 100 / RING_SIZE);
+}
 
 // ----------------------------------------------------------------------------
 // CORE 1 ENTRY — mode dispatcher

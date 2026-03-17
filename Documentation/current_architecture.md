@@ -119,13 +119,13 @@ cmake --build build-rp2350 --clean-first   # RP2350 build
 ---
 
 ## Initialization Flow
-*Last updated: 2026-02-14*
+*Last updated: 2026-03-17*
 
 Defined in `main.c`, function `core0_init()`:
 
 1. **GPIO setup** — LED (GPIO 25), status pin (GPIO 23)
-2. **Clock configuration** — PLL set to 288 MHz (48 kHz family) or 264.6 MHz (44.1 kHz family)
-   - RP2350: `set_sys_clock_hz()`, VREG 1.10V
+2. **Clock configuration** — PLL set to 307.2 MHz (48 kHz family) or 264.6 MHz (44.1 kHz family)
+   - RP2350: `set_sys_clock_hz()`, VREG 1.15V
    - RP2040: Manual PLL (`set_sys_clock_pll()`), VREG 1.20V (overclock)
 3. **Bus priority** — DMA gets highest system bus priority
 4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
@@ -147,7 +147,7 @@ Defined in `main.c`, function `core0_init()`:
 ---
 
 ## USB Audio Pipeline
-*Last updated: 2026-02-22*
+*Last updated: 2026-03-16*
 
 ### USB Stack
 
@@ -200,11 +200,10 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 
 `_as_audio_packet()` → `process_audio_packet(data, len)`
 
-1. **Buffer acquisition** — Get audio buffers from 4 S/PDIF producer pools
+1. **Buffer acquisition** — Get audio buffers from S/PDIF producer pools
 2. **Gap detection** — Reset sync state if >50ms between packets
-3. **Pre-fill** — Insert 2 silent buffers on restart to prevent underrun
-4. **DSP processing** — Platform-specific pipeline (see below)
-5. **Buffer return** — Give completed buffers to S/PDIF consumer pools for DMA
+3. **DSP processing** — Platform-specific pipeline (see below)
+4. **Buffer return** — Give completed buffers to S/PDIF consumer pools for DMA
 
 ### RP2350 Float Pipeline
 *Last updated: 2026-03-02*
@@ -821,13 +820,13 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-03-08*
+*Last updated: 2026-03-17*
 
 ### Hardware
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
-| CPU | Dual Cortex-M0+ @ 133 MHz (OC to 288 MHz) | Dual Cortex-M33 @ 150 MHz (OC to 288 MHz) |
+| CPU | Dual Cortex-M0+ @ 133 MHz (OC to 307.2 MHz) | Dual Cortex-M33 @ 150 MHz (OC to 307.2 MHz) |
 | SRAM | 264 KB | 520 KB |
 | FPU | None (software float) | Single-precision VFP |
 | DCP | N/A | Double-precision coprocessor |
@@ -883,14 +882,14 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
-| 48 kHz family | 288 MHz (VCO 1152 MHz / 4) | 288 MHz (auto PLL) |
+| 48 kHz family | 307.2 MHz (VCO 1536 MHz / 5) | 307.2 MHz (VCO 1536 MHz / 5) |
 | 44.1 kHz family | 264.6 MHz (VCO 1058.4 MHz / 4) | 264.6 MHz (auto PLL) |
 | PLL config | Manual (`set_sys_clock_pll()`) | Automatic (`set_sys_clock_hz()`) |
 
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-10*
+*Last updated: 2026-03-16*
 
 ### RP2040 (264 KB SRAM)
 
@@ -1039,7 +1038,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-03-10*
+*Last updated: 2026-03-16*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -1107,6 +1106,8 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_CHANNEL_NAME | 0x9C | IN | Get channel name (wValue=channel, returns 32 bytes) |
 | REQ_GET_ALL_PARAMS | 0xA0 | IN | Get complete DSP state (~2832 bytes, multi-packet control transfer) |
 | REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (~2832 bytes, multi-packet control transfer) |
+| REQ_GET_BUFFER_STATS | 0xB0 | IN | Get 44-byte buffer fill level statistics packet |
+| REQ_RESET_BUFFER_STATS | 0xB1 | IN | Reset watermarks (wValue bit 0), returns 1-byte ack |
 
 ### Bulk Parameter Transfer
 *Last updated: 2026-03-11*
@@ -1122,3 +1123,27 @@ Transfers the complete DSP state in a single USB control transfer (~2832 bytes),
 **SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, recalculates all filters and delays, then transitions Core 1 mode to match the new output enable state.
 
 **Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.
+
+### Buffer Statistics
+*Last updated: 2026-03-17*
+
+Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. Producer (USB-side) pool stats are not tracked because `producer_pool_blocking_give` returns buffers synchronously — the producer pool is always fully free between USB packets.
+
+**Wire format:** `BufferStatsPacket` (44 bytes, fits in a single 64-byte USB control transfer). Contains per-instance SPDIF consumer stats (`SpdifBufferStats` x4, 8 bytes each), PDM stats (`PdmBufferStats`, 8 bytes), instance count, flags (PDM active, audio streaming), and a monotonic sequence counter.
+
+**SPDIF stats per instance:** consumer free/prepared/playing counts with fill percentage and min/max watermarks (DMA-side pool).
+
+**PDM stats:** DMA circular buffer fill percentage and software ring buffer fill percentage, each with min/max watermarks.
+
+**Fill percentage formulas:**
+- SPDIF consumer: `(prepared + playing) * 100 / (AUDIO_BUFFER_COUNT / 2)` — healthy: 25-75%
+- PDM DMA: `((write_idx - read_idx) & (PDM_DMA_BUFFER_SIZE-1)) * 100 / PDM_DMA_BUFFER_SIZE` — healthy: ~12.5%
+- PDM ring: `((head - tail) & 0xFF) * 100 / RING_SIZE` — healthy: 0-10%
+
+**Producer fill formula:** `(capacity - free) * 100 / capacity` — measures in-flight + prepared buffers, since `prepared` alone is always near zero (DMA IRQ drains it on-demand via the connection).
+
+**Watermark tracking:** Consumer watermarks updated once per USB audio packet (~1ms) in `process_audio_packet()`. Overhead ~1-2us (consumer pool list traversals under spinlock). Reset via `REQ_RESET_BUFFER_STATS` (0xB1, wValue bit 0).
+
+**Implementation:** `audio_buffer_list_count()` inline in `pico/audio.h` for read-only list traversal. `pdm_stats_write_idx` volatile in `pdm_generator.c` exposes Core 1 write position to Core 0 (atomic on ARM). Helper functions in `usb_audio.c`: `count_pool_free()`, `count_pool_prepared()`, `update_buffer_watermarks()`, `reset_buffer_watermarks()`.
+
+**BSS impact:** ~18 bytes total (watermark arrays + sequence counter + pdm_stats_write_idx).

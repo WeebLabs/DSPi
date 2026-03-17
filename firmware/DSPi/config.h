@@ -184,6 +184,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_ALL_PARAMS          0xA0
 #define REQ_SET_ALL_PARAMS          0xA1
 
+// Buffer statistics
+#define REQ_GET_BUFFER_STATS        0xB0
+#define REQ_RESET_BUFFER_STATS      0xB1
+
 // Preset configuration
 #define PRESET_SLOTS                10
 #define PRESET_NAME_LEN             32
@@ -414,6 +418,35 @@ typedef struct __attribute__((packed)) {
         uint8_t raw[60];
     };
 } VendorRespPacket;
+
+// Buffer Statistics Wire Format — fits in a single 64-byte control transfer
+typedef struct __attribute__((packed)) {
+    uint8_t consumer_free;       // [0-4] SPDIF buffers available for DMA
+    uint8_t consumer_prepared;   // [0-4] SPDIF buffers queued for DMA playback
+    uint8_t consumer_playing;    // [0-1] DMA in-flight
+    uint8_t consumer_fill_pct;   // Consumer pipeline fill %
+    uint8_t consumer_min_fill_pct; // Lowest consumer fill since last reset
+    uint8_t consumer_max_fill_pct; // Highest consumer fill since last reset
+    uint8_t pad[2];
+} SpdifBufferStats;              // 8 bytes
+
+typedef struct __attribute__((packed)) {
+    uint8_t dma_fill_pct;        // DMA circular buffer fill %
+    uint8_t dma_min_fill_pct;
+    uint8_t dma_max_fill_pct;
+    uint8_t ring_fill_pct;       // Software ring buffer fill %
+    uint8_t ring_min_fill_pct;
+    uint8_t ring_max_fill_pct;
+    uint8_t pad[2];
+} PdmBufferStats;                // 8 bytes
+
+typedef struct __attribute__((packed)) {
+    uint8_t num_spdif;           // NUM_SPDIF_INSTANCES (2 or 4)
+    uint8_t flags;               // Bit 0: PDM active, Bit 1: audio streaming
+    uint16_t sequence;           // Monotonic counter, wraps at 65535
+    SpdifBufferStats spdif[4];   // Per-instance (unused zeroed)
+    PdmBufferStats pdm;
+} BufferStatsPacket;             // 4 + 32 + 8 = 44 bytes
 
 extern uint8_t channel_band_counts[NUM_CHANNELS];
 extern volatile SystemStatusPacket global_status;

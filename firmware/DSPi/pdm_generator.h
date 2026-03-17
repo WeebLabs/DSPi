@@ -15,6 +15,10 @@ void pdm_update_clock(uint32_t freq);
 void pdm_push_sample(int32_t sample, bool reset);
 void pdm_change_pin(uint8_t new_pin);
 
+// Buffer fill level accessors (called from Core 0 for stats)
+uint8_t pdm_get_dma_fill_pct(void);
+uint8_t pdm_get_ring_fill_pct(void);
+
 // Core 1 mode and EQ worker state (written by Core 0, read by Core 1)
 extern volatile Core1Mode core1_mode;
 extern Core1EqWork core1_eq_work;

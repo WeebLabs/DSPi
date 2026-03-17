@@ -105,23 +105,22 @@ static void perform_rate_change(uint32_t new_freq) {
 
 #if PICO_RP2350
     // RP2350: Dynamic clock switching for optimal performance and integer PIO dividers
-    // 48kHz family -> 288MHz (48000 * 6000)
+    // 48kHz family -> 307.2MHz (PIO divider 6400 = 25.0 exact integer)
     // 44.1kHz family -> 264.6MHz (44100 * 6000)
-    uint32_t target_freq = (new_freq == 44100) ? 264600000 : 288000000;
-    
+    uint32_t target_freq = (new_freq == 44100) ? 264600000 : 307200000;
+
     // Only change if needed to avoid glitches
     if (clock_get_hz(clk_sys) != target_freq) {
-        // User requested 1.1V even for high clock
-        vreg_set_voltage(VREG_VOLTAGE_1_10); 
+        vreg_set_voltage(VREG_VOLTAGE_1_15);
         busy_wait_us(100);
         set_sys_clock_hz(target_freq, false);
     }
 #else
     // RP2040: Change system clock for optimal S/PDIF timing
-    // Overclocked to 288MHz / 264.6MHz
+    // 307.2MHz gives integer PIO divider (25.0) for 48kHz SPDIF
     if((new_freq == 48000 || new_freq == 96000) && clock_176mhz) {
-        // 288MHz (48000 * 6000) -> VCO 1152 MHz
-        set_sys_clock_pll(1152000000, 4, 1);
+        // 307.2MHz -> VCO 1536 MHz / 5 / 1
+        set_sys_clock_pll(1536000000, 5, 1);
         clock_176mhz = 0;
     }
     else if(new_freq == 44100 && !clock_176mhz) {
@@ -161,20 +160,19 @@ void core0_init() {
         __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
     }
 
-    // RP2350: Use set_sys_clock_hz for proper clock tracking
-    vreg_set_voltage(VREG_VOLTAGE_1_10);
+    // RP2350: 307.2MHz gives integer PIO divider (25.0) for 48kHz SPDIF
+    vreg_set_voltage(VREG_VOLTAGE_1_15);
     busy_wait_ms(10);
 
-    // Target 288MHz for 48kHz audio start
-    if (!set_sys_clock_hz(288000000, false)) {
-        // Fall back to 150MHz if 288MHz not achievable
+    // VCO 1536MHz / 5 = 307.2MHz
+    if (!set_sys_clock_hz(307200000, false)) {
         set_sys_clock_hz(150000000, false);
     }
 #else
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     busy_wait_ms(10);
-    // Initial 288MHz
-    set_sys_clock_pll(1152000000, 4, 1);
+    // Initial 307.2MHz -> VCO 1536 MHz / 5 / 1
+    set_sys_clock_pll(1536000000, 5, 1);
 #endif
 
     gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);
