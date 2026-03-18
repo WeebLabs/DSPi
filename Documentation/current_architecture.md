@@ -697,17 +697,25 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 - `REQ_LOAD_PARAMS` (0x52): reloads the active preset slot
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
-### Preset-Switch Mute
+### Preset-Switch Mute & Feedback Recovery
+*Last updated: 2026-03-18*
 
-When a preset is loaded, the firmware mutes audio output for ~5 ms (256 samples at 48 kHz) to prevent audible glitches from sudden coefficient changes. The `preset_loading` flag is checked in the audio callback on both platforms.
+Flash operations (`flash_range_erase` + `flash_range_program`) disable all interrupts for ~45ms per sector, which stalls SPDIF TX DMA and causes the USB SOF feedback IIR filter (`fb_accum`) to absorb incorrect measurements. To prevent persistent buffer fill/drain drift:
+
+- **`flash_write_sector()`** re-seeds the USB feedback loop (`feedback_reset_value = nominal_feedback_10_14`) and re-arms a 512-sample (~10ms) mute after every interrupt-disabled flash operation. This eliminates slow IIR convergence and covers SPDIF consumer pool refill time.
+- **`preset_save()`** engages mute before the first flash write (previously had no mute).
+- **`preset_delete()`** engages mute and resets feedback around its raw `flash_range_erase()` call (not routed through `flash_write_sector()`).
+- `feedback_reset_value` in `main.c` is global (not static) so `flash_storage.c` can access it via `extern`.
+
+The `preset_loading` flag and `preset_mute_counter` are checked in the audio callback on both platforms.
 
 ### Operations
 
-**Save:** Collect live state → build PresetSlot → CRC32 → erase sector → program → update directory
+**Save:** Engage mute → collect live state → build PresetSlot → CRC32 → erase sector + program (feedback reset + re-mute) → update directory (feedback reset + re-mute)
 
-**Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → transition Core 1 mode (`derive_core1_mode()` + `pdm_set_enabled()`) → update active slot
+**Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → transition Core 1 mode (`derive_core1_mode()` + `pdm_set_enabled()`) → update directory (feedback reset + re-mute)
 
-**Delete:** Erase slot sector → clear occupied bit → if active slot: mute + apply factory defaults + recalculate filters/delays + transition Core 1 mode (active slot selection unchanged)
+**Delete:** Engage mute → erase slot sector (feedback reset + re-mute) → update directory (feedback reset + re-mute) → if active slot: apply factory defaults + recalculate filters/delays + transition Core 1 mode (active slot selection unchanged)
 
 ---
 

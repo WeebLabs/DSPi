@@ -37,7 +37,7 @@ volatile uint32_t nominal_feedback_10_14 = 0;
 static uint32_t sof_count = 0;
 static uint32_t fb_last_total = 0;
 static uint32_t fb_accum = 0;
-static volatile uint32_t feedback_reset_value = 0;
+volatile uint32_t feedback_reset_value = 0;
 
 // USB SOF IRQ — measures device clock vs host clock for async feedback
 void __not_in_flash_func(usb_sof_irq)(void) {

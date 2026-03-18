@@ -193,6 +193,9 @@ extern volatile bool crossfeed_update_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
+extern volatile uint32_t feedback_10_14;
+extern volatile uint32_t nominal_feedback_10_14;
+extern volatile uint32_t feedback_reset_value;
 
 // ============================================================================
 // MODULE STATE
@@ -261,6 +264,15 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     flash_range_erase(offset, FLASH_SECTOR_SIZE);
     flash_range_program(offset, write_buf, write_size);
     restore_interrupts(flags);
+
+    // Re-seed USB feedback loop to avoid slow IIR convergence after
+    // the ~45ms interrupt blackout (see preset_bugfix.md for details)
+    feedback_reset_value = nominal_feedback_10_14;
+    feedback_10_14 = nominal_feedback_10_14;
+
+    // Re-arm mute to cover SPDIF consumer pool refill (~4-8ms)
+    preset_mute_counter = 512;
+    preset_loading = true;
 
     // Verify magic survived the write
     const uint32_t *verify = (const uint32_t *)(XIP_BASE + offset);
@@ -519,6 +531,11 @@ uint8_t preset_save(uint8_t slot) {
     static PresetSlot slot_buf;
     collect_live_state(&slot_buf, slot);
 
+    // Engage mute before flash writes to prevent audio glitches
+    preset_mute_counter = 512;
+    preset_loading = true;
+    __dmb();
+
     // Write slot to flash
     if (flash_write_sector(SLOT_SECTOR_OFFSET(slot), &slot_buf, sizeof(slot_buf)) != 0) {
         return PRESET_ERR_FLASH_WRITE;
@@ -585,10 +602,21 @@ uint8_t preset_delete(uint8_t slot) {
 
     dir_ensure();
 
+    // Mute before flash erase to prevent audio glitches
+    preset_mute_counter = 512;
+    preset_loading = true;
+    __dmb();
+
     // Erase the slot's flash sector
     uint32_t flags = save_and_disable_interrupts();
     flash_range_erase(SLOT_SECTOR_OFFSET(slot), FLASH_SECTOR_SIZE);
     restore_interrupts(flags);
+
+    // Re-seed feedback loop and re-arm mute after interrupt blackout
+    feedback_reset_value = nominal_feedback_10_14;
+    feedback_10_14 = nominal_feedback_10_14;
+    preset_mute_counter = 512;
+    preset_loading = true;
 
     // Update directory — clear occupied bit but keep slot selected if active
     dir_cache.slot_occupied &= ~(1u << slot);
