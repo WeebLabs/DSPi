@@ -39,6 +39,13 @@ static uint32_t fb_last_total = 0;
 static uint32_t fb_accum = 0;
 volatile uint32_t feedback_reset_value = 0;
 
+// Fill-level servo (Loop B): proportional correction based on consumer buffer fill
+extern volatile uint8_t spdif0_consumer_fill;
+#define FILL_TARGET      2       // 50% of consumer capacity (4 buffers)
+#define FILL_SERVO_KP    1024    // 10.14 units per buffer of error, tau ~6s at max
+#define FILL_SERVO_CLAMP 8192    // ±0.5 samples in 10.14 — prevents servo dominating rate
+#define FB_OUTER_CLAMP   16384   // ±1 sample in 10.14 from nominal
+
 // USB SOF IRQ — measures device clock vs host clock for async feedback
 void __not_in_flash_func(usb_sof_irq)(void) {
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
@@ -73,7 +80,21 @@ void __not_in_flash_func(usb_sof_irq)(void) {
                 int32_t error = (int32_t)raw - (int32_t)fb_accum;
                 fb_accum += error >> 3;  // IIR α≈0.125, τ≈32ms
             }
-            feedback_10_14 = fb_accum;
+
+            // Loop B: proportional fill-level servo
+            // Underfull (fill < target) → negative error → positive servo → host sends more
+            int32_t fill_error = (int32_t)spdif0_consumer_fill - FILL_TARGET;
+            int32_t fb_servo = -(fill_error * FILL_SERVO_KP);
+            if (fb_servo > FILL_SERVO_CLAMP)  fb_servo = FILL_SERVO_CLAMP;
+            if (fb_servo < -FILL_SERVO_CLAMP) fb_servo = -FILL_SERVO_CLAMP;
+
+            // Sum rate + fill, clamp to nominal ± 1 sample
+            int32_t fb_out = (int32_t)fb_accum + fb_servo;
+            int32_t nom = (int32_t)nominal_feedback_10_14;
+            if (fb_out > nom + FB_OUTER_CLAMP) fb_out = nom + FB_OUTER_CLAMP;
+            if (fb_out < nom - FB_OUTER_CLAMP) fb_out = nom - FB_OUTER_CLAMP;
+
+            feedback_10_14 = (uint32_t)fb_out;
         }
     }
 }

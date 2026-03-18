@@ -160,6 +160,9 @@ static uint32_t cpu0_last_packet_end = 0;
 static uint32_t cpu0_load_q8 = 0;         // EMA in Q8 fixed point (0-25600 = 0-100%)
 static bool cpu0_load_primed = false;
 
+// Fill-level servo: consumer fill for instance 0, read by usb_sof_irq()
+volatile uint8_t spdif0_consumer_fill = 0;
+
 // Buffer statistics watermark tracking
 static void update_buffer_watermarks(void);
 static void reset_buffer_watermarks(void);
@@ -1657,9 +1660,11 @@ static void update_buffer_watermarks(void) {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
         uint cons_prepared = count_pool_prepared(inst->consumer_pool);
         uint playing = (inst->playing_buffer != NULL) ? 1 : 0;
-        uint8_t cons_pct = (uint8_t)((cons_prepared + playing) * 100 / consumer_capacity);
+        uint fill = cons_prepared + playing;
+        uint8_t cons_pct = (uint8_t)(fill * 100 / consumer_capacity);
         if (cons_pct < spdif_consumer_min_fill_pct[i]) spdif_consumer_min_fill_pct[i] = cons_pct;
         if (cons_pct > spdif_consumer_max_fill_pct[i]) spdif_consumer_max_fill_pct[i] = cons_pct;
+        if (i == 0) spdif0_consumer_fill = (uint8_t)fill;
     }
 
     if (pdm_enabled) {

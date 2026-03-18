@@ -147,7 +147,7 @@ Defined in `main.c`, function `core0_init()`:
 ---
 
 ## USB Audio Pipeline
-*Last updated: 2026-03-16*
+*Last updated: 2026-03-18*
 
 ### USB Stack
 
@@ -177,16 +177,18 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 **Measurement method:** DMA word-level counting with IIR-filtered SOF measurement.
 
 - **SOF handler** (`usb_sof_irq()`): Runs at each USB Start-of-Frame (1 kHz). Reads the DMA transfer counter of S/PDIF instance 0 and combines with `words_consumed` (total completed DMA words) to get a sub-buffer-precise total. Every 4 SOFs (matching `bRefresh=2`, i.e. 2^2=4 ms), computes the delta in DMA words and converts to 10.14 format: `raw = delta_words << 10`.
-- **IIR filter:** First-order low-pass with α≈0.125 (K=3 shift), giving a ~32 ms time constant. Smooths jitter while tracking crystal drift. Effective resolution after filtering is ~160 ppm, sufficient for typical 50 ppm crystal oscillators.
+- **IIR filter (Loop A — rate):** First-order low-pass with α≈0.125 (K=3 shift), giving a ~32 ms time constant. Smooths jitter while tracking crystal drift. Effective resolution after filtering is ~160 ppm, sufficient for typical 50 ppm crystal oscillators.
+- **Fill-level servo (Loop B — fill):** Proportional correction based on S/PDIF instance 0 consumer buffer fill level. `spdif0_consumer_fill` (volatile uint8_t, 0-4 buffers) is written by `update_buffer_watermarks()` in `usb_audio.c` every audio packet (~1ms) and read by `usb_sof_irq()`. The servo computes `fb_servo = -(fill - FILL_TARGET) * FILL_SERVO_KP`, clamped to ±8192 (±0.5 samples in 10.14). This is added to `fb_accum` at the output, never fed back into Loop A state. Kp=1024 gives τ ~6s at max error (±2 buffers), 190× slower than the rate IIR, providing stable convergence toward 50% fill without interfering with rate tracking. The summed output is clamped to `nominal ± 16384` (±1 sample). Has no effect on S/PDIF PIO clock — only changes the feedback value sent to the USB host.
 - **Rate change:** On sample rate switch, `perform_rate_change()` pre-computes `nominal_feedback_10_14 = (freq << 14) / 1000` using 64-bit arithmetic and resets the IIR accumulator via `feedback_reset_value`, providing immediate correct feedback for the new rate.
 - **Fallback:** If `feedback_10_14` is zero (not yet measured), `_as_sync_packet()` falls back to `nominal_feedback_10_14`.
 
 **Key variables (defined in `main.c`, externed in `config.h`):**
 | Variable | Type | Description |
 |----------|------|-------------|
-| `feedback_10_14` | `volatile uint32_t` | SOF-measured feedback value (10.14 fixed-point) |
+| `feedback_10_14` | `volatile uint32_t` | Final feedback value (rate + fill servo, 10.14 fixed-point) |
 | `nominal_feedback_10_14` | `volatile uint32_t` | Pre-computed nominal feedback for current rate |
 | `feedback_reset_value` | `static volatile uint32_t` | Non-zero triggers IIR reset in SOF handler |
+| `spdif0_consumer_fill` | `volatile uint8_t` | Consumer fill level for instance 0 (0-4 buffers) |
 
 **S/PDIF library additions (`audio_spdif_instance_t`):**
 | Field | Type | Description |
