@@ -41,8 +41,8 @@ volatile uint32_t feedback_reset_value = 0;
 
 // Fill-level servo (Loop B): proportional correction based on consumer buffer fill
 extern volatile uint8_t spdif0_consumer_fill;
-#define FILL_TARGET      2       // 50% of consumer capacity (4 buffers)
-#define FILL_SERVO_KP    1024    // 10.14 units per buffer of error, tau ~6s at max
+#define FILL_TARGET      8       // 50% of 16 consumer buffers
+#define FILL_SERVO_KP    1024    // 10.14 units per buffer of error, keeps fill within ±1 of target
 #define FILL_SERVO_CLAMP 8192    // ±0.5 samples in 10.14 — prevents servo dominating rate
 #define FB_OUTER_CLAMP   16384   // ±1 sample in 10.14 from nominal
 

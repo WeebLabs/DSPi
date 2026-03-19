@@ -75,7 +75,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define PDM_FADE_IN_SAMPLES (1u << PDM_FADE_IN_SHIFT) // ~21ms at 48kHz
 
 // SPDIF Buffer Configuration
-#define AUDIO_BUFFER_COUNT    8   // Reduced from 8, compromise for lower latency
+#define AUDIO_BUFFER_COUNT    8   // Producer buffers per SPDIF instance
+#define SPDIF_CONSUMER_BUFFER_COUNT 16  // Consumer buffers per SPDIF instance (DMA side)
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
@@ -86,7 +87,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Latency alignment (in samples - automatically adapts to sample rate)
 // SPDIF path: watermark = AUDIO_BUFFER_COUNT/2 buffers
 // PDM path: DMA buffer = PDM_DMA_BUFFER_SIZE/8 PCM samples
-#define SPDIF_BUFFER_SAMPLES  ((AUDIO_BUFFER_COUNT / 2) * AUDIO_BUFFER_SAMPLES)  // 384
+#define SPDIF_BUFFER_SAMPLES  384  // Consumer path depth at 50% fill (16 buffers * 48 samples * 50%)
 #define PDM_BUFFER_SAMPLES    (PDM_DMA_BUFFER_SIZE / 8)                           // 256
 #define SUB_ALIGN_SAMPLES     (SPDIF_BUFFER_SAMPLES - PDM_BUFFER_SAMPLES)         // 128
 

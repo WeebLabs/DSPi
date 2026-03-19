@@ -1654,7 +1654,7 @@ static void reset_buffer_watermarks(void) {
 }
 
 static void update_buffer_watermarks(void) {
-    uint consumer_capacity = AUDIO_BUFFER_COUNT / 2;
+    uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
@@ -2171,7 +2171,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 pkt.flags = (pdm_enabled ? 0x01 : 0) | (sync_started ? 0x02 : 0);
                 pkt.sequence = buffer_stats_sequence++;
 
-                uint consumer_capacity = AUDIO_BUFFER_COUNT / 2;
+                uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
 
                 for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
                     audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
@@ -2359,17 +2359,17 @@ void usb_sound_card_init(void) {
 
     // Setup S/PDIF instances
     audio_spdif_setup(&spdif_instance_1, &audio_format_48k, &spdif_config_1);
-    audio_spdif_connect_extra(&spdif_instance_1, producer_pool_1, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    audio_spdif_connect_extra(&spdif_instance_1, producer_pool_1, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
 
     audio_spdif_setup(&spdif_instance_2, &audio_format_48k, &spdif_config_2);
-    audio_spdif_connect_extra(&spdif_instance_2, producer_pool_2, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    audio_spdif_connect_extra(&spdif_instance_2, producer_pool_2, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
 
 #if PICO_RP2350
     audio_spdif_setup(&spdif_instance_3, &audio_format_48k, &spdif_config_3);
-    audio_spdif_connect_extra(&spdif_instance_3, producer_pool_3, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    audio_spdif_connect_extra(&spdif_instance_3, producer_pool_3, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
 
     audio_spdif_setup(&spdif_instance_4, &audio_format_48k, &spdif_config_4);
-    audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, AUDIO_BUFFER_COUNT / 2, NULL);
+    audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
 #endif
 
     // Populate instance pointer array for pin config commands

@@ -178,7 +178,7 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 
 - **SOF handler** (`usb_sof_irq()`): Runs at each USB Start-of-Frame (1 kHz). Reads the DMA transfer counter of S/PDIF instance 0 and combines with `words_consumed` (total completed DMA words) to get a sub-buffer-precise total. Every 4 SOFs (matching `bRefresh=2`, i.e. 2^2=4 ms), computes the delta in DMA words and converts to 10.14 format: `raw = delta_words << 10`.
 - **IIR filter (Loop A — rate):** First-order low-pass with α≈0.125 (K=3 shift), giving a ~32 ms time constant. Smooths jitter while tracking crystal drift. Effective resolution after filtering is ~160 ppm, sufficient for typical 50 ppm crystal oscillators.
-- **Fill-level servo (Loop B — fill):** Proportional correction based on S/PDIF instance 0 consumer buffer fill level. `spdif0_consumer_fill` (volatile uint8_t, 0-4 buffers) is written by `update_buffer_watermarks()` in `usb_audio.c` every audio packet (~1ms) and read by `usb_sof_irq()`. The servo computes `fb_servo = -(fill - FILL_TARGET) * FILL_SERVO_KP`, clamped to ±8192 (±0.5 samples in 10.14). This is added to `fb_accum` at the output, never fed back into Loop A state. Kp=1024 gives τ ~6s at max error (±2 buffers), 190× slower than the rate IIR, providing stable convergence toward 50% fill without interfering with rate tracking. The summed output is clamped to `nominal ± 16384` (±1 sample). Has no effect on S/PDIF PIO clock — only changes the feedback value sent to the USB host.
+- **Fill-level servo (Loop B — fill):** Proportional correction based on S/PDIF instance 0 consumer buffer fill level. `spdif0_consumer_fill` (volatile uint8_t, 0-16 buffers) is written by `update_buffer_watermarks()` in `usb_audio.c` every audio packet (~1ms) and read by `usb_sof_irq()`. The servo computes `fb_servo = -(fill - FILL_TARGET) * FILL_SERVO_KP`, clamped to ±8192 (±0.5 samples in 10.14). FILL_TARGET=8 (50% of 16 consumer buffers). This is added to `fb_accum` at the output, never fed back into Loop A state. Kp=1024 gives τ ~6s at max error, providing stable convergence toward 50% fill without interfering with rate tracking. The summed output is clamped to `nominal ± 16384` (±1 sample). Has no effect on S/PDIF PIO clock — only changes the feedback value sent to the USB host.
 - **Rate change:** On sample rate switch, `perform_rate_change()` pre-computes `nominal_feedback_10_14 = (freq << 14) / 1000` using 64-bit arithmetic and resets the IIR accumulator via `feedback_reset_value`, providing immediate correct feedback for the new rate.
 - **Fallback:** If `feedback_10_14` is zero (not yet measured), `_as_sync_packet()` falls back to `nominal_feedback_10_14`.
 
@@ -188,13 +188,14 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 | `feedback_10_14` | `volatile uint32_t` | Final feedback value (rate + fill servo, 10.14 fixed-point) |
 | `nominal_feedback_10_14` | `volatile uint32_t` | Pre-computed nominal feedback for current rate |
 | `feedback_reset_value` | `static volatile uint32_t` | Non-zero triggers IIR reset in SOF handler |
-| `spdif0_consumer_fill` | `volatile uint8_t` | Consumer fill level for instance 0 (0-4 buffers) |
+| `spdif0_consumer_fill` | `volatile uint8_t` | Consumer fill level for instance 0 (0-16 buffers) |
 
 **S/PDIF library additions (`audio_spdif_instance_t`):**
 | Field | Type | Description |
 |-------|------|-------------|
 | `words_consumed` | `volatile uint32_t` | Total DMA words completed (incremented in DMA IRQ) |
 | `current_transfer_words` | `uint32_t` | Size of current in-flight DMA transfer |
+| `subframe_position` | `uint8_t` | 0-191: position in IEC 60958-1 192-frame audio block |
 
 **IRQ safety:** The SOF handler runs inside `isr_usbctrl`. The DMA IRQ handler (`audio_spdif_dma_irq_handler`) has the same default priority on Cortex-M0+/M33. Same-priority interrupts cannot preempt each other, so reading both `words_consumed` and `transfer_count` is atomic with respect to DMA completion.
 
@@ -419,7 +420,7 @@ Each output: `sample = L * gain_L + R * gain_R` (with phase invert option)
 ---
 
 ## SPDIF Output System
-*Last updated: 2026-02-22*
+*Last updated: 2026-03-18*
 
 ### Multi-Instance Architecture
 
@@ -452,6 +453,7 @@ typedef struct audio_spdif_instance {
     PIO pio;
     uint8_t pio_sm, dma_channel, dma_irq, pin;
     bool enabled;
+    uint8_t subframe_position;  // 0-191: position in IEC 60958-1 192-frame audio block
     audio_buffer_pool_t *consumer_pool;
     audio_buffer_t silence_buffer;
     // ... format, connection details
@@ -462,8 +464,20 @@ typedef struct audio_spdif_instance {
 
 - Producer pool: 8 buffers × 192 samples × 2ch × 4 bytes = 12,288 bytes per pool
 - Producer format: `AUDIO_BUFFER_FORMAT_PCM_S32` (24-bit audio in lower 24 bits of int32)
-- Consumer pool: 4 buffers (half watermark)
+- Consumer pool: 16 buffers × 48 samples (`SPDIF_CONSUMER_BUFFER_COUNT` × `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT`)
 - Consumer format: `AUDIO_BUFFER_FORMAT_PIO_SPDIF` (pre-encoded NRZI subframes)
+- DMA transfer granularity: 48 samples (1 ms at 48 kHz), down from 192 samples (4 ms)
+- Total consumer capacity: 16 × 48 = 768 samples (same as previous 4 × 192)
+- Fill target: 8 buffers (50%), latency jitter: ±1 buffer = ±1 ms (was ±4 ms with 192-sample buffers)
+
+### IEC 60958-1 Block Position Tracking
+
+Each 192-frame audio block carries channel status bits and a Z preamble at frame 0. With 48-sample DMA transfers, block boundaries no longer align to buffer boundaries. A per-instance `subframe_position` counter (0-191) tracks the current position within the 192-frame block across buffer boundaries:
+
+- **Init:** Each consumer buffer is pre-initialized with correct preambles and channel status for its position within the block via `init_spdif_buffer(buffer, start_pos)`.
+- **Runtime:** `subframe_position` advances by `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT` (48) after each DMA completion in the IRQ handler. Wraps at 192 using a branch (no modulo — avoids expensive division on M0+).
+- **Silence:** The silence buffer is initialized at position 0 (contains Z preamble), so after an underrun the receiver re-locks within one block (4 ms).
+- **Static assert:** `PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0` enforced at compile time.
 
 ### 24-bit Output Encoding
 
@@ -899,7 +913,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-16*
+*Last updated: 2026-03-18*
 
 ### RP2040 (264 KB SRAM)
 
@@ -913,9 +927,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Bulk param buffer (4 KB aligned) | ~4 KB |
 | Channel names (7 × 32) | ~224 B |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~127 KB** |
+| **Total BSS** | **~124 KB** |
 | Code in RAM (.text copy_to_ram) | ~72 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
+| SPDIF consumer pools (heap, 2 × 16 × 48 × 16) | ~24 KB |
 | Stack + remaining heap | ~42 KB |
 
 ### RP2350 (520 KB SRAM)
@@ -929,9 +944,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Bulk param buffer (4 KB aligned) | ~4 KB |
 | Channel names (11 × 32) | ~352 B |
 | Other BSS | ~24 KB |
-| **Total BSS** | **~205 KB** |
+| **Total BSS** | **~201 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
+| SPDIF consumer pools (heap, 4 × 16 × 48 × 16) | ~48 KB |
 | Stack + remaining heap | ~200 KB |
 
 ### Flash Layout
@@ -945,15 +961,17 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Performance Characteristics
-*Last updated: 2026-02-15*
+*Last updated: 2026-03-18*
 
 ### Buffer Sizes
 
 | Buffer | Size |
 |--------|------|
 | USB packet | 44-49 samples (~1 ms at 48 kHz) |
-| S/PDIF block | 192 samples (IEC60958 standard) |
-| S/PDIF pool | 8 buffers per output pair |
+| S/PDIF IEC block | 192 samples (IEC 60958-1 standard) |
+| S/PDIF DMA transfer | 48 samples (1 ms at 48 kHz) |
+| S/PDIF consumer pool | 16 buffers × 48 samples per output pair |
+| S/PDIF producer pool | 8 buffers × 192 samples per output pair |
 | PDM DMA ring | 2048 words |
 | PDM sample ring | 256 entries (Core 0 → Core 1) |
 
@@ -961,7 +979,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 
 | Path | Latency |
 |------|---------|
-| USB → S/PDIF | 4-8 ms (buffer watermark + processing) |
+| USB → S/PDIF | ~8 ms mean (16 × 48-sample buffers at 50% fill) |
+| S/PDIF latency jitter | ±1 ms (±1 buffer of 48 samples) |
 | S/PDIF → PDM alignment | +2.67 ms (+128 samples) |
 | Total end-to-end | ~10-15 ms |
 
@@ -1146,7 +1165,7 @@ Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and P
 **PDM stats:** DMA circular buffer fill percentage and software ring buffer fill percentage, each with min/max watermarks.
 
 **Fill percentage formulas:**
-- SPDIF consumer: `(prepared + playing) * 100 / (AUDIO_BUFFER_COUNT / 2)` — healthy: 25-75%
+- SPDIF consumer: `(prepared + playing) * 100 / SPDIF_CONSUMER_BUFFER_COUNT` — healthy: 25-75%
 - PDM DMA: `((write_idx - read_idx) & (PDM_DMA_BUFFER_SIZE-1)) * 100 / PDM_DMA_BUFFER_SIZE` — healthy: ~12.5%
 - PDM ring: `((head - tail) & 0xFF) * 100 / RING_SIZE` — healthy: 0-10%
 

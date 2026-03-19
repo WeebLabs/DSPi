@@ -34,6 +34,9 @@ CU_REGISTER_DEBUG_PINS(audio_timing)
     ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
+_Static_assert(PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0,
+    "DMA sample count must divide block sample count (192) evenly");
+
 // ---------------------------------------------------------------------------
 // Global shared state
 // ---------------------------------------------------------------------------
@@ -90,12 +93,13 @@ static inline uint get_channel_status_bit(uint subframe_idx) {
 // ---------------------------------------------------------------------------
 
 // each buffer is pre-filled with preambles, channel status, and silence
-static void init_spdif_buffer(audio_buffer_t *buffer) {
-    assert(buffer->max_sample_count == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
+static void init_spdif_buffer(audio_buffer_t *buffer, uint start_pos) {
+    assert(buffer->max_sample_count <= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
     spdif_subframe_t *p = (spdif_subframe_t *)buffer->buffer->bytes;
-    for (uint i = 0; i < PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT; i++) {
-        uint c_bit = get_channel_status_bit(i);
-        p->l = (i ? PREAMBLE_X : PREAMBLE_Z);
+    for (uint i = 0; i < buffer->max_sample_count; i++) {
+        uint block_pos = start_pos + i;  // no modulo needed: 48 divides 192
+        uint c_bit = get_channel_status_bit(block_pos);
+        p->l = (block_pos == 0) ? PREAMBLE_Z : PREAMBLE_X;
         p->h = 0x55000000u | (c_bit << 29u);
         spdif_update_subframe(p++, 0);
         p->l = PREAMBLE_Y;
@@ -173,14 +177,15 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
 
     spdif_program_init(inst->pio, inst->pio_sm, offset, config->pin);
 
-    // Initialize per-instance silence buffer
+    // Initialize per-instance silence buffer (DMA-sized, position 0 for Z preamble re-lock)
     inst->consumer_buffer_format.format = &inst->consumer_format;
-    inst->silence_buffer.sample_count = PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;
-    inst->silence_buffer.max_sample_count = PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;
+    inst->silence_buffer.sample_count = PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
+    inst->silence_buffer.max_sample_count = PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
     inst->silence_buffer.format = &inst->consumer_buffer_format;
 
-    inst->silence_buffer.buffer = pico_buffer_alloc(PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT * 2 * sizeof(spdif_subframe_t));
-    init_spdif_buffer(&inst->silence_buffer);
+    inst->silence_buffer.buffer = pico_buffer_alloc(PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT * 2 * sizeof(spdif_subframe_t));
+    init_spdif_buffer(&inst->silence_buffer, 0);
+    inst->subframe_position = 0;
 
     __mem_fence_release();
 
@@ -304,9 +309,14 @@ bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
     inst->consumer_buffer_format.format = &inst->consumer_format;
     inst->consumer_buffer_format.sample_stride = 2 * sizeof(spdif_subframe_t);
 
-    inst->consumer_pool = audio_new_consumer_pool(&inst->consumer_buffer_format, buffer_count, PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
-    for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
-        init_spdif_buffer(buffer);
+    inst->consumer_pool = audio_new_consumer_pool(&inst->consumer_buffer_format, buffer_count, PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT);
+    {
+        uint pos = 0;
+        for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
+            init_spdif_buffer(buffer, pos);
+            pos += PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
+            if (pos >= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) pos = 0;
+        }
     }
 
     update_pio_frequency(inst, producer->format->sample_freq);
@@ -353,6 +363,18 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
         overruns++;
     }
 
+    // Fix IEC 60958-1 Z/X preamble: the consumer free list is LIFO, so buffers
+    // may return in a different order than they were initialized.  Stamp the
+    // correct preamble on the first L-channel subframe based on the current
+    // block position.  All three preamble bytes have even bit-parity, so
+    // swapping them does not affect the separately-computed subframe parity.
+    // (Skip the shared silence buffer — it always carries position-0 preambles.)
+    if (inst->playing_buffer) {
+        spdif_subframe_t *sf = (spdif_subframe_t *)ab->buffer->bytes;
+        sf[0].l = (sf[0].l & ~0xffu)
+                | ((inst->subframe_position == 0) ? PREAMBLE_Z : PREAMBLE_X);
+    }
+
     uint32_t transfer_words = ab->sample_count * 4;
     inst->current_transfer_words = transfer_words;
     dma_channel_transfer_from_buffer_now(inst->dma_channel, ab->buffer->bytes, transfer_words);
@@ -377,6 +399,10 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
             if (inst->playing_buffer) {
                 extern volatile uint32_t pio_samples_dma;
                 pio_samples_dma++;
+
+                inst->subframe_position += PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
+                if (inst->subframe_position >= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT)
+                    inst->subframe_position = 0;
 
                 give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
                 inst->playing_buffer = NULL;

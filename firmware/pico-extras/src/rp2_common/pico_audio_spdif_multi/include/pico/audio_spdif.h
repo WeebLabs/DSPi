@@ -57,6 +57,11 @@ extern "C" {
 // fixed by S/PDIF
 #define PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT 192u
 
+// DMA transfer granularity — must divide PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT evenly
+#ifndef PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT
+#define PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT 48u
+#endif
+
 // Allow use of pico_audio driver without actually doing anything much
 #ifndef PICO_AUDIO_SPDIF_NOOP
 #ifdef PICO_AUDIO_NOOP
@@ -99,6 +104,7 @@ typedef struct audio_spdif_instance {
     // DMA word tracking for USB feedback endpoint
     volatile uint32_t words_consumed;       // Total DMA words consumed (incremented in DMA IRQ)
     uint32_t current_transfer_words;        // DMA word count of current transfer
+    uint8_t subframe_position;              // 0-191: position in IEC 60958-1 192-frame audio block
 
     // Per-instance audio pipeline
     audio_format_t consumer_format;
