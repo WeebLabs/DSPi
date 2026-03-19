@@ -360,7 +360,9 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
         ab = &inst->silence_buffer;
 
         extern int overruns;
-        overruns++;
+        extern volatile bool preset_loading;
+        if (!preset_loading)
+            overruns++;
     }
 
     // Fix IEC 60958-1 Z/X preamble: the consumer free list is LIFO, so buffers

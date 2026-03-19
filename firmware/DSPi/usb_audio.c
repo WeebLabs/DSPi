@@ -318,7 +318,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     // Detect SPDIF underrun: USB packets should arrive every ~1ms
     static uint32_t last_packet_time = 0;
-    if (last_packet_time > 0) {
+    if (last_packet_time > 0 && !preset_loading) {
         uint32_t gap = packet_start - last_packet_time;
         if (gap > 2000 && gap < 50000) {  // 2ms-50ms gap = underrun
             spdif_underruns++;
@@ -348,7 +348,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
         if (audio_buf[b]) {
             audio_buf[b]->sample_count = sample_count;
-        } else if (matrix_mixer.outputs[b*2].enabled || matrix_mixer.outputs[b*2+1].enabled) {
+        } else if (!preset_loading && (matrix_mixer.outputs[b*2].enabled || matrix_mixer.outputs[b*2+1].enabled)) {
             spdif_overruns++;
         }
     }
