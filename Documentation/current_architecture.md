@@ -420,7 +420,7 @@ Each output: `sample = L * gain_L + R * gain_R` (with phase invert option)
 ---
 
 ## SPDIF Output System
-*Last updated: 2026-03-18*
+*Last updated: 2026-03-19*
 
 ### Multi-Instance Architecture
 
@@ -476,6 +476,7 @@ Each 192-frame audio block carries channel status bits and a Z preamble at frame
 
 - **Init:** Each consumer buffer is pre-initialized with correct preambles and channel status for its position within the block via `init_spdif_buffer(buffer, start_pos)`.
 - **Runtime:** `subframe_position` advances by `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT` (48) after each DMA completion in the IRQ handler. Wraps at 192 using a branch (no modulo — avoids expensive division on M0+).
+- **Preamble stamping:** The consumer pool free list is LIFO, so buffers may return in a different order than initialized. `audio_start_dma_transfer()` stamps the correct Z/X preamble on the first L-channel subframe based on `subframe_position` before each DMA transfer. All three preamble bytes (X, Y, Z) have even bit-parity, so swapping them does not affect the separately-computed subframe parity. Only real buffers are stamped — the shared silence buffer always carries position-0 preambles.
 - **Silence:** The silence buffer is initialized at position 0 (contains Z preamble), so after an underrun the receiver re-locks within one block (4 ms).
 - **Static assert:** `PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0` enforced at compile time.
 
@@ -714,7 +715,7 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
 ### Preset-Switch Mute & Feedback Recovery
-*Last updated: 2026-03-18*
+*Last updated: 2026-03-19*
 
 Flash operations (`flash_range_erase` + `flash_range_program`) disable all interrupts for ~45ms per sector, which stalls SPDIF TX DMA and causes the USB SOF feedback IIR filter (`fb_accum`) to absorb incorrect measurements. To prevent persistent buffer fill/drain drift:
 
@@ -724,6 +725,8 @@ Flash operations (`flash_range_erase` + `flash_range_program`) disable all inter
 - `feedback_reset_value` in `main.c` is global (not static) so `flash_storage.c` can access it via `extern`.
 
 The `preset_loading` flag and `preset_mute_counter` are checked in the audio callback on both platforms.
+
+**Underrun suppression during preset operations:** All three underrun/overrun counters (`overruns` in DMA IRQ, `spdif_underruns` and `spdif_overruns` in USB callback) are suppressed while `preset_loading` is true. This prevents erroneous counts during preset loads, saves, and deletes — operations that intentionally disrupt the audio pipeline. The `preset_loading` flag is set before every flash operation and cleared when the mute period expires.
 
 ### Operations
 
@@ -1154,7 +1157,7 @@ Transfers the complete DSP state in a single USB control transfer (~2832 bytes),
 **Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.
 
 ### Buffer Statistics
-*Last updated: 2026-03-17*
+*Last updated: 2026-03-19*
 
 Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. Producer (USB-side) pool stats are not tracked because `producer_pool_blocking_give` returns buffers synchronously — the producer pool is always fully free between USB packets.
 
