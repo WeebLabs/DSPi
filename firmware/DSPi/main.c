@@ -132,7 +132,7 @@ static void perform_rate_change(uint32_t new_freq) {
 
     // Only change if needed to avoid glitches
     if (clock_get_hz(clk_sys) != target_freq) {
-        vreg_set_voltage(VREG_VOLTAGE_1_15);
+        vreg_set_voltage(VREG_VOLTAGE_1_20);
         busy_wait_us(100);
         set_sys_clock_hz(target_freq, false);
     }
@@ -182,7 +182,7 @@ void core0_init() {
     }
 
     // RP2350: 307.2MHz gives integer PIO divider (25.0) for 48kHz SPDIF
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    vreg_set_voltage(VREG_VOLTAGE_1_20);
     busy_wait_ms(10);
 
     // VCO 1536MHz / 5 = 307.2MHz
