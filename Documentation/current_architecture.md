@@ -474,10 +474,11 @@ typedef struct audio_spdif_instance {
 
 Each 192-frame audio block carries channel status bits and a Z preamble at frame 0. With 48-sample DMA transfers, block boundaries no longer align to buffer boundaries. A per-instance `subframe_position` counter (0-191) tracks the current position within the 192-frame block across buffer boundaries:
 
-- **Init:** Each consumer buffer is pre-initialized with correct preambles and channel status for its position within the block via `init_spdif_buffer(buffer, start_pos)`.
-- **Runtime:** `subframe_position` advances by `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT` (48) after each DMA completion in the IRQ handler. Wraps at 192 using a branch (no modulo — avoids expensive division on M0+).
-- **Preamble stamping:** The consumer pool free list is LIFO, so buffers may return in a different order than initialized. `audio_start_dma_transfer()` stamps the correct Z/X preamble on the first L-channel subframe based on `subframe_position` before each DMA transfer. All three preamble bytes (X, Y, Z) have even bit-parity, so swapping them does not affect the separately-computed subframe parity. Only real buffers are stamped — the shared silence buffer always carries position-0 preambles.
-- **Silence:** The silence buffer is initialized at position 0 (contains Z preamble), so after an underrun the receiver re-locks within one block (4 ms).
+*Last updated: 2026-03-23*
+
+- **Init:** Each consumer buffer is pre-initialized with preambles and channel status via `init_spdif_buffer(buffer, start_pos)`. These are treated as templates — runtime fixup corrects them before each DMA transfer.
+- **Runtime:** `subframe_position` advances by `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT` (48) **unconditionally** after each DMA completion (including silence), maintaining correct 192-frame alignment across silence/audio transitions. Wraps at 192 using a branch (no modulo — avoids expensive division on M0+).
+- **Preamble + channel status stamping:** The consumer pool free list is LIFO, so buffers may return in a different order than initialized. `audio_start_dma_transfer()` stamps the correct Z/X preamble on the first L-channel subframe **and** corrects all channel status bits (IEC 60958-3 C bit at h[29]) to match the current `subframe_position`. When the C bit must flip, both C (bit 29) and parity P (bit 31) are XOR'd together, maintaining even subframe parity without recomputation. Applied to all buffers including the silence buffer.
 - **Static assert:** `PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0` enforced at compile time.
 
 ### 24-bit Output Encoding

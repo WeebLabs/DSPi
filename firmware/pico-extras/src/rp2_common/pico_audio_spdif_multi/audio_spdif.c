@@ -365,16 +365,26 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
             overruns++;
     }
 
-    // Fix IEC 60958-1 Z/X preamble: the consumer free list is LIFO, so buffers
-    // may return in a different order than they were initialized.  Stamp the
-    // correct preamble on the first L-channel subframe based on the current
-    // block position.  All three preamble bytes have even bit-parity, so
-    // swapping them does not affect the separately-computed subframe parity.
-    // (Skip the shared silence buffer — it always carries position-0 preambles.)
-    if (inst->playing_buffer) {
+    // Fix IEC 60958-1 preamble and channel status: the consumer free list is
+    // LIFO, so buffers may return in a different order than they were
+    // initialized.  Re-stamp the Z/X preamble and correct any channel status
+    // bits that don't match the current block position.  Flipping the C bit
+    // (bit 29) also flips parity (bit 31) to maintain even subframe parity.
+    // Applied to all buffers including silence so the block position stays
+    // coherent across silence/audio transitions.
+    {
         spdif_subframe_t *sf = (spdif_subframe_t *)ab->buffer->bytes;
         sf[0].l = (sf[0].l & ~0xffu)
                 | ((inst->subframe_position == 0) ? PREAMBLE_Z : PREAMBLE_X);
+
+        for (uint i = 0; i < ab->sample_count; i++) {
+            uint correct_c = get_channel_status_bit(inst->subframe_position + i);
+            uint current_c = (sf[i * 2].h >> 29u) & 1u;
+            if (correct_c != current_c) {
+                sf[i * 2].h     ^= (1u << 29u) | (1u << 31u);  // L subframe
+                sf[i * 2 + 1].h ^= (1u << 29u) | (1u << 31u);  // R subframe
+            }
+        }
     }
 
     uint32_t transfer_words = ab->sample_count * 4;
@@ -397,14 +407,16 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
             DEBUG_PINS_SET(audio_timing, 4);
             // Track total DMA words consumed (for USB feedback endpoint)
             inst->words_consumed += inst->current_transfer_words;
+            // Advance block position unconditionally so silence buffers
+            // also maintain correct 192-frame alignment
+            inst->subframe_position += PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
+            if (inst->subframe_position >= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT)
+                inst->subframe_position = 0;
+
             // free the buffer we just finished
             if (inst->playing_buffer) {
                 extern volatile uint32_t pio_samples_dma;
                 pio_samples_dma++;
-
-                inst->subframe_position += PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
-                if (inst->subframe_position >= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT)
-                    inst->subframe_position = 0;
 
                 give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
                 inst->playing_buffer = NULL;
