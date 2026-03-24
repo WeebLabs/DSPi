@@ -196,6 +196,27 @@ static void perform_rate_change(uint32_t new_freq) {
     }
 }
 
+// Reset an SPDIF instance's software queue state so it can restart in phase with
+// other SPDIF instances after output-type switching.
+static void spdif_reset_consumer_pipeline(audio_spdif_instance_t *inst) {
+    // Return any partially filled producer->consumer staging buffer.
+    if (inst->connection.current_consumer_buffer) {
+        queue_free_audio_buffer(inst->consumer_pool, inst->connection.current_consumer_buffer);
+        inst->connection.current_consumer_buffer = NULL;
+    }
+    inst->connection.current_consumer_buffer_pos = 0;
+
+    // Drain prepared buffers back to free so we don't resume with stale backlog.
+    for (;;) {
+        audio_buffer_t *ab = get_full_audio_buffer(inst->consumer_pool, false);
+        if (!ab) break;
+        queue_free_audio_buffer(inst->consumer_pool, ab);
+    }
+
+    // Restart IEC60958 block framing from position 0 on next DMA prime.
+    inst->subframe_position = 0;
+}
+
 void core0_init() {
     // LED setup
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
@@ -412,6 +433,7 @@ int main(void) {
                         give_audio_buffer(spdif_inst->consumer_pool, spdif_inst->playing_buffer);
                         spdif_inst->playing_buffer = NULL;
                     }
+                    spdif_reset_consumer_pipeline(spdif_inst);
 
                     // Unclaim SM so I2S can claim it (DMA channel stays claimed/dormant)
                     pio_sm_unclaim(spdif_inst->pio, spdif_inst->pio_sm);
@@ -457,11 +479,37 @@ int main(void) {
                                               producer_pools[slot],
                                               spdif_inst->consumer_pool);
 
-                    // Re-enable SPDIF output
-                    audio_spdif_set_enabled(spdif_inst, true);
+                    // Re-sync all active SPDIF instances together so consumer fill
+                    // and block phase match after a type switch.
+                    audio_spdif_instance_t *spdif_sync[NUM_SPDIF_INSTANCES];
+                    uint sync_count = 0;
+                    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                        if (i != slot && output_types[i] != OUTPUT_TYPE_SPDIF) continue;
+                        audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+
+                        if (inst->enabled) {
+                            audio_spdif_set_enabled(inst, false);
+                        }
+                        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+                        dma_channel_abort(inst->dma_channel);
+                        if (inst->playing_buffer) {
+                            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                            inst->playing_buffer = NULL;
+                        }
+
+                        spdif_reset_consumer_pipeline(inst);
+                        dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+                        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+
+                        spdif_sync[sync_count++] = inst;
+                    }
+                    if (sync_count) {
+                        audio_spdif_enable_sync(spdif_sync, sync_count);
+                    }
 
                     output_types[slot] = OUTPUT_TYPE_SPDIF;
-                    printf("Slot %d switched to S/PDIF\n", slot);
+                    printf("Slot %d switched to S/PDIF (resynced %u SPDIF slots)\n",
+                           slot, sync_count);
                 }
             }
         }
