@@ -174,6 +174,7 @@ volatile uint8_t spdif0_consumer_fill = 0;
 // Buffer statistics watermark tracking
 static void update_buffer_watermarks(void);
 static void reset_buffer_watermarks(void);
+static inline void update_slot0_fill_fast(void);
 static uint16_t buffer_stats_sequence = 0;
 static uint8_t spdif_consumer_min_fill_pct[NUM_SPDIF_INSTANCES];
 static uint8_t spdif_consumer_max_fill_pct[NUM_SPDIF_INSTANCES];
@@ -347,7 +348,13 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
 #endif
 
-    update_buffer_watermarks();
+    update_slot0_fill_fast();
+    // Watermark tracking is diagnostic-only; run at lower cadence to keep
+    // the packet callback lean under heavy DSP/output load.
+    static uint8_t watermark_div = 0;
+    if ((++watermark_div & 0x07u) == 0) {
+        update_buffer_watermarks();
+    }
 
     const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
     uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
@@ -1710,6 +1717,32 @@ static void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepa
     }
 }
 
+static uint get_slot_consumer_fill(uint slot) {
+    uint cons_prepared = 0;
+    uint playing = 0;
+
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (inst && inst->consumer_pool) {
+            cons_prepared = count_pool_prepared(inst->consumer_pool);
+            playing = (inst->playing_buffer != NULL) ? 1 : 0;
+        }
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+        if (inst && inst->consumer_pool) {
+            cons_prepared = count_pool_prepared(inst->consumer_pool);
+            playing = (inst->playing_buffer != NULL) ? 1 : 0;
+        }
+    }
+
+    return cons_prepared + playing;
+}
+
+// Servo-critical: update slot-0 fill every packet with minimal work.
+static inline void update_slot0_fill_fast(void) {
+    spdif0_consumer_fill = (uint8_t)get_slot_consumer_fill(0);
+}
+
 static void reset_buffer_watermarks(void) {
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         spdif_consumer_min_fill_pct[i] = 100;
@@ -1725,10 +1758,7 @@ static void update_buffer_watermarks(void) {
     uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        uint cons_free, cons_prepared, playing;
-        get_slot_consumer_stats(i, &cons_free, &cons_prepared, &playing);
-        (void)cons_free;
-        uint fill = cons_prepared + playing;
+        uint fill = get_slot_consumer_fill(i);
         uint8_t cons_pct = (uint8_t)(fill * 100 / consumer_capacity);
         if (cons_pct < spdif_consumer_min_fill_pct[i]) spdif_consumer_min_fill_pct[i] = cons_pct;
         if (cons_pct > spdif_consumer_max_fill_pct[i]) spdif_consumer_max_fill_pct[i] = cons_pct;
