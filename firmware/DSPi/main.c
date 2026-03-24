@@ -217,6 +217,83 @@ static void spdif_reset_consumer_pipeline(audio_spdif_instance_t *inst) {
     inst->subframe_position = 0;
 }
 
+static void i2s_reset_consumer_pipeline(audio_i2s_instance_t *inst) {
+    // Return any partially filled producer->consumer staging buffer.
+    if (inst->connection.current_consumer_buffer) {
+        queue_free_audio_buffer(inst->consumer_pool, inst->connection.current_consumer_buffer);
+        inst->connection.current_consumer_buffer = NULL;
+    }
+    inst->connection.current_consumer_buffer_pos = 0;
+
+    // Drain prepared buffers back to free so we don't resume with stale backlog.
+    for (;;) {
+        audio_buffer_t *ab = get_full_audio_buffer(inst->consumer_pool, false);
+        if (!ab) break;
+        queue_free_audio_buffer(inst->consumer_pool, ab);
+    }
+}
+
+// Re-lock consumer fill across all active outputs after any type switch.
+static void resync_active_output_pipelines(void) {
+    extern uint8_t output_types[];
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+
+    audio_spdif_instance_t *spdif_sync[NUM_SPDIF_INSTANCES];
+    audio_i2s_instance_t *i2s_sync[NUM_SPDIF_INSTANCES];
+    uint spdif_count = 0;
+    uint i2s_count = 0;
+
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (!inst || !inst->consumer_pool) continue;
+
+            if (inst->enabled) {
+                audio_i2s_set_enabled(inst, false);
+            }
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+
+            i2s_reset_consumer_pipeline(inst);
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+
+            i2s_sync[i2s_count++] = inst;
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (!inst || !inst->consumer_pool) continue;
+
+            if (inst->enabled) {
+                audio_spdif_set_enabled(inst, false);
+            }
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+
+            spdif_reset_consumer_pipeline(inst);
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+
+            spdif_sync[spdif_count++] = inst;
+        }
+    }
+
+    if (spdif_count) {
+        audio_spdif_enable_sync(spdif_sync, spdif_count);
+    }
+    if (i2s_count) {
+        audio_i2s_enable_sync(i2s_sync, i2s_count);
+    }
+}
+
 void core0_init() {
     // LED setup
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
@@ -453,10 +530,10 @@ int main(void) {
                     audio_i2s_setup(i2s_instance_ptrs[slot], &audio_format_48k, &i2s_cfg);
                     audio_i2s_connect_extra(i2s_instance_ptrs[slot], producer_pools[slot],
                                             false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
-                    audio_i2s_set_enabled(i2s_instance_ptrs[slot], true);
 
                     output_types[slot] = OUTPUT_TYPE_I2S;
-                    printf("Slot %d switched to I2S (DMA ch %d)\n", slot, slot + 8);
+                    resync_active_output_pipelines();
+                    printf("Slot %d switched to I2S (DMA ch %d, outputs resynced)\n", slot, slot + 8);
 
                 } else if (new_type == OUTPUT_TYPE_SPDIF && output_types[slot] == OUTPUT_TYPE_I2S) {
                     // --- I2S → S/PDIF ---
@@ -479,37 +556,9 @@ int main(void) {
                                               producer_pools[slot],
                                               spdif_inst->consumer_pool);
 
-                    // Re-sync all active SPDIF instances together so consumer fill
-                    // and block phase match after a type switch.
-                    audio_spdif_instance_t *spdif_sync[NUM_SPDIF_INSTANCES];
-                    uint sync_count = 0;
-                    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                        if (i != slot && output_types[i] != OUTPUT_TYPE_SPDIF) continue;
-                        audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-
-                        if (inst->enabled) {
-                            audio_spdif_set_enabled(inst, false);
-                        }
-                        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-                        dma_channel_abort(inst->dma_channel);
-                        if (inst->playing_buffer) {
-                            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                            inst->playing_buffer = NULL;
-                        }
-
-                        spdif_reset_consumer_pipeline(inst);
-                        dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-                        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
-
-                        spdif_sync[sync_count++] = inst;
-                    }
-                    if (sync_count) {
-                        audio_spdif_enable_sync(spdif_sync, sync_count);
-                    }
-
                     output_types[slot] = OUTPUT_TYPE_SPDIF;
-                    printf("Slot %d switched to S/PDIF (resynced %u SPDIF slots)\n",
-                           slot, sync_count);
+                    resync_active_output_pipelines();
+                    printf("Slot %d switched to S/PDIF (outputs resynced)\n", slot);
                 }
             }
         }

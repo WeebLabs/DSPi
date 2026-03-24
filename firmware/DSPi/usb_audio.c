@@ -1684,6 +1684,32 @@ static uint count_pool_prepared(audio_buffer_pool_t *pool) {
     return count;
 }
 
+static void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, uint *playing) {
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (!inst || !inst->consumer_pool) {
+            *cons_free = 0;
+            *cons_prepared = 0;
+            *playing = 0;
+            return;
+        }
+        *cons_free = count_pool_free(inst->consumer_pool);
+        *cons_prepared = count_pool_prepared(inst->consumer_pool);
+        *playing = (inst->playing_buffer != NULL) ? 1 : 0;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+        if (!inst || !inst->consumer_pool) {
+            *cons_free = 0;
+            *cons_prepared = 0;
+            *playing = 0;
+            return;
+        }
+        *cons_free = count_pool_free(inst->consumer_pool);
+        *cons_prepared = count_pool_prepared(inst->consumer_pool);
+        *playing = (inst->playing_buffer != NULL) ? 1 : 0;
+    }
+}
+
 static void reset_buffer_watermarks(void) {
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         spdif_consumer_min_fill_pct[i] = 100;
@@ -1699,9 +1725,9 @@ static void update_buffer_watermarks(void) {
     uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-        uint cons_prepared = count_pool_prepared(inst->consumer_pool);
-        uint playing = (inst->playing_buffer != NULL) ? 1 : 0;
+        uint cons_free, cons_prepared, playing;
+        get_slot_consumer_stats(i, &cons_free, &cons_prepared, &playing);
+        (void)cons_free;
         uint fill = cons_prepared + playing;
         uint8_t cons_pct = (uint8_t)(fill * 100 / consumer_capacity);
         if (cons_pct < spdif_consumer_min_fill_pct[i]) spdif_consumer_min_fill_pct[i] = cons_pct;
@@ -2223,10 +2249,11 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
 
                 for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                    audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-                    pkt.spdif[i].consumer_free = count_pool_free(inst->consumer_pool);
-                    pkt.spdif[i].consumer_prepared = count_pool_prepared(inst->consumer_pool);
-                    pkt.spdif[i].consumer_playing = (inst->playing_buffer != NULL) ? 1 : 0;
+                    uint cons_free, cons_prepared, playing;
+                    get_slot_consumer_stats(i, &cons_free, &cons_prepared, &playing);
+                    pkt.spdif[i].consumer_free = (uint8_t)cons_free;
+                    pkt.spdif[i].consumer_prepared = (uint8_t)cons_prepared;
+                    pkt.spdif[i].consumer_playing = (uint8_t)playing;
                     uint cons_fill = pkt.spdif[i].consumer_prepared + pkt.spdif[i].consumer_playing;
                     pkt.spdif[i].consumer_fill_pct = (uint8_t)(cons_fill * 100 / consumer_capacity);
                     pkt.spdif[i].consumer_min_fill_pct = spdif_consumer_min_fill_pct[i];
