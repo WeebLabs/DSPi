@@ -63,7 +63,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       8
+#define SLOT_DATA_VERSION       9
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -142,6 +142,12 @@ typedef struct __attribute__((packed)) {
     uint8_t pin_padding[8 - NUM_PIN_OUTPUTS];
     // Channel names (V8)
     char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
+    // I2S output configuration (V9)
+    uint8_t output_types[4];     // Per-slot type: 0=S/PDIF, 1=I2S (padded to 4)
+    uint8_t i2s_bck_pin;         // BCK GPIO; LRCLK = BCK + 1
+    uint8_t i2s_mck_pin;         // MCK GPIO
+    uint8_t i2s_mck_enabled;     // MCK on/off (0 or 1)
+    uint8_t i2s_mck_multiplier;  // MCK = multiplier × Fs (128 or 256)
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -405,6 +411,20 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // Channel names
     memcpy(slot->channel_names, channel_names, sizeof(slot->channel_names));
 
+    // I2S configuration (V9)
+    extern uint8_t output_types[];
+    extern uint8_t i2s_bck_pin;
+    extern uint8_t i2s_mck_pin;
+    extern bool    i2s_mck_enabled;
+    extern uint8_t i2s_mck_multiplier;
+    memcpy(slot->output_types, output_types, NUM_SPDIF_INSTANCES);
+    // Zero-pad remaining entries (RP2040 has 2 slots, array is 4)
+    for (int i = NUM_SPDIF_INSTANCES; i < 4; i++) slot->output_types[i] = 0;
+    slot->i2s_bck_pin = i2s_bck_pin;
+    slot->i2s_mck_pin = i2s_mck_pin;
+    slot->i2s_mck_enabled = i2s_mck_enabled ? 1 : 0;
+    slot->i2s_mck_multiplier = i2s_mck_multiplier;
+
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
     size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
@@ -498,6 +518,29 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
     } else {
         for (int ch = 0; ch < NUM_CHANNELS; ch++)
             get_default_channel_name(ch, channel_names[ch]);
+    }
+
+    // I2S configuration (V9+)
+    {
+        extern uint8_t output_types[];
+        extern uint8_t i2s_bck_pin;
+        extern uint8_t i2s_mck_pin;
+        extern bool    i2s_mck_enabled;
+        extern uint8_t i2s_mck_multiplier;
+        if (slot->version >= 9) {
+            memcpy(output_types, slot->output_types, NUM_SPDIF_INSTANCES);
+            i2s_bck_pin = slot->i2s_bck_pin;
+            i2s_mck_pin = slot->i2s_mck_pin;
+            i2s_mck_enabled = (slot->i2s_mck_enabled != 0);
+            i2s_mck_multiplier = slot->i2s_mck_multiplier;
+        } else {
+            // Default: all S/PDIF, no I2S/MCK
+            memset(output_types, 0, NUM_SPDIF_INSTANCES);
+            i2s_bck_pin = PICO_I2S_BCK_PIN;
+            i2s_mck_pin = PICO_I2S_MCK_PIN;
+            i2s_mck_enabled = false;
+            i2s_mck_multiplier = 128;
+        }
     }
 }
 
@@ -917,6 +960,20 @@ static void apply_factory_defaults(void) {
     // Reset channel names to defaults
     for (int ch = 0; ch < NUM_CHANNELS; ch++)
         get_default_channel_name(ch, channel_names[ch]);
+
+    // Reset I2S configuration
+    {
+        extern uint8_t output_types[];
+        extern uint8_t i2s_bck_pin;
+        extern uint8_t i2s_mck_pin;
+        extern bool    i2s_mck_enabled;
+        extern uint8_t i2s_mck_multiplier;
+        memset(output_types, 0, NUM_SPDIF_INSTANCES);  // All S/PDIF
+        i2s_bck_pin = PICO_I2S_BCK_PIN;
+        i2s_mck_pin = PICO_I2S_MCK_PIN;
+        i2s_mck_enabled = false;
+        i2s_mck_multiplier = 128;
+    }
 }
 
 void flash_factory_reset(void) {

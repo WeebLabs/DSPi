@@ -131,6 +131,21 @@ void bulk_params_collect(WireBulkParams *out) {
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         memcpy(out->channel_names.names[ch], channel_names[ch], PRESET_NAME_LEN);
     }
+
+    // I2S configuration (V3)
+    {
+        extern uint8_t output_types[];
+        extern uint8_t i2s_bck_pin;
+        extern uint8_t i2s_mck_pin;
+        extern bool    i2s_mck_enabled;
+        extern uint8_t i2s_mck_multiplier;
+        memset(&out->i2s_config, 0, sizeof(out->i2s_config));
+        memcpy(out->i2s_config.output_types, output_types, NUM_SPDIF_INSTANCES);
+        out->i2s_config.bck_pin = i2s_bck_pin;
+        out->i2s_config.mck_pin = i2s_mck_pin;
+        out->i2s_config.mck_enabled = i2s_mck_enabled ? 1 : 0;
+        out->i2s_config.mck_multiplier = i2s_mck_multiplier;
+    }
 }
 
 // ============================================================================
@@ -138,8 +153,9 @@ void bulk_params_collect(WireBulkParams *out) {
 // ============================================================================
 
 int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
-    // Validate header
-    if (in->header.format_version != WIRE_FORMAT_VERSION)
+    // Validate header (accept V2 for backward compat — V2 payloads lack I2S section)
+    if (in->header.format_version != WIRE_FORMAT_VERSION &&
+        in->header.format_version != 2)
         return -1;
 
 #if PICO_RP2350
@@ -154,7 +170,10 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         return -3;
     if (in->header.num_output_channels != NUM_OUTPUT_CHANNELS)
         return -3;
-    if (in->header.payload_length != sizeof(WireBulkParams))
+    // Accept V2 (2832 bytes, no I2S section) or V3 (2848 bytes, with I2S)
+    uint16_t v2_size = sizeof(WireBulkParams) - sizeof(WireI2SConfig);
+    if (in->header.payload_length != sizeof(WireBulkParams) &&
+        in->header.payload_length != v2_size)
         return -4;
 
     // Global params
@@ -250,6 +269,21 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         memcpy(channel_names[ch], in->channel_names.names[ch], PRESET_NAME_LEN);
         channel_names[ch][PRESET_NAME_LEN - 1] = '\0';  // Enforce NUL termination
+    }
+
+    // I2S configuration (V3 payloads only — V2 payloads skip this)
+    if (in->header.format_version >= 3 &&
+        in->header.payload_length >= sizeof(WireBulkParams)) {
+        extern uint8_t output_types[];
+        extern uint8_t i2s_bck_pin;
+        extern uint8_t i2s_mck_pin;
+        extern bool    i2s_mck_enabled;
+        extern uint8_t i2s_mck_multiplier;
+        memcpy(output_types, in->i2s_config.output_types, NUM_SPDIF_INSTANCES);
+        i2s_bck_pin = in->i2s_config.bck_pin;
+        i2s_mck_pin = in->i2s_config.mck_pin;
+        i2s_mck_enabled = (in->i2s_config.mck_enabled != 0);
+        i2s_mck_multiplier = in->i2s_config.mck_multiplier;
     }
 
     return 0;

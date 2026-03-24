@@ -1180,3 +1180,59 @@ Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and P
 **Implementation:** `audio_buffer_list_count()` inline in `pico/audio.h` for read-only list traversal. `pdm_stats_write_idx` volatile in `pdm_generator.c` exposes Core 1 write position to Core 0 (atomic on ARM). Helper functions in `usb_audio.c`: `count_pool_free()`, `count_pool_prepared()`, `update_buffer_watermarks()`, `reset_buffer_watermarks()`.
 
 **BSS impact:** ~18 bytes total (watermark arrays + sequence counter + pdm_stats_write_idx).
+
+---
+
+## I2S Output Support
+*Last updated: 2026-03-23*
+
+### Overview
+
+Each output slot can be independently configured as S/PDIF or I2S at runtime via vendor commands. A new `pico_audio_i2s_multi` library mirrors the proven `pico_audio_spdif_multi` patterns. The S/PDIF library is completely unchanged.
+
+### Architecture
+
+- **PIO0:** Both S/PDIF (4 instructions) and I2S (8 instructions) programs coexist in instruction memory (12/32 slots). Each SM's side-set pins are independent — S/PDIF side-set = data pin, I2S side-set = BCK/LRCLK.
+- **PIO1 SM1:** MCK generator (2-instruction toggle), independent of data path.
+- **OutputSlot abstraction** in `usb_audio.c` manages per-slot type, holding either a SPDIF or I2S instance.
+- **DMA IRQ:** Both libraries register on the same DMA IRQ line via `irq_add_shared_handler()`. Each iterates its own instance array.
+- **Producer pools** are format-identical (PCM_S32, stride 8). The I2S library's connection callback left-shifts samples by 8 for MSB-first I2S framing.
+- **No audio callback changes.** Core 1 remains output-type-agnostic.
+
+### Clock Math at 307.2 MHz / 48 kHz
+
+| Signal | Frequency | PIO Divider | Jitter |
+|--------|-----------|-------------|--------|
+| I2S BCK (Fs×64) | 3.072 MHz | 50.0 | Zero |
+| MCK 128× | 6.144 MHz | 25.0 | Zero |
+| MCK 256× | 12.288 MHz | 12.5 | Fractional |
+
+### Vendor Commands (0xC0–0xC9)
+
+| Code | Command | Direction |
+|------|---------|-----------|
+| 0xC0 | SET_OUTPUT_TYPE | SET |
+| 0xC1 | GET_OUTPUT_TYPE | GET |
+| 0xC2 | SET_I2S_BCK_PIN | SET |
+| 0xC3 | GET_I2S_BCK_PIN | GET |
+| 0xC4 | SET_MCK_ENABLE | SET |
+| 0xC5 | GET_MCK_ENABLE | GET |
+| 0xC6 | SET_MCK_PIN | SET |
+| 0xC7 | GET_MCK_PIN | GET |
+| 0xC8 | SET_MCK_MULTIPLIER | SET |
+| 0xC9 | GET_MCK_MULTIPLIER | GET |
+
+### Persistence
+
+- `SLOT_DATA_VERSION` = 9: adds `output_types[4]`, `i2s_bck_pin`, `i2s_mck_pin`, `i2s_mck_enabled`, `i2s_mck_multiplier` (8 bytes)
+- `WIRE_FORMAT_VERSION` = 3: adds `WireI2SConfig` (16 bytes) to `WireBulkParams` (total 2848 bytes)
+- Backward compatible: V<9 slots default to all-S/PDIF; V2 bulk payloads accepted without I2S changes
+
+### BSS Impact
+
+| Platform | Delta |
+|----------|-------|
+| RP2040 | +292 bytes |
+| RP2350 | +528 bytes |
+
+Full specification: `Documentation/Features/i2s_output_spec.md`

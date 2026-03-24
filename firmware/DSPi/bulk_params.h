@@ -29,7 +29,8 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       2
+#define WIRE_FORMAT_VERSION       3
+#define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
 #define WIRE_PLATFORM_RP2040      0
@@ -143,6 +144,18 @@ typedef struct __attribute__((packed)) {
 } WireChannelNames;                  // 352 bytes
 
 // ============================================================================
+// Section 11: I2S Configuration (16 bytes) — V3+
+// ============================================================================
+typedef struct __attribute__((packed)) {
+    uint8_t  output_types[WIRE_MAX_SPDIF_INSTANCES]; // Per-slot: 0=S/PDIF, 1=I2S
+    uint8_t  bck_pin;                // BCK GPIO (LRCLK = BCK + 1)
+    uint8_t  mck_pin;                // MCK GPIO
+    uint8_t  mck_enabled;            // 0 = off, 1 = on
+    uint8_t  mck_multiplier;         // 128 or 256
+    uint8_t  reserved[8];            // Future expansion (must be 0)
+} WireI2SConfig;                     // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -156,7 +169,8 @@ typedef struct __attribute__((packed)) {
     WirePinConfig       pins;                                             //    8
     WireBandParams      eq[WIRE_MAX_CHANNELS][WIRE_MAX_BANDS];           // 2112
     WireChannelNames    channel_names;                                    //  352
-} WireBulkParams;                    // Total: 2832 bytes
+    WireI2SConfig       i2s_config;                                       //   16
+} WireBulkParams;                    // Total: 2848 bytes
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 

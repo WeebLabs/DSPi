@@ -14,8 +14,11 @@
 #include "pico/usb_device_private.h"
 #include "pico/audio.h"
 #include "pico/audio_spdif.h"
+#include "pico/audio_i2s_multi.h"
 #include "hardware/sync.h"
 #include "hardware/irq.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
 #include "hardware/timer.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
@@ -46,6 +49,11 @@ volatile EqParamPacket pending_packet;
 volatile bool rate_change_pending = false;
 volatile uint32_t pending_rate = 48000;
 volatile bool bulk_params_pending = false;
+
+// Output type switching — deferred to main loop (needs heap allocation)
+volatile bool output_type_change_pending = false;
+volatile uint8_t pending_output_slot = 0;
+volatile uint8_t pending_output_type = 0;
 
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
@@ -1605,6 +1613,31 @@ uint8_t output_pins[NUM_PIN_OUTPUTS] = {
 
 audio_spdif_instance_t *spdif_instance_ptrs[NUM_SPDIF_INSTANCES];
 
+// ---------------------------------------------------------------------------
+// OutputSlot — per-slot output type management (S/PDIF or I2S)
+// ---------------------------------------------------------------------------
+
+// Per-slot output type: OUTPUT_TYPE_SPDIF (0) or OUTPUT_TYPE_I2S (1)
+uint8_t output_types[NUM_SPDIF_INSTANCES] = {0};  // All S/PDIF by default
+
+// I2S instances — statically allocated, activated when a slot switches to I2S
+static audio_i2s_instance_t i2s_instance_1 = {0};
+static audio_i2s_instance_t i2s_instance_2 = {0};
+#if PICO_RP2350
+static audio_i2s_instance_t i2s_instance_3 = {0};
+static audio_i2s_instance_t i2s_instance_4 = {0};
+#endif
+
+// Indexed arrays for both instance types (populated in usb_sound_card_init)
+audio_i2s_instance_t *i2s_instance_ptrs[NUM_SPDIF_INSTANCES];
+struct audio_buffer_pool *producer_pools[NUM_SPDIF_INSTANCES];
+
+// I2S clock configuration
+uint8_t i2s_bck_pin = PICO_I2S_BCK_PIN;     // BCK GPIO; LRCLK = BCK + 1
+uint8_t i2s_mck_pin = PICO_I2S_MCK_PIN;     // MCK GPIO
+bool    i2s_mck_enabled = false;             // MCK enabled state
+uint8_t i2s_mck_multiplier = 128;            // MCK = multiplier × Fs
+
 // Pin validation helpers
 static bool is_valid_gpio_pin(uint8_t pin) {
     if (pin == 12) return false;                // UART TX
@@ -1621,6 +1654,15 @@ static bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
         if (i == exclude) continue;
         if (output_pins[i] == pin) return true;
     }
+    // Also check I2S BCK and LRCLK pins if any slot is I2S
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            if (pin == i2s_bck_pin || pin == (i2s_bck_pin + 1)) return true;
+            break;  // All I2S slots share the same BCK/LRCLK
+        }
+    }
+    // Check MCK pin if enabled
+    if (i2s_mck_enabled && pin == i2s_mck_pin) return true;
     return false;
 }
 
@@ -1990,11 +2032,18 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                     // No-op: pin unchanged
                     status = PIN_CONFIG_SUCCESS;
                 } else if (out_idx < NUM_SPDIF_INSTANCES) {
-                    // SPDIF output: disable → change pin → re-enable
-                    audio_spdif_instance_t *inst = spdif_instance_ptrs[out_idx];
-                    audio_spdif_set_enabled(inst, false);
-                    audio_spdif_change_pin(inst, new_pin);
-                    audio_spdif_set_enabled(inst, true);
+                    // Output slot: disable → change pin → re-enable
+                    if (output_types[out_idx] == OUTPUT_TYPE_I2S) {
+                        audio_i2s_instance_t *inst = i2s_instance_ptrs[out_idx];
+                        audio_i2s_set_enabled(inst, false);
+                        audio_i2s_change_data_pin(inst, new_pin);
+                        audio_i2s_set_enabled(inst, true);
+                    } else {
+                        audio_spdif_instance_t *inst = spdif_instance_ptrs[out_idx];
+                        audio_spdif_set_enabled(inst, false);
+                        audio_spdif_change_pin(inst, new_pin);
+                        audio_spdif_set_enabled(inst, true);
+                    }
                     output_pins[out_idx] = new_pin;
                     status = PIN_CONFIG_SUCCESS;
                 } else {
@@ -2207,6 +2256,158 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
+
+            // ----------------------------------------------------------------
+            // I2S / MCK Configuration Commands (0xC0-0xC9)
+            // ----------------------------------------------------------------
+
+            case REQ_SET_OUTPUT_TYPE: {
+                // wValue = (new_type << 8) | slot_index
+                //
+                // Type switching is DEFERRED to the main loop because it involves
+                // heap allocation (consumer pool creation) which cannot safely run
+                // in USB ISR context (malloc uses a spin lock that can deadlock if
+                // the main loop is also in malloc).
+                //
+                uint8_t slot = setup->wValue & 0xFF;
+                uint8_t new_type = (setup->wValue >> 8) & 0xFF;
+                uint8_t status;
+
+                if (slot >= NUM_SPDIF_INSTANCES) {
+                    status = PIN_CONFIG_INVALID_OUTPUT;
+                } else if (new_type > 1) {
+                    status = PIN_CONFIG_INVALID_PIN;
+                } else if (new_type == output_types[slot]) {
+                    status = PIN_CONFIG_SUCCESS;  // No-op
+                } else {
+                    // Defer to main loop
+                    extern volatile bool output_type_change_pending;
+                    extern volatile uint8_t pending_output_slot;
+                    extern volatile uint8_t pending_output_type;
+                    pending_output_slot = slot;
+                    pending_output_type = new_type;
+                    __dmb();
+                    output_type_change_pending = true;
+                    status = PIN_CONFIG_SUCCESS;
+                }
+
+                resp_buf[0] = status;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_OUTPUT_TYPE: {
+                uint8_t slot = (uint8_t)setup->wValue;
+                if (slot < NUM_SPDIF_INSTANCES) {
+                    resp_buf[0] = output_types[slot];
+                    vendor_send_response(resp_buf, 1);
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_SET_I2S_BCK_PIN: {
+                uint8_t new_pin = (uint8_t)setup->wValue;
+                uint8_t status;
+
+                if (!is_valid_gpio_pin(new_pin) || !is_valid_gpio_pin(new_pin + 1)) {
+                    status = PIN_CONFIG_INVALID_PIN;
+                } else if (new_pin == i2s_bck_pin) {
+                    status = PIN_CONFIG_SUCCESS;  // No-op
+                } else {
+                    // Reject if any slot is currently I2S
+                    bool any_i2s = false;
+                    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                        if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
+                    }
+                    if (any_i2s) {
+                        status = PIN_CONFIG_OUTPUT_ACTIVE;
+                    } else if (is_pin_in_use(new_pin, 0xFF) || is_pin_in_use(new_pin + 1, 0xFF)) {
+                        status = PIN_CONFIG_PIN_IN_USE;
+                    } else {
+                        i2s_bck_pin = new_pin;
+                        status = PIN_CONFIG_SUCCESS;
+                    }
+                }
+                resp_buf[0] = status;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_I2S_BCK_PIN: {
+                resp_buf[0] = i2s_bck_pin;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_SET_MCK_ENABLE: {
+                bool enable = (setup->wValue != 0);
+                if (enable && !i2s_mck_enabled) {
+                    audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                    audio_i2s_mck_set_enabled(true);
+                    i2s_mck_enabled = true;
+                } else if (!enable && i2s_mck_enabled) {
+                    audio_i2s_mck_set_enabled(false);
+                    i2s_mck_enabled = false;
+                }
+                resp_buf[0] = PIN_CONFIG_SUCCESS;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_MCK_ENABLE: {
+                resp_buf[0] = i2s_mck_enabled ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_SET_MCK_PIN: {
+                uint8_t new_pin = (uint8_t)setup->wValue;
+                uint8_t status;
+                if (!is_valid_gpio_pin(new_pin)) {
+                    status = PIN_CONFIG_INVALID_PIN;
+                } else if (i2s_mck_enabled) {
+                    status = PIN_CONFIG_OUTPUT_ACTIVE;
+                } else if (is_pin_in_use(new_pin, 0xFF)) {
+                    status = PIN_CONFIG_PIN_IN_USE;
+                } else if (new_pin == i2s_mck_pin) {
+                    status = PIN_CONFIG_SUCCESS;
+                } else {
+                    audio_i2s_mck_change_pin(new_pin);
+                    i2s_mck_pin = new_pin;
+                    status = PIN_CONFIG_SUCCESS;
+                }
+                resp_buf[0] = status;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_MCK_PIN: {
+                resp_buf[0] = i2s_mck_pin;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_SET_MCK_MULTIPLIER: {
+                uint16_t mult = setup->wValue;
+                if (mult == 128 || mult == 256) {
+                    i2s_mck_multiplier = (uint8_t)mult;
+                    if (i2s_mck_enabled) {
+                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                    }
+                    resp_buf[0] = PIN_CONFIG_SUCCESS;
+                } else {
+                    resp_buf[0] = PIN_CONFIG_INVALID_PIN;  // Reuse: invalid value
+                }
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_MCK_MULTIPLIER: {
+                resp_buf[0] = i2s_mck_multiplier;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
         }
 
         return false;
@@ -2372,7 +2573,7 @@ void usb_sound_card_init(void) {
     audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
 #endif
 
-    // Populate instance pointer array for pin config commands
+    // Populate instance pointer arrays for pin/type config commands
     spdif_instance_ptrs[0] = &spdif_instance_1;
     spdif_instance_ptrs[1] = &spdif_instance_2;
 #if PICO_RP2350
@@ -2380,7 +2581,27 @@ void usb_sound_card_init(void) {
     spdif_instance_ptrs[3] = &spdif_instance_4;
 #endif
 
+    // I2S instance pointers (instances are dormant until a slot is switched to I2S)
+    i2s_instance_ptrs[0] = &i2s_instance_1;
+    i2s_instance_ptrs[1] = &i2s_instance_2;
+#if PICO_RP2350
+    i2s_instance_ptrs[2] = &i2s_instance_3;
+    i2s_instance_ptrs[3] = &i2s_instance_4;
+#endif
+
+    // Indexed producer pool array for type-switching convenience
+    producer_pools[0] = producer_pool_1;
+    producer_pools[1] = producer_pool_2;
+#if PICO_RP2350
+    producer_pools[2] = producer_pool_3;
+    producer_pools[3] = producer_pool_4;
+#endif
+
+    // MCK generator setup on PIO1 SM1 (starts disabled)
+    audio_i2s_mck_setup(pio1, 1, i2s_mck_pin);
+
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
+    irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
 
     // Start all outputs synchronized
 #if PICO_RP2350

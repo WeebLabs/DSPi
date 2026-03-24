@@ -4,6 +4,7 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "pico/unique_id.h"
@@ -18,6 +19,7 @@
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "flash_storage.h"
+#include "pico/audio_i2s_multi.h"
 #include "pdm_generator.h"
 #include "usb_audio.h"
 #include "loudness.h"
@@ -49,12 +51,30 @@ extern volatile uint8_t spdif0_consumer_fill;
 // USB SOF IRQ — measures device clock vs host clock for async feedback
 void __not_in_flash_func(usb_sof_irq)(void) {
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
-    audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
+    extern uint8_t output_types[];
+
+    // Read DMA word count from instance 0 (SPDIF or I2S)
+    volatile uint32_t *p_words_consumed;
+    uint32_t xfer_words;
+    uint8_t dma_ch;
+    uint8_t slot0_type = output_types[0];
+
+    if (slot0_type == OUTPUT_TYPE_I2S) {
+        extern audio_i2s_instance_t *i2s_instance_ptrs[];
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[0];
+        p_words_consumed = &inst->words_consumed;
+        xfer_words = inst->current_transfer_words;
+        dma_ch = inst->dma_channel;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
+        p_words_consumed = &inst->words_consumed;
+        xfer_words = inst->current_transfer_words;
+        dma_ch = inst->dma_channel;
+    }
 
     // Read total DMA words consumed by instance 0 (sub-buffer precision)
-    uint32_t remaining = dma_channel_hw_addr(inst->dma_channel)->transfer_count;
-    uint32_t current_total = inst->words_consumed
-                           + (inst->current_transfer_words - remaining);
+    uint32_t remaining = dma_channel_hw_addr(dma_ch)->transfer_count;
+    uint32_t current_total = *p_words_consumed + (xfer_words - remaining);
 
     // Handle reset request from rate change
     if (feedback_reset_value) {
@@ -70,9 +90,11 @@ void __not_in_flash_func(usb_sof_irq)(void) {
         fb_last_total = current_total;
 
         if (delta_words > 0) {
-            // 10.14 format: delta_words / 4_SOFs / 4_words_per_sample * 2^14
-            //             = delta_words * (2^14 / 16) = delta_words << 10
-            uint32_t raw = delta_words << 10;
+            // 10.14 format: delta_words / 4_SOFs / words_per_sample * 2^14
+            // SPDIF: 4 words/sample → shift = 10 (2^14 / 16 = 1024)
+            // I2S:   2 words/sample → shift = 11 (2^14 / 8  = 2048)
+            uint32_t shift = (slot0_type == OUTPUT_TYPE_I2S) ? 11 : 10;
+            uint32_t raw = delta_words << shift;
 
             if (fb_accum == 0) {
                 fb_accum = raw;
@@ -165,6 +187,13 @@ static void perform_rate_change(uint32_t new_freq) {
     loudness_recompute_pending = true;
     crossfeed_update_pending = true;  // Recalculate crossfeed coefficients for new sample rate
     pdm_update_clock(new_freq);
+
+    // Update MCK frequency for new sample rate (if enabled)
+    extern bool i2s_mck_enabled;
+    extern uint8_t i2s_mck_multiplier;
+    if (i2s_mck_enabled) {
+        audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
+    }
 }
 
 void core0_init() {
@@ -338,6 +367,103 @@ int main(void) {
             crossfeed_compute_coefficients(&crossfeed_state, (const CrossfeedConfig *)&crossfeed_config, (float)audio_state.freq);
             // Update bypass flag atomically
             crossfeed_bypassed = !crossfeed_config.enabled;
+        }
+
+        // Handle output type change (deferred from USB ISR — needs heap allocation)
+        {
+            extern volatile bool output_type_change_pending;
+            extern volatile uint8_t pending_output_slot;
+            extern volatile uint8_t pending_output_type;
+
+            if (output_type_change_pending) {
+                output_type_change_pending = false;
+                __dmb();
+
+                uint8_t slot = pending_output_slot;
+                uint8_t new_type = pending_output_type;
+
+                extern uint8_t output_types[];
+                extern audio_spdif_instance_t *spdif_instance_ptrs[];
+                extern audio_i2s_instance_t *i2s_instance_ptrs[];
+                extern uint8_t output_pins[];
+                extern uint8_t i2s_bck_pin;
+
+                // Mute audio during switch (~5ms)
+                preset_mute_counter = 256;
+                preset_loading = true;
+                __dmb();
+
+                // Wait for Core 1 to finish current work
+                if (core1_mode == CORE1_MODE_EQ_WORKER) {
+                    while (core1_eq_work.work_ready && !core1_eq_work.work_done)
+                        tight_loop_contents();
+                    __dmb();
+                }
+
+                if (new_type == OUTPUT_TYPE_I2S && output_types[slot] == OUTPUT_TYPE_SPDIF) {
+                    // --- S/PDIF → I2S ---
+                    audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[slot];
+
+                    // Disable SPDIF and silence its DMA IRQ
+                    audio_spdif_set_enabled(spdif_inst, false);
+                    dma_irqn_set_channel_enabled(spdif_inst->dma_irq, spdif_inst->dma_channel, false);
+                    dma_channel_abort(spdif_inst->dma_channel);
+                    if (spdif_inst->playing_buffer) {
+                        give_audio_buffer(spdif_inst->consumer_pool, spdif_inst->playing_buffer);
+                        spdif_inst->playing_buffer = NULL;
+                    }
+
+                    // Unclaim SM so I2S can claim it (DMA channel stays claimed/dormant)
+                    pio_sm_unclaim(spdif_inst->pio, spdif_inst->pio_sm);
+
+                    // Set up I2S with same SM but a DIFFERENT DMA channel
+                    // (SPDIF uses 0-3, I2S uses 8-11 to avoid handler conflict)
+                    audio_i2s_config_t i2s_cfg = {
+                        .data_pin = output_pins[slot],
+                        .clock_pin_base = i2s_bck_pin,
+                        .dma_channel = slot + 8,
+                        .pio_sm = slot,
+                        .pio = PICO_AUDIO_SPDIF_PIO,
+                        .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
+                    };
+
+                    extern struct audio_buffer_pool *producer_pools[];
+                    audio_i2s_setup(i2s_instance_ptrs[slot], &audio_format_48k, &i2s_cfg);
+                    audio_i2s_connect_extra(i2s_instance_ptrs[slot], producer_pools[slot],
+                                            false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+                    audio_i2s_set_enabled(i2s_instance_ptrs[slot], true);
+
+                    output_types[slot] = OUTPUT_TYPE_I2S;
+                    printf("Slot %d switched to I2S (DMA ch %d)\n", slot, slot + 8);
+
+                } else if (new_type == OUTPUT_TYPE_SPDIF && output_types[slot] == OUTPUT_TYPE_I2S) {
+                    // --- I2S → S/PDIF ---
+                    audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[slot];
+
+                    // Tear down I2S (releases its DMA channel + SM)
+                    audio_i2s_teardown(i2s_instance_ptrs[slot]);
+                    memset(i2s_instance_ptrs[slot], 0, sizeof(audio_i2s_instance_t));
+
+                    // Reclaim SM for SPDIF
+                    pio_sm_claim(spdif_inst->pio, spdif_inst->pio_sm);
+
+                    // Reinit SPDIF SM (handles PIO program, clock divider, DMA IRQ re-enable)
+                    audio_spdif_change_pin(spdif_inst, output_pins[slot]);
+
+                    // Reconnect producer pool to SPDIF consumer pool
+                    // (audio_i2s_connect_extra replaced the connection; restore it)
+                    extern struct audio_buffer_pool *producer_pools[];
+                    audio_complete_connection(&spdif_inst->connection.core,
+                                              producer_pools[slot],
+                                              spdif_inst->consumer_pool);
+
+                    // Re-enable SPDIF output
+                    audio_spdif_set_enabled(spdif_inst, true);
+
+                    output_types[slot] = OUTPUT_TYPE_SPDIF;
+                    printf("Slot %d switched to S/PDIF\n", slot);
+                }
+            }
         }
 
         // Handle bulk parameter SET (deferred from USB IRQ)

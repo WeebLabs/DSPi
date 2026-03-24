@@ -185,6 +185,18 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_ALL_PARAMS          0xA0
 #define REQ_SET_ALL_PARAMS          0xA1
 
+// I2S Output Configuration Commands
+#define REQ_SET_OUTPUT_TYPE         0xC0
+#define REQ_GET_OUTPUT_TYPE         0xC1
+#define REQ_SET_I2S_BCK_PIN         0xC2
+#define REQ_GET_I2S_BCK_PIN         0xC3
+#define REQ_SET_MCK_ENABLE          0xC4
+#define REQ_GET_MCK_ENABLE          0xC5
+#define REQ_SET_MCK_PIN             0xC6
+#define REQ_GET_MCK_PIN             0xC7
+#define REQ_SET_MCK_MULTIPLIER      0xC8
+#define REQ_GET_MCK_MULTIPLIER      0xC9
+
 // Buffer statistics
 #define REQ_GET_BUFFER_STATS        0xB0
 #define REQ_RESET_BUFFER_STATS      0xB1
@@ -214,12 +226,20 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define FW_VERSION_PATCH            2
 #define FW_VERSION_BCD              ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
 
-// Pin config status codes
+// Pin config status codes (shared by S/PDIF, I2S, and MCK pin commands)
 #define PIN_CONFIG_SUCCESS          0x00
 #define PIN_CONFIG_INVALID_PIN      0x01
 #define PIN_CONFIG_PIN_IN_USE       0x02
 #define PIN_CONFIG_INVALID_OUTPUT   0x03
 #define PIN_CONFIG_OUTPUT_ACTIVE    0x04
+
+// Output type identifiers
+#define OUTPUT_TYPE_SPDIF           0
+#define OUTPUT_TYPE_I2S             1
+
+// I2S default pins
+#define PICO_I2S_BCK_PIN            14   // BCK; LRCLK = BCK + 1 = GPIO 15
+#define PICO_I2S_MCK_PIN            13   // Master clock (optional)
 
 // Number of configurable outputs (SPDIF + PDM)
 #if PICO_RP2350

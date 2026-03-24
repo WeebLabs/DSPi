@@ -48,6 +48,8 @@ target_compile_definitions(DSPi PRIVATE
     # S/PDIF output configuration (pins defined in config.h)
     PICO_AUDIO_SPDIF_PIO=0
     PICO_AUDIO_SPDIF_DMA_IRQ=1
+    # Keep I2S on a separate DMA IRQ line to avoid cross-driver IRQ gating.
+    PICO_AUDIO_I2S_DMA_IRQ=0
 
     PICO_DEFAULT_UART_TX_PIN=12
 
@@ -65,6 +67,7 @@ target_link_libraries(DSPi
     hardware_flash
     hardware_adc
     pico_audio_spdif_multi
+    pico_audio_i2s_multi
     usb_device
 )
 

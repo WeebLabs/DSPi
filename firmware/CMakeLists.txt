@@ -24,4 +24,7 @@ pico_sdk_init()
 # Local multi-instance S/PDIF library (replaces system pico_audio_spdif)
 add_subdirectory(pico-extras/src/rp2_common/pico_audio_spdif_multi)
 
+# Multi-instance I2S library (same patterns as S/PDIF multi, independent)
+add_subdirectory(pico-extras/src/rp2_common/pico_audio_i2s_multi)
+
 add_subdirectory(DSPi)
