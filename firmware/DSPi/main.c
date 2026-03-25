@@ -240,8 +240,39 @@ static void reset_usb_feedback_loop(void) {
     feedback_10_14 = nominal_feedback_10_14;
 }
 
-// Re-lock consumer fill across all active outputs after any type switch.
-static void resync_active_output_pipelines(void) {
+// ---------------------------------------------------------------------------
+// Two-phase pipeline reset API
+//
+// Any operation that disrupts output pipeline phase alignment (stream
+// start/restart, output type switch) must bracket the disruptive work:
+//
+//   prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+//   ... type-specific teardown / setup ...
+//   complete_pipeline_reset();
+//
+// For simple cases (stream restart) with no work between phases, call
+// both back-to-back.  Callers that only need a mute (bulk params, preset
+// load) can call prepare_pipeline_reset() alone.
+// ---------------------------------------------------------------------------
+
+// Phase 1: prepare for disruptive pipeline work.
+// Waits for Core 1 EQ worker to finish, then engages the audio mute.
+static void prepare_pipeline_reset(uint32_t mute_samples) {
+    if (core1_mode == CORE1_MODE_EQ_WORKER) {
+        while (core1_eq_work.work_ready && !core1_eq_work.work_done)
+            tight_loop_contents();
+        __dmb();
+    }
+    preset_mute_counter = mute_samples;
+    preset_loading = true;
+    __dmb();
+}
+
+// Phase 2: drain all consumer pipelines, restart outputs in sync, reset
+// USB feedback.  The entire sequence runs with interrupts disabled so that
+// USB audio packets cannot produce into already-drained pools (which would
+// create a persistent inter-slot fill offset).
+static void complete_pipeline_reset(void) {
     extern uint8_t output_types[];
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
     extern audio_i2s_instance_t *i2s_instance_ptrs[];
@@ -250,6 +281,8 @@ static void resync_active_output_pipelines(void) {
     audio_i2s_instance_t *i2s_sync[NUM_SPDIF_INSTANCES];
     uint spdif_count = 0;
     uint i2s_count = 0;
+
+    uint32_t flags = save_and_disable_interrupts();
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
@@ -299,6 +332,10 @@ static void resync_active_output_pipelines(void) {
     if (i2s_count) {
         audio_i2s_enable_sync(i2s_sync, i2s_count);
     }
+
+    reset_usb_feedback_loop();
+
+    restore_interrupts(flags);
 }
 
 void core0_init() {
@@ -482,20 +519,8 @@ int main(void) {
                 stream_restart_resync_pending = false;
                 __dmb();
 
-                // Wait for Core 1 to finish current work before touching pipelines.
-                if (core1_mode == CORE1_MODE_EQ_WORKER) {
-                    while (core1_eq_work.work_ready && !core1_eq_work.work_done) {
-                        tight_loop_contents();
-                    }
-                    __dmb();
-                }
-
-                preset_mute_counter = 256;
-                preset_loading = true;
-                __dmb();
-
-                resync_active_output_pipelines();
-                reset_usb_feedback_loop();
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                complete_pipeline_reset();
                 printf("USB stream restart: outputs resynced\n");
             }
         }
@@ -519,17 +544,7 @@ int main(void) {
                 extern uint8_t output_pins[];
                 extern uint8_t i2s_bck_pin;
 
-                // Mute audio during switch (~5ms)
-                preset_mute_counter = 256;
-                preset_loading = true;
-                __dmb();
-
-                // Wait for Core 1 to finish current work
-                if (core1_mode == CORE1_MODE_EQ_WORKER) {
-                    while (core1_eq_work.work_ready && !core1_eq_work.work_done)
-                        tight_loop_contents();
-                    __dmb();
-                }
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
                 if (new_type == OUTPUT_TYPE_I2S && output_types[slot] == OUTPUT_TYPE_SPDIF) {
                     // --- S/PDIF → I2S ---
@@ -565,8 +580,7 @@ int main(void) {
                                             false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
 
                     output_types[slot] = OUTPUT_TYPE_I2S;
-                    resync_active_output_pipelines();
-                    reset_usb_feedback_loop();
+                    complete_pipeline_reset();
                     printf("Slot %d switched to I2S (DMA ch %d, outputs resynced)\n", slot, slot + 8);
 
                 } else if (new_type == OUTPUT_TYPE_SPDIF && output_types[slot] == OUTPUT_TYPE_I2S) {
@@ -575,7 +589,6 @@ int main(void) {
 
                     // Tear down I2S (releases its DMA channel + SM)
                     audio_i2s_teardown(i2s_instance_ptrs[slot]);
-                    memset(i2s_instance_ptrs[slot], 0, sizeof(audio_i2s_instance_t));
 
                     // Reclaim SM for SPDIF
                     pio_sm_claim(spdif_inst->pio, spdif_inst->pio_sm);
@@ -583,16 +596,17 @@ int main(void) {
                     // Reinit SPDIF SM (handles PIO program, clock divider, DMA IRQ re-enable)
                     audio_spdif_change_pin(spdif_inst, output_pins[slot]);
 
-                    // Reconnect producer pool to SPDIF consumer pool
-                    // (audio_i2s_connect_extra replaced the connection; restore it)
+                    // Restore SPDIF connection BEFORE zeroing the I2S instance so
+                    // producer_pools[slot]->connection never points at freed memory
+                    // if a USB IRQ fires between here and the memset.
                     extern struct audio_buffer_pool *producer_pools[];
                     audio_complete_connection(&spdif_inst->connection.core,
                                               producer_pools[slot],
                                               spdif_inst->consumer_pool);
+                    memset(i2s_instance_ptrs[slot], 0, sizeof(audio_i2s_instance_t));
 
                     output_types[slot] = OUTPUT_TYPE_SPDIF;
-                    resync_active_output_pipelines();
-                    reset_usb_feedback_loop();
+                    complete_pipeline_reset();
                     printf("Slot %d switched to S/PDIF (outputs resynced)\n", slot);
                 }
             }
@@ -602,18 +616,7 @@ int main(void) {
         if (bulk_params_pending) {
             bulk_params_pending = false;
 
-            // Wait for Core 1 to finish current work
-            if (core1_mode == CORE1_MODE_EQ_WORKER) {
-                while (core1_eq_work.work_ready && !core1_eq_work.work_done) {
-                    tight_loop_contents();
-                }
-                __dmb();
-            }
-
-            // Mute audio during parameter swap
-            preset_mute_counter = PRESET_MUTE_SAMPLES;
-            preset_loading = true;
-            __dmb();
+            prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
             // Apply the received parameters (pin config gated by include_pins setting)
             uint16_t _occ; uint8_t _m, _d, _la, inc_pins;

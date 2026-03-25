@@ -1198,6 +1198,9 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - **DMA IRQ:** Both libraries register on the same DMA IRQ line via `irq_add_shared_handler()`. Each iterates its own instance array.
 - **Producer pools** are format-identical (PCM_S32, stride 8). The I2S library's connection callback left-shifts samples by 8 for MSB-first I2S framing.
 - **No audio callback changes.** Core 1 remains output-type-agnostic.
+- **Pipeline reset API** (`main.c`): two-phase `prepare_pipeline_reset()` / `complete_pipeline_reset()` brackets any disruptive output work. `complete_pipeline_reset()` runs the entire drain → enable_sync → feedback reset sequence with interrupts disabled to prevent inter-slot fill offsets. I2S→S/PDIF switch restores the SPDIF connection before zeroing the I2S instance to prevent a dangling `producer_pool->connection` pointer.
+
+*Last updated: 2026-03-25*
 
 ### Clock Math at 307.2 MHz / 48 kHz
 
