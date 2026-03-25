@@ -58,6 +58,11 @@ static bool irq_handler_installed[2] = {false, false};
 // Reference count for DMA IRQ enable/disable
 static uint8_t irq_enable_count[2] = {0, 0};
 
+// Diagnostic counters: consumer-empty DMA starts (silence fallback)
+static volatile bool spdif_starvation_monitor_enabled = false;
+static volatile uint32_t spdif_dma_starvations = 0;
+static volatile uint32_t spdif_dma_starvations_by_inst[PICO_AUDIO_SPDIF_MAX_INSTANCES] = {0};
+
 // ---------------------------------------------------------------------------
 // Forward declarations
 // ---------------------------------------------------------------------------
@@ -157,6 +162,7 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
     inst->playing_buffer = NULL;
     inst->freq = 0;
     inst->enabled = false;
+    inst->instance_index = (uint8_t)spdif_instance_count;
 
     // Assert all instances share the same DMA IRQ line
     if (spdif_instance_count > 0) {
@@ -359,6 +365,13 @@ static void __time_critical_func(audio_start_dma_transfer)(audio_spdif_instance_
         // just play some silence
         ab = &inst->silence_buffer;
 
+        if (spdif_starvation_monitor_enabled) {
+            spdif_dma_starvations++;
+            if (inst->instance_index < PICO_AUDIO_SPDIF_MAX_INSTANCES) {
+                spdif_dma_starvations_by_inst[inst->instance_index]++;
+            }
+        }
+
         extern int overruns;
         extern volatile bool preset_loading;
         if (!preset_loading)
@@ -541,4 +554,24 @@ void audio_spdif_enable_sync(audio_spdif_instance_t *instances[], uint count) {
     for (uint i = 0; i < count; i++) {
         instances[i]->enabled = true;
     }
+}
+
+void audio_spdif_set_starvation_monitoring(bool enabled) {
+    spdif_starvation_monitor_enabled = enabled;
+}
+
+void audio_spdif_reset_dma_starvations(void) {
+    spdif_dma_starvations = 0;
+    for (uint i = 0; i < PICO_AUDIO_SPDIF_MAX_INSTANCES; i++) {
+        spdif_dma_starvations_by_inst[i] = 0;
+    }
+}
+
+uint32_t audio_spdif_get_dma_starvations(void) {
+    return spdif_dma_starvations;
+}
+
+uint32_t audio_spdif_get_dma_starvations_instance(uint index) {
+    if (index >= PICO_AUDIO_SPDIF_MAX_INSTANCES) return 0;
+    return spdif_dma_starvations_by_inst[index];
 }

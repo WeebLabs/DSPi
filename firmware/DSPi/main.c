@@ -233,6 +233,13 @@ static void i2s_reset_consumer_pipeline(audio_i2s_instance_t *inst) {
     }
 }
 
+// Reset USB async feedback loop state after disruptive output pipeline events
+// (type switch + global resync), so SOF estimation restarts from nominal.
+static void reset_usb_feedback_loop(void) {
+    feedback_reset_value = nominal_feedback_10_14;
+    feedback_10_14 = nominal_feedback_10_14;
+}
+
 // Re-lock consumer fill across all active outputs after any type switch.
 static void resync_active_output_pipelines(void) {
     extern uint8_t output_types[];
@@ -467,6 +474,32 @@ int main(void) {
             crossfeed_bypassed = !crossfeed_config.enabled;
         }
 
+        // Handle USB stream restart (alt 0 -> alt > 0): re-lock all active output
+        // pipelines so consumer fill/phase starts aligned after host re-prime.
+        {
+            extern volatile bool stream_restart_resync_pending;
+            if (stream_restart_resync_pending) {
+                stream_restart_resync_pending = false;
+                __dmb();
+
+                // Wait for Core 1 to finish current work before touching pipelines.
+                if (core1_mode == CORE1_MODE_EQ_WORKER) {
+                    while (core1_eq_work.work_ready && !core1_eq_work.work_done) {
+                        tight_loop_contents();
+                    }
+                    __dmb();
+                }
+
+                preset_mute_counter = 256;
+                preset_loading = true;
+                __dmb();
+
+                resync_active_output_pipelines();
+                reset_usb_feedback_loop();
+                printf("USB stream restart: outputs resynced\n");
+            }
+        }
+
         // Handle output type change (deferred from USB ISR — needs heap allocation)
         {
             extern volatile bool output_type_change_pending;
@@ -533,6 +566,7 @@ int main(void) {
 
                     output_types[slot] = OUTPUT_TYPE_I2S;
                     resync_active_output_pipelines();
+                    reset_usb_feedback_loop();
                     printf("Slot %d switched to I2S (DMA ch %d, outputs resynced)\n", slot, slot + 8);
 
                 } else if (new_type == OUTPUT_TYPE_SPDIF && output_types[slot] == OUTPUT_TYPE_I2S) {
@@ -558,6 +592,7 @@ int main(void) {
 
                     output_types[slot] = OUTPUT_TYPE_SPDIF;
                     resync_active_output_pipelines();
+                    reset_usb_feedback_loop();
                     printf("Slot %d switched to S/PDIF (outputs resynced)\n", slot);
                 }
             }

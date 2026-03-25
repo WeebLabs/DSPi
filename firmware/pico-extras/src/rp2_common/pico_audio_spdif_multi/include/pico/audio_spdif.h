@@ -105,6 +105,7 @@ typedef struct audio_spdif_instance {
     volatile uint32_t words_consumed;       // Total DMA words consumed (incremented in DMA IRQ)
     uint32_t current_transfer_words;        // DMA word count of current transfer
     uint8_t subframe_position;              // 0-191: position in IEC 60958-1 192-frame audio block
+    uint8_t instance_index;                 // Stable registration index (0..PICO_AUDIO_SPDIF_MAX_INSTANCES-1)
 
     // Per-instance audio pipeline
     audio_format_t consumer_format;
@@ -195,6 +196,29 @@ void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin);
  * \param count Number of instances
  */
 void audio_spdif_enable_sync(audio_spdif_instance_t *instances[], uint count);
+
+/** \brief Enable/disable DMA-starvation monitoring
+ * \ingroup audio_spdif
+ *
+ * When enabled, the driver counts consumer-empty DMA starts (silence fallback).
+ * Intended for dropout diagnostics during active USB streaming.
+ */
+void audio_spdif_set_starvation_monitoring(bool enabled);
+
+/** \brief Reset DMA-starvation counters
+ * \ingroup audio_spdif
+ */
+void audio_spdif_reset_dma_starvations(void);
+
+/** \brief Get total DMA-starvation events across all instances
+ * \ingroup audio_spdif
+ */
+uint32_t audio_spdif_get_dma_starvations(void);
+
+/** \brief Get DMA-starvation events for one instance index (0..3)
+ * \ingroup audio_spdif
+ */
+uint32_t audio_spdif_get_dma_starvations_instance(uint index);
 
 #ifdef __cplusplus
 }

@@ -54,6 +54,8 @@ volatile bool bulk_params_pending = false;
 volatile bool output_type_change_pending = false;
 volatile uint8_t pending_output_slot = 0;
 volatile uint8_t pending_output_type = 0;
+// USB stream restart (alt 0 -> alt > 0) — deferred to main loop for safe pipeline re-lock
+volatile bool stream_restart_resync_pending = false;
 
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
@@ -1272,13 +1274,28 @@ static bool _as_setup_request_handler(__unused struct usb_endpoint *ep, struct u
 
 static bool as_set_alternate(struct usb_interface *interface, uint alt) {
     assert(interface == &as_op_interface);
+    if (alt >= 3) return false;
+
+    uint32_t prev_alt = usb_audio_alt_set;
     usb_audio_alt_set = alt;
     if (alt == 2) {
         usb_input_bit_depth = 24;
     } else {
         usb_input_bit_depth = 16;
     }
-    return alt < 3;
+
+    // Arm/disarm SPDIF starvation diagnostics with stream state.
+    // Reset only on inactive->active transition so changing 16/24-bit alt
+    // doesn't clear counters mid-stream.
+    bool active = (alt > 0);
+    audio_spdif_set_starvation_monitoring(active);
+    if (active && prev_alt == 0) {
+        audio_spdif_reset_dma_starvations();
+        stream_restart_resync_pending = true;
+        __dmb();
+    }
+
+    return true;
 }
 
 // ----------------------------------------------------------------------------
@@ -1718,24 +1735,22 @@ static void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepa
 }
 
 static uint get_slot_consumer_fill(uint slot) {
-    uint cons_prepared = 0;
-    uint playing = 0;
+    uint cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
 
     if (output_types[slot] == OUTPUT_TYPE_I2S) {
         audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
         if (inst && inst->consumer_pool) {
-            cons_prepared = count_pool_prepared(inst->consumer_pool);
-            playing = (inst->playing_buffer != NULL) ? 1 : 0;
+            cons_free = count_pool_free(inst->consumer_pool);
         }
     } else {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
         if (inst && inst->consumer_pool) {
-            cons_prepared = count_pool_prepared(inst->consumer_pool);
-            playing = (inst->playing_buffer != NULL) ? 1 : 0;
+            cons_free = count_pool_free(inst->consumer_pool);
         }
     }
 
-    return cons_prepared + playing;
+    if (cons_free > SPDIF_CONSUMER_BUFFER_COUNT) cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
+    return SPDIF_CONSUMER_BUFFER_COUNT - cons_free;
 }
 
 // Servo-critical: update slot-0 fill every packet with minimal work.
@@ -1936,6 +1951,11 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                     case 14: resp = vreg_voltage_to_mv(vreg_get_voltage()); break;  // Core voltage in mV
                     case 15: resp = audio_state.freq; break;  // Sample rate in Hz
                     case 16: resp = (uint32_t)read_temperature_cdeg(); break;  // Temperature in centi-degrees C
+                    case 17: resp = audio_spdif_get_dma_starvations(); break;  // Total SPDIF DMA starvations
+                    case 18: resp = audio_spdif_get_dma_starvations_instance(0); break;  // SPDIF instance 0
+                    case 19: resp = audio_spdif_get_dma_starvations_instance(1); break;  // SPDIF instance 1
+                    case 20: resp = audio_spdif_get_dma_starvations_instance(2); break;  // SPDIF instance 2
+                    case 21: resp = audio_spdif_get_dma_starvations_instance(3); break;  // SPDIF instance 3
                 }
                 usb_start_tiny_control_in_transfer(resp, 4);
                 return true;
@@ -2284,7 +2304,9 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                     pkt.spdif[i].consumer_free = (uint8_t)cons_free;
                     pkt.spdif[i].consumer_prepared = (uint8_t)cons_prepared;
                     pkt.spdif[i].consumer_playing = (uint8_t)playing;
-                    uint cons_fill = pkt.spdif[i].consumer_prepared + pkt.spdif[i].consumer_playing;
+                    // Fill % is based on total occupied buffers (capacity - free), so it
+                    // includes hidden staging buffers (e.g., I2S partial-assembly buffer).
+                    uint cons_fill = (cons_free > consumer_capacity) ? 0 : (consumer_capacity - cons_free);
                     pkt.spdif[i].consumer_fill_pct = (uint8_t)(cons_fill * 100 / consumer_capacity);
                     pkt.spdif[i].consumer_min_fill_pct = spdif_consumer_min_fill_pct[i];
                     pkt.spdif[i].consumer_max_fill_pct = spdif_consumer_max_fill_pct[i];
