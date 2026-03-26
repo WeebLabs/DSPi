@@ -1,0 +1,67 @@
+;
+; Copyright (c) 2026 WeebLabs
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; Master Clock (MCK) generator — square wave toggle
+;
+; Produces a 50% duty cycle clock on one GPIO pin. Intended for I2S DACs
+; that require an external master clock reference (MCLK/SCK).
+;
+; Runs on PIO1 SM1 (PIO1 SM0 is PDM output). Independent of the I2S
+; data path on PIO0.
+;
+; Timing:
+;   MCK frequency = PIO clock / 2 (one toggle per instruction, 2 instructions
+;   per full cycle).
+;
+;   PIO clock = MCK × 2 = sample_freq × multiplier × 2
+;
+;   Clock divider (24.8 fixed-point):
+;     divider = sys_clk × 256 / (sample_freq × multiplier × 2)
+;
+;   At 307.2 MHz, 48 kHz, 128× multiplier:
+;     MCK = 6.144 MHz, PIO clock = 12.288 MHz
+;     divider = 307200000 × 256 / (48000 × 128 × 2) = 6400 → 25.0 (integer)
+;
+;   At 307.2 MHz, 48 kHz, 256× multiplier:
+;     MCK = 12.288 MHz, PIO clock = 24.576 MHz
+;     divider = 12.5 (fractional — introduces jitter, not recommended)
+
+.program audio_mck
+.side_set 1
+
+    nop   side 1    ; MCK high
+    nop   side 0    ; MCK low
+
+; Total: 2 instructions.
+
+% c-sdk {
+
+// ---------------------------------------------------------------------------
+// audio_mck_program_init — Configure a PIO state machine for MCK generation
+//
+// Parameters:
+//   pio    — PIO block (typically pio1)
+//   sm     — State machine index (typically 1, since SM0 is PDM)
+//   offset — Instruction memory offset from pio_add_program()
+//   pin    — GPIO for MCK output
+// ---------------------------------------------------------------------------
+static inline void audio_mck_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_config sm_config = audio_mck_program_get_default_config(offset);
+
+    // MCK on side-set pin
+    sm_config_set_sideset_pins(&sm_config, pin);
+
+    // Initialize the state machine
+    pio_sm_init(pio, sm, offset, &sm_config);
+
+    // Pin direction: output
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+
+    // Drive low initially
+    pio_sm_set_pins(pio, sm, 0);
+}
+
+%}
