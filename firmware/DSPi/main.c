@@ -392,15 +392,60 @@ void core0_init() {
         dsp_update_delay_samples(48000.0f);
         restore_interrupts(flags);
 
-        // Apply SPDIF pin configuration (before Core 1 starts)
+        // Apply output type + pin configuration from preset (before Core 1 starts).
+        // usb_sound_card_init() created all slots as SPDIF; convert any that the
+        // preset saved as I2S.
         extern uint8_t output_pins[];
+        extern uint8_t output_types[];
         extern audio_spdif_instance_t *spdif_instance_ptrs[];
+        extern audio_i2s_instance_t *i2s_instance_ptrs[];
+        extern struct audio_buffer_pool *producer_pools[];
+        extern uint8_t i2s_bck_pin;
+        extern bool i2s_mck_enabled;
+        extern uint8_t i2s_mck_multiplier;
+
+        bool any_i2s = false;
         for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-            if (output_pins[i] != spdif_instance_ptrs[i]->pin) {
-                audio_spdif_set_enabled(spdif_instance_ptrs[i], false);
-                audio_spdif_change_pin(spdif_instance_ptrs[i], output_pins[i]);
-                audio_spdif_set_enabled(spdif_instance_ptrs[i], true);
+            if (output_types[i] == OUTPUT_TYPE_I2S) {
+                // Tear down the SPDIF instance and replace with I2S
+                audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
+
+                audio_spdif_set_enabled(spdif_inst, false);
+                dma_irqn_set_channel_enabled(spdif_inst->dma_irq, spdif_inst->dma_channel, false);
+                dma_channel_abort(spdif_inst->dma_channel);
+                if (spdif_inst->playing_buffer) {
+                    give_audio_buffer(spdif_inst->consumer_pool, spdif_inst->playing_buffer);
+                    spdif_inst->playing_buffer = NULL;
+                }
+                spdif_reset_consumer_pipeline(spdif_inst);
+                pio_sm_unclaim(spdif_inst->pio, spdif_inst->pio_sm);
+
+                audio_i2s_config_t i2s_cfg = {
+                    .data_pin = output_pins[i],
+                    .clock_pin_base = i2s_bck_pin,
+                    .dma_channel = i + 8,
+                    .pio_sm = i,
+                    .pio = PICO_AUDIO_SPDIF_PIO,
+                    .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
+                };
+                audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
+                audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
+                                        false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+                audio_i2s_set_enabled(i2s_instance_ptrs[i], true);
+                any_i2s = true;
+            } else {
+                // SPDIF slot — apply pin config if changed
+                if (output_pins[i] != spdif_instance_ptrs[i]->pin) {
+                    audio_spdif_set_enabled(spdif_instance_ptrs[i], false);
+                    audio_spdif_change_pin(spdif_instance_ptrs[i], output_pins[i]);
+                    audio_spdif_set_enabled(spdif_instance_ptrs[i], true);
+                }
             }
+        }
+
+        if (any_i2s && i2s_mck_enabled) {
+            audio_i2s_mck_set_enabled(true);
+            audio_i2s_mck_update_frequency(48000, i2s_mck_multiplier);
         }
     }
 
