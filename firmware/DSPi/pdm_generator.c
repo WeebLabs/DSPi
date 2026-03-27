@@ -10,6 +10,7 @@
 #include "hardware/clocks.h"
 #include "hardware/timer.h"
 #include "hardware/sync.h"
+#include "pico/multicore.h"
 
 // ----------------------------------------------------------------------------
 // DATA STRUCTURES
@@ -698,6 +699,10 @@ void pdm_core1_entry() {
         __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
     }
 #endif
+
+    // Register as a lockout victim so Core 0 can safely park us in RAM
+    // during flash erase/program operations (XIP is quiesced).
+    multicore_lockout_victim_init();
 
     while (1) {
         switch (core1_mode) {

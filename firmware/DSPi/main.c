@@ -497,6 +497,57 @@ int main(void) {
         // Update watchdog
         watchdog_update();
 
+        // Drain USB audio ring — highest priority.
+        // USB ISR pushes raw packets into the ring; we run the full DSP
+        // pipeline here in main-loop context instead of USB IRQ context.
+        usb_audio_drain_ring();
+
+        // Handle deferred flash SET commands (fire-and-forget, no result).
+        // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,
+        // preventing the USB ISR from overwriting payload mid-read.
+        {
+            extern volatile bool flash_set_name_pending;
+            if (flash_set_name_pending) {
+                char name[PRESET_NAME_LEN];
+                uint8_t slot;
+                uint32_t f = save_and_disable_interrupts();
+                extern uint8_t flash_set_name_slot;
+                extern char flash_set_name_buf[];
+                slot = flash_set_name_slot;
+                memcpy(name, flash_set_name_buf, PRESET_NAME_LEN);
+                flash_set_name_pending = false;
+                restore_interrupts(f);
+                usb_audio_drain_ring();
+                preset_set_name(slot, name);
+            }
+
+            extern volatile bool flash_set_startup_pending;
+            if (flash_set_startup_pending) {
+                uint8_t mode, slot;
+                uint32_t f = save_and_disable_interrupts();
+                extern uint8_t flash_set_startup_mode;
+                extern uint8_t flash_set_startup_slot;
+                mode = flash_set_startup_mode;
+                slot = flash_set_startup_slot;
+                flash_set_startup_pending = false;
+                restore_interrupts(f);
+                usb_audio_drain_ring();
+                preset_set_startup(mode, slot);
+            }
+
+            extern volatile bool flash_set_include_pins_pending;
+            if (flash_set_include_pins_pending) {
+                uint8_t val;
+                uint32_t f = save_and_disable_interrupts();
+                extern uint8_t flash_set_include_pins_val;
+                val = flash_set_include_pins_val;
+                flash_set_include_pins_pending = false;
+                restore_interrupts(f);
+                usb_audio_drain_ring();
+                preset_set_include_pins(val);
+            }
+        }
+
         // Handle EQ parameter updates from USB
         if (eq_update_pending) {
             EqParamPacket p = pending_packet;
@@ -535,6 +586,7 @@ int main(void) {
         if (rate_change_pending) {
             uint32_t r = pending_rate;
             rate_change_pending = false;
+            usb_audio_drain_ring();  // Process old-rate packets before clock switch
             perform_rate_change(r);
         }
 
@@ -564,6 +616,9 @@ int main(void) {
                 stream_restart_resync_pending = false;
                 __dmb();
 
+                usb_audio_drain_ring();   // Process remaining packets
+                usb_audio_flush_ring();   // Discard stale data from previous stream
+
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
                 complete_pipeline_reset();
                 printf("USB stream restart: outputs resynced\n");
@@ -579,6 +634,8 @@ int main(void) {
             if (output_type_change_pending) {
                 output_type_change_pending = false;
                 __dmb();
+
+                usb_audio_drain_ring();  // Process before pool teardown/rebuild
 
                 uint8_t slot = pending_output_slot;
                 uint8_t new_type = pending_output_type;
@@ -661,6 +718,7 @@ int main(void) {
         if (bulk_params_pending) {
             bulk_params_pending = false;
 
+            usb_audio_drain_ring();  // Process before full state swap
             prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
             // Apply the received parameters (pin config gated by include_pins setting)

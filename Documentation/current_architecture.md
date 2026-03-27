@@ -199,14 +199,31 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 
 **IRQ safety:** The SOF handler runs inside `isr_usbctrl`. The DMA IRQ handler (`audio_spdif_dma_irq_handler`) has the same default priority on Cortex-M0+/M33. Same-priority interrupts cannot preempt each other, so reading both `words_consumed` and `transfer_count` is atomic with respect to DMA completion.
 
+### USB Audio Decoupling (SPSC Ring Buffer)
+*Last updated: 2026-03-27*
+
+The DSP pipeline is decoupled from the USB IRQ via a lock-free SPSC ring buffer (`usb_audio_ring.h`). The USB ISR pushes raw packets into the ring (~5µs); the main loop drains the ring and runs the full DSP pipeline in thread context. This prevents the USB stack from being blocked for hundreds of microseconds per packet and eliminates ISR-context spinlock contention.
+
+**Ring buffer:** 4 fixed-size slots × 578 bytes (576 payload + 2 length). ~2.3KB BSS. Placed in RAM (`__not_in_flash`) for flash-operation safety. Peek/consume pattern (zero-copy consumer).
+
+**Memory barriers:** `__dmb()` at publish/acquire points. Redundant on RP2040 (Cortex-M0+ in-order single-bus) but required on RP2350 (Cortex-M33 write buffer).
+
+**Gap detection:** USB packet arrival gap measurement runs in the ISR (at actual arrival time, not main-loop processing time) using file-scope `audio_ring_last_push_us`, reset on stream lifecycle transitions in `as_set_alternate()` and `usb_audio_flush_ring()`.
+
+**Ring overruns:** Separate `audio_ring.overrun_count` counter (distinct from `spdif_overruns`). Queryable via `REQ_GET_STATUS` wValue=22.
+
+**Deferred flash SET commands:** `REQ_PRESET_SET_NAME`, `REQ_PRESET_SET_STARTUP`, `REQ_PRESET_SET_INCLUDE_PINS` use separate pending flags per command type. Main loop copies payload under brief interrupt-off (~1µs) to prevent ISR/thread race, then drains ring and executes the flash write. GET-style flash commands (SAVE/LOAD/DELETE) remain synchronous in the vendor handler with real result codes.
+
 ### Packet Flow
+*Last updated: 2026-03-27*
 
-`_as_audio_packet()` → `process_audio_packet(data, len)`
+`_as_audio_packet()` → `usb_audio_ring_push()` → (main loop) → `usb_audio_drain_ring()` → `process_audio_packet(data, len)`
 
-1. **Buffer acquisition** — Get audio buffers from S/PDIF producer pools
-2. **Gap detection** — Reset sync state if >50ms between packets
-3. **DSP processing** — Platform-specific pipeline (see below)
-4. **Buffer return** — Give completed buffers to S/PDIF consumer pools for DMA
+1. **Ring push (USB ISR)** — Copy raw packet into SPSC ring, detect arrival gaps
+2. **Ring drain (main loop)** — Peek/process/consume loop, highest priority in main loop
+3. **Buffer acquisition** — Get audio buffers from S/PDIF/I2S producer pools
+4. **DSP processing** — Platform-specific pipeline (see below)
+5. **Buffer return** — Give completed buffers to consumer pools for DMA
 
 ### RP2350 Float Pipeline
 *Last updated: 2026-03-02*
@@ -648,7 +665,15 @@ LoudnessCoeffs loudness_tables[2][61][2];  // [buffer][volume_step][biquad]
 ---
 
 ## Flash Storage
-*Last updated: 2026-03-11*
+*Last updated: 2026-03-27*
+
+### Flash Operation Safety
+
+Flash erase/program requires quiescing XIP (execute-in-place). `flash_write_sector()` and `preset_delete()` use a guarded `multicore_lockout` to safely park Core 1 in RAM during the operation:
+
+- **Guard condition:** `multicore_lockout_victim_is_initialized(1) && (__get_current_exception() == 0)`. The SDK function handles first-boot (Core 1 not launched) and launch-to-init race windows. The exception check skips lockout from IRQ context (USB vendor handler), where SDK lock internals are unsafe. IRQ callers rely on the `copy_to_ram` build for XIP safety.
+- **Core 1 victim init:** `multicore_lockout_victim_init()` called at the start of `pdm_core1_entry()`.
+- **Interrupt blackout:** ~45ms for sector erase + program. All interrupts disabled on Core 0 during this window. The existing mute strategy (`preset_loading` + `preset_mute_counter`) and feedback reseed cover the audio gap.
 
 ### Preset System (replaces single-sector storage)
 
@@ -917,7 +942,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-18*
+*Last updated: 2026-03-27*
 
 ### RP2040 (264 KB SRAM)
 
@@ -929,9 +954,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~6 KB |
 | Bulk param buffer (4 KB aligned) | ~4 KB |
+| USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (7 × 32) | ~224 B |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~124 KB** |
+| **Total BSS** | **~127 KB** |
 | Code in RAM (.text copy_to_ram) | ~72 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | SPDIF consumer pools (heap, 2 × 16 × 48 × 16) | ~24 KB |
@@ -946,9 +972,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |
 | Bulk param buffer (4 KB aligned) | ~4 KB |
+| USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (11 × 32) | ~352 B |
 | Other BSS | ~24 KB |
-| **Total BSS** | **~201 KB** |
+| **Total BSS** | **~203 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | SPDIF consumer pools (heap, 4 × 16 × 48 × 16) | ~48 KB |

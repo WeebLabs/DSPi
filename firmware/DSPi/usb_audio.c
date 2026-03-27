@@ -35,6 +35,7 @@
 #include "crossfeed.h"
 #include "bulk_params.h"
 #include "pico/usb_stream_helper.h"
+#include "usb_audio_ring.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -56,6 +57,31 @@ volatile uint8_t pending_output_slot = 0;
 volatile uint8_t pending_output_type = 0;
 // USB stream restart (alt 0 -> alt > 0) — deferred to main loop for safe pipeline re-lock
 volatile bool stream_restart_resync_pending = false;
+
+// SPSC ring buffer: USB audio ISR pushes raw packets, main loop consumes
+// and runs the DSP pipeline.  Placed in RAM for flash-operation safety.
+static usb_audio_ring_t __not_in_flash("audio_ring") audio_ring;
+
+// USB packet arrival timestamp for gap detection.  File-scope (not function-
+// local) so it can be reset to 0 on stream lifecycle transitions in
+// as_set_alternate() and usb_audio_flush_ring().
+static uint32_t audio_ring_last_push_us = 0;
+
+// Deferred fire-and-forget flash SET commands.
+// Separate pending flags per command type prevent cross-command clobbering.
+// Same-command back-to-back is last-writer-wins (correct for idempotent settings).
+// Known limitation: SET_NAME for different slots in rapid succession can lose
+// one update.  In practice, host apps serialize preset edits.
+volatile bool flash_set_name_pending = false;
+uint8_t flash_set_name_slot = 0;
+char    flash_set_name_buf[PRESET_NAME_LEN];
+
+volatile bool flash_set_startup_pending = false;
+uint8_t flash_set_startup_mode = 0;
+uint8_t flash_set_startup_slot = 0;
+
+volatile bool flash_set_include_pins_pending = false;
+uint8_t flash_set_include_pins_val = 0;
 
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
@@ -327,15 +353,9 @@ void audio_set_volume(int16_t volume) {
 static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
     uint32_t packet_start = time_us_32();
 
-    // Detect SPDIF underrun: USB packets should arrive every ~1ms
-    static uint32_t last_packet_time = 0;
-    if (last_packet_time > 0 && !preset_loading) {
-        uint32_t gap = packet_start - last_packet_time;
-        if (gap > 2000 && gap < 50000) {  // 2ms-50ms gap = underrun
-            spdif_underruns++;
-        }
-    }
-    last_packet_time = packet_start;
+    // NOTE: USB packet gap detection has moved to _as_audio_packet() (ISR
+    // context) where it measures actual packet arrival timing rather than
+    // main-loop processing timing.  See audio_ring_last_push_us.
 
     // Get audio buffers for S/PDIF outputs
 #if PICO_RP2350
@@ -1058,6 +1078,29 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 }
 
 // ----------------------------------------------------------------------------
+// USB AUDIO RING BUFFER — PUBLIC WRAPPERS
+// ----------------------------------------------------------------------------
+
+// Drain all pending packets from the ring, running the DSP pipeline for
+// each.  Called as the first operation in the main loop and before any
+// disruptive deferred operation (rate change, output type switch, etc.).
+void usb_audio_drain_ring(void) {
+    usb_audio_slot_t *slot;
+    while ((slot = usb_audio_ring_peek(&audio_ring)) != NULL) {
+        process_audio_packet(slot->data, slot->data_len);
+        usb_audio_ring_consume(&audio_ring);
+    }
+}
+
+// Discard all pending ring data and reset gap-detection timestamp.
+// Used on stream stop/start transitions to flush stale packets from a
+// previous stream.
+void usb_audio_flush_ring(void) {
+    usb_audio_ring_flush(&audio_ring);
+    audio_ring_last_push_us = 0;
+}
+
+// ----------------------------------------------------------------------------
 // USB AUDIO PACKET CALLBACKS (pico-extras usb_device)
 // ----------------------------------------------------------------------------
 
@@ -1066,9 +1109,27 @@ static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
     struct usb_buffer *usb_buffer = usb_current_out_packet_buffer(ep);
 
     usb_audio_packets++;
-    process_audio_packet(usb_buffer->data, usb_buffer->data_len);
 
-    // keep on truckin'
+    // USB packet gap detection — runs at ISR arrival time (not main-loop
+    // processing time) to avoid false positives from ring queue delay.
+    // audio_ring_last_push_us is file-scope so it can be reset on stream
+    // lifecycle transitions in as_set_alternate() and usb_audio_flush_ring().
+    {
+        uint32_t now = time_us_32();
+        if (audio_ring_last_push_us > 0 && !preset_loading) {
+            uint32_t gap = now - audio_ring_last_push_us;
+            if (gap > 2000 && gap < 50000) {
+                spdif_underruns++;
+            }
+        }
+        audio_ring_last_push_us = now;
+    }
+
+    // Push raw packet into ring for main-loop DSP processing.
+    // Ring-full drops are counted separately from spdif_overruns
+    // (different fault class: ring backpressure vs pool pressure).
+    usb_audio_ring_push(&audio_ring, usb_buffer->data, usb_buffer->data_len);
+
     usb_grow_transfer(ep->current_transfer, 1);
     usb_packet_done(ep);
 }
@@ -1289,6 +1350,11 @@ static bool as_set_alternate(struct usb_interface *interface, uint alt) {
     // doesn't clear counters mid-stream.
     bool active = (alt > 0);
     audio_spdif_set_starvation_monitoring(active);
+
+    // Reset gap-detection timestamp on stream transitions to prevent false
+    // underrun counts from stale timestamps across stream lifecycle events.
+    audio_ring_last_push_us = 0;
+
     if (active && prev_alt == 0) {
         audio_spdif_reset_dma_starvations();
         stream_restart_resync_pending = true;
@@ -1564,32 +1630,38 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
         // --- Preset SET commands ---
 
         case REQ_PRESET_SET_NAME: {
-            // wValue = slot index, payload = up to 32 bytes of name
+            // Deferred to main loop — flash write in dir_flush() is too
+            // slow for USB IRQ context.  Copy payload to pending buffer.
             uint8_t slot = vendor_last_wValue & 0xFF;
             if (buffer->data_len > 0) {
-                // Ensure NUL termination
-                char name[PRESET_NAME_LEN];
-                memset(name, 0, sizeof(name));
+                memset(flash_set_name_buf, 0, sizeof(flash_set_name_buf));
                 size_t copy_len = buffer->data_len < (PRESET_NAME_LEN - 1)
                                 ? buffer->data_len : (PRESET_NAME_LEN - 1);
-                memcpy(name, vendor_rx_buf, copy_len);
-                preset_set_name(slot, name);
+                memcpy(flash_set_name_buf, vendor_rx_buf, copy_len);
+                flash_set_name_slot = slot;
+                __dmb();
+                flash_set_name_pending = true;
             }
             break;
         }
 
         case REQ_PRESET_SET_STARTUP: {
-            // payload: byte 0 = startup_mode, byte 1 = default_slot
+            // Deferred to main loop — flash write in dir_flush().
             if (buffer->data_len >= 2) {
-                preset_set_startup(vendor_rx_buf[0], vendor_rx_buf[1]);
+                flash_set_startup_mode = vendor_rx_buf[0];
+                flash_set_startup_slot = vendor_rx_buf[1];
+                __dmb();
+                flash_set_startup_pending = true;
             }
             break;
         }
 
         case REQ_PRESET_SET_INCLUDE_PINS: {
-            // payload: byte 0 = include_pins (0 or 1)
+            // Deferred to main loop — flash write in dir_flush().
             if (buffer->data_len >= 1) {
-                preset_set_include_pins(vendor_rx_buf[0]);
+                flash_set_include_pins_val = vendor_rx_buf[0];
+                __dmb();
+                flash_set_include_pins_pending = true;
             }
             break;
         }
@@ -1956,6 +2028,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                     case 19: resp = audio_spdif_get_dma_starvations_instance(1); break;  // SPDIF instance 1
                     case 20: resp = audio_spdif_get_dma_starvations_instance(2); break;  // SPDIF instance 2
                     case 21: resp = audio_spdif_get_dma_starvations_instance(3); break;  // SPDIF instance 3
+                    case 22: resp = audio_ring.overrun_count; break;  // USB audio ring overruns
                 }
                 usb_start_tiny_control_in_transfer(resp, 4);
                 return true;

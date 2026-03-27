@@ -67,6 +67,10 @@ Core1Mode derive_core1_mode(void);
 void usb_sound_card_init(void);
 void audio_set_volume(int16_t volume);
 
+// USB audio ring buffer — main-loop entry points for decoupled DSP processing
+void usb_audio_drain_ring(void);   // Process all pending USB audio packets
+void usb_audio_flush_ring(void);   // Discard stale ring data + reset gap timestamp
+
 // Expose serial string buffer for main.c to write unique board ID
 extern char *usb_descriptor_str_serial;
 

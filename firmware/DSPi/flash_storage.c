@@ -35,6 +35,7 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
 
 #include <string.h>
 
@@ -266,10 +267,22 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     memset(write_buf, 0xFF, sizeof(write_buf));
     memcpy(write_buf, data, len);
 
+    // Park Core 1 in RAM before quiescing XIP for flash erase/program.
+    // Guarded: (a) victim_is_initialized handles first-boot (Core 1 not
+    // launched yet) and launch-to-init race; (b) __get_current_exception
+    // skips lockout in IRQ context (USB vendor handler) where SDK lock
+    // internals are unsafe — IRQ callers rely on copy_to_ram build for
+    // XIP safety (see CMakeLists.txt:38).
+    bool do_lockout = multicore_lockout_victim_is_initialized(1)
+                      && (__get_current_exception() == 0);
+    if (do_lockout) multicore_lockout_start_blocking();
+
     uint32_t flags = save_and_disable_interrupts();
     flash_range_erase(offset, FLASH_SECTOR_SIZE);
     flash_range_program(offset, write_buf, write_size);
     restore_interrupts(flags);
+
+    if (do_lockout) multicore_lockout_end_blocking();
 
     // Re-seed USB feedback loop to avoid slow IIR convergence after
     // the ~45ms interrupt blackout (see preset_bugfix.md for details)
@@ -650,10 +663,16 @@ uint8_t preset_delete(uint8_t slot) {
     preset_loading = true;
     __dmb();
 
-    // Erase the slot's flash sector
+    // Erase the slot's flash sector (same lockout guard as flash_write_sector)
+    bool do_lockout = multicore_lockout_victim_is_initialized(1)
+                      && (__get_current_exception() == 0);
+    if (do_lockout) multicore_lockout_start_blocking();
+
     uint32_t flags = save_and_disable_interrupts();
     flash_range_erase(SLOT_SECTOR_OFFSET(slot), FLASH_SECTOR_SIZE);
     restore_interrupts(flags);
+
+    if (do_lockout) multicore_lockout_end_blocking();
 
     // Re-seed feedback loop and re-arm mute after interrupt blackout
     feedback_reset_value = nominal_feedback_10_14;
