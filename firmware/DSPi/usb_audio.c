@@ -65,7 +65,7 @@ static usb_audio_ring_t __not_in_flash("audio_ring") audio_ring;
 // USB packet arrival timestamp for gap detection.  File-scope (not function-
 // local) so it can be reset to 0 on stream lifecycle transitions in
 // as_set_alternate() and usb_audio_flush_ring().
-static uint32_t audio_ring_last_push_us = 0;
+static volatile uint32_t audio_ring_last_push_us = 0;
 
 // Deferred fire-and-forget flash SET commands.
 // Separate pending flags per command type prevent cross-command clobbering.

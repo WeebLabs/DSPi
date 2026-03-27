@@ -125,6 +125,7 @@ static inline void __not_in_flash_func(usb_audio_ring_consume)(
 // Discard all pending data.  Used on stream stop/start to flush stale
 // packets from a previous stream.
 static inline void usb_audio_ring_flush(usb_audio_ring_t *ring) {
+    __dmb();  // Consistent with barrier discipline in push/peek/consume
     ring->tail = ring->head;
 }
 
