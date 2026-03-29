@@ -43,6 +43,14 @@ static volatile uint32_t trace_i;
     USB_INTS_ERROR_RX_OVERFLOW_BITS   |  \
     USB_INTS_ERROR_RX_TIMEOUT_BITS)
 
+// Diagnostic counters for USB errors — read/reset via vendor commands
+volatile uint32_t usb_error_count = 0;
+volatile uint32_t usb_crc_error_count = 0;
+volatile uint32_t usb_bitstuff_error_count = 0;
+volatile uint32_t usb_rx_overflow_count = 0;
+volatile uint32_t usb_rx_timeout_count = 0;
+volatile uint32_t usb_data_seq_error_count = 0;
+
 // define some macros so we implement different allocation schemes (right now we use bootrom which is no-alloc and assume zero)
 #if PICO_USBDEV_ASSUME_ZERO_INIT
 #define usb_init_clear_deref(x) ((void)0)
@@ -1039,20 +1047,27 @@ void __isr __used isr_usbctrl(void) {
 
     if (status & USB_INTS_ERROR_BITS) {
         handled |= (status & USB_INTS_ERROR_BITS);
-#ifndef NDEBUG
-        _usb_dump_eps();
-#endif
-        //uint32_t errs = usb_hw->sie_status;
-        usb_warn("Error 0x%lx (sie status 0x%lx)\n", (status & USB_INTS_ERROR_BITS), usb_hw->sie_status);
-        if (usb_hw->sie_status & USB_SIE_STATUS_DATA_SEQ_ERROR_BITS) {
-            usb_dump_trace();
-            usb_warn("Data seq error\n");
-            usb_hw_clear->sie_status = USB_SIE_STATUS_DATA_SEQ_ERROR_BITS;
-        } else {
-            // Assume we have been unplugged
-            usb_debug("Assuming unplugged\n");
-            _usb_handle_bus_reset();
-        }
+        uint32_t sie = usb_hw->sie_status;
+
+        // Clear all error bits in SIE status.  These are transient
+        // electrical events (CRC, bit stuff, RX timeout, RX overflow,
+        // data sequence).  The host retransmits automatically; no
+        // device-side recovery action is needed.  The previous code
+        // triggered a full bus reset here for anything other than
+        // DATA_SEQ_ERROR, which killed active audio streaming.
+        usb_hw_clear->sie_status =
+            USB_SIE_STATUS_DATA_SEQ_ERROR_BITS |
+            USB_SIE_STATUS_BIT_STUFF_ERROR_BITS |
+            USB_SIE_STATUS_CRC_ERROR_BITS |
+            USB_SIE_STATUS_RX_OVERFLOW_BITS |
+            USB_SIE_STATUS_RX_TIMEOUT_BITS;
+
+        usb_error_count++;
+        if (sie & USB_SIE_STATUS_CRC_ERROR_BITS)       usb_crc_error_count++;
+        if (sie & USB_SIE_STATUS_BIT_STUFF_ERROR_BITS)  usb_bitstuff_error_count++;
+        if (sie & USB_SIE_STATUS_RX_OVERFLOW_BITS)      usb_rx_overflow_count++;
+        if (sie & USB_SIE_STATUS_RX_TIMEOUT_BITS)       usb_rx_timeout_count++;
+        if (sie & USB_SIE_STATUS_DATA_SEQ_ERROR_BITS)   usb_data_seq_error_count++;
     }
 
     if (status ^ handled) {

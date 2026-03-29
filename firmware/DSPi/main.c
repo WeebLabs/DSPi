@@ -26,38 +26,33 @@
 #include "crossfeed.h"
 #include "bulk_params.h"
 #include "pico/audio_spdif.h"
+#include "usb_feedback_controller.h"
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
 // ----------------------------------------------------------------------------
 
-// USB audio feedback (SOF-measured, 10.14 fixed-point)
+// USB audio feedback controller (Q16.16 internal, 10.14 wire)
+usb_feedback_ctrl_t fb_ctrl;
+
+// Legacy endpoint-facing values (written by controller, read by sync packet handler)
 volatile uint32_t feedback_10_14 = 0;
 volatile uint32_t nominal_feedback_10_14 = 0;
 
-// SOF handler state for feedback measurement
-static uint32_t sof_count = 0;
-static uint32_t fb_last_total = 0;
-static uint32_t fb_accum = 0;
-volatile uint32_t feedback_reset_value = 0;
-
-// Fill-level servo (Loop B): proportional correction based on consumer buffer fill
+// Consumer fill level for slot 0 — written by usb_audio.c, read by SOF handler
 extern volatile uint8_t spdif0_consumer_fill;
-#define FILL_TARGET      8       // 50% of 16 consumer buffers
-#define FILL_SERVO_KP    1024    // 10.14 units per buffer of error, keeps fill within ±1 of target
-#define FILL_SERVO_CLAMP 8192    // ±0.5 samples in 10.14 — prevents servo dominating rate
-#define FB_OUTER_CLAMP   16384   // ±1 sample in 10.14 from nominal
 
 // USB SOF IRQ — measures device clock vs host clock for async feedback
 void __not_in_flash_func(usb_sof_irq)(void) {
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
     extern uint8_t output_types[];
 
-    // Read DMA word count from instance 0 (SPDIF or I2S)
+    // Read DMA word count from slot 0 (SPDIF or I2S)
     volatile uint32_t *p_words_consumed;
     uint32_t xfer_words;
     uint8_t dma_ch;
     uint8_t slot0_type = output_types[0];
+    uint32_t rate_shift;
 
     if (slot0_type == OUTPUT_TYPE_I2S) {
         extern audio_i2s_instance_t *i2s_instance_ptrs[];
@@ -65,60 +60,25 @@ void __not_in_flash_func(usb_sof_irq)(void) {
         p_words_consumed = &inst->words_consumed;
         xfer_words = inst->current_transfer_words;
         dma_ch = inst->dma_channel;
+        rate_shift = 13;      // I2S: << (16-3)
     } else {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
         p_words_consumed = &inst->words_consumed;
         xfer_words = inst->current_transfer_words;
         dma_ch = inst->dma_channel;
+        rate_shift = 12;      // SPDIF: << (16-4)
     }
 
-    // Read total DMA words consumed by instance 0 (sub-buffer precision)
+    // Sub-buffer-precise DMA word total for slot 0
     uint32_t remaining = dma_channel_hw_addr(dma_ch)->transfer_count;
     uint32_t current_total = *p_words_consumed + (xfer_words - remaining);
 
-    // Handle reset request from rate change
-    if (feedback_reset_value) {
-        fb_accum = feedback_reset_value;
-        feedback_reset_value = 0;
-        fb_last_total = current_total;
-        sof_count = 0;
-    }
+    fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift, spdif0_consumer_fill);
 
-    sof_count++;
-    if ((sof_count & 0x3) == 0) {  // Every 4 SOFs (bRefresh=2 → 2^2=4)
-        uint32_t delta_words = current_total - fb_last_total;
-        fb_last_total = current_total;
-
-        if (delta_words > 0) {
-            // 10.14 format: delta_words / 4_SOFs / words_per_sample * 2^14
-            // SPDIF: 4 words/sample → shift = 10 (2^14 / 16 = 1024)
-            // I2S:   2 words/sample → shift = 11 (2^14 / 8  = 2048)
-            uint32_t shift = (slot0_type == OUTPUT_TYPE_I2S) ? 11 : 10;
-            uint32_t raw = delta_words << shift;
-
-            if (fb_accum == 0) {
-                fb_accum = raw;
-            } else {
-                int32_t error = (int32_t)raw - (int32_t)fb_accum;
-                fb_accum += error >> 3;  // IIR α≈0.125, τ≈32ms
-            }
-
-            // Loop B: proportional fill-level servo
-            // Underfull (fill < target) → negative error → positive servo → host sends more
-            int32_t fill_error = (int32_t)spdif0_consumer_fill - FILL_TARGET;
-            int32_t fb_servo = -(fill_error * FILL_SERVO_KP);
-            if (fb_servo > FILL_SERVO_CLAMP)  fb_servo = FILL_SERVO_CLAMP;
-            if (fb_servo < -FILL_SERVO_CLAMP) fb_servo = -FILL_SERVO_CLAMP;
-
-            // Sum rate + fill, clamp to nominal ± 1 sample
-            int32_t fb_out = (int32_t)fb_accum + fb_servo;
-            int32_t nom = (int32_t)nominal_feedback_10_14;
-            if (fb_out > nom + FB_OUTER_CLAMP) fb_out = nom + FB_OUTER_CLAMP;
-            if (fb_out < nom - FB_OUTER_CLAMP) fb_out = nom - FB_OUTER_CLAMP;
-
-            feedback_10_14 = (uint32_t)fb_out;
-        }
-    }
+    // Publish to endpoint-facing variables
+    uint32_t fb_10_14 = fb_ctrl_get_10_14(&fb_ctrl);
+    if (fb_10_14)
+        feedback_10_14 = fb_10_14;
 }
 
 volatile int overruns = 0;  // Legacy - kept for compatibility
@@ -140,6 +100,8 @@ static volatile uint8_t clock_176mhz = 0;
 extern struct audio_format audio_format_48k;
 extern MatrixMixer matrix_mixer;
 
+static void reset_usb_feedback_loop(void);
+
 static void perform_rate_change(uint32_t new_freq) {
     switch (new_freq) { case 44100: case 48000: case 96000: break; default: new_freq = 44100; }
 
@@ -157,10 +119,10 @@ static void perform_rate_change(uint32_t new_freq) {
     sync_started = false;
     total_samples_produced = 0;
 
-    // Pre-compute nominal feedback and reset SOF measurement
+    // Pre-compute nominal feedback and reset controller
     nominal_feedback_10_14 = ((uint64_t)new_freq << 14) / 1000;
     feedback_10_14 = nominal_feedback_10_14;
-    feedback_reset_value = nominal_feedback_10_14;
+    reset_usb_feedback_loop();
 
     dsp_recalculate_all_filters((float)new_freq);
     loudness_recompute_pending = true;
@@ -213,9 +175,9 @@ static void i2s_reset_consumer_pipeline(audio_i2s_instance_t *inst) {
 }
 
 // Reset USB async feedback loop state after disruptive output pipeline events
-// (type switch + global resync), so SOF estimation restarts from nominal.
+// (type switch, global resync, stream activation).
 static void reset_usb_feedback_loop(void) {
-    feedback_reset_value = nominal_feedback_10_14;
+    fb_ctrl_reset(&fb_ctrl, nominal_feedback_10_14 << 2);
     feedback_10_14 = nominal_feedback_10_14;
 }
 
@@ -331,18 +293,18 @@ void core0_init() {
         __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
     }
 
-    // RP2350: 266.4MHz (VCO 1332 / 5 / 1)
+    // RP2350: 249.6MHz (VCO 1248 / 5 / 1) — multiple of 2.4MHz for matched SPDIF/I2S rates
     vreg_set_voltage(VREG_VOLTAGE_1_15);
     busy_wait_ms(10);
 
-    if (!set_sys_clock_hz(266400000, false)) {
+    if (!set_sys_clock_hz(249600000, false)) {
         set_sys_clock_hz(150000000, false);
     }
 #else
     vreg_set_voltage(VREG_VOLTAGE_1_15);
     busy_wait_ms(10);
-    // 266.4MHz -> VCO 1332 MHz / 5 / 1
-    set_sys_clock_pll(1332000000, 5, 1);
+    // 249.6MHz -> VCO 1248 MHz / 5 / 1 — multiple of 2.4MHz for matched SPDIF/I2S rates
+    set_sys_clock_pll(1248000000, 5, 1);
 #endif
 
     gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);
@@ -357,9 +319,15 @@ void core0_init() {
     // If PDM inits first, it steals Ch 0 via dma_claim_unused_channel(), causing SPDIF to panic/crash.
     usb_sound_card_init();
 
-    // Initialize nominal feedback for default sample rate
+    // Initialize feedback controller and nominal rate
+    fb_ctrl_init(&fb_ctrl);
     nominal_feedback_10_14 = ((uint64_t)audio_state.freq << 14) / 1000;
     feedback_10_14 = nominal_feedback_10_14;
+
+    // Assert USB SOF cannot be preempted by DMA IRQs — required for
+    // the non-atomic multi-field read in usb_sof_irq() to be safe.
+    assert(NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ));
+    assert(NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ));
 
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.

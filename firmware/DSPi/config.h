@@ -200,6 +200,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Buffer statistics
 #define REQ_GET_BUFFER_STATS        0xB0
 #define REQ_RESET_BUFFER_STATS      0xB1
+#define REQ_GET_USB_ERROR_STATS     0xB2
+#define REQ_RESET_USB_ERROR_STATS   0xB3
 
 // Preset configuration
 #define PRESET_SLOTS                10

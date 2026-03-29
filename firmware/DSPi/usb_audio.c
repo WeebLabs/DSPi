@@ -36,6 +36,7 @@
 #include "bulk_params.h"
 #include "pico/usb_stream_helper.h"
 #include "usb_audio_ring.h"
+#include "usb_feedback_controller.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -196,7 +197,8 @@ static uint32_t cpu0_last_packet_end = 0;
 static uint32_t cpu0_load_q8 = 0;         // EMA in Q8 fixed point (0-25600 = 0-100%)
 static bool cpu0_load_primed = false;
 
-// Fill-level servo: consumer fill for instance 0, read by usb_sof_irq()
+// Consumer fill for instance 0 — used by watermark monitoring only
+// (no longer part of the active feedback path).
 volatile uint8_t spdif0_consumer_fill = 0;
 
 // Buffer statistics watermark tracking
@@ -1359,6 +1361,10 @@ static bool as_set_alternate(struct usb_interface *interface, uint alt) {
         audio_spdif_reset_dma_starvations();
         stream_restart_resync_pending = true;
         __dmb();
+    } else if (!active && prev_alt > 0) {
+        // Stream deactivation: force controller invalid, publish nominal
+        extern usb_feedback_ctrl_t fb_ctrl;
+        fb_ctrl_stream_stop(&fb_ctrl);
     }
 
     return true;
@@ -2404,6 +2410,56 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 if (flags & 0x01) {
                     reset_buffer_watermarks();
                 }
+                resp_buf[0] = 1;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_USB_ERROR_STATS: {
+                extern volatile uint32_t usb_error_count;
+                extern volatile uint32_t usb_crc_error_count;
+                extern volatile uint32_t usb_bitstuff_error_count;
+                extern volatile uint32_t usb_rx_overflow_count;
+                extern volatile uint32_t usb_rx_timeout_count;
+                extern volatile uint32_t usb_data_seq_error_count;
+
+                typedef struct __attribute__((packed)) {
+                    uint32_t total;
+                    uint32_t crc;
+                    uint32_t bitstuff;
+                    uint32_t rx_overflow;
+                    uint32_t rx_timeout;
+                    uint32_t data_seq;
+                } UsbErrorStatsPacket;
+
+                UsbErrorStatsPacket pkt;
+                pkt.total       = usb_error_count;
+                pkt.crc         = usb_crc_error_count;
+                pkt.bitstuff    = usb_bitstuff_error_count;
+                pkt.rx_overflow = usb_rx_overflow_count;
+                pkt.rx_timeout  = usb_rx_timeout_count;
+                pkt.data_seq    = usb_data_seq_error_count;
+
+                memcpy(resp_buf, &pkt, sizeof(pkt));
+                vendor_send_response(resp_buf, sizeof(pkt));
+                return true;
+            }
+
+            case REQ_RESET_USB_ERROR_STATS: {
+                extern volatile uint32_t usb_error_count;
+                extern volatile uint32_t usb_crc_error_count;
+                extern volatile uint32_t usb_bitstuff_error_count;
+                extern volatile uint32_t usb_rx_overflow_count;
+                extern volatile uint32_t usb_rx_timeout_count;
+                extern volatile uint32_t usb_data_seq_error_count;
+
+                usb_error_count = 0;
+                usb_crc_error_count = 0;
+                usb_bitstuff_error_count = 0;
+                usb_rx_overflow_count = 0;
+                usb_rx_timeout_count = 0;
+                usb_data_seq_error_count = 0;
+
                 resp_buf[0] = 1;
                 vendor_send_response(resp_buf, 1);
                 return true;

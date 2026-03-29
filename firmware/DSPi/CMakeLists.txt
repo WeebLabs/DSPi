@@ -29,6 +29,8 @@ add_executable(DSPi
     usb_audio.h
     usb_descriptors.c
     usb_descriptors.h
+    usb_feedback_controller.c
+    usb_feedback_controller.h
 )
 
 if (PICO_PLATFORM STREQUAL "rp2040")

@@ -31,6 +31,7 @@
 #include "usb_audio.h"
 #include "crossfeed.h"
 #include "pdm_generator.h"
+#include "usb_feedback_controller.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -202,7 +203,7 @@ extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 extern volatile uint32_t feedback_10_14;
 extern volatile uint32_t nominal_feedback_10_14;
-extern volatile uint32_t feedback_reset_value;
+extern usb_feedback_ctrl_t fb_ctrl;
 
 // ============================================================================
 // MODULE STATE
@@ -284,9 +285,9 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
 
     if (do_lockout) multicore_lockout_end_blocking();
 
-    // Re-seed USB feedback loop to avoid slow IIR convergence after
-    // the ~45ms interrupt blackout (see preset_bugfix.md for details)
-    feedback_reset_value = nominal_feedback_10_14;
+    // Re-seed USB feedback controller after ~45ms interrupt blackout
+    // (see preset_bugfix.md for details)
+    fb_ctrl_reset(&fb_ctrl, nominal_feedback_10_14 << 2);
     feedback_10_14 = nominal_feedback_10_14;
 
     // Re-arm mute to cover SPDIF consumer pool refill (~4-8ms)
@@ -674,8 +675,8 @@ uint8_t preset_delete(uint8_t slot) {
 
     if (do_lockout) multicore_lockout_end_blocking();
 
-    // Re-seed feedback loop and re-arm mute after interrupt blackout
-    feedback_reset_value = nominal_feedback_10_14;
+    // Re-seed feedback controller after interrupt blackout
+    fb_ctrl_reset(&fb_ctrl, nominal_feedback_10_14 << 2);
     feedback_10_14 = nominal_feedback_10_14;
     preset_mute_counter = 512;
     preset_loading = true;

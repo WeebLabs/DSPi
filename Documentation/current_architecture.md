@@ -150,8 +150,11 @@ Defined in `main.c`, function `core0_init()`:
 *Last updated: 2026-03-18*
 
 ### USB Stack
+*Last updated: 2026-03-29*
 
 **Library:** pico-extras `usb_device` (UAC1)
+
+**Error handling:** The pico-extras USB IRQ handler (`usb_device.c`) receives `USB_INTS_ERROR_BITS` interrupts for CRC errors, bit stuff errors, RX overflow, RX timeout, and data sequence errors. All error types are handled by clearing the corresponding SIE status bits and incrementing per-type diagnostic counters — no bus reset or re-enumeration. The host retransmits automatically per USB spec. Counters are readable via `REQ_GET_USB_ERROR_STATS` (0xB2) and resettable via `REQ_RESET_USB_ERROR_STATS` (0xB3).
 
 **Interfaces:**
 1. **Audio Control (AC)** — Interface 0
@@ -170,34 +173,36 @@ Defined in `main.c`, function `core0_init()`:
 **Mute:** UAC1 Feature Unit MUTE control. When `audio_state.mute` is set, `vol_mul` is forced to zero in the audio callback (RP2350: 0.0f, RP2040: 0), silencing all outputs immediately.
 
 ### Asynchronous Feedback Endpoint
-*Last updated: 2026-02-16*
+*Last updated: 2026-03-29*
 
 The device declares itself as a USB asynchronous sink, meaning it drives the audio clock from its own crystal oscillator rather than locking to the host's SOF timing. The feedback endpoint (`_as_sync_packet()`) reports the actual device sample rate to the host in 10.14 fixed-point format (samples per USB frame), allowing the host to adjust its packet sizes to match.
 
-**Measurement method:** DMA word-level counting with IIR-filtered SOF measurement.
+**Architecture:** Q16.16 dual-loop controller (`usb_feedback_controller.c/h`) with 10.14 wire serialization. All internal math uses Q16.16 fixed-point with rounded updates; only the endpoint-facing value is quantized to 10.14.
 
-- **SOF handler** (`usb_sof_irq()`): Runs at each USB Start-of-Frame (1 kHz). Reads the DMA transfer counter of S/PDIF instance 0 and combines with `words_consumed` (total completed DMA words) to get a sub-buffer-precise total. Every 4 SOFs (matching `bRefresh=2`, i.e. 2^2=4 ms), computes the delta in DMA words and converts to 10.14 format: `raw = delta_words << 10`.
-- **IIR filter (Loop A — rate):** First-order low-pass with α≈0.125 (K=3 shift), giving a ~32 ms time constant. Smooths jitter while tracking crystal drift. Effective resolution after filtering is ~160 ppm, sufficient for typical 50 ppm crystal oscillators.
-- **Fill-level servo (Loop B — fill):** Proportional correction based on S/PDIF instance 0 consumer buffer fill level. `spdif0_consumer_fill` (volatile uint8_t, 0-16 buffers) is written by `update_buffer_watermarks()` in `usb_audio.c` every audio packet (~1ms) and read by `usb_sof_irq()`. The servo computes `fb_servo = -(fill - FILL_TARGET) * FILL_SERVO_KP`, clamped to ±8192 (±0.5 samples in 10.14). FILL_TARGET=8 (50% of 16 consumer buffers). This is added to `fb_accum` at the output, never fed back into Loop A state. Kp=1024 gives τ ~6s at max error, providing stable convergence toward 50% fill without interfering with rate tracking. The summed output is clamped to `nominal ± 16384` (±1 sample). Has no effect on S/PDIF PIO clock — only changes the feedback value sent to the USB host.
-- **Rate change:** On sample rate switch, `perform_rate_change()` pre-computes `nominal_feedback_10_14 = (freq << 14) / 1000` using 64-bit arithmetic and resets the IIR accumulator via `feedback_reset_value`, providing immediate correct feedback for the new rate.
-- **Fallback:** If `feedback_10_14` is zero (not yet measured), `_as_sync_packet()` falls back to `nominal_feedback_10_14`.
+- **SOF handler** (`usb_sof_irq()` in `main.c`): Runs at each USB Start-of-Frame (1 kHz). Reads the DMA transfer counter of slot 0 (SPDIF or I2S) and combines with `words_consumed` to get a sub-buffer-precise word total. Calls `fb_ctrl_sof_update()` which performs the 4-SOF decimated measurement and control update.
+- **Rate estimator (Loop A):** First-order IIR with α=1/16 and `round_div_pow2_s32()` (symmetric half-away-from-zero rounding, int64_t-safe). Time constant τ≈64ms at the 4ms update rate (bRefresh=2). Raw rate computed via shifts only: SPDIF `delta_words << 12`, I2S `delta_words << 13`. The rounded update eliminates the truncation deadzone present in the previous `error >> 3` implementation.
+- **Backlog servo (Loop B):** Proportional correction based on epoch-relative produced/consumed sample balance, replacing the former integer buffer-count fill servo. `slot0_produced_samples` is incremented in `usb_audio.c` when a slot-0 producer buffer is committed. Consumption is derived from DMA word progress: SPDIF `current_total_words << 14`, I2S `<< 15`. Backlog is computed in unsigned Q16.16 with modular arithmetic (wrap-safe as long as actual backlog remains far below 32768 stereo samples; steady-state ≈384, giving 85× margin). Servo gain Kp_q16=85 (equivalent to old 1024 per 48-sample buffer), clamped to ±0.25 sample/frame. No integrator.
+- **Startup/reset gating:** After any reset, resync, stream activation, or slot-0 output-type switch, the servo is held at zero for 2 controller updates (~8ms). During holdoff, nominal feedback is emitted. On stream deactivation (alt 0), the controller is invalidated and all filter state cleared.
+- **Rate change:** `perform_rate_change()` pre-computes `nominal_feedback_10_14 = (freq << 14) / 1000` and calls `reset_usb_feedback_loop()` → `fb_ctrl_reset()`, reseeding the rate estimator at nominal and establishing a new backlog epoch.
+- **Flash blackout recovery:** `flash_write_sector()` and `preset_delete()` call `fb_ctrl_reset()` after the ~45ms interrupt blackout, reseeding the controller at nominal.
+- **Endpoint serialization:** `fb_ctrl_get_10_14()` converts Q16.16 to 10.14 via rounded shift: `(q16 + 2) >> 2`. Fallback to `nominal_feedback_10_14` if the controller has never been reset.
+- **Total clamp:** nominal ±1.0 sample/frame (65536 in Q16.16).
 
-**Key variables (defined in `main.c`, externed in `config.h`):**
-| Variable | Type | Description |
-|----------|------|-------------|
-| `feedback_10_14` | `volatile uint32_t` | Final feedback value (rate + fill servo, 10.14 fixed-point) |
-| `nominal_feedback_10_14` | `volatile uint32_t` | Pre-computed nominal feedback for current rate |
-| `feedback_reset_value` | `static volatile uint32_t` | Non-zero triggers IIR reset in SOF handler |
-| `spdif0_consumer_fill` | `volatile uint8_t` | Consumer fill level for instance 0 (0-16 buffers) |
+**Key variables:**
+| Variable | Type | Location | Description |
+|----------|------|----------|-------------|
+| `fb_ctrl` | `usb_feedback_ctrl_t` | `main.c` | Controller state (rate estimate, backlog filter, holdoff) |
+| `feedback_10_14` | `volatile uint32_t` | `main.c` | Serialized endpoint value (written by SOF handler) |
+| `nominal_feedback_10_14` | `volatile uint32_t` | `main.c` | Pre-computed nominal for current rate |
+| `slot0_produced_samples` | `volatile uint32_t` | `main.c` | Monotonic produced counter (incremented in `usb_audio.c`) |
 
-**S/PDIF library additions (`audio_spdif_instance_t`):**
+**S/PDIF/I2S library fields used by feedback:**
 | Field | Type | Description |
 |-------|------|-------------|
 | `words_consumed` | `volatile uint32_t` | Total DMA words completed (incremented in DMA IRQ) |
 | `current_transfer_words` | `uint32_t` | Size of current in-flight DMA transfer |
-| `subframe_position` | `uint8_t` | 0-191: position in IEC 60958-1 192-frame audio block |
 
-**IRQ safety:** The SOF handler runs inside `isr_usbctrl`. The DMA IRQ handler (`audio_spdif_dma_irq_handler`) has the same default priority on Cortex-M0+/M33. Same-priority interrupts cannot preempt each other, so reading both `words_consumed` and `transfer_count` is atomic with respect to DMA completion.
+**IRQ safety:** The SOF handler runs inside `isr_usbctrl`. DMA IRQ priorities are explicitly set to `PICO_HIGHEST_IRQ_PRIORITY` (`usb_audio.c:2755-2756`), matching the USB IRQ default. An init-time assertion (`NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ)`) verifies that DMA cannot preempt the SOF handler's non-atomic multi-field read of `words_consumed` + `transfer_count`.
 
 ### USB Audio Decoupling (SPSC Ring Buffer)
 *Last updated: 2026-03-27*
@@ -741,14 +746,14 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
 ### Preset-Switch Mute & Feedback Recovery
-*Last updated: 2026-03-19*
+*Last updated: 2026-03-29*
 
-Flash operations (`flash_range_erase` + `flash_range_program`) disable all interrupts for ~45ms per sector, which stalls SPDIF TX DMA and causes the USB SOF feedback IIR filter (`fb_accum`) to absorb incorrect measurements. To prevent persistent buffer fill/drain drift:
+Flash operations (`flash_range_erase` + `flash_range_program`) disable all interrupts for ~45ms per sector, which stalls SPDIF TX DMA and causes the USB feedback controller to see stale measurements. To prevent persistent buffer fill/drain drift:
 
-- **`flash_write_sector()`** re-seeds the USB feedback loop (`feedback_reset_value = nominal_feedback_10_14`) and re-arms a 512-sample (~10ms) mute after every interrupt-disabled flash operation. This eliminates slow IIR convergence and covers SPDIF consumer pool refill time.
-- **`preset_save()`** engages mute before the first flash write (previously had no mute).
-- **`preset_delete()`** engages mute and resets feedback around its raw `flash_range_erase()` call (not routed through `flash_write_sector()`).
-- `feedback_reset_value` in `main.c` is global (not static) so `flash_storage.c` can access it via `extern`.
+- **`flash_write_sector()`** calls `fb_ctrl_reset()` to reseed the controller at nominal and re-arms a 512-sample (~10ms) mute after every interrupt-disabled flash operation.
+- **`preset_save()`** engages mute before the first flash write.
+- **`preset_delete()`** engages mute and resets the controller around its raw `flash_range_erase()` call.
+- The `fb_ctrl` controller state is global in `main.c` and accessed via `extern` in `flash_storage.c`.
 
 The `preset_loading` flag and `preset_mute_counter` are checked in the audio callback on both platforms.
 
