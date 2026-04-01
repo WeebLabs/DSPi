@@ -746,25 +746,28 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 - `REQ_LOAD_PARAMS` (0x52): reloads the active preset slot
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
-### Preset-Switch Mute & Feedback Recovery
-*Last updated: 2026-03-29*
+### Preset-Switch Mute & Pipeline Reset
+*Last updated: 2026-04-01*
 
-Flash operations (`flash_range_erase` + `flash_range_program`) disable all interrupts for ~45ms per sector, which stalls SPDIF TX DMA and causes the USB feedback controller to see stale measurements. To prevent persistent buffer fill/drain drift:
+All preset operations (load, save, delete) are **deferred from the USB IRQ to the main loop** via pending flags (`preset_load_pending`, `preset_save_pending`, `preset_delete_pending` in `usb_audio.c`). This avoids running flash operations inside the USB ISR (which would cause a ~45ms interrupt blackout inside an interrupt handler) and allows proper pipeline reset bracketing.
 
-- **`flash_write_sector()`** calls `fb_ctrl_reset()` to reseed the controller at nominal and re-arms a 512-sample (~10ms) mute after every interrupt-disabled flash operation.
-- **`preset_save()`** engages mute before the first flash write.
-- **`preset_delete()`** engages mute and resets the controller around its raw `flash_range_erase()` call.
-- The `fb_ctrl` controller state is global in `main.c` and accessed via `extern` in `flash_storage.c`.
+The main loop handler for each operation follows the pattern:
+1. `usb_audio_drain_ring()` — process in-flight audio packets
+2. `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` — wait for Core 1 idle, engage mute
+3. Execute the preset operation (`preset_load/save/delete`)
+4. `complete_pipeline_reset()` — drain stale consumer buffers, resync outputs, reset USB feedback
 
-The `preset_loading` flag and `preset_mute_counter` are checked in the audio callback on both platforms.
+**Delay line zeroing:** `preset_load()` clears all delay line buffers (`memset(delay_lines, 0, ...)`) after `dsp_update_delay_samples()` to prevent stale audio from the previous preset's delay configuration bleeding through.
 
-**Underrun suppression during preset operations:** All three underrun/overrun counters (`overruns` in DMA IRQ, `spdif_underruns` and `spdif_overruns` in USB callback) are suppressed while `preset_loading` is true. This prevents erroneous counts during preset loads, saves, and deletes — operations that intentionally disrupt the audio pipeline. The `preset_loading` flag is set before every flash operation and cleared when the mute period expires.
+**Feedback recovery:** `flash_write_sector()` (called during save/delete) reseeds the feedback controller at nominal after the ~45ms interrupt blackout. `complete_pipeline_reset()` (called after load/delete) also resets feedback state.
+
+**Underrun suppression:** All underrun/overrun counters are suppressed while `preset_loading` is true, preventing erroneous counts during intentional pipeline disruption.
 
 ### Operations
 
-**Save:** Engage mute → collect live state → build PresetSlot → CRC32 → erase sector + program (feedback reset + re-mute) → update directory (feedback reset + re-mute)
+**Save:** drain ring → prepare reset → collect live state → build PresetSlot → CRC32 → flash erase + program → update directory
 
-**Load:** Engage mute → if occupied: validate CRC + apply user data; if empty: apply factory defaults → recalculate filters/delays → transition Core 1 mode (`derive_core1_mode()` + `pdm_set_enabled()`) → update directory (feedback reset + re-mute)
+**Load:** drain ring → prepare reset → validate CRC + apply user data (or factory defaults) → recalculate filters/delays → zero delay lines → transition Core 1 mode → update directory → complete pipeline reset (drain stale buffers, resync outputs)
 
 **Delete:** Engage mute → erase slot sector (feedback reset + re-mute) → update directory (feedback reset + re-mute) → if active slot: apply factory defaults + recalculate filters/delays + transition Core 1 mode (active slot selection unchanged)
 

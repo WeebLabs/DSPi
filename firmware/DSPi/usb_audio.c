@@ -60,6 +60,20 @@ volatile uint8_t pending_output_type = 0;
 // USB stream restart (alt 0 -> alt > 0) — deferred to main loop for safe pipeline re-lock
 volatile bool stream_restart_resync_pending = false;
 
+// Preset operations — deferred to main loop so that:
+//  1. Flash writes (preset_save/delete/dir_flush) don't run in USB IRQ context,
+//     avoiding a ~45ms interrupt blackout inside an ISR.
+//  2. preset_load can be bracketed with prepare_pipeline_reset() /
+//     complete_pipeline_reset() to drain stale consumer buffers and resync
+//     all outputs.  Without this, buffers containing audio processed with the
+//     OLD preset's parameters play out for ~24ms after the new preset is applied.
+//  3. Delay line contents from the old preset are zeroed, preventing stale audio
+//     from bleeding through when delay length changes.
+volatile bool preset_load_pending = false;
+volatile bool preset_save_pending = false;
+volatile bool preset_delete_pending = false;
+volatile uint8_t pending_preset_slot = 0;
+
 // SPSC ring buffer: USB audio ISR pushes raw packets, main loop consumes
 // and runs the DSP pipeline.  Placed in RAM for flash-operation safety.
 static usb_audio_ring_t __not_in_flash("audio_ring") audio_ring;
@@ -2257,28 +2271,58 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             // --- Preset Commands ---
 
             case REQ_PRESET_SAVE: {
-                // wValue = slot index (0-9).  Saves current live state.
+                // Deferred to main loop: flash writes must not run in IRQ
+                // context (45ms interrupt blackout).  The main loop brackets
+                // the save with prepare_pipeline_reset() to mute audio during
+                // the flash operation.  Response is fire-and-forget: "accepted".
                 uint8_t slot = (uint8_t)setup->wValue;
-                uint8_t result = preset_save(slot);
-                resp_buf[0] = result;
+                if (slot >= PRESET_SLOTS) {
+                    resp_buf[0] = PRESET_ERR_INVALID_SLOT;
+                } else {
+                    pending_preset_slot = slot;
+                    preset_save_pending = true;
+                    __dmb();
+                    resp_buf[0] = PRESET_OK;
+                }
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
 
             case REQ_PRESET_LOAD: {
-                // wValue = slot index (0-9).  Loads slot into live state.
+                // Deferred to main loop so that:
+                //  - Flash reads and dir_flush don't run in IRQ context
+                //  - The operation is bracketed with prepare/complete_pipeline_reset
+                //    to drain stale consumer buffers and resync outputs
+                //  - Delay lines are zeroed to prevent old audio bleed-through
+                // Response is fire-and-forget: "accepted".  The host can poll
+                // REQ_PRESET_GET_ACTIVE to confirm the load completed.
                 uint8_t slot = (uint8_t)setup->wValue;
-                uint8_t result = preset_load(slot);
-                resp_buf[0] = result;
+                if (slot >= PRESET_SLOTS) {
+                    resp_buf[0] = PRESET_ERR_INVALID_SLOT;
+                } else {
+                    pending_preset_slot = slot;
+                    preset_load_pending = true;
+                    __dmb();
+                    resp_buf[0] = PRESET_OK;
+                }
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
 
             case REQ_PRESET_DELETE: {
-                // wValue = slot index (0-9).  Erases the slot.
+                // Deferred to main loop: flash erase runs with interrupts
+                // disabled for ~45ms.  If the deleted slot is the active slot,
+                // factory defaults are applied — which needs pipeline reset
+                // to flush stale buffers processed with the old parameters.
                 uint8_t slot = (uint8_t)setup->wValue;
-                uint8_t result = preset_delete(slot);
-                resp_buf[0] = result;
+                if (slot >= PRESET_SLOTS) {
+                    resp_buf[0] = PRESET_ERR_INVALID_SLOT;
+                } else {
+                    pending_preset_slot = slot;
+                    preset_delete_pending = true;
+                    __dmb();
+                    resp_buf[0] = PRESET_OK;
+                }
                 vendor_send_response(resp_buf, 1);
                 return true;
             }

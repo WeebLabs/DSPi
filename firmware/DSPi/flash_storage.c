@@ -613,10 +613,8 @@ uint8_t preset_load(uint8_t slot) {
 
     dir_ensure();
 
-    // Engage mute to prevent audio glitches during parameter swap
-    preset_mute_counter = PRESET_MUTE_SAMPLES;
-    preset_loading = true;
-    __dmb();
+    // NOTE: muting is now handled by prepare_pipeline_reset() in the main
+    // loop caller, which also waits for Core 1 idle before we modify state.
 
     if (dir_cache.slot_occupied & (1u << slot)) {
         // Slot has user data — validate and load it
@@ -636,6 +634,18 @@ uint8_t preset_load(uint8_t slot) {
     float rate = (float)audio_state.freq;
     dsp_recalculate_all_filters(rate);
     dsp_update_delay_samples(rate);
+
+    // Zero all delay line buffers.  Without this, stale audio from the
+    // previous preset's delay lines bleeds through — e.g. switching from
+    // a 40ms delay to 0ms would replay ~40ms of old audio as the write
+    // index wraps past the old data.
+    extern
+#if PICO_RP2350
+    float delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
+#else
+    int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
+#endif
+    memset(delay_lines, 0, sizeof(delay_lines));
 
     // Transition Core 1 mode to match the new output enable state
     Core1Mode new_mode = derive_core1_mode();
@@ -659,9 +669,8 @@ uint8_t preset_delete(uint8_t slot) {
 
     dir_ensure();
 
-    // Mute before flash erase to prevent audio glitches
-    preset_mute_counter = 512;
-    preset_loading = true;
+    // NOTE: muting is now handled by prepare_pipeline_reset() in the main
+    // loop caller.  The mute counter and preset_loading flag are set there.
     __dmb();
 
     // Erase the slot's flash sector (same lockout guard as flash_write_sector)

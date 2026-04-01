@@ -571,6 +571,154 @@ int main(void) {
             }
         }
 
+        // Handle deferred preset operations.
+        // These were moved out of the USB IRQ to avoid:
+        //  - 45ms interrupt blackout from flash writes inside an ISR
+        //  - Missing pipeline reset after preset_load (stale consumer buffers
+        //    with old DSP parameters would play out for ~24ms)
+        //  - Delay line bleed-through when delay length changes between presets
+        {
+            extern volatile bool preset_load_pending;
+            extern volatile bool preset_save_pending;
+            extern volatile bool preset_delete_pending;
+            extern volatile uint8_t pending_preset_slot;
+
+            if (preset_load_pending) {
+                preset_load_pending = false;
+                __dmb();
+
+                extern uint8_t output_types[];
+                extern audio_spdif_instance_t *spdif_instance_ptrs[];
+                extern audio_i2s_instance_t *i2s_instance_ptrs[];
+                extern uint8_t output_pins[];
+                extern uint8_t i2s_bck_pin;
+                extern bool i2s_mck_enabled;
+                extern uint8_t i2s_mck_multiplier;
+                extern struct audio_buffer_pool *producer_pools[];
+
+                // Snapshot the current output types BEFORE load, so we can
+                // detect which slots need hardware reconfiguration afterward.
+                // preset_load() writes to output_types[] but doesn't do the
+                // actual PIO/DMA teardown/setup — just the bookkeeping.
+                uint8_t old_types[NUM_SPDIF_INSTANCES];
+                memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
+
+                // Drain any in-flight audio packets so they don't produce
+                // into the pipeline after we've applied the new preset.
+                usb_audio_drain_ring();
+
+                // Wait for Core 1 to finish and engage mute BEFORE loading.
+                // preset_load() no longer needs its own mute — we handle it here.
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+
+                // Apply the new preset: overwrites all DSP state (EQ, delays,
+                // matrix, gains, output_types[]), recalculates filter coefficients,
+                // transitions Core 1 mode, and writes the directory to flash.
+                preset_load(pending_preset_slot);
+
+                // Reconfigure any output slots whose type changed between the
+                // old and new preset.  apply_slot_to_live() only updates the
+                // output_types[] array — it doesn't tear down the old PIO/DMA
+                // driver or set up the new one.  Without this, a slot labeled
+                // SPDIF still has I2S hardware running (or vice versa), causing
+                // 0% buffer fill and no audio on the affected slot.
+                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                    if (output_types[i] == old_types[i])
+                        continue;  // No change on this slot
+
+                    if (output_types[i] == OUTPUT_TYPE_I2S && old_types[i] == OUTPUT_TYPE_SPDIF) {
+                        // --- S/PDIF → I2S ---
+                        audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
+
+                        audio_spdif_set_enabled(spdif_inst, false);
+                        dma_irqn_set_channel_enabled(spdif_inst->dma_irq, spdif_inst->dma_channel, false);
+                        dma_channel_abort(spdif_inst->dma_channel);
+                        if (spdif_inst->playing_buffer) {
+                            give_audio_buffer(spdif_inst->consumer_pool, spdif_inst->playing_buffer);
+                            spdif_inst->playing_buffer = NULL;
+                        }
+                        spdif_reset_consumer_pipeline(spdif_inst);
+                        pio_sm_unclaim(spdif_inst->pio, spdif_inst->pio_sm);
+
+                        audio_i2s_config_t i2s_cfg = {
+                            .data_pin = output_pins[i],
+                            .clock_pin_base = i2s_bck_pin,
+                            .dma_channel = i + 8,
+                            .pio_sm = i,
+                            .pio = PICO_AUDIO_SPDIF_PIO,
+                            .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
+                        };
+                        audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
+                        audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
+                                                false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+
+                    } else if (output_types[i] == OUTPUT_TYPE_SPDIF && old_types[i] == OUTPUT_TYPE_I2S) {
+                        // --- I2S → S/PDIF ---
+                        audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
+
+                        audio_i2s_teardown(i2s_instance_ptrs[i]);
+                        pio_sm_claim(spdif_inst->pio, spdif_inst->pio_sm);
+                        audio_spdif_change_pin(spdif_inst, output_pins[i]);
+                        audio_complete_connection(&spdif_inst->connection.core,
+                                                  producer_pools[i],
+                                                  spdif_inst->consumer_pool);
+                        memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
+                    }
+                }
+
+                // Start/stop MCK based on whether any slot is now I2S
+                {
+                    bool any_i2s = false;
+                    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                        if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
+                    }
+                    if (any_i2s && i2s_mck_enabled) {
+                        audio_i2s_mck_set_enabled(true);
+                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                    } else if (!any_i2s) {
+                        audio_i2s_mck_set_enabled(false);
+                    }
+                }
+
+                // Drain and resync all consumer pipelines.  Without this,
+                // buffers processed with the OLD preset's parameters would
+                // play out for ~24ms before new data arrives.  Also resets
+                // USB feedback to prevent IIR drift from the flash blackout
+                // during dir_flush().
+                complete_pipeline_reset();
+            }
+
+            if (preset_save_pending) {
+                preset_save_pending = false;
+                __dmb();
+
+                // Drain audio ring before flash write to minimize starvation
+                // during the ~45ms interrupt blackout.
+                usb_audio_drain_ring();
+
+                // Mute audio during the flash operation.  No pipeline reset
+                // needed after save — DSP parameters are unchanged, only
+                // flash state is written.
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                preset_save(pending_preset_slot);
+            }
+
+            if (preset_delete_pending) {
+                preset_delete_pending = false;
+                __dmb();
+
+                usb_audio_drain_ring();
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+
+                // preset_delete() erases the slot's flash sector.  If the
+                // deleted slot is the active slot, it applies factory defaults
+                // — changing all DSP parameters.  Pipeline reset flushes stale
+                // buffers and resyncs outputs in that case.
+                preset_delete(pending_preset_slot);
+                complete_pipeline_reset();
+            }
+        }
+
         // Handle output type change (deferred from USB ISR — needs heap allocation)
         {
             extern volatile bool output_type_change_pending;
