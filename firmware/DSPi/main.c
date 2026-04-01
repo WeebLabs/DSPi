@@ -109,9 +109,9 @@ static void perform_rate_change(uint32_t new_freq) {
     audio_format_48k.sample_freq = new_freq;
 
 #if PICO_RP2350
-    // RP2350: 266.4MHz fixed (VCO 1332 / 5 / 1) — no clock switching
+    // RP2350: 307.2MHz fixed (VCO 1536 / 5 / 1) — no clock switching
 #else
-    // RP2040: 266.4MHz fixed (VCO 1332 / 5 / 1) — no clock switching
+    // RP2040: 307.2MHz fixed (VCO 1536 / 5 / 1) — no clock switching
 #endif
     // Reset sync
     extern volatile bool sync_started;
@@ -293,18 +293,18 @@ void core0_init() {
         __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
     }
 
-    // RP2350: 249.6MHz (VCO 1248 / 5 / 1) — multiple of 2.4MHz for matched SPDIF/I2S rates
+    // RP2350: 307.2MHz (VCO 1536 / 5 / 1) — integer SPDIF/I2S dividers at 48kHz
     vreg_set_voltage(VREG_VOLTAGE_1_15);
     busy_wait_ms(10);
 
-    if (!set_sys_clock_hz(249600000, false)) {
+    if (!set_sys_clock_hz(307200000, false)) {
         set_sys_clock_hz(150000000, false);
     }
 #else
     vreg_set_voltage(VREG_VOLTAGE_1_15);
     busy_wait_ms(10);
-    // 249.6MHz -> VCO 1248 MHz / 5 / 1 — multiple of 2.4MHz for matched SPDIF/I2S rates
-    set_sys_clock_pll(1248000000, 5, 1);
+    // 307.2MHz -> VCO 1536 MHz / 5 / 1 — integer SPDIF/I2S dividers at 48kHz
+    set_sys_clock_pll(1536000000, 5, 1);
 #endif
 
     gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);

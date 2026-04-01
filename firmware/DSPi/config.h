@@ -203,6 +203,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_USB_ERROR_STATS     0xB2
 #define REQ_RESET_USB_ERROR_STATS   0xB3
 
+// System
+#define REQ_ENTER_BOOTLOADER        0xF0
+
 // Preset configuration
 #define PRESET_SLOTS                10
 #define PRESET_NAME_LEN             32

@@ -16,6 +16,7 @@
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "hardware/sync.h"
+#include "pico/bootrom.h"
 #include "hardware/irq.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
@@ -2463,6 +2464,20 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 resp_buf[0] = 1;
                 vendor_send_response(resp_buf, 1);
                 return true;
+            }
+
+            // ----------------------------------------------------------------
+            // System Commands (0xF0+)
+            // ----------------------------------------------------------------
+
+            case REQ_ENTER_BOOTLOADER: {
+                // Send response before rebooting so the host sees success
+                resp_buf[0] = 1;
+                vendor_send_response(resp_buf, 1);
+                // Brief delay to let the USB response complete
+                busy_wait_ms(100);
+                reset_usb_boot(0, 0);
+                // Never returns
             }
 
             // ----------------------------------------------------------------

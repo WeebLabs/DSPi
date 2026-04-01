@@ -124,9 +124,10 @@ cmake --build build-rp2350 --clean-first   # RP2350 build
 Defined in `main.c`, function `core0_init()`:
 
 1. **GPIO setup** — LED (GPIO 25), status pin (GPIO 23)
-2. **Clock configuration** — PLL set to 307.2 MHz (48 kHz family) or 264.6 MHz (44.1 kHz family)
-   - RP2350: `set_sys_clock_hz()`, VREG 1.15V
-   - RP2040: Manual PLL (`set_sys_clock_pll()`), VREG 1.20V (overclock)
+2. **Clock configuration** — PLL fixed at 307.2 MHz (VCO 1536 / 5 / 1), no runtime clock switching
+   - RP2350: `set_sys_clock_hz(307200000)`, VREG 1.15V
+   - RP2040: `set_sys_clock_pll(1536000000, 5, 1)`, VREG 1.15V
+   *Last updated: 2026-03-31*
 3. **Bus priority** — DMA gets highest system bus priority
 4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
 5. **Preset boot load** — `preset_boot_load()` always selects a preset. Reads preset directory, loads appropriate slot based on startup policy (specified default or last active). If the target slot is empty, applies factory defaults while keeping the slot selected. On first boot after upgrade, migrates legacy single-sector data into preset slot 0. A preset is always active — there is no "no preset" state.
