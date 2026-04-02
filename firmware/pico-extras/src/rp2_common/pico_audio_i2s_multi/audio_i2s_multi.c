@@ -116,7 +116,11 @@ static void i2s_update_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample
     assert(system_clock_frequency < 0x40000000);
 
     // divider in 24.8 fixed-point = sys_clk * 2 / sample_freq
-    uint32_t divider = (system_clock_frequency * 2) / sample_freq;
+    // Ceiling division to match SPDIF library rounding.  Truncation makes I2S
+    // ~3 Hz fast at 44.1kHz/307.2MHz; if the feedback endpoint tracks this I2S
+    // slot, all SPDIF outputs accumulate the surplus and fill over minutes.
+    uint64_t num = (uint64_t)system_clock_frequency * 2;
+    uint32_t divider = (uint32_t)((num + sample_freq - 1) / sample_freq);
 
     printf("I2S[SM%d] clock divider 0x%x/256 (%u.%u) for %d Hz\n",
            inst->pio_sm, (uint)divider,
