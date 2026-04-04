@@ -14,6 +14,7 @@
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "crossfeed.h"
+#include "leveller.h"
 
 #include <string.h>
 
@@ -31,6 +32,9 @@ extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
 extern volatile CrossfeedConfig crossfeed_config;
 extern volatile bool crossfeed_update_pending;
+extern volatile LevellerConfig leveller_config;
+extern volatile bool leveller_update_pending;
+extern volatile bool leveller_reset_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 
@@ -146,6 +150,14 @@ void bulk_params_collect(WireBulkParams *out) {
         out->i2s_config.mck_enabled = i2s_mck_enabled ? 1 : 0;
         out->i2s_config.mck_multiplier = i2s_mck_multiplier;
     }
+
+    // Volume Leveller (V4+)
+    out->leveller.enabled = leveller_config.enabled ? 1 : 0;
+    out->leveller.speed = leveller_config.speed;
+    out->leveller.lookahead = leveller_config.lookahead ? 1 : 0;
+    out->leveller.amount = leveller_config.amount;
+    out->leveller.max_gain_db = leveller_config.max_gain_db;
+    out->leveller.gate_threshold_db = leveller_config.gate_threshold_db;
 }
 
 // ============================================================================
@@ -153,9 +165,9 @@ void bulk_params_collect(WireBulkParams *out) {
 // ============================================================================
 
 int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
-    // Validate header (accept V2 for backward compat — V2 payloads lack I2S section)
-    if (in->header.format_version != WIRE_FORMAT_VERSION &&
-        in->header.format_version != 2)
+    // Validate header (accept V2-V4 for backward compat)
+    // V2: lacks I2S + leveller sections, V3: lacks leveller section
+    if (in->header.format_version < 2 || in->header.format_version > WIRE_FORMAT_VERSION)
         return -1;
 
 #if PICO_RP2350
@@ -285,6 +297,26 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         i2s_mck_enabled = (in->i2s_config.mck_enabled != 0);
         i2s_mck_multiplier = in->i2s_config.mck_multiplier;
     }
+
+    // Volume Leveller (V4+ payloads only)
+    if (in->header.format_version >= 4) {
+        leveller_config.enabled = (in->leveller.enabled != 0);
+        leveller_config.speed = in->leveller.speed;
+        leveller_config.lookahead = (in->leveller.lookahead != 0);
+        leveller_config.amount = in->leveller.amount;
+        leveller_config.max_gain_db = in->leveller.max_gain_db;
+        leveller_config.gate_threshold_db = in->leveller.gate_threshold_db;
+    } else {
+        // V2/V3 payload: apply defaults
+        leveller_config.enabled = LEVELLER_DEFAULT_ENABLED;
+        leveller_config.amount = LEVELLER_DEFAULT_AMOUNT;
+        leveller_config.speed = LEVELLER_DEFAULT_SPEED;
+        leveller_config.max_gain_db = LEVELLER_DEFAULT_MAX_GAIN_DB;
+        leveller_config.lookahead = LEVELLER_DEFAULT_LOOKAHEAD;
+        leveller_config.gate_threshold_db = LEVELLER_DEFAULT_GATE_DB;
+    }
+    leveller_update_pending = true;
+    leveller_reset_pending = true;
 
     return 0;
 }

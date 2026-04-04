@@ -32,6 +32,7 @@
 #include "crossfeed.h"
 #include "pdm_generator.h"
 #include "usb_feedback_controller.h"
+#include "leveller.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -65,7 +66,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       9
+#define SLOT_DATA_VERSION       10
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -150,6 +151,14 @@ typedef struct __attribute__((packed)) {
     uint8_t i2s_mck_pin;         // MCK GPIO
     uint8_t i2s_mck_enabled;     // MCK on/off (0 or 1)
     uint8_t i2s_mck_multiplier;  // MCK = multiplier × Fs (128 or 256)
+    // Volume Leveller (V10)
+    uint8_t leveller_enabled;
+    uint8_t leveller_speed;
+    uint8_t leveller_lookahead;
+    uint8_t leveller_padding;
+    float   leveller_amount;
+    float   leveller_max_gain_db;
+    float   leveller_gate_threshold_db;
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -198,6 +207,9 @@ extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
 extern volatile CrossfeedConfig crossfeed_config;
 extern volatile bool crossfeed_update_pending;
+extern volatile LevellerConfig leveller_config;
+extern volatile bool leveller_update_pending;
+extern volatile bool leveller_reset_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
@@ -439,6 +451,14 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->i2s_mck_enabled = i2s_mck_enabled ? 1 : 0;
     slot->i2s_mck_multiplier = i2s_mck_multiplier;
 
+    // Volume Leveller (V10)
+    slot->leveller_enabled = leveller_config.enabled ? 1 : 0;
+    slot->leveller_speed = leveller_config.speed;
+    slot->leveller_lookahead = leveller_config.lookahead ? 1 : 0;
+    slot->leveller_amount = leveller_config.amount;
+    slot->leveller_max_gain_db = leveller_config.max_gain_db;
+    slot->leveller_gate_threshold_db = leveller_config.gate_threshold_db;
+
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
     size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
@@ -556,6 +576,25 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
             i2s_mck_multiplier = 128;
         }
     }
+
+    // Volume Leveller (V10+)
+    if (slot->version >= 10) {
+        leveller_config.enabled = (slot->leveller_enabled != 0);
+        leveller_config.speed = slot->leveller_speed;
+        leveller_config.lookahead = (slot->leveller_lookahead != 0);
+        leveller_config.amount = slot->leveller_amount;
+        leveller_config.max_gain_db = slot->leveller_max_gain_db;
+        leveller_config.gate_threshold_db = slot->leveller_gate_threshold_db;
+    } else {
+        leveller_config.enabled = LEVELLER_DEFAULT_ENABLED;
+        leveller_config.amount = LEVELLER_DEFAULT_AMOUNT;
+        leveller_config.speed = LEVELLER_DEFAULT_SPEED;
+        leveller_config.max_gain_db = LEVELLER_DEFAULT_MAX_GAIN_DB;
+        leveller_config.lookahead = LEVELLER_DEFAULT_LOOKAHEAD;
+        leveller_config.gate_threshold_db = LEVELLER_DEFAULT_GATE_DB;
+    }
+    leveller_update_pending = true;
+    leveller_reset_pending = true;
 }
 
 // ============================================================================
@@ -1003,6 +1042,16 @@ static void apply_factory_defaults(void) {
         i2s_mck_enabled = false;
         i2s_mck_multiplier = 128;
     }
+
+    // Volume Leveller
+    leveller_config.enabled = LEVELLER_DEFAULT_ENABLED;
+    leveller_config.amount = LEVELLER_DEFAULT_AMOUNT;
+    leveller_config.speed = LEVELLER_DEFAULT_SPEED;
+    leveller_config.max_gain_db = LEVELLER_DEFAULT_MAX_GAIN_DB;
+    leveller_config.lookahead = LEVELLER_DEFAULT_LOOKAHEAD;
+    leveller_config.gate_threshold_db = LEVELLER_DEFAULT_GATE_DB;
+    leveller_update_pending = true;
+    leveller_reset_pending = true;
 }
 
 void flash_factory_reset(void) {

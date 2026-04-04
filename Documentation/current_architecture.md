@@ -14,13 +14,14 @@
 8. [SPDIF Output System](#spdif-output-system)
 9. [PDM Subsystem](#pdm-subsystem)
 10. [Crossfeed](#crossfeed)
-11. [Loudness Compensation](#loudness-compensation)
-12. [Flash Storage](#flash-storage)
-13. [Pin Configuration](#pin-configuration)
-14. [Core 1 Architecture](#core-1-architecture)
-15. [RP2040 vs RP2350 Comparison](#rp2040-vs-rp2350-comparison)
-16. [Memory Layout](#memory-layout)
-17. [Performance Characteristics](#performance-characteristics)
+11. [Volume Leveller](#volume-leveller)
+12. [Loudness Compensation](#loudness-compensation)
+13. [Flash Storage](#flash-storage)
+14. [Pin Configuration](#pin-configuration)
+15. [Core 1 Architecture](#core-1-architecture)
+16. [RP2040 vs RP2350 Comparison](#rp2040-vs-rp2350-comparison)
+17. [Memory Layout](#memory-layout)
+18. [Performance Characteristics](#performance-characteristics)
 
 ---
 
@@ -47,7 +48,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-03-08*
+*Last updated: 2026-04-04*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -65,6 +66,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `crossfeed.h` | Crossfeed API, presets, state structs |
 | `loudness.c` | ISO 226:2003 loudness curve computation, double-buffered tables |
 | `loudness.h` | Loudness API, coefficient structs |
+| `leveller.c` | Volume leveller (feedforward RMS compressor) |
+| `leveller.h` | Volume leveller API, state/config structs |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
 | `flash_storage.h` | Flash storage API |
 | `bulk_params.c` | Bulk parameter collect/apply (wire format ↔ live state) |
@@ -232,7 +235,7 @@ The DSP pipeline is decoupled from the USB IRQ via a lock-free SPSC ring buffer 
 5. **Buffer return** — Give completed buffers to consumer pools for DMA
 
 ### RP2350 Float Pipeline
-*Last updated: 2026-03-02*
+*Last updated: 2026-04-04*
 
 All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
@@ -241,6 +244,7 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 | Input conversion | int16 → float, preamp gain |
 | Loudness | 2 SVF shelf filters (low shelf + high shelf), volume-dependent |
 | Master EQ | Block-based `dsp_process_channel_block()`, 10 bands per channel, hybrid SVF/biquad |
+| Volume Leveller | Upward RMS compressor on master L/R with gain-reduction limiter (float throughout) |
 | Crossfeed | BS2B lowpass + allpass (ILD + ITD) |
 | Matrix mixing | Block-based: 2 inputs × 9 outputs with gain/phase |
 | Output EQ | Block-based, 10 bands per output (Core 0: outputs 0-1, Core 1: outputs 2-7) |
@@ -250,7 +254,7 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 | PDM output | Float → Q28 for sigma-delta modulation |
 
 ### RP2040 Fixed-Point Pipeline
-*Last updated: 2026-02-15*
+*Last updated: 2026-04-04*
 
 Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixed-point (28 fractional bits). 2 S/PDIF stereo pairs + 1 PDM sub (5 output channels).
 
@@ -261,6 +265,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 | Input conversion | int16 → Q28 (shift left 14), preamp via `fast_mul_q28()` — block loop to `buf_l[192]`, `buf_r[192]` |
 | Loudness | 2 biquads per-sample via `fast_mul_q28()` (Q28 coefficients, state coupling) |
 | Master EQ | **Block-based** `dsp_process_channel_block()`, 10 bands per channel |
+| Volume Leveller | Upward RMS compressor on master L/R with gain-reduction limiter (Q28 envelope + float gain) |
 | Crossfeed | BS2B per-sample via `fast_mul_q28()` (Q28 coefficients, stereo coupling) |
 | Matrix mixing | Q15 gains via `fast_mul_q15()` (16-bit partial products), 2 inputs × 5 outputs → `buf_out[5][192]` |
 
@@ -636,6 +641,72 @@ output  = direct + ap_opposite     // Mix with opposite channel's crossfeed
 
 ---
 
+## Volume Leveller
+*Last updated: 2026-04-04*
+
+### Purpose
+
+Automatic volume levelling via a feedforward, stereo-linked, single-band RMS compressor applied to the master L/R channels. Sits in the signal chain after Master EQ and before Crossfeed (PASS 2.5 in the pipeline).
+
+### Algorithm
+
+- **Topology:** Feedforward upward compressor with soft knee — boosts content below the threshold, leaves content above the threshold completely untouched (no makeup gain needed)
+- **Stereo linking:** Stereo-linked — RMS envelope is computed from the louder of L/R channels, and the same gain is applied to both channels to preserve the stereo image
+- **Envelope:** Asymmetric attack/release smoothing on the RMS envelope
+- **Lookahead:** Optional 10ms lookahead delay buffer (less critical with upward compression since loud content receives 0 dB gain, reducing overshoot risk)
+- **Gain computation:** Upward compression curve: content below threshold is boosted by `(threshold - x_db) * (1 - 1/ratio)`, content above threshold + knee/2 passes at unity (0 dB gain), with soft knee transition between
+- **Limiter:** Gain-reduction style at -6 dBFS ceiling (instant attack, 100ms release) — computes gain reduction rather than hard clipping, rarely engages since loud content is untouched
+- **Gate:** User-configurable silence gate prevents noise amplification when input is below the gate threshold
+
+### Parameters
+
+| Parameter | Type | Range | Default | Description |
+|-----------|------|-------|---------|-------------|
+| enabled | bool | 0/1 | false | Enable/disable the leveller |
+| amount | float | 0.0–100.0 | 50.0 | Compression strength % (ratio = 1 + amount/100 * 19) |
+| speed | uint8_t | 0/1/2 | 0 (Slow) | Envelope speed: 0 = Slow, 1 = Medium, 2 = Fast |
+| max_gain_db | float | 0.0–35.0 | 15.0 | Maximum boost gain in dB |
+| lookahead | bool | 0/1 | true | Enable 10ms lookahead delay buffer |
+| gate_threshold_db | float | -96.0–0.0 | -96.0 | Silence gate level in dBFS (below = no boost) |
+
+### Signal Chain Position
+
+```
+USB Input → Preamp → Loudness → Master EQ → Volume Leveller → Crossfeed → Matrix Mix → Output EQ → ...
+                                              (PASS 2.5)
+```
+
+### Platform Implementation
+
+- **RP2350:** Float throughout — RMS envelope, gain computation, and gain application all in single-precision float
+- **RP2040:** Q28 fixed-point for the RMS envelope accumulator, float for gain computation and smoothing. Gain applied to Q28 audio samples
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `leveller.c` | RMS envelope tracking, gain computation, soft-knee curve, lookahead buffer |
+| `leveller.h` | Public API, state struct, configuration struct |
+
+### Vendor Commands (0xB4–0xBF)
+
+| Code | Command | Direction | Description |
+|------|---------|-----------|-------------|
+| 0xB4 | REQ_SET_LEVELLER_ENABLE | OUT | Enable/disable leveller |
+| 0xB5 | REQ_GET_LEVELLER_ENABLE | IN | Get leveller enabled state |
+| 0xB6 | REQ_SET_LEVELLER_AMOUNT | OUT | Set compression amount (0.0–100.0, float) |
+| 0xB7 | REQ_GET_LEVELLER_AMOUNT | IN | Get compression amount |
+| 0xB8 | REQ_SET_LEVELLER_SPEED | OUT | Set envelope speed (0=Slow, 1=Medium, 2=Fast) |
+| 0xB9 | REQ_GET_LEVELLER_SPEED | IN | Get envelope speed |
+| 0xBA | REQ_SET_LEVELLER_MAX_GAIN | OUT | Set max boost gain in dB (0.0–35.0, float) |
+| 0xBB | REQ_GET_LEVELLER_MAX_GAIN | IN | Get max boost gain |
+| 0xBC | REQ_SET_LEVELLER_LOOKAHEAD | OUT | Enable/disable 10ms lookahead |
+| 0xBD | REQ_GET_LEVELLER_LOOKAHEAD | IN | Get lookahead state |
+| 0xBE | REQ_SET_LEVELLER_GATE | OUT | Set silence gate threshold (-96.0–0.0 dBFS, float) |
+| 0xBF | REQ_GET_LEVELLER_GATE | IN | Get silence gate threshold |
+
+---
+
 ## Loudness Compensation
 *Last updated: 2026-03-02*
 
@@ -882,7 +953,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-03-17*
+*Last updated: 2026-04-04*
 
 ### Hardware
 
@@ -911,6 +982,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | USB input bit depth | 16-bit or 24-bit (alt setting) | 16-bit or 24-bit (alt setting) |
 | S/PDIF bit depth | 24-bit | 24-bit |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
+| Volume leveller | Q28 envelope + float gain | Float throughout |
 | EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |
 
 ### Delay Lines
@@ -951,7 +1023,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-03-27*
+*Last updated: 2026-04-04*
 
 ### RP2040 (264 KB SRAM)
 
@@ -965,8 +1037,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Bulk param buffer (4 KB aligned) | ~4 KB |
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (7 × 32) | ~224 B |
+| Leveller state + lookahead | ~2 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~127 KB** |
+| **Total BSS** | **~90 KB** |
 | Code in RAM (.text copy_to_ram) | ~72 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | SPDIF consumer pools (heap, 2 × 16 × 48 × 16) | ~24 KB |
@@ -983,8 +1056,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Bulk param buffer (4 KB aligned) | ~4 KB |
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (11 × 32) | ~352 B |
+| Leveller state + lookahead | ~2 KB |
 | Other BSS | ~24 KB |
-| **Total BSS** | **~203 KB** |
+| **Total BSS** | **~210 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | SPDIF consumer pools (heap, 4 × 16 × 48 × 16) | ~48 KB |
@@ -1107,7 +1181,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-03-16*
+*Last updated: 2026-04-04*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -1177,6 +1251,18 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (~2832 bytes, multi-packet control transfer) |
 | REQ_GET_BUFFER_STATS | 0xB0 | IN | Get 44-byte buffer fill level statistics packet |
 | REQ_RESET_BUFFER_STATS | 0xB1 | IN | Reset watermarks (wValue bit 0), returns 1-byte ack |
+| REQ_SET_LEVELLER_ENABLE | 0xB4 | OUT | Enable/disable volume leveller |
+| REQ_GET_LEVELLER_ENABLE | 0xB5 | IN | Get volume leveller enabled state |
+| REQ_SET_LEVELLER_AMOUNT | 0xB6 | OUT | Set leveller compression amount (0.0–100.0, float) |
+| REQ_GET_LEVELLER_AMOUNT | 0xB7 | IN | Get leveller compression amount |
+| REQ_SET_LEVELLER_SPEED | 0xB8 | OUT | Set leveller envelope speed (0=Slow, 1=Med, 2=Fast) |
+| REQ_GET_LEVELLER_SPEED | 0xB9 | IN | Get leveller envelope speed |
+| REQ_SET_LEVELLER_MAX_GAIN | 0xBA | OUT | Set leveller max boost gain (0.0–35.0 dB, float) |
+| REQ_GET_LEVELLER_MAX_GAIN | 0xBB | IN | Get leveller max boost gain |
+| REQ_SET_LEVELLER_LOOKAHEAD | 0xBC | OUT | Enable/disable leveller 10ms lookahead |
+| REQ_GET_LEVELLER_LOOKAHEAD | 0xBD | IN | Get leveller lookahead state |
+| REQ_SET_LEVELLER_GATE | 0xBE | OUT | Set leveller silence gate threshold (-96.0–0.0 dBFS, float) |
+| REQ_GET_LEVELLER_GATE | 0xBF | IN | Get leveller silence gate threshold |
 
 ### Bulk Parameter Transfer
 *Last updated: 2026-03-11*

@@ -29,7 +29,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       3
+#define WIRE_FORMAT_VERSION       4
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -156,6 +156,19 @@ typedef struct __attribute__((packed)) {
 } WireI2SConfig;                     // 16 bytes
 
 // ============================================================================
+// Section 12: Volume Leveller Configuration (16 bytes) — V4+
+// ============================================================================
+typedef struct __attribute__((packed)) {
+    uint8_t  enabled;                // 0/1
+    uint8_t  speed;                  // 0=Slow, 1=Medium, 2=Fast
+    uint8_t  lookahead;              // 0/1 (10ms lookahead delay)
+    uint8_t  reserved;
+    float    amount;                 // 0.0-100.0 (compression strength %)
+    float    max_gain_db;            // 0.0-35.0 (max boost for quiet content)
+    float    gate_threshold_db;      // -96.0-0.0 (silence gate level dBFS)
+} WireLevellerConfig;                // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -170,7 +183,8 @@ typedef struct __attribute__((packed)) {
     WireBandParams      eq[WIRE_MAX_CHANNELS][WIRE_MAX_BANDS];           // 2112
     WireChannelNames    channel_names;                                    //  352
     WireI2SConfig       i2s_config;                                       //   16
-} WireBulkParams;                    // Total: 2848 bytes
+    WireLevellerConfig  leveller;                                          //   16
+} WireBulkParams;                    // Total: 2864 bytes
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 

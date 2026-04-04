@@ -34,6 +34,7 @@
 #include "flash_storage.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "leveller.h"
 #include "bulk_params.h"
 #include "pico/usb_stream_helper.h"
 #include "usb_audio_ring.h"
@@ -167,6 +168,21 @@ volatile CrossfeedConfig crossfeed_config = {
 volatile bool crossfeed_update_pending = false;
 volatile bool crossfeed_bypassed = true;  // Fast bypass flag for audio callback
 CrossfeedState crossfeed_state;
+
+// Volume Leveller state
+volatile LevellerConfig leveller_config = {
+    .enabled = LEVELLER_DEFAULT_ENABLED,
+    .amount = LEVELLER_DEFAULT_AMOUNT,
+    .speed = LEVELLER_DEFAULT_SPEED,
+    .max_gain_db = LEVELLER_DEFAULT_MAX_GAIN_DB,
+    .lookahead = LEVELLER_DEFAULT_LOOKAHEAD,
+    .gate_threshold_db = LEVELLER_DEFAULT_GATE_DB
+};
+volatile bool leveller_update_pending = false;
+volatile bool leveller_reset_pending = false;
+volatile bool leveller_bypassed = true;  // Fast bypass flag for audio callback
+LevellerCoeffs leveller_coeffs;
+LevellerState leveller_state;
 
 // Per-channel user-configurable names
 char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
@@ -521,6 +537,13 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         }
     }
 
+    // ========== PASS 2.5: Volume Leveller ==========
+    if (!leveller_bypassed) {
+        leveller_process_block(&leveller_state, &leveller_coeffs,
+                               (const LevellerConfig *)&leveller_config,
+                               buf_l, buf_r, sample_count);
+    }
+
     // ========== PASS 3: Crossfeed + Master Peaks ==========
     bool do_crossfeed = !crossfeed_bypassed;
 
@@ -839,6 +862,13 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             dsp_process_channel_block(filters[CH_MASTER_LEFT], buf_l, sample_count, CH_MASTER_LEFT);
         if (!channel_bypassed[CH_MASTER_RIGHT])
             dsp_process_channel_block(filters[CH_MASTER_RIGHT], buf_r, sample_count, CH_MASTER_RIGHT);
+    }
+
+    // ========== PASS 2.5: Volume Leveller ==========
+    if (!leveller_bypassed) {
+        leveller_process_block(&leveller_state, &leveller_coeffs,
+                               (const LevellerConfig *)&leveller_config,
+                               buf_l, buf_r, sample_count);
     }
 
     // ========== PASS 3: Crossfeed + Master Peaks ==========
@@ -1563,6 +1593,66 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             }
             break;
 
+        // Volume Leveller Commands
+        case REQ_SET_LEVELLER_ENABLE:
+            if (buffer->data_len >= 1) {
+                leveller_config.enabled = (vendor_rx_buf[0] != 0);
+                leveller_update_pending = true;
+                leveller_reset_pending = true;  // Reset state when toggling
+            }
+            break;
+
+        case REQ_SET_LEVELLER_AMOUNT:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < LEVELLER_AMOUNT_MIN) val = LEVELLER_AMOUNT_MIN;
+                if (val > LEVELLER_AMOUNT_MAX) val = LEVELLER_AMOUNT_MAX;
+                leveller_config.amount = val;
+                leveller_update_pending = true;
+            }
+            break;
+
+        case REQ_SET_LEVELLER_SPEED:
+            if (buffer->data_len >= 1) {
+                uint8_t spd = vendor_rx_buf[0];
+                if (spd < LEVELLER_SPEED_COUNT) {
+                    leveller_config.speed = spd;
+                    leveller_update_pending = true;
+                }
+            }
+            break;
+
+        case REQ_SET_LEVELLER_MAX_GAIN:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < LEVELLER_MAX_GAIN_MIN) val = LEVELLER_MAX_GAIN_MIN;
+                if (val > LEVELLER_MAX_GAIN_MAX) val = LEVELLER_MAX_GAIN_MAX;
+                leveller_config.max_gain_db = val;
+                leveller_update_pending = true;
+            }
+            break;
+
+        case REQ_SET_LEVELLER_LOOKAHEAD:
+            if (buffer->data_len >= 1) {
+                leveller_config.lookahead = (vendor_rx_buf[0] != 0);
+                leveller_update_pending = true;
+                leveller_reset_pending = true;  // Clear delay buffer on toggle
+            }
+            break;
+
+        case REQ_SET_LEVELLER_GATE:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < LEVELLER_GATE_MIN) val = LEVELLER_GATE_MIN;
+                if (val > LEVELLER_GATE_MAX) val = LEVELLER_GATE_MAX;
+                leveller_config.gate_threshold_db = val;
+                leveller_update_pending = true;
+            }
+            break;
+
         // Matrix Mixer Commands
         case REQ_SET_MATRIX_ROUTE:
             if (buffer->data_len >= sizeof(MatrixRoutePacket)) {
@@ -2006,6 +2096,46 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             case REQ_GET_CROSSFEED_ITD: {
                 resp_buf[0] = crossfeed_config.itd_enabled ? 1 : 0;
                 vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            // Volume Leveller GET commands
+            case REQ_GET_LEVELLER_ENABLE: {
+                resp_buf[0] = leveller_config.enabled ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_LEVELLER_AMOUNT: {
+                float val = leveller_config.amount;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_LEVELLER_SPEED: {
+                resp_buf[0] = leveller_config.speed;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_LEVELLER_MAX_GAIN: {
+                float val = leveller_config.max_gain_db;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_LEVELLER_LOOKAHEAD: {
+                resp_buf[0] = leveller_config.lookahead ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_LEVELLER_GATE: {
+                float val = leveller_config.gate_threshold_db;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
                 return true;
             }
 

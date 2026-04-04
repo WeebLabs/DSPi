@@ -206,6 +206,20 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_USB_ERROR_STATS     0xB2
 #define REQ_RESET_USB_ERROR_STATS   0xB3
 
+// Volume Leveller Commands
+#define REQ_SET_LEVELLER_ENABLE     0xB4
+#define REQ_GET_LEVELLER_ENABLE     0xB5
+#define REQ_SET_LEVELLER_AMOUNT     0xB6
+#define REQ_GET_LEVELLER_AMOUNT     0xB7
+#define REQ_SET_LEVELLER_SPEED      0xB8
+#define REQ_GET_LEVELLER_SPEED      0xB9
+#define REQ_SET_LEVELLER_MAX_GAIN   0xBA
+#define REQ_GET_LEVELLER_MAX_GAIN   0xBB
+#define REQ_SET_LEVELLER_LOOKAHEAD  0xBC
+#define REQ_GET_LEVELLER_LOOKAHEAD  0xBD
+#define REQ_SET_LEVELLER_GATE       0xBE
+#define REQ_GET_LEVELLER_GATE       0xBF
+
 // System
 #define REQ_ENTER_BOOTLOADER        0xF0
 

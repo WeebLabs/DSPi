@@ -24,6 +24,7 @@
 #include "usb_audio.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "leveller.h"
 #include "bulk_params.h"
 #include "pico/audio_spdif.h"
 #include "usb_feedback_controller.h"
@@ -100,6 +101,14 @@ static volatile uint8_t clock_176mhz = 0;
 extern struct audio_format audio_format_48k;
 extern MatrixMixer matrix_mixer;
 
+// Volume Leveller globals (defined in usb_audio.c)
+extern volatile LevellerConfig leveller_config;
+extern volatile bool leveller_update_pending;
+extern volatile bool leveller_reset_pending;
+extern volatile bool leveller_bypassed;
+extern LevellerCoeffs leveller_coeffs;
+extern LevellerState leveller_state;
+
 static void reset_usb_feedback_loop(void);
 
 static void perform_rate_change(uint32_t new_freq) {
@@ -127,6 +136,7 @@ static void perform_rate_change(uint32_t new_freq) {
     dsp_recalculate_all_filters((float)new_freq);
     loudness_recompute_pending = true;
     crossfeed_update_pending = true;  // Recalculate crossfeed coefficients for new sample rate
+    leveller_update_pending = true;   // Recalculate leveller coefficients for new sample rate
     pdm_update_clock(new_freq);
 
     // Update MCK frequency for new sample rate (if enabled)
@@ -401,6 +411,11 @@ void core0_init() {
         audio_set_volume(audio_state.volume);  // Re-select loudness coefficients
     }
 
+    // Initial volume leveller setup (uses loaded or default params)
+    leveller_compute_coefficients(&leveller_coeffs, (const LevellerConfig *)&leveller_config, 48000.0f);
+    leveller_reset_state(&leveller_state);
+    leveller_bypassed = !leveller_config.enabled;
+
 #if ENABLE_SUB
     {
         extern uint8_t output_pins[];
@@ -552,6 +567,17 @@ int main(void) {
             crossfeed_compute_coefficients(&crossfeed_state, (const CrossfeedConfig *)&crossfeed_config, (float)audio_state.freq);
             // Update bypass flag atomically
             crossfeed_bypassed = !crossfeed_config.enabled;
+        }
+
+        // Handle volume leveller coefficient updates
+        if (leveller_update_pending) {
+            leveller_update_pending = false;
+            leveller_compute_coefficients(&leveller_coeffs, (const LevellerConfig *)&leveller_config, (float)audio_state.freq);
+            if (leveller_reset_pending) {
+                leveller_reset_pending = false;
+                leveller_reset_state(&leveller_state);
+            }
+            leveller_bypassed = !leveller_config.enabled;
         }
 
         // Handle USB stream restart (alt 0 -> alt > 0): re-lock all active output
