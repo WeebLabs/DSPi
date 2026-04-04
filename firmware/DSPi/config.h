@@ -80,8 +80,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
-// Both platforms: 4096 samples = 85ms max delay at 48kHz
-#define MAX_DELAY_SAMPLES 4096
+#if PICO_RP2350
+#define MAX_DELAY_SAMPLES 4096   // 85ms at 48kHz
+#else
+#define MAX_DELAY_SAMPLES 2048   // 42ms at 48kHz
+#endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
 // Latency alignment (in samples - automatically adapts to sample rate)
