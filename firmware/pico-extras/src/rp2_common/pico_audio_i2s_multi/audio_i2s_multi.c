@@ -356,10 +356,14 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
         i2s_irq_handler_installed[inst->dma_irq] = true;
     }
 
+    // Clear any stale completion flag from prior channel users before unmasking.
+    dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
     dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, 1);
 
-    // Register instance
+    // Register instance atomically against DMA IRQ iteration.
+    uint32_t save = save_and_disable_interrupts();
     i2s_instances[i2s_instance_count++] = inst;
+    restore_interrupts(save);
 
     return intended_audio_format;
 }
@@ -562,6 +566,29 @@ void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
 void audio_i2s_enable_sync(audio_i2s_instance_t *instances[], uint count) {
     assert(count > 0 && count <= PICO_AUDIO_I2S_MAX_INSTANCES);
 
+    // Rewind each SM to a known program entry state before synchronous start.
+    // pio_enable_sm_mask_in_sync() aligns divider phase, but does not reset
+    // instruction position or shift counters. Without this reset, previously
+    // running SMs can resume at different bit positions and produce data/clock
+    // misalignment (audible as white-noise-like corruption).
+    for (uint i = 0; i < count; i++) {
+        audio_i2s_instance_t *inst = instances[i];
+        uint pio_idx = pio_get_index(inst->pio);
+        uint entry_pc;
+
+        if (inst->clock_master) {
+            assert(i2s_pio_program_offset[pio_idx] >= 0);
+            entry_pc = (uint)i2s_pio_program_offset[pio_idx] + audio_i2s_24_offset_entry_point;
+        } else {
+            assert(i2s_slave_pio_program_offset[pio_idx] >= 0);
+            entry_pc = (uint)i2s_slave_pio_program_offset[pio_idx] + audio_i2s_24_slave_offset_entry_point;
+        }
+
+        pio_sm_clear_fifos(inst->pio, inst->pio_sm);
+        pio_sm_restart(inst->pio, inst->pio_sm);
+        pio_sm_exec(inst->pio, inst->pio_sm, pio_encode_jmp(entry_pc));
+    }
+
     // Enable DMA IRQ and prime DMA for all instances
     for (uint i = 0; i < count; i++) {
         audio_i2s_instance_t *inst = instances[i];
@@ -611,6 +638,7 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     // Mask DMA IRQ and abort
     dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
     dma_channel_abort(inst->dma_channel);
+    dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
 
     // Return in-flight buffer
     if (inst->playing_buffer != NULL) {
@@ -626,8 +654,9 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     dma_channel_unclaim(inst->dma_channel);
     pio_sm_unclaim(inst->pio, inst->pio_sm);
 
-    // Remove from instance registry
+    // Remove from instance registry atomically against DMA IRQ iteration.
     bool was_master = inst->clock_master;
+    uint32_t save = save_and_disable_interrupts();
     for (uint i = 0; i < i2s_instance_count; i++) {
         if (i2s_instances[i] == inst) {
             for (uint j = i; j < i2s_instance_count - 1; j++) {
@@ -653,6 +682,7 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
         // hold their last driven level (no high-Z glitch). The caller is
         // responsible for promoting a slave to master and restarting in sync.
     }
+    restore_interrupts(save);
 
     printf("I2S teardown: SM%d %s, data GPIO %d (instances remaining: %d)\n",
            inst->pio_sm, was_master ? "(was master)" : "(slave)",

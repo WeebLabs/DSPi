@@ -220,15 +220,57 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     extern bool i2s_mck_enabled;
     extern uint8_t i2s_mck_multiplier;
 
+    uint8_t current_types[NUM_SPDIF_INSTANCES];
+    uint8_t target_types[NUM_SPDIF_INSTANCES];
+    memcpy(current_types, output_types, NUM_SPDIF_INSTANCES);
+    memcpy(target_types, current_types, NUM_SPDIF_INSTANCES);
+
+    // Snapshot requested targets for this batch so ISR updates that arrive
+    // mid-switch are handled in the NEXT batch.
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (change_mask & (1u << i)) {
+            uint8_t req = new_types[i];
+            if (req <= OUTPUT_TYPE_I2S) {
+                target_types[i] = req;
+            }
+        }
+    }
+
+    bool any_change = false;
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (target_types[i] != current_types[i]) {
+            any_change = true;
+            break;
+        }
+    }
+    if (!any_change) return;
+
+    // Deterministic master policy: lowest-index active I2S slot is master.
+    int target_master_slot = -1;
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (target_types[i] == OUTPUT_TYPE_I2S) {
+            target_master_slot = i;
+            break;
+        }
+    }
+
     usb_audio_drain_ring();
     prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
+    // Prevent DMA IRQ handlers from touching registries while we teardown/setup
+    // instances and mutate hardware ownership.
+    const uint spdif_dma_irq_num = DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ;
+    const uint i2s_dma_irq_num = DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ;
+    irq_set_enabled(spdif_dma_irq_num, false);
+    if (i2s_dma_irq_num != spdif_dma_irq_num) {
+        irq_set_enabled(i2s_dma_irq_num, false);
+    }
+
     // ---- Pass 1: Teardown outgoing types ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (!(change_mask & (1u << i))) continue;
-        if (new_types[i] == output_types[i]) continue;  // No actual change
+        if (target_types[i] == current_types[i]) continue;  // No type change
 
-        if (output_types[i] == OUTPUT_TYPE_I2S) {
+        if (current_types[i] == OUTPUT_TYPE_I2S) {
             // I2S → SPDIF: teardown the I2S instance
             audio_i2s_teardown(i2s_instance_ptrs[i]);
         } else {
@@ -242,36 +284,49 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                 spdif_inst->playing_buffer = NULL;
             }
             spdif_reset_consumer_pipeline(spdif_inst);
+            dma_irqn_acknowledge_channel(spdif_inst->dma_irq, spdif_inst->dma_channel);
             pio_sm_unclaim(spdif_inst->pio, spdif_inst->pio_sm);
         }
     }
 
-    // ---- Pass 2: Setup new types with master election ----
-    // Scan all slots (not just change_mask) because an existing I2S slave may
-    // need promotion to master if the old master was torn down in Pass 1.
-    bool first_i2s = (audio_i2s_get_clock_master_index() < 0);
-
+    // ---- Pass 2: Setup final types and enforce deterministic master/slave roles ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        bool changed = (change_mask & (1u << i)) && (new_types[i] != output_types[i]);
+        bool had_i2s = (current_types[i] == OUTPUT_TYPE_I2S);
+        bool want_i2s = (target_types[i] == OUTPUT_TYPE_I2S);
 
-        if (changed && new_types[i] == OUTPUT_TYPE_I2S) {
-            // Setup new I2S instance
-            audio_i2s_config_t i2s_cfg = {
-                .data_pin = output_pins[i],
-                .clock_pin_base = i2s_bck_pin,
-                .dma_channel = i + 8,
-                .pio_sm = i,
-                .pio = PICO_AUDIO_SPDIF_PIO,
-                .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
-                .clock_master = first_i2s,  // First I2S slot becomes master
-            };
-            audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
-            audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
-                                    false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
-            output_types[i] = OUTPUT_TYPE_I2S;
-            first_i2s = false;
+        if (want_i2s) {
+            bool want_master = (i == target_master_slot);
+            bool need_rebuild = !had_i2s;
 
-        } else if (changed && new_types[i] == OUTPUT_TYPE_SPDIF) {
+            if (had_i2s) {
+                audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+                if (!inst->consumer_pool || inst->clock_master != want_master) {
+                    if (inst->enabled) {
+                        audio_i2s_set_enabled(inst, false);
+                    }
+                    audio_i2s_teardown(inst);
+                    need_rebuild = true;
+                }
+            }
+
+            if (need_rebuild) {
+                audio_i2s_config_t i2s_cfg = {
+                    .data_pin = output_pins[i],
+                    .clock_pin_base = i2s_bck_pin,
+                    .dma_channel = i + 8,
+                    .pio_sm = i,
+                    .pio = PICO_AUDIO_SPDIF_PIO,
+                    .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
+                    .clock_master = want_master,
+                };
+                audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
+                audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
+                                        false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+                if (had_i2s) {
+                    printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
+                }
+            }
+        } else if (had_i2s) {
             // Setup SPDIF on slot where I2S was torn down
             audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
             pio_sm_claim(spdif_inst->pio, spdif_inst->pio_sm);
@@ -280,32 +335,10 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                                       producer_pools[i],
                                       spdif_inst->consumer_pool);
             memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
-            output_types[i] = OUTPUT_TYPE_SPDIF;
-
-        } else if (!changed && output_types[i] == OUTPUT_TYPE_I2S && first_i2s) {
-            // Existing I2S slave needs promotion to master because the old
-            // master was torn down in Pass 1.
-            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (inst->enabled)
-                audio_i2s_set_enabled(inst, false);
-            audio_i2s_teardown(inst);
-
-            audio_i2s_config_t i2s_cfg = {
-                .data_pin = output_pins[i],
-                .clock_pin_base = i2s_bck_pin,
-                .dma_channel = i + 8,
-                .pio_sm = i,
-                .pio = PICO_AUDIO_SPDIF_PIO,
-                .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
-                .clock_master = true,  // Promoted to master
-            };
-            audio_i2s_setup(inst, &audio_format_48k, &i2s_cfg);
-            audio_i2s_connect_extra(inst, producer_pools[i],
-                                    false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
-            first_i2s = false;
-            printf("Slot %d promoted to I2S master\n", i);
         }
     }
+
+    memcpy(output_types, target_types, NUM_SPDIF_INSTANCES);
 
     // Start/stop MCK based on whether any slot is now I2S
     bool any_i2s = false;
