@@ -217,9 +217,11 @@ static void i2s_wrap_producer_give(audio_connection_t *connection, audio_buffer_
         int32_t *dst = ((int32_t *)pbc->current_consumer_buffer->buffer->bytes) +
                        (pbc->current_consumer_buffer_pos * 2);
 
-        // Left-shift each channel sample by 8 to place 24-bit audio at MSB.
-        for (uint32_t i = 0; i < sample_count * 2; i++) {
-            dst[i] = src[i] << 8;
+        // PIO entry phase transmits the right slot first, so store samples as
+        // R,L in the DMA stream to produce correct I2S L/R at the pins.
+        for (uint32_t i = 0; i < sample_count; i++) {
+            dst[i * 2]     = src[i * 2 + 1] << 8; // R sample
+            dst[i * 2 + 1] = src[i * 2] << 8;     // L sample
         }
 
         pos += sample_count;
