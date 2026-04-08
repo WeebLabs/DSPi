@@ -78,6 +78,11 @@ typedef struct audio_buffer_pool {
         ac_producer, ac_consumer
     } type;
     const audio_format_t *format;
+    // Owned buffer metadata (set by audio_new_buffer_pool). This enables
+    // deterministic teardown for dynamic pool users (e.g. output type switching).
+    audio_buffer_t *buffers;
+    uint16_t buffer_count;
+    uint16_t buffer_sample_count;
     // private
     audio_connection_t *connection;
     spin_lock_t *free_list_spin_lock;
@@ -124,6 +129,16 @@ audio_buffer_pool_t *audio_new_producer_pool(audio_buffer_format_t *format, int 
  */
 audio_buffer_pool_t *audio_new_consumer_pool(audio_buffer_format_t *format, int buffer_count,
                                                          int buffer_sample_count);
+
+/*! \brief Free an audio buffer pool and all buffers owned by it
+ *  \ingroup pico_audio
+ *
+ * The pool must be quiesced by the caller (no concurrent take/give users)
+ * before calling this function.
+ *
+ * \param pool Pool created by audio_new_producer_pool() or audio_new_consumer_pool()
+ */
+void audio_free_buffer_pool(audio_buffer_pool_t *pool);
 
 /*! \brief Allocate and initialise an audio wrapping buffer
  *  \ingroup pico_audio

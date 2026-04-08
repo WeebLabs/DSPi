@@ -163,14 +163,48 @@ void audio_init_buffer(audio_buffer_t *audio_buffer, audio_buffer_format_t *form
     audio_buffer->sample_count = 0;
 }
 
+// Free one mem_buffer_t allocation produced by pico_buffer_alloc().
+static void free_audio_mem_buffer(mem_buffer_t *buffer) {
+    if (!buffer) return;
+    free(buffer->bytes);
+    buffer->bytes = NULL;
+    buffer->size = 0;
+    free(buffer);
+}
+
 audio_buffer_pool_t *
 audio_new_buffer_pool(audio_buffer_format_t *format, int buffer_count, int buffer_sample_count) {
+    audio_assert(buffer_count >= 0);
+    audio_assert(buffer_sample_count >= 0);
+    audio_assert((unsigned)buffer_count <= 0xffffu);
+    audio_assert((unsigned)buffer_sample_count <= 0xffffu);
+
     audio_buffer_pool_t *ac = (audio_buffer_pool_t *) calloc(1, sizeof(audio_buffer_pool_t));
+    if (!ac) return NULL;
+
     audio_buffer_t *audio_buffers = buffer_count ? (audio_buffer_t *) calloc(buffer_count,
                                                                                        sizeof(audio_buffer_t)) : 0;
+    if (buffer_count && !audio_buffers) {
+        free(ac);
+        return NULL;
+    }
+
     ac->format = format->format;
+    ac->buffers = audio_buffers;
+    ac->buffer_count = (uint16_t)buffer_count;
+    ac->buffer_sample_count = (uint16_t)buffer_sample_count;
     for (int i = 0; i < buffer_count; i++) {
         audio_init_buffer(audio_buffers + i, format, buffer_sample_count);
+        if (!audio_buffers[i].buffer) {
+            // Roll back any buffers successfully allocated so far.
+            for (int j = 0; j <= i; j++) {
+                free_audio_mem_buffer(audio_buffers[j].buffer);
+                audio_buffers[j].buffer = NULL;
+            }
+            free(audio_buffers);
+            free(ac);
+            return NULL;
+        }
         audio_buffers[i].next = i != buffer_count - 1 ? &audio_buffers[i + 1] : NULL;
     }
     // todo one per channel?
@@ -199,6 +233,7 @@ audio_buffer_t *audio_new_wrapping_buffer(audio_buffer_format_t *format, mem_buf
 audio_buffer_pool_t *
 audio_new_producer_pool(audio_buffer_format_t *format, int buffer_count, int buffer_sample_count) {
     audio_buffer_pool_t *ac = audio_new_buffer_pool(format, buffer_count, buffer_sample_count);
+    if (!ac) return NULL;
     ac->type = audio_buffer_pool::ac_producer;
     return ac;
 }
@@ -206,8 +241,36 @@ audio_new_producer_pool(audio_buffer_format_t *format, int buffer_count, int buf
 audio_buffer_pool_t *
 audio_new_consumer_pool(audio_buffer_format_t *format, int buffer_count, int buffer_sample_count) {
     audio_buffer_pool_t *ac = audio_new_buffer_pool(format, buffer_count, buffer_sample_count);
+    if (!ac) return NULL;
     ac->type = audio_buffer_pool::ac_consumer;
     return ac;
+}
+
+void audio_free_buffer_pool(audio_buffer_pool_t *pool) {
+    if (!pool) return;
+
+    // The pool owns a contiguous audio_buffer_t array allocated by
+    // audio_new_buffer_pool(). Each element owns its own mem_buffer_t.
+    if (pool->buffers) {
+        for (uint16_t i = 0; i < pool->buffer_count; i++) {
+            free_audio_mem_buffer(pool->buffers[i].buffer);
+            pool->buffers[i].buffer = NULL;
+            pool->buffers[i].next = NULL;
+            pool->buffers[i].sample_count = 0;
+            pool->buffers[i].max_sample_count = 0;
+        }
+        free(pool->buffers);
+        pool->buffers = NULL;
+    }
+
+    pool->free_list = NULL;
+    pool->prepared_list = NULL;
+    pool->prepared_list_tail = NULL;
+    pool->connection = NULL;
+    pool->buffer_count = 0;
+    pool->buffer_sample_count = 0;
+
+    free(pool);
 }
 
 void audio_complete_connection(audio_connection_t *connection, audio_buffer_pool_t *producer_pool,

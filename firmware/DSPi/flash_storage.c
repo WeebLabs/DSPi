@@ -233,6 +233,18 @@ static void apply_factory_defaults(void);
 static PresetDirectory dir_cache;
 static bool dir_cache_valid = false;
 
+// Flash mute hold time in samples (rate-aware).
+//
+// A fixed sample count shrinks in real time at higher rates (e.g. 96 kHz),
+// which can be too short to cover post-flash pipeline refill and envelope
+// transitions.  Keep the hold at roughly 10 ms across rates with a floor
+// that preserves existing behavior at 48 kHz.
+static inline uint32_t flash_mute_hold_samples(void) {
+    uint64_t samples = ((uint64_t)audio_state.freq * 10u + 999u) / 1000u;
+    if (samples < 512u) samples = 512u;
+    return (uint32_t)samples;
+}
+
 // ============================================================================
 // CRC32 (polynomial 0xEDB88320, same as legacy implementation)
 // ============================================================================
@@ -303,7 +315,7 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     feedback_10_14 = nominal_feedback_10_14;
 
     // Re-arm mute to cover SPDIF consumer pool refill (~4-8ms)
-    preset_mute_counter = 512;
+    preset_mute_counter = flash_mute_hold_samples();
     preset_loading = true;
 
     // Verify magic survived the write
@@ -628,7 +640,7 @@ uint8_t preset_save(uint8_t slot) {
     collect_live_state(&slot_buf, slot);
 
     // Engage mute before flash writes to prevent audio glitches
-    preset_mute_counter = 512;
+    preset_mute_counter = flash_mute_hold_samples();
     preset_loading = true;
     __dmb();
 
@@ -726,7 +738,7 @@ uint8_t preset_delete(uint8_t slot) {
     // Re-seed feedback controller after interrupt blackout
     fb_ctrl_reset(&fb_ctrl, nominal_feedback_10_14 << 2);
     feedback_10_14 = nominal_feedback_10_14;
-    preset_mute_counter = 512;
+    preset_mute_counter = flash_mute_hold_samples();
     preset_loading = true;
 
     // Update directory — clear occupied bit but keep slot selected if active

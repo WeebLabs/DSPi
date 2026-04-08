@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include "pico/audio_i2s_multi.h"
 #include "audio_i2s_24.pio.h"
 #include "audio_i2s_24_slave.pio.h"
@@ -263,6 +264,12 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->enabled = false;
     inst->words_consumed = 0;
     inst->current_transfer_words = 0;
+    inst->consumer_pool = NULL;
+
+    // This instance struct may be reused across output-type switches.
+    // Clear carry-over connection state so a stale staging pointer from a
+    // previous lifetime cannot be consumed after reconnect.
+    memset(&inst->connection, 0, sizeof(inst->connection));
 
     // Assert all instances share the same DMA IRQ line
     if (i2s_instance_count > 0) {
@@ -325,10 +332,12 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->silence_buffer.format = &inst->consumer_buffer_format;
 
     // I2S silence: 48 samples × 2 channels × 4 bytes = 384 bytes
-    inst->silence_buffer.buffer = pico_buffer_alloc(
-        PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2 * sizeof(int32_t));
-    memset(inst->silence_buffer.buffer->bytes, 0,
-           PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2 * sizeof(int32_t));
+    const size_t silence_bytes = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2 * sizeof(int32_t);
+    inst->silence_buffer.buffer = pico_buffer_alloc(silence_bytes);
+    if (!inst->silence_buffer.buffer) {
+        panic("I2S setup: failed to allocate silence buffer");
+    }
+    memset(inst->silence_buffer.buffer->bytes, 0, silence_bytes);
 
     __mem_fence_release();
 
@@ -394,6 +403,9 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
     inst->consumer_pool = audio_new_consumer_pool(&inst->consumer_buffer_format,
                                                    buffer_count,
                                                    PICO_AUDIO_I2S_DMA_SAMPLE_COUNT);
+    if (!inst->consumer_pool) {
+        panic("I2S connect failed: consumer pool allocation failed");
+    }
 
     // Zero-fill all consumer buffers (I2S silence is just zeros)
     for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
@@ -642,11 +654,61 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     dma_channel_abort(inst->dma_channel);
     dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
 
-    // Return in-flight buffer
+    // Return in-flight buffer owned by this instance.
     if (inst->playing_buffer != NULL) {
-        give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+        if (inst->consumer_pool != NULL) {
+            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+        }
         inst->playing_buffer = NULL;
     }
+
+    // Return any partially filled producer->consumer staging buffer.
+    // This pointer lives in the embedded connection object, not the DMA path,
+    // so teardown must explicitly drain it before freeing the pool.
+    if (inst->connection.current_consumer_buffer != NULL) {
+        if (inst->consumer_pool != NULL) {
+            queue_free_audio_buffer(inst->consumer_pool,
+                                    inst->connection.current_consumer_buffer);
+        }
+        inst->connection.current_consumer_buffer = NULL;
+    }
+    inst->connection.current_consumer_buffer_pos = 0;
+
+    // Break bidirectional connection links before pool free so accidental
+    // post-teardown take/give paths fail fast instead of touching freed memory.
+    if (inst->consumer_pool &&
+        inst->consumer_pool->connection == &inst->connection.core) {
+        inst->consumer_pool->connection = NULL;
+    }
+    if (inst->connection.core.producer_pool &&
+        inst->connection.core.producer_pool->connection == &inst->connection.core) {
+        inst->connection.core.producer_pool->connection = NULL;
+    }
+    inst->connection.core.producer_pool_take = NULL;
+    inst->connection.core.producer_pool_give = NULL;
+    inst->connection.core.consumer_pool_take = NULL;
+    inst->connection.core.consumer_pool_give = NULL;
+    inst->connection.core.producer_pool = NULL;
+    inst->connection.core.consumer_pool = NULL;
+
+    // Free dynamic consumer pool allocations. Without this, repeated
+    // output-type switching leaks heap and eventually crashes setup paths.
+    if (inst->consumer_pool) {
+        audio_free_buffer_pool(inst->consumer_pool);
+        inst->consumer_pool = NULL;
+    }
+
+    // Free per-instance silence buffer allocated by setup().
+    if (inst->silence_buffer.buffer) {
+        free(inst->silence_buffer.buffer->bytes);
+        inst->silence_buffer.buffer->bytes = NULL;
+        inst->silence_buffer.buffer->size = 0;
+        free(inst->silence_buffer.buffer);
+        inst->silence_buffer.buffer = NULL;
+    }
+    inst->silence_buffer.sample_count = 0;
+    inst->silence_buffer.max_sample_count = 0;
+    inst->silence_buffer.format = NULL;
 
     // Release data pin
     gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);
@@ -701,26 +763,37 @@ void audio_i2s_update_all_frequencies(uint32_t sample_freq) {
     uint32_t divider = i2s_compute_divider(sample_freq);
 
     // Update divider on ALL instances and build masks for restart.
-    // Two masks: all_sm_mask covers every registered SM (for clkdiv phase reset),
-    // enabled_sm_mask covers only running SMs (for stop + sync restart).
+    // all_sm_mask covers every registered SM for clkdiv phase reset.
     uint32_t all_sm_mask = 0;
-    uint32_t enabled_sm_mask = 0;
     audio_i2s_instance_t *active[PICO_AUDIO_I2S_MAX_INSTANCES];
     uint active_count = 0;
     PIO pio = NULL;
 
     for (uint i = 0; i < i2s_instance_count; i++) {
         audio_i2s_instance_t *inst = i2s_instances[i];
+
+        // Quiesce currently enabled instances before sync re-enable.
+        // This keeps i2s_irq_enable_count balanced: audio_i2s_enable_sync()
+        // increments the refcount, so we must pair it with a decrement here.
+        // Also abort DMA to avoid overlapping old/new transfers across restart.
+        if (inst->enabled) {
+            audio_i2s_set_enabled(inst, false);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+            active[active_count++] = inst;
+        }
+
         pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm,
                                     divider >> 8u, divider & 0xffu);
         inst->freq = sample_freq;
         all_sm_mask |= (1u << inst->pio_sm);
         pio = inst->pio;
-
-        if (inst->enabled) {
-            enabled_sm_mask |= (1u << inst->pio_sm);
-            active[active_count++] = inst;
-        }
     }
 
     // Reset clkdiv phase for ALL SMs (including disabled ones) so they're
@@ -730,9 +803,8 @@ void audio_i2s_update_all_frequencies(uint32_t sample_freq) {
         pio_clkdiv_restart_sm_mask(pio, all_sm_mask);
     }
 
-    // Restart enabled SMs in sync
+    // Restart previously enabled SMs in sync
     if (active_count > 0 && pio) {
-        pio_set_sm_mask_enabled(pio, enabled_sm_mask, false);
         audio_i2s_enable_sync(active, active_count);
     }
 

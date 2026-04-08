@@ -383,6 +383,53 @@ void audio_set_volume(int16_t volume) {
 // AUDIO PROCESSING (called from USB audio packet callback)
 // ----------------------------------------------------------------------------
 
+// Preset mute smoothing
+//
+// Flash-backed operations (save/load/delete, directory writes) drive
+// `preset_loading` to force a temporary mute. A hard step between full-scale
+// and zero can produce an audible pop on some DAC chains, so we apply a short
+// envelope around the mute gate.
+//
+// The envelope runs in packet context (process_audio_packet) and advances by
+// `sample_count` each call, giving a time-based transition that is consistent
+// across 44.1/48/96 kHz.
+#define PRESET_MUTE_TRANSITION_SAMPLES 384u   // ~8 ms @48 kHz
+static float preset_mute_smooth_gain = 1.0f;  // 1.0 = full level, 0.0 = muted
+
+static inline float update_preset_mute_envelope(uint32_t sample_count) {
+    // Latch current mute state for THIS packet so the final muted packet
+    // remains fully in the fade-out direction even when the counter expires.
+    bool mute_active_for_packet = preset_loading;
+
+    if (mute_active_for_packet) {
+        if (preset_mute_counter > sample_count) {
+            preset_mute_counter -= sample_count;
+        } else {
+            preset_mute_counter = 0;
+            preset_loading = false;
+        }
+    }
+
+    float target = mute_active_for_packet ? 0.0f : 1.0f;
+    if (sample_count == 0) {
+        preset_mute_smooth_gain = target;
+        return preset_mute_smooth_gain;
+    }
+
+    float step = (float)sample_count / (float)PRESET_MUTE_TRANSITION_SAMPLES;
+    if (step > 1.0f) step = 1.0f;
+
+    if (preset_mute_smooth_gain < target) {
+        preset_mute_smooth_gain += step;
+        if (preset_mute_smooth_gain > target) preset_mute_smooth_gain = target;
+    } else if (preset_mute_smooth_gain > target) {
+        preset_mute_smooth_gain -= step;
+        if (preset_mute_smooth_gain < target) preset_mute_smooth_gain = target;
+    }
+
+    return preset_mute_smooth_gain;
+}
+
 static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
     uint32_t packet_start = time_us_32();
 
@@ -414,6 +461,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
     uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
     uint32_t sample_count = data_len / bytes_per_frame;
+    float preset_mute_gain = update_preset_mute_envelope(sample_count);
 
     for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
         if (audio_buf[b]) {
@@ -448,18 +496,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     const float inv_32768 = 1.0f / 32768.0f;
 
     float vol_mul = audio_state.mute ? 0.0f : (float)audio_state.vol_mul * inv_32768;
-
-    // Preset-switch mute: output silence while new parameters are being applied.
-    // The counter is decremented each packet; audio resumes when it reaches zero.
-    if (preset_loading) {
-        vol_mul = 0.0f;
-        if (preset_mute_counter > sample_count) {
-            preset_mute_counter -= sample_count;
-        } else {
-            preset_mute_counter = 0;
-            preset_loading = false;
-        }
-    }
+    vol_mul *= preset_mute_gain;
 
     float preamp = global_preamp_linear;
     bool is_bypassed = bypass_master_eq;
@@ -779,17 +816,10 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // 2 SPDIF stereo pairs + PDM sub, dual-core EQ worker
     // ------------------------------------------------------------------------
     int32_t vol_mul = audio_state.mute ? 0 : audio_state.vol_mul;
-
-    // Preset-switch mute: output silence while new parameters are being applied.
-    if (preset_loading) {
-        vol_mul = 0;
-        if (preset_mute_counter > sample_count) {
-            preset_mute_counter -= sample_count;
-        } else {
-            preset_mute_counter = 0;
-            preset_loading = false;
-        }
-    }
+    int32_t preset_mute_gain_q15 = (int32_t)(preset_mute_gain * 32768.0f + 0.5f);
+    if (preset_mute_gain_q15 < 0) preset_mute_gain_q15 = 0;
+    if (preset_mute_gain_q15 > 32768) preset_mute_gain_q15 = 32768;
+    vol_mul = fast_mul_q15(vol_mul, preset_mute_gain_q15);
 
     int32_t preamp = global_preamp_mul;
     bool is_bypassed = bypass_master_eq;
@@ -1892,6 +1922,16 @@ static uint count_pool_prepared(audio_buffer_pool_t *pool) {
 }
 
 static void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, uint *playing) {
+    // Output-type switches teardown/setup pools in main-loop context while USB
+    // control requests may still run in IRQ context. Avoid dereferencing pool
+    // pointers during that transition window.
+    if (output_type_switch_in_progress) {
+        *cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
+        *cons_prepared = 0;
+        *playing = 0;
+        return;
+    }
+
     if (output_types[slot] == OUTPUT_TYPE_I2S) {
         audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
         if (!inst || !inst->consumer_pool) {
@@ -1918,6 +1958,12 @@ static void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepa
 }
 
 static uint get_slot_consumer_fill(uint slot) {
+    // See get_slot_consumer_stats(): never touch per-slot pools while a type
+    // switch is mutating ownership/state.
+    if (output_type_switch_in_progress) {
+        return 0;
+    }
+
     uint cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
 
     if (output_types[slot] == OUTPUT_TYPE_I2S) {
@@ -2402,9 +2448,10 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
 
             case REQ_PRESET_SAVE: {
                 // Deferred to main loop: flash writes must not run in IRQ
-                // context (45ms interrupt blackout).  The main loop brackets
-                // the save with prepare_pipeline_reset() to mute audio during
-                // the flash operation.  Response is fire-and-forget: "accepted".
+                // context (45ms interrupt blackout per sector).  The main loop
+                // brackets save with prepare/complete_pipeline_reset() so audio
+                // resumes from a fully resynced output pipeline after blackout.
+                // Response is fire-and-forget: "accepted".
                 uint8_t slot = (uint8_t)setup->wValue;
                 if (slot >= PRESET_SLOTS) {
                     resp_buf[0] = PRESET_ERR_INVALID_SLOT;

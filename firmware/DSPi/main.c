@@ -39,6 +39,7 @@ usb_feedback_ctrl_t fb_ctrl;
 // Legacy endpoint-facing values (written by controller, read by sync packet handler)
 volatile uint32_t feedback_10_14 = 0;
 volatile uint32_t nominal_feedback_10_14 = 0;
+volatile bool output_type_switch_in_progress = false;
 
 // Consumer fill level for slot 0 — written by usb_audio.c, read by SOF handler
 extern volatile uint8_t spdif0_consumer_fill;
@@ -47,6 +48,11 @@ extern volatile uint8_t spdif0_consumer_fill;
 void __not_in_flash_func(usb_sof_irq)(void) {
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
     extern uint8_t output_types[];
+
+    // During output-type reconfiguration, slot ownership and DMA assignment are
+    // transiently inconsistent by design (teardown/setup in progress). Skip this
+    // frame's feedback sample to avoid reading partially transitioned state.
+    if (output_type_switch_in_progress) return;
 
     // Read DMA word count from slot 0 (SPDIF or I2S)
     volatile uint32_t *p_words_consumed;
@@ -245,6 +251,11 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     }
     if (!any_change) return;
 
+    output_type_switch_in_progress = true;
+    __dmb();
+    const bool usb_irq_was_enabled = irq_is_enabled(USBCTRL_IRQ);
+    irq_set_enabled(USBCTRL_IRQ, false);
+
     // Deterministic master policy: lowest-index active I2S slot is master.
     int target_master_slot = -1;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
@@ -264,6 +275,39 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     irq_set_enabled(spdif_dma_irq_num, false);
     if (i2s_dma_irq_num != spdif_dma_irq_num) {
         irq_set_enabled(i2s_dma_irq_num, false);
+    }
+
+    // Quiesce ALL currently active outputs before any teardown/setup work.
+    // Type switching can repurpose SMs/channels and master-clock ownership;
+    // doing that while other slots still run DMA/PIO is unsafe and can crash.
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (current_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (!inst || !inst->consumer_pool) continue;
+            if (inst->enabled) {
+                audio_i2s_set_enabled(inst, false);
+            }
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (!inst || !inst->consumer_pool) continue;
+            if (inst->enabled) {
+                audio_spdif_set_enabled(inst, false);
+            }
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+        }
     }
 
     // ---- Pass 1: Teardown outgoing types ----
@@ -355,6 +399,12 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     // Restart all outputs in sync (handles both SPDIF and I2S instances)
     complete_pipeline_reset();
 
+    __dmb();
+    output_type_switch_in_progress = false;
+    if (usb_irq_was_enabled) {
+        irq_set_enabled(USBCTRL_IRQ, true);
+    }
+
     printf("Type switch complete: mask=0x%02x\n", change_mask);
 }
 
@@ -376,8 +426,8 @@ static void reset_usb_feedback_loop(void) {
 //   complete_pipeline_reset();
 //
 // For simple cases (stream restart) with no work between phases, call
-// both back-to-back.  Callers that only need a mute (bulk params, preset
-// load) can call prepare_pipeline_reset() alone.
+// both back-to-back.  Only non-disruptive RAM-only operations should call
+// prepare_pipeline_reset() alone.
 // ---------------------------------------------------------------------------
 
 // Phase 1: prepare for disruptive pipeline work.
@@ -461,6 +511,51 @@ static void complete_pipeline_reset(void) {
     reset_usb_feedback_loop();
 
     restore_interrupts(flags);
+}
+
+// Flash writes disable interrupts for tens of milliseconds. Even when DSP
+// parameters are unchanged (e.g. preset save or directory writes), that
+// blackout can leave output consumer pools underfilled and inter-slot phase
+// skewed.  Bracket every deferred flash write with these helpers so audio
+// always resumes from a deterministic, synchronized state.
+//
+// Additional anti-pop handling:
+//  1) Use a rate-aware mute window (ms-based, not fixed sample count).
+//  2) Allow a short pre-flash settle period so muted packets are actually
+//     rendered to the outputs before interrupts are blacked out by flash ops.
+#define FLASH_WRITE_PREMUTE_MS       20u
+#define FLASH_WRITE_FADE_SETTLE_US   12000u
+
+static uint32_t samples_for_duration_ms(uint32_t sample_rate_hz, uint32_t duration_ms) {
+    uint64_t samples = ((uint64_t)sample_rate_hz * (uint64_t)duration_ms + 999u) / 1000u;
+    if (samples < PRESET_MUTE_SAMPLES) samples = PRESET_MUTE_SAMPLES;
+    if (samples > UINT32_MAX) samples = UINT32_MAX;
+    return (uint32_t)samples;
+}
+
+static void prepare_flash_write_operation(void) {
+    usb_audio_drain_ring();
+    prepare_pipeline_reset(samples_for_duration_ms(audio_state.freq,
+                                                   FLASH_WRITE_PREMUTE_MS));
+
+    // If stream is active, give the mute envelope time to ramp down before
+    // flash write lockout halts packet processing.
+    extern volatile bool sync_started;
+    if (sync_started) {
+        uint64_t start_us = time_us_64();
+        while ((time_us_64() - start_us) < FLASH_WRITE_FADE_SETTLE_US) {
+            usb_audio_drain_ring();
+            tight_loop_contents();
+        }
+    }
+
+    // Consume any packets that arrived during settle so flash starts from
+    // the quietest possible output state.
+    usb_audio_drain_ring();
+}
+
+static void complete_flash_write_operation(void) {
+    complete_pipeline_reset();
 }
 
 void core0_init() {
@@ -630,8 +725,13 @@ int main(void) {
                 memcpy(name, flash_set_name_buf, PRESET_NAME_LEN);
                 flash_set_name_pending = false;
                 restore_interrupts(f);
-                usb_audio_drain_ring();
-                preset_set_name(slot, name);
+                prepare_flash_write_operation();
+                uint8_t status = preset_set_name(slot, name);
+                complete_flash_write_operation();
+                if (status != PRESET_OK) {
+                    printf("preset_set_name failed: slot=%u err=%u\n",
+                           (unsigned)slot, (unsigned)status);
+                }
             }
 
             extern volatile bool flash_set_startup_pending;
@@ -644,8 +744,13 @@ int main(void) {
                 slot = flash_set_startup_slot;
                 flash_set_startup_pending = false;
                 restore_interrupts(f);
-                usb_audio_drain_ring();
-                preset_set_startup(mode, slot);
+                prepare_flash_write_operation();
+                uint8_t status = preset_set_startup(mode, slot);
+                complete_flash_write_operation();
+                if (status != PRESET_OK) {
+                    printf("preset_set_startup failed: mode=%u slot=%u err=%u\n",
+                           (unsigned)mode, (unsigned)slot, (unsigned)status);
+                }
             }
 
             extern volatile bool flash_set_include_pins_pending;
@@ -656,8 +761,9 @@ int main(void) {
                 val = flash_set_include_pins_val;
                 flash_set_include_pins_pending = false;
                 restore_interrupts(f);
-                usb_audio_drain_ring();
+                prepare_flash_write_operation();
                 preset_set_include_pins(val);
+                complete_flash_write_operation();
             }
         }
 
@@ -805,30 +911,31 @@ int main(void) {
                 preset_save_pending = false;
                 __dmb();
 
-                // Drain audio ring before flash write to minimize starvation
-                // during the ~45ms interrupt blackout.
-                usb_audio_drain_ring();
-
-                // Mute audio during the flash operation.  No pipeline reset
-                // needed after save — DSP parameters are unchanged, only
-                // flash state is written.
-                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
-                preset_save(pending_preset_slot);
+                // Even though save does not modify DSP parameters, it performs
+                // two flash writes (slot + directory), each with long interrupt
+                // blackout.  Always do a full post-write resync so outputs
+                // cannot remain in a skewed/underfilled state.
+                prepare_flash_write_operation();
+                uint8_t status = preset_save(pending_preset_slot);
+                complete_flash_write_operation();
+                if (status != PRESET_OK) {
+                    printf("preset_save failed: slot=%u err=%u\n",
+                           (unsigned)pending_preset_slot, (unsigned)status);
+                }
             }
 
             if (preset_delete_pending) {
                 preset_delete_pending = false;
                 __dmb();
 
-                usb_audio_drain_ring();
-                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                prepare_flash_write_operation();
 
                 // preset_delete() erases the slot's flash sector.  If the
                 // deleted slot is the active slot, it applies factory defaults
                 // — changing all DSP parameters.  Pipeline reset flushes stale
                 // buffers and resyncs outputs in that case.
                 preset_delete(pending_preset_slot);
-                complete_pipeline_reset();
+                complete_flash_write_operation();
             }
         }
 

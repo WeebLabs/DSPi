@@ -53,6 +53,7 @@ extern volatile EqParamPacket pending_packet;
 extern volatile bool rate_change_pending;
 extern volatile uint32_t pending_rate;
 extern volatile bool bulk_params_pending;
+extern volatile bool output_type_switch_in_progress;
 extern uint8_t bulk_param_buf[];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 void get_default_channel_name(int ch, char *buf);
