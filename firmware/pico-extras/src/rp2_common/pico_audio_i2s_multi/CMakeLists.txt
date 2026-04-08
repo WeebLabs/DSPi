@@ -1,7 +1,7 @@
 add_library(pico_audio_i2s_multi INTERFACE)
 
-pico_generate_pio_header(pico_audio_i2s_multi ${CMAKE_CURRENT_LIST_DIR}/audio_i2s_24.pio)
-pico_generate_pio_header(pico_audio_i2s_multi ${CMAKE_CURRENT_LIST_DIR}/audio_i2s_24_slave.pio)
+pico_generate_pio_header(pico_audio_i2s_multi ${CMAKE_CURRENT_LIST_DIR}/audio_i2s_clkout.pio)
+pico_generate_pio_header(pico_audio_i2s_multi ${CMAKE_CURRENT_LIST_DIR}/audio_i2s_dataout.pio)
 pico_generate_pio_header(pico_audio_i2s_multi ${CMAKE_CURRENT_LIST_DIR}/audio_mck.pio)
 
 target_sources(pico_audio_i2s_multi INTERFACE

@@ -26,21 +26,21 @@
 ; Autopull must be enabled, threshold 32, shift direction left (MSB-first).
 ; FIFO is joined for TX only.
 
-.program audio_i2s_24_slave
+.program audio_i2s_dataout
 
 .wrap_target
-bitloop1:
-    out pins, 1          ; Right channel data out (BCK falling equivalent)
-    jmp x-- bitloop1     ; (BCK rising equivalent, 31 loop iterations)
-    out pins, 1          ; Last R bit out (LRCLK transition equivalent)
-    set x, 30            ; Reload bit counter (32-bit frame)
-
 bitloop0:
     out pins, 1          ; Left channel data out (BCK falling equivalent)
     jmp x-- bitloop0     ; (BCK rising equivalent, 31 loop iterations)
     out pins, 1          ; Last L bit out (LRCLK transition equivalent)
+    set x, 30            ; Reload bit counter (32-bit frame)
+
+bitloop1:
+    out pins, 1          ; Right channel data out (BCK falling equivalent)
+    jmp x-- bitloop1     ; (BCK rising equivalent, 31 loop iterations)
+    out pins, 1          ; Last R bit out (LRCLK transition equivalent)
 public entry_point:
-    set x, 30            ; Reload bit counter — entry point matches master
+    set x, 30            ; Reload bit counter — entry point matches clkout
 .wrap
 
 ; Total: 8 instructions. Entry point at instruction 7 (inside .wrap),
@@ -49,7 +49,7 @@ public entry_point:
 % c-sdk {
 
 // ---------------------------------------------------------------------------
-// audio_i2s_24_slave_program_init — Configure a PIO SM for I2S slave (data only)
+// audio_i2s_dataout_program_init — Configure a PIO SM for I2S slave (data only)
 //
 // Unlike the master init, this does NOT configure side-set pins or set
 // BCK/LRCLK pin directions. The master SM exclusively owns the clock pins.
@@ -60,9 +60,9 @@ public entry_point:
 //   offset   — Instruction memory offset from pio_add_program()
 //   data_pin — GPIO for serial audio data (independently assignable)
 // ---------------------------------------------------------------------------
-static inline void audio_i2s_24_slave_program_init(PIO pio, uint sm, uint offset,
+static inline void audio_i2s_dataout_program_init(PIO pio, uint sm, uint offset,
                                                     uint data_pin) {
-    pio_sm_config sm_config = audio_i2s_24_slave_program_get_default_config(offset);
+    pio_sm_config sm_config = audio_i2s_dataout_program_get_default_config(offset);
 
     // Serial data: one output pin (no side-set — slave doesn't drive clocks)
     sm_config_set_out_pins(&sm_config, data_pin, 1);
@@ -83,7 +83,7 @@ static inline void audio_i2s_24_slave_program_init(PIO pio, uint sm, uint offset
     pio_sm_set_pins_with_mask(pio, sm, 0, 1u << data_pin);
 
     // Jump to entry point (matches master's start position)
-    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_24_slave_offset_entry_point));
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_dataout_offset_entry_point));
 }
 
 %}

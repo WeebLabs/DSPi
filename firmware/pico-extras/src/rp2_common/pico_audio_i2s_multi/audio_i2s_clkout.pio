@@ -34,30 +34,30 @@
 ; Autopull must be enabled, threshold 32, shift direction left (MSB-first).
 ; FIFO is joined for TX only.
 
-.program audio_i2s_24
+.program audio_i2s_clkout
 .side_set 2
 
                     ;        /--- LRCLK (side-set bit 1)
                     ;        |/-- BCLK  (side-set bit 0)
-bitloop1:           ;        ||
-    out pins, 1       side 0b10    ; Right channel data out, BCK falling edge
-    jmp x-- bitloop1  side 0b11    ; BCK rising edge (31 loop iterations)
-    out pins, 1       side 0b00    ; Last R bit out, LRCLK transitions low (Left)
-    set x, 30         side 0b01    ; BCK rising, reload bit counter (32-bit frame)
-
-bitloop0:
+bitloop0:           ;        ||
     out pins, 1       side 0b00    ; Left channel data out, BCK falling edge
     jmp x-- bitloop0  side 0b01    ; BCK rising edge (31 loop iterations)
     out pins, 1       side 0b10    ; Last L bit out, LRCLK transitions high (Right)
-public entry_point:
     set x, 30         side 0b11    ; BCK rising, reload bit counter (32-bit frame)
+
+bitloop1:
+    out pins, 1       side 0b10    ; Right channel data out, BCK falling edge
+    jmp x-- bitloop1  side 0b11    ; BCK rising edge (31 loop iterations)
+    out pins, 1       side 0b00    ; Last R bit out, LRCLK transitions low (Left)
+public entry_point:
+    set x, 30         side 0b01    ; BCK rising, reload bit counter (32-bit frame)
 
 ; Total: 8 instructions. Fits alongside SPDIF (4 instr) in PIO0's 32-slot memory.
 
 % c-sdk {
 
 // ---------------------------------------------------------------------------
-// audio_i2s_24_program_init — Configure a PIO state machine for 24-bit I2S
+// audio_i2s_clkout_program_init — Configure a PIO state machine for 24-bit I2S
 //
 // Parameters:
 //   pio            — PIO block (pio0, pio1, or pio2)
@@ -67,9 +67,9 @@ public entry_point:
 //   clock_pin_base — GPIO for BCK; LRCLK is always clock_pin_base + 1
 //                    (PIO side-set hardware constraint)
 // ---------------------------------------------------------------------------
-static inline void audio_i2s_24_program_init(PIO pio, uint sm, uint offset,
+static inline void audio_i2s_clkout_program_init(PIO pio, uint sm, uint offset,
                                               uint data_pin, uint clock_pin_base) {
-    pio_sm_config sm_config = audio_i2s_24_program_get_default_config(offset);
+    pio_sm_config sm_config = audio_i2s_clkout_program_get_default_config(offset);
 
     // Serial data: one output pin
     sm_config_set_out_pins(&sm_config, data_pin, 1);
@@ -94,7 +94,7 @@ static inline void audio_i2s_24_program_init(PIO pio, uint sm, uint offset,
     pio_sm_set_pins(pio, sm, 0);
 
     // Jump to the entry point (starts with Right channel, BCK high)
-    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_24_offset_entry_point));
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_clkout_offset_entry_point));
 }
 
 %}

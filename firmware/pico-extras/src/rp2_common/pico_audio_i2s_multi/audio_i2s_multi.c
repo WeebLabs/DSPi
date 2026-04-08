@@ -31,8 +31,8 @@
 #include <stddef.h>
 #include <stdlib.h>
 #include "pico/audio_i2s_multi.h"
-#include "audio_i2s_24.pio.h"
-#include "audio_i2s_24_slave.pio.h"
+#include "audio_i2s_clkout.pio.h"
+#include "audio_i2s_dataout.pio.h"
 #include "audio_mck.pio.h"
 #include "hardware/pio.h"
 #include "hardware/gpio.h"
@@ -218,11 +218,11 @@ static void i2s_wrap_producer_give(audio_connection_t *connection, audio_buffer_
         int32_t *dst = ((int32_t *)pbc->current_consumer_buffer->buffer->bytes) +
                        (pbc->current_consumer_buffer_pos * 2);
 
-        // PIO entry phase transmits the right slot first, so store samples as
-        // R,L in the DMA stream to produce correct I2S L/R at the pins.
+        // PIO enters at the left channel slot — DMA order matches producer order (L,R).
+        // Left-shift by 8 to place 24-bit audio at MSB for I2S MSB-first output.
         for (uint32_t i = 0; i < sample_count; i++) {
-            dst[i * 2]     = src[i * 2 + 1] << 8; // R sample
-            dst[i * 2 + 1] = src[i * 2] << 8;     // L sample
+            dst[i * 2]     = src[i * 2] << 8;     // L sample
+            dst[i * 2 + 1] = src[i * 2 + 1] << 8; // R sample
         }
 
         pos += sample_count;
@@ -292,12 +292,12 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
         // Load master PIO program once per PIO block
         if (i2s_pio_program_offset[config->pio] < 0) {
             i2s_pio_program_offset[config->pio] =
-                pio_add_program(inst->pio, &audio_i2s_24_program);
+                pio_add_program(inst->pio, &audio_i2s_clkout_program);
         }
         uint offset = (uint)i2s_pio_program_offset[config->pio];
 
         // Initialize with master program (side-set drives BCK/LRCLK)
-        audio_i2s_24_program_init(inst->pio, inst->pio_sm, offset,
+        audio_i2s_clkout_program_init(inst->pio, inst->pio_sm, offset,
                                    config->data_pin, config->clock_pin_base);
 
         // Track this instance as the clock master
@@ -313,12 +313,12 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
         // Load slave PIO program once per PIO block
         if (i2s_slave_pio_program_offset[config->pio] < 0) {
             i2s_slave_pio_program_offset[config->pio] =
-                pio_add_program(inst->pio, &audio_i2s_24_slave_program);
+                pio_add_program(inst->pio, &audio_i2s_dataout_program);
         }
         uint offset = (uint)i2s_slave_pio_program_offset[config->pio];
 
         // Initialize with slave program (no side-set, data pin only)
-        audio_i2s_24_slave_program_init(inst->pio, inst->pio_sm, offset,
+        audio_i2s_dataout_program_init(inst->pio, inst->pio_sm, offset,
                                          config->data_pin);
 
         printf("I2S setup: SM%d as SLAVE (data GPIO %d)\n",
@@ -539,12 +539,12 @@ void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
     if (inst->clock_master) {
         assert(i2s_pio_program_offset[pio_idx] >= 0);
         uint offset = (uint)i2s_pio_program_offset[pio_idx];
-        audio_i2s_24_program_init(inst->pio, inst->pio_sm, offset,
+        audio_i2s_clkout_program_init(inst->pio, inst->pio_sm, offset,
                                    new_pin, inst->clock_pin_base);
     } else {
         assert(i2s_slave_pio_program_offset[pio_idx] >= 0);
         uint offset = (uint)i2s_slave_pio_program_offset[pio_idx];
-        audio_i2s_24_slave_program_init(inst->pio, inst->pio_sm, offset, new_pin);
+        audio_i2s_dataout_program_init(inst->pio, inst->pio_sm, offset, new_pin);
     }
 
     // Restore clock divider (pio_sm_init resets it to default)
@@ -592,10 +592,10 @@ void audio_i2s_enable_sync(audio_i2s_instance_t *instances[], uint count) {
 
         if (inst->clock_master) {
             assert(i2s_pio_program_offset[pio_idx] >= 0);
-            entry_pc = (uint)i2s_pio_program_offset[pio_idx] + audio_i2s_24_offset_entry_point;
+            entry_pc = (uint)i2s_pio_program_offset[pio_idx] + audio_i2s_clkout_offset_entry_point;
         } else {
             assert(i2s_slave_pio_program_offset[pio_idx] >= 0);
-            entry_pc = (uint)i2s_slave_pio_program_offset[pio_idx] + audio_i2s_24_slave_offset_entry_point;
+            entry_pc = (uint)i2s_slave_pio_program_offset[pio_idx] + audio_i2s_dataout_offset_entry_point;
         }
 
         pio_sm_clear_fifos(inst->pio, inst->pio_sm);

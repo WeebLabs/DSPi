@@ -540,8 +540,11 @@ static void complete_pipeline_reset(void) {
 //  1) Use a rate-aware mute window (ms-based, not fixed sample count).
 //  2) Allow a short pre-flash settle period so muted packets are actually
 //     rendered to the outputs before interrupts are blacked out by flash ops.
-#define FLASH_WRITE_PREMUTE_MS       20u
-#define FLASH_WRITE_FADE_SETTLE_US   12000u
+// Settle must exceed envelope ramp (~8ms) + consumer pipeline drain (~16ms @ 48kHz).
+// Premute must exceed settle + flash write (~45ms) + margin so the mute counter
+// never expires before the pipeline is reset.
+#define FLASH_WRITE_PREMUTE_MS       120u
+#define FLASH_WRITE_FADE_SETTLE_US   30000u
 
 static uint32_t samples_for_duration_ms(uint32_t sample_rate_hz, uint32_t duration_ms) {
     uint64_t samples = ((uint64_t)sample_rate_hz * (uint64_t)duration_ms + 999u) / 1000u;
