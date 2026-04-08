@@ -71,6 +71,7 @@ volatile bool stream_restart_resync_pending = false;
 //  3. Delay line contents from the old preset are zeroed, preventing stale audio
 //     from bleeding through when delay length changes.
 volatile bool preset_load_pending = false;
+volatile bool save_params_pending = false;   // Legacy REQ_SAVE_PARAMS (deferred)
 volatile bool preset_save_pending = false;
 volatile bool preset_delete_pending = false;
 volatile uint8_t pending_preset_slot = 0;
@@ -393,10 +394,17 @@ void audio_set_volume(int16_t volume) {
 // The envelope runs in packet context (process_audio_packet) and advances by
 // `sample_count` each call, giving a time-based transition that is consistent
 // across 44.1/48/96 kHz.
-#define PRESET_MUTE_TRANSITION_SAMPLES 384u   // ~8 ms @48 kHz
+#define PRESET_MUTE_TRANSITION_MS 8u
 static float preset_mute_smooth_gain = 1.0f;  // 1.0 = full level, 0.0 = muted
 
-static inline float update_preset_mute_envelope(uint32_t sample_count) {
+static inline uint32_t preset_mute_transition_samples(uint32_t sample_rate_hz) {
+    uint64_t samples = ((uint64_t)sample_rate_hz * PRESET_MUTE_TRANSITION_MS + 999u) / 1000u;
+    if (samples < 1u) samples = 1u;
+    if (samples > UINT32_MAX) samples = UINT32_MAX;
+    return (uint32_t)samples;
+}
+
+static inline float update_preset_mute_envelope(uint32_t sample_count, uint32_t sample_rate_hz) {
     // Latch current mute state for THIS packet so the final muted packet
     // remains fully in the fade-out direction even when the counter expires.
     bool mute_active_for_packet = preset_loading;
@@ -416,7 +424,7 @@ static inline float update_preset_mute_envelope(uint32_t sample_count) {
         return preset_mute_smooth_gain;
     }
 
-    float step = (float)sample_count / (float)PRESET_MUTE_TRANSITION_SAMPLES;
+    float step = (float)sample_count / (float)preset_mute_transition_samples(sample_rate_hz);
     if (step > 1.0f) step = 1.0f;
 
     if (preset_mute_smooth_gain < target) {
@@ -461,7 +469,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
     uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
     uint32_t sample_count = data_len / bytes_per_frame;
-    float preset_mute_gain = update_preset_mute_envelope(sample_count);
+    uint32_t sample_rate_hz = audio_state.freq;
+    float preset_mute_gain = update_preset_mute_envelope(sample_count, sample_rate_hz);
 
     for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
         if (audio_buf[b]) {
@@ -1873,7 +1882,10 @@ struct audio_buffer_pool *producer_pools[NUM_SPDIF_INSTANCES];
 uint8_t i2s_bck_pin = PICO_I2S_BCK_PIN;     // BCK GPIO; LRCLK = BCK + 1
 uint8_t i2s_mck_pin = PICO_I2S_MCK_PIN;     // MCK GPIO
 bool    i2s_mck_enabled = false;             // MCK enabled state
-uint8_t i2s_mck_multiplier = 128;            // MCK = multiplier × Fs
+// Stored in uint8_t for preset/bulk wire compatibility:
+//   raw 128 => effective 128x
+//   raw 0   => effective 256x (because 256 wraps in uint8_t)
+uint8_t i2s_mck_multiplier = 128;
 
 // Pin validation helpers
 static bool is_valid_gpio_pin(uint8_t pin) {
@@ -2232,8 +2244,11 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             }
 
             case REQ_SAVE_PARAMS: {
-                int result = flash_save_params();
-                usb_start_tiny_control_in_transfer(result, 1);
+                // Legacy command retained for compatibility, but deferred to
+                // main loop to avoid flash write blackout in IRQ context.
+                save_params_pending = true;
+                __dmb();
+                usb_start_tiny_control_in_transfer(FLASH_OK, 1);  // Accepted
                 return true;
             }
 
@@ -2834,7 +2849,9 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             case REQ_SET_MCK_MULTIPLIER: {
                 uint16_t mult = setup->wValue;
                 if (mult == 128 || mult == 256) {
-                    i2s_mck_multiplier = (uint8_t)mult;
+                    // Keep raw storage compatible with uint8_t persistence:
+                    // 256 is represented as 0 (wrap), decoded by MCK update.
+                    i2s_mck_multiplier = (mult == 256) ? 0 : (uint8_t)mult;
                     if (i2s_mck_enabled) {
                         audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
                     }

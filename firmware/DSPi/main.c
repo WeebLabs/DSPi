@@ -554,8 +554,18 @@ static void prepare_flash_write_operation(void) {
     usb_audio_drain_ring();
 }
 
-static void complete_flash_write_operation(void) {
+// Full completion path: drain/restart all output consumer pipelines and reset
+// feedback state. Use this for operations that materially affect runtime audio
+// continuity (preset save/delete and legacy save command compatibility path).
+static void complete_flash_write_operation_full(void) {
     complete_pipeline_reset();
+}
+
+// Light completion path: keep the mute envelope active, but skip a full output
+// pipeline rebuild. Suitable for metadata-only flash writes (names/startup flags)
+// where DSP/output topology is unchanged.
+static inline void complete_flash_write_operation_light(void) {
+    // Intentionally empty.
 }
 
 void core0_init() {
@@ -727,7 +737,7 @@ int main(void) {
                 restore_interrupts(f);
                 prepare_flash_write_operation();
                 uint8_t status = preset_set_name(slot, name);
-                complete_flash_write_operation();
+                complete_flash_write_operation_light();
                 if (status != PRESET_OK) {
                     printf("preset_set_name failed: slot=%u err=%u\n",
                            (unsigned)slot, (unsigned)status);
@@ -746,7 +756,7 @@ int main(void) {
                 restore_interrupts(f);
                 prepare_flash_write_operation();
                 uint8_t status = preset_set_startup(mode, slot);
-                complete_flash_write_operation();
+                complete_flash_write_operation_light();
                 if (status != PRESET_OK) {
                     printf("preset_set_startup failed: mode=%u slot=%u err=%u\n",
                            (unsigned)mode, (unsigned)slot, (unsigned)status);
@@ -763,7 +773,7 @@ int main(void) {
                 restore_interrupts(f);
                 prepare_flash_write_operation();
                 preset_set_include_pins(val);
-                complete_flash_write_operation();
+                complete_flash_write_operation_light();
             }
         }
 
@@ -863,6 +873,7 @@ int main(void) {
         //  - Delay line bleed-through when delay length changes between presets
         {
             extern volatile bool preset_load_pending;
+            extern volatile bool save_params_pending;
             extern volatile bool preset_save_pending;
             extern volatile bool preset_delete_pending;
             extern volatile uint8_t pending_preset_slot;
@@ -907,6 +918,20 @@ int main(void) {
                 }
             }
 
+            if (save_params_pending) {
+                save_params_pending = false;
+                __dmb();
+
+                // Legacy REQ_SAVE_PARAMS compatibility path.  Keep this on the
+                // same robust flash-write flow as preset save.
+                prepare_flash_write_operation();
+                int status = flash_save_params();
+                complete_flash_write_operation_full();
+                if (status != FLASH_OK) {
+                    printf("flash_save_params failed: err=%d\n", status);
+                }
+            }
+
             if (preset_save_pending) {
                 preset_save_pending = false;
                 __dmb();
@@ -917,7 +942,7 @@ int main(void) {
                 // cannot remain in a skewed/underfilled state.
                 prepare_flash_write_operation();
                 uint8_t status = preset_save(pending_preset_slot);
-                complete_flash_write_operation();
+                complete_flash_write_operation_full();
                 if (status != PRESET_OK) {
                     printf("preset_save failed: slot=%u err=%u\n",
                            (unsigned)pending_preset_slot, (unsigned)status);
@@ -935,7 +960,7 @@ int main(void) {
                 // — changing all DSP parameters.  Pipeline reset flushes stale
                 // buffers and resyncs outputs in that case.
                 preset_delete(pending_preset_slot);
-                complete_flash_write_operation();
+                complete_flash_write_operation_full();
             }
         }
 
