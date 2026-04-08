@@ -68,6 +68,7 @@ typedef struct audio_i2s_instance {
     uint8_t dma_irq;            // 0 or 1
     uint8_t data_pin;           // Serial audio data GPIO
     uint8_t clock_pin_base;     // BCK GPIO; LRCLK = clock_pin_base + 1
+    bool    clock_master;       // true = drives BCK/LRCLK, false = data only
 
     // Runtime state
     audio_buffer_t *playing_buffer;
@@ -102,6 +103,7 @@ typedef struct audio_i2s_config {
     uint8_t pio_sm;
     uint8_t pio;                // PIO block index (0, 1, or 2 on RP2350)
     uint8_t dma_irq;            // DMA IRQ index (0 or 1)
+    bool    clock_master;       // true = drive BCK/LRCLK (master), false = data only (slave)
 } audio_i2s_config_t;
 
 // ---------------------------------------------------------------------------
@@ -192,6 +194,23 @@ void audio_i2s_enable_sync(audio_i2s_instance_t *instances[], uint count);
  * \param inst The I2S instance to tear down
  */
 void audio_i2s_teardown(audio_i2s_instance_t *inst);
+
+/** \brief Atomically update clock dividers for all I2S instances and restart in sync
+ * \ingroup pico_audio_i2s_multi
+ *
+ * Stops all active I2S state machines, updates every registered instance's
+ * clock divider, and restarts all in sync. Called from perform_rate_change()
+ * to avoid the brief master/slave divider mismatch that occurs with lazy
+ * per-instance updates.
+ *
+ * \param sample_freq New sample rate in Hz
+ */
+void audio_i2s_update_all_frequencies(uint32_t sample_freq);
+
+/** \brief Get the index of the current I2S clock master (-1 if none)
+ * \ingroup pico_audio_i2s_multi
+ */
+int8_t audio_i2s_get_clock_master_index(void);
 
 // ---------------------------------------------------------------------------
 // MCK (Master Clock) generator API

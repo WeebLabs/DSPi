@@ -411,8 +411,13 @@ void _usb_give_buffer(struct usb_endpoint *ep, uint32_t len) {
 
 #if !PICO_USBDEV_BULK_ONLY_EP1_THRU_16
     if (ep->current_give_buffer) {
-        val |= PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE
-                << 11u; // 11 + 16 = 27 - which is where stride bits go (and only relevant on buffer 1)
+        // Compute per-endpoint stride type from the actual buffer_stride.
+        // stride = 128 << type, so type = log2(stride / 128).
+        // Only relevant for buffer 1 addressing in double-buffered isochronous.
+        uint32_t stride_type = 0;
+        uint32_t s = ep->buffer_stride >> 7; // divide by 128
+        while (s > 1) { stride_type++; s >>= 1; }
+        val |= stride_type << 11u;
     }
 #endif
 
@@ -1169,7 +1174,13 @@ struct usb_interface *usb_interface_init(struct usb_interface *interface, const 
         endpoints[i]->descriptor = ep_desc;
 #if !PICO_USBDEV_BULK_ONLY_EP1_THRU_16
         if (USB_TRANSFER_TYPE_ISOCHRONOUS == (ep_desc->bmAttributes & USB_TRANSFER_TYPE_BITS)) {
-            endpoints[i]->buffer_stride = 128 << PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE;
+            // Per-endpoint stride: smallest power-of-2 that fits wMaxPacketSize,
+            // floored at 128.  Avoids wasting DPRAM on small isochronous endpoints
+            // (e.g., 3-byte feedback EP) while accommodating large audio packets.
+            uint32_t mps = ep_desc->wMaxPacketSize;
+            uint32_t stride = 128;
+            while (stride < mps) stride <<= 1;
+            endpoints[i]->buffer_stride = stride;
         } else {
             endpoints[i]->buffer_stride = 64;
         }

@@ -31,9 +31,10 @@
 #define USB_RING_SLOTS      4
 #define USB_RING_SLOT_MASK  (USB_RING_SLOTS - 1)
 
-// Maximum payload per slot.  Matches wMaxPacketSize for the 24-bit
-// alt-setting at 96 kHz (usb_descriptors.c:214).
-#define USB_RING_MAX_PKT    576
+// Maximum payload per slot.  Must accommodate the largest possible USB
+// audio packet: (96kHz/1000 + 1) * 2ch * 3bytes = 582 bytes.
+// The +1 accounts for feedback jitter (host may send 97 samples per frame).
+#define USB_RING_MAX_PKT    582
 
 // ---------------------------------------------------------------------------
 // Slot and ring structures

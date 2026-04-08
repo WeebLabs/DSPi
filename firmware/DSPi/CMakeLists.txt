@@ -60,7 +60,7 @@ target_compile_definitions(DSPi PRIVATE
     # pico-extras usb_device configuration
     PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1
     PICO_USBDEV_MAX_DESCRIPTOR_SIZE=256
-    PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=2
+    PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=2  # Legacy default; stride is now per-endpoint in usb_device.c
 )
 
 target_link_libraries(DSPi

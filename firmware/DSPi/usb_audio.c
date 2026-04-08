@@ -54,10 +54,10 @@ volatile bool rate_change_pending = false;
 volatile uint32_t pending_rate = 48000;
 volatile bool bulk_params_pending = false;
 
-// Output type switching — deferred to main loop (needs heap allocation)
-volatile bool output_type_change_pending = false;
-volatile uint8_t pending_output_slot = 0;
-volatile uint8_t pending_output_type = 0;
+// Output type switching — deferred to main loop (needs heap allocation).
+// Per-slot bitmask supports back-to-back requests without dropping any.
+volatile uint8_t output_type_change_mask = 0;                   // Bit N = slot N has pending change
+volatile uint8_t pending_output_types[NUM_SPDIF_INSTANCES];     // New type per slot
 // USB stream restart (alt 0 -> alt > 0) — deferred to main loop for safe pipeline re-lock
 volatile bool stream_restart_resync_pending = false;
 
@@ -2677,14 +2677,13 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 } else if (new_type == output_types[slot]) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
                 } else {
-                    // Defer to main loop
-                    extern volatile bool output_type_change_pending;
-                    extern volatile uint8_t pending_output_slot;
-                    extern volatile uint8_t pending_output_type;
-                    pending_output_slot = slot;
-                    pending_output_type = new_type;
+                    // Defer to main loop — per-slot bitmask supports
+                    // back-to-back requests without dropping any
+                    extern volatile uint8_t output_type_change_mask;
+                    extern volatile uint8_t pending_output_types[];
+                    pending_output_types[slot] = new_type;
                     __dmb();
-                    output_type_change_pending = true;
+                    output_type_change_mask |= (1u << slot);
                     status = PIN_CONFIG_SUCCESS;
                 }
 

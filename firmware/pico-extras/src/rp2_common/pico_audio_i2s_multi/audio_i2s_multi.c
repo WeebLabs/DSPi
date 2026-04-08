@@ -31,6 +31,7 @@
 #include <stddef.h>
 #include "pico/audio_i2s_multi.h"
 #include "audio_i2s_24.pio.h"
+#include "audio_i2s_24_slave.pio.h"
 #include "audio_mck.pio.h"
 #include "hardware/pio.h"
 #include "hardware/gpio.h"
@@ -48,8 +49,14 @@
 // Global shared state
 // ---------------------------------------------------------------------------
 
-// PIO program offset per PIO block — loaded once per block
-static int i2s_pio_program_offset[3] = {-1, -1, -1};
+// PIO program offsets per PIO block — loaded once per block, persist forever
+static int i2s_pio_program_offset[3] = {-1, -1, -1};          // Master program
+static int i2s_slave_pio_program_offset[3] = {-1, -1, -1};    // Slave program
+
+// Which registered I2S instance index is the clock master (-1 = none).
+// Only the master SM runs the master PIO program (side-set drives BCK/LRCLK).
+// All other I2S SMs run the slave program (data-only, no clock output).
+static int8_t i2s_clock_master_index = -1;
 
 // Instance registry for DMA IRQ handler
 static audio_i2s_instance_t *i2s_instances[PICO_AUDIO_I2S_MAX_INSTANCES];
@@ -111,23 +118,38 @@ static PIO i2s_pio_block_from_index(uint8_t idx) {
 //   At 307.2 MHz / 48 kHz: divider = 12800 → integer 50, fractional 0
 //   (zero PIO clock jitter)
 
-static void i2s_update_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_freq) {
+// Compute the I2S clock divider in 24.8 fixed-point for a given sample rate.
+static uint32_t i2s_compute_divider(uint32_t sample_freq) {
     uint32_t system_clock_frequency = clock_get_hz(clk_sys);
     assert(system_clock_frequency < 0x40000000);
 
-    // divider in 24.8 fixed-point = sys_clk * 2 / sample_freq
-    // Ceiling division to match SPDIF library rounding.  Truncation makes I2S
-    // ~3 Hz fast at 44.1kHz/307.2MHz; if the feedback endpoint tracks this I2S
-    // slot, all SPDIF outputs accumulate the surplus and fill over minutes.
+    // divider = sys_clk * 2 / sample_freq (ceiling division to match SPDIF rounding)
     uint64_t num = (uint64_t)system_clock_frequency * 2;
     uint32_t divider = (uint32_t)((num + sample_freq - 1) / sample_freq);
-
-    printf("I2S[SM%d] clock divider 0x%x/256 (%u.%u) for %d Hz\n",
-           inst->pio_sm, (uint)divider,
-           (uint)(divider >> 8), (uint)(divider & 0xff),
-           (int)sample_freq);
     assert(divider < 0x1000000);
+    return divider;
+}
 
+// Update clock divider for a single instance AND all other I2S instances on
+// the same PIO block.  All I2S SMs must run at the same rate because they
+// share BCK/LRCLK timing from the master.
+static void i2s_update_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_freq) {
+    uint32_t divider = i2s_compute_divider(sample_freq);
+
+    printf("I2S clock divider 0x%x/256 (%u.%u) for %d Hz (all %d instances)\n",
+           (uint)divider, (uint)(divider >> 8), (uint)(divider & 0xff),
+           (int)sample_freq, i2s_instance_count);
+
+    // Apply to ALL registered I2S instances on the same PIO block
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        audio_i2s_instance_t *other = i2s_instances[i];
+        if (other && other->pio == inst->pio) {
+            pio_sm_set_clkdiv_int_frac(other->pio, other->pio_sm,
+                                        divider >> 8u, divider & 0xffu);
+            other->freq = sample_freq;
+        }
+    }
+    // Also update the triggering instance (it may not be registered yet during setup)
     pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm,
                                 divider >> 8u, divider & 0xffu);
     inst->freq = sample_freq;
@@ -233,6 +255,7 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->dma_irq = config->dma_irq;
     inst->data_pin = config->data_pin;
     inst->clock_pin_base = config->clock_pin_base;
+    inst->clock_master = config->clock_master;
     inst->playing_buffer = NULL;
     inst->freq = 0;
     inst->enabled = false;
@@ -244,25 +267,54 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
         assert(inst->dma_irq == i2s_instances[0]->dma_irq);
     }
 
-    // GPIO init for data pin
+    // GPIO init for data pin (always)
     pio_gpio_init(inst->pio, config->data_pin);
-
-    // GPIO init for clock pins (BCK + LRCLK)
-    pio_gpio_init(inst->pio, config->clock_pin_base);
-    pio_gpio_init(inst->pio, config->clock_pin_base + 1);
 
     // Claim SM
     pio_sm_claim(inst->pio, inst->pio_sm);
 
-    // Load I2S PIO program once per PIO block
-    if (i2s_pio_program_offset[config->pio] < 0) {
-        i2s_pio_program_offset[config->pio] = pio_add_program(inst->pio, &audio_i2s_24_program);
-    }
-    uint offset = (uint)i2s_pio_program_offset[config->pio];
+    if (config->clock_master) {
+        // ---- MASTER: drives BCK/LRCLK via side-set ----
 
-    // Initialize the PIO state machine
-    audio_i2s_24_program_init(inst->pio, inst->pio_sm, offset,
-                               config->data_pin, config->clock_pin_base);
+        // GPIO init for clock pins (master only)
+        pio_gpio_init(inst->pio, config->clock_pin_base);
+        pio_gpio_init(inst->pio, config->clock_pin_base + 1);
+
+        // Load master PIO program once per PIO block
+        if (i2s_pio_program_offset[config->pio] < 0) {
+            i2s_pio_program_offset[config->pio] =
+                pio_add_program(inst->pio, &audio_i2s_24_program);
+        }
+        uint offset = (uint)i2s_pio_program_offset[config->pio];
+
+        // Initialize with master program (side-set drives BCK/LRCLK)
+        audio_i2s_24_program_init(inst->pio, inst->pio_sm, offset,
+                                   config->data_pin, config->clock_pin_base);
+
+        // Track this instance as the clock master
+        i2s_clock_master_index = (int8_t)i2s_instance_count;  // Will be registered below
+
+        printf("I2S setup: SM%d as MASTER (data GPIO %d, BCK GPIO %d)\n",
+               inst->pio_sm, inst->data_pin, inst->clock_pin_base);
+    } else {
+        // ---- SLAVE: data-only, no clock output ----
+
+        // Do NOT init BCK/LRCLK pins — master owns them
+
+        // Load slave PIO program once per PIO block
+        if (i2s_slave_pio_program_offset[config->pio] < 0) {
+            i2s_slave_pio_program_offset[config->pio] =
+                pio_add_program(inst->pio, &audio_i2s_24_slave_program);
+        }
+        uint offset = (uint)i2s_slave_pio_program_offset[config->pio];
+
+        // Initialize with slave program (no side-set, data pin only)
+        audio_i2s_24_slave_program_init(inst->pio, inst->pio_sm, offset,
+                                         config->data_pin);
+
+        printf("I2S setup: SM%d as SLAVE (data GPIO %d)\n",
+               inst->pio_sm, inst->data_pin);
+    }
 
     // Initialize per-instance silence buffer (DMA-sized, all zeros)
     inst->consumer_buffer_format.format = &inst->consumer_format;
@@ -464,16 +516,36 @@ void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
     // Claim new data pin for PIO
     pio_gpio_init(inst->pio, new_pin);
 
-    // Reinitialize SM with new data pin (clock pins unchanged)
+    // Reinitialize SM with new data pin using the correct program for role
     uint pio_idx = pio_get_index(inst->pio);
-    assert(i2s_pio_program_offset[pio_idx] >= 0);
-    uint offset = (uint)i2s_pio_program_offset[pio_idx];
-    audio_i2s_24_program_init(inst->pio, inst->pio_sm, offset,
-                               new_pin, inst->clock_pin_base);
+    if (inst->clock_master) {
+        assert(i2s_pio_program_offset[pio_idx] >= 0);
+        uint offset = (uint)i2s_pio_program_offset[pio_idx];
+        audio_i2s_24_program_init(inst->pio, inst->pio_sm, offset,
+                                   new_pin, inst->clock_pin_base);
+    } else {
+        assert(i2s_slave_pio_program_offset[pio_idx] >= 0);
+        uint offset = (uint)i2s_slave_pio_program_offset[pio_idx];
+        audio_i2s_24_slave_program_init(inst->pio, inst->pio_sm, offset, new_pin);
+    }
 
     // Restore clock divider (pio_sm_init resets it to default)
     if (inst->freq != 0) {
         i2s_update_pio_frequency(inst, inst->freq);
+    }
+
+    // pio_sm_init() reset this SM's clock divider phase accumulator.
+    // Restart ALL I2S SM dividers on this PIO block so they stay phase-aligned.
+    // Without this, the re-inited SM's divider is at phase 0 while others are
+    // at arbitrary phases — causing permanent bit-level misalignment.
+    {
+        uint32_t sm_mask = 0;
+        for (uint i = 0; i < i2s_instance_count; i++) {
+            if (i2s_instances[i]->pio == inst->pio)
+                sm_mask |= (1u << i2s_instances[i]->pio_sm);
+        }
+        if (sm_mask)
+            pio_clkdiv_restart_sm_mask(inst->pio, sm_mask);
     }
 
     // Clear any stale DMA completion flag, then unmask
@@ -550,17 +622,14 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);
     gpio_set_dir(inst->data_pin, GPIO_IN);
 
-    // Note: BCK/LRCLK pins are NOT released here — they may still be in use
-    // by other I2S instances on the same PIO block.
-
     // Unclaim DMA channel and PIO SM
     dma_channel_unclaim(inst->dma_channel);
     pio_sm_unclaim(inst->pio, inst->pio_sm);
 
     // Remove from instance registry
+    bool was_master = inst->clock_master;
     for (uint i = 0; i < i2s_instance_count; i++) {
         if (i2s_instances[i] == inst) {
-            // Shift remaining entries down
             for (uint j = i; j < i2s_instance_count - 1; j++) {
                 i2s_instances[j] = i2s_instances[j + 1];
             }
@@ -569,8 +638,82 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
         }
     }
 
-    printf("I2S teardown: SM%d, data GPIO %d (instances remaining: %d)\n",
-           inst->pio_sm, inst->data_pin, i2s_instance_count);
+    // Master election bookkeeping
+    if (was_master) {
+        i2s_clock_master_index = -1;
+
+        if (i2s_instance_count == 0) {
+            // Last I2S instance removed — release BCK/LRCLK to high-Z
+            gpio_set_function(inst->clock_pin_base, GPIO_FUNC_NULL);
+            gpio_set_dir(inst->clock_pin_base, GPIO_IN);
+            gpio_set_function(inst->clock_pin_base + 1, GPIO_FUNC_NULL);
+            gpio_set_dir(inst->clock_pin_base + 1, GPIO_IN);
+        }
+        // If other instances remain, do NOT release BCK/LRCLK — the pins
+        // hold their last driven level (no high-Z glitch). The caller is
+        // responsible for promoting a slave to master and restarting in sync.
+    }
+
+    printf("I2S teardown: SM%d %s, data GPIO %d (instances remaining: %d)\n",
+           inst->pio_sm, was_master ? "(was master)" : "(slave)",
+           inst->data_pin, i2s_instance_count);
+}
+
+// ---------------------------------------------------------------------------
+// Atomic frequency update for all I2S instances (called on sample rate change)
+// ---------------------------------------------------------------------------
+
+void audio_i2s_update_all_frequencies(uint32_t sample_freq) {
+    if (i2s_instance_count == 0) return;
+
+    uint32_t divider = i2s_compute_divider(sample_freq);
+
+    // Update divider on ALL instances and build masks for restart.
+    // Two masks: all_sm_mask covers every registered SM (for clkdiv phase reset),
+    // enabled_sm_mask covers only running SMs (for stop + sync restart).
+    uint32_t all_sm_mask = 0;
+    uint32_t enabled_sm_mask = 0;
+    audio_i2s_instance_t *active[PICO_AUDIO_I2S_MAX_INSTANCES];
+    uint active_count = 0;
+    PIO pio = NULL;
+
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        audio_i2s_instance_t *inst = i2s_instances[i];
+        pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm,
+                                    divider >> 8u, divider & 0xffu);
+        inst->freq = sample_freq;
+        all_sm_mask |= (1u << inst->pio_sm);
+        pio = inst->pio;
+
+        if (inst->enabled) {
+            enabled_sm_mask |= (1u << inst->pio_sm);
+            active[active_count++] = inst;
+        }
+    }
+
+    // Reset clkdiv phase for ALL SMs (including disabled ones) so they're
+    // phase-aligned when later re-enabled. Without this, a disabled SM's
+    // divider accumulator drifts and it starts misaligned.
+    if (pio && all_sm_mask) {
+        pio_clkdiv_restart_sm_mask(pio, all_sm_mask);
+    }
+
+    // Restart enabled SMs in sync
+    if (active_count > 0 && pio) {
+        pio_set_sm_mask_enabled(pio, enabled_sm_mask, false);
+        audio_i2s_enable_sync(active, active_count);
+    }
+
+    printf("I2S rate change: all %d instances updated to %d Hz\n",
+           i2s_instance_count, (int)sample_freq);
+}
+
+// ---------------------------------------------------------------------------
+// Master election query
+// ---------------------------------------------------------------------------
+
+int8_t audio_i2s_get_clock_master_index(void) {
+    return i2s_clock_master_index;
 }
 
 // ---------------------------------------------------------------------------
