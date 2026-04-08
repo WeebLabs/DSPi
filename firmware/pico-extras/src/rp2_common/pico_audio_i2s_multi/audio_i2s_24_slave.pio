@@ -1,0 +1,89 @@
+;
+; Copyright (c) 2026 WeebLabs
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; I2S slave output — 24-bit audio, data-only (no BCK/LRCLK output)
+;
+; Cycle-identical to audio_i2s_24.pio master program. Each instruction
+; executes in exactly 1 PIO clock cycle — no delays in either program.
+; IMPORTANT: if delays are ever added to the master, they must be
+; mirrored here to maintain cycle-identity.
+;
+; Must be started in sync with the master via pio_enable_sm_mask_in_sync()
+; so bit positions stay aligned with the master's BCK/LRCLK edges.
+;
+; Pin mapping:
+;   out pins (1 pin) = serial data (unique per instance)
+;   NO side-set      — BCK/LRCLK driven exclusively by the master SM
+;
+; Timing:
+;   Identical to master: 128 PIO clocks per stereo sample.
+;   32 bits/channel x 2 channels x 2 cycles/bit = 128 cycles.
+;   Clock divider must match the master's divider exactly.
+;
+; Autopull must be enabled, threshold 32, shift direction left (MSB-first).
+; FIFO is joined for TX only.
+
+.program audio_i2s_24_slave
+
+.wrap_target
+bitloop1:
+    out pins, 1          ; Right channel data out (BCK falling equivalent)
+    jmp x-- bitloop1     ; (BCK rising equivalent, 31 loop iterations)
+    out pins, 1          ; Last R bit out (LRCLK transition equivalent)
+    set x, 30            ; Reload bit counter (32-bit frame)
+
+bitloop0:
+    out pins, 1          ; Left channel data out (BCK falling equivalent)
+    jmp x-- bitloop0     ; (BCK rising equivalent, 31 loop iterations)
+    out pins, 1          ; Last L bit out (LRCLK transition equivalent)
+public entry_point:
+    set x, 30            ; Reload bit counter — entry point matches master
+.wrap
+
+; Total: 8 instructions. Entry point at instruction 7 (inside .wrap),
+; matching the master's entry_point placement exactly.
+
+% c-sdk {
+
+// ---------------------------------------------------------------------------
+// audio_i2s_24_slave_program_init — Configure a PIO SM for I2S slave (data only)
+//
+// Unlike the master init, this does NOT configure side-set pins or set
+// BCK/LRCLK pin directions. The master SM exclusively owns the clock pins.
+//
+// Parameters:
+//   pio      — PIO block (must be same block as the master SM)
+//   sm       — State machine index (0-3)
+//   offset   — Instruction memory offset from pio_add_program()
+//   data_pin — GPIO for serial audio data (independently assignable)
+// ---------------------------------------------------------------------------
+static inline void audio_i2s_24_slave_program_init(PIO pio, uint sm, uint offset,
+                                                    uint data_pin) {
+    pio_sm_config sm_config = audio_i2s_24_slave_program_get_default_config(offset);
+
+    // Serial data: one output pin (no side-set — slave doesn't drive clocks)
+    sm_config_set_out_pins(&sm_config, data_pin, 1);
+
+    // MSB-first, autopull at 32 bits (one channel per FIFO word)
+    sm_config_set_out_shift(&sm_config, false, true, 32);
+
+    // Join both FIFOs for TX (doubles TX depth to 8 words)
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+
+    // Initialize the state machine
+    pio_sm_init(pio, sm, offset, &sm_config);
+
+    // Configure ONLY the data pin as output — do NOT touch BCK/LRCLK
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, true);
+
+    // Drive data pin low initially
+    pio_sm_set_pins_with_mask(pio, sm, 0, 1u << data_pin);
+
+    // Jump to entry point (matches master's start position)
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_24_slave_offset_entry_point));
+}
+
+%}
