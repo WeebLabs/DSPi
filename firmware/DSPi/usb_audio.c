@@ -1887,6 +1887,23 @@ bool    i2s_mck_enabled = false;             // MCK enabled state
 //   raw 0   => effective 256x (because 256 wraps in uint8_t)
 uint8_t i2s_mck_multiplier = 128;
 
+// 96 kHz + 256x requires a 24.576 MHz MCK derived from a highly fractional
+// divider on the current fixed sys_clk plan. On real hardware this mode has
+// proven unreliable (lock loss / silence), so clamp to 128x for 96 kHz+.
+static inline bool is_mck_multiplier_supported_for_rate(uint16_t mult, uint32_t sample_rate_hz) {
+    return !(mult == 256u && sample_rate_hz >= 96000u);
+}
+
+// Clamp persisted/raw multiplier state for the current rate.
+// Raw encoding: 128 => 128x, 0 => 256x.
+static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
+    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 0u) {
+        i2s_mck_multiplier = 128u;
+        printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
+               (unsigned long)sample_rate_hz);
+    }
+}
+
 // Pin validation helpers
 static bool is_valid_gpio_pin(uint8_t pin) {
     if (pin == 12) return false;                // UART TX
@@ -2801,6 +2818,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             case REQ_SET_MCK_ENABLE: {
                 bool enable = (setup->wValue != 0);
                 if (enable && !i2s_mck_enabled) {
+                    sanitize_mck_multiplier_for_rate(audio_state.freq);
                     audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
                     audio_i2s_mck_set_enabled(true);
                     i2s_mck_enabled = true;
@@ -2849,6 +2867,13 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             case REQ_SET_MCK_MULTIPLIER: {
                 uint16_t mult = setup->wValue;
                 if (mult == 128 || mult == 256) {
+                    if (!is_mck_multiplier_supported_for_rate(mult, audio_state.freq)) {
+                        printf("Rejected MCK %ux at %lu Hz (unsupported)\n",
+                               (unsigned)mult, (unsigned long)audio_state.freq);
+                        resp_buf[0] = PIN_CONFIG_INVALID_PIN;
+                        vendor_send_response(resp_buf, 1);
+                        return true;
+                    }
                     // Keep raw storage compatible with uint8_t persistence:
                     // 256 is represented as 0 (wrap), decoded by MCK update.
                     i2s_mck_multiplier = (mult == 256) ? 0 : (uint8_t)mult;
@@ -2864,6 +2889,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             }
 
             case REQ_GET_MCK_MULTIPLIER: {
+                sanitize_mck_multiplier_for_rate(audio_state.freq);
                 resp_buf[0] = i2s_mck_multiplier;
                 vendor_send_response(resp_buf, 1);
                 return true;

@@ -117,6 +117,21 @@ extern LevellerState leveller_state;
 
 static void reset_usb_feedback_loop(void);
 
+// Raw MCK multiplier encoding is shared with preset/bulk wire format:
+//   128 => 128x
+//   0   => 256x (uint8 wrap)
+//
+// 96 kHz + 256x (24.576 MHz MCK) is unstable on current hardware/clocking, so
+// force 128x whenever that combination is encountered from persisted state.
+static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
+    extern uint8_t i2s_mck_multiplier;
+    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 0u) {
+        i2s_mck_multiplier = 128u;
+        printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
+               (unsigned long)sample_rate_hz);
+    }
+}
+
 static void perform_rate_change(uint32_t new_freq) {
     switch (new_freq) { case 44100: case 48000: case 96000: break; default: new_freq = 44100; }
 
@@ -153,6 +168,7 @@ static void perform_rate_change(uint32_t new_freq) {
     extern bool i2s_mck_enabled;
     extern uint8_t i2s_mck_multiplier;
     if (i2s_mck_enabled) {
+        sanitize_mck_multiplier_for_rate(new_freq);
         audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
     }
 }
@@ -390,6 +406,7 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
     }
     if (any_i2s && i2s_mck_enabled) {
+        sanitize_mck_multiplier_for_rate(audio_state.freq);
         audio_i2s_mck_set_enabled(true);
         audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
     } else if (!any_i2s) {
@@ -897,6 +914,18 @@ int main(void) {
                 // transitions Core 1 mode, and writes the directory to flash.
                 preset_load(pending_preset_slot);
 
+                // Presets can carry persisted raw MCK=0 (256x). Clamp invalid
+                // 96 kHz combinations and apply the effective MCK divider now
+                // so no-type-change loads still update clock state.
+                {
+                    extern bool i2s_mck_enabled;
+                    extern uint8_t i2s_mck_multiplier;
+                    if (i2s_mck_enabled) {
+                        sanitize_mck_multiplier_for_rate(audio_state.freq);
+                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                    }
+                }
+
                 // Build change mask for slots whose type changed
                 uint8_t change_mask = 0;
                 for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
@@ -992,6 +1021,17 @@ int main(void) {
                 float rate = (float)audio_state.freq;
                 dsp_recalculate_all_filters(rate);
                 dsp_update_delay_samples(rate);
+
+                // Bulk apply can also update persisted MCK settings. Keep MCK
+                // clock state coherent even when output types are unchanged.
+                {
+                    extern bool i2s_mck_enabled;
+                    extern uint8_t i2s_mck_multiplier;
+                    if (i2s_mck_enabled) {
+                        sanitize_mck_multiplier_for_rate(audio_state.freq);
+                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                    }
+                }
 
                 // Transition Core 1 mode to match new output enable state
                 Core1Mode new_mode = derive_core1_mode();
