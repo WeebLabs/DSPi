@@ -29,7 +29,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       5
+#define WIRE_FORMAT_VERSION       6   // V6: per-channel preamp + master volume
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -169,6 +169,22 @@ typedef struct __attribute__((packed)) {
 } WireLevellerConfig;                // 16 bytes
 
 // ============================================================================
+// Section 13: Per-Channel Preamp Configuration (16 bytes) — V6+
+// ============================================================================
+typedef struct __attribute__((packed)) {
+    float    preamp_db[WIRE_MAX_INPUT_CHANNELS]; // Per-input-channel preamp (dB), 0=L, 1=R
+    uint8_t  reserved[8];                        // Pad to 16 bytes (future input channels)
+} WirePreampConfig;                              // 16 bytes
+
+// ============================================================================
+// Section 14: Master Volume (16 bytes) — V6+
+// ============================================================================
+typedef struct __attribute__((packed)) {
+    float    master_volume_db;   // Device master volume: -128 (mute sentinel), -127..0 dB range
+    uint8_t  reserved[12];       // Future expansion (pad to 16 bytes)
+} WireMasterVolume;              // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -184,7 +200,9 @@ typedef struct __attribute__((packed)) {
     WireChannelNames    channel_names;                                    //  352
     WireI2SConfig       i2s_config;                                       //   16
     WireLevellerConfig  leveller;                                          //   16
-} WireBulkParams;                    // Total: 2864 bytes
+    WirePreampConfig    preamp;                                            //   16
+    WireMasterVolume    master_volume;                                     //   16
+} WireBulkParams;                    // Total: 2896 bytes
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 

@@ -40,6 +40,7 @@
 #include "pico/multicore.h"
 
 #include <string.h>
+#include <math.h>    // powf(), isfinite() for master volume (db_to_linear() clamps at -60 dB)
 
 // ============================================================================
 // FLASH GEOMETRY
@@ -66,7 +67,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       11
+#define SLOT_DATA_VERSION       12   // V12: per-channel preamp + master volume
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -104,7 +105,8 @@ typedef struct __attribute__((packed)) {
 
     // Slot metadata
     uint16_t slot_occupied;                  // Bitmask: bit N = slot N has valid data
-    uint8_t  padding[2];
+    uint8_t  include_master_volume;          // Whether preset load restores master volume (was padding[0])
+    uint8_t  padding[1];                     // Remaining padding (was padding[1])
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
 } PresetDirectory;
 
@@ -159,6 +161,9 @@ typedef struct __attribute__((packed)) {
     float   leveller_amount;
     float   leveller_max_gain_db;
     float   leveller_gate_threshold_db;
+    // Per-channel preamp + Master volume (V12)
+    float   preamp_db_per_ch[NUM_INPUT_CHANNELS];  // Per-input-channel preamp (dB)
+    float   master_volume_db;                       // Device master volume (-128 mute, -127..0 dB)
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -195,9 +200,12 @@ typedef struct __attribute__((packed)) {
 // EXTERNAL VARIABLES (defined in usb_audio.c / dsp_pipeline.c)
 // ============================================================================
 
-extern volatile float global_preamp_db;
-extern volatile int32_t global_preamp_mul;
-extern volatile float global_preamp_linear;
+extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
+extern volatile int32_t global_preamp_mul[NUM_INPUT_CHANNELS];
+extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
+extern volatile float master_volume_db;
+extern volatile float master_volume_linear;
+extern volatile int32_t master_volume_q15;
 extern volatile float channel_gain_db[3];
 extern volatile int32_t channel_gain_mul[3];
 extern volatile bool channel_mute[3];
@@ -379,8 +387,9 @@ static void dir_ensure(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;     // Default to slot 0
-    dir_cache.include_pins = 0;         // Don't include pins by default
-    dir_cache.slot_occupied = 0;        // All slots empty
+    dir_cache.include_pins = 0;              // Don't include pins by default
+    dir_cache.include_master_volume = 0;     // Don't include master volume by default
+    dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
     strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
     dir_cache_valid = true;
@@ -402,8 +411,8 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // EQ
     memcpy(slot->filter_recipes, (void *)filter_recipes, sizeof(slot->filter_recipes));
 
-    // Preamp
-    slot->preamp_db = global_preamp_db;
+    // Preamp — legacy field stores channel 0 for backward compat
+    slot->preamp_db = global_preamp_db[0];
 
     // Bypass
     slot->bypass = bypass_master_eq ? 1 : 0;
@@ -471,6 +480,11 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->leveller_max_gain_db = leveller_config.max_gain_db;
     slot->leveller_gate_threshold_db = leveller_config.gate_threshold_db;
 
+    // Per-channel preamp + Master volume (V12)
+    for (int i = 0; i < NUM_INPUT_CHANNELS; i++)
+        slot->preamp_db_per_ch[i] = global_preamp_db[i];
+    slot->master_volume_db = master_volume_db;
+
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
     size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
@@ -479,16 +493,49 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
 
 // Apply a validated PresetSlot to the live DSP state.
 // `include_pins` controls whether pin config is restored.
+// `include_master_vol` controls whether master volume is restored.
 // Does NOT trigger filter recalculation — caller must do that.
-static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
+static void apply_slot_to_live(const PresetSlot *slot, bool include_pins,
+                               bool include_master_vol) {
     // EQ
     memcpy((void *)filter_recipes, slot->filter_recipes, sizeof(filter_recipes));
 
-    // Preamp
-    global_preamp_db = slot->preamp_db;
-    float linear = db_to_linear(slot->preamp_db);
-    global_preamp_mul = (int32_t)(linear * (float)(1 << 28));
-    global_preamp_linear = linear;
+    // Preamp — V12+ has per-channel values, older versions use single legacy field
+    if (slot->version >= 12) {
+        for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
+            global_preamp_db[i] = slot->preamp_db_per_ch[i];
+            float linear = db_to_linear(slot->preamp_db_per_ch[i]);
+            global_preamp_mul[i] = (int32_t)(linear * (float)(1 << 28));
+            global_preamp_linear[i] = linear;
+        }
+    } else {
+        // Legacy: apply single preamp_db to all channels
+        for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
+            global_preamp_db[i] = slot->preamp_db;
+            float linear = db_to_linear(slot->preamp_db);
+            global_preamp_mul[i] = (int32_t)(linear * (float)(1 << 28));
+            global_preamp_linear[i] = linear;
+        }
+    }
+
+    // Master volume — only restored if the directory flag allows it and slot is V12+.
+    // Uses powf() instead of db_to_linear() because db_to_linear() clamps at -60 dB
+    // and master volume ranges to -127 dB.
+    if (include_master_vol && slot->version >= 12) {
+        float db = slot->master_volume_db;
+        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;  // NaN/Inf → unity (safe default)
+        if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
+        if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
+        master_volume_db = db;
+        if (db <= MASTER_VOL_MUTE_DB) {
+            master_volume_linear = 0.0f;
+            master_volume_q15    = 0;
+        } else {
+            float linear = powf(10.0f, db / 20.0f);
+            master_volume_linear = linear;
+            master_volume_q15    = (int32_t)(linear * 32768.0f);
+        }
+    }
 
     // Bypass
     bypass_master_eq = (slot->bypass != 0);
@@ -680,7 +727,8 @@ uint8_t preset_load(uint8_t slot) {
             preset_loading = false;
             return PRESET_ERR_CRC;
         }
-        apply_slot_to_live(s, dir_cache.include_pins != 0);
+        apply_slot_to_live(s, dir_cache.include_pins != 0,
+                               dir_cache.include_master_volume != 0);
     } else {
         // Slot not configured — apply factory defaults
         apply_factory_defaults();
@@ -747,8 +795,9 @@ uint8_t preset_delete(uint8_t slot) {
     preset_mute_counter = flash_mute_hold_samples();
     preset_loading = true;
 
-    // Update directory — clear occupied bit but keep slot selected if active
+    // Update directory — clear occupied bit and name, keep slot selected if active
     dir_cache.slot_occupied &= ~(1u << slot);
+    memset(dir_cache.slot_names[slot], 0, PRESET_NAME_LEN);
     dir_flush();
 
     // If deleting the active slot, apply factory defaults to live state
@@ -801,13 +850,14 @@ uint8_t preset_set_name(uint8_t slot, const char *name) {
 
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,
-                          uint8_t *include_pins) {
+                          uint8_t *include_pins, uint8_t *include_master_volume) {
     dir_ensure();
     *slot_occupied = dir_cache.slot_occupied;
     *startup_mode = dir_cache.startup_mode;
     *default_slot = dir_cache.default_slot;
     *last_active = dir_cache.last_active_slot;
     *include_pins = dir_cache.include_pins;
+    *include_master_volume = dir_cache.include_master_volume;
 }
 
 uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot) {
@@ -826,6 +876,12 @@ uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot) {
 void preset_set_include_pins(uint8_t include) {
     dir_ensure();
     dir_cache.include_pins = include ? 1 : 0;
+    dir_flush();
+}
+
+void preset_set_include_master_volume(uint8_t include) {
+    dir_ensure();
+    dir_cache.include_master_volume = include ? 1 : 0;
     dir_flush();
 }
 
@@ -877,6 +933,7 @@ static bool migrate_legacy(void) {
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;
     dir_cache.include_pins = 0;
+    dir_cache.include_master_volume = 0;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
     dir_cache_valid = true;
@@ -911,7 +968,8 @@ int preset_boot_load(void) {
         if ((dir_cache.slot_occupied & (1u << target_slot))) {
             const PresetSlot *s = validate_slot(target_slot);
             if (s) {
-                apply_slot_to_live(s, dir_cache.include_pins != 0);
+                apply_slot_to_live(s, dir_cache.include_pins != 0,
+                               dir_cache.include_master_volume != 0);
             } else {
                 // Corrupt data — fall back to factory defaults
                 apply_factory_defaults();
@@ -929,7 +987,7 @@ int preset_boot_load(void) {
         // Migration succeeded; slot 0 is now populated.  Load it.
         const PresetSlot *s = validate_slot(0);
         if (s) {
-            apply_slot_to_live(s, false);
+            apply_slot_to_live(s, false, false);  // Legacy migration: don't override pins or master vol
         } else {
             apply_factory_defaults();
         }
@@ -986,10 +1044,17 @@ int flash_load_params(void) {
 static void apply_factory_defaults(void) {
     dsp_init_default_filters();
 
-    // Preamp
-    global_preamp_db = 0.0f;
-    global_preamp_mul = (1 << 28);
-    global_preamp_linear = 1.0f;
+    // Preamp — reset all input channels to unity
+    for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
+        global_preamp_db[i]      = 0.0f;
+        global_preamp_mul[i]     = (1 << 28);
+        global_preamp_linear[i]  = 1.0f;
+    }
+
+    // Master volume — reset to unity (no attenuation)
+    master_volume_db     = MASTER_VOL_MAX_DB;
+    master_volume_linear = 1.0f;
+    master_volume_q15    = 32768;
 
     // Bypass
     bypass_master_eq = false;

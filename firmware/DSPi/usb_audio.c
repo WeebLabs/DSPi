@@ -71,10 +71,12 @@ volatile bool stream_restart_resync_pending = false;
 //  3. Delay line contents from the old preset are zeroed, preventing stale audio
 //     from bleeding through when delay length changes.
 volatile bool preset_load_pending = false;
+volatile uint8_t pending_preset_load_slot = 0;
 volatile bool save_params_pending = false;   // Legacy REQ_SAVE_PARAMS (deferred)
 volatile bool preset_save_pending = false;
-volatile bool preset_delete_pending = false;
-volatile uint8_t pending_preset_slot = 0;
+volatile uint8_t pending_preset_save_slot = 0;
+volatile uint16_t preset_delete_mask = 0;  // Bitmask of slots pending delete
+volatile bool factory_reset_pending = false;
 
 // SPSC ring buffer: USB audio ISR pushes raw packets, main loop consumes
 // and runs the DSP pipeline.  Placed in RAM for flash-operation safety.
@@ -100,6 +102,10 @@ uint8_t flash_set_startup_slot = 0;
 
 volatile bool flash_set_include_pins_pending = false;
 uint8_t flash_set_include_pins_val = 0;
+
+// Deferred include_master_volume directory update (flash write must happen on main loop)
+volatile bool flash_set_include_master_vol_pending = false;
+uint8_t flash_set_include_master_vol_val = 0;
 
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
@@ -132,9 +138,20 @@ static void _vendor_set_complete(__unused struct usb_endpoint *ep,
                              _vendor_set_ack_done);
 }
 
-volatile float global_preamp_db = 0.0f;
-volatile int32_t global_preamp_mul = 268435456;
-volatile float global_preamp_linear = 1.0f;
+// Per-input-channel preamp gain.  Indexed by input channel (0=USB L, 1=USB R).
+// Arrays sized by NUM_INPUT_CHANNELS so adding future inputs (e.g. S/PDIF)
+// only requires changing that constant.
+volatile float global_preamp_db[NUM_INPUT_CHANNELS]      = {[0 ... NUM_INPUT_CHANNELS-1] = 0.0f};
+volatile int32_t global_preamp_mul[NUM_INPUT_CHANNELS]    = {[0 ... NUM_INPUT_CHANNELS-1] = 268435456};  // Unity = 1<<28 (Q28)
+volatile float global_preamp_linear[NUM_INPUT_CHANNELS]   = {[0 ... NUM_INPUT_CHANNELS-1] = 1.0f};
+
+// Master volume — device-side ceiling on all output.  Applied post-output-gain,
+// does NOT affect loudness compensation, leveller, or any other DSP stage.
+// Range: MASTER_VOL_MIN_DB (-127) to MASTER_VOL_MAX_DB (0), with
+// MASTER_VOL_MUTE_DB (-128) as sentinel for true silence.
+volatile float master_volume_db       = MASTER_VOL_MAX_DB;   // 0 dB = unity (no attenuation)
+volatile float master_volume_linear   = 1.0f;
+volatile int32_t master_volume_q15    = 32768;                // Unity in Q15 (for RP2040 path)
 
 // Per-channel gain and mute (legacy 3-channel interface for flash compatibility)
 volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
@@ -206,6 +223,40 @@ void get_default_channel_name(int ch, char *buf) {
 #endif
     if (ch >= 0 && ch < NUM_CHANNELS) {
         strncpy(buf, defaults[ch], PRESET_NAME_LEN - 1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preamp & Master Volume helpers
+// ---------------------------------------------------------------------------
+
+// Update a single input channel's preamp gain from a dB value.
+// Computes both float (RP2350) and Q28 (RP2040) representations so the
+// audio callback can read the correct format without conversion.
+static void update_preamp(uint8_t ch, float db) {
+    if (!isfinite(db)) return;  // Reject NaN/Inf — would propagate through entire audio path
+    global_preamp_db[ch] = db;
+    float linear = powf(10.0f, db / 20.0f);
+    global_preamp_mul[ch]    = (int32_t)(linear * (float)(1 << 28));
+    global_preamp_linear[ch] = linear;
+}
+
+// Update the device-side master volume from a dB value.
+// Clamps to [MASTER_VOL_MUTE_DB .. MASTER_VOL_MAX_DB].
+// MASTER_VOL_MUTE_DB (-128) is a sentinel meaning true silence (−∞ dB).
+static void update_master_volume(float db) {
+    if (!isfinite(db)) return;  // Reject NaN/Inf — would zero-out or corrupt all output
+    if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
+    if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
+    master_volume_db = db;
+    if (db <= MASTER_VOL_MUTE_DB) {
+        // Mute sentinel — true silence
+        master_volume_linear = 0.0f;
+        master_volume_q15    = 0;
+    } else {
+        float linear = powf(10.0f, db / 20.0f);
+        master_volume_linear = linear;
+        master_volume_q15    = (int32_t)(linear * 32768.0f);
     }
 }
 
@@ -504,10 +555,16 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // ------------------------------------------------------------------------
     const float inv_32768 = 1.0f / 32768.0f;
 
+    // vol_mul: USB host volume (raw) — used for loudness compensation only.
+    // vol_mul_master: host volume × master volume — used for output gain.
+    // Keeping them separate ensures master volume never affects loudness curves.
     float vol_mul = audio_state.mute ? 0.0f : (float)audio_state.vol_mul * inv_32768;
     vol_mul *= preset_mute_gain;
+    float vol_mul_master = vol_mul * master_volume_linear;
 
-    float preamp = global_preamp_linear;
+    // Per-input-channel preamp (snapshot for this block)
+    float preamp_l = global_preamp_linear[0];
+    float preamp_r = global_preamp_linear[1];
     bool is_bypassed = bypass_master_eq;
 
     // Snapshot loudness state for this packet
@@ -529,15 +586,15 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         for (uint32_t i = 0; i < sample_count; i++) {
             int32_t left  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 8;
             int32_t right = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 8;
-            buf_l[i] = (float)left * inv_8388608 * preamp;
-            buf_r[i] = (float)right * inv_8388608 * preamp;
+            buf_l[i] = (float)left * inv_8388608 * preamp_l;
+            buf_r[i] = (float)right * inv_8388608 * preamp_r;
             p += 6;
         }
     } else {
         const int16_t *in = (const int16_t *)data;
         for (uint32_t i = 0; i < sample_count; i++) {
-            buf_l[i] = (float)in[i*2] * inv_32768 * preamp;
-            buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp;
+            buf_l[i] = (float)in[i*2] * inv_32768 * preamp_l;
+            buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp_r;
         }
     }
 
@@ -640,7 +697,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
         // Dispatch to Core 1
         core1_eq_work.sample_count = sample_count;
-        core1_eq_work.vol_mul = vol_mul;
+        core1_eq_work.vol_mul = vol_mul_master;  // Core 1 uses master-scaled volume
         core1_eq_work.delay_write_idx = delay_write_idx;
         core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
         core1_eq_work.spdif_out[1] = audio_buf[2] ? (int32_t *)audio_buf[2]->buffer->bytes : NULL;
@@ -659,8 +716,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
                 }
             }
+            // Output gain uses vol_mul_master (host vol × master vol)
             float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                         : matrix_mixer.outputs[out].gain_linear * vol_mul;
+                         : matrix_mixer.outputs[out].gain_linear * vol_mul_master;
             if (gain == 0.0f) {
                 memset(buf_out[out], 0, sample_count * sizeof(float));
             } else if (gain != 1.0f) {
@@ -737,8 +795,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
                 }
             }
+            // Output gain uses vol_mul_master (host vol × master vol)
             float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                         : matrix_mixer.outputs[out].gain_linear * vol_mul;
+                         : matrix_mixer.outputs[out].gain_linear * vol_mul_master;
             if (gain == 0.0f) {
                 memset(buf_out[out], 0, sample_count * sizeof(float));
             } else if (gain != 1.0f) {
@@ -824,13 +883,18 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // RP2040 BLOCK-BASED FIXED-POINT PIPELINE WITH MATRIX MIXER
     // 2 SPDIF stereo pairs + PDM sub, dual-core EQ worker
     // ------------------------------------------------------------------------
+    // vol_mul: USB host volume (raw Q15) — used for loudness compensation only.
+    // vol_mul_master: host volume × master volume (Q15) — used for output gain.
     int32_t vol_mul = audio_state.mute ? 0 : audio_state.vol_mul;
     int32_t preset_mute_gain_q15 = (int32_t)(preset_mute_gain * 32768.0f + 0.5f);
     if (preset_mute_gain_q15 < 0) preset_mute_gain_q15 = 0;
     if (preset_mute_gain_q15 > 32768) preset_mute_gain_q15 = 32768;
     vol_mul = fast_mul_q15(vol_mul, preset_mute_gain_q15);
+    int32_t vol_mul_master = fast_mul_q15(vol_mul, master_volume_q15);
 
-    int32_t preamp = global_preamp_mul;
+    // Per-input-channel preamp (snapshot for this block)
+    int32_t preamp_l = global_preamp_mul[0];
+    int32_t preamp_r = global_preamp_mul[1];
     bool is_bypassed = bypass_master_eq;
 
     // Snapshot loudness state for this packet
@@ -849,8 +913,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             // 24-bit -> Q28: left-justify to [31:8] then >>2 = net <<6
             int32_t raw_left_32  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 2;
             int32_t raw_right_32 = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 2;
-            buf_l[i] = fast_mul_q28(raw_left_32, preamp);
-            buf_r[i] = fast_mul_q28(raw_right_32, preamp);
+            buf_l[i] = fast_mul_q28(raw_left_32, preamp_l);
+            buf_r[i] = fast_mul_q28(raw_right_32, preamp_r);
             p += 6;
         }
     } else {
@@ -858,8 +922,8 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         for (uint32_t i = 0; i < sample_count; i++) {
             int32_t raw_left_32 = (int32_t)in[i*2] << 14;
             int32_t raw_right_32 = (int32_t)in[i*2+1] << 14;
-            buf_l[i] = fast_mul_q28(raw_left_32, preamp);
-            buf_r[i] = fast_mul_q28(raw_right_32, preamp);
+            buf_l[i] = fast_mul_q28(raw_left_32, preamp_l);
+            buf_r[i] = fast_mul_q28(raw_right_32, preamp_r);
         }
     }
 
@@ -957,7 +1021,7 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
         // Dispatch to Core 1
         core1_eq_work.sample_count = sample_count;
-        core1_eq_work.vol_mul = vol_mul;
+        core1_eq_work.vol_mul = vol_mul_master;  // Core 1 uses master-scaled volume
         core1_eq_work.delay_write_idx = delay_write_idx;
         core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
         core1_eq_work.work_done = false;
@@ -973,8 +1037,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 if (!is_bypassed && !channel_bypassed[eq_ch])
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
             }
+            // Output gain uses vol_mul_master (host vol × master vol, Q15)
             int32_t gain = matrix_mixer.outputs[out].mute ? 0
-                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul);
+                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul_master);
             if (gain == 0) {
                 memset(buf_out[out], 0, sample_count * sizeof(int32_t));
             } else {
@@ -1048,8 +1113,9 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 if (!is_bypassed && !channel_bypassed[eq_ch])
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
             }
+            // Output gain uses vol_mul_master (host vol × master vol, Q15)
             int32_t gain = matrix_mixer.outputs[out].mute ? 0
-                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul);
+                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul_master);
             if (gain == 0) {
                 memset(buf_out[out], 0, sample_count * sizeof(int32_t));
             } else {
@@ -1496,13 +1562,35 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             break;
 
         case REQ_SET_PREAMP:
+            // Legacy: sets ALL input channels to the same preamp value.
+            // Payload: 4 bytes (float dB).
             if (buffer->data_len >= 4) {
                 float db;
                 memcpy(&db, vendor_rx_buf, 4);
-                global_preamp_db = db;
-                float linear = powf(10.0f, db / 20.0f);
-                global_preamp_mul = (int32_t)(linear * (float)(1<<28));
-                global_preamp_linear = linear;
+                for (int ch = 0; ch < NUM_INPUT_CHANNELS; ch++)
+                    update_preamp(ch, db);
+            }
+            break;
+
+        case REQ_SET_PREAMP_CH: {
+            // Per-channel preamp.  wValue = input channel index (0=L, 1=R).
+            // Payload: 4 bytes (float dB).
+            uint8_t ch = vendor_last_wValue & 0xFF;
+            if (ch < NUM_INPUT_CHANNELS && buffer->data_len >= 4) {
+                float db;
+                memcpy(&db, vendor_rx_buf, 4);
+                update_preamp(ch, db);
+            }
+            break;
+        }
+
+        case REQ_SET_MASTER_VOLUME:
+            // Set device-side master volume ceiling.
+            // Payload: 4 bytes (float dB).  -128 = mute, -127..0 = attenuation range.
+            if (buffer->data_len >= 4) {
+                float db;
+                memcpy(&db, vendor_rx_buf, 4);
+                update_master_volume(db);
             }
             break;
 
@@ -1816,6 +1904,18 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             break;
         }
 
+        case REQ_SET_INCLUDE_MASTER_VOL: {
+            // Set whether preset load restores master volume.
+            // Deferred to main loop — flash write in dir_flush().
+            // Payload: 1 byte (0 = don't restore, 1 = restore on load).
+            if (buffer->data_len >= 1) {
+                flash_set_include_master_vol_val = vendor_rx_buf[0];
+                __dmb();
+                flash_set_include_master_vol_pending = true;
+            }
+            break;
+        }
+
         case REQ_SET_CHANNEL_NAME: {
             // wValue = channel index, payload = 1-32 bytes of name
             uint8_t ch = vendor_last_wValue & 0xFF;
@@ -2081,8 +2181,29 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
 
         switch (setup->bRequest) {
             case REQ_GET_PREAMP: {
-                float current_db = global_preamp_db;
+                // Legacy: returns channel 0's preamp value (backward compat)
+                float current_db = global_preamp_db[0];
                 memcpy(resp_buf, &current_db, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_PREAMP_CH: {
+                // Per-channel preamp GET.  wValue = input channel index.
+                uint8_t ch = (uint8_t)setup->wValue;
+                if (ch < NUM_INPUT_CHANNELS) {
+                    float current_db = global_preamp_db[ch];
+                    memcpy(resp_buf, &current_db, 4);
+                    vendor_send_response(resp_buf, 4);
+                    return true;
+                }
+                return false;
+            }
+
+            case REQ_GET_MASTER_VOLUME: {
+                // Returns device master volume in dB (-128 = mute, -127..0 range)
+                float db = master_volume_db;
+                memcpy(resp_buf, &db, 4);
                 vendor_send_response(resp_buf, 4);
                 return true;
             }
@@ -2280,10 +2401,11 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             }
 
             case REQ_FACTORY_RESET: {
-                flash_factory_reset();
-                dsp_recalculate_all_filters((float)audio_state.freq);
-                dsp_update_delay_samples((float)audio_state.freq);
-                loudness_recompute_pending = true;
+                // Deferred to main loop — same pipeline protection as preset
+                // load/save/delete: mute, Core 1 sync, delay line zero, and
+                // output type switch if the live config had I2S outputs.
+                factory_reset_pending = true;
+                __dmb();
                 usb_start_tiny_control_in_transfer(FLASH_OK, 1);
                 return true;
             }
@@ -2489,7 +2611,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 if (slot >= PRESET_SLOTS) {
                     resp_buf[0] = PRESET_ERR_INVALID_SLOT;
                 } else {
-                    pending_preset_slot = slot;
+                    pending_preset_save_slot = slot;
                     preset_save_pending = true;
                     __dmb();
                     resp_buf[0] = PRESET_OK;
@@ -2510,7 +2632,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 if (slot >= PRESET_SLOTS) {
                     resp_buf[0] = PRESET_ERR_INVALID_SLOT;
                 } else {
-                    pending_preset_slot = slot;
+                    pending_preset_load_slot = slot;
                     preset_load_pending = true;
                     __dmb();
                     resp_buf[0] = PRESET_OK;
@@ -2528,8 +2650,7 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 if (slot >= PRESET_SLOTS) {
                     resp_buf[0] = PRESET_ERR_INVALID_SLOT;
                 } else {
-                    pending_preset_slot = slot;
-                    preset_delete_pending = true;
+                    preset_delete_mask |= (1u << slot);
                     __dmb();
                     resp_buf[0] = PRESET_OK;
                 }
@@ -2551,32 +2672,34 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             }
 
             case REQ_PRESET_GET_DIR: {
-                // Returns 6-byte directory summary:
+                // Returns 7-byte directory summary:
                 //   [0-1] slot_occupied bitmask (little-endian u16)
                 //   [2]   startup_mode
                 //   [3]   default_slot
                 //   [4]   last_active_slot
                 //   [5]   include_pins
+                //   [6]   include_master_volume  (V12+, old apps request 6 bytes)
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins;
+                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
                 preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins);
+                                     &last_active, &inc_pins, &inc_master_vol);
                 resp_buf[0] = occupied & 0xFF;
                 resp_buf[1] = occupied >> 8;
                 resp_buf[2] = mode;
                 resp_buf[3] = def_slot;
                 resp_buf[4] = last_active;
                 resp_buf[5] = inc_pins;
-                vendor_send_response(resp_buf, 6);
+                resp_buf[6] = inc_master_vol;
+                vendor_send_response(resp_buf, 7);
                 return true;
             }
 
             case REQ_PRESET_GET_STARTUP: {
                 // Returns 3 bytes: startup_mode, default_slot, last_active
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins;
+                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
                 preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins);
+                                     &last_active, &inc_pins, &inc_master_vol);
                 resp_buf[0] = mode;
                 resp_buf[1] = def_slot;
                 resp_buf[2] = last_active;
@@ -2586,10 +2709,21 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
 
             case REQ_PRESET_GET_INCLUDE_PINS: {
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins;
+                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
                 preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins);
+                                     &last_active, &inc_pins, &inc_master_vol);
                 resp_buf[0] = inc_pins;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_INCLUDE_MASTER_VOL: {
+                // Returns whether preset load restores master volume (0/1).
+                uint16_t occupied;
+                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
+                preset_get_directory(&occupied, &mode, &def_slot,
+                                     &last_active, &inc_pins, &inc_master_vol);
+                resp_buf[0] = inc_master_vol;
                 vendor_send_response(resp_buf, 1);
                 return true;
             }

@@ -17,11 +17,15 @@
 #include "leveller.h"
 
 #include <string.h>
+#include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
 
 // External variables (defined in usb_audio.c)
-extern volatile float global_preamp_db;
-extern volatile int32_t global_preamp_mul;
-extern volatile float global_preamp_linear;
+extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
+extern volatile int32_t global_preamp_mul[NUM_INPUT_CHANNELS];
+extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
+extern volatile float master_volume_db;
+extern volatile float master_volume_linear;
+extern volatile int32_t master_volume_q15;
 extern volatile float channel_gain_db[3];
 extern volatile int32_t channel_gain_mul[3];
 extern volatile float channel_gain_linear[3];
@@ -74,7 +78,7 @@ void bulk_params_collect(WireBulkParams *out) {
     out->header.fw_version_minor = FW_VERSION_MINOR;
 
     // Global params
-    out->global.preamp_gain_db = global_preamp_db;
+    out->global.preamp_gain_db = global_preamp_db[0];  // Legacy field: channel 0
     out->global.bypass = bypass_master_eq ? 1 : 0;
     out->global.loudness_enabled = loudness_enabled ? 1 : 0;
     out->global.loudness_ref_spl = loudness_ref_spl;
@@ -158,6 +162,13 @@ void bulk_params_collect(WireBulkParams *out) {
     out->leveller.amount = leveller_config.amount;
     out->leveller.max_gain_db = leveller_config.max_gain_db;
     out->leveller.gate_threshold_db = leveller_config.gate_threshold_db;
+
+    // Per-channel preamp (V6+)
+    for (int i = 0; i < NUM_INPUT_CHANNELS && i < WIRE_MAX_INPUT_CHANNELS; i++)
+        out->preamp.preamp_db[i] = global_preamp_db[i];
+
+    // Master volume (V6+)
+    out->master_volume.master_volume_db = master_volume_db;
 }
 
 // ============================================================================
@@ -165,8 +176,8 @@ void bulk_params_collect(WireBulkParams *out) {
 // ============================================================================
 
 int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
-    // Validate header (accept V2-V4 for backward compat)
-    // V2: lacks I2S + leveller sections, V3: lacks leveller section
+    // Validate header (accept V2-V6 for backward compat)
+    // V2: no I2S/leveller/preamp/master.  V3-V4: no preamp/master.  V5: no preamp/master.  V6: current.
     if (in->header.format_version < 2 || in->header.format_version > WIRE_FORMAT_VERSION)
         return -1;
 
@@ -182,17 +193,25 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         return -3;
     if (in->header.num_output_channels != NUM_OUTPUT_CHANNELS)
         return -3;
-    // Accept V2 (2832 bytes, no I2S section) or V3 (2848 bytes, with I2S)
-    uint16_t v2_size = sizeof(WireBulkParams) - sizeof(WireI2SConfig);
-    if (in->header.payload_length != sizeof(WireBulkParams) &&
-        in->header.payload_length != v2_size)
+    // Accept payload sizes from V2 through current.
+    // V2: no I2S, no leveller, no preamp/master.  V3/V4: no preamp/master.
+    // V5: no preamp/master sections.  V6: current full size.
+    uint16_t v5_size = sizeof(WireBulkParams) - sizeof(WirePreampConfig) - sizeof(WireMasterVolume);
+    uint16_t v2_size = v5_size - sizeof(WireI2SConfig) - sizeof(WireLevellerConfig);
+    if (in->header.payload_length < v2_size ||
+        in->header.payload_length > sizeof(WireBulkParams))
         return -4;
 
-    // Global params
-    global_preamp_db = in->global.preamp_gain_db;
-    float linear = db_to_linear(in->global.preamp_gain_db);
-    global_preamp_mul = (int32_t)(linear * (float)(1 << 28));
-    global_preamp_linear = linear;
+    // Global params — preamp from legacy field first (overridden by V6+ per-channel below)
+    {
+        float db = in->global.preamp_gain_db;
+        float linear = db_to_linear(db);
+        for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
+            global_preamp_db[i]      = db;
+            global_preamp_mul[i]     = (int32_t)(linear * (float)(1 << 28));
+            global_preamp_linear[i]  = linear;
+        }
+    }
 
     bypass_master_eq = (in->global.bypass != 0);
 
@@ -283,9 +302,9 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         channel_names[ch][PRESET_NAME_LEN - 1] = '\0';  // Enforce NUL termination
     }
 
-    // I2S configuration (V3 payloads only — V2 payloads skip this)
+    // I2S configuration (V3+ payloads — V2 payloads skip this)
     if (in->header.format_version >= 3 &&
-        in->header.payload_length >= sizeof(WireBulkParams)) {
+        in->header.payload_length >= v5_size) {
         extern uint8_t output_types[];
         extern uint8_t i2s_bck_pin;
         extern uint8_t i2s_mck_pin;
@@ -323,6 +342,36 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     }
     leveller_update_pending = true;
     leveller_reset_pending = true;
+
+    // Per-channel preamp (V6+ payloads — overrides the legacy single value set above)
+    if (in->header.format_version >= 6) {
+        for (int i = 0; i < NUM_INPUT_CHANNELS && i < WIRE_MAX_INPUT_CHANNELS; i++) {
+            float db = in->preamp.preamp_db[i];
+            float linear = db_to_linear(db);
+            global_preamp_db[i]      = db;
+            global_preamp_mul[i]     = (int32_t)(linear * (float)(1 << 28));
+            global_preamp_linear[i]  = linear;
+        }
+    }
+
+    // Master volume (V6+ payloads — bulk params always applies, ignores directory flag).
+    // Uses powf() instead of db_to_linear() because db_to_linear() clamps at -60 dB
+    // and master volume ranges to -127 dB.
+    if (in->header.format_version >= 6) {
+        float db = in->master_volume.master_volume_db;
+        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;  // NaN/Inf → unity
+        if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
+        if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
+        master_volume_db = db;
+        if (db <= MASTER_VOL_MUTE_DB) {
+            master_volume_linear = 0.0f;
+            master_volume_q15    = 0;
+        } else {
+            float linear = powf(10.0f, db / 20.0f);
+            master_volume_linear = linear;
+            master_volume_q15    = (int32_t)(linear * 32768.0f);
+        }
+    }
 
     return 0;
 }

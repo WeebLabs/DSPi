@@ -20,8 +20,10 @@
 14. [Pin Configuration](#pin-configuration)
 15. [Core 1 Architecture](#core-1-architecture)
 16. [RP2040 vs RP2350 Comparison](#rp2040-vs-rp2350-comparison)
-17. [Memory Layout](#memory-layout)
-18. [Performance Characteristics](#performance-characteristics)
+17. [Per-Channel Input Preamp](#per-channel-input-preamp)
+18. [Master Volume](#master-volume)
+19. [Memory Layout](#memory-layout)
+20. [Performance Characteristics](#performance-characteristics)
 
 ---
 
@@ -34,8 +36,10 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 - **RP2040:** 5 output channels — 2 S/PDIF stereo pairs (4 channels) + 1 PDM sub
 
 **Key capabilities:**
+- Per-channel input preamp (independent gain per USB input channel)
 - Parametric EQ: 11 channels on RP2350 (2 master + 9 outputs), 7 channels on RP2040 (2 master + 5 outputs)
 - Matrix mixer with per-output gain, mute, phase invert, and delay
+- Master volume: device-side attenuation-only ceiling on all outputs (post-output-gain)
 - BS2B crossfeed for headphone listening
 - ISO 226:2003 loudness compensation
 - Per-output configurable delay lines
@@ -235,26 +239,26 @@ The DSP pipeline is decoupled from the USB IRQ via a lock-free SPSC ring buffer 
 5. **Buffer return** — Give completed buffers to consumer pools for DMA
 
 ### RP2350 Float Pipeline
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-09*
 
 All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
 | Stage | Description |
 |-------|-------------|
-| Input conversion | int16 → float, preamp gain |
+| Input conversion | int16 → float, per-channel preamp gain (`global_preamp_mul[ch]`) |
 | Loudness | 2 SVF shelf filters (low shelf + high shelf), volume-dependent |
 | Master EQ | Block-based `dsp_process_channel_block()`, 10 bands per channel, hybrid SVF/biquad |
 | Volume Leveller | Upward RMS compressor on master L/R with gain-reduction limiter (float throughout) |
 | Crossfeed | BS2B lowpass + allpass (ILD + ITD) |
 | Matrix mixing | Block-based: 2 inputs × 9 outputs with gain/phase |
 | Output EQ | Block-based, 10 bands per output (Core 0: outputs 0-1, Core 1: outputs 2-7) |
-| Output gain | Per-output gain × master volume |
+| Output gain | Per-output gain × host volume × master volume |
 | Delay | Float circular buffers, 8192 samples max |
 | SPDIF output | Float → int16 conversion, 4 stereo pairs |
 | PDM output | Float → Q28 for sigma-delta modulation |
 
 ### RP2040 Fixed-Point Pipeline
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-09*
 
 Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixed-point (28 fractional bits). 2 S/PDIF stereo pairs + 1 PDM sub (5 output channels).
 
@@ -262,7 +266,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 
 | Stage | Description |
 |-------|-------------|
-| Input conversion | int16 → Q28 (shift left 14), preamp via `fast_mul_q28()` — block loop to `buf_l[192]`, `buf_r[192]` |
+| Input conversion | int16 → Q28 (shift left 14), per-channel preamp via `fast_mul_q28()` (`global_preamp_mul[ch]`) — block loop to `buf_l[192]`, `buf_r[192]` |
 | Loudness | 2 biquads per-sample via `fast_mul_q28()` (Q28 coefficients, state coupling) |
 | Master EQ | **Block-based** `dsp_process_channel_block()`, 10 bands per channel |
 | Volume Leveller | Upward RMS compressor on master L/R with gain-reduction limiter (Q28 envelope + float gain) |
@@ -274,7 +278,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 | Stage | Description |
 |-------|-------------|
 | Output EQ | **Block-based** `dsp_process_channel_block()`, 10 bands per output |
-| Output gain + volume | Combined Q15 multiply via `fast_mul_q15()` (output gain × master volume) |
+| Output gain + volume | Combined Q15 multiply via `fast_mul_q15()` (output gain × host volume × master volume) |
 | Delay | int32 circular buffers, 4096 samples max (software-capped at 50ms) |
 | SPDIF output | Q28 → int16 (shift right 14 with rounding), 2 stereo pairs |
 | PDM output | Q28 direct to sigma-delta modulator (single-core fallback only) |
@@ -672,8 +676,8 @@ Automatic volume levelling via a feedforward, stereo-linked, single-band RMS com
 ### Signal Chain Position
 
 ```
-USB Input → Preamp → Loudness → Master EQ → Volume Leveller → Crossfeed → Matrix Mix → Output EQ → ...
-                                              (PASS 2.5)
+USB Input → Per-Ch Preamp → Loudness → Master EQ → Volume Leveller → Crossfeed → Matrix Mix → Output EQ → Output Gain × Host Vol × Master Vol → Delay → Output
+                                                     (PASS 2.5)
 ```
 
 ### Platform Implementation
@@ -742,7 +746,7 @@ LoudnessCoeffs loudness_tables[2][61][2];  // [buffer][volume_step][biquad]
 ---
 
 ## Flash Storage
-*Last updated: 2026-03-27*
+*Last updated: 2026-04-09*
 
 ### Flash Operation Safety
 
@@ -776,19 +780,21 @@ Last 12 sectors (48 KB) of flash:
 | last_active_slot | Last slot loaded/saved (always 0-9) |
 | include_pins | Whether preset load/save includes pin config (0/1, default 0) |
 | slot_occupied | 16-bit bitmask (bit N = slot N has valid data) |
+| include_master_volume | Whether preset load/save includes master volume (0/1, default 0, was padding byte) |
 | slot_names[10][32] | 32-byte NUL-terminated names per slot |
 
-### Preset Slot Data (Version 8)
-*Last updated: 2026-03-10*
+### Preset Slot Data (Version 12)
+*Last updated: 2026-04-09*
 
 | Field | Description |
 |-------|-------------|
 | Magic | 0x44535033 ("DSP3") |
-| Version | 8 |
+| Version | 12 |
 | slot_index | Sanity-check slot number |
 | CRC32 | Integrity check over data section |
 | EQ recipes | NUM_CHANNELS x 12 bands |
-| Preamp | gain_db |
+| Preamp | `preamp_db` (legacy single value) + `preamp_db_per_ch[NUM_INPUT_CHANNELS]` (V12+) |
+| Master volume | `master_volume_db` (V12+, -128 to 0 dB, -128 = mute) |
 | Bypass | master bypass flag |
 | Delays | NUM_CHANNELS delay values |
 | Legacy gain/mute | 3 channels (backward compatibility) |
@@ -953,7 +959,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-09*
 
 ### Hardware
 
@@ -1023,7 +1029,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-09*
 
 ### RP2040 (264 KB SRAM)
 
@@ -1038,6 +1044,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead | ~2 KB |
+| Per-channel preamp + master volume | ~48 B |
 | Other BSS | ~20 KB |
 | **Total BSS** | **~90 KB** |
 | Code in RAM (.text copy_to_ram) | ~72 KB |
@@ -1057,6 +1064,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (11 × 32) | ~352 B |
 | Leveller state + lookahead | ~2 KB |
+| Per-channel preamp + master volume | ~48 B |
 | Other BSS | ~24 KB |
 | **Total BSS** | **~210 KB** |
 | Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
@@ -1181,14 +1189,14 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-09*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
 | REQ_SET_EQ_PARAM | 0x42 | OUT | Set EQ band parameters |
 | REQ_GET_EQ_PARAM | 0x43 | IN | Get EQ band parameters |
-| REQ_SET_PREAMP | 0x44 | OUT | Set preamp gain |
-| REQ_GET_PREAMP | 0x45 | IN | Get preamp gain |
+| REQ_SET_PREAMP | 0x44 | OUT | Set preamp gain (legacy: sets all input channels) |
+| REQ_GET_PREAMP | 0x45 | IN | Get preamp gain (legacy: returns channel 0) |
 | REQ_SET_BYPASS | 0x46 | OUT | Set master EQ bypass |
 | REQ_GET_BYPASS | 0x47 | IN | Get master EQ bypass state |
 | REQ_SET_DELAY | 0x48 | OUT | Set channel delay |
@@ -1239,7 +1247,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_PRESET_DELETE | 0x92 | IN | Delete preset slot (wValue=slot) |
 | REQ_PRESET_GET_NAME | 0x93 | IN | Get 32-byte preset name (wValue=slot) |
 | REQ_PRESET_SET_NAME | 0x94 | OUT | Set preset name (wValue=slot, payload=32 bytes) |
-| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (6 bytes) |
+| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (7 bytes: +include_master_volume) |
 | REQ_PRESET_SET_STARTUP | 0x96 | OUT | Set startup mode + default slot (2 bytes) |
 | REQ_PRESET_GET_STARTUP | 0x97 | IN | Get startup config (3 bytes) |
 | REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
@@ -1263,13 +1271,29 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_LEVELLER_LOOKAHEAD | 0xBD | IN | Get leveller lookahead state |
 | REQ_SET_LEVELLER_GATE | 0xBE | OUT | Set leveller silence gate threshold (-96.0–0.0 dBFS, float) |
 | REQ_GET_LEVELLER_GATE | 0xBF | IN | Get leveller silence gate threshold |
+| SET_OUTPUT_TYPE | 0xC0 | OUT | Set output slot type (S/PDIF or I2S) |
+| GET_OUTPUT_TYPE | 0xC1 | IN | Get output slot type |
+| SET_I2S_BCK_PIN | 0xC2 | OUT | Set I2S BCK pin |
+| GET_I2S_BCK_PIN | 0xC3 | IN | Get I2S BCK pin |
+| SET_MCK_ENABLE | 0xC4 | OUT | Set MCK enable |
+| GET_MCK_ENABLE | 0xC5 | IN | Get MCK enable |
+| SET_MCK_PIN | 0xC6 | OUT | Set MCK pin |
+| GET_MCK_PIN | 0xC7 | IN | Get MCK pin |
+| SET_MCK_MULTIPLIER | 0xC8 | OUT | Set MCK multiplier (0=128x, 1=256x) |
+| GET_MCK_MULTIPLIER | 0xC9 | IN | Get MCK multiplier |
+| REQ_SET_PREAMP_CH | 0xD0 | OUT | Set per-channel preamp gain (wValue=channel) |
+| REQ_GET_PREAMP_CH | 0xD1 | IN | Get per-channel preamp gain (wValue=channel) |
+| REQ_SET_MASTER_VOLUME | 0xD2 | OUT | Set master volume (-128 to 0 dB, -128=mute) |
+| REQ_GET_MASTER_VOLUME | 0xD3 | IN | Get master volume |
+| REQ_SET_INCLUDE_MASTER_VOL | 0xD4 | OUT | Set include-master-volume flag in preset directory |
+| REQ_GET_INCLUDE_MASTER_VOL | 0xD5 | IN | Get include-master-volume flag |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-04-08*
+*Last updated: 2026-04-09*
 
 Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 5) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, and leveller config. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 6) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), and master volume config (`WireMasterVolume`, 16 bytes). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
 
 **Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
 
@@ -1306,7 +1330,7 @@ Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and P
 ---
 
 ## I2S Output Support
-*Last updated: 2026-04-08*
+*Last updated: 2026-04-09*
 
 ### Overview
 
@@ -1353,10 +1377,12 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - `SLOT_DATA_VERSION` = 9: adds `output_types[4]`, `i2s_bck_pin`, `i2s_mck_pin`, `i2s_mck_enabled`, `i2s_mck_multiplier` (8 bytes)
 - `SLOT_DATA_VERSION` = 10: adds leveller fields (16 bytes)
 - `SLOT_DATA_VERSION` = 11: changes `i2s_mck_multiplier` encoding from raw uint8_t (128 = 128x, 0 = 256x) to enum-style (0 = 128x, 1 = 256x); internal storage is `uint16_t`
+- `SLOT_DATA_VERSION` = 12: adds `preamp_db_per_ch[NUM_INPUT_CHANNELS]` and `master_volume_db`; legacy `preamp_db` still populated for backward compat
 - `WIRE_FORMAT_VERSION` = 3: adds `WireI2SConfig` (16 bytes) to `WireBulkParams`
 - `WIRE_FORMAT_VERSION` = 4: adds `WireLevellerConfig` (16 bytes) to `WireBulkParams` (total 2864 bytes)
 - `WIRE_FORMAT_VERSION` = 5: changes `mck_multiplier` wire encoding in `WireI2SConfig` from raw value to enum-style (0 = 128x, 1 = 256x)
-- Backward compatible: V<9 slots default to all-S/PDIF; V9-V10 slots use old MCK encoding; older wire payloads accepted without I2S/leveller changes
+- `WIRE_FORMAT_VERSION` = 6: adds `WirePreampConfig` (16 bytes) and `WireMasterVolume` (16 bytes) to `WireBulkParams`
+- Backward compatible: V<9 slots default to all-S/PDIF; V9-V10 slots use old MCK encoding; V<12 slots use single preamp value for all channels, default master volume 0 dB; older wire payloads accepted without new fields
 
 ### BSS Impact
 
@@ -1366,3 +1392,75 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 | RP2350 | +528 bytes |
 
 Full specification: `Documentation/Features/i2s_output_spec.md`
+
+---
+
+## Per-Channel Input Preamp
+*Last updated: 2026-04-09*
+
+### Overview
+
+The input preamp is per-channel rather than a single global value. Each USB input channel (L/R) has an independent gain control, allowing asymmetric preamp adjustments. Arrays are sized by `NUM_INPUT_CHANNELS` (currently 2).
+
+### Globals
+
+| Variable | Type | Description |
+|----------|------|-------------|
+| `global_preamp_db[NUM_INPUT_CHANNELS]` | `float` | Per-channel preamp gain in dB |
+| `global_preamp_mul[NUM_INPUT_CHANNELS]` | Platform-dependent | Pre-computed linear multiplier (float on RP2350, Q28 on RP2040) |
+| `global_preamp_linear[NUM_INPUT_CHANNELS]` | `float` | Linear gain for metering/display |
+
+### Vendor Commands
+
+| Code | Command | Direction | Description |
+|------|---------|-----------|-------------|
+| 0xD0 | REQ_SET_PREAMP_CH | OUT | Set preamp gain for channel (wValue=channel index) |
+| 0xD1 | REQ_GET_PREAMP_CH | IN | Get preamp gain for channel (wValue=channel index) |
+| 0x44 | REQ_SET_PREAMP | OUT | Legacy: sets all input channels to the same gain |
+| 0x45 | REQ_GET_PREAMP | IN | Legacy: returns channel 0 gain |
+
+### Persistence
+
+- `SLOT_DATA_VERSION` 12 adds `preamp_db_per_ch[NUM_INPUT_CHANNELS]` to `PresetSlot`
+- Legacy `preamp_db` field still populated on save for backward compatibility with older firmware
+- Slots with version < 12 initialize all per-channel preamp values from the single legacy `preamp_db`
+- `WirePreampConfig` (16 bytes) section in `WireBulkParams` V6+
+
+---
+
+## Master Volume
+*Last updated: 2026-04-09*
+
+### Overview
+
+Device-side master volume providing an attenuation-only ceiling on all output channels. This is independent of the USB Audio Class host volume control and is applied as the final gain stage before output.
+
+### Range & Semantics
+
+- **Range:** -127 dB to 0 dB (0 dB = unity, no attenuation)
+- **Mute sentinel:** -128 dB = full mute
+- **Direction:** Attenuation only — cannot boost above unity
+- **Application point:** Post-output-gain: `output_gain * host_volume * master_volume`
+- **Scope:** Affects all output channels uniformly
+- **Does NOT affect:** Loudness compensation, volume leveller, EQ, crossfeed — only the final output gain stage
+
+### Core 1 Integration
+
+Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Core1EqWork` handshake struct. No special handling needed in the EQ worker — the combined volume multiplier is pre-computed by Core 0.
+
+### Vendor Commands
+
+| Code | Command | Direction | Description |
+|------|---------|-----------|-------------|
+| 0xD2 | REQ_SET_MASTER_VOLUME | OUT | Set master volume (-128 to 0 dB) |
+| 0xD3 | REQ_GET_MASTER_VOLUME | IN | Get master volume |
+| 0xD4 | REQ_SET_INCLUDE_MASTER_VOL | OUT | Set include-master-volume flag in preset directory |
+| 0xD5 | REQ_GET_INCLUDE_MASTER_VOL | IN | Get include-master-volume flag |
+
+### Persistence
+
+- `SLOT_DATA_VERSION` 12 adds `master_volume_db` to `PresetSlot`
+- Directory-level `include_master_volume` flag (default: exclude) controls whether preset load restores master volume
+- Preset directory response is now 7 bytes (was 6) — byte 6 = `include_master_volume`
+- Slots with version < 12 default to 0 dB master volume (unity, no attenuation)
+- `WireMasterVolume` (16 bytes) section in `WireBulkParams` V6+

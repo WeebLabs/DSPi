@@ -58,14 +58,15 @@ uint8_t preset_get_name(uint8_t slot, char *name_out);
 uint8_t preset_set_name(uint8_t slot, const char *name);
 
 // Get a summary of the preset directory:
-//   - slot_occupied: 16-bit bitmask (bit N = slot N occupied)
-//   - startup_mode:  PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
-//   - default_slot:  slot loaded in SPECIFIED mode (0-9)
-//   - last_active:   last slot that was loaded/saved (always 0-9)
-//   - include_pins:  whether preset load restores pin config (0/1)
+//   - slot_occupied:        16-bit bitmask (bit N = slot N occupied)
+//   - startup_mode:         PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
+//   - default_slot:         slot loaded in SPECIFIED mode (0-9)
+//   - last_active:          last slot that was loaded/saved (always 0-9)
+//   - include_pins:         whether preset load restores pin config (0/1)
+//   - include_master_volume: whether preset load restores master volume (0/1)
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,
-                          uint8_t *include_pins);
+                          uint8_t *include_pins, uint8_t *include_master_volume);
 
 // Set startup behavior.
 //   mode: PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
@@ -75,6 +76,9 @@ uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot);
 
 // Set whether preset load/save includes pin configuration.
 void preset_set_include_pins(uint8_t include);
+
+// Set whether preset load restores master volume from the preset.
+void preset_set_include_master_volume(uint8_t include);
 
 // Get the currently active preset slot (always 0-9).
 uint8_t preset_get_active(void);

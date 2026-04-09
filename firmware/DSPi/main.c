@@ -791,6 +791,19 @@ int main(void) {
                 preset_set_include_pins(val);
                 complete_flash_write_operation_light();
             }
+
+            extern volatile bool flash_set_include_master_vol_pending;
+            if (flash_set_include_master_vol_pending) {
+                uint8_t val;
+                uint32_t f = save_and_disable_interrupts();
+                extern uint8_t flash_set_include_master_vol_val;
+                val = flash_set_include_master_vol_val;
+                flash_set_include_master_vol_pending = false;
+                restore_interrupts(f);
+                prepare_flash_write_operation();
+                preset_set_include_master_volume(val);
+                complete_flash_write_operation_light();
+            }
         }
 
         // Handle EQ parameter updates from USB
@@ -891,8 +904,8 @@ int main(void) {
             extern volatile bool preset_load_pending;
             extern volatile bool save_params_pending;
             extern volatile bool preset_save_pending;
-            extern volatile bool preset_delete_pending;
-            extern volatile uint8_t pending_preset_slot;
+            extern volatile uint8_t pending_preset_load_slot;
+            extern volatile uint8_t pending_preset_save_slot;
 
             if (preset_load_pending) {
                 preset_load_pending = false;
@@ -911,7 +924,7 @@ int main(void) {
                 // Apply the new preset: overwrites all DSP state (EQ, delays,
                 // matrix, gains, output_types[]), recalculates filter coefficients,
                 // transitions Core 1 mode, and writes the directory to flash.
-                preset_load(pending_preset_slot);
+                preset_load(pending_preset_load_slot);
 
                 // Presets can carry persisted raw MCK=0 (256x). Clamp invalid
                 // 96 kHz combinations and apply the effective MCK divider now
@@ -969,26 +982,114 @@ int main(void) {
                 // blackout.  Always do a full post-write resync so outputs
                 // cannot remain in a skewed/underfilled state.
                 prepare_flash_write_operation();
-                uint8_t status = preset_save(pending_preset_slot);
+                uint8_t status = preset_save(pending_preset_save_slot);
                 complete_flash_write_operation_full();
                 if (status != PRESET_OK) {
                     printf("preset_save failed: slot=%u err=%u\n",
-                           (unsigned)pending_preset_slot, (unsigned)status);
+                           (unsigned)pending_preset_save_slot, (unsigned)status);
                 }
             }
 
-            if (preset_delete_pending) {
-                preset_delete_pending = false;
+            extern volatile uint16_t preset_delete_mask;
+            if (preset_delete_mask) {
+                // Atomically snapshot and clear the mask so new deletes
+                // arriving during processing are captured in the next pass.
+                uint32_t flags = save_and_disable_interrupts();
+                uint16_t mask = preset_delete_mask;
+                preset_delete_mask = 0;
+                restore_interrupts(flags);
+
+                extern uint8_t output_types[];
+
+                // Snapshot output types before deletes — if the active
+                // slot is deleted, apply_factory_defaults() resets
+                // output_types[] to all-SPDIF without a hardware switch.
+                uint8_t old_types[NUM_SPDIF_INSTANCES];
+                memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
+
+                // Single prepare/complete bracket around all deletes —
+                // each preset_delete() does its own flash erase internally.
+                prepare_flash_write_operation();
+                for (int slot = 0; slot < PRESET_SLOTS; slot++) {
+                    if (mask & (1u << slot)) {
+                        preset_delete(slot);
+                    }
+                }
+
+                // Check if output types changed (active slot deleted →
+                // factory defaults → all SPDIF).  If so, do a proper
+                // hardware type switch instead of just a pipeline reset.
+                uint8_t change_mask = 0;
+                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                    if (output_types[i] != old_types[i])
+                        change_mask |= (1u << i);
+                }
+
+                if (change_mask) {
+                    uint8_t new_types[NUM_SPDIF_INSTANCES];
+                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
+                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
+                    process_type_switches(change_mask, new_types);
+                } else {
+                    complete_flash_write_operation_full();
+                }
+            }
+
+            extern volatile bool factory_reset_pending;
+            if (factory_reset_pending) {
+                factory_reset_pending = false;
                 __dmb();
 
-                prepare_flash_write_operation();
+                extern uint8_t output_types[];
 
-                // preset_delete() erases the slot's flash sector.  If the
-                // deleted slot is the active slot, it applies factory defaults
-                // — changing all DSP parameters.  Pipeline reset flushes stale
-                // buffers and resyncs outputs in that case.
-                preset_delete(pending_preset_slot);
-                complete_flash_write_operation_full();
+                // Snapshot current output types before reset clears them to
+                // all-SPDIF so we can detect I2S→SPDIF transitions.
+                uint8_t old_types[NUM_SPDIF_INSTANCES];
+                memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
+
+                usb_audio_drain_ring();
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+
+                flash_factory_reset();
+                dsp_recalculate_all_filters((float)audio_state.freq);
+                dsp_update_delay_samples((float)audio_state.freq);
+                loudness_recompute_pending = true;
+                crossfeed_update_pending = true;
+
+                // Zero delay lines to prevent stale audio bleed-through
+                extern
+#if PICO_RP2350
+                float delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
+#else
+                int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
+#endif
+                memset(delay_lines, 0, sizeof(delay_lines));
+
+                // Transition Core 1 mode to match new output enable state
+                Core1Mode new_mode = derive_core1_mode();
+                if (new_mode != core1_mode) {
+                    core1_mode = new_mode;
+#if ENABLE_SUB
+                    pdm_set_enabled(new_mode == CORE1_MODE_PDM);
+#endif
+                    __sev();
+                }
+
+                // Check if output types changed (factory defaults = all SPDIF)
+                uint8_t change_mask = 0;
+                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                    if (output_types[i] != old_types[i])
+                        change_mask |= (1u << i);
+                }
+
+                if (change_mask) {
+                    uint8_t new_types[NUM_SPDIF_INSTANCES];
+                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
+                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
+                    process_type_switches(change_mask, new_types);
+                } else {
+                    complete_pipeline_reset();
+                }
             }
         }
 
@@ -1013,8 +1114,8 @@ int main(void) {
             prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
             // Apply the received parameters (pin config gated by include_pins setting)
-            uint16_t _occ; uint8_t _m, _d, _la, inc_pins;
-            preset_get_directory(&_occ, &_m, &_d, &_la, &inc_pins);
+            uint16_t _occ; uint8_t _m, _d, _la, inc_pins, _inc_mv;
+            preset_get_directory(&_occ, &_m, &_d, &_la, &inc_pins, &_inc_mv);
             int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf, inc_pins != 0);
             if (err == 0) {
                 float rate = (float)audio_state.freq;

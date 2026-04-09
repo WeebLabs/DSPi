@@ -220,6 +220,21 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_LEVELLER_GATE       0xBE
 #define REQ_GET_LEVELLER_GATE       0xBF
 
+// Per-Channel Preamp Commands
+#define REQ_SET_PREAMP_CH           0xD0  // wValue = channel index (0=L, 1=R), payload = float dB
+#define REQ_GET_PREAMP_CH           0xD1  // wValue = channel index, returns float dB
+
+// Master Volume Commands
+#define REQ_SET_MASTER_VOLUME       0xD2  // payload = float dB (-128 mute sentinel, -127..0 range)
+#define REQ_GET_MASTER_VOLUME       0xD3  // returns float dB
+#define REQ_SET_INCLUDE_MASTER_VOL  0xD4  // payload = uint8_t (0/1), controls preset load behavior
+#define REQ_GET_INCLUDE_MASTER_VOL  0xD5  // returns uint8_t
+
+// Master Volume Constants
+#define MASTER_VOL_MUTE_DB          (-128.0f)  // Sentinel value: true -inf (mute)
+#define MASTER_VOL_MIN_DB           (-127.0f)  // Minimum non-mute attenuation
+#define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
+
 // System
 #define REQ_ENTER_BOOTLOADER        0xF0
 

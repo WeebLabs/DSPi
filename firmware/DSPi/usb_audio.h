@@ -28,8 +28,15 @@ extern volatile int32_t channel_gain_mul[3];
 extern volatile float channel_gain_linear[3];
 extern volatile bool channel_mute[3];
 
-// Preamp
-extern volatile float global_preamp_linear;
+// Per-input-channel preamp gain (indexed by input channel: 0=USB L, 1=USB R)
+extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
+extern volatile int32_t global_preamp_mul[NUM_INPUT_CHANNELS];
+extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
+
+// Master volume — device-side ceiling on all output (does not affect DSP stages)
+extern volatile float master_volume_db;
+extern volatile float master_volume_linear;
+extern volatile int32_t master_volume_q15;
 
 // Loudness compensation
 extern volatile bool loudness_enabled;
