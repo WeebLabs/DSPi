@@ -472,13 +472,14 @@ The `WireLevellerConfig` is the last section in the `WireBulkParams` struct:
 
 ### Version compatibility
 
-The `WireLevellerConfig` section was introduced in `WIRE_FORMAT_VERSION` 4.
+The `WireLevellerConfig` section was introduced in `WIRE_FORMAT_VERSION` 4. The current version is 5 (V5 changes the MCK multiplier encoding in `WireI2SConfig` but does not affect the leveller section).
 
 | Wire format version | Leveller section present | Behavior on SET |
 |---------------------|--------------------------|-----------------|
 | V2 | No | Leveller defaults applied |
 | V3 | No | Leveller defaults applied |
 | V4 | Yes | Leveller config parsed and applied |
+| V5 | Yes | Leveller config parsed and applied (MCK encoding changed elsewhere) |
 
 When the firmware receives a SET (0xA1) with `format_version` < 4, the leveller is reset to factory defaults:
 - enabled = false
@@ -488,7 +489,7 @@ When the firmware receives a SET (0xA1) with `format_version` < 4, the leveller 
 - lookahead = true
 - gate_threshold_db = -96.0
 
-When the firmware sends a GET (0xA0), the `WireLevellerConfig` section is always populated with current values and `format_version` is set to 4.
+When the firmware sends a GET (0xA0), the `WireLevellerConfig` section is always populated with current values and `format_version` is set to 5.
 
 ### Bulk transfer commands
 
@@ -507,7 +508,7 @@ Volume Leveller parameters are saved and restored as part of the user preset sys
 
 ### Flash storage version
 
-The leveller fields were added to the `PresetSlot` struct at `SLOT_DATA_VERSION` 10 (previously 9 for I2S config).
+The leveller fields were added to the `PresetSlot` struct at `SLOT_DATA_VERSION` 10 (previously 9 for I2S config). The current version is 11 (V11 changes the MCK multiplier encoding in the I2S fields but does not affect leveller fields).
 
 ### PresetSlot fields
 

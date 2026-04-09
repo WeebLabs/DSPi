@@ -863,14 +863,7 @@ void audio_i2s_mck_set_enabled(bool enabled) {
 void audio_i2s_mck_update_frequency(uint32_t sample_freq, uint32_t multiplier) {
     if (mck_pio == NULL) return;
 
-    // Multiplier wire/storage compatibility:
-    //   - Control requests pass 128 or 256 (wValue, 16-bit)
-    //   - Some persisted/bulk paths store it in uint8_t, where 256 wraps to 0.
-    // Treat 0 as 256 so saved configurations remain valid and we never divide by 0.
-    if (multiplier == 0) {
-        multiplier = 256;
-    }
-    // Defensive fallback for unexpected values from external callers/payloads.
+    // Defensive fallback for unexpected values.
     if (multiplier != 128 && multiplier != 256) {
         printf("MCK invalid multiplier %u, forcing 128\n", (uint)multiplier);
         multiplier = 128;

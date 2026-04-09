@@ -1882,10 +1882,13 @@ struct audio_buffer_pool *producer_pools[NUM_SPDIF_INSTANCES];
 uint8_t i2s_bck_pin = PICO_I2S_BCK_PIN;     // BCK GPIO; LRCLK = BCK + 1
 uint8_t i2s_mck_pin = PICO_I2S_MCK_PIN;     // MCK GPIO
 bool    i2s_mck_enabled = false;             // MCK enabled state
-// Stored in uint8_t for preset/bulk wire compatibility:
-//   raw 128 => effective 128x
-//   raw 0   => effective 256x (because 256 wraps in uint8_t)
-uint8_t i2s_mck_multiplier = 128;
+// MCK multiplier: actual value (128 or 256).
+// Wire/flash format uses uint8_t where 256 wraps to 0 — encode/decode at boundaries only.
+uint16_t i2s_mck_multiplier = 128;
+
+// Encode/decode for wire and flash persistence: 0 = 128x, 1 = 256x
+static inline uint8_t  mck_encode(uint16_t val) { return (val == 256) ? 1 : 0; }
+static inline uint16_t mck_decode(uint8_t raw)  { return (raw == 1) ? 256 : 128; }
 
 // 96 kHz + 256x requires a 24.576 MHz MCK derived from a highly fractional
 // divider on the current fixed sys_clk plan. On real hardware this mode has
@@ -1894,10 +1897,8 @@ static inline bool is_mck_multiplier_supported_for_rate(uint16_t mult, uint32_t 
     return !(mult == 256u && sample_rate_hz >= 96000u);
 }
 
-// Clamp persisted/raw multiplier state for the current rate.
-// Raw encoding: 128 => 128x, 0 => 256x.
 static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
-    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 0u) {
+    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 256u) {
         i2s_mck_multiplier = 128u;
         printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
                (unsigned long)sample_rate_hz);
@@ -2865,32 +2866,30 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
             }
 
             case REQ_SET_MCK_MULTIPLIER: {
-                uint16_t mult = setup->wValue;
-                if (mult == 128 || mult == 256) {
-                    if (!is_mck_multiplier_supported_for_rate(mult, audio_state.freq)) {
-                        printf("Rejected MCK %ux at %lu Hz (unsupported)\n",
-                               (unsigned)mult, (unsigned long)audio_state.freq);
-                        resp_buf[0] = PIN_CONFIG_INVALID_PIN;
-                        vendor_send_response(resp_buf, 1);
-                        return true;
-                    }
-                    // Keep raw storage compatible with uint8_t persistence:
-                    // 256 is represented as 0 (wrap), decoded by MCK update.
-                    i2s_mck_multiplier = (mult == 256) ? 0 : (uint8_t)mult;
-                    if (i2s_mck_enabled) {
-                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-                    }
-                    resp_buf[0] = PIN_CONFIG_SUCCESS;
-                } else {
-                    resp_buf[0] = PIN_CONFIG_INVALID_PIN;  // Reuse: invalid value
+                // Wire encoding: 0 = 128x, 1 = 256x
+                uint16_t raw = setup->wValue;
+                if (raw > 1) { resp_buf[0] = PIN_CONFIG_INVALID_PIN; vendor_send_response(resp_buf, 1); return true; }
+                uint16_t mult = (raw == 1) ? 256 : 128;
+
+                if (!is_mck_multiplier_supported_for_rate(mult, audio_state.freq)) {
+                    printf("Rejected MCK %ux at %lu Hz (unsupported)\n",
+                           (unsigned)mult, (unsigned long)audio_state.freq);
+                    resp_buf[0] = PIN_CONFIG_INVALID_PIN;
+                    vendor_send_response(resp_buf, 1);
+                    return true;
                 }
+                i2s_mck_multiplier = mult;
+                if (i2s_mck_enabled) {
+                    audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                }
+                resp_buf[0] = PIN_CONFIG_SUCCESS;
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
 
             case REQ_GET_MCK_MULTIPLIER: {
                 sanitize_mck_multiplier_for_rate(audio_state.freq);
-                resp_buf[0] = i2s_mck_multiplier;
+                resp_buf[0] = mck_encode(i2s_mck_multiplier);
                 vendor_send_response(resp_buf, 1);
                 return true;
             }

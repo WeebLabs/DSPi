@@ -117,15 +117,11 @@ extern LevellerState leveller_state;
 
 static void reset_usb_feedback_loop(void);
 
-// Raw MCK multiplier encoding is shared with preset/bulk wire format:
-//   128 => 128x
-//   0   => 256x (uint8 wrap)
-//
 // 96 kHz + 256x (24.576 MHz MCK) is unstable on current hardware/clocking, so
 // force 128x whenever that combination is encountered from persisted state.
 static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
-    extern uint8_t i2s_mck_multiplier;
-    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 0u) {
+    extern uint16_t i2s_mck_multiplier;
+    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 256u) {
         i2s_mck_multiplier = 128u;
         printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
                (unsigned long)sample_rate_hz);
@@ -166,7 +162,7 @@ static void perform_rate_change(uint32_t new_freq) {
 
     // Update MCK frequency for new sample rate (if enabled)
     extern bool i2s_mck_enabled;
-    extern uint8_t i2s_mck_multiplier;
+    extern uint16_t i2s_mck_multiplier;
     if (i2s_mck_enabled) {
         sanitize_mck_multiplier_for_rate(new_freq);
         audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
@@ -240,7 +236,7 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     extern uint8_t i2s_bck_pin;
     extern struct audio_buffer_pool *producer_pools[];
     extern bool i2s_mck_enabled;
-    extern uint8_t i2s_mck_multiplier;
+    extern uint16_t i2s_mck_multiplier;
 
     uint8_t current_types[NUM_SPDIF_INSTANCES];
     uint8_t target_types[NUM_SPDIF_INSTANCES];
@@ -922,7 +918,7 @@ int main(void) {
                 // so no-type-change loads still update clock state.
                 {
                     extern bool i2s_mck_enabled;
-                    extern uint8_t i2s_mck_multiplier;
+                    extern uint16_t i2s_mck_multiplier;
                     if (i2s_mck_enabled) {
                         sanitize_mck_multiplier_for_rate(audio_state.freq);
                         audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
@@ -1029,7 +1025,7 @@ int main(void) {
                 // clock state coherent even when output types are unchanged.
                 {
                     extern bool i2s_mck_enabled;
-                    extern uint8_t i2s_mck_multiplier;
+                    extern uint16_t i2s_mck_multiplier;
                     if (i2s_mck_enabled) {
                         sanitize_mck_multiplier_for_rate(audio_state.freq);
                         audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);

@@ -326,7 +326,7 @@ Set the MCK frequency multiplier.
 
 ### REQ_GET_MCK_MULTIPLIER (0xC9)
 
-**Response:** 1 byte — `128` or `256` (note: wraps in uint8_t, 256 = `0x00`; use 16-bit read if needed).
+**Response:** 1 byte — `0` = 128x, `1` = 256x.
 
 ---
 
@@ -353,13 +353,13 @@ I2S output configuration is included in the preset system. When a preset is save
 | `i2s_bck_pin` | 1 byte | BCK GPIO pin number |
 | `i2s_mck_pin` | 1 byte | MCK GPIO pin number |
 | `i2s_mck_enabled` | 1 byte | MCK on/off (0 or 1) |
-| `i2s_mck_multiplier` | 1 byte | MCK multiplier (128 or 256) |
+| `i2s_mck_multiplier` | 1 byte | MCK multiplier encoding: 0 = 128x, 1 = 256x (V11+); raw 128 or 0 (V9-V10) |
 
 ### Flash Storage Version
 
-`SLOT_DATA_VERSION` is **9** (was 8). The I2S fields are appended at the end of the `PresetSlot` structure.
+`SLOT_DATA_VERSION` is **11** (was 10). The I2S fields are appended at the end of the `PresetSlot` structure. Version 11 changes the `i2s_mck_multiplier` encoding from raw value (128 or 0) to enum-style (0 = 128x, 1 = 256x); internal storage is `uint16_t` holding the actual multiplier value.
 
-**Backward compatibility:** Preset slots saved with version < 9 do not contain I2S configuration. When loaded, all output types default to S/PDIF and the BCK/MCK pins retain their default values. Existing presets are unaffected by the upgrade.
+**Backward compatibility:** Preset slots saved with version < 9 do not contain I2S configuration. When loaded, all output types default to S/PDIF and the BCK/MCK pins retain their default values. Slots saved with version 9-10 use the old MCK multiplier encoding (raw uint8_t: 128 = 128x, 0 = 256x due to uint8 wrap); V11+ uses the new encoding. Existing presets are unaffected by the upgrade.
 
 **Factory reset** restores: all slots to S/PDIF, BCK = GPIO 14, MCK disabled, MCK pin = GPIO 13, MCK multiplier = 128x.
 
@@ -369,7 +369,7 @@ I2S configuration is included in the bulk parameter transfer (`REQ_GET_ALL_PARAM
 
 ### Wire Format Version
 
-`WIRE_FORMAT_VERSION` is **3** (was 2). The `WireI2SConfig` section is appended at the end of `WireBulkParams`.
+`WIRE_FORMAT_VERSION` is **5** (was 4). The `WireI2SConfig` section is appended at the end of `WireBulkParams`. Version 5 changes the `mck_multiplier` wire encoding from raw value to enum-style (0 = 128x, 1 = 256x).
 
 ### WireI2SConfig Structure
 
@@ -381,7 +381,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  bck_pin;                // BCK GPIO pin number
     uint8_t  mck_pin;                // MCK GPIO pin number
     uint8_t  mck_enabled;            // MCK on/off (0 or 1)
-    uint8_t  mck_multiplier;         // 128 or 256
+    uint8_t  mck_multiplier;         // 0 = 128x, 1 = 256x (V5+); raw 128 or 0 (V2-V4)
     uint8_t  reserved[8];            // Future use (must be 0)
 } WireI2SConfig;                     // 16 bytes
 ```
@@ -408,10 +408,10 @@ typedef struct __attribute__((packed)) {
 
 | Scenario | Behavior |
 |----------|----------|
-| V3 firmware, V2 host sends 2832-byte SET | Accepted: `format_version=2` allowed, I2S section absent, no I2S changes |
-| V3 firmware, V3 host sends 2848-byte SET | Normal: all fields including I2S config applied |
-| V3 firmware, V3 host sends GET | Returns 2848 bytes including I2S config |
-| V2 firmware, V3 host sends 2848-byte SET | V2 firmware rejects: `format_version=3` not accepted |
+| V5 firmware, V2-V4 host sends SET | Accepted: older `format_version` allowed, missing sections get defaults; V2-V4 MCK multiplier uses old encoding (raw value) |
+| V5 firmware, V5 host sends SET | Normal: all fields including I2S config applied with new MCK multiplier encoding (0 = 128x, 1 = 256x) |
+| V5 firmware, V5 host sends GET | Returns full payload including I2S config with new MCK multiplier encoding |
+| V4 firmware, V5 host sends SET | V4 firmware rejects: `format_version=5` not accepted |
 
 ## Application Integration Patterns
 

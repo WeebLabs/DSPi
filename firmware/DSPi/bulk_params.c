@@ -142,13 +142,13 @@ void bulk_params_collect(WireBulkParams *out) {
         extern uint8_t i2s_bck_pin;
         extern uint8_t i2s_mck_pin;
         extern bool    i2s_mck_enabled;
-        extern uint8_t i2s_mck_multiplier;
+        extern uint16_t i2s_mck_multiplier;
         memset(&out->i2s_config, 0, sizeof(out->i2s_config));
         memcpy(out->i2s_config.output_types, output_types, NUM_SPDIF_INSTANCES);
         out->i2s_config.bck_pin = i2s_bck_pin;
         out->i2s_config.mck_pin = i2s_mck_pin;
         out->i2s_config.mck_enabled = i2s_mck_enabled ? 1 : 0;
-        out->i2s_config.mck_multiplier = i2s_mck_multiplier;
+        out->i2s_config.mck_multiplier = (i2s_mck_multiplier == 256) ? 1 : 0;  // 0=128x, 1=256x
     }
 
     // Volume Leveller (V4+)
@@ -290,12 +290,18 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         extern uint8_t i2s_bck_pin;
         extern uint8_t i2s_mck_pin;
         extern bool    i2s_mck_enabled;
-        extern uint8_t i2s_mck_multiplier;
+        extern uint16_t i2s_mck_multiplier;
         memcpy(output_types, in->i2s_config.output_types, NUM_SPDIF_INSTANCES);
         i2s_bck_pin = in->i2s_config.bck_pin;
         i2s_mck_pin = in->i2s_config.mck_pin;
         i2s_mck_enabled = (in->i2s_config.mck_enabled != 0);
-        i2s_mck_multiplier = in->i2s_config.mck_multiplier;
+        if (in->header.format_version >= 5) {
+            // V5+: 0=128x, 1=256x
+            i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 1) ? 256 : 128;
+        } else {
+            // V3-V4: raw value (128 or 0 for 256)
+            i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 0) ? 256 : in->i2s_config.mck_multiplier;
+        }
     }
 
     // Volume Leveller (V4+ payloads only)

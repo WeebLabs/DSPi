@@ -1265,11 +1265,11 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_LEVELLER_GATE | 0xBF | IN | Get leveller silence gate threshold |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-03-11*
+*Last updated: 2026-04-08*
 
 Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 2) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, and channel names. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 5) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, and leveller config. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
 
 **Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
 
@@ -1306,7 +1306,7 @@ Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and P
 ---
 
 ## I2S Output Support
-*Last updated: 2026-03-23*
+*Last updated: 2026-04-08*
 
 ### Overview
 
@@ -1351,8 +1351,12 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 ### Persistence
 
 - `SLOT_DATA_VERSION` = 9: adds `output_types[4]`, `i2s_bck_pin`, `i2s_mck_pin`, `i2s_mck_enabled`, `i2s_mck_multiplier` (8 bytes)
-- `WIRE_FORMAT_VERSION` = 3: adds `WireI2SConfig` (16 bytes) to `WireBulkParams` (total 2848 bytes)
-- Backward compatible: V<9 slots default to all-S/PDIF; V2 bulk payloads accepted without I2S changes
+- `SLOT_DATA_VERSION` = 10: adds leveller fields (16 bytes)
+- `SLOT_DATA_VERSION` = 11: changes `i2s_mck_multiplier` encoding from raw uint8_t (128 = 128x, 0 = 256x) to enum-style (0 = 128x, 1 = 256x); internal storage is `uint16_t`
+- `WIRE_FORMAT_VERSION` = 3: adds `WireI2SConfig` (16 bytes) to `WireBulkParams`
+- `WIRE_FORMAT_VERSION` = 4: adds `WireLevellerConfig` (16 bytes) to `WireBulkParams` (total 2864 bytes)
+- `WIRE_FORMAT_VERSION` = 5: changes `mck_multiplier` wire encoding in `WireI2SConfig` from raw value to enum-style (0 = 128x, 1 = 256x)
+- Backward compatible: V<9 slots default to all-S/PDIF; V9-V10 slots use old MCK encoding; older wire payloads accepted without I2S/leveller changes
 
 ### BSS Impact
 
