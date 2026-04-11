@@ -1,0 +1,132 @@
+; Copyright (c) 2023, Elehobica
+; Released under the BSD-2-Clause
+; refer to https://opensource.org/licenses/BSD-2-Clause
+
+; === S/PDIF Specification ===
+; [Bit] (1 bit = 2 symbols)
+; BMC (Bitphase Mark Code)
+;          prev   bit0   bit1
+; symbol   X 0    1 1    1 0
+; symbol   X 1    0 0    0 1
+; 
+; [Sync] not encoded in BMC (Sync Code = 8 symbols)
+; Sync Code B: symbol 1 1 1 0 1 0 0 0 (0xE8), 0 0 0 1 0 1 1 1 (0x17)
+; Sync Code M: symbol 1 1 1 0 0 0 1 0 (0xE2), 0 0 0 1 1 1 0 1 (0x1D)
+; Sync Code W: symbol 1 1 1 0 0 1 0 0 (0xE4), 0 0 0 1 1 0 1 1 (0x1B)
+;
+; [S/PDIF Sub Frame Format] (64 symbols)
+; 16bit Audio Format
+; Sync (8) + AUX (8) + '0000' (8) + 16bit Audio (32) + VUCP (8)
+; 24bit Audio Format
+; Sync (8) + 24bit Audio (48) + VUCP (8)
+;
+; Audio data
+;  Audio data appears from LSB earlier to MSB later
+;
+; VUCP
+;  P: parity should be checked every sub frame (checking 27bits excluding sync and P out of 32 bits )
+;  C: for standard case, heading 32 frames' value as bit 0 to 31 out of 192 frames (C value of 2 sub frames should be the same)
+;   further detail for C bits, see https://www.minidisc.org/spdif_c_channel.html
+;   for extended case, it can be up to 192 bits when 192 frames fully utilized
+;
+; [S/PDIF Frame Format] (2 Sub Frames)
+; B(L) + W(R) : head block
+; M(L) + W(R) : succeeding blocks
+
+; [S/PDIF Block Format] (192 Frames = 384 Sub Frames)
+; B(L0) + W(R0) + M(L1) + W(R1) + M(L2) + W(R2) + .... + M(L191) + W(R191)
+
+; === spdif_rx PIO program Specification ===
+; - Overview
+; PIO frequency: 125 MHz (sys_clk)
+; example for the case of input sampling frequency: 48.0 KHz
+; -> symbol clock: 6.144 MHz (128fs) (20.34 cycles of sys_clk -> assume 20 cycles per a symbol)
+; -> PIO output bit rate: 3.072 Mbps (32bits per a sample)
+; PIO program detects the 'edge' of input bitstream at some points, that enables to achieve no bit loss generated
+;  regardless of the cycle difference between symbol of input source and that of PIO assuming.
+;  For the same reason, it can absorb near-by sampling frequencies as well, e.g. decoding 44.1 KHz by 48.0 KHz program.
+; S/PDIF protocol (Sync + BMC) is symetric for the signal polarity,
+;  therefore the PIO program handles only normal polarity and GPIO inverting takes care of inverted polarity.
+; Thanks to BMC + Parity effect, appearance of Sync polarity is limited to one side under consistent bitstream context,
+;  that allows the PIO program to handle only either polarity of Sync patterns.
+
+; - PIO output format as [31:0] (bit order is opposite to symbol order of S/PDIF format for easy copy of audio data)
+;
+; case of 24bit Audio format
+;   [31:28]  VUCP (bit31: P, bit30: C, bit29: U, bit28: V)
+;   [27: 4]  24bit audio data (signed, MSB is bit 27)
+;   [ 3: 0]  Sync
+;
+; case of 16bit Audio format
+;   [31:28]  VUCP (bit31: P, bit30: C, bit29: U, bit28: V)
+;   [27:12]  16bit audio data (signed, MSB is bit 27)
+;   [11: 8]  '0000'
+;   [ 7: 4]  AUX
+;   [ 3: 0]  Sync
+;   if assuming AUX is always 0b0000, then 16bit audio data can be treated as 24bit audio data as [27:4]
+;
+; Sync code consists of below (at [3:0])
+;   0b1111 : Sync Code B (sync E8 or sync 17) (syncE -> sync8  or  sync1 -> sync7)
+;   0b1011 : Sync Code M (sync E2 or sync 1D) (syncE -> bit0 -> bit1  or  sync1 -> bit0 -> bit1)
+;   0b0111 : Sync Code W (sync E4 or sync 1B) (syncE -> bit1 -> bit0  or  sync1 -> bit1 -> bit0)
+;   In precision, only syncE and sync8 (sync1 and sync7) are corresponding to 0b11 and other sync codes follow data bit assignment
+;
+; Each bit of data part (at [31:4])
+;   0b0  : bit0 (symbol_00 or symbol_11)
+;   0b1  : bit1 (symbol_10 or symbol_01)
+
+; ==============================================================================================
+.program spdif_rx_48000
+; It's desirable that 'cy' (cycles per symbol) should be adjusted to the symbol period of target sampling frequency
+;  as close as it can keep good latching position during 2+1 symbol periods.
+;  ('wait' intruction can cancel the accumulated timing error for longer symbol periods)
+;
+; cy: 20 clocks for a symbol cycle for both 44.1 KHz and 48 KHz (for reference, cy = 22.14 for 44.1 KHz, cy = 20.34 for 48 KHz)
+; cy: 10 clocks for a symbol cycle for both 88.2 KHz and 96 KHz (for reference, cy = 11.07 for 88.2 KHz, cy = 10.17 for 96 KHz)
+; cy:  5 clocks for a symbol cycle for both 176.4 KHz and 192 KHz (for reference, cy = 5.54 for 176.4 KHz, cy = 5.09 for 192 KHz)
+; lp: symbol latch point (0 ~ cy-1)
+
+.define cy 20
+.define lp cy/2
+
+; assuming osr register is configured as below
+;   osr: 0xFFFFFFFF (only LSB 2 bits are used to emit 0b1 or 0b11)
+
+public entry_point:
+    wait 0 pin 0
+
+;                          ; comment                       :  start sym pos   end sym pos
+;                                                             (*) symbol latch with delay
+.wrap_target
+wait1:
+    wait 1 pin 0 [cy-1+lp] ; wait for 0 -> 1               :  0                1 + lp/cy
+symbol_1x:
+    jmp pin symbol_11x     ; If symbol 11 -> go symbol_11x :  1 + lp/cy (*)    1 + (lp+1)/cy
+    in osr, 1              ; else emit 1 (symbol 10)       :  1 + (lp+1)/cy    1 + (lp+2)/cy
+    jmp wait1              ; go wait1                      :  1 + (lp+2)/cy    1 + (lp+3)/cy
+symbol_11x:
+    nop [cy-2]             ;                               :  1 + (lp+1)/cy    2 + lp/cy
+    jmp pin sync1110       ; If symbol 111 -> go sync1110  :  2 + lp/cy (*)    2 + (lp+1)/cy (maximum delayed latch point)
+    in null, 1             ; else emit 0 (symbol 110)      :  2 + (lp+1)/cy    2 + (lp+2)/cy
+    jmp symbol_0x [cy-3]   ; go symbol_0x                  :  2 + (lp+2)/cy    3 + lp/cy (= 1 + lp/cy)
+
+wait0:
+    wait 0 pin 0 [cy-1+lp] ; wait for 1 -> 0               :  0                1 + lp/cy
+symbol_0x:
+    jmp pin symbol_01      ; If symbol 01 -> go symbol_01  :  1 + lp/cy (*)    1 + (lp+1)/cy
+    in null, 1             ; else emit 0 (symbol 00)       :  1 + (lp+1)/cy    1 + (lp+2)/cy
+.wrap
+symbol_01:
+    in osr, 1              ; emit 1                        :  1 + (lp+1)/cy    1 + (lp+2)/cy
+    jmp wait0              ; go wait0                      :  1 + (lp+2)/cy    1 + (lp+3)/cy
+
+sync1110:
+    push block             ; this is 32bit start
+    in osr, 2              ; emit sync (sync 1110)         :  2 + (lp+1)/cy    2 + (lp+2)/cy
+    wait 0 pin 0 [cy-1+lp] ; wait for 1 -> 0               :  3                4 + lp/cy
+    jmp pin sync1xxx [cy-2]; If sync 1xxx -> go sync1xxx   :  4 + lp/cy (*)    5 + (lp-1)/cy
+    jmp symbol_0x          ; else go symbol_0x (sync 0xxx) :  5 + (lp-1)/cy    5 + lp/cy (= 1 + lp/cy)
+
+sync1xxx:                  ; sync1xxx must be sync1000
+    in osr, 2              ; emit sync (sync 1000)         :  2 + (lp-1)/cy    2 + lp/cy
+    jmp entry_point        ;                               :  2 + lp/cy        2 + (lp+1)/cy

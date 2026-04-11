@@ -1295,8 +1295,8 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_INCLUDE_MASTER_VOL | 0xD5 | IN | Get include-master-volume flag |
 | REQ_SET_INPUT_SOURCE | 0xE0 | OUT | Set active input source (0=USB, 1=SPDIF) |
 | REQ_GET_INPUT_SOURCE | 0xE1 | IN | Get active input source |
-| REQ_GET_SPDIF_RX_STATUS | 0xE2 | IN | Get SPDIF RX status (16 bytes, Phase 2) |
-| REQ_GET_SPDIF_RX_CH_STATUS | 0xE3 | IN | Get IEC 60958 channel status (24 bytes, Phase 2) |
+| REQ_GET_SPDIF_RX_STATUS | 0xE2 | IN | Get SPDIF RX status (16-byte SpdifRxStatusPacket) |
+| REQ_GET_SPDIF_RX_CH_STATUS | 0xE3 | IN | Get IEC 60958 channel status (24 bytes) |
 | REQ_SET_SPDIF_RX_PIN | 0xE4 | IN* | Set SPDIF RX GPIO pin (wValue=pin, returns status) |
 | REQ_GET_SPDIF_RX_PIN | 0xE5 | IN | Get SPDIF RX GPIO pin |
 
@@ -1513,12 +1513,36 @@ typedef enum {
 - Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5)
 - Pin change rejected when SPDIF input is active
 
+### SPDIF RX Implementation
+
+**Library**: Forked from `elehobica/pico_spdif_rx` v0.9.3 at `firmware/pico-extras/src/rp2_common/pico_spdif_rx/`.
+
+**PIO Allocation**:
+- RP2350: PIO2 SM0 (dedicated block, no conflicts)
+- RP2040: PIO1 SM2 (shared with PDM/MCK — patched to not clear instruction memory)
+
+**Clock**: sys_clk 307.2 MHz → PIO clock 122.88 MHz (divider 2.5, exact). At 122.88 MHz: cy=20 (48kHz), cy=10 (96kHz), cy=5 (192kHz) — identical to original library values, zero error.
+
+**DMA**: Channels 5+6 (RP2350) or 4+5 (RP2040) on DMA_IRQ_1 (isolated from TX's DMA_IRQ_0).
+
+**State Machine**: `spdif_input.h/c`
+- INACTIVE → ACQUIRING → LOCKED → RELOCKING (on signal loss) → LOCKED (on re-lock)
+- Lock: ~64ms library internal stability + firmware debounce polls
+- Loss: 10ms timeout
+- Audio extraction: FIFO → 24-bit decode → per-channel preamp → buf_l/buf_r → process_input_block()
+
+**Clock Servo**: PI controller in `spdif_input_update_clock_servo()` adjusts all output PIO dividers based on FIFO fill level (target 50%). Gains: KP=0.0005, KI=0.000005, deadband ±2 blocks.
+
+**Files**: `spdif_input.h` (API + status struct), `spdif_input.c` (lifecycle, audio extraction, clock servo, status queries)
+
 ### Vendor Commands
 
 | Code | Command | Direction | Description |
 |------|---------|-----------|-------------|
 | 0xE0 | REQ_SET_INPUT_SOURCE | OUT | Set active input source (uint8_t payload) |
 | 0xE1 | REQ_GET_INPUT_SOURCE | IN | Get active input source (returns uint8_t) |
+| 0xE2 | REQ_GET_SPDIF_RX_STATUS | IN | Get SPDIF RX status (16-byte SpdifRxStatusPacket) |
+| 0xE3 | REQ_GET_SPDIF_RX_CH_STATUS | IN | Get IEC 60958 channel status (24 bytes) |
 | 0xE4 | REQ_SET_SPDIF_RX_PIN | IN* | Set SPDIF RX pin (wValue=pin, returns status byte) |
 | 0xE5 | REQ_GET_SPDIF_RX_PIN | IN | Get SPDIF RX pin (returns uint8_t) |
 

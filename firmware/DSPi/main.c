@@ -18,6 +18,9 @@
 // Local headers
 #include "config.h"
 #include "audio_input.h"
+#include "audio_pipeline.h"
+#include "spdif_input.h"
+#include "spdif_rx.h"
 #include "dsp_pipeline.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
@@ -712,6 +715,15 @@ void core0_init() {
 
     multicore_launch_core1(pdm_core1_entry);
 #endif
+
+    // Initialize SPDIF RX subsystem (no PIO/DMA resources claimed yet)
+    spdif_input_init();
+
+    // If the loaded preset has SPDIF as input source, start RX hardware.
+    // Output remains muted until lock is acquired (handled in main loop).
+    if (active_input_source == INPUT_SOURCE_SPDIF) {
+        spdif_input_start();
+    }
 }
 
 int main(void) {
@@ -737,6 +749,32 @@ int main(void) {
         // pipeline here in main-loop context instead of USB IRQ context.
         if (active_input_source == INPUT_SOURCE_USB) {
             usb_audio_drain_ring();
+        }
+
+        // Poll SPDIF input when active
+        if (active_input_source == INPUT_SOURCE_SPDIF) {
+            SpdifInputState rx_state = spdif_input_get_state();
+
+            // Handle lock acquisition: check for rate change, then unmute
+            if (rx_state == SPDIF_INPUT_LOCKED && preset_loading) {
+                // Rate change check before unmuting
+                spdif_input_check_rate_change();
+                // Unmute once FIFO has built up sufficiently
+                if (spdif_rx_get_fifo_count() >= SPDIF_RX_FIFO_SIZE / 4) {
+                    complete_pipeline_reset();
+                }
+            }
+
+            // Handle lock loss: mute output immediately
+            if (rx_state == SPDIF_INPUT_RELOCKING && !preset_loading) {
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+            }
+
+            // Read FIFO audio and feed DSP pipeline
+            spdif_input_poll();
+
+            // Adjust output PIO dividers to track SPDIF input clock
+            spdif_input_update_clock_servo();
         }
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
@@ -1160,12 +1198,36 @@ int main(void) {
                 usb_audio_drain_ring();
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
-                // Phase 1: just update the state variable.
-                // Phase 2 adds: stop old source HW, start new source HW,
-                // wait for lock (SPDIF), configure clock servo.
+                // Stop old source hardware
+                if (old_source == INPUT_SOURCE_SPDIF) {
+                    spdif_input_stop();
+
+                    // Restore nominal output PIO dividers — the clock servo
+                    // adjusts them during SPDIF input and they must be reset
+                    // to prevent garbled audio on the new input source.
+                    // perform_rate_change() recalculates all PIO dividers,
+                    // filter coefficients, and resets the feedback loop.
+                    perform_rate_change(audio_state.freq);
+                    dsp_update_delay_samples((float)audio_state.freq);
+
+                    // Reset DSP state to prevent stale SPDIF data leaking
+                    leveller_reset_pending = true;
+                    pipeline_reset_cpu_metering();
+                }
+
                 active_input_source = new_source;
 
-                complete_pipeline_reset();
+                // Start new source hardware
+                if (new_source == INPUT_SOURCE_SPDIF) {
+                    spdif_input_start();
+                    // Don't complete_pipeline_reset yet — output stays muted
+                    // until SPDIF lock is acquired (handled in polling block below)
+                } else {
+                    // Switching to USB: flush stale ring data, complete reset
+                    usb_audio_flush_ring();
+                    complete_pipeline_reset();
+                }
+
                 printf("Input source: %u -> %u\n",
                        (unsigned)old_source, (unsigned)new_source);
             }

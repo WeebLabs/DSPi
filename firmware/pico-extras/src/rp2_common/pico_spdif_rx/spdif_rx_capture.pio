@@ -1,0 +1,61 @@
+; Copyright (c) 2023, Elehobica
+; Released under the BSD-2-Clause
+; refer to https://opensource.org/licenses/BSD-2-Clause
+
+; PIO program for direct sample of S/PDIF data
+; sampled data is used for detection of sampling frequency
+
+; ==============================================================================================
+.program spdif_rx_capture
+
+public entry_point:
+    set x, 31
+; block here if no signal
+loop_wait_toggle:
+    wait 0 pin 0
+    wait 1 pin 0
+    jmp x-- loop_wait_toggle
+
+; one more wait turn to avoid spending 1 cyc by jmp
+    wait 0 pin 0
+    wait 1 pin 0
+; here just after rising edge of pin
+
+; output samples non-stop unless fifo gets full
+.wrap_target
+    in pins, 1
+.wrap
+
+; ==============================================================================================
+% c-sdk {
+
+#include "spdif_rx.h"
+
+static inline void spdif_rx_capture_program_init(PIO pio, uint sm, uint offset, uint entry_point, pio_sm_config (*get_default_config)(uint), uint pin)
+{
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, false);
+    pio_gpio_init(pio, pin);
+    //gpio_pull_down(pin);
+    gpio_set_inover(pin, GPIO_OVERRIDE_NORMAL);
+
+    pio_sm_config sm_config = (*get_default_config)(offset);
+
+    const uint32_t div_int   = SPDIF_RX_SYS_CLK_FREQ / SPDIF_RX_PIO_CLK_FREQ;
+    const uint8_t  div_frac8 = (uint8_t) (((uint64_t) SPDIF_RX_SYS_CLK_FREQ * 256) / SPDIF_RX_PIO_CLK_FREQ - 256);
+    sm_config_set_clkdiv_int_frac8(&sm_config, div_int, div_frac8);
+    sm_config_set_jmp_pin(&sm_config, pin);
+    sm_config_set_in_pins(&sm_config, pin); // PINCTRL_IN_BASE for wait
+    sm_config_set_in_shift(&sm_config, false, true, 32); // shift_left, autopush, 32bit
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_RX);
+
+    pio_sm_init(pio, sm, offset, &sm_config);
+    pio_sm_set_pins(pio, sm, 0); // clear pins
+    pio_sm_clear_fifos(pio, sm);
+    pio_sm_drain_tx_fifo(pio, sm);
+
+    pio_sm_set_enabled(pio, sm, true);
+
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + entry_point));
+}
+
+%}

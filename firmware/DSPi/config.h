@@ -80,11 +80,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
-#if PICO_RP2350
-#define MAX_DELAY_SAMPLES 4096   // 85ms at 48kHz
-#else
-#define MAX_DELAY_SAMPLES 2048   // 42ms at 48kHz
-#endif
+#define MAX_DELAY_SAMPLES 2048   // 42ms at 48kHz (both platforms)
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
 // Latency alignment (in samples - automatically adapts to sample rate)
@@ -285,6 +281,15 @@ extern volatile uint32_t nominal_feedback_10_14;
 // I2S default pins
 #define PICO_I2S_BCK_PIN            14   // BCK; LRCLK = BCK + 1 = GPIO 15
 #define PICO_I2S_MCK_PIN            13   // Master clock (optional)
+
+// S/PDIF RX DMA channel assignments (explicit, not auto-claimed)
+#if PICO_RP2350
+#define PICO_SPDIF_RX_DMA_CH0      5
+#define PICO_SPDIF_RX_DMA_CH1      6
+#else
+#define PICO_SPDIF_RX_DMA_CH0      4
+#define PICO_SPDIF_RX_DMA_CH1      5
+#endif
 
 // Number of configurable outputs (SPDIF + PDM)
 #if PICO_RP2350

@@ -11,6 +11,7 @@
 #include "vendor_commands.h"
 #include "usb_audio.h"
 #include "audio_input.h"
+#include "spdif_input.h"
 #include "audio_pipeline.h"
 #include "config.h"
 #include "dsp_pipeline.h"
@@ -1565,6 +1566,20 @@ bool vendor_setup_request_handler(__unused struct usb_interface *interface, stru
             case REQ_GET_SPDIF_RX_PIN: {
                 resp_buf[0] = spdif_rx_pin;
                 vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_SPDIF_RX_STATUS: {
+                SpdifRxStatusPacket status;
+                spdif_input_get_status(&status);
+                vendor_send_response(&status, sizeof(status));
+                return true;
+            }
+
+            case REQ_GET_SPDIF_RX_CH_STATUS: {
+                uint8_t ch_status[24];
+                spdif_input_get_channel_status(ch_status);
+                vendor_send_response(ch_status, 24);
                 return true;
             }
         }

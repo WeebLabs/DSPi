@@ -5,7 +5,7 @@ add_compile_options(-O2)
 
 # Use -O3 for DSP-critical files
 set_source_files_properties(
-    dsp_pipeline.c usb_audio.c vendor_commands.c audio_pipeline.c crossfeed.c loudness.c leveller.c
+    dsp_pipeline.c usb_audio.c vendor_commands.c audio_pipeline.c crossfeed.c loudness.c leveller.c spdif_input.c
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
@@ -31,6 +31,8 @@ add_executable(DSPi
     main.c
     pdm_generator.c
     pdm_generator.h
+    spdif_input.c
+    spdif_input.h
     usb_audio.c
     usb_audio.h
     vendor_commands.c
@@ -43,6 +45,11 @@ add_executable(DSPi
 
 if (PICO_PLATFORM STREQUAL "rp2040")
     target_sources(DSPi PRIVATE dsp_process_rp2040.S)
+    # RP2040: SPDIF RX on PIO1 (shared with PDM/MCK, 24 of 32 instructions)
+    target_compile_definitions(DSPi PRIVATE PICO_SPDIF_RX_PIO=1)
+else()
+    # RP2350: SPDIF RX on PIO2 (dedicated block, no conflicts)
+    target_compile_definitions(DSPi PRIVATE PICO_SPDIF_RX_PIO=2)
 endif()
 
 pico_set_binary_type(DSPi copy_to_ram)
@@ -61,6 +68,10 @@ target_compile_definitions(DSPi PRIVATE
     # Keep I2S on a separate DMA IRQ line to avoid cross-driver IRQ gating.
     PICO_AUDIO_I2S_DMA_IRQ=0
 
+    # S/PDIF RX on DMA_IRQ_0 — isolated from SPDIF TX (DMA_IRQ_1) to avoid
+    # shared handler conflicts (handler registration, IRQ enable/disable, re-entrancy).
+    PICO_SPDIF_RX_DMA_IRQ=0
+
     PICO_DEFAULT_UART_TX_PIN=12
 
     # pico-extras usb_device configuration
@@ -78,6 +89,7 @@ target_link_libraries(DSPi
     hardware_adc
     pico_audio_spdif_multi
     pico_audio_i2s_multi
+    pico_spdif_rx
     usb_device
 )
 
