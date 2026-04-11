@@ -52,15 +52,17 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-04-04*
+*Last updated: 2026-04-11*
 
 ### Core Firmware (`firmware/DSPi/`)
 
 | File | Purpose |
 |------|---------|
 | `main.c` | Entry point, initialization, main event loop |
-| `usb_audio.c` | USB audio packet processing, DSP pipeline orchestration |
-| `usb_audio.h` | USB audio interface API, AudioState struct |
+| `usb_audio.c` | USB audio packet processing, DSP pipeline, output slots, UAC1 control, init |
+| `usb_audio.h` | USB audio interface API, AudioState struct, extern declarations for shared state |
+| `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, pin/MCK helpers, diagnostics) |
+| `vendor_commands.h` | Vendor handler declarations, system stats and pin helper prototypes |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
 | `dsp_pipeline.h` | Filter storage declarations, delay line API |
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |

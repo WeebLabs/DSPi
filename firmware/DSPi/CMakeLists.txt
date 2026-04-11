@@ -5,7 +5,7 @@ add_compile_options(-O2)
 
 # Use -O3 for DSP-critical files
 set_source_files_properties(
-    dsp_pipeline.c usb_audio.c crossfeed.c loudness.c leveller.c
+    dsp_pipeline.c usb_audio.c vendor_commands.c crossfeed.c loudness.c leveller.c
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
@@ -29,6 +29,8 @@ add_executable(DSPi
     pdm_generator.h
     usb_audio.c
     usb_audio.h
+    vendor_commands.c
+    vendor_commands.h
     usb_descriptors.c
     usb_descriptors.h
     usb_feedback_controller.c

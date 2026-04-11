@@ -7,6 +7,9 @@
 #define USB_AUDIO_H
 
 #include "config.h"
+#include "pico/types.h"
+#include "loudness.h"
+#include "leveller.h"
 
 // ----------------------------------------------------------------------------
 // AUDIO STATE (exposed to Main)
@@ -43,6 +46,7 @@ extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
+extern const LoudnessCoeffs *current_loudness_coeffs;
 
 // Crossfeed
 #include "crossfeed.h"
@@ -50,6 +54,17 @@ extern volatile CrossfeedConfig crossfeed_config;
 extern volatile bool crossfeed_update_pending;
 extern volatile bool crossfeed_bypassed;
 extern CrossfeedState crossfeed_state;
+
+// Volume Leveller
+extern volatile LevellerConfig leveller_config;
+extern volatile bool leveller_update_pending;
+extern volatile bool leveller_reset_pending;
+extern volatile bool leveller_bypassed;
+extern LevellerCoeffs leveller_coeffs;
+extern LevellerState leveller_state;
+
+// Matrix Mixer
+extern MatrixMixer matrix_mixer;
 
 // ----------------------------------------------------------------------------
 // EQ UPDATE FLAGS (for main loop to handle)
@@ -67,6 +82,90 @@ void get_default_channel_name(int ch, char *buf);
 
 // Core 1 mode derivation (used by preset load and bulk params)
 Core1Mode derive_core1_mode(void);
+
+// ----------------------------------------------------------------------------
+// OUTPUT SLOT STATE
+// ----------------------------------------------------------------------------
+
+extern uint8_t output_pins[];
+extern uint8_t output_types[];
+extern struct audio_spdif_instance *spdif_instance_ptrs[];
+extern struct audio_i2s_instance *i2s_instance_ptrs[];
+extern struct audio_buffer_pool *producer_pools[];
+
+// Producer pool aliases (individual named, used by pipeline)
+extern struct audio_buffer_pool *producer_pool_1;
+extern struct audio_buffer_pool *producer_pool_2;
+#if PICO_RP2350
+extern struct audio_buffer_pool *producer_pool_3;
+extern struct audio_buffer_pool *producer_pool_4;
+#endif
+
+// I2S clock configuration
+extern uint8_t i2s_bck_pin;
+extern uint8_t i2s_mck_pin;
+extern bool    i2s_mck_enabled;
+extern uint16_t i2s_mck_multiplier;
+
+// ----------------------------------------------------------------------------
+// DEFERRED COMMAND FLAGS (written by vendor SET, read by main loop)
+// ----------------------------------------------------------------------------
+
+extern volatile bool flash_set_name_pending;
+extern uint8_t flash_set_name_slot;
+extern char    flash_set_name_buf[];
+
+extern volatile bool flash_set_startup_pending;
+extern uint8_t flash_set_startup_mode;
+extern uint8_t flash_set_startup_slot;
+
+extern volatile bool flash_set_include_pins_pending;
+extern uint8_t flash_set_include_pins_val;
+
+extern volatile bool flash_set_include_master_vol_pending;
+extern uint8_t flash_set_include_master_vol_val;
+
+extern volatile bool save_params_pending;
+extern volatile bool preset_save_pending;
+extern volatile bool preset_load_pending;
+extern volatile bool factory_reset_pending;
+extern volatile uint8_t pending_preset_load_slot;
+extern volatile uint8_t pending_preset_save_slot;
+extern volatile uint16_t preset_delete_mask;
+
+extern volatile uint8_t output_type_change_mask;
+extern volatile uint8_t pending_output_types[];
+extern volatile bool stream_restart_resync_pending;
+
+// Sync state (used by vendor GET handler for buffer stats)
+extern volatile bool sync_started;
+
+// ----------------------------------------------------------------------------
+// VOLUME CONSTANT (shared by audio_set_volume and vendor command handlers)
+// ----------------------------------------------------------------------------
+
+#define CENTER_VOLUME_INDEX 60
+
+// ----------------------------------------------------------------------------
+// SHARED HELPERS (defined in usb_audio.c, called from vendor_commands.c)
+// ----------------------------------------------------------------------------
+
+void update_preamp(uint8_t ch, float db);
+void update_master_volume(float db);
+
+// Buffer statistics (defined in usb_audio.c, called from vendor_commands.c)
+void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, uint *playing);
+uint get_slot_consumer_fill(uint slot);
+void reset_buffer_watermarks(void);
+
+// Buffer watermark state (written by usb_audio.c, read by vendor_commands.c)
+extern uint16_t buffer_stats_sequence;
+extern uint8_t spdif_consumer_min_fill_pct[];
+extern uint8_t spdif_consumer_max_fill_pct[];
+extern uint8_t pdm_dma_min_fill_pct;
+extern uint8_t pdm_dma_max_fill_pct;
+extern uint8_t pdm_ring_min_fill_pct;
+extern uint8_t pdm_ring_max_fill_pct;
 
 // ----------------------------------------------------------------------------
 // API
