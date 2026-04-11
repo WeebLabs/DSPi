@@ -29,7 +29,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       6   // V6: per-channel preamp + master volume
+#define WIRE_FORMAT_VERSION       7   // V7: input source configuration
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -185,6 +185,15 @@ typedef struct __attribute__((packed)) {
 } WireMasterVolume;              // 16 bytes
 
 // ============================================================================
+// Section 15: Input Source Configuration (16 bytes) — V7+
+// ============================================================================
+typedef struct __attribute__((packed)) {
+    uint8_t  input_source;           // InputSource enum (0=USB, 1=SPDIF)
+    uint8_t  spdif_rx_pin;          // SPDIF RX GPIO pin (informational, SET does not apply)
+    uint8_t  reserved[14];           // Future expansion (pad to 16 bytes)
+} WireInputConfig;                   // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -202,7 +211,8 @@ typedef struct __attribute__((packed)) {
     WireLevellerConfig  leveller;                                          //   16
     WirePreampConfig    preamp;                                            //   16
     WireMasterVolume    master_volume;                                     //   16
-} WireBulkParams;                    // Total: 2896 bytes
+    WireInputConfig     input_config;                                      //   16
+} WireBulkParams;                    // Total: 2912 bytes
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 

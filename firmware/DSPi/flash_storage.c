@@ -27,6 +27,7 @@
 
 #include "flash_storage.h"
 #include "config.h"
+#include "audio_input.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "crossfeed.h"
@@ -67,7 +68,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       12   // V12: per-channel preamp + master volume
+#define SLOT_DATA_VERSION       13   // V13: input source selection
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -106,7 +107,7 @@ typedef struct __attribute__((packed)) {
     // Slot metadata
     uint16_t slot_occupied;                  // Bitmask: bit N = slot N has valid data
     uint8_t  include_master_volume;          // Whether preset load restores master volume (was padding[0])
-    uint8_t  padding[1];                     // Remaining padding (was padding[1])
+    uint8_t  spdif_rx_pin;                   // SPDIF RX GPIO pin, device-level (was padding[1])
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
 } PresetDirectory;
 
@@ -164,6 +165,9 @@ typedef struct __attribute__((packed)) {
     // Per-channel preamp + Master volume (V12)
     float   preamp_db_per_ch[NUM_INPUT_CHANNELS];  // Per-input-channel preamp (dB)
     float   master_volume_db;                       // Device master volume (-128 mute, -127..0 dB)
+    // Input source selection (V13)
+    uint8_t input_source;            // InputSource enum (0=USB, 1=SPDIF)
+    uint8_t input_source_padding[3]; // Pad to 4-byte boundary
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -389,6 +393,7 @@ static void dir_ensure(void) {
     dir_cache.last_active_slot = 0;     // Default to slot 0
     dir_cache.include_pins = 0;              // Don't include pins by default
     dir_cache.include_master_volume = 0;     // Don't include master volume by default
+    dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
     dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
     strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
@@ -484,6 +489,9 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     for (int i = 0; i < NUM_INPUT_CHANNELS; i++)
         slot->preamp_db_per_ch[i] = global_preamp_db[i];
     slot->master_volume_db = master_volume_db;
+
+    // Input source (V13)
+    slot->input_source = active_input_source;
 
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
@@ -660,6 +668,17 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins,
     }
     leveller_update_pending = true;
     leveller_reset_pending = true;
+
+    // Input source (V13+)
+    if (slot->version >= 13) {
+        uint8_t src = slot->input_source;
+        if (input_source_valid(src) && src != active_input_source) {
+            pending_input_source = src;
+            __dmb();
+            input_source_change_pending = true;
+        }
+    }
+    // V12 and earlier: leave input source at current value (USB by default)
 }
 
 // ============================================================================
@@ -885,6 +904,12 @@ void preset_set_include_master_volume(uint8_t include) {
     dir_flush();
 }
 
+void preset_set_spdif_rx_pin(uint8_t pin) {
+    dir_ensure();
+    dir_cache.spdif_rx_pin = pin;
+    dir_flush();
+}
+
 uint8_t preset_get_active(void) {
     dir_ensure();
     return dir_cache.last_active_slot;
@@ -934,6 +959,7 @@ static bool migrate_legacy(void) {
     dir_cache.last_active_slot = 0;
     dir_cache.include_pins = 0;
     dir_cache.include_master_volume = 0;
+    dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
     dir_cache_valid = true;
@@ -948,6 +974,15 @@ static bool migrate_legacy(void) {
 int preset_boot_load(void) {
     // Try to load the preset directory from flash
     if (dir_load_cache()) {
+        // Restore device-level SPDIF RX pin from directory
+        uint8_t rx_pin = dir_cache.spdif_rx_pin;
+        if (rx_pin > 0 && rx_pin <= 29 && rx_pin != 12 &&
+            !(rx_pin >= 23 && rx_pin <= 25)) {
+            spdif_rx_pin = rx_pin;
+        } else {
+            spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
+        }
+
         // Directory exists — determine which slot to load
         uint8_t target_slot;
 
@@ -1135,6 +1170,9 @@ static void apply_factory_defaults(void) {
     leveller_config.gate_threshold_db = LEVELLER_DEFAULT_GATE_DB;
     leveller_update_pending = true;
     leveller_reset_pending = true;
+
+    // Input source: default to USB
+    active_input_source = INPUT_SOURCE_USB;
 }
 
 void flash_factory_reset(void) {

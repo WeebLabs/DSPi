@@ -235,6 +235,14 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOL_MIN_DB           (-127.0f)  // Minimum non-mute attenuation
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
 
+// Audio Input Source Commands
+#define REQ_SET_INPUT_SOURCE        0xE0  // payload = uint8_t (InputSource enum)
+#define REQ_GET_INPUT_SOURCE        0xE1  // returns uint8_t
+#define REQ_GET_SPDIF_RX_STATUS     0xE2  // returns 16-byte status struct (Phase 2)
+#define REQ_GET_SPDIF_RX_CH_STATUS  0xE3  // returns 24-byte IEC 60958 channel status (Phase 2)
+#define REQ_SET_SPDIF_RX_PIN        0xE4  // wValue = GPIO pin, returns status byte
+#define REQ_GET_SPDIF_RX_PIN        0xE5  // returns uint8_t
+
 // System
 #define REQ_ENTER_BOOTLOADER        0xF0
 

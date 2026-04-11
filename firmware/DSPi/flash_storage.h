@@ -80,6 +80,9 @@ void preset_set_include_pins(uint8_t include);
 // Set whether preset load restores master volume from the preset.
 void preset_set_include_master_volume(uint8_t include);
 
+// Set the SPDIF RX input GPIO pin (device-level, stored in directory).
+void preset_set_spdif_rx_pin(uint8_t pin);
+
 // Get the currently active preset slot (always 0-9).
 uint8_t preset_get_active(void);
 

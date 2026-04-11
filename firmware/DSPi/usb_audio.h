@@ -125,6 +125,8 @@ extern uint8_t flash_set_include_pins_val;
 extern volatile bool flash_set_include_master_vol_pending;
 extern uint8_t flash_set_include_master_vol_val;
 
+extern volatile bool flash_set_spdif_rx_pin_pending;
+
 extern volatile bool save_params_pending;
 extern volatile bool preset_save_pending;
 extern volatile bool preset_load_pending;

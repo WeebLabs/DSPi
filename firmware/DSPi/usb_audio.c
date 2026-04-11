@@ -109,6 +109,9 @@ uint8_t flash_set_include_pins_val = 0;
 volatile bool flash_set_include_master_vol_pending = false;
 uint8_t flash_set_include_master_vol_val = 0;
 
+// Deferred SPDIF RX pin directory update
+volatile bool flash_set_spdif_rx_pin_pending = false;
+
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
 

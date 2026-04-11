@@ -10,6 +10,8 @@ set_source_files_properties(
 )
 
 add_executable(DSPi
+    audio_input.c
+    audio_input.h
     audio_pipeline.c
     audio_pipeline.h
     bulk_params.c

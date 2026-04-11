@@ -1293,13 +1293,19 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_MASTER_VOLUME | 0xD3 | IN | Get master volume |
 | REQ_SET_INCLUDE_MASTER_VOL | 0xD4 | OUT | Set include-master-volume flag in preset directory |
 | REQ_GET_INCLUDE_MASTER_VOL | 0xD5 | IN | Get include-master-volume flag |
+| REQ_SET_INPUT_SOURCE | 0xE0 | OUT | Set active input source (0=USB, 1=SPDIF) |
+| REQ_GET_INPUT_SOURCE | 0xE1 | IN | Get active input source |
+| REQ_GET_SPDIF_RX_STATUS | 0xE2 | IN | Get SPDIF RX status (16 bytes, Phase 2) |
+| REQ_GET_SPDIF_RX_CH_STATUS | 0xE3 | IN | Get IEC 60958 channel status (24 bytes, Phase 2) |
+| REQ_SET_SPDIF_RX_PIN | 0xE4 | IN* | Set SPDIF RX GPIO pin (wValue=pin, returns status) |
+| REQ_GET_SPDIF_RX_PIN | 0xE5 | IN | Get SPDIF RX GPIO pin |
 
 ### Bulk Parameter Transfer
 *Last updated: 2026-04-09*
 
 Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 6) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), and master volume config (`WireMasterVolume`, 16 bytes). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 7) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), and input source config (`WireInputConfig`, 16 bytes). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
 
 **Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
 
@@ -1470,3 +1476,58 @@ Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Cor
 - Preset directory response is now 7 bytes (was 6) — byte 6 = `include_master_volume`
 - Slots with version < 12 default to 0 dB master volume (unity, no attenuation)
 - `WireMasterVolume` (16 bytes) section in `WireBulkParams` V6+
+
+---
+
+## Audio Input Source System
+*Last updated: 2026-04-11*
+
+Abstraction layer enabling selection between multiple audio input sources. Currently supports USB (default) and SPDIF. Designed for future extensibility to I2S and ADAT inputs without restructuring.
+
+### Files
+
+- `audio_input.h` — `InputSource` enum, globals, constants
+- `audio_input.c` — Global definitions
+
+### Input Source Enum
+
+```c
+typedef enum {
+    INPUT_SOURCE_USB   = 0,
+    INPUT_SOURCE_SPDIF = 1,
+    // Future: INPUT_SOURCE_I2S = 2, INPUT_SOURCE_ADAT = 3
+} InputSource;
+```
+
+### Switching Behavior
+
+- Source switching is deferred to the main loop via `input_source_change_pending` / `pending_input_source` flags (same pattern as output type switching)
+- On switch: drain USB ring, `prepare_pipeline_reset()`, update `active_input_source`, `complete_pipeline_reset()`
+- When input is not USB, `usb_audio_drain_ring()` is skipped — USB enumeration stays active but audio data is silently dropped
+- SPDIF RX hardware only runs when SPDIF is the selected input source
+
+### SPDIF RX Pin
+
+- Default: GPIO 11 (`PICO_SPDIF_RX_PIN_DEFAULT`)
+- Device-level setting stored in `PresetDirectory` (not per-preset)
+- Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5)
+- Pin change rejected when SPDIF input is active
+
+### Vendor Commands
+
+| Code | Command | Direction | Description |
+|------|---------|-----------|-------------|
+| 0xE0 | REQ_SET_INPUT_SOURCE | OUT | Set active input source (uint8_t payload) |
+| 0xE1 | REQ_GET_INPUT_SOURCE | IN | Get active input source (returns uint8_t) |
+| 0xE4 | REQ_SET_SPDIF_RX_PIN | IN* | Set SPDIF RX pin (wValue=pin, returns status byte) |
+| 0xE5 | REQ_GET_SPDIF_RX_PIN | IN | Get SPDIF RX pin (returns uint8_t) |
+
+*0xE4 uses the immediate-response SET pattern (same as `REQ_SET_I2S_BCK_PIN`).
+
+### Persistence
+
+- `SLOT_DATA_VERSION` 13 adds `input_source` (uint8_t) to `PresetSlot`
+- Slots with version < 13 leave input source at its current value (USB by default)
+- Factory reset sets `active_input_source = INPUT_SOURCE_USB`
+- `WireInputConfig` (16 bytes) section in `WireBulkParams` V7+
+- SPDIF RX pin stored in `PresetDirectory` (consumed existing padding byte, no directory format change)

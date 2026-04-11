@@ -17,6 +17,7 @@
 
 // Local headers
 #include "config.h"
+#include "audio_input.h"
 #include "dsp_pipeline.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
@@ -731,10 +732,12 @@ int main(void) {
         // Update watchdog
         watchdog_update();
 
-        // Drain USB audio ring — highest priority.
+        // Drain USB audio ring — highest priority (only when USB is active input).
         // USB ISR pushes raw packets into the ring; we run the full DSP
         // pipeline here in main-loop context instead of USB IRQ context.
-        usb_audio_drain_ring();
+        if (active_input_source == INPUT_SOURCE_USB) {
+            usb_audio_drain_ring();
+        }
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,
@@ -1143,6 +1146,37 @@ int main(void) {
                     __sev();
                 }
             }
+        }
+
+        // Handle deferred input source switch
+        if (input_source_change_pending) {
+            input_source_change_pending = false;
+            __dmb();
+
+            uint8_t new_source = pending_input_source;
+            uint8_t old_source = active_input_source;
+
+            if (new_source != old_source && input_source_valid(new_source)) {
+                usb_audio_drain_ring();
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+
+                // Phase 1: just update the state variable.
+                // Phase 2 adds: stop old source HW, start new source HW,
+                // wait for lock (SPDIF), configure clock servo.
+                active_input_source = new_source;
+
+                complete_pipeline_reset();
+                printf("Input source: %u -> %u\n",
+                       (unsigned)old_source, (unsigned)new_source);
+            }
+        }
+
+        // Handle deferred SPDIF RX pin directory update
+        if (flash_set_spdif_rx_pin_pending) {
+            flash_set_spdif_rx_pin_pending = false;
+            prepare_flash_write_operation();
+            preset_set_spdif_rx_pin(spdif_rx_pin);
+            complete_flash_write_operation_light();
         }
 
         // LED heartbeat - toggle every ~1000 iterations

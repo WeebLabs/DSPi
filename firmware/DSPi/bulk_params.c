@@ -11,6 +11,7 @@
 
 #include "bulk_params.h"
 #include "config.h"
+#include "audio_input.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "crossfeed.h"
@@ -18,6 +19,8 @@
 
 #include <string.h>
 #include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
+
+#include "hardware/sync.h"  // __dmb()
 
 // External variables (defined in usb_audio.c)
 extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
@@ -169,6 +172,10 @@ void bulk_params_collect(WireBulkParams *out) {
 
     // Master volume (V6+)
     out->master_volume.master_volume_db = master_volume_db;
+
+    // Input source configuration (V7+)
+    out->input_config.input_source = active_input_source;
+    out->input_config.spdif_rx_pin = spdif_rx_pin;
 }
 
 // ============================================================================
@@ -176,8 +183,8 @@ void bulk_params_collect(WireBulkParams *out) {
 // ============================================================================
 
 int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
-    // Validate header (accept V2-V6 for backward compat)
-    // V2: no I2S/leveller/preamp/master.  V3-V4: no preamp/master.  V5: no preamp/master.  V6: current.
+    // Validate header (accept V2-V7 for backward compat)
+    // V2: no I2S/leveller/preamp/master.  V3-V5: no preamp/master.  V6: preamp+master.  V7: +input source.
     if (in->header.format_version < 2 || in->header.format_version > WIRE_FORMAT_VERSION)
         return -1;
 
@@ -194,9 +201,10 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     if (in->header.num_output_channels != NUM_OUTPUT_CHANNELS)
         return -3;
     // Accept payload sizes from V2 through current.
-    // V2: no I2S, no leveller, no preamp/master.  V3/V4: no preamp/master.
-    // V5: no preamp/master sections.  V6: current full size.
-    uint16_t v5_size = sizeof(WireBulkParams) - sizeof(WirePreampConfig) - sizeof(WireMasterVolume);
+    // V2: no I2S/leveller/preamp/master/input.  V3-V5: no preamp/master/input.
+    // V6: no input.  V7: current full size.
+    uint16_t v6_size = sizeof(WireBulkParams) - sizeof(WireInputConfig);
+    uint16_t v5_size = v6_size - sizeof(WirePreampConfig) - sizeof(WireMasterVolume);
     uint16_t v2_size = v5_size - sizeof(WireI2SConfig) - sizeof(WireLevellerConfig);
     if (in->header.payload_length < v2_size ||
         in->header.payload_length > sizeof(WireBulkParams))
@@ -370,6 +378,16 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             float linear = powf(10.0f, db / 20.0f);
             master_volume_linear = linear;
             master_volume_q15    = (int32_t)(linear * 32768.0f);
+        }
+    }
+
+    // Input source (V7+ payloads)
+    if (in->header.format_version >= 7) {
+        uint8_t src = in->input_config.input_source;
+        if (input_source_valid(src) && src != active_input_source) {
+            pending_input_source = src;
+            __dmb();
+            input_source_change_pending = true;
         }
     }
 

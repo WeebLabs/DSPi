@@ -10,6 +10,7 @@
 
 #include "vendor_commands.h"
 #include "usb_audio.h"
+#include "audio_input.h"
 #include "audio_pipeline.h"
 #include "config.h"
 #include "dsp_pipeline.h"
@@ -217,6 +218,8 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
     }
     // Check MCK pin if enabled
     if (i2s_mck_enabled && pin == i2s_mck_pin) return true;
+    // Check SPDIF RX input pin
+    if (pin == spdif_rx_pin) return true;
     return false;
 }
 
@@ -606,6 +609,21 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
                 size_t copy_len = buffer->data_len < (PRESET_NAME_LEN - 1)
                                 ? buffer->data_len : (PRESET_NAME_LEN - 1);
                 memcpy(channel_names[ch], vendor_rx_buf, copy_len);
+            }
+            break;
+        }
+
+        case REQ_SET_INPUT_SOURCE: {
+            // Payload: 1 byte = InputSource enum value.
+            // Deferred to main loop — actual source switch requires
+            // pipeline reset and (Phase 2) hardware start/stop.
+            if (buffer->data_len >= 1) {
+                uint8_t src = vendor_rx_buf[0];
+                if (input_source_valid(src) && src != active_input_source) {
+                    pending_input_source = src;
+                    __dmb();
+                    input_source_change_pending = true;
+                }
             }
             break;
         }
@@ -1509,6 +1527,43 @@ bool vendor_setup_request_handler(__unused struct usb_interface *interface, stru
             case REQ_GET_MCK_MULTIPLIER: {
                 sanitize_mck_multiplier_for_rate(audio_state.freq);
                 resp_buf[0] = mck_encode(i2s_mck_multiplier);
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            // ---- Audio Input Source Commands ----
+
+            case REQ_GET_INPUT_SOURCE: {
+                resp_buf[0] = active_input_source;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_SET_SPDIF_RX_PIN: {
+                // Immediate-response SET (same pattern as SET_I2S_BCK_PIN).
+                // wValue = new GPIO pin number.
+                uint8_t new_pin = (uint8_t)setup->wValue;
+                uint8_t status;
+                if (!is_valid_gpio_pin(new_pin)) {
+                    status = PIN_CONFIG_INVALID_PIN;
+                } else if (new_pin == spdif_rx_pin) {
+                    status = PIN_CONFIG_SUCCESS;  // No-op
+                } else if (active_input_source == INPUT_SOURCE_SPDIF) {
+                    status = PIN_CONFIG_OUTPUT_ACTIVE;  // Can't change while RX active
+                } else if (is_pin_in_use(new_pin, 0xFF)) {
+                    status = PIN_CONFIG_PIN_IN_USE;
+                } else {
+                    spdif_rx_pin = new_pin;
+                    flash_set_spdif_rx_pin_pending = true;
+                    status = PIN_CONFIG_SUCCESS;
+                }
+                resp_buf[0] = status;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_SPDIF_RX_PIN: {
+                resp_buf[0] = spdif_rx_pin;
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
