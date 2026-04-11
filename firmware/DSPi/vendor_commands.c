@@ -10,6 +10,7 @@
 
 #include "vendor_commands.h"
 #include "usb_audio.h"
+#include "audio_pipeline.h"
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "flash_storage.h"

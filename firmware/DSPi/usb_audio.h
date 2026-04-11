@@ -153,20 +153,6 @@ extern volatile bool sync_started;
 void update_preamp(uint8_t ch, float db);
 void update_master_volume(float db);
 
-// Buffer statistics (defined in usb_audio.c, called from vendor_commands.c)
-void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, uint *playing);
-uint get_slot_consumer_fill(uint slot);
-void reset_buffer_watermarks(void);
-
-// Buffer watermark state (written by usb_audio.c, read by vendor_commands.c)
-extern uint16_t buffer_stats_sequence;
-extern uint8_t spdif_consumer_min_fill_pct[];
-extern uint8_t spdif_consumer_max_fill_pct[];
-extern uint8_t pdm_dma_min_fill_pct;
-extern uint8_t pdm_dma_max_fill_pct;
-extern uint8_t pdm_ring_min_fill_pct;
-extern uint8_t pdm_ring_max_fill_pct;
-
 // ----------------------------------------------------------------------------
 // API
 // ----------------------------------------------------------------------------

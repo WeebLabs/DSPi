@@ -59,8 +59,10 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | File | Purpose |
 |------|---------|
 | `main.c` | Entry point, initialization, main event loop |
-| `usb_audio.c` | USB audio input decode (`process_audio_packet`), input-agnostic DSP pipeline (`process_input_block`), output slots, UAC1 control, init |
+| `usb_audio.c` | USB audio input decode (`process_audio_packet`), output slots, UAC1 control, volume, init |
 | `usb_audio.h` | USB audio interface API, AudioState struct, extern declarations for shared state |
+| `audio_pipeline.c` | Input-agnostic DSP pipeline (`process_input_block`): loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer stats |
+| `audio_pipeline.h` | Pipeline entry point, shared buffer declarations (`buf_l`/`buf_r`/`buf_out`), buffer stats API |
 | `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, pin/MCK helpers, diagnostics) |
 | `vendor_commands.h` | Vendor handler declarations, system stats and pin helper prototypes |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
@@ -232,15 +234,15 @@ The DSP pipeline is decoupled from the USB IRQ via a lock-free SPSC ring buffer 
 ### Packet Flow
 *Last updated: 2026-04-11*
 
-`_as_audio_packet()` → `usb_audio_ring_push()` → (main loop) → `usb_audio_drain_ring()` → `process_audio_packet(data, len)` → `process_input_block(sample_count)`
+`_as_audio_packet()` → `usb_audio_ring_push()` → (main loop) → `usb_audio_drain_ring()` → `process_audio_packet(data, len)` [usb_audio.c] → `process_input_block(sample_count)` [audio_pipeline.c]
 
 1. **Ring push (USB ISR)** — Copy raw packet into SPSC ring, detect arrival gaps
 2. **Ring drain (main loop)** — Peek/process/consume loop, highest priority in main loop
-3. **USB decode (`process_audio_packet`)** — Gap detection, sync tracking, USB byte decode (16/24-bit) with per-channel preamp into `buf_l[]`/`buf_r[]`
-4. **DSP pipeline (`process_input_block`)** — Input-agnostic: buffer acquisition, loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer return, CPU metering
+3. **USB decode (`process_audio_packet` in `usb_audio.c`)** — Gap detection, sync tracking, USB byte decode (16/24-bit) with per-channel preamp into `buf_l[]`/`buf_r[]`
+4. **DSP pipeline (`process_input_block` in `audio_pipeline.c`)** — Input-agnostic: buffer acquisition, preset mute envelope, loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer return, CPU metering
 5. **Buffer return** — Give completed buffers to consumer pools for DMA
 
-The `process_input_block()` function reads from file-scope `buf_l[]`/`buf_r[]` arrays (filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly.
+The `process_input_block()` function reads from `buf_l[]`/`buf_r[]` arrays (extern, defined in `audio_pipeline.c`, filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly. Buffer statistics helpers (`get_slot_consumer_fill()`, `get_slot_consumer_stats()`, `reset_buffer_watermarks()`) also live in `audio_pipeline.c`.
 
 ### RP2350 Float Pipeline
 *Last updated: 2026-04-09*
