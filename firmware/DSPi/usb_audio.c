@@ -240,6 +240,13 @@ static float buf_out[NUM_OUTPUT_CHANNELS][192];
 static int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 #endif
 
+// Shared input buffers — file scope for pipeline access
+#if PICO_RP2350
+static float buf_l[192], buf_r[192];
+#else
+static int32_t buf_l[192], buf_r[192];
+#endif
+
 // Sync State
 volatile uint64_t total_samples_produced = 0;
 volatile uint64_t start_time_us = 0;
@@ -383,12 +390,13 @@ static inline float update_preset_mute_envelope(uint32_t sample_count, uint32_t 
     return preset_mute_smooth_gain;
 }
 
-static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
+// ----------------------------------------------------------------------------
+// Input-agnostic DSP pipeline: loudness, EQ, leveller, crossfeed, matrix
+// mixer, per-output EQ/gain/delay, output encoding, buffer return, CPU
+// metering.  Reads from file-scope buf_l[]/buf_r[] (filled by caller).
+// ----------------------------------------------------------------------------
+static void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     uint32_t packet_start = time_us_32();
-
-    // NOTE: USB packet gap detection has moved to _as_audio_packet() (ISR
-    // context) where it measures actual packet arrival timing rather than
-    // main-loop processing timing.  See audio_ring_last_push_us.
 
     // Get audio buffers for S/PDIF outputs
 #if PICO_RP2350
@@ -411,9 +419,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         update_buffer_watermarks();
     }
 
-    const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
-    uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
-    uint32_t sample_count = data_len / bytes_per_frame;
     uint32_t sample_rate_hz = audio_state.freq;
     float preset_mute_gain = update_preset_mute_envelope(sample_count, sample_rate_hz);
 
@@ -424,24 +429,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
             spdif_overruns++;
         }
     }
-
-    uint64_t now_us = time_us_64();
-
-    // Detect audio restart after gap - reset sync state and pre-fill pool
-    if (sync_started && last_packet_time_us > 0 &&
-        (now_us - last_packet_time_us) > AUDIO_GAP_THRESHOLD_US) {
-        sync_started = false;
-        total_samples_produced = 0;
-        cpu0_load_primed = false;
-        cpu0_load_q8 = 0;
-    }
-    last_packet_time_us = now_us;
-
-    if (!sync_started) {
-        start_time_us = now_us;
-        sync_started = true;
-    }
-    total_samples_produced += sample_count;
 
 #if PICO_RP2350
     // ------------------------------------------------------------------------
@@ -456,9 +443,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     vol_mul *= preset_mute_gain;
     float vol_mul_master = vol_mul * master_volume_linear;
 
-    // Per-input-channel preamp (snapshot for this block)
-    float preamp_l = global_preamp_linear[0];
-    float preamp_r = global_preamp_linear[1];
     bool is_bypassed = bypass_master_eq;
 
     // Snapshot loudness state for this packet
@@ -469,28 +453,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
 
     // Pre-compute PDM scale factor
     const float pdm_scale = (float)(1 << 28);
-
-    // Static buffers to avoid stack overflow (~8KB would be too much for stack)
-    static float buf_l[192], buf_r[192];
-
-    // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    if (bit_depth == 24) {
-        const uint8_t *p = (const uint8_t *)data;
-        const float inv_8388608 = 1.0f / 8388608.0f;
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int32_t left  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 8;
-            int32_t right = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 8;
-            buf_l[i] = (float)left * inv_8388608 * preamp_l;
-            buf_r[i] = (float)right * inv_8388608 * preamp_r;
-            p += 6;
-        }
-    } else {
-        const int16_t *in = (const int16_t *)data;
-        for (uint32_t i = 0; i < sample_count; i++) {
-            buf_l[i] = (float)in[i*2] * inv_32768 * preamp_l;
-            buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp_r;
-        }
-    }
 
     // Loudness compensation (SVF shelf filters)
     if (loud_on && loud_coeffs) {
@@ -786,9 +748,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     vol_mul = fast_mul_q15(vol_mul, preset_mute_gain_q15);
     int32_t vol_mul_master = fast_mul_q15(vol_mul, master_volume_q15);
 
-    // Per-input-channel preamp (snapshot for this block)
-    int32_t preamp_l = global_preamp_mul[0];
-    int32_t preamp_r = global_preamp_mul[1];
     bool is_bypassed = bypass_master_eq;
 
     // Snapshot loudness state for this packet
@@ -796,30 +755,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     const LoudnessCoeffs *loud_coeffs = current_loudness_coeffs;
 
     int32_t peak_ml = 0, peak_mr = 0;
-
-    // Static buffers for block processing
-    static int32_t buf_l[192], buf_r[192];
-
-    // ========== PASS 1: Input conversion + Preamp + Loudness ==========
-    if (bit_depth == 24) {
-        const uint8_t *p = (const uint8_t *)data;
-        for (uint32_t i = 0; i < sample_count; i++) {
-            // 24-bit -> Q28: left-justify to [31:8] then >>2 = net <<6
-            int32_t raw_left_32  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 2;
-            int32_t raw_right_32 = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 2;
-            buf_l[i] = fast_mul_q28(raw_left_32, preamp_l);
-            buf_r[i] = fast_mul_q28(raw_right_32, preamp_r);
-            p += 6;
-        }
-    } else {
-        const int16_t *in = (const int16_t *)data;
-        for (uint32_t i = 0; i < sample_count; i++) {
-            int32_t raw_left_32 = (int32_t)in[i*2] << 14;
-            int32_t raw_right_32 = (int32_t)in[i*2+1] << 14;
-            buf_l[i] = fast_mul_q28(raw_left_32, preamp_l);
-            buf_r[i] = fast_mul_q28(raw_right_32, preamp_r);
-        }
-    }
 
     // Loudness compensation (per-sample — biquad state coupling)
     if (loud_on && loud_coeffs) {
@@ -1121,6 +1056,87 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
         cpu0_load_primed = true;
     }
     cpu0_last_packet_end = packet_end;
+}
+
+// ----------------------------------------------------------------------------
+// USB-specific wrapper: byte decode + gap detection, then pipeline
+// ----------------------------------------------------------------------------
+static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint16_t data_len) {
+    // USB format snapshot
+    const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
+    uint32_t bytes_per_frame = (bit_depth == 24) ? 6 : 4;
+    uint32_t sample_count = data_len / bytes_per_frame;
+
+    // USB-specific gap detection + sync tracking
+    // NOTE: USB packet gap detection has moved to _as_audio_packet() (ISR
+    // context) where it measures actual packet arrival timing rather than
+    // main-loop processing timing.  See audio_ring_last_push_us.
+    uint64_t now_us = time_us_64();
+    if (sync_started && last_packet_time_us > 0 &&
+        (now_us - last_packet_time_us) > AUDIO_GAP_THRESHOLD_US) {
+        sync_started = false;
+        total_samples_produced = 0;
+        cpu0_load_primed = false;
+        cpu0_load_q8 = 0;
+    }
+    last_packet_time_us = now_us;
+    if (!sync_started) {
+        start_time_us = now_us;
+        sync_started = true;
+    }
+    total_samples_produced += sample_count;
+
+    // PASS 1: USB byte decode → buf_l/buf_r + preamp
+#if PICO_RP2350
+    {
+        float preamp_l = global_preamp_linear[0];
+        float preamp_r = global_preamp_linear[1];
+        const float inv_32768 = 1.0f / 32768.0f;
+        if (bit_depth == 24) {
+            const uint8_t *p = (const uint8_t *)data;
+            const float inv_8388608 = 1.0f / 8388608.0f;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                int32_t left  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 8;
+                int32_t right = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 8;
+                buf_l[i] = (float)left * inv_8388608 * preamp_l;
+                buf_r[i] = (float)right * inv_8388608 * preamp_r;
+                p += 6;
+            }
+        } else {
+            const int16_t *in = (const int16_t *)data;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                buf_l[i] = (float)in[i*2] * inv_32768 * preamp_l;
+                buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp_r;
+            }
+        }
+    }
+#else
+    {
+        int32_t preamp_l = global_preamp_mul[0];
+        int32_t preamp_r = global_preamp_mul[1];
+        if (bit_depth == 24) {
+            const uint8_t *p = (const uint8_t *)data;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                // 24-bit -> Q28: left-justify to [31:8] then >>2 = net <<6
+                int32_t raw_left_32  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 2;
+                int32_t raw_right_32 = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 2;
+                buf_l[i] = fast_mul_q28(raw_left_32, preamp_l);
+                buf_r[i] = fast_mul_q28(raw_right_32, preamp_r);
+                p += 6;
+            }
+        } else {
+            const int16_t *in = (const int16_t *)data;
+            for (uint32_t i = 0; i < sample_count; i++) {
+                int32_t raw_left_32 = (int32_t)in[i*2] << 14;
+                int32_t raw_right_32 = (int32_t)in[i*2+1] << 14;
+                buf_l[i] = fast_mul_q28(raw_left_32, preamp_l);
+                buf_r[i] = fast_mul_q28(raw_right_32, preamp_r);
+            }
+        }
+    }
+#endif
+
+    process_input_block(sample_count);
 }
 
 // ----------------------------------------------------------------------------
