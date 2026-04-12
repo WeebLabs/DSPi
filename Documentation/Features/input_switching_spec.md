@@ -919,7 +919,8 @@ Input source switching is available on both RP2040 and RP2350. The vendor comman
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
-| S/PDIF RX PIO | PIO1 SM1 | PIO2 SM0 |
+| S/PDIF RX PIO | PIO1 SM2 (SM0=PDM, SM1=MCK occupied) | PIO2 SM0 (dedicated PIO block) |
+| RX DMA IRQ | DMA_IRQ_0 (shared with I2S TX) | DMA_IRQ_0 (shared with I2S TX) |
 | Internal precision | Q28 fixed-point | IEEE 754 float |
 | Supported input rates | 44.1-192 kHz | 44.1-192 kHz |
 | Input bit depth | 24-bit | 24-bit |

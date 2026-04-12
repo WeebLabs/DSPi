@@ -458,14 +458,9 @@ static int64_t _spdif_rx_capture_timeout(alarm_id_t id, void* user_data)
     (void) id;
     (void) user_data;
 
-    // DSPi patch: disable interrupts for the entire callback to prevent the
-    // DMA IRQ (higher priority) from preempting mid-teardown and causing
-    // double resource claim/unclaim panics.
-    uint32_t save = save_and_disable_interrupts();
     _clear_timer();
-    _spdif_rx_common_end();
+    _spdif_rx_common_end();  // internally interrupt-safe (save_and_disable_interrupts)
     _set_timer_after_by_ms(_spdif_rx_capture_retry, capture_retry_interval_ms);
-    restore_interrupts(save);
     return 0;
 }
 
@@ -474,11 +469,9 @@ static int64_t _spdif_rx_capture_retry(alarm_id_t id, void* user_data)
     (void) id;
     (void) user_data;
 
-    uint32_t save = save_and_disable_interrupts();
     _clear_timer();
     _spdif_rx_capture_start();
     _set_timer_after_by_us(_spdif_rx_capture_timeout, capture_timeout_us);
-    restore_interrupts(save);
     return 0;
 }
 
@@ -606,17 +599,13 @@ static int64_t _spdif_rx_decode_timeout(alarm_id_t id, void* user_data)
     (void) id;
     (void) user_data;
 
-    // DSPi patch: disable interrupts for the entire callback (same reason
-    // as _spdif_rx_capture_timeout — prevent DMA IRQ re-entrancy).
-    uint32_t save = save_and_disable_interrupts();
     state = SPDIF_RX_STATE_NO_SIGNAL;
     if ((gcfg.flags & SPDIF_RX_FLAG_CALLBACKS) && on_lost_stable_func != NULL) {
         (*on_lost_stable_func)();
     }
     _clear_timer();
-    _spdif_rx_common_end();
+    _spdif_rx_common_end();  // internally interrupt-safe
     _set_timer_after_by_ms(_spdif_rx_capture_retry, capture_retry_interval_ms);
-    restore_interrupts(save);
     return 0;
 }
 
@@ -711,11 +700,8 @@ static void _spdif_rx_decode_start(spdif_rx_samp_freq_t samp_freq, bool inverted
 // irq handler for DMA
 void __isr __time_critical_func(spdif_rx_dma_irq_handler)()
 {
-    _clear_timer(); // timeout must not happen while isr
     bool proc_dma0 = false;
     bool proc_dma1 = false;
-    uint64_t now_us = _micros();
-    uint32_t now_ms = _millis();
     if (dma_irqn_get_channel_status(PICO_SPDIF_RX_DMA_IRQ, gcfg.dma_channel0)) {
         dma_irqn_acknowledge_channel(PICO_SPDIF_RX_DMA_IRQ, gcfg.dma_channel0);
         proc_dma0 = true;
@@ -723,6 +709,15 @@ void __isr __time_critical_func(spdif_rx_dma_irq_handler)()
         dma_irqn_acknowledge_channel(PICO_SPDIF_RX_DMA_IRQ, gcfg.dma_channel1);
         proc_dma1 = true;
     }
+    // DSPi patch: if neither of our DMA channels fired, this IRQ is from
+    // another subsystem sharing the same DMA IRQ line (e.g. SPDIF TX).
+    // Return immediately — do NOT clear timers or process state transitions,
+    // as that would tear down an in-progress capture or corrupt decode timing.
+    if (!proc_dma0 && !proc_dma1) return;
+
+    _clear_timer(); // timeout must not happen while processing our DMA event
+    uint64_t now_us = _micros();
+    uint32_t now_ms = _millis();
     // state transition in capture operation case
     if (state == SPDIF_RX_STATE_NO_SIGNAL) {
         spdif_rx_samp_freq_t samp_freq;

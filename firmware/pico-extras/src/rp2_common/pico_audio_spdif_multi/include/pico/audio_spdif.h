@@ -220,6 +220,18 @@ uint32_t audio_spdif_get_dma_starvations(void);
  */
 uint32_t audio_spdif_get_dma_starvations_instance(uint index);
 
+/** \brief Adjust the DMA IRQ enable reference count for a given IRQ line.
+ * \ingroup audio_spdif
+ *
+ * External subsystems sharing the same DMA IRQ line (e.g. SPDIF RX) must
+ * call this to prevent audio_spdif_set_enabled(false) from disabling the
+ * entire IRQ line while the external subsystem still needs it.
+ *
+ * \param dma_irq  DMA IRQ index (0 or 1)
+ * \param delta    +1 to hold the IRQ enabled, -1 to release
+ */
+void audio_spdif_irq_refcount_adjust(uint dma_irq, int delta);
+
 #ifdef __cplusplus
 }
 #endif

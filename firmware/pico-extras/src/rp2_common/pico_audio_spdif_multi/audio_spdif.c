@@ -575,3 +575,14 @@ uint32_t audio_spdif_get_dma_starvations_instance(uint index) {
     if (index >= PICO_AUDIO_SPDIF_MAX_INSTANCES) return 0;
     return spdif_dma_starvations_by_inst[index];
 }
+
+void audio_spdif_irq_refcount_adjust(uint dma_irq, int delta) {
+    assert(dma_irq <= 1);
+    if (delta > 0) {
+        if (irq_enable_count[dma_irq]++ == 0)
+            irq_set_enabled(DMA_IRQ_0 + dma_irq, true);
+    } else if (delta < 0 && irq_enable_count[dma_irq] > 0) {
+        if (--irq_enable_count[dma_irq] == 0)
+            irq_set_enabled(DMA_IRQ_0 + dma_irq, false);
+    }
+}

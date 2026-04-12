@@ -245,7 +245,7 @@ The DSP pipeline is decoupled from the USB IRQ via a lock-free SPSC ring buffer 
 The `process_input_block()` function reads from `buf_l[]`/`buf_r[]` arrays (extern, defined in `audio_pipeline.c`, filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly. Buffer statistics helpers (`get_slot_consumer_fill()`, `get_slot_consumer_stats()`, `reset_buffer_watermarks()`) also live in `audio_pipeline.c`.
 
 ### RP2350 Float Pipeline
-*Last updated: 2026-04-09*
+*Last updated: 2026-04-11*
 
 All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
@@ -259,12 +259,12 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 | Matrix mixing | Block-based: 2 inputs × 9 outputs with gain/phase |
 | Output EQ | Block-based, 10 bands per output (Core 0: outputs 0-1, Core 1: outputs 2-7) |
 | Output gain | Per-output gain × host volume × master volume |
-| Delay | Float circular buffers, 8192 samples max |
+| Delay | Float circular buffers, 2048 samples max (42ms at 48kHz) |
 | SPDIF output | Float → int16 conversion, 4 stereo pairs |
 | PDM output | Float → Q28 for sigma-delta modulation |
 
 ### RP2040 Fixed-Point Pipeline
-*Last updated: 2026-04-09*
+*Last updated: 2026-04-11*
 
 Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixed-point (28 fractional bits). 2 S/PDIF stereo pairs + 1 PDM sub (5 output channels).
 
@@ -285,7 +285,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 |-------|-------------|
 | Output EQ | **Block-based** `dsp_process_channel_block()`, 10 bands per output |
 | Output gain + volume | Combined Q15 multiply via `fast_mul_q15()` (output gain × host volume × master volume) |
-| Delay | int32 circular buffers, 4096 samples max (software-capped at 50ms) |
+| Delay | int32 circular buffers, 2048 samples max (42ms at 48kHz) |
 | SPDIF output | Q28 → int16 (shift right 14 with rounding), 2 stereo pairs |
 | PDM output | Q28 direct to sigma-delta modulator (single-core fallback only) |
 
@@ -296,7 +296,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 ---
 
 ## DSP Processing Engine
-*Last updated: 2026-03-02*
+*Last updated: 2026-04-11*
 
 ### Channel Layout
 
@@ -400,8 +400,8 @@ NUM_DELAY_CHANNELS = NUM_OUTPUT_CHANNELS (platform-dependent).
 
 | Platform | Channels | Type | Max samples | Max delay (48kHz) | RAM usage |
 |----------|----------|------|-------------|--------------------|-----------|
-| RP2350 | 9 | float | 8192 | 170 ms | 288 KB |
-| RP2040 | 5 | int32_t | 4096 | 50 ms (software cap) | 80 KB |
+| RP2350 | 9 | float | 2048 | 42 ms | 72 KB |
+| RP2040 | 5 | int32_t | 2048 | 42 ms | 40 KB |
 
 Circular buffer: `delay_lines[ch][(write_idx - delay_samples) & MAX_DELAY_MASK]`
 
@@ -965,7 +965,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-04-09*
+*Last updated: 2026-04-11*
 
 ### Hardware
 
@@ -1003,9 +1003,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 |---------|--------|--------|
 | Channels | 5 | 9 |
 | Type | int32_t | float |
-| Max samples | 4096 | 4096 |
-| Max delay (48kHz) | 85 ms | 85 ms |
-| RAM usage | 80 KB | 144 KB |
+| Max samples | 2048 | 2048 |
+| Max delay (48kHz) | 42 ms | 42 ms |
+| RAM usage | 40 KB | 72 KB |
 
 ### Core 1 Usage
 
@@ -1021,7 +1021,10 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
 | Priority | Global bus priority bits | Per-channel high-priority flag |
-| SPDIF channels | 0-1 (hardcoded) | 0-3 (hardcoded) |
+| SPDIF TX channels | 0-1 (hardcoded) | 0-3 (hardcoded) |
+| SPDIF TX IRQ | DMA_IRQ_1 (dedicated) | DMA_IRQ_1 (dedicated) |
+| SPDIF RX channels | CH4, CH5 | CH5, CH6 |
+| SPDIF RX IRQ | DMA_IRQ_0 (shared with I2S TX) | DMA_IRQ_0 (shared with I2S TX) |
 | PDM channel | Dynamic (claim) | Dynamic (claim) |
 
 ### Clock Configuration
@@ -1035,13 +1038,13 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-04-09*
+*Last updated: 2026-04-11*
 
 ### RP2040 (264 KB SRAM)
 
 | Section | Size (approx) |
 |---------|---------------|
-| Delay lines (5 × 4096 × 4) | 80 KB |
+| Delay lines (5 × 2048 × 4) | 40 KB |
 | Output buffers (5 × 192 × 4 + 2 × 192 × 4) | ~5.25 KB |
 | Filters + recipes (7 channels) | ~8 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
@@ -1062,7 +1065,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 
 | Section | Size (approx) |
 |---------|---------------|
-| Delay lines (9 × 4096 × 4) | 144 KB |
+| Delay lines (9 × 2048 × 4) | 72 KB |
 | Filters + recipes | ~18 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |
@@ -1353,7 +1356,7 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - **PIO0:** Both S/PDIF (4 instructions) and I2S (8 instructions) programs coexist in instruction memory (12/32 slots). Each SM's side-set pins are independent — S/PDIF side-set = data pin, I2S side-set = BCK/LRCLK.
 - **PIO1 SM1:** MCK generator (2-instruction toggle), independent of data path.
 - **OutputSlot abstraction** in `usb_audio.c` manages per-slot type, holding either a SPDIF or I2S instance.
-- **DMA IRQ:** Both libraries register on the same DMA IRQ line via `irq_add_shared_handler()`. Each iterates its own instance array.
+- **DMA IRQ:** S/PDIF TX uses DMA_IRQ_1 (dedicated). I2S TX uses DMA_IRQ_0 (shared with SPDIF RX when active). Both register via `irq_add_shared_handler()`.
 - **Producer pools** are format-identical (PCM_S32, stride 8). The I2S library's connection callback left-shifts samples by 8 for MSB-first I2S framing.
 - **No audio callback changes.** Core 1 remains output-type-agnostic.
 - **Pipeline reset API** (`main.c`): two-phase `prepare_pipeline_reset()` / `complete_pipeline_reset()` brackets any disruptive output work. `complete_pipeline_reset()` runs the entire drain → enable_sync → feedback reset sequence with interrupts disabled to prevent inter-slot fill offsets. I2S→S/PDIF switch restores the SPDIF connection before zeroing the I2S instance to prevent a dangling `producer_pool->connection` pointer.
@@ -1517,13 +1520,22 @@ typedef enum {
 
 **Library**: Forked from `elehobica/pico_spdif_rx` v0.9.3 at `firmware/pico-extras/src/rp2_common/pico_spdif_rx/`.
 
+**DSPi library patches:**
+- PIO2 support for RP2350
+- Clock constants: 307.2 MHz sys_clk, 122.88 MHz PIO clock (divider 2.5 exact)
+- Removed `pio_clear_instruction_memory()` (destroys shared PIO programs)
+- Removed `irq_set_enabled(DMA_IRQ_x, false)` (disables entire shared IRQ line)
+- Replaced `irq_has_shared_handler()` with private `irq_handler_registered` flag (prevents handler registration when other libraries share the IRQ line)
+- Added `irq_remove_handler()` in `spdif_rx_end()` for clean lifecycle
+- Added `save_and_disable_interrupts()` in `_spdif_rx_common_end()` to prevent re-entrant teardown
+
 **PIO Allocation**:
 - RP2350: PIO2 SM0 (dedicated block, no conflicts)
-- RP2040: PIO1 SM2 (shared with PDM/MCK — patched to not clear instruction memory)
+- RP2040: PIO1 SM2 (SM0=PDM, SM1=MCK occupied — patched to not clear instruction memory)
 
 **Clock**: sys_clk 307.2 MHz → PIO clock 122.88 MHz (divider 2.5, exact). At 122.88 MHz: cy=20 (48kHz), cy=10 (96kHz), cy=5 (192kHz) — identical to original library values, zero error.
 
-**DMA**: Channels 5+6 (RP2350) or 4+5 (RP2040) on DMA_IRQ_1 (isolated from TX's DMA_IRQ_0).
+**DMA**: Channels 5+6 (RP2350) or 4+5 (RP2040) on DMA_IRQ_0 (shared with I2S TX when active). DMA_IRQ_1 is dedicated to SPDIF TX only. This isolates SPDIF RX from SPDIF TX, avoiding shared handler conflicts.
 
 **State Machine**: `spdif_input.h/c`
 - INACTIVE → ACQUIRING → LOCKED → RELOCKING (on signal loss) → LOCKED (on re-lock)

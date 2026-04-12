@@ -45,10 +45,13 @@ add_executable(DSPi
 
 if (PICO_PLATFORM STREQUAL "rp2040")
     target_sources(DSPi PRIVATE dsp_process_rp2040.S)
-    # RP2040: SPDIF RX on PIO1 (shared with PDM/MCK, 24 of 32 instructions)
+endif()
+
+if (PICO_PLATFORM STREQUAL "rp2040")
+    # RP2040: SPDIF RX on PIO1 SM2 (SM0=PDM, SM1=MCK occupied)
     target_compile_definitions(DSPi PRIVATE PICO_SPDIF_RX_PIO=1)
 else()
-    # RP2350: SPDIF RX on PIO2 (dedicated block, no conflicts)
+    # RP2350: SPDIF RX on PIO2 (dedicated block, proven working)
     target_compile_definitions(DSPi PRIVATE PICO_SPDIF_RX_PIO=2)
 endif()
 
@@ -65,12 +68,15 @@ target_compile_definitions(DSPi PRIVATE
     # S/PDIF output configuration (pins defined in config.h)
     PICO_AUDIO_SPDIF_PIO=0
     PICO_AUDIO_SPDIF_DMA_IRQ=1
-    # Keep I2S on a separate DMA IRQ line to avoid cross-driver IRQ gating.
+    # I2S TX on DMA_IRQ_0 — must stay separate from SPDIF TX (DMA_IRQ_1)
+    # to avoid cross-driver IRQ gating between the two output libraries.
     PICO_AUDIO_I2S_DMA_IRQ=0
 
-    # S/PDIF RX on DMA_IRQ_0 — isolated from SPDIF TX (DMA_IRQ_1) to avoid
-    # shared handler conflicts (handler registration, IRQ enable/disable, re-entrancy).
-    PICO_SPDIF_RX_DMA_IRQ=0
+    # S/PDIF RX on DMA_IRQ_1 with SPDIF TX. Our library patches ensure
+    # safe coexistence: private irq_handler_registered flag (not
+    # irq_has_shared_handler), removed irq_set_enabled in teardown,
+    # interrupt-safe _spdif_rx_common_end.
+    PICO_SPDIF_RX_DMA_IRQ=1
 
     PICO_DEFAULT_UART_TX_PIN=12
 

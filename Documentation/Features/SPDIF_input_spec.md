@@ -256,7 +256,7 @@ typedef struct __attribute__((packed)) {
     uint32_t sample_rate;        // Detected sample rate in Hz (0 if not locked)
     uint32_t parity_errors;      // Cumulative parity error count
     uint16_t fifo_fill_pct;      // RX FIFO fill percentage (0-100)
-    uint16_t reserved;           // Zero
+    uint16_t reserved;           // Debug: byte 14 = library state, byte 15 = callback counters
 } SpdifRxStatusPacket;           // 16 bytes
 ```
 
@@ -281,7 +281,8 @@ SR = sample_rate     PE = parity_errors   FF = fifo_fill_pct  RR = reserved
 | 4 | 4 | uint32_t LE | `sample_rate` | Detected sample rate in Hz, or `0` if not locked/unsupported |
 | 8 | 4 | uint32_t LE | `parity_errors` | Cumulative parity error count |
 | 12 | 2 | uint16_t LE | `fifo_fill_pct` | RX FIFO fill level as percentage (0-100) |
-| 14 | 2 | uint16_t LE | `reserved` | Always 0 (padding for alignment) |
+| 14 | 1 | uint8_t | `reserved[0]` | Temporary debug: library internal state (0=NO_SIGNAL, 1=WAITING_STABLE, 2=STABLE) |
+| 15 | 1 | uint8_t | `reserved[1]` | Temporary debug: high nibble = on_stable callback count (0-15), low nibble = on_lost_stable callback count (0-15) |
 
 #### State values
 
@@ -318,9 +319,9 @@ Rates 88200, 176400, and 192000 are detected by the library but are not supporte
 
 #### Example response (hex)
 
-Locked at 48 kHz, 2 locks, 0 losses, no parity errors, FIFO at 48%:
+Locked at 48 kHz, 2 locks, 0 losses, no parity errors, FIFO at 48%, library STABLE, 1 on_stable callback:
 ```
-02 01 02 00  80 BB 00 00  00 00 00 00  30 00 00 00
+02 01 02 00  80 BB 00 00  00 00 00 00  30 00 02 10
 ```
 
 Breakdown:
@@ -331,7 +332,8 @@ Breakdown:
 - `80 BB 00 00` = 48000 (0x0000BB80 LE)
 - `00 00 00 00` = 0 parity errors
 - `30 00` = 48% FIFO fill (0x0030 LE)
-- `00 00` = reserved
+- `02` = reserved[0]: library state 2 (STABLE)
+- `10` = reserved[1]: high nibble 1 = 1 on_stable callback, low nibble 0 = 0 on_lost_stable callbacks
 
 ---
 
@@ -806,6 +808,8 @@ When a preset is loaded that switches the input source, the standard 256-sample 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
 | SPDIF RX PIO block | PIO1 | PIO2 |
+| SPDIF RX PIO SM | SM2 (SM0=PDM, SM1=MCK occupied) | SM0 (dedicated PIO block) |
+| RX DMA IRQ | DMA_IRQ_0 (shared with I2S TX) | DMA_IRQ_0 (shared with I2S TX) |
 | RX DMA channels | CH4, CH5 | CH5, CH6 |
 | Internal audio format | Q28 fixed-point (32-bit) | IEEE 754 float |
 | Sample conversion | `raw >> 4` then `fast_mul_q28()` | `raw * inv_2147483648 * preamp` |
@@ -813,6 +817,8 @@ When a preset is loaded that switches the input source, the standard 256-sample 
 | Input bit depth | 24-bit | 24-bit |
 | Default RX pin | GPIO 11 | GPIO 11 |
 | SPDIF output slots | 2 (4 channels) | 4 (8 channels) |
+
+DMA IRQ assignment: SPDIF RX uses DMA_IRQ_0 (shared with I2S TX when active). DMA_IRQ_1 is dedicated to SPDIF TX only. This isolates SPDIF RX from SPDIF TX, avoiding shared handler conflicts.
 
 From `config.h`:
 
@@ -827,6 +833,20 @@ From `config.h`:
 ```
 
 Both platforms expose identical vendor command interfaces and status struct formats. Application code does not need to differentiate between platforms for S/PDIF input functionality.
+
+### Library Patches
+
+The forked `pico_spdif_rx` library (from `elehobica/pico_spdif_rx` v0.9.3) has the following DSPi-specific patches:
+
+| Patch | Reason |
+|-------|--------|
+| PIO2 support for RP2350 | RP2350 uses a dedicated PIO2 block for SPDIF RX |
+| Clock constants: 307.2 MHz sys_clk, 122.88 MHz PIO clock (divider 2.5 exact) | Match DSPi's overclocked sys_clk |
+| Removed `pio_clear_instruction_memory()` | Destroys shared PIO programs (PDM, MCK on same PIO block) |
+| Removed `irq_set_enabled(DMA_IRQ_x, false)` | Disables entire shared IRQ line, breaking other DMA users |
+| Replaced `irq_has_shared_handler()` with private `irq_handler_registered` flag | Prevents incorrect handler registration when other libraries share the IRQ line |
+| Added `irq_remove_handler()` in `spdif_rx_end()` | Clean lifecycle — handler is properly deregistered on shutdown |
+| Added `save_and_disable_interrupts()` in `_spdif_rx_common_end()` | Prevents re-entrant teardown during shutdown sequence |
 
 ---
 
@@ -876,7 +896,8 @@ typedef struct __attribute__((packed)) {
     uint32_t sample_rate;     // Detected Hz (0/44100/48000/96000), little-endian
     uint32_t parity_errors;   // Cumulative parity error count, little-endian
     uint16_t fifo_fill_pct;   // 0-100, little-endian
-    uint16_t reserved;        // Always 0
+    uint8_t  lib_state;       // Debug: library internal state (0-2)
+    uint8_t  callback_counts; // Debug: high nibble = on_stable count, low = on_lost_stable count
 } SpdifRxStatusPacket;        // 16 bytes total
 ```
 

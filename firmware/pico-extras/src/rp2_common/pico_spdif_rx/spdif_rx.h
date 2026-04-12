@@ -41,7 +41,7 @@ extern "C" {
   #endif
 #endif
 
-// DSPi: sys_clk 307.2 MHz, PIO clock 122.88 MHz (div = 2.5, exact).
+// DSPi: sys_clk 307.2 MHz, PIO clock 122.88 MHz (div = 2.5).
 // At 122.88 MHz the cy values match the original 125 MHz programs exactly:
 //   48kHz: cy = 122880000 / 6144000  = 20
 //   96kHz: cy = 122880000 / 12288000 = 10
