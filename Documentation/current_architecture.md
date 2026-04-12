@@ -958,9 +958,14 @@ Uses `__dmb()` memory barriers + `__sev()` / `__wfe()` for low-latency synchroni
 Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and writing PDM bitstream to DMA buffer.
 
 ### CPU Load Tracking
+*Last updated: 2026-04-12*
 
-- Core 0: Idle-time based EMA filter, reported via `global_status.cpu0_load`
-- Core 1: Separate tracking for PDM vs EQ worker modes (both platforms)
+- Budget-based metering: `load = busy_us / (sample_count / sample_rate)`, reported as EMA (7/8 retention) via `global_status.cpu0_load` / `cpu1_load`
+- Immune to bursty calling patterns (SPDIF RX DMA delivers 192-sample blocks every ~4ms; previous idle-time approach clamped inter-block gaps to zero → permanent 100%)
+- Core 0: measured in `process_input_block()` (`audio_pipeline.c`)
+- Core 1 EQ worker: same budget approach using `audio_state.freq` (`pdm_generator.c`)
+- Core 1 PDM: accumulates active_us over 48-sample windows (already budget-based)
+- Metering reset (`pipeline_reset_cpu_metering()`) called on: USB audio gap detection, input source switch away from SPDIF, and SPDIF lock loss
 
 ---
 

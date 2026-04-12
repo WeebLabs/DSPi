@@ -768,6 +768,7 @@ int main(void) {
             // Handle lock loss: mute output immediately
             if (rx_state == SPDIF_INPUT_RELOCKING && !preset_loading) {
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                pipeline_reset_cpu_metering();
             }
 
             // Read FIFO audio and feed DSP pipeline

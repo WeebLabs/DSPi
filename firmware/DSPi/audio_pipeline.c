@@ -61,10 +61,10 @@ float buf_l[192], buf_r[192];
 int32_t buf_l[192], buf_r[192];
 #endif
 
-// Idle-time CPU load metering (Core 0)
-static uint32_t cpu0_last_packet_end = 0;
+// Budget-based CPU load metering (Core 0)
+// Measures busy_us / budget_us where budget = sample_count / sample_rate.
+// Immune to bursty delivery (SPDIF RX DMA delivers 192-sample blocks every ~4ms).
 static uint32_t cpu0_load_q8 = 0;         // EMA in Q8 fixed point (0-25600 = 0-100%)
-static bool cpu0_load_primed = false;
 
 // Buffer statistics watermark tracking
 uint16_t buffer_stats_sequence = 0;
@@ -142,7 +142,6 @@ static inline float update_preset_mute_envelope(uint32_t sample_count, uint32_t 
 // ----------------------------------------------------------------------------
 
 void pipeline_reset_cpu_metering(void) {
-    cpu0_load_primed = false;
     cpu0_load_q8 = 0;
 }
 
@@ -797,21 +796,20 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
     uint32_t packet_end = time_us_32();
 
-    if (cpu0_load_primed) {
+    // Budget-based CPU metering: compare processing time against the time
+    // budget for sample_count samples.  Immune to bursty calling patterns
+    // (SPDIF RX DMA delivers 192-sample blocks every ~4ms at 48kHz; the old
+    // idle-time approach clamped that 4ms gap to zero → permanent 100%).
+    {
         uint32_t busy_us = packet_end - packet_start;
-        uint32_t idle_us = packet_start - cpu0_last_packet_end;
-        if (idle_us > 2000) idle_us = 0;   // clamp during USB gaps
-
-        uint32_t total_us = busy_us + idle_us;
-        if (total_us > 0) {
-            uint32_t inst_q8 = (busy_us * 25600) / total_us;
+        uint32_t budget_us = (uint32_t)((uint64_t)sample_count * 1000000u / sample_rate_hz);
+        if (budget_us > 0) {
+            uint32_t inst_q8 = (busy_us * 25600) / budget_us;
+            if (inst_q8 > 25600) inst_q8 = 25600;  // cap at 100%
             cpu0_load_q8 = cpu0_load_q8 - (cpu0_load_q8 >> 3) + (inst_q8 >> 3);
         }
         global_status.cpu0_load = (uint8_t)((cpu0_load_q8 + 128) >> 8);
-    } else {
-        cpu0_load_primed = true;
     }
-    cpu0_last_packet_end = packet_end;
 }
 
 // ----------------------------------------------------------------------------

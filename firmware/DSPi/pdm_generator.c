@@ -44,10 +44,8 @@ Core1EqWork core1_eq_work = {0};
 // DMA write index snapshot for buffer stats (written by Core 1, read by Core 0)
 static volatile uint32_t pdm_stats_write_idx = 0;
 
-// Idle-time CPU load metering (Core 1)
-static uint32_t c1eq_last_work_end = 0;
+// Budget-based CPU load metering (Core 1 EQ worker)
 static uint32_t c1eq_load_q8 = 0;
-static bool c1eq_load_primed = false;
 static uint32_t pdm_load_q8 = 0;
 
 // ----------------------------------------------------------------------------
@@ -426,7 +424,6 @@ static void pdm_processing_loop() {
 // ----------------------------------------------------------------------------
 #if PICO_RP2350
 static void __not_in_flash_func(eq_worker_loop)() {
-    c1eq_load_primed = false;
     c1eq_load_q8 = 0;
 
     while (core1_mode == CORE1_MODE_EQ_WORKER) {
@@ -517,21 +514,17 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         uint32_t work_end = time_us_32();
 
-        if (c1eq_load_primed) {
+        // Budget-based CPU metering (same approach as Core 0)
+        {
             uint32_t busy_us = work_end - work_start;
-            uint32_t idle_us = work_start - c1eq_last_work_end;
-            if (idle_us > 2000) idle_us = 0;
-
-            uint32_t total_us = busy_us + idle_us;
-            if (total_us > 0) {
-                uint32_t inst_q8 = (busy_us * 25600) / total_us;
+            uint32_t budget_us = (uint32_t)((uint64_t)sample_count * 1000000u / audio_state.freq);
+            if (budget_us > 0) {
+                uint32_t inst_q8 = (busy_us * 25600) / budget_us;
+                if (inst_q8 > 25600) inst_q8 = 25600;
                 c1eq_load_q8 = c1eq_load_q8 - (c1eq_load_q8 >> 3) + (inst_q8 >> 3);
             }
             global_status.cpu1_load = (uint8_t)((c1eq_load_q8 + 128) >> 8);
-        } else {
-            c1eq_load_primed = true;
         }
-        c1eq_last_work_end = work_end;
 
         // Signal completion to Core 0
         core1_eq_work.work_ready = false;
@@ -549,7 +542,6 @@ static void __not_in_flash_func(eq_worker_loop)() {
 // in parallel with Core 0 processing outputs 0-1
 // ----------------------------------------------------------------------------
 static void __not_in_flash_func(eq_worker_loop)() {
-    c1eq_load_primed = false;
     c1eq_load_q8 = 0;
 
     while (core1_mode == CORE1_MODE_EQ_WORKER) {
@@ -640,21 +632,17 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         uint32_t work_end = time_us_32();
 
-        if (c1eq_load_primed) {
+        // Budget-based CPU metering (same approach as Core 0)
+        {
             uint32_t busy_us = work_end - work_start;
-            uint32_t idle_us = work_start - c1eq_last_work_end;
-            if (idle_us > 2000) idle_us = 0;
-
-            uint32_t total_us = busy_us + idle_us;
-            if (total_us > 0) {
-                uint32_t inst_q8 = (busy_us * 25600) / total_us;
+            uint32_t budget_us = (uint32_t)((uint64_t)sample_count * 1000000u / audio_state.freq);
+            if (budget_us > 0) {
+                uint32_t inst_q8 = (busy_us * 25600) / budget_us;
+                if (inst_q8 > 25600) inst_q8 = 25600;
                 c1eq_load_q8 = c1eq_load_q8 - (c1eq_load_q8 >> 3) + (inst_q8 >> 3);
             }
             global_status.cpu1_load = (uint8_t)((c1eq_load_q8 + 128) >> 8);
-        } else {
-            c1eq_load_primed = true;
         }
-        c1eq_last_work_end = work_end;
 
         // Signal completion to Core 0
         core1_eq_work.work_ready = false;
