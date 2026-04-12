@@ -262,6 +262,16 @@ uint8_t audio_i2s_mck_get_pin(void);
 /** \brief Check if MCK is currently enabled */
 bool audio_i2s_mck_is_enabled(void);
 
+/** \brief Set the MCK PIO clock divider directly (16.8 fixed-point)
+ * \ingroup pico_audio_i2s_multi
+ *
+ * Used by the SPDIF input clock servo to keep MCK frequency-locked
+ * to the servoed I2S data rate.
+ *
+ * \param div_16_8 Clock divider in 16.8 fixed-point format
+ */
+void audio_i2s_mck_set_divider(uint32_t div_16_8);
+
 #ifdef __cplusplus
 }
 #endif

@@ -910,3 +910,8 @@ uint8_t audio_i2s_mck_get_pin(void) {
 bool audio_i2s_mck_is_enabled(void) {
     return mck_running;
 }
+
+void audio_i2s_mck_set_divider(uint32_t div_16_8) {
+    if (mck_pio == NULL) return;
+    pio_sm_set_clkdiv_int_frac(mck_pio, mck_sm, div_16_8 >> 8, div_16_8 & 0xFF);
+}

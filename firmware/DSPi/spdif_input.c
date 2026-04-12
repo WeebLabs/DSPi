@@ -139,6 +139,7 @@ static inline void set_divider(PIO pio, uint sm, uint32_t div_16_8) {
 // Last written dividers — skip PIO writes when unchanged
 static uint32_t last_spdif_div = 0;
 static uint32_t last_i2s_div = 0;
+static uint32_t last_mck_div = 0;
 
 // ============================================================================
 // PUBLIC API
@@ -407,6 +408,19 @@ void spdif_input_update_clock_servo(void) {
         } else if (output_types[i] == OUTPUT_TYPE_I2S && i2s_instance_ptrs[i]) {
             set_divider(i2s_instance_ptrs[i]->pio,
                         i2s_instance_ptrs[i]->pio_sm, i2s_div);
+        }
+    }
+
+    // MCK servo: keep master clock frequency-locked to the servoed I2S data rate.
+    // MCK divider (16.8) = sys_clk × 128 / (actual_freq × multiplier)
+    extern bool i2s_mck_enabled;
+    extern uint16_t i2s_mck_multiplier;
+    if (i2s_mck_enabled && i2s_mck_multiplier > 0) {
+        float mck_div_f = (float)sys_clk * 128.0f / (actual_freq * (float)i2s_mck_multiplier);
+        uint32_t mck_div = (uint32_t)(mck_div_f * (1.0f + fill_trim) + 0.5f);
+        if (mck_div != last_mck_div) {
+            last_mck_div = mck_div;
+            audio_i2s_mck_set_divider(mck_div);
         }
     }
 }
