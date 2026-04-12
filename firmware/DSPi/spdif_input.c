@@ -36,11 +36,12 @@
 // Clock servo: rate-based + proportional fill trim (mirrors USB feedback controller)
 // The library's measured actual sample rate provides the base divider.
 // FIFO fill level provides a small proportional trim to prevent drift.
-// Fill trim gain: must be strong enough to dither between adjacent PIO
-// divider values (~8 Hz step at 48kHz) to achieve sub-LSB rate matching.
-#define SERVO_FILL_KP       0.001f    // Fill-level proportional gain
-#define SERVO_FILL_DEADBAND (SPDIF_BLOCK_SIZE / 2)  // Tight deadband — allow active dithering
-#define SERVO_UPDATE_INTERVAL 250     // Main loop iterations between servo updates (~5ms)
+// Fill trim biases the rounding of the PIO divider between adjacent integer
+// values, dithering across LSB boundaries to achieve sub-LSB rate matching.
+// With output prefill at 50% (8 buffers), worst-case PIO quantization drift
+// (~156 ppm at 96kHz) takes ~19s to exhaust headroom, so gentle gains suffice.
+#define SERVO_FILL_KP         0.0005f   // Fill-level proportional gain
+#define SERVO_UPDATE_INTERVAL 1000      // Main loop iterations between servo updates (~20ms)
 
 // ============================================================================
 // STATE
@@ -379,7 +380,7 @@ void spdif_input_update_clock_servo(void) {
     int32_t fill_error = (int32_t)consumer_fill - 8;    // Target 50% of 16 buffers
 
     float fill_trim = 0.0f;
-    if (fill_error > 1 || fill_error < -1) {
+    if (fill_error > 2 || fill_error < -2) {
         // Positive error (overfull) → negative trim → reduce divider → speed up outputs
         fill_trim = -(float)fill_error / 16.0f * SERVO_FILL_KP;
     }

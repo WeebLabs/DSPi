@@ -213,6 +213,11 @@ static void i2s_reset_consumer_pipeline(audio_i2s_instance_t *inst) {
 // Forward declarations (defined later in this file)
 static void prepare_pipeline_reset(uint32_t mute_samples);
 static void complete_pipeline_reset(void);
+static void drain_and_disable_outputs(void);
+static void enable_outputs_in_sync(void);
+
+// SPDIF input prefill: outputs disabled while consumer buffers fill to 50%
+static bool spdif_prefilling = false;
 
 // ---------------------------------------------------------------------------
 // process_type_switches — unified output type transition handler
@@ -530,6 +535,81 @@ static void complete_pipeline_reset(void) {
     restore_interrupts(flags);
 }
 
+// Disable all outputs, abort DMA, drain consumer pipelines. Outputs stay
+// disabled so consumer buffers can be prefilled before starting playback.
+// Counterpart: enable_outputs_in_sync().
+static void drain_and_disable_outputs(void) {
+    extern uint8_t output_types[];
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+
+    uint32_t flags = save_and_disable_interrupts();
+
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (!inst || !inst->consumer_pool) continue;
+
+            if (inst->enabled) audio_i2s_set_enabled(inst, false);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+            i2s_reset_consumer_pipeline(inst);
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (!inst || !inst->consumer_pool) continue;
+
+            if (inst->enabled) audio_spdif_set_enabled(inst, false);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+            dma_channel_abort(inst->dma_channel);
+            if (inst->playing_buffer) {
+                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+                inst->playing_buffer = NULL;
+            }
+            spdif_reset_consumer_pipeline(inst);
+            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+        }
+    }
+
+    restore_interrupts(flags);
+}
+
+// Enable all outputs in sync. Call after consumer buffers have been prefilled.
+// Counterpart: drain_and_disable_outputs().
+static void enable_outputs_in_sync(void) {
+    extern uint8_t output_types[];
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+
+    audio_spdif_instance_t *spdif_sync[NUM_SPDIF_INSTANCES];
+    audio_i2s_instance_t *i2s_sync[NUM_SPDIF_INSTANCES];
+    uint spdif_count = 0;
+    uint i2s_count = 0;
+
+    uint32_t flags = save_and_disable_interrupts();
+
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->consumer_pool) i2s_sync[i2s_count++] = inst;
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->consumer_pool) spdif_sync[spdif_count++] = inst;
+        }
+    }
+
+    if (spdif_count) audio_spdif_enable_sync(spdif_sync, spdif_count);
+    if (i2s_count) audio_i2s_enable_sync(i2s_sync, i2s_count);
+
+    restore_interrupts(flags);
+}
+
 // Flash writes disable interrupts for tens of milliseconds. Even when DSP
 // parameters are unchanged (e.g. preset save or directory writes), that
 // blackout can leave output consumer pools underfilled and inter-slot phase
@@ -755,19 +835,29 @@ int main(void) {
         if (active_input_source == INPUT_SOURCE_SPDIF) {
             SpdifInputState rx_state = spdif_input_get_state();
 
-            // Handle lock acquisition: check for rate change, then unmute
-            if (rx_state == SPDIF_INPUT_LOCKED && preset_loading) {
-                // Rate change check before unmuting
+            // Handle lock acquisition: drain outputs, prefill, then start
+            if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling) {
                 spdif_input_check_rate_change();
-                // Unmute once FIFO has built up sufficiently
-                if (spdif_rx_get_fifo_count() >= SPDIF_RX_FIFO_SIZE / 4) {
-                    complete_pipeline_reset();
+                // Disable outputs and drain consumer buffers so they can
+                // be prefilled with real audio before playback begins.
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                spdif_prefilling = true;
+            }
+
+            // Prefill: wait for consumer buffers to reach 50% before enabling outputs
+            if (spdif_prefilling) {
+                if (get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                    enable_outputs_in_sync();
+                    spdif_prefilling = false;
                 }
             }
 
             // Handle lock loss: mute output immediately
-            if (rx_state == SPDIF_INPUT_RELOCKING && !preset_loading) {
+            if (rx_state == SPDIF_INPUT_RELOCKING && !preset_loading && !spdif_prefilling) {
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                spdif_prefilling = false;
                 pipeline_reset_cpu_metering();
             }
 
@@ -1202,6 +1292,7 @@ int main(void) {
                 // Stop old source hardware
                 if (old_source == INPUT_SOURCE_SPDIF) {
                     spdif_input_stop();
+                    spdif_prefilling = false;
 
                     // Restore nominal output PIO dividers — the clock servo
                     // adjusts them during SPDIF input and they must be reset

@@ -1550,6 +1550,8 @@ typedef enum {
 
 **Clock Servo**: PI controller in `spdif_input_update_clock_servo()` adjusts all output PIO dividers based on FIFO fill level (target 50%). Gains: KP=0.0005, KI=0.000005, deadband ±2 blocks. MCK divider is servoed alongside I2S data SM dividers when MCK is enabled, using `audio_i2s_mck_set_divider()` to keep master clock frequency-locked to the servoed output rate. *Last updated: 2026-04-12*
 
+**Output Prefill**: On SPDIF lock acquisition, outputs are disabled and consumer buffers drained via `drain_and_disable_outputs()`. The pipeline then feeds real audio into consumer buffers while outputs are stopped. Once slot 0 consumer fill reaches 50% (8 of 16 buffers), outputs are started in sync via `enable_outputs_in_sync()`. This eliminates initial underruns after lock acquisition. Controlled by `spdif_prefilling` flag in `main.c`. *Last updated: 2026-04-12*
+
 **Files**: `spdif_input.h` (API + status struct), `spdif_input.c` (lifecycle, audio extraction, clock servo, status queries)
 
 ### Vendor Commands
