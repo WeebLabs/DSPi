@@ -36,8 +36,10 @@
 // Clock servo: rate-based + proportional fill trim (mirrors USB feedback controller)
 // The library's measured actual sample rate provides the base divider.
 // FIFO fill level provides a small proportional trim to prevent drift.
-#define SERVO_FILL_KP       0.00005f  // Fill-level proportional gain (gentle trim)
-#define SERVO_FILL_DEADBAND (2 * SPDIF_BLOCK_SIZE)  // Ignore fill within 2 blocks of center
+// Fill trim gain: must be strong enough to dither between adjacent PIO
+// divider values (~8 Hz step at 48kHz) to achieve sub-LSB rate matching.
+#define SERVO_FILL_KP       0.001f    // Fill-level proportional gain
+#define SERVO_FILL_DEADBAND (SPDIF_BLOCK_SIZE / 2)  // Tight deadband — allow active dithering
 #define SERVO_UPDATE_INTERVAL 250     // Main loop iterations between servo updates (~5ms)
 
 // ============================================================================
@@ -121,9 +123,9 @@ static void servo_cache_base_dividers(uint32_t sample_freq) {
     // SPDIF TX: divider = sys_clk / sample_freq (16.8 fixed-point)
     spdif_tx_base_divider = sys_clk / sample_freq +
                             (sys_clk % sample_freq != 0);
-    // I2S TX: divider = sys_clk * 2 / sample_freq (the I2S PIO clock is half the SPDIF rate)
-    uint64_t i2s_div = ((uint64_t)sys_clk * 2) / sample_freq;
-    i2s_tx_base_divider = (uint32_t)i2s_div;
+    // I2S TX: divider = sys_clk * 2 / sample_freq (ceiling division, matches I2S library)
+    uint64_t i2s_num = (uint64_t)sys_clk * 2;
+    i2s_tx_base_divider = (uint32_t)((i2s_num + sample_freq - 1) / sample_freq);
 }
 
 // Apply a divider (16.8 fixed-point) to a PIO SM
@@ -361,28 +363,33 @@ void spdif_input_update_clock_servo(void) {
     if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;  // Sanity check
 
     uint32_t sys_clk = clock_get_hz(clk_sys);
+    // No ceiling — precise float division lets the fill trim dither between
+    // adjacent integer divider values to achieve sub-LSB rate matching.
     float spdif_div_f = (float)sys_clk / actual_freq;
     float i2s_div_f   = (float)sys_clk * 2.0f / actual_freq;
 
     // -----------------------------------------------------------------------
-    // Loop B: Fill-level trim (proportional only, same as USB servo)
-    // Prevents long-term FIFO drift that rate measurement alone can't catch.
+    // Loop B: Consumer fill trim (proportional only, mirrors USB servo)
+    // Uses output consumer buffer fill — the direct measure of whether
+    // outputs are consuming too fast or too slow. The RX FIFO only shows
+    // input-vs-pipeline rate, NOT pipeline-vs-output rate.
     // -----------------------------------------------------------------------
-    uint32_t fifo_count = spdif_rx_get_fifo_count();
-    int32_t fill_error = (int32_t)fifo_count - (int32_t)(SPDIF_RX_FIFO_SIZE / 2);
+    uint8_t consumer_fill = get_slot_consumer_fill(0);  // Slot 0 as reference
+    int32_t fill_error = (int32_t)consumer_fill - 8;    // Target 50% of 16 buffers
 
     float fill_trim = 0.0f;
-    if (fill_error > (int32_t)SERVO_FILL_DEADBAND ||
-        fill_error < -(int32_t)SERVO_FILL_DEADBAND) {
-        // Positive error (filling) → negative trim → reduce divider → speed up outputs
-        fill_trim = -(float)fill_error / (float)SPDIF_RX_FIFO_SIZE * SERVO_FILL_KP;
+    if (fill_error > 1 || fill_error < -1) {
+        // Positive error (overfull) → negative trim → reduce divider → speed up outputs
+        fill_trim = -(float)fill_error / 16.0f * SERVO_FILL_KP;
     }
 
     // -----------------------------------------------------------------------
     // Apply: rate-based divider + fill trim
+    // I2S divider is forced to exactly 2× SPDIF divider to prevent independent
+    // rounding from causing the two output types to drift apart over time.
     // -----------------------------------------------------------------------
     uint32_t spdif_div = (uint32_t)(spdif_div_f * (1.0f + fill_trim) + 0.5f);
-    uint32_t i2s_div   = (uint32_t)(i2s_div_f * (1.0f + fill_trim) + 0.5f);
+    uint32_t i2s_div   = spdif_div * 2;
 
     // Skip PIO writes if dividers haven't changed
     if (spdif_div == last_spdif_div && i2s_div == last_i2s_div) return;
