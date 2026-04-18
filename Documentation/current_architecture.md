@@ -181,6 +181,20 @@ Defined in `main.c`, function `core0_init()`:
 
 The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
 
+### Sample-rate & Bit-depth Switching
+*Last updated: 2026-04-18*
+
+Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switch) or SET_CUR on the endpoint sampling_freq control (rate switch) — must land on a muted, drained pipeline. Otherwise old-rate/old-bit-depth audio still queued in the consumer pools plays out against the new PIO divider or gets decoded under the wrong bytes-per-frame assumption, producing an audible pitch shift or byte-scramble burst.
+
+**`uac1_apply_alt()` (usb_audio.c):**
+- **Idempotent early-return.** `SET_INTERFACE(alt=current)` is common from host driver probes and used to tear down / re-open iso endpoints for no reason. Now skipped.
+- **Bit-depth switch (alt 1↔2) is treated the same as a cold start (alt 0→>0).** Both paths engage the mute envelope inline (`preset_mute_counter = PRESET_MUTE_SAMPLES`, `preset_loading = true`) so any packet decoded between the SETUP ack and the main-loop's `complete_pipeline_reset()` is silenced. Both paths also raise `stream_restart_resync_pending`, reset the feedback controller (`fb_ctrl_stream_stop` + `feedback_10_14 = nominal_feedback_10_14`), and clear `sync_started` / `total_samples_produced` so gap detection and the feedback loop resume from a deterministic baseline.
+- The pre-existing ring flush on `bit_depth_changed` still runs; combined with the mute, stale packets cannot reach the DSP pipeline in the wrong format.
+
+**SET_CUR sampling_freq validation:** unsupported rates are now stalled at EP0 rather than silently committed. Previously any 24-bit value was accepted — `audio_state.freq` would store garbage that `perform_rate_change()` later coerced to 44100, so a subsequent GET_CUR returned a rate the device never actually applied. The accepted set is {44100, 48000, 96000} to match the Type-I format descriptors on both alts.
+
+**`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
+
 ### Notification Endpoint (device→host push)
 *Last updated: 2026-04-18*
 
@@ -554,6 +568,8 @@ Each 192-frame audio block carries channel status bits and a Z preamble at frame
 ### 24-bit Output Encoding
 
 The USB input supports both 16-bit and 24-bit PCM via two alternate settings on the Audio Streaming interface. The host OS selects the desired bit depth; a runtime variable (`usb_input_bit_depth`) tracks the active format and branches the input conversion accordingly. With 24-bit input and 24-bit SPDIF output, the full precision signal path is maintained end-to-end. The DSP pipeline operates at >16-bit precision internally (float on RP2350, Q28 fixed-point on RP2040).
+
+**Alt-change safety (2026-04-18):** With `TUP_DCD_EDPT_ISO_ALLOC` enabled on RP2040/RP2350, TinyUSB's `usbd_edpt_close()` is a no-op — it does not clear the `busy` flag left by the previous alt's in-flight iso xfer. On the next `usbd_edpt_xfer()` this trips `TU_ASSERT(busy == 0)` and crashes the device. `uac1_open_stream_eps()` therefore calls `usbd_edpt_clear_stall()` on both stream endpoints after `usbd_edpt_iso_activate()` to force-clear the stale busy bit (the same workaround TinyUSB's stock audio class driver applies at `audio_device.c:1871`). `uac1_apply_alt()` also flushes the USB audio ring whenever `usb_input_bit_depth` changes so queued pre-switch packets aren't re-decoded under the new bytes/frame assumption. See "Sample-rate & Bit-depth Switching" for the full mute/resync flow that brackets every format change.
 
 **Input conversion (24-bit):**
 - **RP2350:** 3-byte little-endian → sign-extended int32 → float via `÷ 8388608.0f`

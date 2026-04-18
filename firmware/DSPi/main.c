@@ -78,6 +78,8 @@ extern LevellerCoeffs leveller_coeffs;
 extern LevellerState leveller_state;
 
 static void reset_usb_feedback_loop(void);
+static void prepare_pipeline_reset(uint32_t mute_samples);
+static void complete_pipeline_reset(void);
 
 // 96 kHz + 256x (24.576 MHz MCK) is unstable on current hardware/clocking, so
 // force 128x whenever that combination is encountered from persisted state.
@@ -92,6 +94,12 @@ static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
 
 static void perform_rate_change(uint32_t new_freq) {
     switch (new_freq) { case 44100: case 48000: case 96000: break; default: new_freq = 44100; }
+
+    // Engage mute and wait for Core 1 EQ worker to drain before touching
+    // filter coefficients or PIO dividers. Without this bracket, old-rate
+    // consumer-pool buffers would play at the new PIO bit-clock for ~16ms
+    // (audible pitch shift + resync click).
+    prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
     // Update the audio format so pico_audio_spdif can update the PIO divider
     audio_format_48k.sample_freq = new_freq;
@@ -129,6 +137,12 @@ static void perform_rate_change(uint32_t new_freq) {
         sanitize_mck_multiplier_for_rate(new_freq);
         audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
     }
+
+    // Drain all consumer pools (old-rate audio) and restart outputs in sync
+    // at the new PIO divider. The SPDIF wrap_consumer_take path would
+    // otherwise update the divider lazily mid-stream with old-rate audio
+    // still queued in each consumer pool.
+    complete_pipeline_reset();
 }
 
 // Reset an SPDIF instance's software queue state so it can restart in phase with
@@ -167,10 +181,6 @@ static void i2s_reset_consumer_pipeline(audio_i2s_instance_t *inst) {
         queue_free_audio_buffer(inst->consumer_pool, ab);
     }
 }
-
-// Forward declarations (defined later in this file)
-static void prepare_pipeline_reset(uint32_t mute_samples);
-static void complete_pipeline_reset(void);
 
 // ---------------------------------------------------------------------------
 // process_type_switches — unified output type transition handler

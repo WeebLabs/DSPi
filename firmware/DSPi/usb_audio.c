@@ -683,6 +683,28 @@ static bool uac1_open_stream_eps(uint8_t rhport, uint8_t alt) {
     TU_ASSERT(usbd_edpt_open(rhport, (tusb_desc_endpoint_t const *)data_ep));
     TU_ASSERT(usbd_edpt_open(rhport, (tusb_desc_endpoint_t const *)fb_ep));
 #endif
+    // usbd_edpt_close() is a no-op when TUP_DCD_EDPT_ISO_ALLOC is defined, so
+    // alt-switching leaves two pieces of stale state behind on each iso EP:
+    //
+    //   1. The TinyUSB stack-level `busy` flag (from the previous alt's
+    //      in-flight xfer) — would trip TU_ASSERT(busy == 0) in
+    //      usbd_edpt_xfer() (usbd.c:1337).
+    //
+    //   2. The RP2040/RP2350 hardware-level USB_BUF_CTRL_AVAIL bit in the
+    //      EP's buffer_control register — iso EPs hold AVAIL set while
+    //      waiting for the next packet; the host stops sending on the old
+    //      alt without clearing it, so the next arm panics with
+    //      "ep XX was already available" (rp2040_usb.c:108).
+    //
+    // Stall → clear_stall flushes BOTH: dcd_edpt_stall() overwrites
+    // buffer_control with just USB_BUF_CTRL_STALL (clearing AVAIL),
+    // dcd_edpt_clear_stall() then clears STALL, leaving buffer_control=0
+    // and stack-level busy/stalled flags cleared.
+    usbd_edpt_stall(rhport, AUDIO_OUT_ENDPOINT);
+    usbd_edpt_clear_stall(rhport, AUDIO_OUT_ENDPOINT);
+    usbd_edpt_stall(rhport, AUDIO_IN_ENDPOINT);
+    usbd_edpt_clear_stall(rhport, AUDIO_IN_ENDPOINT);
+
     uac1.ep_data_open = true;
     uac1.ep_fb_open = true;
 
@@ -748,16 +770,56 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
     if (alt > 2) return false;
 
     uint32_t prev_alt = usb_audio_alt_set;
+
+    // Idempotent SET_INTERFACE(alt=current) is common from host driver probes.
+    // Tearing down and re-opening iso EPs for no reason just introduces a
+    // pause in the stream and a risk of DCD state desync — bail early.
+    if (alt == prev_alt) return true;
+
+    uint8_t  new_bit_depth = (alt == 2) ? 24 : 16;
+    bool     bit_depth_changed = (new_bit_depth != usb_input_bit_depth);
+    // Any active→active transition (e.g. alt 1↔alt 2) needs the same
+    // mute/drain/feedback-reset treatment as a cold start (alt 0→>0).
+    // Otherwise stale consumer-pool audio plays out across the switch and
+    // a drifted feedback value is handed back to the host the instant the
+    // feedback EP re-arms, producing an audible click.
+    bool need_resync = (alt > 0) && (prev_alt == 0 || bit_depth_changed);
+
     usb_audio_alt_set = alt;
     uac1.cur_alt = alt;
-    usb_input_bit_depth = (alt == 2) ? 24 : 16;
+    usb_input_bit_depth = new_bit_depth;
+
+    // If the bit depth is changing, any packets still queued in the ring were
+    // encoded under the old format. Decoding them with the new bytes/frame
+    // assumption would misread sample counts and channel layout. Flush them.
+    if (bit_depth_changed) {
+        usb_audio_flush_ring();
+    }
 
     bool active = (alt > 0);
     audio_spdif_set_starvation_monitoring(active);
     audio_ring_last_push_us = 0;
 
     if (active) {
-        if (prev_alt == 0) {
+        if (need_resync) {
+            // Engage the mute envelope immediately so any packets decoded
+            // between here and the main-loop's full pipeline resync are
+            // silenced. Main loop will honor stream_restart_resync_pending
+            // and do prepare/complete_pipeline_reset (consumer drain + sync
+            // restart). The mute window covers that entire interval.
+            preset_mute_counter = PRESET_MUTE_SAMPLES;
+            preset_loading = true;
+
+            // Reset feedback + sync state so the loop doesn't resume with
+            // drifted values that would cause the host to emit off-size
+            // packets right after the alt change.
+            fb_ctrl_stream_stop(&fb_ctrl);
+            feedback_10_14 = nominal_feedback_10_14;
+            extern volatile bool sync_started;
+            extern volatile uint64_t total_samples_produced;
+            sync_started = false;
+            total_samples_produced = 0;
+
             audio_spdif_reset_dma_starvations();
             stream_restart_resync_pending = true;
             __dmb();
@@ -937,6 +999,19 @@ static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
                 uint32_t new_freq = (uint32_t)uac1_ctrl_buf[0]
                                   | ((uint32_t)uac1_ctrl_buf[1] << 8)
                                   | ((uint32_t)uac1_ctrl_buf[2] << 16);
+                // Only accept rates that the AS alt descriptors advertise.
+                // Accepting arbitrary values used to commit audio_state.freq
+                // to garbage that perform_rate_change() would silently
+                // coerce to 44100 — GET_CUR would then lie to the host.
+                bool rate_ok = (new_freq == 44100u ||
+                                new_freq == 48000u ||
+                                new_freq == 96000u);
+                if (!rate_ok) {
+                    // Stall EP0 — per UAC1, unsupported control values
+                    // must be rejected rather than silently clamped.
+                    uac1.pending_recipient = 0;
+                    return false;
+                }
                 if (new_freq != audio_state.freq) {
                     audio_state.freq = new_freq;
                     rate_change_pending = true;
