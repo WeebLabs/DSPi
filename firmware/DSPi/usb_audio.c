@@ -46,6 +46,7 @@
 #include "bulk_params.h"
 #include "usb_audio_ring.h"
 #include "usb_feedback_controller.h"
+#include "vendor_commands.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -429,10 +430,11 @@ static uint8_t __attribute__((aligned(4))) __not_in_flash("audio_scratch") ep_fb
 // Control request scratch for SET_CUR data stage (1-3 bytes payload).
 static uint8_t uac1_ctrl_buf[8];
 
-// Class driver state (single AC+AS audio function).
+// Class driver state (AC+AS audio function + vendor interface).
 static struct {
     uint8_t ac_itf;
     uint8_t as_itf;
+    uint8_t vendor_itf;      // 0xFF = not claimed
     uint8_t cur_alt;         // Current AS alt setting (0, 1, or 2)
     bool    ep_data_open;
     bool    ep_fb_open;
@@ -440,7 +442,7 @@ static struct {
     uint8_t pending_cs;
     uint8_t pending_recipient;
     uint8_t pending_len;
-} uac1 = {0};
+} uac1 = { .vendor_itf = 0xFF };
 
 extern usb_feedback_ctrl_t fb_ctrl;
 
@@ -489,10 +491,20 @@ static void uac1_driver_reset(uint8_t rhport) {
     uac1.ep_data_open = false;
     uac1.ep_fb_open = false;
     uac1.cur_alt = 0;
+    uac1.vendor_itf = 0xFF;
     usb_audio_alt_set = 0;
 }
 
 static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc, uint16_t max_len) {
+    // Second call path: vendor interface (class 0xFF, 0 EPs, no CS descriptors).
+    // TinyUSB calls open() again with this interface after we've claimed AC+AS.
+    if (itf_desc->bInterfaceClass == 0xFF &&
+        itf_desc->bAlternateSetting == 0 &&
+        itf_desc->bNumEndpoints == 0) {
+        uac1.vendor_itf = itf_desc->bInterfaceNumber;
+        return tu_desc_len(itf_desc);  // 9 bytes
+    }
+
     // Claim the UAC1 AC interface (don't check bInterfaceProtocol — UAC1 uses 0x00).
     TU_VERIFY(itf_desc->bInterfaceClass == TUSB_CLASS_AUDIO);
     TU_VERIFY(itf_desc->bInterfaceSubClass == AUDIO_SUBCLASS_CONTROL);
@@ -701,6 +713,10 @@ static bool uac1_handle_ep_get(uint8_t rhport, tusb_control_request_t const *req
 }
 
 static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req) {
+    // Note: vendor-type requests never reach this callback.  TinyUSB routes
+    // them directly to tud_vendor_control_xfer_cb (usbd.c:727-730) without
+    // consulting class drivers.  See vendor_commands.c for the vendor dispatch.
+
     if (stage == CONTROL_STAGE_SETUP) {
         // --- Standard requests on our interfaces ---
         if (req->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD) {
@@ -716,6 +732,11 @@ static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
                     if (!uac1_apply_alt(rhport, alt)) return false;
                     return tud_control_status(rhport, req);
                 }
+                if (itf == uac1.vendor_itf) {
+                    // Vendor interface has only alt 0
+                    if (alt != 0) return false;
+                    return tud_control_status(rhport, req);
+                }
                 return false;
             }
             if (req->bRequest == TUSB_REQ_GET_INTERFACE) {
@@ -725,6 +746,8 @@ static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
                     alt_resp = 0;
                 } else if (itf == uac1.as_itf) {
                     alt_resp = uac1.cur_alt;
+                } else if (itf == uac1.vendor_itf) {
+                    alt_resp = 0;
                 } else {
                     return false;
                 }

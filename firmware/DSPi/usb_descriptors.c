@@ -79,10 +79,16 @@ static const tusb_desc_device_t device_descriptor = {
 // 166  Std iso EP OUT 0x01                             (9 bytes)
 // 175  CS iso data EP                                  (7 bytes)
 // 182  Std iso feedback EP IN 0x82                     (9 bytes)
-// 191  total
+// 191  Vendor std interface (itf 2, class 0xFF, 0 EPs) (9 bytes)
+// 200  total
+//
+// The vendor interface sits OUTSIDE the AC+AS IAD — it is its own USB
+// function.  TinyUSB's process_set_config() will call our driver's open()
+// a second time with this interface descriptor; we claim it and handle all
+// class/vendor requests on it in control_xfer_cb().
 // ----------------------------------------------------------------------------
 
-#define CONFIG_TOTAL_LEN 191
+#define CONFIG_TOTAL_LEN 200
 #define AC_CS_TOTAL_LEN  40   // CS AC: header(9) + input(12) + FU(10) + output(9)
 
 #define OFFSET_ALT1_DATA_EP 108
@@ -300,6 +306,17 @@ const uint8_t usb_config_descriptor[CONFIG_TOTAL_LEN] = {
     0x01,
     0x02,
     0x00,
+
+    // --- 183 (offset -8 below the 191-total comment): Vendor std itf 2 ---
+    9,                                  // bLength
+    TUSB_DESC_INTERFACE,
+    ITF_NUM_VENDOR,                     // bInterfaceNumber (= 2)
+    0x00,                               // bAlternateSetting
+    0x00,                               // bNumEndpoints — control-only
+    0xFF,                               // bInterfaceClass (vendor specific)
+    0x00,                               // bInterfaceSubClass
+    0x00,                               // bInterfaceProtocol
+    0x00,                               // iInterface
 };
 
 const uint16_t usb_config_descriptor_len = CONFIG_TOTAL_LEN;

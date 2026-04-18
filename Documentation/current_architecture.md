@@ -64,8 +64,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `tusb_config.h` | TinyUSB configuration (disables built-in classes; UAC1 handled by custom driver) |
 | `audio_pipeline.c` | Input-agnostic DSP pipeline (`process_input_block`): loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer stats |
 | `audio_pipeline.h` | Pipeline entry point, shared buffer declarations (`buf_l`/`buf_r`/`buf_out`), buffer stats API |
-| `vendor_commands.c` | **Not compiled in Phase 1.** Vendor USB control request handlers; to be re-wired via TinyUSB's vendor class in Phase 2. |
-| `vendor_commands.h` | **Not compiled in Phase 1.** Kept on disk for Phase 2 reference. |
+| `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, pin/MCK helpers, diagnostics). Public entry `vendor_control_xfer_cb(rhport, stage, req)` is invoked from `usb_audio.c`'s UAC1 class driver. |
+| `vendor_commands.h` | Vendor handler declarations, system stats and pin helper prototypes. |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
 | `dsp_pipeline.h` | Filter storage declarations, delay line API |
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |
@@ -121,7 +121,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 - `PICO_AUDIO_SPDIF_DMA_IRQ=1`
 - `PICO_AUDIO_I2S_DMA_IRQ=0`
 
-**Phase 1 source exclusions:** `vendor_commands.c` / `vendor_commands.h` are not in `add_executable()` and therefore not compiled. Files remain on disk for Phase 2.
+**Vendor commands** were temporarily excluded in Phase 1 and re-added in Phase 2; `vendor_commands.c` / `vendor_commands.h` are now back in `add_executable()`.
 
 **Build commands:**
 ```bash
@@ -1478,10 +1478,10 @@ Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Cor
 
 ---
 
-## TinyUSB Migration (Phase 1)
+## TinyUSB Migration (Phases 1 + 2)
 *Last updated: 2026-04-18*
 
-Phase 1 of a two-phase migration from the pico-extras `usb_device` library to TinyUSB. Phase 1 swaps the library and keeps UAC1 audio with full parity. The vendor control interface has been removed temporarily and will return in Phase 2.
+Phase 1 swapped the USB library from pico-extras `usb_device` to TinyUSB with full UAC1 audio parity. Phase 2 brought the vendor control interface back under TinyUSB. MS OS 2.0 descriptors for WinUSB auto-binding are still deferred (Phase 2b) — on Windows the host app must bind WinUSB manually (e.g. via Zadig) until that lands. macOS and Linux need no extra binding.
 
 ### Why a custom UAC1 class driver
 
@@ -1491,9 +1491,10 @@ TinyUSB's built-in audio class driver (`lib/tinyusb/src/class/audio/audio_device
 
 | Area | File | Notes |
 |------|------|-------|
-| TinyUSB configuration | `tusb_config.h` | `CFG_TUD_AUDIO = 0` and all other classes off. Phase 2 will add `CFG_TUD_VENDOR`. |
-| UAC1 descriptors | `usb_descriptors.c` / `usb_descriptors.h` | Hand-rolled byte array (no LUFA). UAC1 spec shape: AC + AS with 3 alts (0, 1, 2). Feature unit entity 2 exposes master mute + volume. |
-| Class driver | `usb_audio.c` | `uac1_driver` struct is registered as the single app driver. Implements `init`/`reset`/`open`/`control_xfer_cb`/`xfer_cb`/`sof`. |
+| TinyUSB configuration | `tusb_config.h` | `CFG_TUD_AUDIO = 0` and all other classes off. The vendor interface is also handled by our custom driver (not `CFG_TUD_VENDOR`), because our vendor interface is control-transfer-only with no bulk endpoints. |
+| UAC1 descriptors | `usb_descriptors.c` / `usb_descriptors.h` | Hand-rolled byte array (no LUFA). Layout: config (9B) → IAD (8B) → AC std itf + CS (49B) → AS alt 0/1/2 (125B) → vendor std itf (9B). Total 200B. Feature unit entity 2 exposes master mute + volume. |
+| Class driver | `usb_audio.c` | `uac1_driver` struct is registered as the single app driver. Implements `init`/`reset`/`open`/`control_xfer_cb`/`xfer_cb`/`sof`. The same driver claims AC+AS (via IAD) AND the vendor interface 2 (class 0xFF). |
+| Vendor command dispatch | `vendor_commands.c` | All existing SET/GET handlers preserved. Public entry point is `tud_vendor_control_xfer_cb(rhport, stage, req)` — TinyUSB's weakly-linked global callback. TinyUSB routes **every** vendor-type control transfer here directly from `process_control_request` (usbd.c:727-730), bypassing class drivers. A `vendor_send_response()` shim wraps `tud_control_xfer()` so case bodies stay unchanged. Bulk SET/GET (`REQ_SET_ALL_PARAMS` / `REQ_GET_ALL_PARAMS`) use `tud_control_xfer()`'s native EP0 chunking instead of the old `usb_stream_setup_transfer` plumbing. |
 | USB init | `usb_audio.c:usb_sound_card_init()` | Calls `tud_init(0)` in place of the pico-extras `usb_interface_init()` / `usb_device_init()` / `usb_device_start()` block. |
 | Main loop | `main.c` | `tud_task()` is called once per iteration before `usb_audio_drain_ring()`. |
 | SOF feedback servo | `usb_audio.c:uac1_driver_sof()` | Replaces the former `usb_sof_irq()` in `main.c`. Runs in USB IRQ context (TinyUSB dispatches SOF-consumer callbacks synchronously from `dcd_event_handler`). |
@@ -1502,11 +1503,11 @@ TinyUSB's built-in audio class driver (`lib/tinyusb/src/class/audio/audio_device
 
 Under pico-extras, `_as_audio_packet()` ran in USB IRQ context on every audio OUT packet completion. Under TinyUSB, `DCD_EVENT_XFER_COMPLETE` events are enqueued by the DCD IRQ and dispatched to our `uac1_driver_xfer_cb` from `tud_task()` (main-loop context). The SPSC ring is unchanged; the producer moved from IRQ to task. Gap detection timestamps still come from `time_us_32()` captured in `xfer_cb` — noise is bounded by the main-loop polling rate (~kHz), well below the 2 ms gap threshold. SOF still runs in IRQ, so feedback servo latency is unchanged.
 
-### Descriptor layout (UAC1, byte offsets into `usb_config_descriptor[]`)
+### Descriptor layout (UAC1 + vendor, byte offsets into `usb_config_descriptor[]`)
 
 | Offset | Length | Contents |
 |--------|--------|----------|
-| 0 | 9 | Configuration descriptor (total length 191) |
+| 0 | 9 | Configuration descriptor (total length 200) |
 | 9 | 8 | IAD grouping AC + AS (bInterfaceCount = 2) |
 | 17 | 9 | AC std interface (itf 0, 0 EPs, UAC1 protocol 0x00) |
 | 26 | 9 | AC CS header (bcdADC 0x0100, bInCollection 1) |
@@ -1516,6 +1517,9 @@ Under pico-extras, `_as_audio_packet()` ran in USB IRQ context on every audio OU
 | 66 | 9 | AS std interface alt 0 (zero-bandwidth) |
 | 75 | 58 | AS alt 1 (16-bit, 44.1/48/96 kHz) incl. std + CS data EP 0x01 and feedback EP 0x82 |
 | 133 | 58 | AS alt 2 (24-bit, 44.1/48/96 kHz) incl. std + CS data EP 0x01 and feedback EP 0x82 |
+| 191 | 9 | Vendor std interface (itf 2, class 0xFF, 0 EPs — control-only) |
+
+The vendor interface sits **outside** the IAD — it is its own USB function. TinyUSB's `process_set_config()` calls our `open()` a second time with the vendor interface descriptor; we recognize class 0xFF and claim it.
 
 **Why the IAD is required:** TinyUSB's `process_set_config()` in `usbd.c` binds interfaces to class drivers based on `bInterfaceCount` — and defaults to 1 when no IAD is present. Without the IAD, TinyUSB would bind only the AC interface (itf 0) to our UAC1 class driver, leaving the AS interface (itf 1) unbound. `SET_INTERFACE` requests for AS would then fail at `_usbd_dev.itf2drv[1] == DRVID_INVALID`, the isochronous endpoints would never open, and the device would fail to appear as a functional audio endpoint on the host. The IAD makes TinyUSB bind both interfaces (itf 0 + itf 1) to our driver in a single `open()` call.
 
@@ -1534,17 +1538,25 @@ UAC1 uses discrete `bRequest` opcodes (`SET_CUR` 0x01, `GET_CUR` 0x81, `GET_MIN`
 - MS OS / WCID descriptors + `device_setup_request_handler` WCID dispatch.
 - All vendor commands (0x42 … 0xD5). The host configuration app will not function until Phase 2.
 
-### Phase 2 handoff
+### Phase 2 status (done) and Phase 2b (deferred)
 
-- Re-enable `CFG_TUD_VENDOR = 1` in `tusb_config.h`, add a vendor-class interface to the config descriptor, and port `vendor_setup_request_handler` to `tud_vendor_control_xfer_cb`.
-- Add MS OS 2.0 descriptors (BOS + platform capability UUID `D8DD60DF-4589-4CC7-9CD2-659D9E648A9F`) for WinUSB auto-binding. Drop the legacy MS OS 1.0 / WCID path.
-- Bulk parameter transfers (~2912 bytes): `tud_control_xfer` handles long EP0 transfers natively; the old `usb_stream_setup_transfer` chunking is unnecessary.
+Done in Phase 2:
+
+- Vendor interface (class 0xFF, 0 endpoints) re-added to the config descriptor at itf 2 (outside the AC+AS IAD).
+- `vendor_commands.c` adapted: public entry point is `vendor_control_xfer_cb(rhport, stage, req)`, invoked from our UAC1 class driver's `control_xfer_cb` when a vendor-class request targets the vendor interface. A legacy `vendor_buffer_t` shim and a `vendor_send_response()` wrapper keep all 30+ SET/GET case bodies unchanged.
+- `REQ_GET_ALL_PARAMS` / `REQ_SET_ALL_PARAMS` (~2912 bytes) now use `tud_control_xfer()`'s native EP0 chunking — the old `usb_stream_setup_transfer` / `_vendor_stream` / `_vendor_*_complete` plumbing is gone.
+- `REQ_GET_USB_ERROR_STATS` / `REQ_RESET_USB_ERROR_STATS` return zeros / no-op under TinyUSB (pico-extras' per-category error counters have no TinyUSB equivalent yet).
+
+Deferred to Phase 2b:
+
+- MS OS 2.0 descriptors (BOS + platform capability UUID `D8DD60DF-4589-4CC7-9CD2-659D9E648A9F`) for automatic WinUSB binding on Windows. Until this lands, Windows hosts must bind WinUSB manually (e.g. via Zadig). macOS and Linux work without any additional binding.
+- Resurface a meaningful USB error counter path if/when TinyUSB adds DCD-level error event hooks.
 
 ### Size impact
 
-| Platform | text (pre) | text (post) | bss (pre) | bss (post) |
-|----------|-----------:|------------:|----------:|-----------:|
-| RP2350 | 89,720 | 80,812 | 210,024 | 210,556 |
-| RP2040 | n/a | 84,844 | n/a | 90,564 |
+| Platform | text (pre-migration) | text (Phase 1) | text (Phase 2) | bss (Phase 2) |
+|----------|-------------------:|---------------:|---------------:|--------------:|
+| RP2350 | 89,720 | 80,812 | 91,240 | 210,696 |
+| RP2040 | n/a | 84,844 | 95,612 | 90,704 |
 
-RP2350 .text shrank by ~9 KB (vendor commands gone); bss rose by ~0.5 KB. Both platforms build with no warnings.
+Phase 1 removed the vendor surface entirely (~9 KB saved). Phase 2 re-added it (~10.5 KB), and also added the IAD (+8 bytes) and the vendor interface descriptor (+9 bytes). Net vs. pre-migration on RP2350: +1.5 KB text.

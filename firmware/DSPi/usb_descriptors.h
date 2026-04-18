@@ -36,7 +36,8 @@
 
 #define ITF_NUM_AUDIO_CONTROL   0
 #define ITF_NUM_AUDIO_STREAMING 1
-#define ITF_NUM_TOTAL           2
+#define ITF_NUM_VENDOR          2
+#define ITF_NUM_TOTAL           3
 
 // ----------------------------------------------------------------------------
 // UAC1 ENTITY IDs
