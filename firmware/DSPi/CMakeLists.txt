@@ -5,7 +5,7 @@ add_compile_options(-O2)
 
 # Use -O3 for DSP-critical files
 set_source_files_properties(
-    dsp_pipeline.c usb_audio.c vendor_commands.c audio_pipeline.c crossfeed.c loudness.c leveller.c
+    dsp_pipeline.c usb_audio.c audio_pipeline.c crossfeed.c loudness.c leveller.c
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
@@ -31,12 +31,11 @@ add_executable(DSPi
     pdm_generator.h
     usb_audio.c
     usb_audio.h
-    vendor_commands.c
-    vendor_commands.h
     usb_descriptors.c
     usb_descriptors.h
     usb_feedback_controller.c
     usb_feedback_controller.h
+    tusb_config.h
 )
 
 if (PICO_PLATFORM STREQUAL "rp2040")
@@ -47,7 +46,6 @@ pico_set_binary_type(DSPi copy_to_ram)
 
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/lufa
 )
 
 target_compile_definitions(DSPi PRIVATE
@@ -60,11 +58,6 @@ target_compile_definitions(DSPi PRIVATE
     PICO_AUDIO_I2S_DMA_IRQ=0
 
     PICO_DEFAULT_UART_TX_PIN=12
-
-    # pico-extras usb_device configuration
-    PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1
-    PICO_USBDEV_MAX_DESCRIPTOR_SIZE=256
-    PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=2  # Legacy default; stride is now per-endpoint in usb_device.c
 )
 
 target_link_libraries(DSPi
@@ -76,7 +69,7 @@ target_link_libraries(DSPi
     hardware_adc
     pico_audio_spdif_multi
     pico_audio_i2s_multi
-    usb_device
+    tinyusb_device
 )
 
 pico_add_extra_outputs(DSPi)

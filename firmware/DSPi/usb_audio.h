@@ -164,7 +164,6 @@ void audio_set_volume(int16_t volume);
 void usb_audio_drain_ring(void);   // Process all pending USB audio packets
 void usb_audio_flush_ring(void);   // Discard stale ring data + reset gap timestamp
 
-// Expose serial string buffer for main.c to write unique board ID
-extern char *usb_descriptor_str_serial;
+// Exposed in usb_descriptors.h (populated by main.c from the chip unique ID).
 
 #endif // USB_AUDIO_H

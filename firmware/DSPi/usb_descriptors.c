@@ -1,319 +1,352 @@
 /*
- * USB Descriptors for DSPi
- * UAC1 Device, Configuration, and MS OS descriptor data
+ * USB Descriptors for DSPi — TinyUSB / UAC1
+ *
+ * Hand-rolled UAC1 config descriptor as a packed byte array.  TinyUSB's
+ * TUD_AUDIO_DESC_* macros emit UAC2-shaped descriptors, so they cannot be
+ * used here.
  */
+
+#include <string.h>
+
+#include "tusb.h"
+#include "class/audio/audio.h"
+#include "pico/unique_id.h"
 
 #include "usb_descriptors.h"
 
 // ----------------------------------------------------------------------------
-// STRING DESCRIPTORS
+// STRINGS
 // ----------------------------------------------------------------------------
 
-static char descriptor_str_serial_buf[17] = "0123456789ABCDEF";
-char *usb_descriptor_str_serial = descriptor_str_serial_buf;
+char usb_descriptor_str_serial[17] = "0123456789ABCDEF";
 
-char *descriptor_strings[DESCRIPTOR_STRING_COUNT] = {
-    "GitHub.com/WeebLabs",
-    "Weeb Labs DSPi",
-    descriptor_str_serial_buf
-};
-
-// ----------------------------------------------------------------------------
-// CONFIGURATION DESCRIPTOR (LUFA-style UAC1)
-// ----------------------------------------------------------------------------
-
-const struct audio_device_config audio_device_config = {
-    .descriptor = {
-        .bLength             = sizeof(audio_device_config.descriptor),
-        .bDescriptorType     = DTYPE_Configuration,
-        .wTotalLength        = sizeof(audio_device_config),
-        .bNumInterfaces      = ITF_NUM_TOTAL,
-        .bConfigurationValue = 0x01,
-        .iConfiguration      = 0x00,
-        .bmAttributes        = 0x80,
-        .bMaxPower           = 0x32,
-    },
-    .ac_interface = {
-        .bLength            = sizeof(audio_device_config.ac_interface),
-        .bDescriptorType    = DTYPE_Interface,
-        .bInterfaceNumber   = ITF_NUM_AUDIO_CONTROL,
-        .bAlternateSetting  = 0x00,
-        .bNumEndpoints      = 0x00,
-        .bInterfaceClass    = AUDIO_CSCP_AudioClass,
-        .bInterfaceSubClass = AUDIO_CSCP_ControlSubclass,
-        .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
-        .iInterface         = 0x00,
-    },
-    .ac_audio = {
-        .core = {
-            .bLength = sizeof(audio_device_config.ac_audio.core),
-            .bDescriptorType = AUDIO_DTYPE_CSInterface,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_Header,
-            .bcdADC = VERSION_BCD(1, 0, 0),
-            .wTotalLength = sizeof(audio_device_config.ac_audio),
-            .bInCollection = 1,
-            .bInterfaceNumbers = ITF_NUM_AUDIO_STREAMING,
-        },
-        .input_terminal = {
-            .bLength = sizeof(audio_device_config.ac_audio.input_terminal),
-            .bDescriptorType = AUDIO_DTYPE_CSInterface,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_InputTerminal,
-            .bTerminalID = 1,
-            .wTerminalType = AUDIO_TERMINAL_STREAMING,
-            .bAssocTerminal = 0,
-            .bNrChannels = 2,
-            .wChannelConfig = AUDIO_CHANNEL_LEFT_FRONT | AUDIO_CHANNEL_RIGHT_FRONT,
-            .iChannelNames = 0,
-            .iTerminal = 0,
-        },
-        .feature_unit = {
-            .bLength = sizeof(audio_device_config.ac_audio.feature_unit),
-            .bDescriptorType = AUDIO_DTYPE_CSInterface,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_Feature,
-            .bUnitID = 2,
-            .bSourceID = 1,
-            .bControlSize = 1,
-            .bmaControls = {AUDIO_FEATURE_MUTE | AUDIO_FEATURE_VOLUME, 0, 0},
-            .iFeature = 0,
-        },
-        .output_terminal = {
-            .bLength = sizeof(audio_device_config.ac_audio.output_terminal),
-            .bDescriptorType = AUDIO_DTYPE_CSInterface,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_OutputTerminal,
-            .bTerminalID = 3,
-            .wTerminalType = AUDIO_TERMINAL_OUT_SPEAKER,
-            .bAssocTerminal = 0,
-            .bSourceID = 2,
-            .iTerminal = 0,
-        },
-    },
-    .as_zero_interface = {
-        .bLength            = sizeof(audio_device_config.as_zero_interface),
-        .bDescriptorType    = DTYPE_Interface,
-        .bInterfaceNumber   = ITF_NUM_AUDIO_STREAMING,
-        .bAlternateSetting  = 0x00,
-        .bNumEndpoints      = 0x00,
-        .bInterfaceClass    = AUDIO_CSCP_AudioClass,
-        .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
-        .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
-        .iInterface         = 0x00,
-    },
-    .as_op_interface = {
-        .bLength            = sizeof(audio_device_config.as_op_interface),
-        .bDescriptorType    = DTYPE_Interface,
-        .bInterfaceNumber   = ITF_NUM_AUDIO_STREAMING,
-        .bAlternateSetting  = 0x01,
-        .bNumEndpoints      = 0x02,
-        .bInterfaceClass    = AUDIO_CSCP_AudioClass,
-        .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
-        .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
-        .iInterface         = 0x00,
-    },
-    .as_audio = {
-        .streaming = {
-            .bLength = sizeof(audio_device_config.as_audio.streaming),
-            .bDescriptorType = AUDIO_DTYPE_CSInterface,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_General,
-            .bTerminalLink = 1,
-            .bDelay = 1,
-            .wFormatTag = 1, // PCM
-        },
-        .format = {
-            .core = {
-                .bLength = sizeof(audio_device_config.as_audio.format),
-                .bDescriptorType = AUDIO_DTYPE_CSInterface,
-                .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_FormatType,
-                .bFormatType = 1,
-                .bNrChannels = 2,
-                .bSubFrameSize = 2,
-                .bBitResolution = 16,
-                .bSampleFrequencyType = count_of(audio_device_config.as_audio.format.freqs),
-            },
-            .freqs = {
-                AUDIO_SAMPLE_FREQ(44100),
-                AUDIO_SAMPLE_FREQ(48000),
-                AUDIO_SAMPLE_FREQ(96000),
-            },
-        },
-    },
-    .ep1 = {
-        .core = {
-            .bLength          = sizeof(audio_device_config.ep1.core),
-            .bDescriptorType  = DTYPE_Endpoint,
-            .bEndpointAddress = AUDIO_OUT_ENDPOINT,
-            .bmAttributes     = 5,        // Isochronous, async
-            .wMaxPacketSize   = 582,      // Sized for largest alt (24-bit 96kHz) so DPRAM allocation fits both
-            .bInterval        = 1,
-            .bRefresh         = 0,
-            .bSyncAddr        = AUDIO_IN_ENDPOINT,
-        },
-        .audio = {
-            .bLength = sizeof(audio_device_config.ep1.audio),
-            .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
-            .bmAttributes = 1,            // Sampling frequency control
-            .bLockDelayUnits = 0,
-            .wLockDelay = 0,
-        },
-    },
-    .ep2 = {
-        .bLength          = sizeof(audio_device_config.ep2),
-        .bDescriptorType  = 0x05,
-        .bEndpointAddress = AUDIO_IN_ENDPOINT,
-        .bmAttributes     = 0x11,         // Isochronous, feedback
-        .wMaxPacketSize   = 3,
-        .bInterval        = 0x01,
-        .bRefresh         = 2,
-        .bSyncAddr        = 0,
-    },
-    // Alt setting 2: 24-bit audio
-    .as_op_interface_24 = {
-        .bLength            = sizeof(audio_device_config.as_op_interface_24),
-        .bDescriptorType    = DTYPE_Interface,
-        .bInterfaceNumber   = ITF_NUM_AUDIO_STREAMING,
-        .bAlternateSetting  = 0x02,
-        .bNumEndpoints      = 0x02,
-        .bInterfaceClass    = AUDIO_CSCP_AudioClass,
-        .bInterfaceSubClass = AUDIO_CSCP_AudioStreamingSubclass,
-        .bInterfaceProtocol = AUDIO_CSCP_ControlProtocol,
-        .iInterface         = 0x00,
-    },
-    .as_audio_24 = {
-        .streaming = {
-            .bLength = sizeof(audio_device_config.as_audio_24.streaming),
-            .bDescriptorType = AUDIO_DTYPE_CSInterface,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_General,
-            .bTerminalLink = 1,
-            .bDelay = 1,
-            .wFormatTag = 1, // PCM
-        },
-        .format = {
-            .core = {
-                .bLength = sizeof(audio_device_config.as_audio_24.format),
-                .bDescriptorType = AUDIO_DTYPE_CSInterface,
-                .bDescriptorSubtype = AUDIO_DSUBTYPE_CSInterface_FormatType,
-                .bFormatType = 1,
-                .bNrChannels = 2,
-                .bSubFrameSize = 3,
-                .bBitResolution = 24,
-                .bSampleFrequencyType = count_of(audio_device_config.as_audio_24.format.freqs),
-            },
-            .freqs = {
-                AUDIO_SAMPLE_FREQ(44100),
-                AUDIO_SAMPLE_FREQ(48000),
-                AUDIO_SAMPLE_FREQ(96000),
-            },
-        },
-    },
-    .ep1_24 = {
-        .core = {
-            .bLength          = sizeof(audio_device_config.ep1_24.core),
-            .bDescriptorType  = DTYPE_Endpoint,
-            .bEndpointAddress = AUDIO_OUT_ENDPOINT,
-            .bmAttributes     = 5,        // Isochronous, async
-            .wMaxPacketSize   = 582,      // (96kHz/1000 + 1) * 2ch * 3bytes
-            .bInterval        = 1,
-            .bRefresh         = 0,
-            .bSyncAddr        = AUDIO_IN_ENDPOINT,
-        },
-        .audio = {
-            .bLength = sizeof(audio_device_config.ep1_24.audio),
-            .bDescriptorType = AUDIO_DTYPE_CSEndpoint,
-            .bDescriptorSubtype = AUDIO_DSUBTYPE_CSEndpoint_General,
-            .bmAttributes = 1,            // Sampling frequency control
-            .bLockDelayUnits = 0,
-            .wLockDelay = 0,
-        },
-    },
-    .ep2_24 = {
-        .bLength          = sizeof(audio_device_config.ep2_24),
-        .bDescriptorType  = 0x05,
-        .bEndpointAddress = AUDIO_IN_ENDPOINT,
-        .bmAttributes     = 0x11,         // Isochronous, feedback
-        .wMaxPacketSize   = 3,
-        .bInterval        = 0x01,
-        .bRefresh         = 2,
-        .bSyncAddr        = 0,
-    },
-    .vendor_interface = {
-        .bLength            = sizeof(audio_device_config.vendor_interface),
-        .bDescriptorType    = DTYPE_Interface,
-        .bInterfaceNumber   = ITF_NUM_VENDOR,
-        .bAlternateSetting  = 0x00,
-        .bNumEndpoints      = 0x00,
-        .bInterfaceClass    = 0xFF,       // Vendor specific
-        .bInterfaceSubClass = 0x00,
-        .bInterfaceProtocol = 0x00,
-        .iInterface         = 0x00,
-    },
+static const char *const string_table[] = {
+    "",                    // 0 — placeholder; langid returned separately
+    "GitHub.com/WeebLabs", // 1 — manufacturer
+    "Weeb Labs DSPi",      // 2 — product
+    usb_descriptor_str_serial, // 3 — serial (populated at boot)
 };
 
 // ----------------------------------------------------------------------------
 // DEVICE DESCRIPTOR
 // ----------------------------------------------------------------------------
 
-const struct usb_device_descriptor boot_device_descriptor = {
-    .bLength            = 18,
-    .bDescriptorType    = 0x01,
+static const tusb_desc_device_t device_descriptor = {
+    .bLength            = sizeof(tusb_desc_device_t),
+    .bDescriptorType    = TUSB_DESC_DEVICE,
     .bcdUSB             = 0x0200,
     .bDeviceClass       = 0x00,
     .bDeviceSubClass    = 0x00,
     .bDeviceProtocol    = 0x00,
-    .bMaxPacketSize0    = 0x40,
-    .idVendor           = VENDOR_ID,
-    .idProduct          = PRODUCT_ID,
-    .bcdDevice          = 0x0200,
-    .iManufacturer      = 0x01,
-    .iProduct           = 0x02,
-    .iSerialNumber      = 0x03,
+    .bMaxPacketSize0    = CFG_TUD_ENDPOINT0_SIZE,
+    .idVendor           = USB_VENDOR_ID,
+    .idProduct          = USB_PRODUCT_ID,
+    .bcdDevice          = USB_BCD_DEVICE,
+    .iManufacturer      = STRID_MANUFACTURER,
+    .iProduct           = STRID_PRODUCT,
+    .iSerialNumber      = STRID_SERIAL,
     .bNumConfigurations = 0x01,
 };
 
 // ----------------------------------------------------------------------------
-// MICROSOFT WCID / OS DESCRIPTORS
+// CONFIGURATION DESCRIPTOR (UAC1 with IAD)
+//
+// The Interface Association Descriptor (IAD) is required so TinyUSB's
+// process_set_config() binds BOTH the AC and AS interfaces to our custom UAC1
+// class driver.  Without an IAD, TinyUSB would only bind the first interface
+// (AC) per the bInterfaceCount==1 default, and SET_INTERFACE requests on the
+// AS interface would fail to route to our driver (no EP opens, no audio).
+//
+// Layout (offsets from start of usb_config_descriptor[]):
+//
+//   0  Config descriptor                               (9 bytes)
+//   9  IAD (covers AC + AS)                            (8 bytes)
+//  17  AC std interface (itf 0, 0 EPs, UAC1)           (9 bytes)
+//  26  AC CS header                                    (9 bytes)
+//  35  AC CS input terminal (ID 1, USB streaming)      (12 bytes)
+//  47  AC CS feature unit (ID 2, mute+volume master)   (10 bytes)
+//  57  AC CS output terminal (ID 3, speaker)           (9 bytes)
+//  66  AS std interface alt 0 (zero-bw)                (9 bytes)
+//  75  AS std interface alt 1 (16-bit)                 (9 bytes)
+//  84  AS CS general (wFormatTag=PCM)                  (7 bytes)
+//  91  AS CS format type I (16-bit, 3 rates)           (17 bytes)
+// 108  Std iso EP OUT 0x01                             (9 bytes)
+// 117  CS iso data EP (sampling freq control)          (7 bytes)
+// 124  Std iso feedback EP IN 0x82                     (9 bytes)
+// 133  AS std interface alt 2 (24-bit)                 (9 bytes)
+// 142  AS CS general                                   (7 bytes)
+// 149  AS CS format type I (24-bit, 3 rates)           (17 bytes)
+// 166  Std iso EP OUT 0x01                             (9 bytes)
+// 175  CS iso data EP                                  (7 bytes)
+// 182  Std iso feedback EP IN 0x82                     (9 bytes)
+// 191  total
 // ----------------------------------------------------------------------------
 
-const uint8_t ms_os_string_descriptor[MS_OS_STRING_DESC_LEN] = {
-    MS_OS_STRING_DESC_LEN,
-    0x03, // DTYPE_String
-    'M', 0, 'S', 0, 'F', 0, 'T', 0, '1', 0, '0', 0, '0', 0,
-    MS_VENDOR_CODE,
-    0x00
+#define CONFIG_TOTAL_LEN 191
+#define AC_CS_TOTAL_LEN  40   // CS AC: header(9) + input(12) + FU(10) + output(9)
+
+#define OFFSET_ALT1_DATA_EP 108
+#define OFFSET_ALT1_FB_EP   124
+#define OFFSET_ALT2_DATA_EP 166
+#define OFFSET_ALT2_FB_EP   182
+
+// Sample rate little-endian expansion
+#define RATE_LE(r) ((r) & 0xFF), (((r) >> 8) & 0xFF), (((r) >> 16) & 0xFF)
+
+const uint8_t usb_config_descriptor[CONFIG_TOTAL_LEN] = {
+    // --- 0: Config descriptor ---------------------------------------------
+    9,                                  // bLength
+    TUSB_DESC_CONFIGURATION,            // bDescriptorType
+    U16_TO_U8S_LE(CONFIG_TOTAL_LEN),    // wTotalLength
+    ITF_NUM_TOTAL,                      // bNumInterfaces
+    0x01,                               // bConfigurationValue
+    0x00,                               // iConfiguration
+    0x80,                               // bmAttributes (bus-powered)
+    0x32,                               // bMaxPower (100 mA)
+
+    // --- 9: IAD grouping AC + AS into one audio function ------------------
+    // Required so TinyUSB's process_set_config() binds both interfaces to our
+    // class driver (bInterfaceCount = 2).
+    8,                                  // bLength
+    TUSB_DESC_INTERFACE_ASSOCIATION,    // 0x0B
+    ITF_NUM_AUDIO_CONTROL,              // bFirstInterface (= 0)
+    0x02,                               // bInterfaceCount (AC + AS)
+    TUSB_CLASS_AUDIO,                   // bFunctionClass
+    AUDIO_SUBCLASS_CONTROL,             // bFunctionSubClass (per USB-IF IAD convention for audio)
+    0x00,                               // bFunctionProtocol (UAC1)
+    0x00,                               // iFunction
+
+    // --- 17: AC std interface (itf 0, 0 EPs, UAC1 protocol 0x00) ---------
+    9,                                  // bLength
+    TUSB_DESC_INTERFACE,                // bDescriptorType
+    ITF_NUM_AUDIO_CONTROL,              // bInterfaceNumber
+    0x00,                               // bAlternateSetting
+    0x00,                               // bNumEndpoints
+    TUSB_CLASS_AUDIO,                   // bInterfaceClass
+    AUDIO_SUBCLASS_CONTROL,             // bInterfaceSubClass
+    0x00,                               // bInterfaceProtocol (UAC1 = 0x00)
+    0x00,                               // iInterface
+
+    // --- 18: AC CS header ------------------------------------------------
+    9,                                  // bLength
+    TUSB_DESC_CS_INTERFACE,             // bDescriptorType
+    AUDIO_CS_AC_INTERFACE_HEADER,       // bDescriptorSubtype (0x01)
+    U16_TO_U8S_LE(0x0100),              // bcdADC (UAC1.0)
+    U16_TO_U8S_LE(AC_CS_TOTAL_LEN),     // wTotalLength (CS AC header+input+FU+output)
+    0x01,                               // bInCollection
+    ITF_NUM_AUDIO_STREAMING,            // baInterfaceNr[0]
+
+    // --- 27: AC CS input terminal (ID 1, USB streaming) ------------------
+    12,                                 // bLength
+    TUSB_DESC_CS_INTERFACE,             // bDescriptorType
+    AUDIO_CS_AC_INTERFACE_INPUT_TERMINAL, // bDescriptorSubtype (0x02)
+    UAC1_INPUT_TERMINAL_ID,             // bTerminalID
+    U16_TO_U8S_LE(AUDIO_TERM_TYPE_USB_STREAMING),  // wTerminalType (0x0101)
+    0x00,                               // bAssocTerminal
+    0x02,                               // bNrChannels
+    U16_TO_U8S_LE(0x0003),              // wChannelConfig (L|R)
+    0x00,                               // iChannelNames
+    0x00,                               // iTerminal
+
+    // --- 39: AC CS feature unit (ID 2, master mute+volume, 2 logical ch) -
+    10,                                 // bLength (7 + (2+1)*1)
+    TUSB_DESC_CS_INTERFACE,             // bDescriptorType
+    AUDIO_CS_AC_INTERFACE_FEATURE_UNIT, // bDescriptorSubtype (0x06)
+    UAC1_FEATURE_UNIT_ID,               // bUnitID
+    UAC1_INPUT_TERMINAL_ID,             // bSourceID
+    0x01,                               // bControlSize
+    0x03,                               // bmaControls[0] master: MUTE|VOLUME
+    0x00,                               // bmaControls[1] ch 1
+    0x00,                               // bmaControls[2] ch 2
+    0x00,                               // iFeature
+
+    // --- 49: AC CS output terminal (ID 3, speaker) -----------------------
+    9,                                  // bLength
+    TUSB_DESC_CS_INTERFACE,             // bDescriptorType
+    AUDIO_CS_AC_INTERFACE_OUTPUT_TERMINAL, // bDescriptorSubtype (0x03)
+    UAC1_OUTPUT_TERMINAL_ID,            // bTerminalID
+    U16_TO_U8S_LE(AUDIO_TERM_TYPE_OUT_GENERIC_SPEAKER),  // wTerminalType (0x0301)
+    0x00,                               // bAssocTerminal
+    UAC1_FEATURE_UNIT_ID,               // bSourceID
+    0x00,                               // iTerminal
+
+    // --- 58: AS std interface alt 0 (zero-bw) ----------------------------
+    9,                                  // bLength
+    TUSB_DESC_INTERFACE,
+    ITF_NUM_AUDIO_STREAMING,
+    0x00,                               // bAlternateSetting
+    0x00,                               // bNumEndpoints
+    TUSB_CLASS_AUDIO,
+    AUDIO_SUBCLASS_STREAMING,
+    0x00,                               // bInterfaceProtocol (UAC1)
+    0x00,                               // iInterface
+
+    // --- 67: AS std interface alt 1 (16-bit) -----------------------------
+    9,
+    TUSB_DESC_INTERFACE,
+    ITF_NUM_AUDIO_STREAMING,
+    0x01,                               // bAlternateSetting
+    0x02,                               // bNumEndpoints
+    TUSB_CLASS_AUDIO,
+    AUDIO_SUBCLASS_STREAMING,
+    0x00,
+    0x00,
+
+    // --- 76: AS CS general alt 1 -----------------------------------------
+    7,
+    TUSB_DESC_CS_INTERFACE,
+    AUDIO_CS_AS_INTERFACE_AS_GENERAL,   // 0x01
+    UAC1_INPUT_TERMINAL_ID,             // bTerminalLink
+    0x01,                               // bDelay
+    U16_TO_U8S_LE(0x0001),              // wFormatTag = PCM
+
+    // --- 83: AS CS format type I alt 1 (16-bit, discrete 44.1/48/96) ----
+    17,
+    TUSB_DESC_CS_INTERFACE,
+    AUDIO_CS_AS_INTERFACE_FORMAT_TYPE,  // 0x02
+    0x01,                               // bFormatType = TYPE_I
+    0x02,                               // bNrChannels
+    0x02,                               // bSubFrameSize
+    16,                                 // bBitResolution
+    0x03,                               // bSamFreqType (3 discrete)
+    RATE_LE(44100),
+    RATE_LE(48000),
+    RATE_LE(96000),
+
+    // --- 100: Std iso EP OUT 0x01, alt 1 ---------------------------------
+    9,
+    TUSB_DESC_ENDPOINT,
+    AUDIO_OUT_ENDPOINT,                 // bEndpointAddress
+    0x05,                               // bmAttributes: iso, async
+    U16_TO_U8S_LE(AUDIO_EP_MAX_PKT),    // wMaxPacketSize = 582
+    0x01,                               // bInterval
+    0x00,                               // bRefresh
+    AUDIO_IN_ENDPOINT,                  // bSynchAddress (feedback EP)
+
+    // --- 109: CS iso data EP alt 1 ---------------------------------------
+    7,
+    TUSB_DESC_CS_ENDPOINT,              // 0x25
+    AUDIO_CS_EP_SUBTYPE_GENERAL,        // 0x01
+    0x01,                               // bmAttributes: sampling freq control
+    0x00,                               // bLockDelayUnits
+    U16_TO_U8S_LE(0x0000),              // wLockDelay
+
+    // --- 116: Std iso feedback EP IN 0x82, alt 1 -------------------------
+    9,
+    TUSB_DESC_ENDPOINT,
+    AUDIO_IN_ENDPOINT,
+    0x11,                               // bmAttributes: iso, feedback
+    U16_TO_U8S_LE(3),                   // wMaxPacketSize
+    0x01,                               // bInterval
+    0x02,                               // bRefresh (2^2 = 4 ms)
+    0x00,                               // bSynchAddress
+
+    // --- 125: AS std interface alt 2 (24-bit) ----------------------------
+    9,
+    TUSB_DESC_INTERFACE,
+    ITF_NUM_AUDIO_STREAMING,
+    0x02,                               // bAlternateSetting
+    0x02,                               // bNumEndpoints
+    TUSB_CLASS_AUDIO,
+    AUDIO_SUBCLASS_STREAMING,
+    0x00,
+    0x00,
+
+    // --- 134: AS CS general alt 2 ----------------------------------------
+    7,
+    TUSB_DESC_CS_INTERFACE,
+    AUDIO_CS_AS_INTERFACE_AS_GENERAL,
+    UAC1_INPUT_TERMINAL_ID,
+    0x01,
+    U16_TO_U8S_LE(0x0001),
+
+    // --- 141: AS CS format type I alt 2 (24-bit, discrete 44.1/48/96) ---
+    17,
+    TUSB_DESC_CS_INTERFACE,
+    AUDIO_CS_AS_INTERFACE_FORMAT_TYPE,
+    0x01,
+    0x02,
+    0x03,                               // bSubFrameSize
+    24,                                 // bBitResolution
+    0x03,
+    RATE_LE(44100),
+    RATE_LE(48000),
+    RATE_LE(96000),
+
+    // --- 158: Std iso EP OUT 0x01, alt 2 ---------------------------------
+    9,
+    TUSB_DESC_ENDPOINT,
+    AUDIO_OUT_ENDPOINT,
+    0x05,
+    U16_TO_U8S_LE(AUDIO_EP_MAX_PKT),
+    0x01,
+    0x00,
+    AUDIO_IN_ENDPOINT,
+
+    // --- 167: CS iso data EP alt 2 ---------------------------------------
+    7,
+    TUSB_DESC_CS_ENDPOINT,
+    AUDIO_CS_EP_SUBTYPE_GENERAL,
+    0x01,
+    0x00,
+    U16_TO_U8S_LE(0x0000),
+
+    // --- 174: Std iso feedback EP IN 0x82, alt 2 -------------------------
+    9,
+    TUSB_DESC_ENDPOINT,
+    AUDIO_IN_ENDPOINT,
+    0x11,
+    U16_TO_U8S_LE(3),
+    0x01,
+    0x02,
+    0x00,
 };
 
-const uint8_t ms_compat_id_descriptor[MS_COMPAT_ID_DESC_LEN] = {
-    // Header
-    0x28, 0x00, 0x00, 0x00, // dwLength = 40
-    0x00, 0x01,             // bcdVersion = 1.0
-    0x04, 0x00,             // wIndex = 4 (compat ID)
-    0x01,                   // bCount = 1
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // reserved
-    // Function section
-    ITF_NUM_VENDOR,         // bFirstInterfaceNumber
-    0x01,                   // reserved (must be 0x01 per MS spec)
-    'W', 'I', 'N', 'U', 'S', 'B', 0x00, 0x00, // compatibleID
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // subCompatibleID
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // reserved
+const uint16_t usb_config_descriptor_len = CONFIG_TOTAL_LEN;
+
+// Per-alt EP descriptor pointers consumed by the UAC1 class driver.
+const uint8_t *const usb_audio_data_ep_desc[2] = {
+    &usb_config_descriptor[OFFSET_ALT1_DATA_EP],
+    &usb_config_descriptor[OFFSET_ALT2_DATA_EP],
+};
+const uint8_t *const usb_audio_fb_ep_desc[2] = {
+    &usb_config_descriptor[OFFSET_ALT1_FB_EP],
+    &usb_config_descriptor[OFFSET_ALT2_FB_EP],
 };
 
-const uint8_t ms_ext_prop_descriptor[MS_EXT_PROP_DESC_LEN] = {
-    // Header
-    0x8e, 0x00, 0x00, 0x00, // dwLength = 142
-    0x00, 0x01,             // bcdVersion = 1.0
-    0x05, 0x00,             // wIndex = 5 (ext props)
-    0x01, 0x00,             // wCount = 1
-    // Property section
-    0x84, 0x00, 0x00, 0x00, // dwSize = 132
-    0x01, 0x00, 0x00, 0x00, // dwPropertyDataType = 1 (REG_SZ)
-    0x28, 0x00,             // wPropertyNameLength = 40
-    'D', 0x00, 'e', 0x00, 'v', 0x00, 'i', 0x00, 'c', 0x00, 'e', 0x00,
-    'I', 0x00, 'n', 0x00, 't', 0x00, 'e', 0x00, 'r', 0x00, 'f', 0x00,
-    'a', 0x00, 'c', 0x00, 'e', 0x00, 'G', 0x00, 'U', 0x00, 'I', 0x00,
-    'D', 0x00, 0x00, 0x00,
-    0x4e, 0x00, 0x00, 0x00, // dwPropertyDataLength = 78
-    '{', 0x00, '8', 0x00, '8', 0x00, 'B', 0x00, 'A', 0x00, 'E', 0x00, '0', 0x00, '3', 0x00,
-    '2', 0x00, '-', 0x00, '5', 0x00, 'A', 0x00, '8', 0x00, '1', 0x00, '-', 0x00, '4', 0x00,
-    '9', 0x00, 'F', 0x00, '0', 0x00, '-', 0x00, 'B', 0x00, 'C', 0x00, '3', 0x00, 'D', 0x00,
-    '-', 0x00, 'A', 0x00, '4', 0x00, 'F', 0x00, 'F', 0x00, '1', 0x00, '3', 0x00, '8', 0x00,
-    '2', 0x00, '1', 0x00, '6', 0x00, 'D', 0x00, '6', 0x00, '}', 0x00, 0x00, 0x00
-};
+// ----------------------------------------------------------------------------
+// TinyUSB descriptor callbacks
+// ----------------------------------------------------------------------------
+
+uint8_t const *tud_descriptor_device_cb(void) {
+    return (uint8_t const *)&device_descriptor;
+}
+
+uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
+    (void)index;
+    return usb_config_descriptor;
+}
+
+static uint16_t string_response[32];
+
+uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
+    (void)langid;
+
+    if (index == STRID_LANGID) {
+        string_response[0] = (TUSB_DESC_STRING << 8) | 4;
+        string_response[1] = 0x0409;  // English (US)
+        return string_response;
+    }
+
+    if (index >= TU_ARRAY_SIZE(string_table)) return NULL;
+    const char *str = string_table[index];
+    if (!str) return NULL;
+
+    size_t len = strlen(str);
+    if (len > TU_ARRAY_SIZE(string_response) - 1) len = TU_ARRAY_SIZE(string_response) - 1;
+    for (size_t i = 0; i < len; i++) {
+        string_response[1 + i] = str[i];
+    }
+    string_response[0] = (TUSB_DESC_STRING << 8) | (uint8_t)(2 * len + 2);
+    return string_response;
+}

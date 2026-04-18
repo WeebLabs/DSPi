@@ -28,6 +28,8 @@
 #include "bulk_params.h"
 #include "pico/audio_spdif.h"
 #include "usb_feedback_controller.h"
+#include "usb_descriptors.h"
+#include "tusb.h"
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS
@@ -44,49 +46,9 @@ volatile bool output_type_switch_in_progress = false;
 // Consumer fill level for slot 0 — written by usb_audio.c, read by SOF handler
 extern volatile uint8_t spdif0_consumer_fill;
 
-// USB SOF IRQ — measures device clock vs host clock for async feedback
-void __not_in_flash_func(usb_sof_irq)(void) {
-    extern audio_spdif_instance_t *spdif_instance_ptrs[];
-    extern uint8_t output_types[];
-
-    // During output-type reconfiguration, slot ownership and DMA assignment are
-    // transiently inconsistent by design (teardown/setup in progress). Skip this
-    // frame's feedback sample to avoid reading partially transitioned state.
-    if (output_type_switch_in_progress) return;
-
-    // Read DMA word count from slot 0 (SPDIF or I2S)
-    volatile uint32_t *p_words_consumed;
-    uint32_t xfer_words;
-    uint8_t dma_ch;
-    uint8_t slot0_type = output_types[0];
-    uint32_t rate_shift;
-
-    if (slot0_type == OUTPUT_TYPE_I2S) {
-        extern audio_i2s_instance_t *i2s_instance_ptrs[];
-        audio_i2s_instance_t *inst = i2s_instance_ptrs[0];
-        p_words_consumed = &inst->words_consumed;
-        xfer_words = inst->current_transfer_words;
-        dma_ch = inst->dma_channel;
-        rate_shift = 13;      // I2S: << (16-3)
-    } else {
-        audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
-        p_words_consumed = &inst->words_consumed;
-        xfer_words = inst->current_transfer_words;
-        dma_ch = inst->dma_channel;
-        rate_shift = 12;      // SPDIF: << (16-4)
-    }
-
-    // Sub-buffer-precise DMA word total for slot 0
-    uint32_t remaining = dma_channel_hw_addr(dma_ch)->transfer_count;
-    uint32_t current_total = *p_words_consumed + (xfer_words - remaining);
-
-    fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift, spdif0_consumer_fill);
-
-    // Publish to endpoint-facing variables
-    uint32_t fb_10_14 = fb_ctrl_get_10_14(&fb_ctrl);
-    if (fb_10_14)
-        feedback_10_14 = fb_10_14;
-}
+// NOTE: The per-SOF feedback servo tick now lives in the UAC1 class driver
+// (usb_audio.c:uac1_driver_sof) which TinyUSB dispatches from the USB IRQ
+// whenever an SOF arrives.  No standalone usb_sof_irq() is needed.
 
 volatile int overruns = 0;  // Legacy - kept for compatibility
 volatile uint32_t pio_samples_dma = 0;
@@ -730,6 +692,13 @@ int main(void) {
     while (1) {
         // Update watchdog
         watchdog_update();
+
+        // TinyUSB device task — processes enumeration, control transfers, and
+        // deferred bus events.  Must be called at least once per main-loop
+        // iteration.  Audio RX and feedback tx happen from USB IRQ via our
+        // UAC1 class driver callbacks, so tud_task() is not latency-critical
+        // for the audio stream itself.
+        tud_task();
 
         // Drain USB audio ring — highest priority.
         // USB ISR pushes raw packets into the ring; we run the full DSP
