@@ -79,22 +79,24 @@ static const tusb_desc_device_t device_descriptor = {
 // 166  Std iso EP OUT 0x01                             (9 bytes)
 // 175  CS iso data EP                                  (7 bytes)
 // 182  Std iso feedback EP IN 0x82                     (9 bytes)
-// 191  Vendor std interface (itf 2, class 0xFF, 0 EPs) (9 bytes)
-// 200  total
+// 191  Vendor std interface (itf 2, class 0xFF, 1 EP)  (9 bytes)
+// 200  Std interrupt EP IN 0x83 (notifications, 4 ms)  (7 bytes)
+// 207  total
 //
 // The vendor interface sits OUTSIDE the AC+AS IAD — it is its own USB
 // function.  TinyUSB's process_set_config() will call our driver's open()
-// a second time with this interface descriptor; we claim it and handle all
-// class/vendor requests on it in control_xfer_cb().
+// a second time with this interface descriptor; we claim it, open the
+// notification EP, and handle all class/vendor requests in control_xfer_cb().
 // ----------------------------------------------------------------------------
 
-#define CONFIG_TOTAL_LEN 200
+#define CONFIG_TOTAL_LEN 207
 #define AC_CS_TOTAL_LEN  40   // CS AC: header(9) + input(12) + FU(10) + output(9)
 
 #define OFFSET_ALT1_DATA_EP 108
 #define OFFSET_ALT1_FB_EP   124
 #define OFFSET_ALT2_DATA_EP 166
 #define OFFSET_ALT2_FB_EP   182
+#define OFFSET_NOTIFY_EP    200   // Std interrupt EP descriptor, 7 bytes
 
 // Sample rate little-endian expansion
 #define RATE_LE(r) ((r) & 0xFF), (((r) >> 8) & 0xFF), (((r) >> 16) & 0xFF)
@@ -307,16 +309,24 @@ const uint8_t usb_config_descriptor[CONFIG_TOTAL_LEN] = {
     0x02,
     0x00,
 
-    // --- 183 (offset -8 below the 191-total comment): Vendor std itf 2 ---
+    // --- 191: Vendor std itf 2 (class 0xFF, 1 EP) -----------------------
     9,                                  // bLength
     TUSB_DESC_INTERFACE,
     ITF_NUM_VENDOR,                     // bInterfaceNumber (= 2)
     0x00,                               // bAlternateSetting
-    0x00,                               // bNumEndpoints — control-only
+    0x01,                               // bNumEndpoints (interrupt IN)
     0xFF,                               // bInterfaceClass (vendor specific)
     0x00,                               // bInterfaceSubClass
     0x00,                               // bInterfaceProtocol
     0x00,                               // iInterface
+
+    // --- 200: Std bulk EP IN 0x83 --------------------------------------
+    7,                                  // bLength
+    TUSB_DESC_ENDPOINT,
+    NOTIFY_IN_ENDPOINT,                 // bEndpointAddress (0x83)
+    TUSB_XFER_BULK,                     // bmAttributes (0x02)
+    U16_TO_U8S_LE(NOTIFY_EP_MAX_PKT),   // wMaxPacketSize (8)
+    NOTIFY_EP_INTERVAL_MS,              // bInterval (ignored for bulk on FS)
 };
 
 const uint16_t usb_config_descriptor_len = CONFIG_TOTAL_LEN;

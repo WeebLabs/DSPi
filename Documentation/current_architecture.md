@@ -181,6 +181,33 @@ Defined in `main.c`, function `core0_init()`:
 
 The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
 
+### Notification Endpoint (device→host push)
+*Last updated: 2026-04-18*
+
+The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 8) for out-of-band device→host notifications. Its first producer is the master-volume change path; additional event types drop in without transport-layer changes.
+
+**Why bulk rather than interrupt:** an earlier draft used an interrupt IN endpoint at 4 ms polling. Under heavy EP0 control-transfer traffic (rapid `REQ_SET_MASTER_VOLUME` from a slider drag in the host app) the RP2040/2350 USB controller crashed after ~20–40 s and the device re-enumerated. The bug reproduced regardless of whether the EP was on the vendor interface or a dedicated one, and regardless of polling rate (4 ms → 32 ms) or NAK-vs-always-armed strategy — rules out descriptor shape, polling cadence, and NAK handling. Switching the EP to bulk IN eliminates the crash: bulk uses opportunistic host scheduling rather than a fixed bInterval poll cadence, so the interrupt-poll / EP0 SETUP IRQ interaction that was exercising the bug no longer happens. Notification latency is still well under a main-loop iteration; the host sees changes effectively instantly.
+
+**Packet shape (fixed 8 bytes):**
+
+| Byte | Field | Description |
+|------|-------|-------------|
+| 0 | event type | `NOTIFY_EVENT_MASTER_VOLUME = 0x01` (others reserved) |
+| 1–3 | reserved | Zero, padding for alignment |
+| 4–7 | payload | For master volume: `float` dB, little-endian |
+
+**Produce:** `usb_notify_master_volume(float db)` in `usb_audio.c` sets a latest-wins pending flag + cached value. It does NOT fire a transfer directly; the actual xfer is scheduled by `usb_notify_tick()` (called once per main-loop iteration) or by the `xfer_cb` re-arm after a completion. Deferring the fire keeps the notification path off the vendor control-transfer DATA-stage call graph.
+
+**Consume:** `usb_notify_drain()` uses the TinyUSB-blessed claim pattern (same as `tud_hid_n_report`): `usbd_edpt_claim()` atomically tests `busy == 0 && claimed == 0` and sets `claimed = 1`. If the claim succeeds, it snapshots the pending value under a brief IRQ-off critical section, packs the 8-byte `notify_buf`, and calls `usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, 8)`. If the claim fails (xfer in flight or already claimed), the call defers — the next tick or `xfer_cb` re-arm picks it up. If the DCD rejects the xfer, we `usbd_edpt_release` and re-mark the event pending.
+
+**Emit hookpoint:** `update_master_volume()` (usb_audio.c) calls `usb_notify_master_volume(db)` at the end of its body. Every caller of `update_master_volume()` — vendor SET (`REQ_SET_MASTER_VOLUME`), preset load (`flash_storage.c:preset_load`), factory reset (`flash_storage.c:apply_factory_defaults`), bulk params apply (`bulk_params.c:bulk_params_apply`) — therefore produces a notification. Three inline clamp+linearize sites that previously bypassed `update_master_volume()` were refactored to call it during this change.
+
+**Host-echo suppression (compile-time):** `NOTIFY_SUPPRESS_HOST_ECHO` (default `0` in `usb_audio.c`). When `1`, host-originated master-volume writes (via `REQ_SET_MASTER_VOLUME`) do NOT produce notifications — device-originated changes still do. The vendor-command handler brackets its `update_master_volume()` call with `notify_master_vol_host_initiated = true/false`; the emit path short-circuits when both the flag is true and `NOTIFY_SUPPRESS_HOST_ECHO = 1`. Default-off so host-app integration tests exercise the full loop.
+
+**Semantics:** latest-wins per event type. If the host polls slower than notifications are produced (e.g., a slider dragged faster than 250 Hz / 4 ms), intermediate values are dropped — the host sees the final value within one polling interval. This matches slider/encoder UX expectations.
+
+**Host side:** the DSPi Console must open a pipe on EP 0x83 via the vendor interface and post repeated interrupt-IN read requests. Each completion is one 8-byte event; dispatch on byte 0. Host plumbing is out of scope for the firmware change but documented here for reference.
+
 ### Volume & Mute
 
 **Volume range:** -60 dB to 0 dB (1 dB resolution, 61 steps). Bottom step is fully silent. USB Audio Class 8.8 fixed-point dB encoding. Q15 lookup table (`db_to_vol[61]`) maps dB index to linear multiplier; index 0 = 0x0000 (silent), index 60 = 0x7FFF (unity).
@@ -1503,11 +1530,11 @@ TinyUSB's built-in audio class driver (`lib/tinyusb/src/class/audio/audio_device
 
 Under pico-extras, `_as_audio_packet()` ran in USB IRQ context on every audio OUT packet completion. Under TinyUSB, `DCD_EVENT_XFER_COMPLETE` events are enqueued by the DCD IRQ and dispatched to our `uac1_driver_xfer_cb` from `tud_task()` (main-loop context). The SPSC ring is unchanged; the producer moved from IRQ to task. Gap detection timestamps still come from `time_us_32()` captured in `xfer_cb` — noise is bounded by the main-loop polling rate (~kHz), well below the 2 ms gap threshold. SOF still runs in IRQ, so feedback servo latency is unchanged.
 
-### Descriptor layout (UAC1 + vendor, byte offsets into `usb_config_descriptor[]`)
+### Descriptor layout (UAC1 + vendor + notifications, byte offsets into `usb_config_descriptor[]`)
 
 | Offset | Length | Contents |
 |--------|--------|----------|
-| 0 | 9 | Configuration descriptor (total length 200) |
+| 0 | 9 | Configuration descriptor (total length 207) |
 | 9 | 8 | IAD grouping AC + AS (bInterfaceCount = 2) |
 | 17 | 9 | AC std interface (itf 0, 0 EPs, UAC1 protocol 0x00) |
 | 26 | 9 | AC CS header (bcdADC 0x0100, bInCollection 1) |
@@ -1517,9 +1544,10 @@ Under pico-extras, `_as_audio_packet()` ran in USB IRQ context on every audio OU
 | 66 | 9 | AS std interface alt 0 (zero-bandwidth) |
 | 75 | 58 | AS alt 1 (16-bit, 44.1/48/96 kHz) incl. std + CS data EP 0x01 and feedback EP 0x82 |
 | 133 | 58 | AS alt 2 (24-bit, 44.1/48/96 kHz) incl. std + CS data EP 0x01 and feedback EP 0x82 |
-| 191 | 9 | Vendor std interface (itf 2, class 0xFF, 0 EPs — control-only) |
+| 191 | 9 | Vendor std interface (itf 2, class 0xFF, 1 EP) |
+| 200 | 7 | Std bulk EP IN 0x83 (notifications, 8 B) |
 
-The vendor interface sits **outside** the IAD — it is its own USB function. TinyUSB's `process_set_config()` calls our `open()` a second time with the vendor interface descriptor; we recognize class 0xFF and claim it.
+The vendor interface sits **outside** the IAD — it is its own USB function. TinyUSB's `process_set_config()` calls our `open()` a second time with the vendor interface descriptor; we recognize class 0xFF, claim it, and open the notification endpoint. See "Notification Interrupt Endpoint" below for the push channel that rides on EP 0x83.
 
 **Why the IAD is required:** TinyUSB's `process_set_config()` in `usbd.c` binds interfaces to class drivers based on `bInterfaceCount` — and defaults to 1 when no IAD is present. Without the IAD, TinyUSB would bind only the AC interface (itf 0) to our UAC1 class driver, leaving the AS interface (itf 1) unbound. `SET_INTERFACE` requests for AS would then fail at `_usbd_dev.itf2drv[1] == DRVID_INVALID`, the isochronous endpoints would never open, and the device would fail to appear as a functional audio endpoint on the host. The IAD makes TinyUSB bind both interfaces (itf 0 + itf 1) to our driver in a single `open()` call.
 

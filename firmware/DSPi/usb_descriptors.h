@@ -30,6 +30,28 @@
 #define AUDIO_IN_ENDPOINT   0x82U
 #define AUDIO_EP_MAX_PKT    582U   // Sized for 24-bit stereo 96 kHz + 1 jitter sample
 
+// Bulk IN endpoint on the vendor interface — device→host notifications
+// (master volume changes, future knob events, etc.).
+//
+// We switched this from INTERRUPT to BULK after observing an RP2040/2350
+// DCD-level crash when an interrupt IN endpoint under continuous host
+// polling ran alongside rapid EP0 control transfers.  Bulk IN uses
+// opportunistic host scheduling rather than fixed-interval polling, so the
+// crash trigger (poll-timed IRQ cadence interacting with EP0 SETUP IRQs)
+// is dodged.  bInterval is ignored for bulk on full-speed devices.
+#define NOTIFY_IN_ENDPOINT      0x83U
+#define NOTIFY_EP_MAX_PKT       8U
+#define NOTIFY_EP_INTERVAL_MS   0U
+
+// Notification event types (byte 0 of every notification packet).
+// 0x00 is "idle" — the device always keeps EP 0x83 armed (see rationale
+// in usb_audio.c). Host ignores idle packets; they exist so the endpoint
+// never NAKs, working around an RP2040/2350 DCD crash that fires when
+// EP 0x83 NAKs concurrently with rapid EP0 control transfers.
+#define NOTIFY_EVENT_IDLE          0x00
+#define NOTIFY_EVENT_MASTER_VOLUME 0x01
+// Future: 0x02 = knob, 0x03 = preset changed, etc.
+
 // ----------------------------------------------------------------------------
 // INTERFACE NUMBERS
 // ----------------------------------------------------------------------------

@@ -355,22 +355,12 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     }
 
     // Master volume (V6+ payloads — bulk params always applies, ignores directory flag).
-    // Uses powf() instead of db_to_linear() because db_to_linear() clamps at -60 dB
-    // and master volume ranges to -127 dB.
+    // Delegated to update_master_volume() for consistent clamping and to emit
+    // a device→host notification via interrupt EP 0x83.
     if (in->header.format_version >= 6) {
         float db = in->master_volume.master_volume_db;
-        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;  // NaN/Inf → unity
-        if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
-        if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
-        master_volume_db = db;
-        if (db <= MASTER_VOL_MUTE_DB) {
-            master_volume_linear = 0.0f;
-            master_volume_q15    = 0;
-        } else {
-            float linear = powf(10.0f, db / 20.0f);
-            master_volume_linear = linear;
-            master_volume_q15    = (int32_t)(linear * 32768.0f);
-        }
+        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;
+        update_master_volume(db);
     }
 
     return 0;

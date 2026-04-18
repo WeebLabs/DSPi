@@ -133,6 +133,31 @@ volatile float master_volume_db       = MASTER_VOL_MAX_DB;   // 0 dB = unity (no
 volatile float master_volume_linear   = 1.0f;
 volatile int32_t master_volume_q15    = 32768;                // Unity in Q15 (for RP2040 path)
 
+// ----------------------------------------------------------------------------
+// Notification (interrupt IN) state.  Declared here so update_master_volume()
+// below can reach them. The actual TX buffer + drain/arm logic + xfer_cb hook
+// live in the UAC1 CLASS DRIVER section below.
+// ----------------------------------------------------------------------------
+
+// Compile-time echo policy.  Default: emit every master-volume change,
+// including host-originated writes (useful for exercising the notification
+// path from host-side tests).  Rebuild with -DNOTIFY_SUPPRESS_HOST_ECHO=1 to
+// suppress echoes of host REQ_SET_MASTER_VOLUME; device-initiated changes
+// (preset load, factory reset, future knob/encoder) still emit.
+#ifndef NOTIFY_SUPPRESS_HOST_ECHO
+#define NOTIFY_SUPPRESS_HOST_ECHO 0
+#endif
+
+// Set true by REQ_SET_MASTER_VOLUME dispatch bracket in vendor_commands.c;
+// read by the emit path when NOTIFY_SUPPRESS_HOST_ECHO is on.
+volatile bool notify_master_vol_host_initiated = false;
+
+static volatile bool  notify_master_vol_pending = false;
+static volatile float notify_master_vol_db      = 0.0f;
+
+// Defined in the UAC1 CLASS DRIVER section below.
+static void usb_notify_drain(uint8_t rhport);
+
 // Per-channel gain and mute (legacy 3-channel interface for flash compatibility)
 volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
 volatile int32_t channel_gain_mul[3] = {32768, 32768, 32768};  // Unity = 2^15
@@ -230,6 +255,32 @@ void update_master_volume(float db) {
         master_volume_linear = linear;
         master_volume_q15    = (int32_t)(linear * 32768.0f);
     }
+    usb_notify_master_volume(db);
+}
+
+// Push a master-volume change to the host via the interrupt IN endpoint.
+// Called from update_master_volume() so every change path (vendor SET, preset
+// load, factory reset, bulk params, future knob) emits automatically.
+//
+// This function ONLY sets the latest-wins pending state. The actual
+// usbd_edpt_xfer is fired later from usb_notify_tick() (main loop) or from
+// the xfer_cb on EP 0x83 completion. Doing emit-from-update inside a vendor
+// DATA-stage control_xfer_cb caused USB stack instability; deferring to the
+// main loop keeps the notification path off the control-transfer call graph.
+void usb_notify_master_volume(float db) {
+#if NOTIFY_SUPPRESS_HOST_ECHO
+    if (notify_master_vol_host_initiated) return;
+#endif
+    notify_master_vol_db = db;
+    __dmb();
+    notify_master_vol_pending = true;
+}
+
+// Called once per main-loop iteration from main.c.  Also handles the initial
+// arm (first time after enumeration, when the EP is open but no xfer has
+// fired yet) since xfer_cb only re-arms after a completion.
+void usb_notify_tick(void) {
+    usb_notify_drain(0);
 }
 
 // Sync State
@@ -438,11 +489,19 @@ static struct {
     uint8_t cur_alt;         // Current AS alt setting (0, 1, or 2)
     bool    ep_data_open;
     bool    ep_fb_open;
+    bool    notify_ep_open;  // Interrupt IN EP 0x83 on the vendor interface
     // Deferred SET_CUR context (captured at SETUP, applied at DATA)
     uint8_t pending_cs;
     uint8_t pending_recipient;
     uint8_t pending_len;
 } uac1 = { .vendor_itf = 0xFF };
+
+// Stable TX buffer for the notification EP — DCD may DMA from it until
+// xfer_cb fires. Placed in RAM for flash-operation safety.
+static uint8_t __attribute__((aligned(4))) __not_in_flash("notify_buf") notify_buf[NOTIFY_EP_MAX_PKT];
+
+// usb_notify_drain is forward-declared near the other notification state at
+// the top of this file so update_master_volume() can reach it.
 
 extern usb_feedback_ctrl_t fb_ctrl;
 
@@ -490,19 +549,37 @@ static void uac1_driver_reset(uint8_t rhport) {
     (void)rhport;
     uac1.ep_data_open = false;
     uac1.ep_fb_open = false;
+    uac1.notify_ep_open = false;
     uac1.cur_alt = 0;
     uac1.vendor_itf = 0xFF;
     usb_audio_alt_set = 0;
+
+    // Clear any pending notifications — they would be stale post-reset.
+    notify_master_vol_pending = false;
+    notify_master_vol_host_initiated = false;
 }
 
 static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc, uint16_t max_len) {
-    // Second call path: vendor interface (class 0xFF, 0 EPs, no CS descriptors).
-    // TinyUSB calls open() again with this interface after we've claimed AC+AS.
+    // Second call path: vendor interface (class 0xFF).  TinyUSB calls open()
+    // again with this interface after we've claimed AC+AS.  The vendor
+    // interface has bNumEndpoints = 1 (interrupt IN EP 0x83 for device→host
+    // notifications); accept 0 too for defensive forward compat.
     if (itf_desc->bInterfaceClass == 0xFF &&
         itf_desc->bAlternateSetting == 0 &&
-        itf_desc->bNumEndpoints == 0) {
+        itf_desc->bNumEndpoints <= 1) {
         uac1.vendor_itf = itf_desc->bInterfaceNumber;
-        return tu_desc_len(itf_desc);  // 9 bytes
+
+        uint16_t drv_len = tu_desc_len(itf_desc);       // 9 bytes for std itf
+        if (itf_desc->bNumEndpoints == 1) {
+            // The interrupt EP descriptor follows immediately.
+            uint8_t const *ep_desc = (uint8_t const *)itf_desc + tu_desc_len(itf_desc);
+            if (tu_desc_type(ep_desc) == TUSB_DESC_ENDPOINT) {
+                TU_ASSERT(usbd_edpt_open(rhport, (tusb_desc_endpoint_t const *)ep_desc));
+                uac1.notify_ep_open = true;
+                drv_len += tu_desc_len(ep_desc);         // 7 bytes for std EP
+            }
+        }
+        return drv_len;
     }
 
     // Claim the UAC1 AC interface (don't check bInterfaceProtocol — UAC1 uses 0x00).
@@ -612,6 +689,47 @@ static bool uac1_open_stream_eps(uint8_t rhport, uint8_t alt) {
     uac1_arm_data_out(rhport);
     uac1_arm_feedback(rhport);
     return true;
+}
+
+// Drain/arm the interrupt IN endpoint.  Always keeps EP 0x83 armed: if a
+// Drain the notification queue to the bulk IN endpoint.  Follows TinyUSB's
+// recommended pattern (same as HID's tud_hid_n_report):
+//   1. Bail early if no event is pending — bulk IN doesn't need keep-alives.
+//   2. Atomic claim of the EP via usbd_edpt_claim (checks busy && !claimed).
+//   3. Fill the stable TX buffer while holding the claim.
+//   4. usbd_edpt_xfer kicks off the transfer; claim is released on completion.
+//
+// The claim-based pattern eliminates the race window between checking busy
+// and calling usbd_edpt_xfer that our previous code had.  If the EP is
+// currently busy (xfer in flight) or already claimed by another path, claim
+// returns false and we defer to the next tick / xfer_cb re-arm.
+static void __not_in_flash_func(usb_notify_drain)(uint8_t rhport) {
+    if (!uac1.notify_ep_open) return;
+    if (!notify_master_vol_pending) return;
+
+    if (!usbd_edpt_claim(rhport, NOTIFY_IN_ENDPOINT)) {
+        // EP busy or already claimed — next tick will retry.
+        return;
+    }
+
+    // We hold the claim; safely consume pending state.
+    uint32_t flags = save_and_disable_interrupts();
+    float db = notify_master_vol_db;
+    notify_master_vol_pending = false;
+    restore_interrupts(flags);
+
+    notify_buf[0] = NOTIFY_EVENT_MASTER_VOLUME;
+    notify_buf[1] = 0;
+    notify_buf[2] = 0;
+    notify_buf[3] = 0;
+    memcpy(&notify_buf[4], &db, sizeof(db));
+
+    if (!usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, NOTIFY_EP_MAX_PKT)) {
+        // DCD rejected — release claim and re-arm pending so the next tick
+        // retries with the same value.
+        usbd_edpt_release(rhport, NOTIFY_IN_ENDPOINT);
+        notify_master_vol_pending = true;
+    }
 }
 
 static void uac1_close_stream_eps(uint8_t rhport) {
@@ -865,6 +983,12 @@ static bool __not_in_flash_func(uac1_driver_xfer_cb)(uint8_t rhport, uint8_t ep_
     if (ep_addr == AUDIO_IN_ENDPOINT) {
         // Feedback packet transmitted; publish the current value and re-arm.
         if (uac1.ep_fb_open) uac1_arm_feedback(rhport);
+        return true;
+    }
+
+    if (ep_addr == NOTIFY_IN_ENDPOINT) {
+        // Notification delivered; send the next pending one, if any.
+        if (uac1.notify_ep_open) usb_notify_drain(rhport);
         return true;
     }
 

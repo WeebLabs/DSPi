@@ -700,6 +700,11 @@ int main(void) {
         // for the audio stream itself.
         tud_task();
 
+        // Fire any queued device→host notifications to EP 0x83.  Emit is
+        // deferred from update_master_volume() to here so we never call
+        // usbd_edpt_xfer from within a control-transfer DATA stage.
+        usb_notify_tick();
+
         // Drain USB audio ring — highest priority.
         // USB ISR pushes raw packets into the ring; we run the full DSP
         // pipeline here in main-loop context instead of USB IRQ context.

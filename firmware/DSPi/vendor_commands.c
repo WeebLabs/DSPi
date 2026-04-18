@@ -258,7 +258,11 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             if (buffer->data_len >= 4) {
                 float db;
                 memcpy(&db, vendor_rx_buf, 4);
+                // Bracket the call so NOTIFY_SUPPRESS_HOST_ECHO (in usb_audio.c)
+                // can filter out host-originated echoes if enabled.
+                notify_master_vol_host_initiated = true;
                 update_master_volume(db);
+                notify_master_vol_host_initiated = false;
             }
             break;
 
