@@ -196,31 +196,43 @@ Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switc
 **`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-04-18*
+*Last updated: 2026-04-19*
 
-The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 8) for out-of-band device→host notifications. Its first producer is the master-volume change path; additional event types drop in without transport-layer changes.
+The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
-**Why bulk rather than interrupt:** an earlier draft used an interrupt IN endpoint at 4 ms polling. Under heavy EP0 control-transfer traffic (rapid `REQ_SET_MASTER_VOLUME` from a slider drag in the host app) the RP2040/2350 USB controller crashed after ~20–40 s and the device re-enumerated. The bug reproduced regardless of whether the EP was on the vendor interface or a dedicated one, and regardless of polling rate (4 ms → 32 ms) or NAK-vs-always-armed strategy — rules out descriptor shape, polling cadence, and NAK handling. Switching the EP to bulk IN eliminates the crash: bulk uses opportunistic host scheduling rather than a fixed bInterval poll cadence, so the interrupt-poll / EP0 SETUP IRQ interaction that was exercising the bug no longer happens. Notification latency is still well under a main-loop iteration; the host sees changes effectively instantly.
+See `Documentation/Features/notification_protocol_v2_spec.md` for the full protocol specification.
 
-**Packet shape (fixed 8 bytes):**
+**Why bulk rather than interrupt:** an earlier draft used an interrupt IN endpoint at 4 ms polling. Under heavy EP0 control-transfer traffic (rapid `REQ_SET_MASTER_VOLUME` from a slider drag in the host app) the RP2040/2350 USB controller crashed after ~20–40 s and the device re-enumerated. Switching the EP to bulk IN eliminates the crash: bulk uses opportunistic host scheduling rather than a fixed bInterval poll cadence. The v2 protocol preserves the bulk transport.
 
-| Byte | Field | Description |
-|------|-------|-------------|
-| 0 | event type | `NOTIFY_EVENT_MASTER_VOLUME = 0x01` (others reserved) |
-| 1–3 | reserved | Zero, padding for alignment |
-| 4–7 | payload | For master volume: `float` dB, little-endian |
+**v2 core design (`notify.c/notify.h`):** every parameter is identified by its `offsetof` into `WireBulkParams`. A single event ID (`NOTIFY_EVT_PARAM_CHANGED = 0x02`) carries `(wire_offset, wire_size, source, value)`. Host dispatch is a flat lookup on offset, not a hand-written switch — adding a parameter requires zero wire-format changes.
 
-**Produce:** `usb_notify_master_volume(float db)` in `usb_audio.c` sets a latest-wins pending flag + cached value. It does NOT fire a transfer directly; the actual xfer is scheduled by `usb_notify_tick()` (called once per main-loop iteration) or by the `xfer_cb` re-arm after a completion. Deferring the fire keeps the notification path off the vendor control-transfer DATA-stage call graph.
+**Subsystem state:**
+- `param_shadow`: mirror of `WireBulkParams` (2912 B BSS). `notify_param_write` compares writes against it; notifications only fire on real byte-level changes.
+- `notify_ring[32]`: SPSC ring of pending events (1920 B BSS). Coalesces PARAM_CHANGED entries on `(event_id, offset, size)` — a swept knob generates one queued entry, not hundreds.
+- `notify_bulk_depth`: nesting counter. While `> 0`, per-field `param_write` calls are suppressed (shadow still updates) and the outermost `notify_end_bulk()` emits a single `BULK_INVALIDATED` event.
+- `notify_current_source`: global source tag set by scoped brackets (see below).
 
-**Consume:** `usb_notify_drain()` uses the TinyUSB-blessed claim pattern (same as `tud_hid_n_report`): `usbd_edpt_claim()` atomically tests `busy == 0 && claimed == 0` and sets `claimed = 1`. If the claim succeeds, it snapshots the pending value under a brief IRQ-off critical section, packs the 8-byte `notify_buf`, and calls `usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, 8)`. If the claim fails (xfer in flight or already claimed), the call defers — the next tick or `xfer_cb` re-arm picks it up. If the DCD rejects the xfer, we `usbd_edpt_release` and re-mark the event pending.
+**Source tagging:** every notification carries a `ParamSource` byte:
 
-**Emit hookpoint:** `update_master_volume()` (usb_audio.c) calls `usb_notify_master_volume(db)` at the end of its body. Every caller of `update_master_volume()` — vendor SET (`REQ_SET_MASTER_VOLUME`), preset load (`flash_storage.c:preset_load`), factory reset (`flash_storage.c:apply_factory_defaults`), bulk params apply (`bulk_params.c:bulk_params_apply`) — therefore produces a notification. Three inline clamp+linearize sites that previously bypassed `update_master_volume()` were refactored to call it during this change.
+| Value | Source | Set by |
+|-------|--------|--------|
+| 0 | UNKNOWN | Default |
+| 1 | HOST_SET | `vendor_handle_set_data` / `vendor_handle_get` brackets in `vendor_commands.c` |
+| 2 | BULK_SET | `bulk_params_apply()` |
+| 3 | PRESET | `preset_load()` |
+| 4 | FACTORY | `flash_factory_reset()` |
+| 5 | GPIO | Future hardware knob/encoder handlers |
+| 6 | INTERNAL | Firmware-initiated (clamps, auto-recalc) |
 
-**Host-echo suppression (compile-time):** `NOTIFY_SUPPRESS_HOST_ECHO` (default `0` in `usb_audio.c`). When `1`, host-originated master-volume writes (via `REQ_SET_MASTER_VOLUME`) do NOT produce notifications — device-originated changes still do. The vendor-command handler brackets its `update_master_volume()` call with `notify_master_vol_host_initiated = true/false`; the emit path short-circuits when both the flag is true and `NOTIFY_SUPPRESS_HOST_ECHO = 1`. Default-off so host-app integration tests exercise the full loop.
+**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in `vendor_commands.c` (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`.
 
-**Semantics:** latest-wins per event type. If the host polls slower than notifications are produced (e.g., a slider dragged faster than 250 Hz / 4 ms), intermediate values are dropped — the host sees the final value within one polling interval. This matches slider/encoder UX expectations.
+**Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `REQ_GET_ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
-**Host side:** the DSPi Console must open a pipe on EP 0x83 via the vendor interface and post repeated interrupt-IN read requests. Each completion is one 8-byte event; dispatch on byte 0. Host plumbing is out of scope for the firmware change but documented here for reference.
+**Drain:** `usb_notify_drain` (usb_audio.c) claims EP 0x83 via `usbd_edpt_claim`, calls `notify_peek_next` to format the next packet into the stable TX buffer, and submits via `usbd_edpt_xfer`. On success, `notify_commit_pop` advances the ring tail. On xfer rejection, the entry stays queued; the next tick retries.
+
+**Initialisation:** `notify_init()` is called from `core0_init()` after `preset_boot_load()` so `bulk_params_collect(&param_shadow)` sees a fully-populated live state. The USB reset path (`uac1_driver_reset`) calls `notify_reset_queue()` to drop stale events.
+
+**v1 back-compat:** `update_master_volume` still pushes an 8-byte `MASTER_VOLUME` (0x01) event into the ring. Existing v1 host apps that only recognise byte 0 = 0x01 continue to work; v2 hosts receive the parallel PARAM_CHANGED event and dispatch by offset.
 
 ### Volume & Mute
 

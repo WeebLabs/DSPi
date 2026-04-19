@@ -20,7 +20,10 @@
 
 #define USB_VENDOR_ID   0x2E8A
 #define USB_PRODUCT_ID  0xFEAA
-#define USB_BCD_DEVICE  0x0200
+// Bump on descriptor-affecting changes so Windows re-reads instead of using
+// its cached descriptor.  0x0200 → 0x0201 for notification EP max-packet
+// bump (8 → 64 bytes) introduced with the v2 notification protocol.
+#define USB_BCD_DEVICE  0x0201
 
 // ----------------------------------------------------------------------------
 // ENDPOINT ADDRESSES
@@ -40,17 +43,16 @@
 // crash trigger (poll-timed IRQ cadence interacting with EP0 SETUP IRQs)
 // is dodged.  bInterval is ignored for bulk on full-speed devices.
 #define NOTIFY_IN_ENDPOINT      0x83U
-#define NOTIFY_EP_MAX_PKT       8U
+// 64 bytes is the USB 2.0 full-speed bulk ceiling; it fits every current
+// WireBulkParams field in a single transaction.  See notification_protocol_v2_spec.md.
+#define NOTIFY_EP_MAX_PKT       64U
 #define NOTIFY_EP_INTERVAL_MS   0U
 
-// Notification event types (byte 0 of every notification packet).
-// 0x00 is "idle" — the device always keeps EP 0x83 armed (see rationale
-// in usb_audio.c). Host ignores idle packets; they exist so the endpoint
-// never NAKs, working around an RP2040/2350 DCD crash that fires when
-// EP 0x83 NAKs concurrently with rapid EP0 control transfers.
+// Notification event type constants are now defined in notify.h
+// (NOTIFY_EVT_IDLE, NOTIFY_EVT_MASTER_VOLUME, NOTIFY_EVT_PARAM_CHANGED, ...).
+// Legacy aliases retained for any code still using the old names.
 #define NOTIFY_EVENT_IDLE          0x00
 #define NOTIFY_EVENT_MASTER_VOLUME 0x01
-// Future: 0x02 = knob, 0x03 = preset changed, etc.
 
 // ----------------------------------------------------------------------------
 // INTERFACE NUMBERS

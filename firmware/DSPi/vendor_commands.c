@@ -23,6 +23,7 @@
 #include "crossfeed.h"
 #include "leveller.h"
 #include "bulk_params.h"
+#include "notify.h"
 #include "pdm_generator.h"
 #include "usb_descriptors.h"
 #include "tusb.h"
@@ -221,6 +222,11 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
     vendor_buffer_t *buffer = &_buf;
     (void)buffer;
 
+    // Tag every setter call that runs inside this dispatch as HOST_SET so
+    // the v2 notification subsystem can attribute its origin.  Cleared at
+    // the single exit point below.
+    notify_set_source(PARAM_SRC_HOST_SET);
+
     // Process command based on saved request info
     switch (vendor_last_request) {
         case REQ_SET_EQ_PARAM:
@@ -278,6 +284,9 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (ms < 0) ms = 0;
                 channel_delays_ms[ch] = ms;
                 dsp_update_delay_samples((float)audio_state.freq);
+                notify_param_write(
+                    (uint16_t)(offsetof(WireBulkParams, delays.delay_ms) + ch * sizeof(float)),
+                    sizeof(float), &ms);
             }
             break;
         }
@@ -285,6 +294,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
         case REQ_SET_BYPASS:
             if (buffer->data_len >= 1) {
                 bypass_master_eq = (vendor_rx_buf[0] != 0);
+                uint8_t v = bypass_master_eq ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, global.bypass), 1, &v);
             }
             break;
 
@@ -297,6 +308,9 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 float linear = powf(10.0f, db / 20.0f);
                 channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
                 channel_gain_linear[ch] = linear;
+                notify_param_write(
+                    (uint16_t)(offsetof(WireBulkParams, legacy.gain_db) + ch * sizeof(float)),
+                    sizeof(float), &db);
             }
             break;
         }
@@ -305,6 +319,10 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             uint8_t ch = vendor_last_wValue & 0xFF;
             if (ch < 3 && buffer->data_len >= 1) {
                 channel_mute[ch] = (vendor_rx_buf[0] != 0);
+                uint8_t v = channel_mute[ch] ? 1 : 0;
+                notify_param_write(
+                    (uint16_t)(offsetof(WireBulkParams, legacy.mute) + ch),
+                    1, &v);
             }
             break;
         }
@@ -321,6 +339,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 } else {
                     current_loudness_coeffs = NULL;
                 }
+                uint8_t v = loudness_enabled ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, global.loudness_enabled), 1, &v);
             }
             break;
 
@@ -332,6 +352,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (val > 100.0f) val = 100.0f;
                 loudness_ref_spl = val;
                 loudness_recompute_pending = true;
+                notify_param_write(offsetof(WireBulkParams, global.loudness_ref_spl),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -343,6 +365,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (val > 200.0f) val = 200.0f;
                 loudness_intensity_pct = val;
                 loudness_recompute_pending = true;
+                notify_param_write(offsetof(WireBulkParams, global.loudness_intensity_pct),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -350,6 +374,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             if (buffer->data_len >= 1) {
                 crossfeed_config.enabled = (vendor_rx_buf[0] != 0);
                 crossfeed_update_pending = true;
+                uint8_t v = crossfeed_config.enabled ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, crossfeed.enabled), 1, &v);
             }
             break;
 
@@ -359,6 +385,7 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (preset <= CROSSFEED_PRESET_CUSTOM) {
                     crossfeed_config.preset = preset;
                     crossfeed_update_pending = true;
+                    notify_param_write(offsetof(WireBulkParams, crossfeed.preset), 1, &preset);
                 }
             }
             break;
@@ -373,6 +400,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (crossfeed_config.preset == CROSSFEED_PRESET_CUSTOM) {
                     crossfeed_update_pending = true;
                 }
+                notify_param_write(offsetof(WireBulkParams, crossfeed.custom_fc),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -386,6 +415,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (crossfeed_config.preset == CROSSFEED_PRESET_CUSTOM) {
                     crossfeed_update_pending = true;
                 }
+                notify_param_write(offsetof(WireBulkParams, crossfeed.custom_feed_db),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -393,6 +424,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             if (buffer->data_len >= 1) {
                 crossfeed_config.itd_enabled = (vendor_rx_buf[0] != 0);
                 crossfeed_update_pending = true;
+                uint8_t v = crossfeed_config.itd_enabled ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, crossfeed.itd_enabled), 1, &v);
             }
             break;
 
@@ -402,6 +435,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 leveller_config.enabled = (vendor_rx_buf[0] != 0);
                 leveller_update_pending = true;
                 leveller_reset_pending = true;  // Reset state when toggling
+                uint8_t v = leveller_config.enabled ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, leveller.enabled), 1, &v);
             }
             break;
 
@@ -413,6 +448,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (val > LEVELLER_AMOUNT_MAX) val = LEVELLER_AMOUNT_MAX;
                 leveller_config.amount = val;
                 leveller_update_pending = true;
+                notify_param_write(offsetof(WireBulkParams, leveller.amount),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -422,6 +459,7 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (spd < LEVELLER_SPEED_COUNT) {
                     leveller_config.speed = spd;
                     leveller_update_pending = true;
+                    notify_param_write(offsetof(WireBulkParams, leveller.speed), 1, &spd);
                 }
             }
             break;
@@ -434,6 +472,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (val > LEVELLER_MAX_GAIN_MAX) val = LEVELLER_MAX_GAIN_MAX;
                 leveller_config.max_gain_db = val;
                 leveller_update_pending = true;
+                notify_param_write(offsetof(WireBulkParams, leveller.max_gain_db),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -442,6 +482,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 leveller_config.lookahead = (vendor_rx_buf[0] != 0);
                 leveller_update_pending = true;
                 leveller_reset_pending = true;  // Clear delay buffer on toggle
+                uint8_t v = leveller_config.lookahead ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, leveller.lookahead), 1, &v);
             }
             break;
 
@@ -453,6 +495,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 if (val > LEVELLER_GATE_MAX) val = LEVELLER_GATE_MAX;
                 leveller_config.gate_threshold_db = val;
                 leveller_update_pending = true;
+                notify_param_write(offsetof(WireBulkParams, leveller.gate_threshold_db),
+                                   sizeof(float), &val);
             }
             break;
 
@@ -468,6 +512,16 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                     xp->gain_db = pkt.gain_db;
                     // Compute linear gain
                     xp->gain_linear = powf(10.0f, pkt.gain_db / 20.0f);
+
+                    WireCrosspoint wxp;
+                    memset(&wxp, 0, sizeof(wxp));
+                    wxp.enabled = pkt.enabled ? 1 : 0;
+                    wxp.phase_invert = pkt.phase_invert ? 1 : 0;
+                    wxp.gain_db = pkt.gain_db;
+                    uint16_t off = (uint16_t)(offsetof(WireBulkParams, crosspoints)
+                        + ((uint16_t)pkt.input * WIRE_MAX_OUTPUT_CHANNELS + pkt.output)
+                          * sizeof(WireCrosspoint));
+                    notify_param_write(off, sizeof(WireCrosspoint), &wxp);
                 }
             }
             break;
@@ -503,6 +557,12 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
 #endif
                     __sev();  // Wake Core 1 to pick up mode change
                 }
+
+                uint8_t v = matrix_mixer.outputs[out].enabled ? 1 : 0;
+                uint16_t off = (uint16_t)(offsetof(WireBulkParams, outputs)
+                    + (uint16_t)out * sizeof(WireOutputChannel)
+                    + offsetof(WireOutputChannel, enabled));
+                notify_param_write(off, 1, &v);
             }
             skip_enable:
             break;
@@ -515,6 +575,10 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 memcpy(&db, vendor_rx_buf, 4);
                 matrix_mixer.outputs[out].gain_db = db;
                 matrix_mixer.outputs[out].gain_linear = powf(10.0f, db / 20.0f);
+                uint16_t off = (uint16_t)(offsetof(WireBulkParams, outputs)
+                    + (uint16_t)out * sizeof(WireOutputChannel)
+                    + offsetof(WireOutputChannel, gain_db));
+                notify_param_write(off, sizeof(float), &db);
             }
             break;
         }
@@ -523,6 +587,11 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             uint8_t out = vendor_last_wValue & 0xFF;
             if (out < NUM_OUTPUT_CHANNELS && buffer->data_len >= 1) {
                 matrix_mixer.outputs[out].mute = vendor_rx_buf[0];
+                uint8_t v = vendor_rx_buf[0];
+                uint16_t off = (uint16_t)(offsetof(WireBulkParams, outputs)
+                    + (uint16_t)out * sizeof(WireOutputChannel)
+                    + offsetof(WireOutputChannel, mute));
+                notify_param_write(off, 1, &v);
             }
             break;
         }
@@ -537,6 +606,16 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 // Update the channel delay used by DSP pipeline
                 channel_delays_ms[CH_OUT_1 + out] = ms;
                 dsp_update_delay_samples((float)audio_state.freq);
+
+                uint16_t off = (uint16_t)(offsetof(WireBulkParams, outputs)
+                    + (uint16_t)out * sizeof(WireOutputChannel)
+                    + offsetof(WireOutputChannel, delay_ms));
+                notify_param_write(off, sizeof(float), &ms);
+                // Also update the per-channel delay shadow for CH_OUT_1+out.
+                notify_param_write(
+                    (uint16_t)(offsetof(WireBulkParams, delays.delay_ms)
+                               + (CH_OUT_1 + out) * sizeof(float)),
+                    sizeof(float), &ms);
             }
             break;
         }
@@ -600,6 +679,10 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 size_t copy_len = buffer->data_len < (PRESET_NAME_LEN - 1)
                                 ? buffer->data_len : (PRESET_NAME_LEN - 1);
                 memcpy(channel_names[ch], vendor_rx_buf, copy_len);
+
+                uint16_t off = (uint16_t)(offsetof(WireBulkParams, channel_names.names)
+                                          + (uint16_t)ch * WIRE_NAME_LEN);
+                notify_param_write(off, WIRE_NAME_LEN, channel_names[ch]);
             }
             break;
         }
@@ -608,6 +691,8 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             // Payload: 1 byte = InputSource enum value.
             // Deferred to main loop — actual source switch requires
             // pipeline reset and (Phase 2) hardware start/stop.
+            // Notification is emitted at apply time (main.c), not here —
+            // the shadow tracks *active* state, not requested state.
             if (buffer->data_len >= 1) {
                 uint8_t src = vendor_rx_buf[0];
                 if (input_source_valid(src) && src != active_input_source) {
@@ -619,6 +704,11 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
         }
     }
+
+    // Clear the source tag so any writes that happen outside a dispatch
+    // bracket (e.g. Core 1 update paths, timer callbacks) aren't falsely
+    // attributed to the host.
+    notify_set_source(PARAM_SRC_UNKNOWN);
 
     // TinyUSB auto-sends the status-stage ZLP after control_xfer_cb returns
     // true from CONTROL_STAGE_DATA; no explicit empty-IN transfer needed.
@@ -653,6 +743,12 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
     // Shim to let legacy case bodies reference `setup->...`.
     tusb_control_request_t const *setup = req;
     (void)setup;
+
+    // Some "SET" commands are dispatched through vendor_handle_get because
+    // they carry all parameters in wValue and have no DATA stage (e.g.
+    // REQ_SET_OUTPUT_TYPE, REQ_SET_MCK_*).  Tag them as HOST_SET so their
+    // param_write calls get the correct source.
+    notify_set_source(PARAM_SRC_HOST_SET);
 
     {
         // Device -> Host (GET requests)
@@ -1037,6 +1133,12 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     }
                 }
 
+                if (status == PIN_CONFIG_SUCCESS && out_idx < NUM_PIN_OUTPUTS) {
+                    notify_param_write(
+                        (uint16_t)(offsetof(WireBulkParams, pins.pins) + out_idx),
+                        1, &output_pins[out_idx]);
+                }
+
                 resp_buf[0] = status;
                 vendor_send_response(resp_buf, 1);
                 return true;
@@ -1353,6 +1455,15 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     status = PIN_CONFIG_SUCCESS;
                 }
 
+                // Notify at request time against the eventual type.  Main
+                // loop applies the deferred switch; shadow matches host
+                // expectation either way.
+                if (status == PIN_CONFIG_SUCCESS && slot < NUM_SPDIF_INSTANCES) {
+                    notify_param_write(
+                        (uint16_t)(offsetof(WireBulkParams, i2s_config.output_types) + slot),
+                        1, &new_type);
+                }
+
                 resp_buf[0] = status;
                 vendor_send_response(resp_buf, 1);
                 return true;
@@ -1389,6 +1500,8 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     } else {
                         i2s_bck_pin = new_pin;
                         status = PIN_CONFIG_SUCCESS;
+                        notify_param_write(offsetof(WireBulkParams, i2s_config.bck_pin),
+                                           1, &i2s_bck_pin);
                     }
                 }
                 resp_buf[0] = status;
@@ -1413,6 +1526,8 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     audio_i2s_mck_set_enabled(false);
                     i2s_mck_enabled = false;
                 }
+                uint8_t v = i2s_mck_enabled ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, i2s_config.mck_enabled), 1, &v);
                 resp_buf[0] = PIN_CONFIG_SUCCESS;
                 vendor_send_response(resp_buf, 1);
                 return true;
@@ -1439,6 +1554,8 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     audio_i2s_mck_change_pin(new_pin);
                     i2s_mck_pin = new_pin;
                     status = PIN_CONFIG_SUCCESS;
+                    notify_param_write(offsetof(WireBulkParams, i2s_config.mck_pin),
+                                       1, &i2s_mck_pin);
                 }
                 resp_buf[0] = status;
                 vendor_send_response(resp_buf, 1);
@@ -1468,6 +1585,10 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 if (i2s_mck_enabled) {
                     audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
                 }
+                // Wire encoding: 0 = 128x, 1 = 256x
+                uint8_t wire_mult = (mult == 256) ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, i2s_config.mck_multiplier),
+                                   1, &wire_mult);
                 resp_buf[0] = PIN_CONFIG_SUCCESS;
                 vendor_send_response(resp_buf, 1);
                 return true;
@@ -1505,6 +1626,8 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     spdif_rx_pin = new_pin;
                     flash_set_spdif_rx_pin_pending = true;
                     status = PIN_CONFIG_SUCCESS;
+                    notify_param_write(offsetof(WireBulkParams, input_config.spdif_rx_pin),
+                                       1, &spdif_rx_pin);
                 }
                 resp_buf[0] = status;
                 vendor_send_response(resp_buf, 1);
@@ -1552,7 +1675,12 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     if (stage == CONTROL_STAGE_SETUP) {
         if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
             // GET path — dispatches into the legacy switch.
-            return vendor_handle_get(req);
+            bool ok = vendor_handle_get(req);
+            // Clear any source tag that the GET dispatcher set for embedded
+            // SETs — bleeding HOST_SET would misattribute unrelated writes
+            // that happen outside a dispatch bracket (e.g. timer callbacks).
+            notify_set_source(PARAM_SRC_UNKNOWN);
+            return ok;
         }
 
         // SET path — schedule DATA stage receive.

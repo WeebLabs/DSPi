@@ -34,6 +34,7 @@
 #include "pdm_generator.h"
 #include "usb_feedback_controller.h"
 #include "leveller.h"
+#include "notify.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -730,11 +731,19 @@ uint8_t preset_load(uint8_t slot) {
     // NOTE: muting is now handled by prepare_pipeline_reset() in the main
     // loop caller, which also waits for Core 1 idle before we modify state.
 
+    // Bracket the wholesale state rewrite so per-field param_write calls
+    // are suppressed; notify_end_bulk() emits a single BULK_INVALIDATED.
+    // PRESET_LOADED is pushed here (ahead of the bulk) so the host sees
+    // the two events in order: preset-loaded, then invalidate.
+    notify_push_preset_loaded(slot);
+    notify_begin_bulk(PARAM_SRC_PRESET);
+
     if (dir_cache.slot_occupied & (1u << slot)) {
         // Slot has user data — validate and load it
         const PresetSlot *s = validate_slot(slot);
         if (!s) {
             preset_loading = false;
+            notify_end_bulk();
             return PRESET_ERR_CRC;
         }
         apply_slot_to_live(s, dir_cache.include_pins != 0,
@@ -776,6 +785,8 @@ uint8_t preset_load(uint8_t slot) {
     dir_cache.last_active_slot = slot;
     dir_flush();  // Best-effort; preset is already loaded even if dir write fails
 
+    // Close the bulk bracket; emits one BULK_INVALIDATED with source=PRESET.
+    notify_end_bulk();
     return PRESET_OK;
 }
 
@@ -1166,5 +1177,9 @@ static void apply_factory_defaults(void) {
 }
 
 void flash_factory_reset(void) {
+    // Bracket so per-field writes in apply_factory_defaults() are suppressed
+    // and the host sees exactly one BULK_INVALIDATED(source=FACTORY).
+    notify_begin_bulk(PARAM_SRC_FACTORY);
     apply_factory_defaults();
+    notify_end_bulk();
 }

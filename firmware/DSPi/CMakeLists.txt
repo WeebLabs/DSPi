@@ -29,6 +29,8 @@ add_executable(DSPi
     loudness.c
     loudness.h
     main.c
+    notify.c
+    notify.h
     pdm_generator.c
     pdm_generator.h
     spdif_input.c

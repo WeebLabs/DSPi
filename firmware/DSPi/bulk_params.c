@@ -16,6 +16,7 @@
 #include "usb_audio.h"
 #include "crossfeed.h"
 #include "leveller.h"
+#include "notify.h"
 
 #include <string.h>
 #include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
@@ -210,6 +211,10 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         in->header.payload_length > sizeof(WireBulkParams))
         return -4;
 
+    // Bracket the wholesale state rewrite.  Per-field writes are suppressed
+    // and one BULK_INVALIDATED(source=BULK_SET) is emitted at notify_end_bulk().
+    notify_begin_bulk(PARAM_SRC_BULK_SET);
+
     // Global params — preamp from legacy field first (overridden by V6+ per-channel below)
     {
         float db = in->global.preamp_gain_db;
@@ -381,5 +386,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         }
     }
 
+    // Close the bulk bracket — emits BULK_INVALIDATED(source=BULK_SET).
+    notify_end_bulk();
     return 0;
 }

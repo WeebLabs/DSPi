@@ -325,7 +325,7 @@ const uint8_t usb_config_descriptor[CONFIG_TOTAL_LEN] = {
     TUSB_DESC_ENDPOINT,
     NOTIFY_IN_ENDPOINT,                 // bEndpointAddress (0x83)
     TUSB_XFER_BULK,                     // bmAttributes (0x02)
-    U16_TO_U8S_LE(NOTIFY_EP_MAX_PKT),   // wMaxPacketSize (8)
+    U16_TO_U8S_LE(NOTIFY_EP_MAX_PKT),   // wMaxPacketSize (64 — FS bulk max)
     NOTIFY_EP_INTERVAL_MS,              // bInterval (ignored for bulk on FS)
 };
 

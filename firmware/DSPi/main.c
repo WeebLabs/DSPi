@@ -26,6 +26,7 @@
 #include "pico/audio_i2s_multi.h"
 #include "pdm_generator.h"
 #include "usb_audio.h"
+#include "notify.h"
 #include "loudness.h"
 #include "crossfeed.h"
 #include "leveller.h"
@@ -780,6 +781,12 @@ void core0_init() {
     if (active_input_source == INPUT_SOURCE_SPDIF) {
         spdif_input_start();
     }
+
+    // Baseline the notification shadow from the fully-initialised live state.
+    // Must come after preset_boot_load() / apply_factory_defaults() so any
+    // subsequent param_write call sees a truthful baseline and only emits
+    // notifications on real changes.
+    notify_init();
 }
 
 int main(void) {
@@ -931,6 +938,21 @@ int main(void) {
             EqParamPacket p = pending_packet;
             eq_update_pending = false;
             filter_recipes[p.channel][p.band] = p;
+
+            // Shadow-notify the host of the new band params.  The wire
+            // struct layout (WireBandParams: type, reserved[3], freq, Q, gain_db)
+            // differs from EqParamPacket, so we marshal into a temp.
+            {
+                WireBandParams wbp;
+                memset(&wbp, 0, sizeof(wbp));
+                wbp.type = (uint8_t)p.type;
+                wbp.freq = p.freq;
+                wbp.q = p.Q;
+                wbp.gain_db = p.gain_db;
+                uint16_t off = (uint16_t)(offsetof(WireBulkParams, eq)
+                    + ((uint16_t)p.channel * WIRE_MAX_BANDS + p.band) * sizeof(WireBandParams));
+                notify_param_write(off, sizeof(WireBandParams), &wbp);
+            }
 
             // If updating a Core 1 EQ channel, wait for Core 1 to finish
             // current work before modifying coefficients
@@ -1310,6 +1332,13 @@ int main(void) {
 
                 printf("Input source: %u -> %u\n",
                        (unsigned)old_source, (unsigned)new_source);
+
+                // Notify host that the active input source has changed.
+                // Source tag carries through from the SET dispatcher if
+                // this came from REQ_SET_INPUT_SOURCE.
+                uint8_t wire_src = (uint8_t)active_input_source;
+                notify_param_write(offsetof(WireBulkParams, input_config.input_source),
+                                   1, &wire_src);
             }
         }
 

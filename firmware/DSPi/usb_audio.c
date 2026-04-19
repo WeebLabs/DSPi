@@ -44,9 +44,12 @@
 #include "crossfeed.h"
 #include "leveller.h"
 #include "bulk_params.h"
+#include "notify.h"
 #include "usb_audio_ring.h"
 #include "usb_feedback_controller.h"
 #include "vendor_commands.h"
+
+#include <stddef.h>  // offsetof
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -137,26 +140,16 @@ volatile float master_volume_linear   = 1.0f;
 volatile int32_t master_volume_q15    = 32768;                // Unity in Q15 (for RP2040 path)
 
 // ----------------------------------------------------------------------------
-// Notification (interrupt IN) state.  Declared here so update_master_volume()
-// below can reach them. The actual TX buffer + drain/arm logic + xfer_cb hook
-// live in the UAC1 CLASS DRIVER section below.
+// Notification (bulk IN) state.  The wire-level ring, coalescing, and shadow
+// mirror live in notify.c; this file only owns the USB transport (TX buffer,
+// drain/arm logic, xfer_cb wiring).
 // ----------------------------------------------------------------------------
 
-// Compile-time echo policy.  Default: emit every master-volume change,
-// including host-originated writes (useful for exercising the notification
-// path from host-side tests).  Rebuild with -DNOTIFY_SUPPRESS_HOST_ECHO=1 to
-// suppress echoes of host REQ_SET_MASTER_VOLUME; device-initiated changes
-// (preset load, factory reset, future knob/encoder) still emit.
-#ifndef NOTIFY_SUPPRESS_HOST_ECHO
-#define NOTIFY_SUPPRESS_HOST_ECHO 0
-#endif
-
-// Set true by REQ_SET_MASTER_VOLUME dispatch bracket in vendor_commands.c;
-// read by the emit path when NOTIFY_SUPPRESS_HOST_ECHO is on.
+// Legacy flag retained for back-compat with vendor_commands.c's existing
+// bracket around REQ_SET_MASTER_VOLUME.  Under v2, the source tag
+// (notify_set_source) carries the origin, but we keep this symbol alive
+// so the existing dispatch code still links.  Reading it is now a no-op.
 volatile bool notify_master_vol_host_initiated = false;
-
-static volatile bool  notify_master_vol_pending = false;
-static volatile float notify_master_vol_db      = 0.0f;
 
 // Defined in the UAC1 CLASS DRIVER section below.
 static void usb_notify_drain(uint8_t rhport);
@@ -235,10 +228,14 @@ void get_default_channel_name(int ch, char *buf) {
 // audio callback can read the correct format without conversion.
 void update_preamp(uint8_t ch, float db) {
     if (!isfinite(db)) return;  // Reject NaN/Inf — would propagate through entire audio path
+    if (ch >= NUM_INPUT_CHANNELS) return;
     global_preamp_db[ch] = db;
     float linear = powf(10.0f, db / 20.0f);
     global_preamp_mul[ch]    = (int32_t)(linear * (float)(1 << 28));
     global_preamp_linear[ch] = linear;
+    notify_param_write(
+        (uint16_t)(offsetof(WireBulkParams, preamp.preamp_db) + ch * sizeof(float)),
+        sizeof(float), &db);
 }
 
 // Update the device-side master volume from a dB value.
@@ -258,25 +255,20 @@ void update_master_volume(float db) {
         master_volume_linear = linear;
         master_volume_q15    = (int32_t)(linear * 32768.0f);
     }
+    // Emit both v1 (legacy 8-byte master-volume packet) and v2
+    // (PARAM_CHANGED at WireBulkParams.master_volume.master_volume_db) so
+    // existing v1 hosts keep working while new hosts see everything via v2.
     usb_notify_master_volume(db);
+    notify_param_write(offsetof(WireBulkParams, master_volume.master_volume_db),
+                       sizeof(float),
+                       &db);
 }
 
-// Push a master-volume change to the host via the interrupt IN endpoint.
-// Called from update_master_volume() so every change path (vendor SET, preset
-// load, factory reset, bulk params, future knob) emits automatically.
-//
-// This function ONLY sets the latest-wins pending state. The actual
-// usbd_edpt_xfer is fired later from usb_notify_tick() (main loop) or from
-// the xfer_cb on EP 0x83 completion. Doing emit-from-update inside a vendor
-// DATA-stage control_xfer_cb caused USB stack instability; deferring to the
-// main loop keeps the notification path off the control-transfer call graph.
+// v1 legacy emit path.  Pushes an 8-byte MASTER_VOLUME entry into the
+// notification ring.  Kept for back-compat; new hosts should consume v2
+// PARAM_CHANGED events instead.  Safe to call from any main-thread context.
 void usb_notify_master_volume(float db) {
-#if NOTIFY_SUPPRESS_HOST_ECHO
-    if (notify_master_vol_host_initiated) return;
-#endif
-    notify_master_vol_db = db;
-    __dmb();
-    notify_master_vol_pending = true;
+    notify_push_master_volume_v1(db);
 }
 
 // Called once per main-loop iteration from main.c.  Also handles the initial
@@ -558,7 +550,7 @@ static void uac1_driver_reset(uint8_t rhport) {
     usb_audio_alt_set = 0;
 
     // Clear any pending notifications — they would be stale post-reset.
-    notify_master_vol_pending = false;
+    notify_reset_queue();
     notify_master_vol_host_initiated = false;
 }
 
@@ -730,30 +722,59 @@ static bool uac1_open_stream_eps(uint8_t rhport, uint8_t alt) {
 // returns false and we defer to the next tick / xfer_cb re-arm.
 static void __not_in_flash_func(usb_notify_drain)(uint8_t rhport) {
     if (!uac1.notify_ep_open) return;
-    if (!notify_master_vol_pending) return;
 
+    // Always-armed pattern: keep a transfer in flight on EP 0x83 at all
+    // times.  When the event ring is empty, we arm a 1-byte idle packet
+    // (0x00) instead of bailing.  Reasons:
+    //
+    // 1. macOS IOKit has been observed to drop the first bulk packet
+    //    after a long idle period — the pipe state gets "cold" and the
+    //    first packet after the gap is lost, while subsequent packets
+    //    arrive normally.  Keeping the pipe hot with idle keep-alives
+    //    eliminates this.
+    //
+    // 2. The original firmware descriptor comment documented this intent
+    //    ("device always keeps EP 0x83 armed") but the actual drain bailed
+    //    on empty ring; this change aligns the behavior with the comment.
+    //
+    // The Swift monitor discards 1-byte idle packets (byte 0 == 0x00),
+    // so the user-visible event stream is unaffected.
     if (!usbd_edpt_claim(rhport, NOTIFY_IN_ENDPOINT)) {
-        // EP busy or already claimed — next tick will retry.
+        // EP already busy/claimed — xfer_cb will re-arm when it completes.
         return;
     }
 
-    // We hold the claim; safely consume pending state.
-    uint32_t flags = save_and_disable_interrupts();
-    float db = notify_master_vol_db;
-    notify_master_vol_pending = false;
-    restore_interrupts(flags);
+    uint16_t len;
+    bool consumed_ring_entry = false;
 
-    notify_buf[0] = NOTIFY_EVENT_MASTER_VOLUME;
-    notify_buf[1] = 0;
-    notify_buf[2] = 0;
-    notify_buf[3] = 0;
-    memcpy(&notify_buf[4], &db, sizeof(db));
+    if (notify_has_pending()) {
+        // Format the next queued event.  peek does NOT advance the tail;
+        // we commit only after the xfer is accepted by DCD.
+        len = notify_peek_next(notify_buf, NOTIFY_EP_MAX_PKT);
+        consumed_ring_entry = (len > 0);
+    } else {
+        len = 0;
+    }
 
-    if (!usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, NOTIFY_EP_MAX_PKT)) {
-        // DCD rejected — release claim and re-arm pending so the next tick
-        // retries with the same value.
+    if (len == 0) {
+        // Ring empty (or unknown event_id).  Arm an idle keep-alive.
+        notify_buf[0] = 0x00;
+        len = 1;
+        consumed_ring_entry = false;
+    }
+
+    if (!usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, len)) {
+        // DCD rejected — release claim.  If we snapshotted a ring entry,
+        // leave the tail where it is so the next tick retries the same
+        // event.
         usbd_edpt_release(rhport, NOTIFY_IN_ENDPOINT);
-        notify_master_vol_pending = true;
+        return;
+    }
+
+    // Xfer accepted.  Advance the ring tail only if this packet represented
+    // a real event; idle keep-alives don't consume ring entries.
+    if (consumed_ring_entry) {
+        notify_commit_pop();
     }
 }
 
