@@ -797,6 +797,16 @@ void spdif_rx_start(const spdif_rx_config_t* config)
 
 void spdif_rx_end()
 {
+    // DSPi patch: cancel any pending alarm BEFORE teardown.  The library
+    // schedules alarms via _set_timer_after_by_{us,ms} for capture retry,
+    // capture timeout, and decode timeout.  Without this cancellation, a
+    // pending alarm can fire after spdif_rx_end() returns — and after a
+    // subsequent spdif_rx_start() re-claims DMA/PIO — at which point its
+    // callback either double-claims (panic) or double-cleans (panic) the
+    // hardware resources.  Manifests as a crash on the first SPDIF→USB→SPDIF
+    // cycle.
+    _clear_timer();
+
     _spdif_rx_common_end();
     // DSPi patch: remove our shared handler and reset flag so it gets
     // re-registered on next spdif_rx_start().
