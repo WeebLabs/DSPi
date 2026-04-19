@@ -86,6 +86,11 @@ static void reset_usb_feedback_loop(void);
 static void prepare_pipeline_reset(uint32_t mute_samples);
 static void complete_pipeline_reset(void);
 
+// Forward declaration — definition further down.  perform_rate_change() needs
+// to check this to avoid tearing down a SPDIF lock-acquisition prefill in
+// progress.
+static bool spdif_prefilling;
+
 // 96 kHz + 256x (24.576 MHz MCK) is unstable on current hardware/clocking, so
 // force 128x whenever that combination is encountered from persisted state.
 static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
@@ -147,7 +152,16 @@ static void perform_rate_change(uint32_t new_freq) {
     // at the new PIO divider. The SPDIF wrap_consumer_take path would
     // otherwise update the divider lazily mid-stream with old-rate audio
     // still queued in each consumer pool.
-    complete_pipeline_reset();
+    //
+    // Exception: if the SPDIF lock-acquisition block is currently prefilling
+    // the pools (spdif_prefilling == true), complete_pipeline_reset() would
+    // drain the half-filled pools and re-enable outputs against an empty
+    // pool — the exact underrun/pop the prefill handshake exists to prevent.
+    // Let the prefill block's own enable_outputs_in_sync() restart outputs
+    // when the 50 % fill threshold is reached instead.
+    if (!spdif_prefilling) {
+        complete_pipeline_reset();
+    }
 }
 
 // Reset an SPDIF instance's software queue state so it can restart in phase with
@@ -611,30 +625,71 @@ static uint32_t samples_for_duration_ms(uint32_t sample_rate_hz, uint32_t durati
 }
 
 static void prepare_flash_write_operation(void) {
-    usb_audio_drain_ring();
+    // Drain the current input source once before the mute engages so the
+    // envelope starts from the freshest possible state.
+    if (active_input_source == INPUT_SOURCE_USB) {
+        usb_audio_drain_ring();
+    } else if (active_input_source == INPUT_SOURCE_SPDIF) {
+        spdif_input_poll();
+    }
+
     prepare_pipeline_reset(samples_for_duration_ms(audio_state.freq,
                                                    FLASH_WRITE_PREMUTE_MS));
 
-    // If stream is active, give the mute envelope time to ramp down before
-    // flash write lockout halts packet processing.
+    // During the fade-out settle window, keep servicing the active input
+    // source so the output consumer pools stay fed (with muted samples)
+    // until the envelope reaches zero.  Prior to this fix, the settle loop
+    // only drained the USB ring — for SPDIF input the RX FIFO filled and
+    // overflowed and the output pools drained, producing post-save pops.
     extern volatile bool sync_started;
-    if (sync_started) {
+    bool usb_streaming   = (active_input_source == INPUT_SOURCE_USB) && sync_started;
+    bool spdif_streaming = (active_input_source == INPUT_SOURCE_SPDIF) &&
+                           (spdif_input_get_state() == SPDIF_INPUT_LOCKED);
+    if (usb_streaming || spdif_streaming) {
         uint64_t start_us = time_us_64();
         while ((time_us_64() - start_us) < FLASH_WRITE_FADE_SETTLE_US) {
-            usb_audio_drain_ring();
+            if (active_input_source == INPUT_SOURCE_USB) {
+                usb_audio_drain_ring();
+            } else {
+                spdif_input_poll();
+            }
             tight_loop_contents();
         }
     }
 
-    // Consume any packets that arrived during settle so flash starts from
-    // the quietest possible output state.
-    usb_audio_drain_ring();
+    // Final flush just before the ~45 ms flash blackout.  For SPDIF, drain
+    // the RX FIFO to completion (spdif_input_poll caps at 192 stereo pairs
+    // per call) so no residual samples are dropped by a FIFO overflow while
+    // interrupts are disabled.
+    if (active_input_source == INPUT_SOURCE_USB) {
+        usb_audio_drain_ring();
+    } else if (active_input_source == INPUT_SOURCE_SPDIF) {
+        while (spdif_input_poll() > 0) {
+            /* keep pulling until the FIFO is empty */
+        }
+    }
 }
 
 // Full completion path: drain/restart all output consumer pipelines and reset
 // feedback state. Use this for operations that materially affect runtime audio
 // continuity (preset save/delete and legacy save command compatibility path).
 static void complete_flash_write_operation_full(void) {
+    if (active_input_source == INPUT_SOURCE_SPDIF) {
+        // For SPDIF input: the pre-flash settle loop pre-filled the output
+        // consumer pools with muted samples, and the flash_write_sector()
+        // SPDIF pre-blackout drain kept the RX FIFO from overflowing.  The
+        // ~45 ms blackout stops DMA chaining after ~one buffer, leaving the
+        // remaining pool buffers intact to play out silence as DMA resumes.
+        // We intentionally skip complete_pipeline_reset() — draining the
+        // pools here would discard those silent buffers and force outputs
+        // to restart against an empty pool, which itself causes pops and
+        // uneven inter-slot fill (the symptom that prompted this change).
+        reset_usb_feedback_loop();
+        return;
+    }
+
+    // USB input: feedback loop and USB ring handle blackout recovery; a full
+    // pipeline reset is safe and keeps inter-slot phase synchronized.
     complete_pipeline_reset();
 }
 
@@ -778,7 +833,19 @@ void core0_init() {
 
     // If the loaded preset has SPDIF as input source, start RX hardware.
     // Output remains muted until lock is acquired (handled in main loop).
+    //
+    // IMPORTANT: prepare_pipeline_reset() must run BEFORE spdif_input_start()
+    // here so preset_loading=true is set when the lock-acquisition block
+    // (line ~834) evaluates on the first post-lock main-loop iteration.
+    // Without this, the block's precondition (`preset_loading && !prefilling`)
+    // is never satisfied, so drain_and_disable_outputs() → prefill →
+    // enable_outputs_in_sync() never runs; outputs instead stream from
+    // whatever fill state usb_sound_card_init() left behind, producing the
+    // "feedback targeting lower fill" asymmetry between boot-with-SPDIF and
+    // the runtime USB→SPDIF switch.  The runtime path already calls this;
+    // boot was the odd one out.
     if (active_input_source == INPUT_SOURCE_SPDIF) {
+        prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
         spdif_input_start();
     }
 
@@ -1095,6 +1162,14 @@ int main(void) {
                     memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
                     memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
                     process_type_switches(change_mask, new_types);
+                } else if (active_input_source == INPUT_SOURCE_SPDIF) {
+                    // SPDIF input: don't drain/re-enable the output pipeline.
+                    // The pool holds muted samples queued by the preset-mute
+                    // window; draining them would force outputs to restart
+                    // against empty pools and produce pops/uneven fill.  Let
+                    // DMA resume chaining after the flash blackout and play
+                    // out silence until the mute envelope fades back in.
+                    reset_usb_feedback_loop();
                 } else {
                     // No type changes — just resync pipelines
                     complete_pipeline_reset();

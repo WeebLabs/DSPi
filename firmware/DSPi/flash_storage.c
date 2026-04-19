@@ -28,6 +28,7 @@
 #include "flash_storage.h"
 #include "config.h"
 #include "audio_input.h"
+#include "spdif_input.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "crossfeed.h"
@@ -304,6 +305,18 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     static uint8_t __attribute__((aligned(256))) write_buf[FLASH_SECTOR_SIZE];
     memset(write_buf, 0xFF, sizeof(write_buf));
     memcpy(write_buf, data, len);
+
+    // Pre-blackout: drain the SPDIF RX FIFO to maximise headroom.  The RX
+    // FIFO holds ~32 ms of audio at 48 kHz; a single flash_write_sector's
+    // ~45 ms blackout would otherwise overflow the FIFO and corrupt the
+    // downstream input pipeline.  Safe no-op when SPDIF is not the active
+    // source or not yet locked (spdif_input_poll returns 0 in those cases).
+    //
+    // Must run OUTSIDE the interrupts-off region and OUTSIDE the Core 1
+    // lockout so the input pipeline can actually process samples.
+    if (active_input_source == INPUT_SOURCE_SPDIF) {
+        while (spdif_input_poll() > 0) { /* drain */ }
+    }
 
     // Park Core 1 in RAM before quiescing XIP for flash erase/program.
     // Guarded: (a) victim_is_initialized handles first-boot (Core 1 not
@@ -798,6 +811,13 @@ uint8_t preset_delete(uint8_t slot) {
     // NOTE: muting is now handled by prepare_pipeline_reset() in the main
     // loop caller.  The mute counter and preset_loading flag are set there.
     __dmb();
+
+    // Pre-blackout: drain the SPDIF RX FIFO so it doesn't overflow during
+    // the ~45 ms interrupt-off window.  Mirrors the identical hook in
+    // flash_write_sector().
+    if (active_input_source == INPUT_SOURCE_SPDIF) {
+        while (spdif_input_poll() > 0) { /* drain */ }
+    }
 
     // Erase the slot's flash sector (same lockout guard as flash_write_sector)
     bool do_lockout = multicore_lockout_victim_is_initialized(1)
