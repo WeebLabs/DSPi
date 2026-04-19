@@ -1,21 +1,26 @@
 /*
- * USB Descriptors for DSPi
- * UAC1 Device, Configuration, and MS OS descriptor definitions
+ * USB Descriptors for DSPi — TinyUSB / UAC1
+ *
+ * Phase 1: audio-only composite (AC + AS).  Vendor interface removed pending
+ * Phase 2.  Configuration descriptor is a packed byte array built at compile
+ * time; no LUFA structs.
  */
 
 #ifndef USB_DESCRIPTORS_H
 #define USB_DESCRIPTORS_H
 
-#include "pico/usb_device.h"
-#include "lufa/AudioClassCommon.h"
-#include "config.h"
+#include <stdint.h>
+
+#include "tusb.h"
+#include "class/audio/audio.h"
 
 // ----------------------------------------------------------------------------
 // USB IDs
 // ----------------------------------------------------------------------------
 
-#define VENDOR_ID   0x2e8au
-#define PRODUCT_ID  0xfeaau
+#define USB_VENDOR_ID   0x2E8A
+#define USB_PRODUCT_ID  0xFEAA
+#define USB_BCD_DEVICE  0x0200
 
 // ----------------------------------------------------------------------------
 // ENDPOINT ADDRESSES
@@ -23,6 +28,29 @@
 
 #define AUDIO_OUT_ENDPOINT  0x01U
 #define AUDIO_IN_ENDPOINT   0x82U
+#define AUDIO_EP_MAX_PKT    582U   // Sized for 24-bit stereo 96 kHz + 1 jitter sample
+
+// Bulk IN endpoint on the vendor interface — device→host notifications
+// (master volume changes, future knob events, etc.).
+//
+// We switched this from INTERRUPT to BULK after observing an RP2040/2350
+// DCD-level crash when an interrupt IN endpoint under continuous host
+// polling ran alongside rapid EP0 control transfers.  Bulk IN uses
+// opportunistic host scheduling rather than fixed-interval polling, so the
+// crash trigger (poll-timed IRQ cadence interacting with EP0 SETUP IRQs)
+// is dodged.  bInterval is ignored for bulk on full-speed devices.
+#define NOTIFY_IN_ENDPOINT      0x83U
+#define NOTIFY_EP_MAX_PKT       8U
+#define NOTIFY_EP_INTERVAL_MS   0U
+
+// Notification event types (byte 0 of every notification packet).
+// 0x00 is "idle" — the device always keeps EP 0x83 armed (see rationale
+// in usb_audio.c). Host ignores idle packets; they exist so the endpoint
+// never NAKs, working around an RP2040/2350 DCD crash that fires when
+// EP 0x83 NAKs concurrently with rapid EP0 control transfers.
+#define NOTIFY_EVENT_IDLE          0x00
+#define NOTIFY_EVENT_MASTER_VOLUME 0x01
+// Future: 0x02 = knob, 0x03 = preset changed, etc.
 
 // ----------------------------------------------------------------------------
 // INTERFACE NUMBERS
@@ -34,83 +62,51 @@
 #define ITF_NUM_TOTAL           3
 
 // ----------------------------------------------------------------------------
-// AUDIO SAMPLE FREQUENCY MACRO (for descriptor byte encoding)
+// UAC1 ENTITY IDs
 // ----------------------------------------------------------------------------
 
-#undef AUDIO_SAMPLE_FREQ
-#define AUDIO_SAMPLE_FREQ(frq) (uint8_t)(frq), (uint8_t)((frq >> 8)), (uint8_t)((frq >> 16))
+#define UAC1_INPUT_TERMINAL_ID   1
+#define UAC1_FEATURE_UNIT_ID     2
+#define UAC1_OUTPUT_TERMINAL_ID  3
 
 // ----------------------------------------------------------------------------
-// CONFIGURATION DESCRIPTOR STRUCT (3 interfaces: AC, AS, Vendor)
+// UAC1 REQUEST OPCODES (not exposed by TinyUSB — UAC2 constants are UAC2-only)
 // ----------------------------------------------------------------------------
 
-struct audio_device_config {
-    struct usb_configuration_descriptor descriptor;
-    struct usb_interface_descriptor ac_interface;
-    struct __packed {
-        USB_Audio_StdDescriptor_Interface_AC_t core;
-        USB_Audio_StdDescriptor_InputTerminal_t input_terminal;
-        USB_Audio_StdDescriptor_FeatureUnit_t feature_unit;
-        USB_Audio_StdDescriptor_OutputTerminal_t output_terminal;
-    } ac_audio;
-    struct usb_interface_descriptor as_zero_interface;
-    struct usb_interface_descriptor as_op_interface;
-    struct __packed {
-        USB_Audio_StdDescriptor_Interface_AS_t streaming;
-        struct __packed {
-            USB_Audio_StdDescriptor_Format_t core;
-            USB_Audio_SampleFreq_t freqs[3];
-        } format;
-    } as_audio;
-    struct __packed {
-        struct usb_endpoint_descriptor_long core;
-        USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
-    } ep1;
-    struct usb_endpoint_descriptor_long ep2;
+#define UAC1_REQ_SET_CUR    0x01
+#define UAC1_REQ_GET_CUR    0x81
+#define UAC1_REQ_GET_MIN    0x82
+#define UAC1_REQ_GET_MAX    0x83
+#define UAC1_REQ_GET_RES    0x84
 
-    // Alt setting 2: 24-bit audio
-    struct usb_interface_descriptor as_op_interface_24;
-    struct __packed {
-        USB_Audio_StdDescriptor_Interface_AS_t streaming;
-        struct __packed {
-            USB_Audio_StdDescriptor_Format_t core;
-            USB_Audio_SampleFreq_t freqs[3];
-        } format;
-    } as_audio_24;
-    struct __packed {
-        struct usb_endpoint_descriptor_long core;
-        USB_Audio_StdDescriptor_StreamEndpoint_Spc_t audio;
-    } ep1_24;
-    struct usb_endpoint_descriptor_long ep2_24;
+// UAC1 feature unit control selectors
+#define UAC1_FU_CTRL_MUTE   0x01
+#define UAC1_FU_CTRL_VOLUME 0x02
 
-    struct usb_interface_descriptor vendor_interface;
-};
+// UAC1 endpoint control selector
+#define UAC1_EP_CTRL_SAMPLING_FREQ 0x01
 
 // ----------------------------------------------------------------------------
-// DESCRIPTOR INSTANCES
+// STRING INDICES
 // ----------------------------------------------------------------------------
 
-extern const struct audio_device_config audio_device_config;
-extern const struct usb_device_descriptor boot_device_descriptor;
+#define STRID_LANGID        0
+#define STRID_MANUFACTURER  1
+#define STRID_PRODUCT       2
+#define STRID_SERIAL        3
 
-// ----------------------------------------------------------------------------
-// STRING DESCRIPTORS
-// ----------------------------------------------------------------------------
+// Exported for main.c — populated from chip unique ID at boot.
+extern char usb_descriptor_str_serial[17];
 
-#define DESCRIPTOR_STRING_COUNT 3
-extern char *descriptor_strings[DESCRIPTOR_STRING_COUNT];
-extern char *usb_descriptor_str_serial;
+// Full configuration descriptor as packed bytes.  Defined in usb_descriptors.c.
+extern const uint8_t usb_config_descriptor[];
+extern const uint16_t usb_config_descriptor_len;
 
-// ----------------------------------------------------------------------------
-// MICROSOFT OS / WCID DESCRIPTORS
-// ----------------------------------------------------------------------------
-
-#define MS_OS_STRING_DESC_LEN 18
-#define MS_COMPAT_ID_DESC_LEN 40
-#define MS_EXT_PROP_DESC_LEN  142
-
-extern const uint8_t ms_os_string_descriptor[MS_OS_STRING_DESC_LEN];
-extern const uint8_t ms_compat_id_descriptor[MS_COMPAT_ID_DESC_LEN];
-extern const uint8_t ms_ext_prop_descriptor[MS_EXT_PROP_DESC_LEN];
+// Alt-setting endpoint descriptor pointers — resolved at link time so the
+// UAC1 class driver can call usbd_edpt_iso_activate() without re-walking the
+// config on every SET_INTERFACE.  Indexed [alt-1]: [0] = alt 1 (16-bit),
+// [1] = alt 2 (24-bit).
+extern const uint8_t *const usb_audio_data_ep_desc[2];
+extern const uint8_t *const usb_audio_fb_ep_desc[2];
 
 #endif // USB_DESCRIPTORS_H

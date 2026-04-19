@@ -52,19 +52,20 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-04-11*
+*Last updated: 2026-04-18*
 
 ### Core Firmware (`firmware/DSPi/`)
 
 | File | Purpose |
 |------|---------|
 | `main.c` | Entry point, initialization, main event loop |
-| `usb_audio.c` | USB audio input decode (`process_audio_packet`), output slots, UAC1 control, volume, init |
+| `usb_audio.c` | USB audio input decode (`process_audio_packet`), custom UAC1 TinyUSB class driver (`uac1_driver_*`), output slots, volume, init |
 | `usb_audio.h` | USB audio interface API, AudioState struct, extern declarations for shared state |
+| `tusb_config.h` | TinyUSB configuration (disables built-in classes; UAC1 handled by custom driver) |
 | `audio_pipeline.c` | Input-agnostic DSP pipeline (`process_input_block`): loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer stats |
 | `audio_pipeline.h` | Pipeline entry point, shared buffer declarations (`buf_l`/`buf_r`/`buf_out`), buffer stats API |
-| `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, pin/MCK helpers, diagnostics) |
-| `vendor_commands.h` | Vendor handler declarations, system stats and pin helper prototypes |
+| `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, pin/MCK helpers, diagnostics). Public entry `vendor_control_xfer_cb(rhport, stage, req)` is invoked from `usb_audio.c`'s UAC1 class driver. |
+| `vendor_commands.h` | Vendor handler declarations, system stats and pin helper prototypes. |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
 | `dsp_pipeline.h` | Filter storage declarations, delay line API |
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |
@@ -81,16 +82,13 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `bulk_params.c` | Bulk parameter collect/apply (wire format ↔ live state) |
 | `bulk_params.h` | Wire format structs (`WireBulkParams`), buffer size defines |
 | `config.h` | Global config, data structures, vendor command IDs, channel defs |
-| `usb_descriptors.c` | USB device/config/interface/endpoint descriptors (UAC1 + vendor) |
-| `usb_descriptors.h` | Descriptor declarations |
+| `usb_descriptors.c` | Hand-rolled UAC1 configuration descriptor as a packed byte array + TinyUSB `tud_descriptor_*_cb()` callbacks |
+| `usb_descriptors.h` | Descriptor declarations, UAC1 request opcodes, per-alt EP descriptor pointer externs |
 | `dcp_inline.h` | RP2350 DCP (Double Coprocessor) inline assembly wrappers |
 
 ### LUFA Compatibility (`firmware/DSPi/lufa/`)
 
-| File | Purpose |
-|------|---------|
-| `AudioClassCommon.h` | UAC1 descriptor type definitions |
-| `StdDescriptors.h` | Standard USB descriptor structures |
+**Not on Phase 1 include path.** Folder retained on disk for Phase 2 reference; the UAC1 descriptor is now hand-rolled in `usb_descriptors.c` against TinyUSB's `AUDIO_*` constants.
 
 ### SPDIF Library (`firmware/pico-extras/src/rp2_common/pico_audio_spdif_multi/`)
 
@@ -99,7 +97,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 ---
 
 ## Build System
-*Last updated: 2026-02-14*
+*Last updated: 2026-04-18*
 
 ### CMake Configuration
 
@@ -109,17 +107,21 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 
 **Optimization levels:**
 - General code: `-O2`
-- DSP-critical files (`dsp_pipeline.c`, `usb_audio.c`, `crossfeed.c`, `loudness.c`): `-O3`
+- DSP-critical files (`dsp_pipeline.c`, `usb_audio.c`, `crossfeed.c`, `loudness.c`, `audio_pipeline.c`, `leveller.c`): `-O3`
 
 **Platform-specific sources:**
 - RP2040: Includes `dsp_process_rp2040.S` (hand-coded biquad assembly)
 - RP2350: Pure C with DCP inline assembly in `dcp_inline.h`
 
+**USB stack:** `tinyusb_device` (TinyUSB via the Pico SDK). The pico-extras `usb_device` library is no longer linked. The legacy `PICO_USBDEV_*` compile definitions have been removed. The `lufa/` include directory is no longer on the target's include path.
+
 **Key compile definitions:**
 - `AUDIO_FREQ_MAX=48000`
 - `PICO_AUDIO_SPDIF_PIO=0`
 - `PICO_AUDIO_SPDIF_DMA_IRQ=1`
-- `PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1`
+- `PICO_AUDIO_I2S_DMA_IRQ=0`
+
+**Vendor commands** were temporarily excluded in Phase 1 and re-added in Phase 2; `vendor_commands.c` / `vendor_commands.h` are now back in `add_executable()`.
 
 **Build commands:**
 ```bash
@@ -162,21 +164,63 @@ Defined in `main.c`, function `core0_init()`:
 *Last updated: 2026-03-18*
 
 ### USB Stack
-*Last updated: 2026-03-29*
+*Last updated: 2026-04-18*
 
-**Library:** pico-extras `usb_device` (UAC1)
+**Library:** TinyUSB (vendored via Pico SDK) with a custom UAC1 class driver (`usb_audio.c`, registered via `usbd_app_driver_get_cb`). TinyUSB's built-in audio class driver is UAC2-only and is bypassed. See "TinyUSB Migration (Phase 1)" for details.
 
-**Error handling:** The pico-extras USB IRQ handler (`usb_device.c`) receives `USB_INTS_ERROR_BITS` interrupts for CRC errors, bit stuff errors, RX overflow, RX timeout, and data sequence errors. All error types are handled by clearing the corresponding SIE status bits and incrementing per-type diagnostic counters — no bus reset or re-enumeration. The host retransmits automatically per USB spec. Counters are readable via `REQ_GET_USB_ERROR_STATS` (0xB2) and resettable via `REQ_RESET_USB_ERROR_STATS` (0xB3).
+**Error handling:** TinyUSB's USB IRQ handler receives bus-level error interrupts and increments internal counters. In Phase 1, the vendor-command hooks for `REQ_GET_USB_ERROR_STATS` / `REQ_RESET_USB_ERROR_STATS` are unreachable (vendor interface dropped); Phase 2 will re-expose these once the vendor interface is wired into TinyUSB.
 
-**Interfaces:**
+**Interfaces (Phase 1):**
 1. **Audio Control (AC)** — Interface 0
 2. **Audio Streaming (AS)** — Interface 1
    - Alt 0: Zero-bandwidth (idle)
-   - Alt 1: 16-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=384
-   - Alt 2: 24-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=576
-   - EP OUT (isochronous): Audio data (44-49 samples/packet at 48 kHz)
-   - EP IN (isochronous): Feedback (10.14 fixed-point rate)
-3. **Vendor (WinUSB/WCID)** — Interface 2 (EP0 control transfers only)
+   - Alt 1: 16-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=582
+   - Alt 2: 24-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=582
+   - EP OUT 0x01 (isochronous async): Audio data
+   - EP IN 0x82 (isochronous feedback): 10.14 fixed-point rate, bRefresh=2 (4 ms)
+
+The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
+
+### Sample-rate & Bit-depth Switching
+*Last updated: 2026-04-18*
+
+Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switch) or SET_CUR on the endpoint sampling_freq control (rate switch) — must land on a muted, drained pipeline. Otherwise old-rate/old-bit-depth audio still queued in the consumer pools plays out against the new PIO divider or gets decoded under the wrong bytes-per-frame assumption, producing an audible pitch shift or byte-scramble burst.
+
+**`uac1_apply_alt()` (usb_audio.c):**
+- **Idempotent early-return.** `SET_INTERFACE(alt=current)` is common from host driver probes and used to tear down / re-open iso endpoints for no reason. Now skipped.
+- **Bit-depth switch (alt 1↔2) is treated the same as a cold start (alt 0→>0).** Both paths engage the mute envelope inline (`preset_mute_counter = PRESET_MUTE_SAMPLES`, `preset_loading = true`) so any packet decoded between the SETUP ack and the main-loop's `complete_pipeline_reset()` is silenced. Both paths also raise `stream_restart_resync_pending`, reset the feedback controller (`fb_ctrl_stream_stop` + `feedback_10_14 = nominal_feedback_10_14`), and clear `sync_started` / `total_samples_produced` so gap detection and the feedback loop resume from a deterministic baseline.
+- The pre-existing ring flush on `bit_depth_changed` still runs; combined with the mute, stale packets cannot reach the DSP pipeline in the wrong format.
+
+**SET_CUR sampling_freq validation:** unsupported rates are now stalled at EP0 rather than silently committed. Previously any 24-bit value was accepted — `audio_state.freq` would store garbage that `perform_rate_change()` later coerced to 44100, so a subsequent GET_CUR returned a rate the device never actually applied. The accepted set is {44100, 48000, 96000} to match the Type-I format descriptors on both alts.
+
+**`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
+
+### Notification Endpoint (device→host push)
+*Last updated: 2026-04-18*
+
+The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 8) for out-of-band device→host notifications. Its first producer is the master-volume change path; additional event types drop in without transport-layer changes.
+
+**Why bulk rather than interrupt:** an earlier draft used an interrupt IN endpoint at 4 ms polling. Under heavy EP0 control-transfer traffic (rapid `REQ_SET_MASTER_VOLUME` from a slider drag in the host app) the RP2040/2350 USB controller crashed after ~20–40 s and the device re-enumerated. The bug reproduced regardless of whether the EP was on the vendor interface or a dedicated one, and regardless of polling rate (4 ms → 32 ms) or NAK-vs-always-armed strategy — rules out descriptor shape, polling cadence, and NAK handling. Switching the EP to bulk IN eliminates the crash: bulk uses opportunistic host scheduling rather than a fixed bInterval poll cadence, so the interrupt-poll / EP0 SETUP IRQ interaction that was exercising the bug no longer happens. Notification latency is still well under a main-loop iteration; the host sees changes effectively instantly.
+
+**Packet shape (fixed 8 bytes):**
+
+| Byte | Field | Description |
+|------|-------|-------------|
+| 0 | event type | `NOTIFY_EVENT_MASTER_VOLUME = 0x01` (others reserved) |
+| 1–3 | reserved | Zero, padding for alignment |
+| 4–7 | payload | For master volume: `float` dB, little-endian |
+
+**Produce:** `usb_notify_master_volume(float db)` in `usb_audio.c` sets a latest-wins pending flag + cached value. It does NOT fire a transfer directly; the actual xfer is scheduled by `usb_notify_tick()` (called once per main-loop iteration) or by the `xfer_cb` re-arm after a completion. Deferring the fire keeps the notification path off the vendor control-transfer DATA-stage call graph.
+
+**Consume:** `usb_notify_drain()` uses the TinyUSB-blessed claim pattern (same as `tud_hid_n_report`): `usbd_edpt_claim()` atomically tests `busy == 0 && claimed == 0` and sets `claimed = 1`. If the claim succeeds, it snapshots the pending value under a brief IRQ-off critical section, packs the 8-byte `notify_buf`, and calls `usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, 8)`. If the claim fails (xfer in flight or already claimed), the call defers — the next tick or `xfer_cb` re-arm picks it up. If the DCD rejects the xfer, we `usbd_edpt_release` and re-mark the event pending.
+
+**Emit hookpoint:** `update_master_volume()` (usb_audio.c) calls `usb_notify_master_volume(db)` at the end of its body. Every caller of `update_master_volume()` — vendor SET (`REQ_SET_MASTER_VOLUME`), preset load (`flash_storage.c:preset_load`), factory reset (`flash_storage.c:apply_factory_defaults`), bulk params apply (`bulk_params.c:bulk_params_apply`) — therefore produces a notification. Three inline clamp+linearize sites that previously bypassed `update_master_volume()` were refactored to call it during this change.
+
+**Host-echo suppression (compile-time):** `NOTIFY_SUPPRESS_HOST_ECHO` (default `0` in `usb_audio.c`). When `1`, host-originated master-volume writes (via `REQ_SET_MASTER_VOLUME`) do NOT produce notifications — device-originated changes still do. The vendor-command handler brackets its `update_master_volume()` call with `notify_master_vol_host_initiated = true/false`; the emit path short-circuits when both the flag is true and `NOTIFY_SUPPRESS_HOST_ECHO = 1`. Default-off so host-app integration tests exercise the full loop.
+
+**Semantics:** latest-wins per event type. If the host polls slower than notifications are produced (e.g., a slider dragged faster than 250 Hz / 4 ms), intermediate values are dropped — the host sees the final value within one polling interval. This matches slider/encoder UX expectations.
+
+**Host side:** the DSPi Console must open a pipe on EP 0x83 via the vendor interface and post repeated interrupt-IN read requests. Each completion is one 8-byte event; dispatch on byte 0. Host plumbing is out of scope for the firmware change but documented here for reference.
 
 ### Volume & Mute
 
@@ -185,13 +229,13 @@ Defined in `main.c`, function `core0_init()`:
 **Mute:** UAC1 Feature Unit MUTE control. When `audio_state.mute` is set, `vol_mul` is forced to zero in the audio callback (RP2350: 0.0f, RP2040: 0), silencing all outputs immediately.
 
 ### Asynchronous Feedback Endpoint
-*Last updated: 2026-03-29*
+*Last updated: 2026-04-18*
 
-The device declares itself as a USB asynchronous sink, meaning it drives the audio clock from its own crystal oscillator rather than locking to the host's SOF timing. The feedback endpoint (`_as_sync_packet()`) reports the actual device sample rate to the host in 10.14 fixed-point format (samples per USB frame), allowing the host to adjust its packet sizes to match.
+The device declares itself as a USB asynchronous sink, meaning it drives the audio clock from its own crystal oscillator rather than locking to the host's SOF timing. The feedback endpoint is re-armed from the `xfer_cb` completion in the custom UAC1 class driver (`uac1_driver_xfer_cb` on EP 0x82 in `usb_audio.c`) with the current `feedback_10_14` value, reporting the actual device sample rate to the host in 10.14 fixed-point format (samples per USB frame).
 
 **Architecture:** Q16.16 dual-loop controller (`usb_feedback_controller.c/h`) with 10.14 wire serialization. All internal math uses Q16.16 fixed-point with rounded updates; only the endpoint-facing value is quantized to 10.14.
 
-- **SOF handler** (`usb_sof_irq()` in `main.c`): Runs at each USB Start-of-Frame (1 kHz). Reads the DMA transfer counter of slot 0 (SPDIF or I2S) and combines with `words_consumed` to get a sub-buffer-precise word total. Calls `fb_ctrl_sof_update()` which performs the 4-SOF decimated measurement and control update.
+- **SOF handler** (`uac1_driver_sof()` in `usb_audio.c`, registered via the class driver's `.sof` pointer): Runs at each USB Start-of-Frame (1 kHz) in USB IRQ context (TinyUSB's DCD dispatches SOF-consumer driver callbacks directly from `dcd_event_handler` without going through the task queue). Reads the DMA transfer counter of slot 0 (SPDIF or I2S) and combines with `words_consumed` to get a sub-buffer-precise word total. Calls `fb_ctrl_sof_update()` which performs the 4-SOF decimated measurement and control update.
 - **Rate estimator (Loop A):** First-order IIR with α=1/16 and `round_div_pow2_s32()` (symmetric half-away-from-zero rounding, int64_t-safe). Time constant τ≈64ms at the 4ms update rate (bRefresh=2). Raw rate computed via shifts only: SPDIF `delta_words << 12`, I2S `delta_words << 13`. The rounded update eliminates the truncation deadzone present in the previous `error >> 3` implementation.
 - **Backlog servo (Loop B):** Proportional correction based on epoch-relative produced/consumed sample balance, replacing the former integer buffer-count fill servo. `slot0_produced_samples` is incremented in `usb_audio.c` when a slot-0 producer buffer is committed. Consumption is derived from DMA word progress: SPDIF `current_total_words << 14`, I2S `<< 15`. Backlog is computed in unsigned Q16.16 with modular arithmetic (wrap-safe as long as actual backlog remains far below 32768 stereo samples; steady-state ≈384, giving 85× margin). Servo gain Kp_q16=85 (equivalent to old 1024 per 48-sample buffer), clamped to ±0.25 sample/frame. No integrator.
 - **Startup/reset gating:** After any reset, resync, stream activation, or slot-0 output-type switch, the servo is held at zero for 2 controller updates (~8ms). During holdoff, nominal feedback is emitted. On stream deactivation (alt 0), the controller is invalidated and all filter state cleared.
@@ -217,26 +261,28 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 **IRQ safety:** The SOF handler runs inside `isr_usbctrl`. DMA IRQ priorities are explicitly set to `PICO_HIGHEST_IRQ_PRIORITY` (`usb_audio.c:2755-2756`), matching the USB IRQ default. An init-time assertion (`NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ)`) verifies that DMA cannot preempt the SOF handler's non-atomic multi-field read of `words_consumed` + `transfer_count`.
 
 ### USB Audio Decoupling (SPSC Ring Buffer)
-*Last updated: 2026-03-27*
+*Last updated: 2026-04-18*
 
-The DSP pipeline is decoupled from the USB IRQ via a lock-free SPSC ring buffer (`usb_audio_ring.h`). The USB ISR pushes raw packets into the ring (~5µs); the main loop drains the ring and runs the full DSP pipeline in thread context. This prevents the USB stack from being blocked for hundreds of microseconds per packet and eliminates ISR-context spinlock contention.
+The DSP pipeline is decoupled from USB audio transfer completion via a lock-free SPSC ring buffer (`usb_audio_ring.h`). The UAC1 class driver's `xfer_cb` pushes raw packets into the ring; the main loop drains the ring and runs the full DSP pipeline. This prevents the USB stack from being blocked for hundreds of microseconds per packet and eliminates ISR-context spinlock contention.
+
+**Context change vs. pico-extras:** under pico-extras, `_as_audio_packet` ran in USB IRQ context. Under TinyUSB, `DCD_EVENT_XFER_COMPLETE` is enqueued in the USB IRQ and dispatched to `uac1_driver_xfer_cb` from `tud_task()` (main-loop context). SOF still runs in IRQ. The ring itself is unchanged — the producer moved from IRQ to task, the consumer remained in the main loop.
 
 **Ring buffer:** 4 fixed-size slots × 578 bytes (576 payload + 2 length). ~2.3KB BSS. Placed in RAM (`__not_in_flash`) for flash-operation safety. Peek/consume pattern (zero-copy consumer).
 
 **Memory barriers:** `__dmb()` at publish/acquire points. Redundant on RP2040 (Cortex-M0+ in-order single-bus) but required on RP2350 (Cortex-M33 write buffer).
 
-**Gap detection:** USB packet arrival gap measurement runs in the ISR (at actual arrival time, not main-loop processing time) using file-scope `audio_ring_last_push_us`, reset on stream lifecycle transitions in `as_set_alternate()` and `usb_audio_flush_ring()`.
+**Gap detection:** USB packet arrival gap measurement runs in `uac1_driver_xfer_cb` (task context under TinyUSB) using file-scope `audio_ring_last_push_us`, reset on stream lifecycle transitions in `uac1_apply_alt()` and `usb_audio_flush_ring()`.
 
 **Ring overruns:** Separate `audio_ring.overrun_count` counter (distinct from `spdif_overruns`). Queryable via `REQ_GET_STATUS` wValue=22.
 
 **Deferred flash SET commands:** `REQ_PRESET_SET_NAME`, `REQ_PRESET_SET_STARTUP`, `REQ_PRESET_SET_INCLUDE_PINS` use separate pending flags per command type. Main loop copies payload under brief interrupt-off (~1µs) to prevent ISR/thread race, then drains ring and executes the flash write. GET-style flash commands (SAVE/LOAD/DELETE) remain synchronous in the vendor handler with real result codes.
 
 ### Packet Flow
-*Last updated: 2026-04-11*
+*Last updated: 2026-04-18*
 
-`_as_audio_packet()` → `usb_audio_ring_push()` → (main loop) → `usb_audio_drain_ring()` → `process_audio_packet(data, len)` [usb_audio.c] → `process_input_block(sample_count)` [audio_pipeline.c]
+`uac1_driver_xfer_cb(EP 0x01)` → `usb_audio_ring_push()` → (main loop) → `usb_audio_drain_ring()` → `process_audio_packet(data, len)` [usb_audio.c] → `process_input_block(sample_count)` [audio_pipeline.c]
 
-1. **Ring push (USB ISR)** — Copy raw packet into SPSC ring, detect arrival gaps
+1. **Ring push (task context)** — Copy raw packet into SPSC ring, detect arrival gaps
 2. **Ring drain (main loop)** — Peek/process/consume loop, highest priority in main loop
 3. **USB decode (`process_audio_packet` in `usb_audio.c`)** — Gap detection, sync tracking, USB byte decode (16/24-bit) with per-channel preamp into `buf_l[]`/`buf_r[]`
 4. **DSP pipeline (`process_input_block` in `audio_pipeline.c`)** — Input-agnostic: buffer acquisition, preset mute envelope, loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer return, CPU metering
@@ -522,6 +568,8 @@ Each 192-frame audio block carries channel status bits and a Z preamble at frame
 ### 24-bit Output Encoding
 
 The USB input supports both 16-bit and 24-bit PCM via two alternate settings on the Audio Streaming interface. The host OS selects the desired bit depth; a runtime variable (`usb_input_bit_depth`) tracks the active format and branches the input conversion accordingly. With 24-bit input and 24-bit SPDIF output, the full precision signal path is maintained end-to-end. The DSP pipeline operates at >16-bit precision internally (float on RP2350, Q28 fixed-point on RP2040).
+
+**Alt-change safety (2026-04-18):** With `TUP_DCD_EDPT_ISO_ALLOC` enabled on RP2040/RP2350, TinyUSB's `usbd_edpt_close()` is a no-op — it does not clear the `busy` flag left by the previous alt's in-flight iso xfer. On the next `usbd_edpt_xfer()` this trips `TU_ASSERT(busy == 0)` and crashes the device. `uac1_open_stream_eps()` therefore calls `usbd_edpt_clear_stall()` on both stream endpoints after `usbd_edpt_iso_activate()` to force-clear the stale busy bit (the same workaround TinyUSB's stock audio class driver applies at `audio_device.c:1871`). `uac1_apply_alt()` also flushes the USB audio ring whenever `usb_input_bit_depth` changes so queued pre-switch packets aren't re-decoded under the new bytes/frame assumption. See "Sample-rate & Bit-depth Switching" for the full mute/resync flow that brackets every format change.
 
 **Input conversion (24-bit):**
 - **RP2350:** 3-byte little-endian → sign-extended int32 → float via `÷ 8388608.0f`
@@ -1574,3 +1622,89 @@ typedef enum {
 - Factory reset sets `active_input_source = INPUT_SOURCE_USB`
 - `WireInputConfig` (16 bytes) section in `WireBulkParams` V7+
 - SPDIF RX pin stored in `PresetDirectory` (consumed existing padding byte, no directory format change)
+
+---
+
+## TinyUSB Migration (Phases 1 + 2)
+*Last updated: 2026-04-18*
+
+Phase 1 swapped the USB library from pico-extras `usb_device` to TinyUSB with full UAC1 audio parity. Phase 2 brought the vendor control interface back under TinyUSB. MS OS 2.0 descriptors for WinUSB auto-binding are still deferred (Phase 2b) — on Windows the host app must bind WinUSB manually (e.g. via Zadig) until that lands. macOS and Linux need no extra binding.
+
+### Why a custom UAC1 class driver
+
+TinyUSB's built-in audio class driver (`lib/tinyusb/src/class/audio/audio_device.c`) hard-rejects any AC interface whose `bInterfaceProtocol` is not `AUDIO_INT_PROTOCOL_CODE_V2` (UAC2, 0x20) at `audiod_open():1576`. UAC1 uses `bInterfaceProtocol = 0x00`, so the built-in driver cannot claim our interface. Rather than patch vendored SDK code, DSPi registers its own minimal UAC1 class driver via TinyUSB's application-driver mechanism (`usbd_app_driver_get_cb`). Our driver's `.open()` callback implements the same descriptor walk + endpoint allocation flow as TinyUSB's audio driver but without the UAC2 protocol check.
+
+### What lives where
+
+| Area | File | Notes |
+|------|------|-------|
+| TinyUSB configuration | `tusb_config.h` | `CFG_TUD_AUDIO = 0` and all other classes off. The vendor interface is also handled by our custom driver (not `CFG_TUD_VENDOR`), because our vendor interface is control-transfer-only with no bulk endpoints. |
+| UAC1 descriptors | `usb_descriptors.c` / `usb_descriptors.h` | Hand-rolled byte array (no LUFA). Layout: config (9B) → IAD (8B) → AC std itf + CS (49B) → AS alt 0/1/2 (125B) → vendor std itf (9B). Total 200B. Feature unit entity 2 exposes master mute + volume. |
+| Class driver | `usb_audio.c` | `uac1_driver` struct is registered as the single app driver. Implements `init`/`reset`/`open`/`control_xfer_cb`/`xfer_cb`/`sof`. The same driver claims AC+AS (via IAD) AND the vendor interface 2 (class 0xFF). |
+| Vendor command dispatch | `vendor_commands.c` | All existing SET/GET handlers preserved. Public entry point is `tud_vendor_control_xfer_cb(rhport, stage, req)` — TinyUSB's weakly-linked global callback. TinyUSB routes **every** vendor-type control transfer here directly from `process_control_request` (usbd.c:727-730), bypassing class drivers. A `vendor_send_response()` shim wraps `tud_control_xfer()` so case bodies stay unchanged. Bulk SET/GET (`REQ_SET_ALL_PARAMS` / `REQ_GET_ALL_PARAMS`) use `tud_control_xfer()`'s native EP0 chunking instead of the old `usb_stream_setup_transfer` plumbing. |
+| USB init | `usb_audio.c:usb_sound_card_init()` | Calls `tud_init(0)` in place of the pico-extras `usb_interface_init()` / `usb_device_init()` / `usb_device_start()` block. |
+| Main loop | `main.c` | `tud_task()` is called once per iteration before `usb_audio_drain_ring()`. |
+| SOF feedback servo | `usb_audio.c:uac1_driver_sof()` | Replaces the former `usb_sof_irq()` in `main.c`. Runs in USB IRQ context (TinyUSB dispatches SOF-consumer callbacks synchronously from `dcd_event_handler`). |
+
+### Context change for the audio RX path
+
+Under pico-extras, `_as_audio_packet()` ran in USB IRQ context on every audio OUT packet completion. Under TinyUSB, `DCD_EVENT_XFER_COMPLETE` events are enqueued by the DCD IRQ and dispatched to our `uac1_driver_xfer_cb` from `tud_task()` (main-loop context). The SPSC ring is unchanged; the producer moved from IRQ to task. Gap detection timestamps still come from `time_us_32()` captured in `xfer_cb` — noise is bounded by the main-loop polling rate (~kHz), well below the 2 ms gap threshold. SOF still runs in IRQ, so feedback servo latency is unchanged.
+
+### Descriptor layout (UAC1 + vendor + notifications, byte offsets into `usb_config_descriptor[]`)
+
+| Offset | Length | Contents |
+|--------|--------|----------|
+| 0 | 9 | Configuration descriptor (total length 207) |
+| 9 | 8 | IAD grouping AC + AS (bInterfaceCount = 2) |
+| 17 | 9 | AC std interface (itf 0, 0 EPs, UAC1 protocol 0x00) |
+| 26 | 9 | AC CS header (bcdADC 0x0100, bInCollection 1) |
+| 35 | 12 | AC CS input terminal (ID 1, USB streaming, 2 ch L|R) |
+| 47 | 10 | AC CS feature unit (ID 2, master MUTE|VOLUME, 2 logical ch) |
+| 57 | 9 | AC CS output terminal (ID 3, generic speaker) |
+| 66 | 9 | AS std interface alt 0 (zero-bandwidth) |
+| 75 | 58 | AS alt 1 (16-bit, 44.1/48/96 kHz) incl. std + CS data EP 0x01 and feedback EP 0x82 |
+| 133 | 58 | AS alt 2 (24-bit, 44.1/48/96 kHz) incl. std + CS data EP 0x01 and feedback EP 0x82 |
+| 191 | 9 | Vendor std interface (itf 2, class 0xFF, 1 EP) |
+| 200 | 7 | Std bulk EP IN 0x83 (notifications, 8 B) |
+
+The vendor interface sits **outside** the IAD — it is its own USB function. TinyUSB's `process_set_config()` calls our `open()` a second time with the vendor interface descriptor; we recognize class 0xFF, claim it, and open the notification endpoint. See "Notification Interrupt Endpoint" below for the push channel that rides on EP 0x83.
+
+**Why the IAD is required:** TinyUSB's `process_set_config()` in `usbd.c` binds interfaces to class drivers based on `bInterfaceCount` — and defaults to 1 when no IAD is present. Without the IAD, TinyUSB would bind only the AC interface (itf 0) to our UAC1 class driver, leaving the AS interface (itf 1) unbound. `SET_INTERFACE` requests for AS would then fail at `_usbd_dev.itf2drv[1] == DRVID_INVALID`, the isochronous endpoints would never open, and the device would fail to appear as a functional audio endpoint on the host. The IAD makes TinyUSB bind both interfaces (itf 0 + itf 1) to our driver in a single `open()` call.
+
+### Control request handling
+
+UAC1 uses discrete `bRequest` opcodes (`SET_CUR` 0x01, `GET_CUR` 0x81, `GET_MIN` 0x82, `GET_MAX` 0x83, `GET_RES` 0x84) that are *not* exposed by TinyUSB's `audio.h` (UAC2 uses a single `RANGE` opcode instead). They are defined in `usb_descriptors.h` as `UAC1_REQ_*`. `uac1_driver_control_xfer_cb()` dispatches on them directly:
+
+- **Feature unit (interface recipient, entity 2):** MUTE + master VOLUME via the existing `audio_state` + `audio_set_volume()` path.
+- **Sampling frequency (endpoint recipient, EP 0x01):** SET_CUR writes `audio_state.freq` and raises `rate_change_pending`. `perform_rate_change()` in `main.c` runs in the main loop as before.
+
+### What is gone in Phase 1
+
+- `vendor_commands.c` / `vendor_commands.h` — not compiled. `derive_core1_mode()` was the only non-vendor helper inside; it has been moved into `usb_audio.c`.
+- `firmware/DSPi/lufa/` — no longer on the target's include path. Folder retained on disk.
+- `PICO_USBDEV_USE_ZERO_BASED_INTERFACES` / `PICO_USBDEV_MAX_DESCRIPTOR_SIZE` / `PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE` compile definitions.
+- MS OS / WCID descriptors + `device_setup_request_handler` WCID dispatch.
+- All vendor commands (0x42 … 0xD5). The host configuration app will not function until Phase 2.
+
+### Phase 2 status (done) and Phase 2b (deferred)
+
+Done in Phase 2:
+
+- Vendor interface (class 0xFF, 0 endpoints) re-added to the config descriptor at itf 2 (outside the AC+AS IAD).
+- `vendor_commands.c` adapted: public entry point is `vendor_control_xfer_cb(rhport, stage, req)`, invoked from our UAC1 class driver's `control_xfer_cb` when a vendor-class request targets the vendor interface. A legacy `vendor_buffer_t` shim and a `vendor_send_response()` wrapper keep all 30+ SET/GET case bodies unchanged.
+- `REQ_GET_ALL_PARAMS` / `REQ_SET_ALL_PARAMS` (~2912 bytes) now use `tud_control_xfer()`'s native EP0 chunking — the old `usb_stream_setup_transfer` / `_vendor_stream` / `_vendor_*_complete` plumbing is gone.
+- `REQ_GET_USB_ERROR_STATS` / `REQ_RESET_USB_ERROR_STATS` return zeros / no-op under TinyUSB (pico-extras' per-category error counters have no TinyUSB equivalent yet).
+
+Deferred to Phase 2b:
+
+- MS OS 2.0 descriptors (BOS + platform capability UUID `D8DD60DF-4589-4CC7-9CD2-659D9E648A9F`) for automatic WinUSB binding on Windows. Until this lands, Windows hosts must bind WinUSB manually (e.g. via Zadig). macOS and Linux work without any additional binding.
+- Resurface a meaningful USB error counter path if/when TinyUSB adds DCD-level error event hooks.
+
+### Size impact
+
+| Platform | text (pre-migration) | text (Phase 1) | text (Phase 2) | bss (Phase 2) |
+|----------|-------------------:|---------------:|---------------:|--------------:|
+| RP2350 | 89,720 | 80,812 | 91,240 | 210,696 |
+| RP2040 | n/a | 84,844 | 95,612 | 90,704 |
+
+Phase 1 removed the vendor surface entirely (~9 KB saved). Phase 2 re-added it (~10.5 KB), and also added the IAD (+8 bytes) and the vendor interface descriptor (+9 bytes). Net vs. pre-migration on RP2350: +1.5 KB text.

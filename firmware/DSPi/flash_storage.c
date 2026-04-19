@@ -527,22 +527,13 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins,
     }
 
     // Master volume — only restored if the directory flag allows it and slot is V12+.
-    // Uses powf() instead of db_to_linear() because db_to_linear() clamps at -60 dB
-    // and master volume ranges to -127 dB.
+    // Delegated to update_master_volume() for consistent clamping and to emit
+    // a device→host notification via interrupt EP 0x83.  NaN/Inf → unity
+    // (safe default; update_master_volume rejects non-finite values outright).
     if (include_master_vol && slot->version >= 12) {
         float db = slot->master_volume_db;
-        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;  // NaN/Inf → unity (safe default)
-        if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
-        if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
-        master_volume_db = db;
-        if (db <= MASTER_VOL_MUTE_DB) {
-            master_volume_linear = 0.0f;
-            master_volume_q15    = 0;
-        } else {
-            float linear = powf(10.0f, db / 20.0f);
-            master_volume_linear = linear;
-            master_volume_q15    = (int32_t)(linear * 32768.0f);
-        }
+        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;
+        update_master_volume(db);
     }
 
     // Bypass
@@ -1086,10 +1077,9 @@ static void apply_factory_defaults(void) {
         global_preamp_linear[i]  = 1.0f;
     }
 
-    // Master volume — reset to unity (no attenuation)
-    master_volume_db     = MASTER_VOL_MAX_DB;
-    master_volume_linear = 1.0f;
-    master_volume_q15    = 32768;
+    // Master volume — reset to unity.  Delegated to update_master_volume()
+    // for consistent linearize/clamp + notification emission on reset.
+    update_master_volume(MASTER_VOL_MAX_DB);
 
     // Bypass
     bypass_master_eq = false;

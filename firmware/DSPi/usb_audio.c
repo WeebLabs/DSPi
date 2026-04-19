@@ -1,7 +1,12 @@
 /*
  * USB Audio Implementation for DSPi
  * UAC1 Audio Streaming with DSP Pipeline
- * Uses pico-extras usb_device library with LUFA descriptor types
+ *
+ * Phase 1: migrated from pico-extras usb_device → TinyUSB.  TinyUSB's built-in
+ * audio class driver is UAC2-only (audio_device.c:1576 rejects bInterfaceProtocol
+ * != V2), so DSPi registers its own UAC1 class driver via usbd_app_driver_get_cb().
+ * The vendor control interface has been dropped temporarily and will return in
+ * Phase 2.
  */
 
 #include <stdio.h>
@@ -10,8 +15,6 @@
 #include <math.h>
 
 #include "pico/stdlib.h"
-#include "pico/usb_device.h"
-#include "pico/usb_device_private.h"
 #include "pico/audio.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
@@ -26,9 +29,12 @@
 #include "hardware/adc.h"
 #include "hardware/vreg.h"
 
+#include "tusb.h"
+#include "device/usbd_pvt.h"
+#include "class/audio/audio.h"
+
 #include "usb_audio.h"
 #include "audio_pipeline.h"
-#include "vendor_commands.h"
 #include "usb_descriptors.h"
 #include "dsp_pipeline.h"
 #include "dcp_inline.h"
@@ -38,9 +44,9 @@
 #include "crossfeed.h"
 #include "leveller.h"
 #include "bulk_params.h"
-#include "pico/usb_stream_helper.h"
 #include "usb_audio_ring.h"
 #include "usb_feedback_controller.h"
+#include "vendor_commands.h"
 
 // ----------------------------------------------------------------------------
 // GLOBALS
@@ -129,6 +135,31 @@ volatile float global_preamp_linear[NUM_INPUT_CHANNELS]   = {[0 ... NUM_INPUT_CH
 volatile float master_volume_db       = MASTER_VOL_MAX_DB;   // 0 dB = unity (no attenuation)
 volatile float master_volume_linear   = 1.0f;
 volatile int32_t master_volume_q15    = 32768;                // Unity in Q15 (for RP2040 path)
+
+// ----------------------------------------------------------------------------
+// Notification (interrupt IN) state.  Declared here so update_master_volume()
+// below can reach them. The actual TX buffer + drain/arm logic + xfer_cb hook
+// live in the UAC1 CLASS DRIVER section below.
+// ----------------------------------------------------------------------------
+
+// Compile-time echo policy.  Default: emit every master-volume change,
+// including host-originated writes (useful for exercising the notification
+// path from host-side tests).  Rebuild with -DNOTIFY_SUPPRESS_HOST_ECHO=1 to
+// suppress echoes of host REQ_SET_MASTER_VOLUME; device-initiated changes
+// (preset load, factory reset, future knob/encoder) still emit.
+#ifndef NOTIFY_SUPPRESS_HOST_ECHO
+#define NOTIFY_SUPPRESS_HOST_ECHO 0
+#endif
+
+// Set true by REQ_SET_MASTER_VOLUME dispatch bracket in vendor_commands.c;
+// read by the emit path when NOTIFY_SUPPRESS_HOST_ECHO is on.
+volatile bool notify_master_vol_host_initiated = false;
+
+static volatile bool  notify_master_vol_pending = false;
+static volatile float notify_master_vol_db      = 0.0f;
+
+// Defined in the UAC1 CLASS DRIVER section below.
+static void usb_notify_drain(uint8_t rhport);
 
 // Per-channel gain and mute (legacy 3-channel interface for flash compatibility)
 volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
@@ -227,6 +258,32 @@ void update_master_volume(float db) {
         master_volume_linear = linear;
         master_volume_q15    = (int32_t)(linear * 32768.0f);
     }
+    usb_notify_master_volume(db);
+}
+
+// Push a master-volume change to the host via the interrupt IN endpoint.
+// Called from update_master_volume() so every change path (vendor SET, preset
+// load, factory reset, bulk params, future knob) emits automatically.
+//
+// This function ONLY sets the latest-wins pending state. The actual
+// usbd_edpt_xfer is fired later from usb_notify_tick() (main loop) or from
+// the xfer_cb on EP 0x83 completion. Doing emit-from-update inside a vendor
+// DATA-stage control_xfer_cb caused USB stack instability; deferring to the
+// main loop keeps the notification path off the control-transfer call graph.
+void usb_notify_master_volume(float db) {
+#if NOTIFY_SUPPRESS_HOST_ECHO
+    if (notify_master_vol_host_initiated) return;
+#endif
+    notify_master_vol_db = db;
+    __dmb();
+    notify_master_vol_pending = true;
+}
+
+// Called once per main-loop iteration from main.c.  Also handles the initial
+// arm (first time after enumeration, when the EP is open but no xfer has
+// fired yet) since xfer_cb only re-arms after a completion.
+void usb_notify_tick(void) {
+    usb_notify_drain(0);
 }
 
 // Sync State
@@ -253,15 +310,6 @@ struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S32, 
 // Legacy aliases
 #define producer_pool producer_pool_1
 #define sub_producer_pool producer_pool_2
-
-// ----------------------------------------------------------------------------
-// USB INTERFACE / ENDPOINT OBJECTS
-// ----------------------------------------------------------------------------
-
-static struct usb_interface ac_interface;
-static struct usb_interface as_op_interface;
-static struct usb_interface vendor_interface;
-static struct usb_endpoint ep_op_out, ep_op_sync;
 
 // ----------------------------------------------------------------------------
 // VOLUME
@@ -402,273 +450,672 @@ void usb_audio_flush_ring(void) {
     audio_ring_last_push_us = 0;
 }
 
-// ----------------------------------------------------------------------------
-// USB AUDIO PACKET CALLBACKS (pico-extras usb_device)
-// ----------------------------------------------------------------------------
-
-static void __not_in_flash_func(_as_audio_packet)(struct usb_endpoint *ep) {
-    assert(ep->current_transfer);
-    struct usb_buffer *usb_buffer = usb_current_out_packet_buffer(ep);
-
-    usb_audio_packets++;
-
-    // USB packet gap detection — runs at ISR arrival time (not main-loop
-    // processing time) to avoid false positives from ring queue delay.
-    // audio_ring_last_push_us is file-scope so it can be reset on stream
-    // lifecycle transitions in as_set_alternate() and usb_audio_flush_ring().
-    {
-        uint32_t now = time_us_32();
-        if (audio_ring_last_push_us > 0 && !preset_loading) {
-            uint32_t gap = now - audio_ring_last_push_us;
-            if (gap > 2000 && gap < 50000) {
-                spdif_underruns++;
-            }
-        }
-        audio_ring_last_push_us = now;
-    }
-
-    // Push raw packet into ring for main-loop DSP processing.
-    // Ring-full drops are counted separately from spdif_overruns
-    // (different fault class: ring backpressure vs pool pressure).
-    usb_audio_ring_push(&audio_ring, usb_buffer->data, usb_buffer->data_len);
-
-    usb_grow_transfer(ep->current_transfer, 1);
-    usb_packet_done(ep);
+// Ring overrun accessor (audio_ring is static)
+uint32_t usb_audio_ring_overrun_count(void) {
+    return audio_ring.overrun_count;
 }
 
-static void __not_in_flash_func(_as_sync_packet)(struct usb_endpoint *ep) {
-    assert(ep->current_transfer);
-    struct usb_buffer *buffer = usb_current_in_packet_buffer(ep);
-    assert(buffer->data_max >= 3);
-    buffer->data_len = 3;
+// Derive Core 1 mode from current output enable state.
+// (Moved from vendor_commands.c during the Phase 1 TinyUSB migration — still
+// needed by main.c and flash_storage.c for preset-load Core 1 transitions.)
+Core1Mode derive_core1_mode(void) {
+    if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled)
+        return CORE1_MODE_PDM;
+    for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
+        if (matrix_mixer.outputs[out].enabled)
+            return CORE1_MODE_EQ_WORKER;
+    }
+    return CORE1_MODE_IDLE;
+}
 
-    // Use SOF-measured feedback; fall back to pre-computed nominal
+// ----------------------------------------------------------------------------
+// UAC1 CLASS DRIVER (custom TinyUSB class driver, registered via
+// usbd_app_driver_get_cb). TinyUSB's built-in audio class driver is UAC2-only
+// (audio_device.c:1576), so we provide our own UAC1 implementation without
+// patching vendored SDK code.
+// ----------------------------------------------------------------------------
+
+// Endpoint buffers.  Must live in RAM; reused across every transfer.
+// Audio data OUT: sized for worst-case (24-bit 96 kHz + 1 jitter sample).
+// Feedback IN: 4 bytes (actual payload 3, DCD requires 4-byte iso alloc).
+static uint8_t __attribute__((aligned(4))) __not_in_flash("audio_scratch") ep_out_buf[AUDIO_EP_MAX_PKT];
+static uint8_t __attribute__((aligned(4))) __not_in_flash("audio_scratch") ep_fb_buf[4];
+
+// Control request scratch for SET_CUR data stage (1-3 bytes payload).
+static uint8_t uac1_ctrl_buf[8];
+
+// Class driver state (AC+AS audio function + vendor interface).
+static struct {
+    uint8_t ac_itf;
+    uint8_t as_itf;
+    uint8_t vendor_itf;      // 0xFF = not claimed
+    uint8_t cur_alt;         // Current AS alt setting (0, 1, or 2)
+    bool    ep_data_open;
+    bool    ep_fb_open;
+    bool    notify_ep_open;  // Interrupt IN EP 0x83 on the vendor interface
+    // Deferred SET_CUR context (captured at SETUP, applied at DATA)
+    uint8_t pending_cs;
+    uint8_t pending_recipient;
+    uint8_t pending_len;
+} uac1 = { .vendor_itf = 0xFF };
+
+// Stable TX buffer for the notification EP — DCD may DMA from it until
+// xfer_cb fires. Placed in RAM for flash-operation safety.
+static uint8_t __attribute__((aligned(4))) __not_in_flash("notify_buf") notify_buf[NOTIFY_EP_MAX_PKT];
+
+// usb_notify_drain is forward-declared near the other notification state at
+// the top of this file so update_master_volume() can reach it.
+
+extern usb_feedback_ctrl_t fb_ctrl;
+
+// Forward decls.
+static void uac1_driver_init(void);
+static bool uac1_driver_deinit(void);
+static void uac1_driver_reset(uint8_t rhport);
+static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc, uint16_t max_len);
+static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req);
+static bool uac1_driver_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes);
+static void uac1_driver_sof(uint8_t rhport, uint32_t frame_count);
+
+static const usbd_class_driver_t uac1_driver = {
+    .name            = "DSPi_UAC1",
+    .init            = uac1_driver_init,
+    .deinit          = uac1_driver_deinit,
+    .reset           = uac1_driver_reset,
+    .open            = uac1_driver_open,
+    .control_xfer_cb = uac1_driver_control_xfer_cb,
+    .xfer_cb         = uac1_driver_xfer_cb,
+    .sof             = uac1_driver_sof,
+};
+
+// TinyUSB looks up this weak symbol during tud_init(). Returning our driver
+// here makes TinyUSB dispatch all interface/endpoint events for our AC+AS
+// interfaces through our callbacks.
+usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count) {
+    *driver_count = 1;
+    return &uac1_driver;
+}
+
+// ----------------------------------------------------------------------------
+// Class driver implementation
+// ----------------------------------------------------------------------------
+
+static void uac1_driver_init(void) {
+    memset(&uac1, 0, sizeof(uac1));
+}
+
+static bool uac1_driver_deinit(void) {
+    return true;
+}
+
+static void uac1_driver_reset(uint8_t rhport) {
+    (void)rhport;
+    uac1.ep_data_open = false;
+    uac1.ep_fb_open = false;
+    uac1.notify_ep_open = false;
+    uac1.cur_alt = 0;
+    uac1.vendor_itf = 0xFF;
+    usb_audio_alt_set = 0;
+
+    // Clear any pending notifications — they would be stale post-reset.
+    notify_master_vol_pending = false;
+    notify_master_vol_host_initiated = false;
+}
+
+static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *itf_desc, uint16_t max_len) {
+    // Second call path: vendor interface (class 0xFF).  TinyUSB calls open()
+    // again with this interface after we've claimed AC+AS.  The vendor
+    // interface has bNumEndpoints = 1 (interrupt IN EP 0x83 for device→host
+    // notifications); accept 0 too for defensive forward compat.
+    if (itf_desc->bInterfaceClass == 0xFF &&
+        itf_desc->bAlternateSetting == 0 &&
+        itf_desc->bNumEndpoints <= 1) {
+        uac1.vendor_itf = itf_desc->bInterfaceNumber;
+
+        uint16_t drv_len = tu_desc_len(itf_desc);       // 9 bytes for std itf
+        if (itf_desc->bNumEndpoints == 1) {
+            // The interrupt EP descriptor follows immediately.
+            uint8_t const *ep_desc = (uint8_t const *)itf_desc + tu_desc_len(itf_desc);
+            if (tu_desc_type(ep_desc) == TUSB_DESC_ENDPOINT) {
+                TU_ASSERT(usbd_edpt_open(rhport, (tusb_desc_endpoint_t const *)ep_desc));
+                uac1.notify_ep_open = true;
+                drv_len += tu_desc_len(ep_desc);         // 7 bytes for std EP
+            }
+        }
+        return drv_len;
+    }
+
+    // Claim the UAC1 AC interface (don't check bInterfaceProtocol — UAC1 uses 0x00).
+    TU_VERIFY(itf_desc->bInterfaceClass == TUSB_CLASS_AUDIO);
+    TU_VERIFY(itf_desc->bInterfaceSubClass == AUDIO_SUBCLASS_CONTROL);
+    TU_VERIFY(itf_desc->bAlternateSetting == 0);
+
+    uac1.ac_itf = itf_desc->bInterfaceNumber;
+
+    uint8_t const *p_desc = (uint8_t const *)itf_desc;
+    uint8_t const *p_end  = p_desc + max_len;
+    uint16_t drv_len = 0;
+
+    // Skip AC standard interface descriptor.
+    drv_len += tu_desc_len(p_desc);
+    p_desc += tu_desc_len(p_desc);
+
+    // Walk AC class-specific descriptors (header, input terminal, feature unit, output terminal).
+    while (p_desc < p_end && tu_desc_type(p_desc) == TUSB_DESC_CS_INTERFACE) {
+        drv_len += tu_desc_len(p_desc);
+        p_desc += tu_desc_len(p_desc);
+    }
+
+    // Walk all AS alt settings (0, 1, 2) and their endpoints.
+    // Reserve worst-case DPRAM for the data OUT and feedback IN endpoints.
+#ifdef TUP_DCD_EDPT_ISO_ALLOC
+    bool allocated_out = false;
+    bool allocated_fb = false;
+#endif
+
+    while (p_desc < p_end && tu_desc_type(p_desc) == TUSB_DESC_INTERFACE) {
+        tusb_desc_interface_t const *as = (tusb_desc_interface_t const *)p_desc;
+        if (as->bInterfaceClass != TUSB_CLASS_AUDIO ||
+            as->bInterfaceSubClass != AUDIO_SUBCLASS_STREAMING) {
+            break;
+        }
+        uac1.as_itf = as->bInterfaceNumber;
+
+        drv_len += tu_desc_len(p_desc);
+        p_desc += tu_desc_len(p_desc);
+
+        // Consume this alt's class-specific + endpoint descriptors up to the
+        // next standard interface descriptor or end.
+        while (p_desc < p_end && tu_desc_type(p_desc) != TUSB_DESC_INTERFACE) {
+#ifdef TUP_DCD_EDPT_ISO_ALLOC
+            if (tu_desc_type(p_desc) == TUSB_DESC_ENDPOINT) {
+                tusb_desc_endpoint_t const *ep = (tusb_desc_endpoint_t const *)p_desc;
+                if (ep->bmAttributes.xfer == TUSB_XFER_ISOCHRONOUS) {
+                    uint16_t mps = tu_edpt_packet_size(ep);
+                    uint8_t  ep_addr = ep->bEndpointAddress;
+                    if (ep_addr == AUDIO_OUT_ENDPOINT && !allocated_out) {
+                        usbd_edpt_iso_alloc(rhport, ep_addr, AUDIO_EP_MAX_PKT);
+                        allocated_out = true;
+                    } else if (ep_addr == AUDIO_IN_ENDPOINT && !allocated_fb) {
+                        (void)mps;
+                        usbd_edpt_iso_alloc(rhport, ep_addr, 4);
+                        allocated_fb = true;
+                    }
+                }
+            }
+#endif
+            drv_len += tu_desc_len(p_desc);
+            p_desc += tu_desc_len(p_desc);
+        }
+    }
+
+    // Enable SOF events for our driver (needed for feedback servo tick).
+    usbd_sof_enable(rhport, SOF_CONSUMER_AUDIO, true);
+
+    return drv_len;
+}
+
+// Arm a fresh data OUT xfer.  Called once on alt>0 activation and from xfer_cb
+// completion.
+static inline void uac1_arm_data_out(uint8_t rhport) {
+    usbd_edpt_xfer(rhport, AUDIO_OUT_ENDPOINT, ep_out_buf, AUDIO_EP_MAX_PKT);
+}
+
+// Arm a fresh feedback IN xfer with the current 10.14 feedback value.
+static inline void uac1_arm_feedback(uint8_t rhport) {
     uint32_t fb = feedback_10_14;
     if (fb == 0) fb = nominal_feedback_10_14;
-
-    buffer->data[0] = fb;
-    buffer->data[1] = fb >> 8u;
-    buffer->data[2] = fb >> 16u;
-
-    usb_grow_transfer(ep->current_transfer, 1);
-    usb_packet_done(ep);
+    ep_fb_buf[0] = (uint8_t)(fb & 0xFF);
+    ep_fb_buf[1] = (uint8_t)((fb >> 8) & 0xFF);
+    ep_fb_buf[2] = (uint8_t)((fb >> 16) & 0xFF);
+    ep_fb_buf[3] = 0;
+    usbd_edpt_xfer(rhport, AUDIO_IN_ENDPOINT, ep_fb_buf, 3);
 }
 
-static const struct usb_transfer_type as_transfer_type = {
-    .on_packet = _as_audio_packet,
-    .initial_packet_count = 1,
-};
+// Open isochronous endpoints for the specified alt (1 or 2).
+static bool uac1_open_stream_eps(uint8_t rhport, uint8_t alt) {
+    if (alt != 1 && alt != 2) return false;
 
-static const struct usb_transfer_type as_sync_transfer_type = {
-    .on_packet = _as_sync_packet,
-    .initial_packet_count = 1,
-};
+    const uint8_t *data_ep = usb_audio_data_ep_desc[alt - 1];
+    const uint8_t *fb_ep   = usb_audio_fb_ep_desc[alt - 1];
 
-static struct usb_transfer as_transfer;
-static struct usb_transfer as_sync_transfer;
+#ifdef TUP_DCD_EDPT_ISO_ALLOC
+    TU_ASSERT(usbd_edpt_iso_activate(rhport, (tusb_desc_endpoint_t const *)data_ep));
+    TU_ASSERT(usbd_edpt_iso_activate(rhport, (tusb_desc_endpoint_t const *)fb_ep));
+#else
+    TU_ASSERT(usbd_edpt_open(rhport, (tusb_desc_endpoint_t const *)data_ep));
+    TU_ASSERT(usbd_edpt_open(rhport, (tusb_desc_endpoint_t const *)fb_ep));
+#endif
+    // usbd_edpt_close() is a no-op when TUP_DCD_EDPT_ISO_ALLOC is defined, so
+    // alt-switching leaves two pieces of stale state behind on each iso EP:
+    //
+    //   1. The TinyUSB stack-level `busy` flag (from the previous alt's
+    //      in-flight xfer) — would trip TU_ASSERT(busy == 0) in
+    //      usbd_edpt_xfer() (usbd.c:1337).
+    //
+    //   2. The RP2040/RP2350 hardware-level USB_BUF_CTRL_AVAIL bit in the
+    //      EP's buffer_control register — iso EPs hold AVAIL set while
+    //      waiting for the next packet; the host stops sending on the old
+    //      alt without clearing it, so the next arm panics with
+    //      "ep XX was already available" (rp2040_usb.c:108).
+    //
+    // Stall → clear_stall flushes BOTH: dcd_edpt_stall() overwrites
+    // buffer_control with just USB_BUF_CTRL_STALL (clearing AVAIL),
+    // dcd_edpt_clear_stall() then clears STALL, leaving buffer_control=0
+    // and stack-level busy/stalled flags cleared.
+    usbd_edpt_stall(rhport, AUDIO_OUT_ENDPOINT);
+    usbd_edpt_clear_stall(rhport, AUDIO_OUT_ENDPOINT);
+    usbd_edpt_stall(rhport, AUDIO_IN_ENDPOINT);
+    usbd_edpt_clear_stall(rhport, AUDIO_IN_ENDPOINT);
+
+    uac1.ep_data_open = true;
+    uac1.ep_fb_open = true;
+
+    uac1_arm_data_out(rhport);
+    uac1_arm_feedback(rhport);
+    return true;
+}
+
+// Drain/arm the interrupt IN endpoint.  Always keeps EP 0x83 armed: if a
+// Drain the notification queue to the bulk IN endpoint.  Follows TinyUSB's
+// recommended pattern (same as HID's tud_hid_n_report):
+//   1. Bail early if no event is pending — bulk IN doesn't need keep-alives.
+//   2. Atomic claim of the EP via usbd_edpt_claim (checks busy && !claimed).
+//   3. Fill the stable TX buffer while holding the claim.
+//   4. usbd_edpt_xfer kicks off the transfer; claim is released on completion.
+//
+// The claim-based pattern eliminates the race window between checking busy
+// and calling usbd_edpt_xfer that our previous code had.  If the EP is
+// currently busy (xfer in flight) or already claimed by another path, claim
+// returns false and we defer to the next tick / xfer_cb re-arm.
+static void __not_in_flash_func(usb_notify_drain)(uint8_t rhport) {
+    if (!uac1.notify_ep_open) return;
+    if (!notify_master_vol_pending) return;
+
+    if (!usbd_edpt_claim(rhport, NOTIFY_IN_ENDPOINT)) {
+        // EP busy or already claimed — next tick will retry.
+        return;
+    }
+
+    // We hold the claim; safely consume pending state.
+    uint32_t flags = save_and_disable_interrupts();
+    float db = notify_master_vol_db;
+    notify_master_vol_pending = false;
+    restore_interrupts(flags);
+
+    notify_buf[0] = NOTIFY_EVENT_MASTER_VOLUME;
+    notify_buf[1] = 0;
+    notify_buf[2] = 0;
+    notify_buf[3] = 0;
+    memcpy(&notify_buf[4], &db, sizeof(db));
+
+    if (!usbd_edpt_xfer(rhport, NOTIFY_IN_ENDPOINT, notify_buf, NOTIFY_EP_MAX_PKT)) {
+        // DCD rejected — release claim and re-arm pending so the next tick
+        // retries with the same value.
+        usbd_edpt_release(rhport, NOTIFY_IN_ENDPOINT);
+        notify_master_vol_pending = true;
+    }
+}
+
+static void uac1_close_stream_eps(uint8_t rhport) {
+    if (uac1.ep_data_open) {
+        usbd_edpt_close(rhport, AUDIO_OUT_ENDPOINT);
+        uac1.ep_data_open = false;
+    }
+    if (uac1.ep_fb_open) {
+        usbd_edpt_close(rhport, AUDIO_IN_ENDPOINT);
+        uac1.ep_fb_open = false;
+    }
+}
+
+// Apply a new AS alt setting (0, 1, or 2). Mirrors the old as_set_alternate().
+static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
+    if (alt > 2) return false;
+
+    uint32_t prev_alt = usb_audio_alt_set;
+
+    // Idempotent SET_INTERFACE(alt=current) is common from host driver probes.
+    // Tearing down and re-opening iso EPs for no reason just introduces a
+    // pause in the stream and a risk of DCD state desync — bail early.
+    if (alt == prev_alt) return true;
+
+    uint8_t  new_bit_depth = (alt == 2) ? 24 : 16;
+    bool     bit_depth_changed = (new_bit_depth != usb_input_bit_depth);
+    // Any active→active transition (e.g. alt 1↔alt 2) needs the same
+    // mute/drain/feedback-reset treatment as a cold start (alt 0→>0).
+    // Otherwise stale consumer-pool audio plays out across the switch and
+    // a drifted feedback value is handed back to the host the instant the
+    // feedback EP re-arms, producing an audible click.
+    bool need_resync = (alt > 0) && (prev_alt == 0 || bit_depth_changed);
+
+    usb_audio_alt_set = alt;
+    uac1.cur_alt = alt;
+    usb_input_bit_depth = new_bit_depth;
+
+    // If the bit depth is changing, any packets still queued in the ring were
+    // encoded under the old format. Decoding them with the new bytes/frame
+    // assumption would misread sample counts and channel layout. Flush them.
+    if (bit_depth_changed) {
+        usb_audio_flush_ring();
+    }
+
+    bool active = (alt > 0);
+    audio_spdif_set_starvation_monitoring(active);
+    audio_ring_last_push_us = 0;
+
+    if (active) {
+        if (need_resync) {
+            // Engage the mute envelope immediately so any packets decoded
+            // between here and the main-loop's full pipeline resync are
+            // silenced. Main loop will honor stream_restart_resync_pending
+            // and do prepare/complete_pipeline_reset (consumer drain + sync
+            // restart). The mute window covers that entire interval.
+            preset_mute_counter = PRESET_MUTE_SAMPLES;
+            preset_loading = true;
+
+            // Reset feedback + sync state so the loop doesn't resume with
+            // drifted values that would cause the host to emit off-size
+            // packets right after the alt change.
+            fb_ctrl_stream_stop(&fb_ctrl);
+            feedback_10_14 = nominal_feedback_10_14;
+            extern volatile bool sync_started;
+            extern volatile uint64_t total_samples_produced;
+            sync_started = false;
+            total_samples_produced = 0;
+
+            audio_spdif_reset_dma_starvations();
+            stream_restart_resync_pending = true;
+            __dmb();
+        }
+        // Open (or reopen if bit-depth changed) isochronous endpoints.
+        uac1_close_stream_eps(rhport);
+        if (!uac1_open_stream_eps(rhport, alt)) return false;
+    } else {
+        uac1_close_stream_eps(rhport);
+        if (prev_alt > 0) {
+            fb_ctrl_stream_stop(&fb_ctrl);
+            feedback_10_14 = nominal_feedback_10_14;
+        }
+    }
+    return true;
+}
 
 // ----------------------------------------------------------------------------
-// UAC1 AUDIO CONTROL REQUEST HANDLERS
+// Class + standard control requests
 // ----------------------------------------------------------------------------
 
-static struct audio_control_cmd {
-    uint8_t cmd;
-    uint8_t type;
-    uint8_t cs;
-    uint8_t cn;
-    uint8_t unit;
-    uint8_t len;
-} audio_control_cmd_t;
-
-static void _audio_reconfigure(void) {
-    rate_change_pending = true;
-    pending_rate = audio_state.freq;
-}
-
-static bool do_get_current(struct usb_setup_packet *setup) {
-    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
-        switch (setup->wValue >> 8u) {
-        case FEATURE_MUTE_CONTROL:
-            usb_start_tiny_control_in_transfer(audio_state.mute, 1);
-            return true;
-        case FEATURE_VOLUME_CONTROL:
-            usb_start_tiny_control_in_transfer(audio_state.volume, 2);
-            return true;
-        }
-    } else if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_ENDPOINT) {
-        if ((setup->wValue >> 8u) == ENDPOINT_FREQ_CONTROL) {
-            usb_start_tiny_control_in_transfer(audio_state.freq, 3);
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool do_get_minimum(struct usb_setup_packet *setup) {
-    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
-        switch (setup->wValue >> 8u) {
-        case FEATURE_VOLUME_CONTROL:
-            usb_start_tiny_control_in_transfer(MIN_VOLUME, 2);
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool do_get_maximum(struct usb_setup_packet *setup) {
-    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
-        switch (setup->wValue >> 8u) {
-        case FEATURE_VOLUME_CONTROL:
-            usb_start_tiny_control_in_transfer(MAX_VOLUME, 2);
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool do_get_resolution(struct usb_setup_packet *setup) {
-    if ((setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK) == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
-        switch (setup->wValue >> 8u) {
-        case FEATURE_VOLUME_CONTROL:
-            usb_start_tiny_control_in_transfer(VOLUME_RESOLUTION, 2);
-            return true;
-        }
-    }
-    return false;
-}
-
-static void audio_cmd_packet(struct usb_endpoint *ep) {
-    assert(audio_control_cmd_t.cmd == AUDIO_REQ_SetCurrent);
-    struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
-    audio_control_cmd_t.cmd = 0;
-    if (buffer->data_len >= audio_control_cmd_t.len) {
-        if (audio_control_cmd_t.type == USB_REQ_TYPE_RECIPIENT_INTERFACE) {
-            switch (audio_control_cmd_t.cs) {
-            case FEATURE_MUTE_CONTROL:
-                audio_state.mute = buffer->data[0];
-                break;
-            case FEATURE_VOLUME_CONTROL:
-                audio_set_volume(*(int16_t *) buffer->data);
-                break;
+// UAC1 feature unit (entity 2) — mute + master volume.
+static bool uac1_handle_fu_get(uint8_t rhport, tusb_control_request_t const *req) {
+    uint8_t cs = TU_U16_HIGH(req->wValue);
+    switch (req->bRequest) {
+        case UAC1_REQ_GET_CUR:
+            if (cs == UAC1_FU_CTRL_MUTE) {
+                static uint8_t m;
+                m = audio_state.mute ? 1 : 0;
+                return tud_control_xfer(rhport, req, &m, 1);
             }
-        } else if (audio_control_cmd_t.type == USB_REQ_TYPE_RECIPIENT_ENDPOINT) {
-            if (audio_control_cmd_t.cs == ENDPOINT_FREQ_CONTROL) {
-                uint32_t new_freq = (*(uint32_t *) buffer->data) & 0x00ffffffu;
-                if (audio_state.freq != new_freq) {
+            if (cs == UAC1_FU_CTRL_VOLUME) {
+                static int16_t v;
+                v = audio_state.volume;
+                return tud_control_xfer(rhport, req, &v, 2);
+            }
+            break;
+        case UAC1_REQ_GET_MIN:
+            if (cs == UAC1_FU_CTRL_VOLUME) {
+                static int16_t v = MIN_VOLUME;
+                return tud_control_xfer(rhport, req, &v, 2);
+            }
+            break;
+        case UAC1_REQ_GET_MAX:
+            if (cs == UAC1_FU_CTRL_VOLUME) {
+                static int16_t v = MAX_VOLUME;
+                return tud_control_xfer(rhport, req, &v, 2);
+            }
+            break;
+        case UAC1_REQ_GET_RES:
+            if (cs == UAC1_FU_CTRL_VOLUME) {
+                static int16_t v = VOLUME_RESOLUTION;
+                return tud_control_xfer(rhport, req, &v, 2);
+            }
+            break;
+    }
+    return false;
+}
+
+static bool uac1_handle_ep_get(uint8_t rhport, tusb_control_request_t const *req) {
+    uint8_t cs = TU_U16_HIGH(req->wValue);
+    if (req->bRequest == UAC1_REQ_GET_CUR && cs == UAC1_EP_CTRL_SAMPLING_FREQ) {
+        static uint8_t freq_bytes[3];
+        uint32_t f = audio_state.freq;
+        freq_bytes[0] = (uint8_t)(f & 0xFF);
+        freq_bytes[1] = (uint8_t)((f >> 8) & 0xFF);
+        freq_bytes[2] = (uint8_t)((f >> 16) & 0xFF);
+        return tud_control_xfer(rhport, req, freq_bytes, 3);
+    }
+    return false;
+}
+
+static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req) {
+    // Note: vendor-type requests never reach this callback.  TinyUSB routes
+    // them directly to tud_vendor_control_xfer_cb (usbd.c:727-730) without
+    // consulting class drivers.  See vendor_commands.c for the vendor dispatch.
+
+    if (stage == CONTROL_STAGE_SETUP) {
+        // --- Standard requests on our interfaces ---
+        if (req->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD) {
+            if (req->bRequest == TUSB_REQ_SET_INTERFACE) {
+                uint8_t itf = TU_U16_LOW(req->wIndex);
+                uint8_t alt = TU_U16_LOW(req->wValue);
+                if (itf == uac1.ac_itf) {
+                    // AC interface only has alt 0
+                    if (alt != 0) return false;
+                    return tud_control_status(rhport, req);
+                }
+                if (itf == uac1.as_itf) {
+                    if (!uac1_apply_alt(rhport, alt)) return false;
+                    return tud_control_status(rhport, req);
+                }
+                if (itf == uac1.vendor_itf) {
+                    // Vendor interface has only alt 0
+                    if (alt != 0) return false;
+                    return tud_control_status(rhport, req);
+                }
+                return false;
+            }
+            if (req->bRequest == TUSB_REQ_GET_INTERFACE) {
+                uint8_t itf = TU_U16_LOW(req->wIndex);
+                static uint8_t alt_resp;
+                if (itf == uac1.ac_itf) {
+                    alt_resp = 0;
+                } else if (itf == uac1.as_itf) {
+                    alt_resp = uac1.cur_alt;
+                } else if (itf == uac1.vendor_itf) {
+                    alt_resp = 0;
+                } else {
+                    return false;
+                }
+                return tud_control_xfer(rhport, req, &alt_resp, 1);
+            }
+            return false;
+        }
+
+        // --- Class requests ---
+        if (req->bmRequestType_bit.type == TUSB_REQ_TYPE_CLASS) {
+            uint8_t recipient = req->bmRequestType_bit.recipient;
+            bool is_get = (req->bmRequestType_bit.direction == TUSB_DIR_IN);
+
+            if (recipient == TUSB_REQ_RCPT_INTERFACE) {
+                uint8_t itf      = TU_U16_LOW(req->wIndex);
+                uint8_t entityID = TU_U16_HIGH(req->wIndex);
+                if (itf != uac1.ac_itf) return false;
+                if (entityID != UAC1_FEATURE_UNIT_ID) return false;
+
+                if (is_get) return uac1_handle_fu_get(rhport, req);
+
+                // SET_CUR: schedule data stage.
+                if (req->bRequest == UAC1_REQ_SET_CUR) {
+                    uint16_t len = req->wLength;
+                    if (len == 0 || len > sizeof(uac1_ctrl_buf)) return false;
+                    uac1.pending_cs        = TU_U16_HIGH(req->wValue);
+                    uac1.pending_recipient = TUSB_REQ_RCPT_INTERFACE;
+                    uac1.pending_len       = (uint8_t)len;
+                    return tud_control_xfer(rhport, req, uac1_ctrl_buf, len);
+                }
+                return false;
+            }
+
+            if (recipient == TUSB_REQ_RCPT_ENDPOINT) {
+                uint8_t ep = TU_U16_LOW(req->wIndex);
+                if (ep != AUDIO_OUT_ENDPOINT) return false;
+
+                if (is_get) return uac1_handle_ep_get(rhport, req);
+
+                if (req->bRequest == UAC1_REQ_SET_CUR) {
+                    uint16_t len = req->wLength;
+                    if (len == 0 || len > sizeof(uac1_ctrl_buf)) return false;
+                    uac1.pending_cs        = TU_U16_HIGH(req->wValue);
+                    uac1.pending_recipient = TUSB_REQ_RCPT_ENDPOINT;
+                    uac1.pending_len       = (uint8_t)len;
+                    return tud_control_xfer(rhport, req, uac1_ctrl_buf, len);
+                }
+                return false;
+            }
+            return false;
+        }
+
+        return false;
+    }
+
+    if (stage == CONTROL_STAGE_DATA) {
+        // Apply SET_CUR payload captured at SETUP.
+        if (req->bmRequestType_bit.type != TUSB_REQ_TYPE_CLASS) return true;
+        if (uac1.pending_recipient == TUSB_REQ_RCPT_INTERFACE) {
+            if (uac1.pending_cs == UAC1_FU_CTRL_MUTE) {
+                audio_state.mute = uac1_ctrl_buf[0];
+            } else if (uac1.pending_cs == UAC1_FU_CTRL_VOLUME) {
+                int16_t v;
+                memcpy(&v, uac1_ctrl_buf, sizeof(v));
+                audio_set_volume(v);
+            }
+        } else if (uac1.pending_recipient == TUSB_REQ_RCPT_ENDPOINT) {
+            if (uac1.pending_cs == UAC1_EP_CTRL_SAMPLING_FREQ) {
+                uint32_t new_freq = (uint32_t)uac1_ctrl_buf[0]
+                                  | ((uint32_t)uac1_ctrl_buf[1] << 8)
+                                  | ((uint32_t)uac1_ctrl_buf[2] << 16);
+                // Only accept rates that the AS alt descriptors advertise.
+                // Accepting arbitrary values used to commit audio_state.freq
+                // to garbage that perform_rate_change() would silently
+                // coerce to 44100 — GET_CUR would then lie to the host.
+                bool rate_ok = (new_freq == 44100u ||
+                                new_freq == 48000u ||
+                                new_freq == 96000u);
+                if (!rate_ok) {
+                    // Stall EP0 — per UAC1, unsupported control values
+                    // must be rejected rather than silently clamped.
+                    uac1.pending_recipient = 0;
+                    return false;
+                }
+                if (new_freq != audio_state.freq) {
                     audio_state.freq = new_freq;
-                    _audio_reconfigure();
+                    rate_change_pending = true;
+                    pending_rate = new_freq;
                 }
             }
         }
-    }
-    usb_start_empty_control_in_transfer_null_completion();
-}
-
-static const struct usb_transfer_type _audio_cmd_transfer_type = {
-    .on_packet = audio_cmd_packet,
-    .initial_packet_count = 1,
-};
-
-static bool do_set_current(struct usb_setup_packet *setup) {
-    if (setup->wLength && setup->wLength < 64) {
-        audio_control_cmd_t.cmd = AUDIO_REQ_SetCurrent;
-        audio_control_cmd_t.type = setup->bmRequestType & USB_REQ_TYPE_RECIPIENT_MASK;
-        audio_control_cmd_t.len = (uint8_t) setup->wLength;
-        audio_control_cmd_t.unit = setup->wIndex >> 8u;
-        audio_control_cmd_t.cs = setup->wValue >> 8u;
-        audio_control_cmd_t.cn = (uint8_t) setup->wValue;
-        usb_start_control_out_transfer(&_audio_cmd_transfer_type);
+        uac1.pending_recipient = 0;
         return true;
-    }
-    return false;
-}
-
-static bool ac_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
-    setup = __builtin_assume_aligned(setup, 4);
-
-    // Forward vendor-type requests to the vendor handler (Console sends wIndex=0)
-    if (USB_REQ_TYPE_TYPE_VENDOR == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
-        return vendor_setup_request_handler(interface, setup);
-    }
-
-    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
-        switch (setup->bRequest) {
-        case AUDIO_REQ_SetCurrent:
-            return do_set_current(setup);
-        case AUDIO_REQ_GetCurrent:
-            return do_get_current(setup);
-        case AUDIO_REQ_GetMinimum:
-            return do_get_minimum(setup);
-        case AUDIO_REQ_GetMaximum:
-            return do_get_maximum(setup);
-        case AUDIO_REQ_GetResolution:
-            return do_get_resolution(setup);
-        default:
-            break;
-        }
-    }
-    return false;
-}
-
-static bool _as_setup_request_handler(__unused struct usb_endpoint *ep, struct usb_setup_packet *setup) {
-    setup = __builtin_assume_aligned(setup, 4);
-    if (USB_REQ_TYPE_TYPE_CLASS == (setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK)) {
-        switch (setup->bRequest) {
-        case AUDIO_REQ_SetCurrent:
-            return do_set_current(setup);
-        case AUDIO_REQ_GetCurrent:
-            return do_get_current(setup);
-        case AUDIO_REQ_GetMinimum:
-            return do_get_minimum(setup);
-        case AUDIO_REQ_GetMaximum:
-            return do_get_maximum(setup);
-        case AUDIO_REQ_GetResolution:
-            return do_get_resolution(setup);
-        default:
-            break;
-        }
-    }
-    return false;
-}
-
-static bool as_set_alternate(struct usb_interface *interface, uint alt) {
-    assert(interface == &as_op_interface);
-    if (alt >= 3) return false;
-
-    uint32_t prev_alt = usb_audio_alt_set;
-    usb_audio_alt_set = alt;
-    if (alt == 2) {
-        usb_input_bit_depth = 24;
-    } else {
-        usb_input_bit_depth = 16;
-    }
-
-    // Arm/disarm SPDIF starvation diagnostics with stream state.
-    // Reset only on inactive->active transition so changing 16/24-bit alt
-    // doesn't clear counters mid-stream.
-    bool active = (alt > 0);
-    audio_spdif_set_starvation_monitoring(active);
-
-    // Reset gap-detection timestamp on stream transitions to prevent false
-    // underrun counts from stale timestamps across stream lifecycle events.
-    audio_ring_last_push_us = 0;
-
-    if (active && prev_alt == 0) {
-        audio_spdif_reset_dma_starvations();
-        stream_restart_resync_pending = true;
-        __dmb();
-    } else if (!active && prev_alt > 0) {
-        // Stream deactivation: force controller invalid, publish nominal
-        extern usb_feedback_ctrl_t fb_ctrl;
-        fb_ctrl_stream_stop(&fb_ctrl);
     }
 
     return true;
 }
 
-// Ring overrun accessor (audio_ring is static; vendor_commands.c calls this)
-uint32_t usb_audio_ring_overrun_count(void) {
-    return audio_ring.overrun_count;
+// ----------------------------------------------------------------------------
+// Endpoint transfer completion — audio RX producer + feedback re-arm.
+// Runs in USB IRQ context (rp2040/rp2350 DCD fires xfer_cb synchronously).
+// ----------------------------------------------------------------------------
+
+static bool __not_in_flash_func(uac1_driver_xfer_cb)(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint32_t xferred_bytes) {
+    if (ep_addr == AUDIO_OUT_ENDPOINT) {
+        if (result == XFER_RESULT_SUCCESS && xferred_bytes > 0) {
+            usb_audio_packets++;
+
+            // Gap detection at actual packet arrival time (preserves the same
+            // fault-counting semantics as the old _as_audio_packet callback).
+            uint32_t now = time_us_32();
+            if (audio_ring_last_push_us > 0 && !preset_loading) {
+                uint32_t gap = now - audio_ring_last_push_us;
+                if (gap > 2000 && gap < 50000) {
+                    spdif_underruns++;
+                }
+            }
+            audio_ring_last_push_us = now;
+
+            usb_audio_ring_push(&audio_ring, ep_out_buf,
+                                xferred_bytes > 0xFFFFu ? 0xFFFFu : (uint16_t)xferred_bytes);
+        }
+        // Re-arm regardless of this frame's success — iso transfers fail-open.
+        if (uac1.ep_data_open) uac1_arm_data_out(rhport);
+        return true;
+    }
+
+    if (ep_addr == AUDIO_IN_ENDPOINT) {
+        // Feedback packet transmitted; publish the current value and re-arm.
+        if (uac1.ep_fb_open) uac1_arm_feedback(rhport);
+        return true;
+    }
+
+    if (ep_addr == NOTIFY_IN_ENDPOINT) {
+        // Notification delivered; send the next pending one, if any.
+        if (uac1.notify_ep_open) usb_notify_drain(rhport);
+        return true;
+    }
+
+    return false;
+}
+
+// ----------------------------------------------------------------------------
+// SOF tick — measures device clock vs host clock, drives the Q16.16 feedback
+// servo.  Replaces the old usb_sof_irq() that lived in main.c.
+// ----------------------------------------------------------------------------
+
+static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_count) {
+    (void)rhport;
+    (void)frame_count;
+
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern volatile bool output_type_switch_in_progress;
+
+    // Skip during output-type reconfiguration (slot ownership is transiently
+    // inconsistent; reading DMA state could crash).
+    if (output_type_switch_in_progress) return;
+
+    volatile uint32_t *p_words_consumed;
+    uint32_t xfer_words;
+    uint8_t dma_ch;
+    uint8_t slot0_type = output_types[0];
+    uint32_t rate_shift;
+
+    if (slot0_type == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[0];
+        p_words_consumed = &inst->words_consumed;
+        xfer_words = inst->current_transfer_words;
+        dma_ch = inst->dma_channel;
+        rate_shift = 13;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
+        p_words_consumed = &inst->words_consumed;
+        xfer_words = inst->current_transfer_words;
+        dma_ch = inst->dma_channel;
+        rate_shift = 12;
+    }
+
+    uint32_t remaining = dma_channel_hw_addr(dma_ch)->transfer_count;
+    uint32_t current_total = *p_words_consumed + (xfer_words - remaining);
+
+    fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift, spdif0_consumer_fill);
+
+    uint32_t fb_10_14 = fb_ctrl_get_10_14(&fb_ctrl);
+    if (fb_10_14) feedback_10_14 = fb_10_14;
 }
 
 // Runtime pin configuration
@@ -712,57 +1159,6 @@ bool    i2s_mck_enabled = false;             // MCK enabled state
 // Wire/flash format uses uint8_t where 256 wraps to 0 — encode/decode at boundaries only.
 uint16_t i2s_mck_multiplier = 128;
 
-
-// ----------------------------------------------------------------------------
-// DEVICE-LEVEL SETUP REQUEST HANDLER (WCID / MS OS descriptors)
-// ----------------------------------------------------------------------------
-
-static bool device_setup_request_handler(struct usb_device *dev, struct usb_setup_packet *setup) {
-    (void)dev;
-    setup = __builtin_assume_aligned(setup, 4);
-
-    // Intercept GET_DESCRIPTOR(String, 0xEE) — MS OS String Descriptor
-    // The default string handler only converts ASCII→UTF-16, but the MS OS
-    // string descriptor is a fixed 18-byte binary blob that must be returned raw.
-    if (!(setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK) &&
-        (setup->bmRequestType & USB_DIR_IN) &&
-        setup->bRequest == USB_REQUEST_GET_DESCRIPTOR &&
-        setup->wValue == 0x03EE) {
-        uint16_t len = setup->wLength < MS_OS_STRING_DESC_LEN ? setup->wLength : MS_OS_STRING_DESC_LEN;
-        vendor_send_response(ms_os_string_descriptor, len);
-        return true;
-    }
-
-    // Handle Microsoft OS vendor requests (WCID compat ID and ext props)
-    if ((setup->bmRequestType & USB_REQ_TYPE_TYPE_MASK) == USB_REQ_TYPE_TYPE_VENDOR &&
-        setup->bRequest == MS_VENDOR_CODE) {
-        switch (setup->wIndex) {
-            case 0x0004: {
-                uint16_t len = setup->wLength < MS_COMPAT_ID_DESC_LEN ? setup->wLength : MS_COMPAT_ID_DESC_LEN;
-                vendor_send_response(ms_compat_id_descriptor, len);
-                return true;
-            }
-            case 0x0005: {
-                uint16_t len = setup->wLength < MS_EXT_PROP_DESC_LEN ? setup->wLength : MS_EXT_PROP_DESC_LEN;
-                vendor_send_response(ms_ext_prop_descriptor, len);
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-// ----------------------------------------------------------------------------
-// STRING DESCRIPTOR CALLBACK (with MS OS string at index 0xEE)
-// ----------------------------------------------------------------------------
-
-static const char *_get_descriptor_string(uint index) {
-    if (index >= 1 && index <= count_of(descriptor_strings)) {
-        return descriptor_strings[index - 1];
-    }
-    return "";
-}
 
 // ----------------------------------------------------------------------------
 // INIT
@@ -915,45 +1311,16 @@ void usb_sound_card_init(void) {
     audio_spdif_enable_sync(spdif_all, 2);
 #endif
 
-    // Initialize pico-extras USB device with 3 interfaces: AC, AS, Vendor
-
-    // Audio Control interface
-    usb_interface_init(&ac_interface, &audio_device_config.ac_interface, NULL, 0, true);
-    ac_interface.setup_request_handler = ac_setup_request_handler;
-
-    // Audio Streaming interface with OUT + sync endpoints
-    static struct usb_endpoint *const op_endpoints[] = {
-        &ep_op_out, &ep_op_sync
-    };
-    usb_interface_init(&as_op_interface, &audio_device_config.as_op_interface, op_endpoints, count_of(op_endpoints), true);
-    as_op_interface.set_alternate_handler = as_set_alternate;
-    ep_op_out.setup_request_handler = _as_setup_request_handler;
-    as_transfer.type = &as_transfer_type;
-    usb_set_default_transfer(&ep_op_out, &as_transfer);
-    as_sync_transfer.type = &as_sync_transfer_type;
-    usb_set_default_transfer(&ep_op_sync, &as_sync_transfer);
-
-    // Vendor interface (control-only, no endpoints)
-    usb_interface_init(&vendor_interface, &audio_device_config.vendor_interface, NULL, 0, true);
-    vendor_interface.setup_request_handler = vendor_setup_request_handler;
-
-    // Initialize USB device
-    static struct usb_interface *const boot_device_interfaces[] = {
-        &ac_interface,
-        &as_op_interface,
-        &vendor_interface,
-    };
-    struct usb_device *device = usb_device_init(&boot_device_descriptor, &audio_device_config.descriptor,
-        boot_device_interfaces, count_of(boot_device_interfaces),
-        _get_descriptor_string);
-    assert(device);
-    device->setup_request_handler = device_setup_request_handler;
+    // Initialize TinyUSB device stack.  The UAC1 class driver registered via
+    // usbd_app_driver_get_cb() will own the AC + AS interfaces.
+    tud_init(0);
 
     // Initialize DSP
     dsp_init_default_filters();
     dsp_recalculate_all_filters(48000.0f);
     audio_set_volume(DEFAULT_VOLUME);
-    _audio_reconfigure();
+    rate_change_pending = true;
+    pending_rate = audio_state.freq;
 
     // Initialize Core 1 EQ worker pointer to shared output buffer
     core1_eq_work.buf_out = buf_out;
@@ -961,6 +1328,4 @@ void usb_sound_card_init(void) {
     // Initialize ADC for temperature sensor
     adc_init();
     adc_set_temp_sensor_enabled(true);
-
-    usb_device_start();
 }

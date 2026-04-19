@@ -2,7 +2,7 @@
  * USB Feedback Controller — Q16.16 rate + fill servo
  *
  * Pure module: no Pico SDK dependencies, no hardware access.
- * All hardware interaction happens in the caller (usb_sof_irq).
+ * All hardware interaction happens in the caller (uac1_driver_sof).
  */
 
 #include "usb_feedback_controller.h"

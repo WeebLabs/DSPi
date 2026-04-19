@@ -1,8 +1,10 @@
 /*
  * vendor_commands.h — Vendor USB control request handlers for DSPi
  *
- * Extracted from usb_audio.c: GET/SET dispatch, pin/MCK helpers,
- * system diagnostics (temperature, voltage), and ring buffer accessor.
+ * Phase 2: adapted for TinyUSB.  The previous pico-extras `struct usb_interface`
+ * / `struct usb_setup_packet` API is replaced by TinyUSB's stage-based
+ * `tud_control_xfer` flow.  The DSPi UAC1 class driver (`usb_audio.c`) routes
+ * vendor-class vendor-interface requests here via `vendor_control_xfer_cb`.
  */
 
 #ifndef VENDOR_COMMANDS_H
@@ -12,19 +14,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "hardware/vreg.h"
+#include "tusb.h"
 
-// Forward declarations to avoid pulling in heavy headers
-struct usb_interface;
-struct usb_setup_packet;
-
-// GET/SET vendor request dispatch (assigned to vendor_interface.setup_request_handler)
-bool vendor_setup_request_handler(struct usb_interface *interface, struct usb_setup_packet *setup);
-
-// USB control IN helper — also called by device_setup_request_handler() in usb_audio.c
-void vendor_send_response(const void *data, uint len);
-
-// Core 1 mode derivation from current output enable state
-Core1Mode derive_core1_mode(void);
+// Overrides TinyUSB's weak tud_vendor_control_xfer_cb (usbd.c:82).  TinyUSB
+// routes ALL vendor-type control transfers here directly (usbd.c:727-730),
+// bypassing class drivers, regardless of wIndex/recipient.
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req);
 
 // System statistics helpers
 uint16_t vreg_voltage_to_mv(enum vreg_voltage voltage);

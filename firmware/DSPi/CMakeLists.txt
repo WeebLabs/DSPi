@@ -41,6 +41,7 @@ add_executable(DSPi
     usb_descriptors.h
     usb_feedback_controller.c
     usb_feedback_controller.h
+    tusb_config.h
 )
 
 if (PICO_PLATFORM STREQUAL "rp2040")
@@ -59,7 +60,6 @@ pico_set_binary_type(DSPi copy_to_ram)
 
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/lufa
 )
 
 target_compile_definitions(DSPi PRIVATE
@@ -79,11 +79,6 @@ target_compile_definitions(DSPi PRIVATE
     PICO_SPDIF_RX_DMA_IRQ=1
 
     PICO_DEFAULT_UART_TX_PIN=12
-
-    # pico-extras usb_device configuration
-    PICO_USBDEV_USE_ZERO_BASED_INTERFACES=1
-    PICO_USBDEV_MAX_DESCRIPTOR_SIZE=256
-    PICO_USBDEV_ISOCHRONOUS_BUFFER_STRIDE_TYPE=2  # Legacy default; stride is now per-endpoint in usb_device.c
 )
 
 target_link_libraries(DSPi
@@ -96,7 +91,7 @@ target_link_libraries(DSPi
     pico_audio_spdif_multi
     pico_audio_i2s_multi
     pico_spdif_rx
-    usb_device
+    tinyusb_device
 )
 
 pico_add_extra_outputs(DSPi)

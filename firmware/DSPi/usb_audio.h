@@ -162,11 +162,23 @@ void update_master_volume(float db);
 void usb_sound_card_init(void);
 void audio_set_volume(int16_t volume);
 
+// Push a master-volume change to the host over the interrupt IN endpoint.
+// Called internally from update_master_volume(); vendor_commands.c brackets
+// its update_master_volume() call with notify_master_vol_host_initiated so
+// the echo-suppression #define (NOTIFY_SUPPRESS_HOST_ECHO) can distinguish
+// host-originated from device-originated changes.  Only sets pending state;
+// the actual xfer fires from usb_notify_tick() (main loop) or xfer_cb.
+void usb_notify_master_volume(float db);
+extern volatile bool notify_master_vol_host_initiated;
+
+// Drain any pending device→host notifications to the interrupt IN endpoint.
+// Called once per iteration from the main loop in main.c.
+void usb_notify_tick(void);
+
 // USB audio ring buffer — main-loop entry points for decoupled DSP processing
 void usb_audio_drain_ring(void);   // Process all pending USB audio packets
 void usb_audio_flush_ring(void);   // Discard stale ring data + reset gap timestamp
 
-// Expose serial string buffer for main.c to write unique board ID
-extern char *usb_descriptor_str_serial;
+// Exposed in usb_descriptors.h (populated by main.c from the chip unique ID).
 
 #endif // USB_AUDIO_H

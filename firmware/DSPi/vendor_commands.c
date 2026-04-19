@@ -1,8 +1,11 @@
 /*
  * vendor_commands.c — Vendor USB control request handlers for DSPi
  *
- * Extracted from usb_audio.c: GET/SET dispatch, pin/MCK helpers,
- * system diagnostics (temperature, voltage).
+ * Phase 2 (TinyUSB): the legacy pico-extras setup/packet handlers have been
+ * replaced by TinyUSB's stage-based tud_control_xfer flow.  All 30+ command
+ * handlers inside the SET and GET switch statements are unchanged — they
+ * continue to consume `vendor_rx_buf` / produce responses via
+ * `vendor_send_response()`, which now trampolines into `tud_control_xfer()`.
  *
  * All state DEFINITIONS remain in usb_audio.c; this file accesses them
  * via extern declarations in usb_audio.h.
@@ -22,9 +25,7 @@
 #include "bulk_params.h"
 #include "pdm_generator.h"
 #include "usb_descriptors.h"
-#include "pico/usb_device.h"
-#include "pico/usb_device_private.h"
-#include "pico/usb_stream_helper.h"
+#include "tusb.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "hardware/adc.h"
@@ -38,41 +39,34 @@
 #include "pico/bootrom.h"
 
 // ----------------------------------------------------------------------------
-// VENDOR-INTERNAL STATIC STATE (moved from usb_audio.c)
+// VENDOR-INTERNAL STATIC STATE
 // ----------------------------------------------------------------------------
 
-// Stream transfer state for multi-packet vendor control transfers.
-static struct usb_stream_transfer _vendor_stream;
-static struct usb_transfer _vendor_ack_transfer;
-
-static struct usb_stream_transfer_funcs _vendor_stream_funcs = {
-    .on_chunk = usb_stream_noop_on_chunk,
-    .on_packet_complete = usb_stream_noop_on_packet_complete
-};
-
-// GET completion: data sent -> receive status-stage OUT ZLP from host
-static void _vendor_get_complete(__unused struct usb_endpoint *ep,
-                                 __unused struct usb_transfer *t) {
-    usb_start_empty_transfer(usb_get_control_out_endpoint(), &_vendor_ack_transfer, NULL);
-}
-
-// SET status-stage ACK sent -> signal main loop to apply params
-static void _vendor_set_ack_done(__unused struct usb_endpoint *ep,
-                                 __unused struct usb_transfer *t) {
-    bulk_params_pending = true;
-}
-
-// SET completion: data received -> send status-stage IN ZLP, then signal main loop
-static void _vendor_set_complete(__unused struct usb_endpoint *ep,
-                                 __unused struct usb_transfer *t) {
-    usb_start_empty_transfer(usb_get_control_in_endpoint(), &_vendor_ack_transfer,
-                             _vendor_set_ack_done);
-}
-
-// Buffer for vendor SET requests
+// SET payload buffer (wLength <= 64 for regular SET; bulk SET uses bulk_param_buf).
 static uint8_t vendor_rx_buf[64];
 static uint8_t vendor_last_request = 0;
 static uint16_t vendor_last_wValue = 0;
+static uint16_t vendor_last_wLength = 0;
+
+// Captured during SETUP so vendor_send_response() can issue tud_control_xfer()
+// without every GET case having to plumb rhport + request through.
+static uint8_t _vendor_rhport;
+static tusb_control_request_t const *_vendor_current_req;
+
+// Internal helpers exported via vendor_send_response() replacement.
+static void vendor_send_response(const void *data, uint16_t len);
+
+// Forward declarations: SET data-stage and GET dispatch.
+static void vendor_handle_set_data(tusb_control_request_t const *req);
+static bool vendor_handle_get(tusb_control_request_t const *req);
+
+// Shim type preserved from the pico-extras era so the SET handler case
+// bodies (which still read `buffer->data_len` and `buffer->data`) compile
+// unmodified against TinyUSB's already-buffered control data.
+typedef struct {
+    uint8_t *data;
+    uint16_t data_len;
+} vendor_buffer_t;
 
 // ----------------------------------------------------------------------------
 // SYSTEM STATISTICS HELPERS (moved from usb_audio.c)
@@ -155,18 +149,7 @@ int16_t read_temperature_cdeg(void) {
 // CORE 1 MODE DERIVATION (moved from usb_audio.c)
 // ----------------------------------------------------------------------------
 
-// Derive Core 1 mode from current output enable state
-Core1Mode derive_core1_mode(void) {
-    // PDM output (last) takes priority — checked first
-    if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled)
-        return CORE1_MODE_PDM;
-    // Any of outputs 2-7 enabled → EQ worker
-    for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
-        if (matrix_mixer.outputs[out].enabled)
-            return CORE1_MODE_EQ_WORKER;
-    }
-    return CORE1_MODE_IDLE;
-}
+// derive_core1_mode lives in usb_audio.c (moved during Phase 1 migration).
 
 // ----------------------------------------------------------------------------
 // MCK HELPERS (moved from usb_audio.c)
@@ -228,12 +211,15 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
 // VENDOR SET HANDLER (moved from usb_audio.c)
 // ----------------------------------------------------------------------------
 
-static void vendor_cmd_packet(struct usb_endpoint *ep) {
-    struct usb_buffer *buffer = usb_current_out_packet_buffer(ep);
-
-    if (buffer->data_len > 0 && buffer->data_len <= sizeof(vendor_rx_buf)) {
-        memcpy(vendor_rx_buf, buffer->data, buffer->data_len);
-    }
+static void vendor_handle_set_data(tusb_control_request_t const *req) {
+    (void)req;
+    // Shim for legacy handler bodies below.  The real payload was delivered
+    // into vendor_rx_buf by tud_control_xfer() during the DATA stage; we
+    // synthesize a local struct with the same shape as the pico-extras
+    // `buffer` the handlers used to read, so the case bodies stay unchanged.
+    vendor_buffer_t _buf = { vendor_rx_buf, vendor_last_wLength };
+    vendor_buffer_t *buffer = &_buf;
+    (void)buffer;
 
     // Process command based on saved request info
     switch (vendor_last_request) {
@@ -276,7 +262,11 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             if (buffer->data_len >= 4) {
                 float db;
                 memcpy(&db, vendor_rx_buf, 4);
+                // Bracket the call so NOTIFY_SUPPRESS_HOST_ECHO (in usb_audio.c)
+                // can filter out host-originated echoes if enabled.
+                notify_master_vol_host_initiated = true;
                 update_master_volume(db);
+                notify_master_vol_host_initiated = false;
             }
             break;
 
@@ -630,56 +620,41 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
         }
     }
 
-    usb_start_empty_control_in_transfer_null_completion();
-}
-
-static const struct usb_transfer_type _vendor_cmd_transfer_type = {
-    .on_packet = vendor_cmd_packet,
-    .initial_packet_count = 1,
-};
-
-// ----------------------------------------------------------------------------
-// VENDOR RESPONSE HELPER (moved from usb_audio.c)
-// ----------------------------------------------------------------------------
-
-// Helper: write data into the control IN buffer and send
-void vendor_send_response(const void *data, uint len) {
-    struct usb_buffer *buffer = usb_current_in_packet_buffer(usb_get_control_in_endpoint());
-    memcpy(buffer->data, data, len);
-    buffer->data_len = len;
-    usb_start_single_buffer_control_in_transfer();
+    // TinyUSB auto-sends the status-stage ZLP after control_xfer_cb returns
+    // true from CONTROL_STAGE_DATA; no explicit empty-IN transfer needed.
 }
 
 // ----------------------------------------------------------------------------
-// VENDOR GET/SET REQUEST DISPATCH (moved from usb_audio.c)
+// VENDOR RESPONSE HELPER
 // ----------------------------------------------------------------------------
 
-bool vendor_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
-    setup = __builtin_assume_aligned(setup, 4);
+// Send a control IN response from the current vendor GET handler.
+// Stashes the request + rhport at SETUP so case bodies can stay unchanged.
+static void vendor_send_response(const void *data, uint16_t len) {
+    tud_control_xfer(_vendor_rhport, _vendor_current_req, (void *)data, len);
+}
 
-    if (!(setup->bmRequestType & USB_DIR_IN)) {
-        // Host -> Device (SET requests)
-        vendor_last_request = setup->bRequest;
-        vendor_last_wValue = setup->wValue;
+// Legacy compatibility shim for the pico-extras helper that sent a small
+// integer value as a control IN response in one call.  Several handlers use
+// it for scalar responses (status/enum/flag values).  Buffer must outlive
+// the EP0 transfer — static storage is fine since control xfers are
+// serialized by TinyUSB.
+static uint32_t _vendor_scalar_resp;
+static inline void usb_start_tiny_control_in_transfer(uint32_t val, uint16_t len) {
+    _vendor_scalar_resp = val;
+    vendor_send_response(&_vendor_scalar_resp, len);
+}
 
-        // Large control OUT: bulk parameter SET
-        if (setup->bRequest == REQ_SET_ALL_PARAMS &&
-            setup->wLength == sizeof(WireBulkParams)) {
-            usb_stream_setup_transfer(&_vendor_stream, &_vendor_stream_funcs,
-                                      bulk_param_buf, WIRE_BULK_BUF_SIZE,
-                                      sizeof(WireBulkParams), _vendor_set_complete);
-            _vendor_stream.ep = usb_get_control_out_endpoint();
-            usb_start_transfer(usb_get_control_out_endpoint(), &_vendor_stream.core);
-            return true;
-        }
+// ----------------------------------------------------------------------------
+// VENDOR GET DISPATCH
+// ----------------------------------------------------------------------------
 
-        if (setup->wLength && setup->wLength <= sizeof(vendor_rx_buf)) {
-            usb_start_control_out_transfer(&_vendor_cmd_transfer_type);
-            return true;
-        }
-        return false;
+static bool vendor_handle_get(tusb_control_request_t const *req) {
+    // Shim to let legacy case bodies reference `setup->...`.
+    tusb_control_request_t const *setup = req;
+    (void)setup;
 
-    } else {
+    {
         // Device -> Host (GET requests)
         static uint8_t resp_buf[64];
 
@@ -1249,16 +1224,12 @@ bool vendor_setup_request_handler(__unused struct usb_interface *interface, stru
 
             case REQ_GET_ALL_PARAMS: {
                 bulk_params_collect((WireBulkParams *)bulk_param_buf);
-                uint32_t len = sizeof(WireBulkParams);
+                uint16_t len = sizeof(WireBulkParams);
                 if (setup->wLength < len) len = setup->wLength;
-                usb_stream_setup_transfer(&_vendor_stream, &_vendor_stream_funcs,
-                                          bulk_param_buf, WIRE_BULK_BUF_SIZE, len,
-                                          _vendor_get_complete);
-                bool need_zlp = (len > 0) && ((len & 63u) == 0);
-                if (need_zlp) usb_grow_transfer(&_vendor_stream.core, 1);
-                _vendor_stream.ep = usb_get_control_in_endpoint();
-                usb_start_transfer(usb_get_control_in_endpoint(), &_vendor_stream.core);
-                return true;
+                // tud_control_xfer handles EP0 chunking (including trailing ZLP
+                // on exact-multiple-of-64 transfers) internally.
+                return tud_control_xfer(_vendor_rhport, _vendor_current_req,
+                                         bulk_param_buf, len);
             }
 
             case REQ_GET_BUFFER_STATS: {
@@ -1309,13 +1280,10 @@ bool vendor_setup_request_handler(__unused struct usb_interface *interface, stru
             }
 
             case REQ_GET_USB_ERROR_STATS: {
-                extern volatile uint32_t usb_error_count;
-                extern volatile uint32_t usb_crc_error_count;
-                extern volatile uint32_t usb_bitstuff_error_count;
-                extern volatile uint32_t usb_rx_overflow_count;
-                extern volatile uint32_t usb_rx_timeout_count;
-                extern volatile uint32_t usb_data_seq_error_count;
-
+                // TinyUSB does not expose per-category USB error counters.
+                // Return all zeros so the host app keeps working; re-plumb if
+                // a future TinyUSB version surfaces these via dcd_event or
+                // equivalent.
                 typedef struct __attribute__((packed)) {
                     uint32_t total;
                     uint32_t crc;
@@ -1325,34 +1293,14 @@ bool vendor_setup_request_handler(__unused struct usb_interface *interface, stru
                     uint32_t data_seq;
                 } UsbErrorStatsPacket;
 
-                UsbErrorStatsPacket pkt;
-                pkt.total       = usb_error_count;
-                pkt.crc         = usb_crc_error_count;
-                pkt.bitstuff    = usb_bitstuff_error_count;
-                pkt.rx_overflow = usb_rx_overflow_count;
-                pkt.rx_timeout  = usb_rx_timeout_count;
-                pkt.data_seq    = usb_data_seq_error_count;
-
+                UsbErrorStatsPacket pkt = {0};
                 memcpy(resp_buf, &pkt, sizeof(pkt));
                 vendor_send_response(resp_buf, sizeof(pkt));
                 return true;
             }
 
             case REQ_RESET_USB_ERROR_STATS: {
-                extern volatile uint32_t usb_error_count;
-                extern volatile uint32_t usb_crc_error_count;
-                extern volatile uint32_t usb_bitstuff_error_count;
-                extern volatile uint32_t usb_rx_overflow_count;
-                extern volatile uint32_t usb_rx_timeout_count;
-                extern volatile uint32_t usb_data_seq_error_count;
-
-                usb_error_count = 0;
-                usb_crc_error_count = 0;
-                usb_bitstuff_error_count = 0;
-                usb_rx_overflow_count = 0;
-                usb_rx_timeout_count = 0;
-                usb_data_seq_error_count = 0;
-
+                // No-op under TinyUSB (see REQ_GET_USB_ERROR_STATS).
                 resp_buf[0] = 1;
                 vendor_send_response(resp_buf, 1);
                 return true;
@@ -1586,4 +1534,65 @@ bool vendor_setup_request_handler(__unused struct usb_interface *interface, stru
 
         return false;
     }
+}
+
+// ----------------------------------------------------------------------------
+// PUBLIC ENTRY POINT — overrides TinyUSB's weak tud_vendor_control_xfer_cb
+// (usbd.c:82).  TinyUSB calls this directly for every vendor-type request
+// (usbd.c:727-730), bypassing class drivers.  Dispatches SETUP/DATA/ACK.
+// ----------------------------------------------------------------------------
+
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
+                                tusb_control_request_t const *req) {
+    // Stash rhport + request so vendor_send_response() can complete the xfer
+    // without every case body having to plumb them through.
+    _vendor_rhport       = rhport;
+    _vendor_current_req  = req;
+
+    if (stage == CONTROL_STAGE_SETUP) {
+        if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
+            // GET path — dispatches into the legacy switch.
+            return vendor_handle_get(req);
+        }
+
+        // SET path — schedule DATA stage receive.
+        vendor_last_request = req->bRequest;
+        vendor_last_wValue  = req->wValue;
+        vendor_last_wLength = req->wLength;
+
+        if (req->bRequest == REQ_SET_ALL_PARAMS &&
+            req->wLength == sizeof(WireBulkParams)) {
+            // Large bulk SET — tud_control_xfer handles EP0 chunking.
+            return tud_control_xfer(rhport, req, bulk_param_buf, req->wLength);
+        }
+
+        if (req->wLength == 0) {
+            // Zero-length SET — no DATA stage; ACK immediately.
+            return tud_control_status(rhport, req);
+        }
+
+        if (req->wLength <= sizeof(vendor_rx_buf)) {
+            return tud_control_xfer(rhport, req, vendor_rx_buf, req->wLength);
+        }
+
+        // Oversized SET we can't handle — STALL.
+        return false;
+    }
+
+    if (stage == CONTROL_STAGE_DATA) {
+        // SET data received — run the legacy command dispatcher.
+        if (req->bmRequestType_bit.direction == TUSB_DIR_OUT) {
+            vendor_handle_set_data(req);
+        }
+        return true;
+    }
+
+    if (stage == CONTROL_STAGE_ACK) {
+        // Status-stage completed.  Signal the main loop to apply bulk SET.
+        if (req->bmRequestType_bit.direction == TUSB_DIR_OUT &&
+            req->bRequest == REQ_SET_ALL_PARAMS) {
+            bulk_params_pending = true;
+        }
+    }
+    return true;
 }
