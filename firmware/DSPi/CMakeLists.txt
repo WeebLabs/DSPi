@@ -57,6 +57,8 @@ else()
     # RP2350: SPDIF RX on PIO2 (dedicated block, proven working)
     target_compile_definitions(DSPi PRIVATE PICO_SPDIF_RX_PIO=2)
 endif()
+# PICO_FLASH_SPI_CLKDIV=6 is set at the top-level CMakeLists so it reaches
+# the boot2 build (target-level defines don't propagate to it).
 
 pico_set_binary_type(DSPi copy_to_ram)
 

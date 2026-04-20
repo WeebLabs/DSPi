@@ -80,7 +80,15 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
-#define MAX_DELAY_SAMPLES 2048   // 42ms at 48kHz (both platforms)
+// Per-platform maximum delay line length.  RP2040 has 264 KB SRAM total and
+// runs copy_to_ram, so the delay arrays (NUM_DELAY_CHANNELS × MAX_DELAY_SAMPLES
+// × 4 bytes) compete directly with text/heap.  Keep RP2040 at 21 ms; RP2350
+// has ample SRAM for the longer window.
+#if PICO_RP2350
+#define MAX_DELAY_SAMPLES 2048   // 42 ms at 48 kHz
+#else
+#define MAX_DELAY_SAMPLES 1024   // 21 ms at 48 kHz (RP2040 SRAM budget)
+#endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
 // Latency alignment (in samples - automatically adapts to sample rate)
