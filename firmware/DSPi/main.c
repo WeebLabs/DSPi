@@ -624,6 +624,11 @@ static uint32_t samples_for_duration_ms(uint32_t sample_rate_hz, uint32_t durati
     return (uint32_t)samples;
 }
 
+// Tracks whether prepare_flash_write_operation() tore down SPDIF RX and
+// therefore owes the complete_flash_write_operation_* helpers a restart.
+// Static file-scope; flash operations are serialized via the main loop.
+static bool spdif_suspended_for_flash = false;
+
 static void prepare_flash_write_operation(void) {
     // Drain the current input source once before the mute engages so the
     // envelope starts from the freshest possible state.
@@ -657,33 +662,62 @@ static void prepare_flash_write_operation(void) {
         }
     }
 
-    // Final flush just before the ~45 ms flash blackout.  For SPDIF, drain
-    // the RX FIFO to completion (spdif_input_poll caps at 192 stereo pairs
-    // per call) so no residual samples are dropped by a FIFO overflow while
-    // interrupts are disabled.
+    // Final flush just before the ~45 ms flash blackout.  For USB, drain
+    // any residuals from the ring.
     if (active_input_source == INPUT_SOURCE_USB) {
         usb_audio_drain_ring();
-    } else if (active_input_source == INPUT_SOURCE_SPDIF) {
-        while (spdif_input_poll() > 0) {
-            /* keep pulling until the FIFO is empty */
-        }
     }
+
+    // For SPDIF: fully tear down the RX pipeline before the flash blackout.
+    // The alternative (keeping SPDIF RX running while IRQs are disabled for
+    // ~45 ms × N flash writes) causes decode-timeout alarms to fire on the
+    // blackout edge, tearing down DMA/PIO asynchronously while preset_save
+    // is between its two flash writes.  That race crashes the core.  Stop
+    // cleanly here; complete_flash_write_operation_*() restarts.
+    if (active_input_source == INPUT_SOURCE_SPDIF &&
+        spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
+        spdif_input_stop();
+        spdif_prefilling = false;
+        spdif_suspended_for_flash = true;
+    }
+}
+
+// Restart SPDIF RX if prepare_flash_write_operation() tore it down.  Must
+// be called from both full and light completion paths so every flash op
+// symmetrically restarts what it suspended.
+static void resume_spdif_after_flash(void) {
+    if (!spdif_suspended_for_flash) return;
+    spdif_suspended_for_flash = false;
+
+    // If the active source changed during the flash write (e.g. preset load
+    // that carries USB as the input source), don't restart — the pending
+    // input_source_change_pending handler would immediately stop it again.
+    if (active_input_source != INPUT_SOURCE_SPDIF) return;
+    if (input_source_change_pending) return;
+
+    // preset_loading=true is still set from prepare_pipeline_reset(); the
+    // main loop's SPDIF lock-acquisition block will fire when lock returns
+    // and run the normal drain+prefill handshake.
+    spdif_input_start();
 }
 
 // Full completion path: drain/restart all output consumer pipelines and reset
 // feedback state. Use this for operations that materially affect runtime audio
 // continuity (preset save/delete and legacy save command compatibility path).
 static void complete_flash_write_operation_full(void) {
+    // Restart SPDIF RX if prepare_flash_write_operation() suspended it.
+    // The lock-acquisition block in the main loop will drain outputs and
+    // run the prefill handshake once RX re-locks.
+    resume_spdif_after_flash();
+
     if (active_input_source == INPUT_SOURCE_SPDIF) {
         // For SPDIF input: the pre-flash settle loop pre-filled the output
-        // consumer pools with muted samples, and the flash_write_sector()
-        // SPDIF pre-blackout drain kept the RX FIFO from overflowing.  The
-        // ~45 ms blackout stops DMA chaining after ~one buffer, leaving the
-        // remaining pool buffers intact to play out silence as DMA resumes.
-        // We intentionally skip complete_pipeline_reset() — draining the
-        // pools here would discard those silent buffers and force outputs
-        // to restart against an empty pool, which itself causes pops and
-        // uneven inter-slot fill (the symptom that prompted this change).
+        // consumer pools with muted samples.  The blackout stopped DMA
+        // chaining after ~one buffer, leaving the remaining pool buffers
+        // intact to play out silence as DMA resumes.  We skip
+        // complete_pipeline_reset() — draining the pools here would force
+        // outputs to restart against an empty pool, causing pops and
+        // uneven inter-slot fill.
         reset_usb_feedback_loop();
         return;
     }
@@ -697,7 +731,9 @@ static void complete_flash_write_operation_full(void) {
 // pipeline rebuild. Suitable for metadata-only flash writes (names/startup flags)
 // where DSP/output topology is unchanged.
 static inline void complete_flash_write_operation_light(void) {
-    // Intentionally empty.
+    // Symmetry with prepare_flash_write_operation(): restart SPDIF RX if
+    // it was suspended for the blackout.
+    resume_spdif_after_flash();
 }
 
 void core0_init() {
@@ -1130,10 +1166,32 @@ int main(void) {
                 usb_audio_drain_ring();
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
+                // Tear down SPDIF RX across the flash write (preset_load's
+                // dir_flush does a ~45 ms blackout).  Leaving RX running
+                // during the blackout lets decode-timeout alarms fire on the
+                // post-blackout edge, racing with the downstream pipeline.
+                // See prepare_flash_write_operation() for the same pattern.
+                bool suspended_spdif = false;
+                if (active_input_source == INPUT_SOURCE_SPDIF &&
+                    spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
+                    spdif_input_stop();
+                    spdif_prefilling = false;
+                    suspended_spdif = true;
+                }
+
                 // Apply the new preset: overwrites all DSP state (EQ, delays,
                 // matrix, gains, output_types[]), recalculates filter coefficients,
                 // transitions Core 1 mode, and writes the directory to flash.
                 preset_load(pending_preset_load_slot);
+
+                // Restart SPDIF RX if we suspended it and the load didn't
+                // switch the active input source.  The main-loop lock-acq
+                // block will handle the drain + prefill handshake.
+                if (suspended_spdif &&
+                    active_input_source == INPUT_SOURCE_SPDIF &&
+                    !input_source_change_pending) {
+                    spdif_input_start();
+                }
 
                 // Presets can carry persisted raw MCK=0 (256x). Clamp invalid
                 // 96 kHz combinations and apply the effective MCK divider now
