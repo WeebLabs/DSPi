@@ -448,7 +448,8 @@ typedef struct {
 
 enum FilterType {
     FILTER_FLAT = 0, FILTER_PEAKING = 1, FILTER_LOWSHELF = 2,
-    FILTER_HIGHSHELF = 3, FILTER_LOWPASS = 4, FILTER_HIGHPASS = 5
+    FILTER_HIGHSHELF = 3, FILTER_LOWPASS = 4, FILTER_HIGHPASS = 5,
+    FILTER_NOTCH = 6
 };
 
 typedef struct __attribute__((packed)) {
