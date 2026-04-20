@@ -19,6 +19,11 @@ firmware/eclipse_build/*
 /build
 .vscode
 
+# Python bytecode cache (from tools/)
+__pycache__/
+*.pyc
+*.pyo
+
 # Ignore all markdown files except key docs
 *.md
 !README.md
