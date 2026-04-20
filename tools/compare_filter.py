@@ -202,7 +202,9 @@ def svf_simper_to_biquad(a_coefs, m_coefs):
     D = m0 + m1 * a2 + m2 * a3
 
     zcoef = b1_B * c1 + b2_B * c2
-    const = (2 * a2 * (b2_B * c1 - b1_B * c2)
+    # (C · adj(zI−A) · B) constant term:
+    #   −b1·c1·(1−2·a3) − b2·c2·(2·a1−1) + 2·a2·(b1·c2 − b2·c1)
+    const = (2 * a2 * (b1_B * c2 - b2_B * c1)
              - b1_B * c1 * (1 - 2 * a3)
              - b2_B * c2 * (2 * a1 - 1))
 
@@ -347,6 +349,49 @@ def compare_at_config(user_mod, filter_type, fc, Q, gain_db, Fs, n_freqs=512,
     }
 
 
+# Five disparate (fc_Hz, Q, gain_dB) points per filter type — span low/mid/high
+# fc, low/mid/high Q, and (for gain-shaped types) low/mid/high gain.  Used by
+# the --quick mode so one command tests every type at representative configs
+# without running a full cross-product.
+QUICK_CONFIGS = [
+    # fc (Hz),  Q,      gain (dB)
+    (100.0,     0.707,  -12.0),
+    (500.0,     1.0,    -3.0),
+    (1500.0,    2.0,     1.0),
+    (5000.0,    0.5,     6.0),
+    (12000.0,   5.0,    12.0),
+]
+
+
+def run_quick_sweep(user_mod, types, Fs, threshold_db,
+                    n_freqs=512, impulse_length=8192):
+    header = (f"{'type':<10} {'fc Hz':>10} {'Q':>6} {'gain dB':>8} "
+              f"{'mag err':>9} {'phase err':>10}  status")
+    print(header)
+    print('-' * len(header))
+
+    failures = []
+    total = 0
+    for ft in types:
+        uses_gain = ft in ('peaking', 'lowshelf', 'highshelf')
+        for fc, Q, gain in QUICK_CONFIGS:
+            g = gain if uses_gain else 0.0
+            total += 1
+            r = compare_at_config(user_mod, ft, fc, Q, g, Fs, n_freqs,
+                                  impulse_length)
+            ok = r['max_mag_err_db'] <= threshold_db
+            status = 'OK  ' if ok else 'FAIL'
+            print(f"{ft:<10} {fc:>10.1f} {Q:>6.2f} {g:>8.1f} "
+                  f"{r['max_mag_err_db']:>7.3f}dB "
+                  f"{r['max_phase_err_deg']:>8.2f}°   {status}")
+            if not ok:
+                failures.append({'type': ft, 'fc': fc, 'Q': Q, 'gain_db': g,
+                                 'result': r})
+    print()
+    print(f"{total - len(failures)}/{total} configs within {threshold_db} dB.")
+    return failures
+
+
 def run_sweep(user_mod, types, fcs, Qs, gains_db, Fs, threshold_db,
               n_freqs=512, impulse_length=8192):
     header = (f"{'type':<10} {'fc Hz':>10} {'Q':>6} {'gain dB':>8} "
@@ -478,6 +523,10 @@ def main(argv=None):
                          "'type=peaking,fc=1000,Q=1,gain=6'")
     ap.add_argument('--plot-failures', action='store_true',
                     help='Also plot each config that exceeds the threshold')
+    ap.add_argument('--quick', action='store_true',
+                    help='Run a curated 5-config spread per filter type '
+                         '(one sweep point per type at low/mid/high '
+                         'fc × Q × gain) instead of a full cross-product sweep')
     ap.add_argument('--verify-svf', action='store_true',
                     help='Run an extra sanity check comparing the analytic '
                          'SVF → biquad conversion against a time-domain '
@@ -519,25 +568,34 @@ def main(argv=None):
         print()
 
     types = [t.strip() for t in args.types.split(',') if t.strip()]
-    if args.fcs:
-        fcs = parse_list(args.fcs, float)
+
+    if args.quick:
+        print(f"Fs={args.fs:g} Hz  threshold={args.threshold} dB  "
+              f"n_freqs/config={args.n_freqs}  (quick mode: "
+              f"{len(QUICK_CONFIGS)} configs × {len(types)} types)")
+        print()
+        failures = run_quick_sweep(user_mod, types, args.fs, args.threshold,
+                                   args.n_freqs, args.impulse_length)
     else:
-        fcs = np.round(np.logspace(np.log10(20), np.log10(18000), 7),
-                       1).tolist()
-    Qs = parse_list(args.qs, float)
-    gains = parse_list(args.gains, float)
+        if args.fcs:
+            fcs = parse_list(args.fcs, float)
+        else:
+            fcs = np.round(np.logspace(np.log10(20), np.log10(18000), 7),
+                           1).tolist()
+        Qs = parse_list(args.qs, float)
+        gains = parse_list(args.gains, float)
 
-    print(f"Fs={args.fs:g} Hz  threshold={args.threshold} dB  "
-          f"n_freqs/config={args.n_freqs}")
-    print(f"Types ({len(types)}): {types}")
-    print(f"fcs ({len(fcs)}): {fcs}")
-    print(f"Qs ({len(Qs)}): {Qs}")
-    print(f"Gains ({len(gains)}): {gains}")
-    print()
+        print(f"Fs={args.fs:g} Hz  threshold={args.threshold} dB  "
+              f"n_freqs/config={args.n_freqs}")
+        print(f"Types ({len(types)}): {types}")
+        print(f"fcs ({len(fcs)}): {fcs}")
+        print(f"Qs ({len(Qs)}): {Qs}")
+        print(f"Gains ({len(gains)}): {gains}")
+        print()
 
-    failures = run_sweep(user_mod, types, fcs, Qs, gains,
-                         args.fs, args.threshold, args.n_freqs,
-                         args.impulse_length)
+        failures = run_sweep(user_mod, types, fcs, Qs, gains,
+                             args.fs, args.threshold, args.n_freqs,
+                             args.impulse_length)
 
     if failures and args.plot_failures:
         for fail in failures:

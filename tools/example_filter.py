@@ -22,70 +22,57 @@ import numpy as np
 # ---------------------------------------------------------------------------
 
 def svf_coefficients(filter_type, fc, Q, gain_db, Fs):
-    """Return (a1, a2, a3, m0, m1, m2) for the Cytomic linear-trapezoidal SVF."""
-    A = 10.0 ** (gain_db / 40.0)
-    g = np.tan(np.pi * fc / Fs)
+    """Return (a1, a2, a3, m0, m1, m2) for the linear-trapezoidal SVF.
 
+    Mirrors the firmware exactly (firmware/DSPi/dsp_pipeline.c:94-129,
+    plus PR #39 for notch).  Start with g = tan(π·fc/Fs) and k = 1/Q,
+    then apply per-type modifications to g and/or k, derive the integrator
+    coefficients, and pick the m coefficients for the desired output shape.
+    All configurations match the RBJ Audio-EQ-Cookbook response to machine
+    precision — verified by the compare_filter.py sweep.
+    """
+    A = 10.0 ** (gain_db / 40.0)
     ft = filter_type.lower()
-    if ft == 'lowpass':
-        k = 1.0 / Q
-        a1 = 1.0 / (1 + g * (g + k))
-        a2 = g * a1
-        a3 = g * a2
-        m0 = 0.0
-        m1 = 0.0
-        m2 = 1.0
-    elif ft == 'highpass':
-        k = 1.0 / Q
-        a1 = 1.0 / (1 + g * (g + k))
-        a2 = g * a1
-        a3 = g * a2
-        m0 = 1.0
-        m1 = -k
-        m2 = -1.0
-    elif ft == 'bandpass':
-        k = 1.0 / Q
-        a1 = 1.0 / (1 + g * (g + k))
-        a2 = g * a1
-        a3 = g * a2
-        m0 = 0.0
-        m1 = 1.0
-        m2 = 0.0
-    elif ft == 'notch':
-        k = 1.0 / Q
-        a1 = 1.0 / (1 + g * (g + k))
-        a2 = g * a1
-        a3 = g * a2
-        m0 = 1.0
-        m1 = -k
-        m2 = 0.0
-    elif ft == 'peaking':
-        k = 1.0 / Q
-        a1 = 1.0 / (1 + g * (g + k))
-        a2 = g * a1
-        a3 = g * a2
-        m0 = 1.0
-        m1 = k * (A * A - 1.0)
-        m2 = 0.0
+
+    # Defaults (firmware lines 97-98)
+    g = np.tan(np.pi * fc / Fs)
+    k = 1.0 / Q
+
+    # Per-type g/k modifications (firmware lines 100-115)
+    if ft == 'peaking':
+        k = 1.0 / (Q * A)
     elif ft == 'lowshelf':
-        # Per Cytomic: g_ls = g / sqrt(A); k_ls = 1/(Q * sqrt(A))
-        gl = g / np.sqrt(A)
-        kl = 1.0 / (Q * np.sqrt(A))
-        a1 = 1.0 / (1 + gl * (gl + kl))
-        a2 = gl * a1
-        a3 = gl * a2
-        m0 = 1.0
-        m1 = kl * (A - 1.0)
-        m2 = A * A - 1.0
+        g = g / np.sqrt(A)
     elif ft == 'highshelf':
-        gh = g * np.sqrt(A)
-        kh = 1.0 / (Q * np.sqrt(A))
-        a1 = 1.0 / (1 + gh * (gh + kh))
-        a2 = gh * a1
-        a3 = gh * a2
-        m0 = A * A
-        m1 = kh * (1.0 - A) * A
-        m2 = 1.0 - A * A
+        g = g * np.sqrt(A)
+    elif ft == 'bandpass':
+        # Not in firmware — tool-only.  Scale m1 below to normalise the
+        # SVF BP peak gain (= Q) to 1, matching RBJ's constant-0-dB-peak
+        # bandpass.
+        pass
+    # lowpass, highpass, notch: no modification
+
+    # Integrator coefficients (firmware lines 117-119)
+    a1 = 1.0 / (1.0 + g * (g + k))
+    a2 = g * a1
+    a3 = g * a2
+
+    # Output mix (firmware lines 122-129, plus PR #39 for notch)
+    if ft == 'lowpass':
+        m0, m1, m2 = 0.0, 0.0, 1.0
+    elif ft == 'highpass':
+        m0, m1, m2 = 1.0, -k, -1.0
+    elif ft == 'peaking':
+        m0, m1, m2 = 1.0, k * (A * A - 1.0), 0.0
+    elif ft == 'lowshelf':
+        m0, m1, m2 = 1.0, k * (A - 1.0), A * A - 1.0
+    elif ft == 'highshelf':
+        m0, m1, m2 = A * A, k * (1.0 - A) * A, 1.0 - A * A
+    elif ft == 'notch':
+        m0, m1, m2 = 1.0, -k, 0.0
+    elif ft == 'bandpass':
+        # Tool-only: normalise peak to unity (RBJ constant-skirt-gain BP).
+        m0, m1, m2 = 0.0, k, 0.0
     else:
         raise ValueError(f"Unknown filter type: {filter_type}")
 
