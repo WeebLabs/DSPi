@@ -320,10 +320,32 @@ def get_user_response(user_mod, filter_type, fc, Q, gain_db, Fs, w,
 # Comparison
 # ---------------------------------------------------------------------------
 
+def auto_impulse_length(fc, Q, Fs, user_min=8192):
+    """Pick an impulse length long enough for the filter to decay to -160 dB.
+
+    For a 2-pole section with poles at z ≈ 1 − w0/(2Q), the per-sample decay
+    is log(r) ≈ −w0/(2Q).  To reach ε = 1e-8 (≈ -160 dB) we need
+        N ≈ -log(ε) · 2Q·Fs / (2π·fc)
+    samples.  Round up to the next power of two, floor at `user_min`, cap at
+    1M samples (covers fc=2 Hz, Q=20 at 48 kHz — well past any realistic EQ
+    configuration).  Pure-math user_coefficients/user_response modes ignore
+    this — it only matters for user_process (time-domain impulse simulation).
+    """
+    decay_samples = 18.4 * Q * Fs / (np.pi * max(fc, 1.0))
+    N = max(user_min, int(decay_samples))
+    N = min(N, 1 << 20)  # 1M-sample hard cap
+    # Round up to next power of two for efficient FFT/DTFT use.
+    N = 1 << (int(N - 1).bit_length())
+    return N
+
+
 def compare_at_config(user_mod, filter_type, fc, Q, gain_db, Fs, n_freqs=512,
-                      impulse_length=8192):
+                      impulse_length=None):
     f = np.logspace(np.log10(10.0), np.log10(Fs * 0.475), n_freqs)
     w = 2 * np.pi * f / Fs
+
+    if impulse_length is None:
+        impulse_length = auto_impulse_length(fc, Q, Fs)
 
     ref = eval_biquad(rbj_coefficients(filter_type, fc, Q, gain_db, Fs), w)
     user = get_user_response(user_mod, filter_type, fc, Q, gain_db, Fs, w,
@@ -515,9 +537,11 @@ def main(argv=None):
                     help='Maximum acceptable magnitude error in dB')
     ap.add_argument('--n-freqs', type=int, default=512,
                     help='Number of frequency points per config')
-    ap.add_argument('--impulse-length', type=int, default=8192,
-                    help='Impulse-response length for `user_process` mode '
-                         '(default 8192 samples)')
+    ap.add_argument('--impulse-length', type=int, default=0,
+                    help='Impulse-response length for `user_process` mode. '
+                         'Default 0 = auto-size per config based on fc/Q so '
+                         'extreme configs still decay enough for a clean '
+                         'DTFT.  Pass an explicit positive value to override.')
     ap.add_argument('--plot', default=None,
                     help="Plot a single config, e.g. "
                          "'type=peaking,fc=1000,Q=1,gain=6'")
@@ -569,13 +593,16 @@ def main(argv=None):
 
     types = [t.strip() for t in args.types.split(',') if t.strip()]
 
+    # 0 → auto-size per config; positive → fixed length for every config.
+    impulse_length = args.impulse_length if args.impulse_length > 0 else None
+
     if args.quick:
         print(f"Fs={args.fs:g} Hz  threshold={args.threshold} dB  "
               f"n_freqs/config={args.n_freqs}  (quick mode: "
               f"{len(QUICK_CONFIGS)} configs × {len(types)} types)")
         print()
         failures = run_quick_sweep(user_mod, types, args.fs, args.threshold,
-                                   args.n_freqs, args.impulse_length)
+                                   args.n_freqs, impulse_length)
     else:
         if args.fcs:
             fcs = parse_list(args.fcs, float)
@@ -595,7 +622,7 @@ def main(argv=None):
 
         failures = run_sweep(user_mod, types, fcs, Qs, gains,
                              args.fs, args.threshold, args.n_freqs,
-                             args.impulse_length)
+                             impulse_length)
 
     if failures and args.plot_failures:
         for fail in failures:
