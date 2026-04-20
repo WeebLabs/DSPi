@@ -125,6 +125,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
             case FILTER_PEAKING:   svm0_f = 1.0f; svm1_f = k*(A*A - 1.0f);  svm2_f = 0.0f;       break;
             case FILTER_LOWSHELF:  svm0_f = 1.0f; svm1_f = k*(A - 1.0f);    svm2_f = A*A - 1.0f; break;
             case FILTER_HIGHSHELF: svm0_f = A*A;  svm1_f = k*(1.0f-A)*A;    svm2_f = 1.0f - A*A; break;
+            case FILTER_NOTCH:     svm0_f = 1.0f; svm1_f = -1*k;            svm2_f = 0.0f;       break;
             default: break;
         }
 
@@ -152,6 +153,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
         case FILTER_PEAKING: b0_f = 1+alpha*A; b1_f = -2*cs; b2_f = 1-alpha*A; a0_f = 1+alpha/A; a1_f = -2*cs; a2_f = 1-alpha/A; break;
         case FILTER_LOWSHELF: b0_f = A*((A+1)-(A-1)*cs+2*sqrtf(A)*alpha); b1_f = 2*A*((A-1)-(A+1)*cs); b2_f = A*((A+1)-(A-1)*cs-2*sqrtf(A)*alpha); a0_f = (A+1)+(A-1)*cs+2*sqrtf(A)*alpha; a1_f = -2*((A-1)+(A+1)*cs); a2_f = (A+1)+(A-1)*cs-2*sqrtf(A)*alpha; break;
         case FILTER_HIGHSHELF: b0_f = A*((A+1)+(A-1)*cs+2*sqrtf(A)*alpha); b1_f = -2*A*((A-1)+(A+1)*cs); b2_f = A*((A+1)+(A-1)*cs-2*sqrtf(A)*alpha); a0_f = (A+1)-(A-1)*cs+2*sqrtf(A)*alpha; a1_f = 2*((A-1)-(A+1)*cs); a2_f = (A+1)-(A-1)*cs-2*sqrtf(A)*alpha; break;
+        case FILTER_NOTCH: b0_f = 1.0f; b1_f = -2*cs; b2_f = 1.0f; a0_f = 1+alpha; a1_f=-2*cs; a2_f=1-alpha;
         default: break;
     }
 
@@ -319,6 +321,7 @@ void dsp_process_channel_block(Biquad * __restrict biquads, float * __restrict s
                     }
                     break;
                 case FILTER_PEAKING:
+                case FILTER_NOTCH:
                     for (uint32_t i = 0; i < count; i++) {
                         float in = *sp;
                         float v3 = in - ic2eq;
