@@ -8,6 +8,14 @@ endif()
 # Always use local pico-extras (contains modified libraries)
 set(PICO_EXTRAS_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-extras CACHE PATH "" FORCE)
 
+# Override the "pico" board's PICO_FLASH_SPI_CLKDIV=2 default.  DSPi overclocks
+# RP2040 to 307.2 MHz, making div=2 yield 153.6 MHz flash clock — above the
+# W25Q080's 104-133 MHz rated max.  Reads survive (single-shot at boot) but
+# erase/program can't be clocked reliably at that rate, and preset saves
+# silently fail verification.  Divider 6 → 51.2 MHz, safely within spec.
+# Must be set BEFORE pico_sdk_init() so it propagates to the boot2 build too.
+add_compile_definitions(PICO_FLASH_SPI_CLKDIV=6)
+
 # Pull in PICO SDK (must be before project)
 include(pico_sdk_import.cmake)
 
