@@ -404,7 +404,7 @@ static void dir_ensure(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;     // Default to slot 0
-    dir_cache.include_pins = 0;              // Don't include pins by default
+    dir_cache.include_pins = 1;              // Include pins in preset load by default
     dir_cache.include_master_volume = 0;     // Don't include master volume by default
     dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
     dir_cache.slot_occupied = 0;             // All slots empty
@@ -974,7 +974,7 @@ static bool migrate_legacy(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;
-    dir_cache.include_pins = 0;
+    dir_cache.include_pins = 1;
     dir_cache.include_master_volume = 0;
     dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
