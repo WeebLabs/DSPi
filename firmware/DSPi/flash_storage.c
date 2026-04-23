@@ -388,7 +388,7 @@ static void dir_ensure(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;     // Default to slot 0
-    dir_cache.include_pins = 0;              // Don't include pins by default
+    dir_cache.include_pins = 1;              // Include pins in preset load by default
     dir_cache.include_master_volume = 0;     // Don't include master volume by default
     dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
@@ -933,7 +933,7 @@ static bool migrate_legacy(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;
-    dir_cache.include_pins = 0;
+    dir_cache.include_pins = 1;
     dir_cache.include_master_volume = 0;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
