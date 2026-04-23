@@ -22,6 +22,8 @@ add_executable(DSPi
     dcp_inline.h
     dsp_pipeline.c
     dsp_pipeline.h
+    flash_clkdiv.c
+    flash_clkdiv.h
     flash_storage.c
     flash_storage.h
     leveller.c

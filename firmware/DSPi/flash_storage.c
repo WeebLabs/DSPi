@@ -30,6 +30,7 @@
 #include "audio_input.h"
 #include "spdif_input.h"
 #include "dsp_pipeline.h"
+#include "flash_clkdiv.h"
 #include "usb_audio.h"
 #include "crossfeed.h"
 #include "pdm_generator.h"
@@ -327,8 +328,8 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     if (do_lockout) multicore_lockout_start_blocking();
 
     uint32_t flags = save_and_disable_interrupts();
-    flash_range_erase(offset, FLASH_SECTOR_SIZE);
-    flash_range_program(offset, write_buf, write_size);
+    dspi_flash_range_erase(offset, FLASH_SECTOR_SIZE);
+    dspi_flash_range_program(offset, write_buf, write_size);
     restore_interrupts(flags);
 
     if (do_lockout) multicore_lockout_end_blocking();
@@ -819,7 +820,7 @@ uint8_t preset_delete(uint8_t slot) {
     if (do_lockout) multicore_lockout_start_blocking();
 
     uint32_t flags = save_and_disable_interrupts();
-    flash_range_erase(SLOT_SECTOR_OFFSET(slot), FLASH_SECTOR_SIZE);
+    dspi_flash_range_erase(SLOT_SECTOR_OFFSET(slot), FLASH_SECTOR_SIZE);
     restore_interrupts(flags);
 
     if (do_lockout) multicore_lockout_end_blocking();

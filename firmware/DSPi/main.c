@@ -22,6 +22,7 @@
 #include "spdif_input.h"
 #include "spdif_rx.h"
 #include "dsp_pipeline.h"
+#include "flash_clkdiv.h"
 #include "flash_storage.h"
 #include "pico/audio_i2s_multi.h"
 #include "pdm_generator.h"
@@ -757,6 +758,11 @@ void core0_init() {
     if (!set_sys_clock_hz(307200000, false)) {
         set_sys_clock_hz(150000000, false);
     }
+
+    // Drop flash clock from ROM default (~102 MHz) to sys_clk/6 ≈ 51.2 MHz
+    // for parity with RP2040.  Subsequent flash ops go through the wrappers
+    // in flash_clkdiv.c which restore this after each erase/program.
+    dspi_flash_apply_clkdiv();
 #else
     vreg_set_voltage(VREG_VOLTAGE_1_15);
     busy_wait_ms(10);
