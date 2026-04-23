@@ -8,13 +8,17 @@ endif()
 # Always use local pico-extras (contains modified libraries)
 set(PICO_EXTRAS_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-extras CACHE PATH "" FORCE)
 
-# Override the "pico" board's PICO_FLASH_SPI_CLKDIV=2 default.  DSPi overclocks
-# RP2040 to 307.2 MHz, making div=2 yield 153.6 MHz flash clock — above the
-# W25Q080's 104-133 MHz rated max.  Reads survive (single-shot at boot) but
-# erase/program can't be clocked reliably at that rate, and preset saves
-# silently fail verification.  Divider 6 → 51.2 MHz, safely within spec.
+# Override the "pico"/"pico2" boards' PICO_FLASH_SPI_CLKDIV=2 default.  DSPi
+# runs both platforms at 307.2 MHz, making div=2 yield a 153.6 MHz flash clock
+# — above the W25Q080's 104-133 MHz rated max.  Reads survive (single-shot at
+# boot) but erase/program can't be clocked reliably at that rate, and preset
+# saves silently fail verification.  Divider 6 → 51.2 MHz, safely within spec.
 # Must be set BEFORE pico_sdk_init() so it propagates to the boot2 build too.
 add_compile_definitions(PICO_FLASH_SPI_CLKDIV=6)
+# Note: PICO_FLASH_SPI_CLKDIV only reaches hardware on RP2040 (via boot2's SSI
+# setup).  On RP2350, boot2 isn't executed at all by default, and the ROM's own
+# XIP setup (CLKDIV≈3) stays in force.  The RP2350 override is done at runtime
+# in DSPi/flash_clkdiv.c by writing QMI registers directly.
 
 # Pull in PICO SDK (must be before project)
 include(pico_sdk_import.cmake)
