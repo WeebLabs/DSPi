@@ -122,8 +122,9 @@ extern uint8_t flash_set_startup_slot;
 extern volatile bool flash_set_include_pins_pending;
 extern uint8_t flash_set_include_pins_val;
 
-extern volatile bool flash_set_include_master_vol_pending;
-extern uint8_t flash_set_include_master_vol_val;
+extern volatile bool flash_set_master_volume_mode_pending;
+extern uint8_t flash_set_master_volume_mode_val;
+extern volatile bool flash_save_master_volume_pending;
 
 extern volatile bool flash_set_spdif_rx_pin_pending;
 

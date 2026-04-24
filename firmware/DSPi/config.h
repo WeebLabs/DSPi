@@ -231,13 +231,24 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Master Volume Commands
 #define REQ_SET_MASTER_VOLUME       0xD2  // payload = float dB (-128 mute sentinel, -127..0 range)
 #define REQ_GET_MASTER_VOLUME       0xD3  // returns float dB
-#define REQ_SET_INCLUDE_MASTER_VOL  0xD4  // payload = uint8_t (0/1), controls preset load behavior
-#define REQ_GET_INCLUDE_MASTER_VOL  0xD5  // returns uint8_t
+#define REQ_SET_MASTER_VOLUME_MODE  0xD4  // payload = uint8_t mode (see MASTER_VOLUME_MODE_*)
+#define REQ_GET_MASTER_VOLUME_MODE  0xD5  // returns uint8_t mode
+#define REQ_SAVE_MASTER_VOLUME      0xD6  // no payload, stores live master vol to directory
+#define REQ_GET_SAVED_MASTER_VOLUME 0xD7  // returns float dB from directory's independent field
 
 // Master Volume Constants
 #define MASTER_VOL_MUTE_DB          (-128.0f)  // Sentinel value: true -inf (mute)
 #define MASTER_VOL_MIN_DB           (-127.0f)  // Minimum non-mute attenuation
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
+
+// Master Volume Persistence Modes
+// Mode 0 (default): master volume is independent of presets. REQ_SAVE_MASTER_VOLUME
+//   stores it in the directory sector; it's applied at boot and on factory reset.
+//   Preset save/load does not touch it.
+// Mode 1: master volume is part of the preset. Saved with the preset, restored on
+//   preset load — same as the old include_master_volume=1 behavior.
+#define MASTER_VOLUME_MODE_INDEPENDENT   0
+#define MASTER_VOLUME_MODE_WITH_PRESET   1
 
 // Audio Input Source Commands
 #define REQ_SET_INPUT_SOURCE        0xE0  // payload = uint8_t (InputSource enum)

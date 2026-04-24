@@ -659,15 +659,24 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
         }
 
-        case REQ_SET_INCLUDE_MASTER_VOL: {
-            // Set whether preset load restores master volume.
+        case REQ_SET_MASTER_VOLUME_MODE: {
+            // Set master-volume persistence mode (0 = independent, 1 = per-preset).
             // Deferred to main loop — flash write in dir_flush().
-            // Payload: 1 byte (0 = don't restore, 1 = restore on load).
             if (buffer->data_len >= 1) {
-                flash_set_include_master_vol_val = vendor_rx_buf[0];
+                uint8_t m = vendor_rx_buf[0];
+                if (m > MASTER_VOLUME_MODE_WITH_PRESET) m = MASTER_VOLUME_MODE_INDEPENDENT;
+                flash_set_master_volume_mode_val = m;
                 __dmb();
-                flash_set_include_master_vol_pending = true;
+                flash_set_master_volume_mode_pending = true;
             }
+            break;
+        }
+
+        case REQ_SAVE_MASTER_VOLUME: {
+            // Persist the current live master volume into the directory's
+            // independent field.  Accepted in both modes; dormant in mode 1.
+            // No payload — main-loop dispatcher reads live master_volume_db.
+            flash_save_master_volume_pending = true;
             break;
         }
 
@@ -1259,18 +1268,18 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 //   [3]   default_slot
                 //   [4]   last_active_slot
                 //   [5]   include_pins
-                //   [6]   include_master_volume  (V12+, old apps request 6 bytes)
+                //   [6]   master_volume_mode (0 = independent, 1 = per-preset)
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
-                preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins, &inc_master_vol);
+                uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+                preset_get_directory(&occupied, &startup, &def_slot,
+                                     &last_active, &inc_pins, &mv_mode);
                 resp_buf[0] = occupied & 0xFF;
                 resp_buf[1] = occupied >> 8;
-                resp_buf[2] = mode;
+                resp_buf[2] = startup;
                 resp_buf[3] = def_slot;
                 resp_buf[4] = last_active;
                 resp_buf[5] = inc_pins;
-                resp_buf[6] = inc_master_vol;
+                resp_buf[6] = mv_mode;
                 vendor_send_response(resp_buf, 7);
                 return true;
             }
@@ -1278,10 +1287,10 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             case REQ_PRESET_GET_STARTUP: {
                 // Returns 3 bytes: startup_mode, default_slot, last_active
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
-                preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins, &inc_master_vol);
-                resp_buf[0] = mode;
+                uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+                preset_get_directory(&occupied, &startup, &def_slot,
+                                     &last_active, &inc_pins, &mv_mode);
+                resp_buf[0] = startup;
                 resp_buf[1] = def_slot;
                 resp_buf[2] = last_active;
                 vendor_send_response(resp_buf, 3);
@@ -1290,22 +1299,30 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
 
             case REQ_PRESET_GET_INCLUDE_PINS: {
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
-                preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins, &inc_master_vol);
+                uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+                preset_get_directory(&occupied, &startup, &def_slot,
+                                     &last_active, &inc_pins, &mv_mode);
                 resp_buf[0] = inc_pins;
                 vendor_send_response(resp_buf, 1);
                 return true;
             }
 
-            case REQ_GET_INCLUDE_MASTER_VOL: {
-                // Returns whether preset load restores master volume (0/1).
+            case REQ_GET_MASTER_VOLUME_MODE: {
+                // Returns master-volume persistence mode (0 or 1).
                 uint16_t occupied;
-                uint8_t mode, def_slot, last_active, inc_pins, inc_master_vol;
-                preset_get_directory(&occupied, &mode, &def_slot,
-                                     &last_active, &inc_pins, &inc_master_vol);
-                resp_buf[0] = inc_master_vol;
+                uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+                preset_get_directory(&occupied, &startup, &def_slot,
+                                     &last_active, &inc_pins, &mv_mode);
+                resp_buf[0] = mv_mode;
                 vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_SAVED_MASTER_VOLUME: {
+                // Returns the directory's independent master volume (mode 0 source).
+                float db = preset_get_saved_master_volume();
+                memcpy(resp_buf, &db, 4);
+                vendor_send_response(resp_buf, 4);
                 return true;
             }
 

@@ -114,9 +114,13 @@ uint8_t flash_set_startup_slot = 0;
 volatile bool flash_set_include_pins_pending = false;
 uint8_t flash_set_include_pins_val = 0;
 
-// Deferred include_master_volume directory update (flash write must happen on main loop)
-volatile bool flash_set_include_master_vol_pending = false;
-uint8_t flash_set_include_master_vol_val = 0;
+// Deferred master_volume_mode directory update (flash write must happen on main loop)
+volatile bool flash_set_master_volume_mode_pending = false;
+uint8_t flash_set_master_volume_mode_val = 0;
+
+// Deferred REQ_SAVE_MASTER_VOLUME — captures current live master_volume_db
+// into the directory's independent field.  Value is read at dispatch time.
+volatile bool flash_save_master_volume_pending = false;
 
 // Deferred SPDIF RX pin directory update
 volatile bool flash_set_spdif_rx_pin_pending = false;

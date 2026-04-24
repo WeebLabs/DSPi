@@ -1028,16 +1028,26 @@ int main(void) {
                 complete_flash_write_operation_light();
             }
 
-            extern volatile bool flash_set_include_master_vol_pending;
-            if (flash_set_include_master_vol_pending) {
+            extern volatile bool flash_set_master_volume_mode_pending;
+            if (flash_set_master_volume_mode_pending) {
                 uint8_t val;
                 uint32_t f = save_and_disable_interrupts();
-                extern uint8_t flash_set_include_master_vol_val;
-                val = flash_set_include_master_vol_val;
-                flash_set_include_master_vol_pending = false;
+                extern uint8_t flash_set_master_volume_mode_val;
+                val = flash_set_master_volume_mode_val;
+                flash_set_master_volume_mode_pending = false;
                 restore_interrupts(f);
                 prepare_flash_write_operation();
-                preset_set_include_master_volume(val);
+                preset_set_master_volume_mode(val);
+                complete_flash_write_operation_light();
+            }
+
+            extern volatile bool flash_save_master_volume_pending;
+            if (flash_save_master_volume_pending) {
+                uint32_t f = save_and_disable_interrupts();
+                flash_save_master_volume_pending = false;
+                restore_interrupts(f);
+                prepare_flash_write_operation();
+                preset_save_master_volume();
                 complete_flash_write_operation_light();
             }
         }

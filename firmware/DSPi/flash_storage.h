@@ -58,15 +58,15 @@ uint8_t preset_get_name(uint8_t slot, char *name_out);
 uint8_t preset_set_name(uint8_t slot, const char *name);
 
 // Get a summary of the preset directory:
-//   - slot_occupied:        16-bit bitmask (bit N = slot N occupied)
-//   - startup_mode:         PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
-//   - default_slot:         slot loaded in SPECIFIED mode (0-9)
-//   - last_active:          last slot that was loaded/saved (always 0-9)
-//   - include_pins:         whether preset load restores pin config (0/1)
-//   - include_master_volume: whether preset load restores master volume (0/1)
+//   - slot_occupied:       16-bit bitmask (bit N = slot N occupied)
+//   - startup_mode:        PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
+//   - default_slot:        slot loaded in SPECIFIED mode (0-9)
+//   - last_active:         last slot that was loaded/saved (always 0-9)
+//   - include_pins:        whether preset load restores pin config (0/1)
+//   - master_volume_mode:  MASTER_VOLUME_MODE_INDEPENDENT (0) or _WITH_PRESET (1)
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,
-                          uint8_t *include_pins, uint8_t *include_master_volume);
+                          uint8_t *include_pins, uint8_t *master_volume_mode);
 
 // Set startup behavior.
 //   mode: PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
@@ -77,8 +77,18 @@ uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot);
 // Set whether preset load/save includes pin configuration.
 void preset_set_include_pins(uint8_t include);
 
-// Set whether preset load restores master volume from the preset.
-void preset_set_include_master_volume(uint8_t include);
+// Set the master-volume persistence mode (0 = independent, 1 = per-preset).
+// Values outside the valid range are clamped to INDEPENDENT.
+void preset_set_master_volume_mode(uint8_t mode);
+
+// Copy the live master volume into the directory's independent field and
+// persist.  Accepted regardless of current mode (dormant in mode 1).
+// Returns PRESET_OK or PRESET_ERR_FLASH_WRITE.
+uint8_t preset_save_master_volume(void);
+
+// Read the directory's independent master-volume field (the value applied at
+// boot in mode 0).  Does not affect live state.
+float preset_get_saved_master_volume(void);
 
 // Set the SPDIF RX input GPIO pin (device-level, stored in directory).
 void preset_set_spdif_rx_pin(uint8_t pin);
