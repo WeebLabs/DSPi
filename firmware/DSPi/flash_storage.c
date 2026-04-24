@@ -273,16 +273,15 @@ static uint32_t crc32(const uint8_t *data, size_t len) {
 // dB-TO-LINEAR CONVERSION (no powf dependency in flash context)
 // ============================================================================
 
-// Compute 10^(db/20) using Taylor-series approximation of exp().
-// Accurate to <0.1 dB across the [-60, +20] dB range.
+// Compute 10^(db/20).  An earlier 4-term Taylor approximation here was
+// catastrophically wrong beyond ~±10 dB (at -60 dB it returned ~58 instead
+// of 0.001, producing loud/distorted output after preset load with any
+// deeply-negative gain — see preamp/gain/matrix paths below).  powf is fine:
+// this function runs from flash after XIP is up, no RAM-residency constraint.
 static float db_to_linear(float db) {
-    if (db == 0.0f) return 1.0f;
-    if (db < -60.0f) db = -60.0f;
-    if (db > 20.0f) db = 20.0f;
-    // 10^(db/20) = e^(db * ln(10)/20)
-    float x = db * 0.1151292546f;  // ln(10)/20
-    float linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-    return (linear < 0.0f) ? 0.0f : linear;
+    if (db <= -120.0f) return 0.0f;
+    if (db >=  +80.0f) db = 80.0f;
+    return powf(10.0f, db / 20.0f);
 }
 
 // ============================================================================
