@@ -1921,14 +1921,6 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
             break;
         }
 
-        case REQ_SAVE_MASTER_VOLUME: {
-            // Persist the current live master volume into the directory's
-            // independent field.  Accepted in both modes; dormant in mode 1.
-            // No payload — main-loop dispatcher reads live master_volume_db.
-            flash_save_master_volume_pending = true;
-            break;
-        }
-
         case REQ_SET_CHANNEL_NAME: {
             // wValue = channel index, payload = 1-32 bytes of name
             uint8_t ch = vendor_last_wValue & 0xFF;
@@ -2746,6 +2738,19 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
                 float db = preset_get_saved_master_volume();
                 memcpy(resp_buf, &db, 4);
                 vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_SAVE_MASTER_VOLUME: {
+                // Action-style command: persist current live master volume into
+                // the directory's independent field.  Handled in the IN switch
+                // (matching REQ_FACTORY_RESET) so the host can issue a zero- or
+                // 1-byte-IN control transfer; responds with a 1-byte status so
+                // the transfer is shaped like other action commands.  The flash
+                // write itself is deferred to the main loop.
+                flash_save_master_volume_pending = true;
+                __dmb();
+                usb_start_tiny_control_in_transfer(PRESET_OK, 1);
                 return true;
             }
 
