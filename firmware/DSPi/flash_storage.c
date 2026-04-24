@@ -91,10 +91,28 @@ typedef struct __attribute__((packed)) {
     float delay_ms;
 } FlashOutputChannel;
 
-// --- Preset Directory (sector 0) ---
+// --- Preset Directory v1 (legacy — kept only for upgrade migration) ---
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;                        // == 1
+    uint16_t reserved;
+    uint32_t crc32;
+
+    uint8_t  startup_mode;
+    uint8_t  default_slot;
+    uint8_t  last_active_slot;
+    uint8_t  include_pins;
+
+    uint16_t slot_occupied;
+    uint8_t  include_master_volume;
+    uint8_t  padding[1];
+    char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
+} PresetDirectory_v1;
+
+// --- Preset Directory v2 (current, sector 0) ---
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
-    uint16_t version;                        // Directory format version (1)
+    uint16_t version;                        // Directory format version (2)
     uint16_t reserved;
     uint32_t crc32;                          // CRC over everything after this 12-byte header
 
@@ -106,10 +124,13 @@ typedef struct __attribute__((packed)) {
 
     // Slot metadata
     uint16_t slot_occupied;                  // Bitmask: bit N = slot N has valid data
-    uint8_t  include_master_volume;          // Whether preset load restores master volume (was padding[0])
-    uint8_t  padding[1];                     // Remaining padding (was padding[1])
+    uint8_t  master_volume_mode;             // MASTER_VOLUME_MODE_INDEPENDENT or _WITH_PRESET
+    uint8_t  padding[1];
+    float    master_volume_db;               // Independent master volume (mode 0 at boot)
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
 } PresetDirectory;
+
+#define DIR_VERSION_CURRENT  2
 
 // --- Preset Slot (sectors 1-10) ---
 typedef struct __attribute__((packed)) {
@@ -340,30 +361,68 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
 // ============================================================================
 
 // Load the directory from flash into the RAM cache.
-// Returns true if a valid directory was found.
+// Returns true if a valid directory was found.  Transparently migrates a v1
+// directory to v2 on first boot of new firmware, preserving slot names,
+// startup config, and the old include_master_volume flag (which maps 1:1 to
+// master_volume_mode).  The independent master_volume_db defaults to
+// MASTER_VOL_MAX_DB so boot-time audible behavior is unchanged post-upgrade.
+static int dir_flush(void);  // forward decl — migration calls it
 static bool dir_load_cache(void) {
     const PresetDirectory *flash_dir = DIR_ADDR;
     if (flash_dir->magic != DIR_MAGIC) {
         dir_cache_valid = false;
         return false;
     }
-    // Verify CRC (covers everything after the 12-byte header)
-    const uint8_t *data_start = (const uint8_t *)&flash_dir->startup_mode;
-    size_t data_len = sizeof(PresetDirectory) - offsetof(PresetDirectory, startup_mode);
-    if (crc32(data_start, data_len) != flash_dir->crc32) {
-        dir_cache_valid = false;
-        return false;
+
+    if (flash_dir->version == DIR_VERSION_CURRENT) {
+        // Current format — CRC covers everything after the 12-byte header.
+        const uint8_t *data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t data_len = sizeof(PresetDirectory) - offsetof(PresetDirectory, startup_mode);
+        if (crc32(data_start, data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memcpy(&dir_cache, flash_dir, sizeof(dir_cache));
+        dir_cache_valid = true;
+        return true;
     }
-    memcpy(&dir_cache, flash_dir, sizeof(dir_cache));
-    dir_cache_valid = true;
-    return true;
+
+    if (flash_dir->version == 1) {
+        // Legacy v1 format — read with the old struct, validate old CRC,
+        // then migrate to v2 in memory and flush.
+        const PresetDirectory_v1 *v1 = (const PresetDirectory_v1 *)flash_dir;
+        const uint8_t *v1_data_start = (const uint8_t *)&v1->startup_mode;
+        size_t v1_data_len = sizeof(PresetDirectory_v1) - offsetof(PresetDirectory_v1, startup_mode);
+        if (crc32(v1_data_start, v1_data_len) != v1->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        dir_cache.startup_mode       = v1->startup_mode;
+        dir_cache.default_slot       = v1->default_slot;
+        dir_cache.last_active_slot   = v1->last_active_slot;
+        dir_cache.include_pins       = v1->include_pins;
+        dir_cache.slot_occupied      = v1->slot_occupied;
+        dir_cache.master_volume_mode = v1->include_master_volume
+                                         ? MASTER_VOLUME_MODE_WITH_PRESET
+                                         : MASTER_VOLUME_MODE_INDEPENDENT;
+        dir_cache.master_volume_db   = MASTER_VOL_MAX_DB;
+        memcpy(dir_cache.slot_names, v1->slot_names, sizeof(dir_cache.slot_names));
+        dir_cache_valid = true;
+        (void)dir_flush();  // persist as v2; if the flush fails, cache stays valid in RAM
+        return true;
+    }
+
+    // Unknown future version — treat as invalid.
+    dir_cache_valid = false;
+    return false;
 }
 
 // Write the RAM-cached directory back to flash.
 // Recomputes the CRC before writing.
 static int dir_flush(void) {
     dir_cache.magic = DIR_MAGIC;
-    dir_cache.version = 1;
+    dir_cache.version = DIR_VERSION_CURRENT;
     dir_cache.reserved = 0;
     // CRC covers everything after the 12-byte header (magic + version + reserved + crc32)
     const uint8_t *data_start = (const uint8_t *)&dir_cache.startup_mode;
@@ -388,7 +447,8 @@ static void dir_ensure(void) {
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;     // Default to slot 0
     dir_cache.include_pins = 1;              // Include pins in preset load by default
-    dir_cache.include_master_volume = 0;     // Don't include master volume by default
+    dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
+    dir_cache.master_volume_db   = MASTER_VOL_MAX_DB;
     dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
     strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
@@ -491,12 +551,50 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->crc32 = crc32(data_start, data_len);
 }
 
+// Apply a dB value to the live master volume globals, clamped and with
+// NaN/Inf defended.  Shared between mode-0 (directory) and mode-1 (preset)
+// apply paths.  Uses powf() because db_to_linear() clamps at -60 dB and the
+// master volume range extends to MASTER_VOL_MUTE_DB (-128).
+static void apply_master_volume_db(float db) {
+    if (!isfinite(db)) db = MASTER_VOL_MAX_DB;
+    if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
+    if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
+    master_volume_db = db;
+    if (db <= MASTER_VOL_MUTE_DB) {
+        master_volume_linear = 0.0f;
+        master_volume_q15    = 0;
+    } else {
+        float linear = powf(10.0f, db / 20.0f);
+        master_volume_linear = linear;
+        master_volume_q15    = (int32_t)(linear * 32768.0f);
+    }
+}
+
+// Decide which dB value to apply to master volume based on current mode.
+//   mode 0 (independent): use dir_cache.master_volume_db, which was set
+//     either by a prior REQ_SAVE_MASTER_VOLUME or by fresh-directory init.
+//   mode 1 (per-preset):  use slot->master_volume_db if available (V12+).
+//     Falls back to the directory value for older slots so we never leave
+//     the live globals at a stale value from a previous load.
+// `slot_or_null` may be NULL (e.g. factory-defaults path with no slot).
+static void apply_master_volume_from_mode(const PresetSlot *slot_or_null) {
+    float db;
+    if (dir_cache.master_volume_mode == MASTER_VOLUME_MODE_WITH_PRESET
+        && slot_or_null && slot_or_null->version >= 12) {
+        db = slot_or_null->master_volume_db;
+    } else {
+        db = dir_cache.master_volume_db;
+    }
+    apply_master_volume_db(db);
+}
+
 // Apply a validated PresetSlot to the live DSP state.
 // `include_pins` controls whether pin config is restored.
-// `include_master_vol` controls whether master volume is restored.
+// Master volume is *not* touched here — callers invoke
+// apply_master_volume_from_mode() separately after this returns, so mode
+// changes don't require a preset reload to take effect.
 // Does NOT trigger filter recalculation — caller must do that.
-static void apply_slot_to_live(const PresetSlot *slot, bool include_pins,
-                               bool include_master_vol) {
+static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
     // EQ
     memcpy((void *)filter_recipes, slot->filter_recipes, sizeof(filter_recipes));
 
@@ -515,25 +613,6 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins,
             float linear = db_to_linear(slot->preamp_db);
             global_preamp_mul[i] = (int32_t)(linear * (float)(1 << 28));
             global_preamp_linear[i] = linear;
-        }
-    }
-
-    // Master volume — only restored if the directory flag allows it and slot is V12+.
-    // Uses powf() instead of db_to_linear() because db_to_linear() clamps at -60 dB
-    // and master volume ranges to -127 dB.
-    if (include_master_vol && slot->version >= 12) {
-        float db = slot->master_volume_db;
-        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;  // NaN/Inf → unity (safe default)
-        if (db < MASTER_VOL_MUTE_DB) db = MASTER_VOL_MUTE_DB;
-        if (db > MASTER_VOL_MAX_DB)  db = MASTER_VOL_MAX_DB;
-        master_volume_db = db;
-        if (db <= MASTER_VOL_MUTE_DB) {
-            master_volume_linear = 0.0f;
-            master_volume_q15    = 0;
-        } else {
-            float linear = powf(10.0f, db / 20.0f);
-            master_volume_linear = linear;
-            master_volume_q15    = (int32_t)(linear * 32768.0f);
         }
     }
 
@@ -727,8 +806,8 @@ uint8_t preset_load(uint8_t slot) {
             preset_loading = false;
             return PRESET_ERR_CRC;
         }
-        apply_slot_to_live(s, dir_cache.include_pins != 0,
-                               dir_cache.include_master_volume != 0);
+        apply_slot_to_live(s, dir_cache.include_pins != 0);
+        apply_master_volume_from_mode(s);
     } else {
         // Slot not configured — apply factory defaults
         apply_factory_defaults();
@@ -850,14 +929,14 @@ uint8_t preset_set_name(uint8_t slot, const char *name) {
 
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,
-                          uint8_t *include_pins, uint8_t *include_master_volume) {
+                          uint8_t *include_pins, uint8_t *master_volume_mode) {
     dir_ensure();
-    *slot_occupied = dir_cache.slot_occupied;
-    *startup_mode = dir_cache.startup_mode;
-    *default_slot = dir_cache.default_slot;
-    *last_active = dir_cache.last_active_slot;
-    *include_pins = dir_cache.include_pins;
-    *include_master_volume = dir_cache.include_master_volume;
+    *slot_occupied      = dir_cache.slot_occupied;
+    *startup_mode       = dir_cache.startup_mode;
+    *default_slot       = dir_cache.default_slot;
+    *last_active        = dir_cache.last_active_slot;
+    *include_pins       = dir_cache.include_pins;
+    *master_volume_mode = dir_cache.master_volume_mode;
 }
 
 uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot) {
@@ -879,10 +958,29 @@ void preset_set_include_pins(uint8_t include) {
     dir_flush();
 }
 
-void preset_set_include_master_volume(uint8_t include) {
+void preset_set_master_volume_mode(uint8_t mode) {
+    if (mode > MASTER_VOLUME_MODE_WITH_PRESET) mode = MASTER_VOLUME_MODE_INDEPENDENT;
     dir_ensure();
-    dir_cache.include_master_volume = include ? 1 : 0;
+    dir_cache.master_volume_mode = mode;
     dir_flush();
+}
+
+// Copy the live master volume into the directory's independent field and
+// persist.  Accepted in both modes — in mode 1 the value is dormant until
+// the user switches to mode 0.  Matches the deferred-flush machinery used
+// for the other directory-writing setters.
+uint8_t preset_save_master_volume(void) {
+    dir_ensure();
+    dir_cache.master_volume_db = master_volume_db;
+    if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
+    return PRESET_OK;
+}
+
+// Read back the directory's independent master volume field (the value that
+// would apply at boot in mode 0).  Does not touch live globals.
+float preset_get_saved_master_volume(void) {
+    dir_ensure();
+    return dir_cache.master_volume_db;
 }
 
 uint8_t preset_get_active(void) {
@@ -933,7 +1031,8 @@ static bool migrate_legacy(void) {
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;
     dir_cache.include_pins = 1;
-    dir_cache.include_master_volume = 0;
+    dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
+    dir_cache.master_volume_db   = MASTER_VOL_MAX_DB;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
     dir_cache_valid = true;
@@ -968,8 +1067,8 @@ int preset_boot_load(void) {
         if ((dir_cache.slot_occupied & (1u << target_slot))) {
             const PresetSlot *s = validate_slot(target_slot);
             if (s) {
-                apply_slot_to_live(s, dir_cache.include_pins != 0,
-                               dir_cache.include_master_volume != 0);
+                apply_slot_to_live(s, dir_cache.include_pins != 0);
+                apply_master_volume_from_mode(s);
             } else {
                 // Corrupt data — fall back to factory defaults
                 apply_factory_defaults();
@@ -987,7 +1086,8 @@ int preset_boot_load(void) {
         // Migration succeeded; slot 0 is now populated.  Load it.
         const PresetSlot *s = validate_slot(0);
         if (s) {
-            apply_slot_to_live(s, false, false);  // Legacy migration: don't override pins or master vol
+            apply_slot_to_live(s, false);  // Legacy migration: don't override pins
+            apply_master_volume_from_mode(s);
         } else {
             apply_factory_defaults();
         }
@@ -1051,10 +1151,10 @@ static void apply_factory_defaults(void) {
         global_preamp_linear[i]  = 1.0f;
     }
 
-    // Master volume — reset to unity (no attenuation)
-    master_volume_db     = MASTER_VOL_MAX_DB;
-    master_volume_linear = 1.0f;
-    master_volume_q15    = 32768;
+    // Master volume — defer to the mode-aware helper so mode 0 restores the
+    // directory's independent value instead of always stomping to unity.
+    // (Mode 1 with slot_or_null=NULL also falls back to the directory value.)
+    apply_master_volume_from_mode(NULL);
 
     // Bypass
     bypass_master_eq = false;
