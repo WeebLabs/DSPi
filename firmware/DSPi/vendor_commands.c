@@ -672,14 +672,6 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
         }
 
-        case REQ_SAVE_MASTER_VOLUME: {
-            // Persist the current live master volume into the directory's
-            // independent field.  Accepted in both modes; dormant in mode 1.
-            // No payload — main-loop dispatcher reads live master_volume_db.
-            flash_save_master_volume_pending = true;
-            break;
-        }
-
         case REQ_SET_CHANNEL_NAME: {
             // wValue = channel index, payload = 1-32 bytes of name
             uint8_t ch = vendor_last_wValue & 0xFF;
@@ -991,6 +983,19 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 factory_reset_pending = true;
                 __dmb();
                 usb_start_tiny_control_in_transfer(FLASH_OK, 1);
+                return true;
+            }
+
+            case REQ_SAVE_MASTER_VOLUME: {
+                // Action-style command: persist current live master volume into
+                // the directory's independent field.  Handled in the IN switch
+                // (matching REQ_FACTORY_RESET) so the host can issue a zero- or
+                // 1-byte-IN control transfer; responds with a 1-byte status so
+                // the transfer is shaped like other action commands.  The flash
+                // write itself is deferred to the main loop.
+                flash_save_master_volume_pending = true;
+                __dmb();
+                usb_start_tiny_control_in_transfer(PRESET_OK, 1);
                 return true;
             }
 

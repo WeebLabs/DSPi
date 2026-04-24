@@ -233,25 +233,25 @@ Payload: [0x01]
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
+| **Direction** | Device -> Host (IN) |
 | **bRequest** | `0xD6` |
 | **wValue** | Unused (0) |
 | **wIndex** | Unused (0) |
-| **wLength** | 0 |
-| **Payload** | None |
+| **wLength** | 1 |
+| **Response** | 1 byte: status code (`PRESET_OK` = 0 on acceptance) |
 
-Copies the current live `master_volume_db` into the directory's independent storage field and flushes the directory sector to flash. This is the command that makes a chosen master volume survive a power cycle in mode 0.
+Action-style command: copies the current live `master_volume_db` into the directory's independent storage field and flushes the directory sector to flash. This is the command that makes a chosen master volume survive a power cycle in mode 0. Follows the same request shape as `REQ_FACTORY_RESET` — an IN control transfer with a 1-byte status response, no OUT payload.
 
 **Firmware behavior:**
 1. Sets a pending flag for a deferred flash write on the next main loop iteration.
-2. Main loop captures the then-current live `master_volume_db` value and writes it to the directory.
-3. No value is returned; the transfer completes once the command is accepted.
+2. Returns `PRESET_OK` (0) immediately — the status confirms acceptance, not completion of the flash write. The subsequent main-loop dispatch captures the then-current live `master_volume_db` value and writes it to the directory.
 
 **Accepted in both modes.** In mode 1 the stored value is dormant until the user switches to mode 0, so the app can issue this command regardless of mode without a pre-check. No error is surfaced for a "wrong mode" — the write simply becomes inert.
 
 **Example:** Persist the currently active master volume:
 ```
-bRequest = 0xD6, wValue = 0x0000, wIndex = 0x0000, wLength = 0
+bmRequestType = 0xC0, bRequest = 0xD6, wValue = 0x0000, wIndex = 0x0000, wLength = 1
+Response: [0x00]   (PRESET_OK)
 ```
 
 ### 3.6 REQ_GET_SAVED_MASTER_VOLUME (0xD7)
@@ -512,8 +512,11 @@ usb_vendor_out(0xD2, payload, 4);
 uint8_t mode = 1;
 usb_vendor_out(0xD4, &mode, 1);
 
-// User clicks "Save as boot default" (mode 0 persistence)
-usb_vendor_out(0xD6, NULL, 0);
+// User clicks "Save as boot default" (mode 0 persistence).
+// REQ_SAVE_MASTER_VOLUME is an IN-shaped action command like REQ_FACTORY_RESET:
+// host issues a 1-byte IN transfer, device responds with status (0 = accepted).
+uint8_t status;
+usb_vendor_in(0xD6, &status, 1);
 
 // User clicks "Revert to saved"
 float saved;
