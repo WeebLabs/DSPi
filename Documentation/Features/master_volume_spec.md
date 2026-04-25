@@ -67,7 +67,7 @@ Critically, the master volume does not change the value that loudness compensati
 |----------|-------|
 | **Type** | `float` (IEEE 754 single-precision) |
 | **Range** | -128.0 (mute) to 0.0 (unity) |
-| **Default** | 0.0 (unity -- no attenuation) |
+| **Default** | -20.0 (power-on / fresh-device default; see `MASTER_VOL_DEFAULT_DB`) |
 | **SET command** | `0xD2` (`REQ_SET_MASTER_VOLUME`) |
 | **GET command** | `0xD3` (`REQ_GET_MASTER_VOLUME`) |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
@@ -398,13 +398,13 @@ Fresh-device directory defaults:
 | Parameter | Default value |
 |-----------|---------------|
 | master_volume_mode | 0 (independent) |
-| master_volume_db (directory) | 0.0 (unity) |
+| master_volume_db (directory) | -20.0 (see `MASTER_VOL_DEFAULT_DB`) |
 
 ### Boot behavior
 
 On device startup:
-1. Live `master_volume_db` starts at 0.0 dB (unity) from the static initializer.
-2. Directory is loaded. If directory is v1 (pre-refactor), it's migrated to v2 in-place; the old `include_master_volume` flag maps 1:1 to `master_volume_mode`, and `PresetDirectory.master_volume_db` defaults to 0.0 dB so boot-time audible behavior is unchanged for upgraded devices.
+1. Live `master_volume_db` starts at -20.0 dB (`MASTER_VOL_DEFAULT_DB`) from the static initializer, with matching precomputed linear (0.1) and Q15 (3277) values. This only matters for the tiny window before preset_boot_load runs.
+2. Directory is loaded. If directory is v1 (pre-refactor), it's migrated to v2 in-place; the old `include_master_volume` flag maps 1:1 to `master_volume_mode`, and `PresetDirectory.master_volume_db` is set to `MASTER_VOL_DEFAULT_DB` (-20 dB). Upgraded devices in mode 0 boot at -20 dB instead of their previous 0 dB — quieter, not louder, so the change is safe. Mode 1 upgraders are unaffected (they read master volume from the preset slot).
 3. The preset system loads the startup slot (per the startup policy).
 4. Master volume is applied based on mode:
    - **Mode 0:** `PresetDirectory.master_volume_db` is applied to live globals — the device comes up at the user's last-saved independent value.
@@ -602,12 +602,12 @@ Devices running firmware built before the mode-flag refactor have a `PresetDirec
 1. `dir_load_cache` reads the directory's magic + version from the fixed 12-byte header.
 2. If `version == 1`, the directory is read with a local `PresetDirectory_v1` struct, its v1-sized CRC is validated, and the field values are copied into the new v2 cache:
    - `master_volume_mode` = old `include_master_volume` (direct 1:1 map — `0` stays `0` meaning "independent" with default 0 dB, `1` stays `1` meaning "with preset")
-   - `master_volume_db` = 0.0 dB (unity)
+   - `master_volume_db` = -20.0 dB (`MASTER_VOL_DEFAULT_DB`)
    - All other fields (slot names, startup mode, default slot, last active, include_pins, slot occupancy) copied verbatim
 3. The migrated cache is flushed to flash as `version = 2`. The migration is transparent and one-shot.
 4. If the v1 CRC fails to validate, the fresh-directory path runs — identical to a first-ever boot. User-visible directory state (slot names, startup config, slot occupancy) would be lost, but slot contents remain intact.
 
-Audible behavior is unchanged across the upgrade: old `include_master_volume == 0` devices boot at 0 dB (unity) in both the old and new firmware; old `include_master_volume == 1` devices continue to restore master volume from each loaded preset.
+Behavior across the upgrade: old `include_master_volume == 1` devices continue to restore master volume from each loaded preset, unchanged. Old `include_master_volume == 0` devices previously booted at 0 dB (unity); after upgrade they boot at `MASTER_VOL_DEFAULT_DB` (-20 dB) until the user issues `REQ_SAVE_MASTER_VOLUME` to persist a different value. Quieter, safer — not louder.
 
 ### Old apps with new firmware
 
