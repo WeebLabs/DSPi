@@ -406,7 +406,7 @@ static bool dir_load_cache(void) {
         dir_cache.master_volume_mode = v1->include_master_volume
                                          ? MASTER_VOLUME_MODE_WITH_PRESET
                                          : MASTER_VOLUME_MODE_INDEPENDENT;
-        dir_cache.master_volume_db   = MASTER_VOL_MAX_DB;
+        dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
         memcpy(dir_cache.slot_names, v1->slot_names, sizeof(dir_cache.slot_names));
         dir_cache_valid = true;
         (void)dir_flush();  // persist as v2; if the flush fails, cache stays valid in RAM
@@ -448,7 +448,7 @@ static void dir_ensure(void) {
     dir_cache.last_active_slot = 0;     // Default to slot 0
     dir_cache.include_pins = 1;              // Include pins in preset load by default
     dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
-    dir_cache.master_volume_db   = MASTER_VOL_MAX_DB;
+    dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
     dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
     strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
@@ -1032,7 +1032,7 @@ static bool migrate_legacy(void) {
     dir_cache.last_active_slot = 0;
     dir_cache.include_pins = 1;
     dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
-    dir_cache.master_volume_db   = MASTER_VOL_MAX_DB;
+    dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
     dir_cache_valid = true;

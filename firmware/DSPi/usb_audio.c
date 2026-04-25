@@ -153,9 +153,13 @@ volatile float global_preamp_linear[NUM_INPUT_CHANNELS]   = {[0 ... NUM_INPUT_CH
 // does NOT affect loudness compensation, leveller, or any other DSP stage.
 // Range: MASTER_VOL_MIN_DB (-127) to MASTER_VOL_MAX_DB (0), with
 // MASTER_VOL_MUTE_DB (-128) as sentinel for true silence.
-volatile float master_volume_db       = MASTER_VOL_MAX_DB;   // 0 dB = unity (no attenuation)
-volatile float master_volume_linear   = 1.0f;
-volatile int32_t master_volume_q15    = 32768;                // Unity in Q15 (for RP2040 path)
+// Power-on defaults: -20 dB (MASTER_VOL_DEFAULT_DB).  linear = 10^(-20/20) = 0.1,
+// q15 = 0.1 × 32768 ≈ 3277.  These only matter for the tiny window between C
+// startup and preset_boot_load (which overwrites all three); kept consistent
+// with the dB field so nothing briefly mismatches.
+volatile float master_volume_db       = MASTER_VOL_DEFAULT_DB;
+volatile float master_volume_linear   = 0.1f;
+volatile int32_t master_volume_q15    = 3277;
 
 // Per-channel gain and mute (legacy 3-channel interface for flash compatibility)
 volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};

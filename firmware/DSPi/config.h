@@ -236,6 +236,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOL_MUTE_DB          (-128.0f)  // Sentinel value: true -inf (mute)
 #define MASTER_VOL_MIN_DB           (-127.0f)  // Minimum non-mute attenuation
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
+#define MASTER_VOL_DEFAULT_DB       (-20.0f)   // Power-on / fresh-device default
 
 // Master Volume Persistence Modes
 // Mode 0 (default): master volume is independent of presets. REQ_SAVE_MASTER_VOLUME
