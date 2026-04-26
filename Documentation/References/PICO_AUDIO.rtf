@@ -1,0 +1,1283 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 Carlito;\f1\fnil\fcharset0 Calibri;\f2\ftech\fcharset77 Symbol;
+\f3\fnil\fcharset0 Calibri-Bold;\f4\fswiss\fcharset0 Helvetica;\f5\fswiss\fcharset0 Helvetica-Oblique;
+\f6\fnil\fcharset128 YuGo-Medium;\f7\fswiss\fcharset0 ArialMT;\f8\fnil\fcharset0 Calibri-Italic;
+\f9\froman\fcharset0 TimesNewRomanPSMT;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red38\green38\blue38;\red255\green255\blue11;
+\red251\green0\blue7;\red160\green13\blue54;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;\cssrgb\c20000\c20000\c20000;\cssrgb\c100000\c100000\c0;
+\cssrgb\c100000\c0\c0;\cssrgb\c69804\c12941\c27451;}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid1\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid1}
+{\list\listtemplateid2\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid101\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid2}
+{\list\listtemplateid3\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid201\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid3}
+{\list\listtemplateid4\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat1\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid301\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid4}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}{\listoverride\listid2\listoverridecount0\ls2}{\listoverride\listid3\listoverridecount0\ls3}{\listoverride\listid4\listoverridecount0\ls4}}
+\paperw11900\paperh16840\margl1080\margr1080
+\deftab720
+\pard\pardeftab720\partightenfactor0
+
+\f0\fs56 \cf2 \kerning1\expnd-2\expndtw-10
+\up0 \nosupersub \ulnone PICO AUDIO I2S\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \kerning1\expnd0\expndtw0 There are several factors that are key to producing high quality audio with the Raspberry Pi Pico.\
+\pard\tx360\tx720\pardeftab720\li720\fi-720\sa120\partightenfactor0
+\ls1\ilvl0
+\f2 \cf2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Clocks with accurate frequencies, phase relationships and low jitter.\
+\ls1\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Good board layout.\
+\ls1\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Input and output filtering.\
+\pard\pardeftab720\sa240\partightenfactor0
+\cf2 While many tutorials on Pico I2S focus only on output through a DAC or I2S amplifier IC, here we will also deal with signal input using audio CODECs.\
+\pard\pardeftab720\partightenfactor0
+
+\f3\b\fs36 \cf2 Clocks\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 Design constraints:\
+\pard\tx360\tx720\pardeftab720\li720\fi-720\sa120\partightenfactor0
+\ls2\ilvl0
+\f2 \cf2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Accurate clock frequencies ensure that the pitch of the captured or produced sound are as expected.\
+\ls2\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Clock jitter must be minimised, and hopefully eliminated, to minimise distortion of the audio signal.\
+\ls2\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Correct phase relationships between the various clock signals, namely MCLK, BCLK (SCLK) and LRCLK (WCLK) must be maintained.\
+\ls2\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Some DACs and CODECs do not require MCLK, as they contain internal PLLs that can generate the signal.\
+\ls2\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Other system functions (e.g. USB) must not be disturbed by adjusting the RP2040 clocking to generate I2S signals.\
+\pard\pardeftab720\partightenfactor0
+
+\f3\b\fs28 \cf2 Jitter \
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 Jitter needs to be addressed at two levels \'96 the RP2040 sys_clk frequency needs to have the lowest possible jitter, as well as the MCLK and BCLK signals created by the PIO clock dividers and code.\
+\pard\pardeftab720\li720\sa120\partightenfactor0
+
+\f4\fs16 \cf3 [sys_clk] Jitter is minimised by running the VCO at the highest possible frequency, so that higher post-divide values can be used. (DS 230)\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 For the PIO clock dividers \cb4 it is best that the integer divisor be an even number\cb1  and the fractional part should be zero, as other values will introduce unacceptable clock jitter from the delta-sigma fractional divider, particularly at low fractional values.\
+\pard\pardeftab720\li207\ri567\sa120\qc\partightenfactor0
+
+\f3\b \cf5 ??? Should the sys_clk and PIO divisors also be a power of 2????\
+\pard\pardeftab720\li720\sl259\slmult1\sa160\partightenfactor0
+
+\f4\b0\fs16 \cf3 The [PIO] clock dividers are 16-bit integer, 8-bit fractional, with first-order delta-sigma for the fractional divider. The clock divisor can vary between 1 and 65536, in increments of 1/256. 
+\f1\fs22 \cf2 \'85\
+\pard\pardeftab720\li720\partightenfactor0
+
+\f4\fs16 \cf3 For small 
+\f5\i \cf3 n
+\f4\i0 \cf3 , the jitter introduced by a fractional divider may be unacceptable. However, for larger values, this effect is much less apparent (DS 338)\
+\pard\pardeftab720\partightenfactor0
+\cf3 \
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 For the lowest possible jitter, as many of the dividers as possible should have divisors that are powers of two (1, 2, 4,8, etc). This applies most importantly to dividers close to the signal output, as jitter from dividers further up the chain tends to be evened out by the following dividers. \
+Ultimately, a balance needs to be struck between reducing jitter and finding achievable VCO and sys_clk frequencies.\
+\pard\pardeftab720\partightenfactor0
+
+\f3\b\fs28 \cf2 Frequency\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 Finding an appropriate sys_clk frequency for each of the required MCLK frequencies is not a trivial exercise given all the constraints, outlined above. \
+\
+To avoid clock jitter \
+\pard\tx360\tx720\pardeftab720\li720\fi-720\sa120\partightenfactor0
+\ls3\ilvl0
+\f2 \cf2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone sys_clk to PIO clock divisors for MCLK / BCLK should be integral and even numbers. \uc0\u8232 As MCLK is always an even, integral multiplier of BCLK, constraining MCLK is sufficient to ensure an appropriate BCLK divisor.\
+\ls3\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone While sys_clk should preferably be an even (or, even better, a power of 2) divisor of the VCO frequency (particularly the POSTDIV2 value), this may prove to be an unachievable constraint.\
+\pard\pardeftab720\li720\partightenfactor0
+
+\f6\fs14 \cf6 FOUTPOSTDIV 
+\f4\fs16 \cf3 can then be calculated as (
+\f6\fs14 \cf6 FREF 
+\f4\fs16 \cf3 / 
+\f6\fs14 \cf6 REFDIV
+\f4\fs16 \cf3 ) \'d7 
+\f6\fs14 \cf6 FBDIV 
+\f4\fs16 \cf3 / (
+\f6\fs14 \cf6 POSTDIV1 
+\f4\fs16 \cf3 \'d7 
+\f6\fs14 \cf6 POSTDIV2
+\f4\fs16 \cf3 ). With a desired output frequency in mind, you must select PLL parameters according to the following constraints of the PLL design:\
+\pard\pardeftab720\li720\partightenfactor0
+
+\f7\fs28 \cf3 \'95
+\f4 \cf3  
+\fs16 \cf3 Minimum reference frequency (
+\f6\fs14 \cf6 FREF 
+\f4\fs16 \cf3 / 
+\f6\fs14 \cf6 REFDIV
+\f4\fs16 \cf3 ) is 5MHz\
+
+\f7\fs28 \cf3 \'95
+\f4 \cf3  
+\fs16 \cf3 Oscillator frequency (
+\f6\fs14 \cf6 FOUTVCO
+\f4\fs16 \cf3 ) must be in the range 750MHz 
+\f6 \cf3 \'81\'a8 
+\f4 \cf3 1600MHz\
+
+\f7\fs28 \cf3 \'95
+\f4 \cf3  
+\fs16 \cf3 Feedback divider (
+\f6\fs14 \cf6 FBDIV
+\f4\fs16 \cf3 ) must be in the range 16 
+\f6 \cf3 \'81\'a8 
+\f4 \cf3 320\
+
+\f7\fs28 \cf3 \'95
+\f4 \cf3  
+\fs16 \cf3 The post dividers 
+\f6\fs14 \cf6 POSTDIV1 
+\f4\fs16 \cf3 and 
+\f6\fs14 \cf6 POSTDIV2 
+\f4\fs16 \cf3 must be in the range 1 
+\f6 \cf3 \'81\'a8 
+\f4 \cf3 7\
+
+\f7\fs28 \cf3 \'95
+\f4 \cf3  
+\fs16 \cf3 Maximum input frequency (
+\f6\fs14 \cf6 FREF 
+\f4\fs16 \cf3 / 
+\f6\fs14 \cf6 REFDIV
+\f4\fs16 \cf3 ) is VCO frequency divided by 16, due to minimum feedback divisor Additionally, the maximum frequencies of the chip\'92s clock generators (attached to 
+\f6\fs14 \cf6 FOUTPOSTDIV
+\f4\fs16 \cf3 ) must be respected. For the system PLL this is 133MHz, and for the USB PLL, 48MHz.\
+(DS 229)\
+\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 A scan of several common DACs and CODECs (see Appendix A) produced a common denominator of the following MCLK multipliers and frequencies. Some devices will only accept one of the MCLK multipliers for each word length. \
+The PIO divider will need to create a frequency twice the desired MCLK, as there are two clock states to be programmed.\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clmgf \clvertalc \clshdrawnil \clwWidth6180\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clmrg \clvertalc \clshdrawnil \clwWidth6180\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clmrg \clvertalc \clshdrawnil \clwWidth6180\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clmrg \clvertalc \clshdrawnil \clwWidth6180\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clmrg \clvertalc \clshdrawnil \clwWidth6180\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clmrg \clvertalc \clshdrawnil \clwWidth6180\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f3\b \cf2 Common MCLK frequencies (MHz)
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvmgf \clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clmgf \clvertalc \clshdrawnil \clwWidth1920\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clmrg \clvertalc \clshdrawnil \clwWidth1920\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clmgf \clvertalb \clshdrawnil \clwWidth1920\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clmrg \clvertalb \clshdrawnil \clwWidth1920\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Word length
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK multiplier
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Double MCLK
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvmrg \clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth1000\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth740\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalc \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 44.1 kHz
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 48 kHz
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 44.1 kHz
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 48 kHz
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth1000\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth740\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clvertalb \clshdrawnil \clwWidth800\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone * 128 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 5.6448
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 6.144
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 11.2896
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 12.288
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth1000\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth740\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clvertalb \clshdrawnil \clwWidth800\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 256 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 11.2896
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 12.288
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 22.5792
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 24.576
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth1000\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth740\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clvertalb \clshdrawnil \clwWidth800\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 512 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 22.5792
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 24.576
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 45.1584
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 49.152
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight600 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth1000\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth940\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clvertalb \clshdrawnil \clwWidth800\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 24
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 192 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 8.4672
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 9.216
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 16.9344
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 18.432
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth780\clftsWidth3 \clheight600 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1440
+\clvertalc \clshdrawnil \clwWidth1020\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalc \clshdrawnil \clwWidth1000\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth740\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7200
+\clvertalb \clshdrawnil \clwWidth800\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 384 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 16.9344
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 18.432
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 33.8688
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 36.864
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\sa120\partightenfactor0
+\cf2 * not supported by all CODECs and DACs\
+\pard\pardeftab720\li720\partightenfactor0
+\cf2 \
+\pard\pardeftab720\sa120\partightenfactor0
+\cf2 Practically, the following sys_clk values provide results close to the required Fs. \
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clmgf \clvertalt \clshdrawnil \clwWidth4080\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clmrg \clvertalt \clshdrawnil \clwWidth4080\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clmrg \clvertalt \clshdrawnil \clwWidth4080\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f3\b\fs24 \cf2 Suitable system clocks for I2S audio
+\f4\b0 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth1040\clftsWidth3 \clheight660 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalt \clshdrawnil \clwWidth1160\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth1520\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone * 48 kHz
+\f4 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone sys_clk
+\f4 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone 147.6 Mhz
+\f4 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth1040\clftsWidth3 \clheight660 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalt \clshdrawnil \clwWidth1160\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth1520\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone Error
+\f4 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone -0.098%
+\f4 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clmgf \clvertalt \clshdrawnil \clwWidth4080\clftsWidth3 \clheight60 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clmrg \clvertalt \clshdrawnil \clwWidth4080\clftsWidth3 \clheight60 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clmrg \clvertalt \clshdrawnil \clwWidth4080\clftsWidth3 \clheight60 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cf0 \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth1040\clftsWidth3 \clheight660 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalt \clshdrawnil \clwWidth1160\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth1520\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f7 \cf2 \up0 \nosupersub \ulnone \'86
+\f1 44.1 kHz
+\f4 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone sys_clk
+\f4 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone 135.6 Mhz
+\f4 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth1040\clftsWidth3 \clheight660 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2880
+\clvertalt \clshdrawnil \clwWidth1160\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5760
+\clvertalb \clshdrawnil \clwWidth1520\clftsWidth3 \clheight240 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone Error
+\f4 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1 \cf2 \up0 \nosupersub \ulnone -0.092%
+\f4 \cf0 \up0 \nosupersub \ulnone 
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f7 \cf2 *  8, 16, 48 kHz all word lengths\uc0\u8232 \'86 all word lengths\
+\
+\
+\
+\
+\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clmgf \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clmrg \clvertalc \clshdrawnil \clwWidth8740\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f3\b \cf2 PIO divisors
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight860 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvmgf \clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight860 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clmgf \clvertalc \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clmrg \clvertalc \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clmgf \clvertalt \clshdrawnil \clwWidth2100\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clmrg \clvertalt \clshdrawnil \clwWidth2100\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clmgf \clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clmrg \clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Word length
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK multiplier
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 48kHz and 44.1kHz
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 16kHz
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone 8kHz
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight860 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvmrg \clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight860 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK PIO divisor
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone BCLK PIO divisor
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK PIO divisor
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone BCLK PIO divisor
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK PIO divisor
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone BCLK PIO divisor
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 128 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 12
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 384
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 36
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 1152
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 72
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 2304
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 256 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 6
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 768
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 18
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 2304
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 36
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 4608
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 512 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 3
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 1536
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 9
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 4608
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 18
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 9216
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvmgf \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight600 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 24
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 192 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 8
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 384
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 24
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 1152
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 48
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 2304
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvmrg \clvertalc \clshdrawnil \clwWidth800\clftsWidth3 \clheight600 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx1080
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx2160
+\clvertalc \clshdrawnil \clwWidth960\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx3240
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx5400
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx6480
+\clvertalt \clshdrawnil \clwWidth960\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx7560
+\clvertalt \clshdrawnil \clwWidth940\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\cell
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 384 fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 4
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 768
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 12
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 2304
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 24
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\qr\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 4608
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f7\fs22 \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\partightenfactor0
+
+\f3\b\fs28 \cf2 Phase\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 The phase between LRCLK and BCLK is critical of all surveyed CODECs and DACs, and is managed directly within a single PIO state machine.\
+MCLK to BCLK phase is not critical, but should not shift over time. This is achieved by having related PIO clocks for the LRCLK/BCLK and MCLK state machines.\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f3\b\fs28 \cf2 PIO\
+\pard\pardeftab720\partightenfactor0
+
+\fs36 \cf2 References\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 DS	RP2040 Datasheet\
+SDK	Raspberry Pi Pico C/C++ SDK\
+\pard\pardeftab720\sl259\slmult1\sa160\partightenfactor0
+\cf2 QQ	Quihong Qu, Delta-Sigma Fractional-N Synthesizers Enable Low-Cost, Low-Power, Frequency-Agile Software Radio, https://www.eetimes.com/delta-sigma-fractional-n-synthesizers-enable-low-cost-low-power-frequency-agile-software-radio/\
+\pard\pardeftab720\sa240\partightenfactor0
+\cf2 JW	Jim Wright, Conexant, Enabling next-generation wireless applications, 
+\f8\i Using delta-sigma fractional-n synthesizers reduces the overall bill-of-materials cost and provides for cost-effective solutions in both base stations and terminals for 2.5- and 3-G networks, 
+\f1\i0 https://web.archive.org/web/20070825195525/http://www.electronicproducts.com/ShowPage.asp?SECTION=3700&PRIMID=&FileName=FEBCON1.FEB2001\
+\pard\pardeftab720\partightenfactor0
+
+\f3\b\fs36 \cf2 Appendix A\
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 Assessments have only been made for \
+\pard\tx360\tx720\pardeftab720\li720\fi-720\sa120\partightenfactor0
+\ls4\ilvl0
+\f2 \cf2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Sample frequency (fs) 		8kHz, 16kHz, 44.1kHz and 48kHz.\
+\ls4\ilvl0
+\f2 \up0 \nosupersub \ulnone {\listtext	\uc0\u8226 	}
+\f1 \up0 \nosupersub \ulnone Word length 			16, 24 bits\
+\pard\pardeftab720\sa120\partightenfactor0
+\cf2 Other sample rates and word lengths have not been assessed or accommodated as they are not common in practical audio applications. Double and quad speed modes have not been assessed as they require significantly higher clock speeds and overall data rates.\
+There are two common I2S serial audio synchronisation modes:\
+\pard\pardeftab720\li720\sa120\partightenfactor0
+\cf2 STD	Phillips or I2S standard. The first BCLK cycle after LRCLK rises is not sampled.  \
+LJ	No delay between LRCK rising and first sampled BCLK\
+\pard\pardeftab720\sa120\partightenfactor0
+\cf2 Both modes are synchronised with BCLK falling as LRCLK rises, and data is sampled on the BCLK rising edge.\
+\
+\pard\pardeftab720\sa40\partightenfactor0
+
+\f3\b\fs28 \cf2 DACs and I2S amplifiers\
+\pard\pardeftab720\sa40\partightenfactor0
+
+\fs24 \cf2 PCM5102A\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\fs22 \cf2 Signal
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone Constraint
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK input (p 24)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 bits: 		128fs, 256fs, 512fs \uc0\u8232 24 bits: 		192fs, 384fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone PLL Mode - no MCLK (p 24)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 bits:		128fs\
+24 bits:		192fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight420 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight420 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK Phase (p15)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f7\fs20 \cf2 \up0 \nosupersub \ulnone does not need a specific phase relation between LRCK and system clock [MCLK].
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight660 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight660 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone LRCLK / SCK (BCLK)\uc0\u8232 (p15)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f7\fs20 \cf2 \up0 \nosupersub \ulnone If the relationship between LRCK and system clock changes more than \'b15 SCK \'85 analog outputs are forced to the bipolar zero until resynchronization between LRCK and system clock is completed.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Data formats (p15)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 (BCLK = 32fs) or24 bits (BCLK = 48fs) \'96 LJ/STD. \
+16-bit data packed into 24 or 32-bit slots (BCLK = 48, 64fs) \'96 LJ/STD.\
+24-bit data packed into 32-bit slots (BCLK = 64fs)  \'96 LJ/STD.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f3\b \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 \
+\pard\pardeftab720\sa40\partightenfactor0
+
+\f3\b\fs28 \cf2 CODECs\
+\pard\pardeftab720\sa40\partightenfactor0
+
+\fs24 \cf2 AK4621\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\fs22 \cf2 Signal
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone Constraint
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight960 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK input \
+(Serial mode \'96 p19)\
+(Parallel mode \'96 p20)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 bits: 		256fs, 512fs \uc0\u8232 24 bits: 		384fs, 768fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Auto setting mode (p19)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 bits: 		512fs \uc0\u8232 24 bits: 		768fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone PLL Mode - no MCLK (p19, 20)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone N/A
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK Phase (p19)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone MCLK must be synchronized with LRCK but the phase is not critical.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight460 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone LRCLK / SCK (BCLK)\uc0\u8232 (p15)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone AK4621 is reset automatically when the synchronization is\
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+\cf2 out of phase by changing the clock frequencies.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight1360 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight1360 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Data formats (p21)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16/24bit LJ\
+24 bit STD\
+16-bit data packed into 24 or 32-bit slots (BCLK = 48, 64fs) \'96 LJ.\
+24-bit data packed into 32-bit slots (BCLK = 64fs)  \'96 LJ/STD.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f3\b \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 \
+\pard\pardeftab720\sa40\partightenfactor0
+
+\f3\b\fs24 \cf2 SGTL5000\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\fs22 \cf2 Signal
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone Constraint
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK input \
+(p14)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 bits: 		256fs, 512fs \uc0\u8232 24 bits: 		384fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Auto setting mode 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone No
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone PLL Mode - no MCLK
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Yes 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK Phase (p14)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone MCLK does not need be synchronized with BCLK/LRCK.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Synchronization (p22)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone DAC and ADC outputs are forced to zero if the synchronization is lost.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Data formats (p21)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone I2S, LJ, RJ \'96 16 or 24 bits
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f3\b \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 \
+\pard\pardeftab720\sa40\partightenfactor0
+
+\f3\b\fs24 \cf2 TLV320AIC series (-3104 datasheet references)\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\fs22 \cf2 Signal
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone Constraint
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK input \
+(p25)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Flexible clock generator
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Auto setting mode 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone No
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone PLL Mode 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Yes 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK Phase (p)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone MCLK does not need be synchronized with BCLK/LRCK.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Synchronization (p
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone DAC and ADC outputs are forced to zero if the synchronization is lost.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Data formats (p)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone I2S, LJ, RJ \'96 16 or 24 bits
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f3\b \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+\pard\pardeftab720\sa120\partightenfactor0
+
+\f1\b0\fs22 \cf2 \
+\pard\pardeftab720\sa40\partightenfactor0
+
+\f3\b\fs24 \cf2 PCM3060/PCM3070\
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\fs22 \cf2 Signal
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f3\b\fs22 \cf2 \up0 \nosupersub \ulnone Constraint
+\f4\b0\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight580 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK input \
+(p15)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone 16 bits: 		256fs, 512fs \uc0\u8232 24 bits: 		384fs, 768fs
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Auto setting mode 
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone No
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone PLL Mode - no MCLK
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone PCM3070 only
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone MCLK Phase (p22)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone MCLK must be synchronized with LRCK but the phase is not critical.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight200 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Synchronization (p22)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f9\fs20 \cf2 \up0 \nosupersub \ulnone DAC and ADC outputs are forced to zero if the synchronization is lost.
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell \row
+
+\itap1\trowd \taflags1 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalt \clshdrawnil \clwWidth2080\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx4320
+\clvertalt \clshdrawnil \clwWidth6580\clftsWidth3 \clheight220 \clbrdrt\brdrs\brdrw20\brdrcf2 \clbrdrl\brdrs\brdrw20\brdrcf2 \clbrdrb\brdrs\brdrw20\brdrcf2 \clbrdrr\brdrs\brdrw20\brdrcf2 \clpadt80 \clpadl80 \clpadb80 \clpadr80 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone Data formats (p21)
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone \cell 
+\pard\intbl\itap1\pardeftab720\sa120\partightenfactor0
+
+\f1\fs22 \cf2 \up0 \nosupersub \ulnone I2S, LJ, RJ \'96 16 or 24 bits
+\f4\fs24 \cf0 \up0 \nosupersub \ulnone 
+\f3\b \cf2 \up0 \nosupersub \ulnone \cell \lastrow\row
+}
