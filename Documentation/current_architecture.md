@@ -825,7 +825,7 @@ Flash erase/program requires quiescing XIP (execute-in-place). `flash_write_sect
 ### Preset System (replaces single-sector storage)
 
 The firmware uses a 10-slot preset system. A preset is always active — there is no "no preset" state. Each slot can be either configured (has user data in flash) or unconfigured (loads factory defaults). Presets are stored in individual 4 KB flash sectors with a separate directory sector for metadata. Slot 0 has the default name "Default".
-*Last updated: 2026-03-07*
+*Last updated: 2026-04-26*
 
 ### Flash Layout
 
@@ -846,7 +846,9 @@ Last 12 sectors (48 KB) of flash:
 | last_active_slot | Last slot loaded/saved (always 0-9) |
 | include_pins | Whether preset load/save includes pin config (0/1, default 0) |
 | slot_occupied | 16-bit bitmask (bit N = slot N has valid data) |
-| include_master_volume | Whether preset load/save includes master volume (0/1, default 0, was padding byte) |
+| master_volume_mode | 0 = independent (default, mode 0 saved-to-directory), 1 = with preset (was include_master_volume) |
+| spdif_rx_pin | Device-level SPDIF RX GPIO pin |
+| master_volume_db | Independent master volume (mode 0 source); float, default -20 dB |
 | slot_names[10][32] | 32-byte NUL-terminated names per slot |
 
 ### Preset Slot Data (Version 12)
@@ -1321,7 +1323,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_PRESET_DELETE | 0x92 | IN | Delete preset slot (wValue=slot) |
 | REQ_PRESET_GET_NAME | 0x93 | IN | Get 32-byte preset name (wValue=slot) |
 | REQ_PRESET_SET_NAME | 0x94 | OUT | Set preset name (wValue=slot, payload=32 bytes) |
-| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (7 bytes: +include_master_volume) |
+| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (7 bytes: byte 6 = master_volume_mode) |
 | REQ_PRESET_SET_STARTUP | 0x96 | OUT | Set startup mode + default slot (2 bytes) |
 | REQ_PRESET_GET_STARTUP | 0x97 | IN | Get startup config (3 bytes) |
 | REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
@@ -1359,8 +1361,10 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_PREAMP_CH | 0xD1 | IN | Get per-channel preamp gain (wValue=channel) |
 | REQ_SET_MASTER_VOLUME | 0xD2 | OUT | Set master volume (-128 to 0 dB, -128=mute) |
 | REQ_GET_MASTER_VOLUME | 0xD3 | IN | Get master volume |
-| REQ_SET_INCLUDE_MASTER_VOL | 0xD4 | OUT | Set include-master-volume flag in preset directory |
-| REQ_GET_INCLUDE_MASTER_VOL | 0xD5 | IN | Get include-master-volume flag |
+| REQ_SET_MASTER_VOLUME_MODE | 0xD4 | OUT | Set master volume persistence mode (0=independent, 1=with preset) |
+| REQ_GET_MASTER_VOLUME_MODE | 0xD5 | IN | Get master volume persistence mode |
+| REQ_SAVE_MASTER_VOLUME | 0xD6 | IN | Persist live master volume to directory's independent field (mode 0 source) |
+| REQ_GET_SAVED_MASTER_VOLUME | 0xD7 | IN | Get the directory's independent master volume |
 | REQ_SET_INPUT_SOURCE | 0xE0 | OUT | Set active input source (0=USB, 1=SPDIF) |
 | REQ_GET_INPUT_SOURCE | 0xE1 | IN | Get active input source |
 | REQ_GET_SPDIF_RX_STATUS | 0xE2 | IN | Get SPDIF RX status (16-byte SpdifRxStatusPacket) |
@@ -1509,7 +1513,7 @@ The input preamp is per-channel rather than a single global value. Each USB inpu
 ---
 
 ## Master Volume
-*Last updated: 2026-04-09*
+*Last updated: 2026-04-26*
 
 ### Overview
 
@@ -1534,14 +1538,18 @@ Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Cor
 |------|---------|-----------|-------------|
 | 0xD2 | REQ_SET_MASTER_VOLUME | OUT | Set master volume (-128 to 0 dB) |
 | 0xD3 | REQ_GET_MASTER_VOLUME | IN | Get master volume |
-| 0xD4 | REQ_SET_INCLUDE_MASTER_VOL | OUT | Set include-master-volume flag in preset directory |
-| 0xD5 | REQ_GET_INCLUDE_MASTER_VOL | IN | Get include-master-volume flag |
+| 0xD4 | REQ_SET_MASTER_VOLUME_MODE | OUT | Set master volume persistence mode (0=independent, 1=with preset) |
+| 0xD5 | REQ_GET_MASTER_VOLUME_MODE | IN | Get master volume persistence mode |
+| 0xD6 | REQ_SAVE_MASTER_VOLUME | IN | Persist live master volume to directory's independent field |
+| 0xD7 | REQ_GET_SAVED_MASTER_VOLUME | IN | Get the directory's independent master volume |
 
 ### Persistence
 
 - `SLOT_DATA_VERSION` 12 adds `master_volume_db` to `PresetSlot`
-- Directory-level `include_master_volume` flag (default: exclude) controls whether preset load restores master volume
-- Preset directory response is now 7 bytes (was 6) — byte 6 = `include_master_volume`
+- Directory-level `master_volume_mode` (default 0 = independent): mode 0 saves/restores master volume from a directory field decoupled from presets; mode 1 saves/restores it as part of each preset (legacy behavior)
+- Preset directory response is 7 bytes — byte 6 = `master_volume_mode`
+- Factory default master volume = `MASTER_VOL_DEFAULT_DB` (-20 dB) — applied at boot when the directory is fresh, on factory reset, and on legacy migration
+- `apply_master_volume_db()` in `flash_storage.c` delegates to `update_master_volume()` so all paths emit host notifications
 - Slots with version < 12 default to 0 dB master volume (unity, no attenuation)
 - `WireMasterVolume` (16 bytes) section in `WireBulkParams` V6+
 
