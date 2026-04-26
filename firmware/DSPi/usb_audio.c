@@ -1537,6 +1537,375 @@ static uint8_t vendor_rx_buf[64];
 static uint8_t vendor_last_request = 0;
 static uint16_t vendor_last_wValue = 0;
 
+ControlResult dspi_control_bulk_get(uint8_t *response, uint16_t response_capacity,
+                                    uint16_t *response_len) {
+    if (!response || !response_len) return CONTROL_RESULT_INVALID_VALUE;
+    if (response_capacity < sizeof(WireBulkParams)) return CONTROL_RESULT_BUFFER_TOO_SMALL;
+    bulk_params_collect((WireBulkParams *)response);
+    *response_len = sizeof(WireBulkParams);
+    return CONTROL_RESULT_OK;
+}
+
+ControlResult dspi_control_bulk_set(const uint8_t *payload, uint16_t payload_len) {
+    if (!payload || payload_len != sizeof(WireBulkParams)) {
+        return CONTROL_RESULT_INVALID_LENGTH;
+    }
+    if (payload != bulk_param_buf) {
+        memcpy(bulk_param_buf, payload, sizeof(WireBulkParams));
+    }
+    __dmb();
+    bulk_params_pending = true;
+    return CONTROL_RESULT_ACCEPTED;
+}
+
+ControlResult dspi_control_out(uint8_t request, uint16_t w_value,
+                               const uint8_t *payload, uint16_t payload_len) {
+    if (payload_len && !payload) return CONTROL_RESULT_INVALID_VALUE;
+
+    switch (request) {
+        case REQ_SET_ALL_PARAMS:
+            return dspi_control_bulk_set(payload, payload_len);
+
+        case REQ_SET_EQ_PARAM:
+            if (payload_len < sizeof(EqParamPacket)) return CONTROL_RESULT_INVALID_LENGTH;
+            memcpy((void*)&pending_packet, payload, sizeof(EqParamPacket));
+            if (pending_packet.channel >= NUM_CHANNELS ||
+                pending_packet.band >= channel_band_counts[pending_packet.channel]) {
+                return CONTROL_RESULT_INVALID_VALUE;
+            }
+            eq_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_PREAMP: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float db;
+            memcpy(&db, payload, 4);
+            for (int ch = 0; ch < NUM_INPUT_CHANNELS; ch++)
+                update_preamp(ch, db);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_PREAMP_CH: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t ch = w_value & 0xFF;
+            if (ch >= NUM_INPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            float db;
+            memcpy(&db, payload, 4);
+            update_preamp(ch, db);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_MASTER_VOLUME: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float db;
+            memcpy(&db, payload, 4);
+            update_master_volume(db);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_DELAY: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t ch = w_value & 0xFF;
+            if (ch >= NUM_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            float ms;
+            memcpy(&ms, payload, 4);
+            if (ms < 0) ms = 0;
+            channel_delays_ms[ch] = ms;
+            dsp_update_delay_samples((float)audio_state.freq);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_BYPASS:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            bypass_master_eq = (payload[0] != 0);
+            return CONTROL_RESULT_OK;
+
+        case REQ_SET_CHANNEL_GAIN: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t ch = w_value & 0xFF;
+            if (ch >= 3) return CONTROL_RESULT_INVALID_VALUE;
+            float db;
+            memcpy(&db, payload, 4);
+            channel_gain_db[ch] = db;
+            float linear = powf(10.0f, db / 20.0f);
+            channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
+            channel_gain_linear[ch] = linear;
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_CHANNEL_MUTE: {
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t ch = w_value & 0xFF;
+            if (ch >= 3) return CONTROL_RESULT_INVALID_VALUE;
+            channel_mute[ch] = (payload[0] != 0);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_LOUDNESS:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            loudness_enabled = (payload[0] != 0);
+            if (loudness_enabled && loudness_active_table) {
+                int16_t vol = audio_state.volume + CENTER_VOLUME_INDEX * 256;
+                if (vol < 0) vol = 0;
+                if (vol >= (CENTER_VOLUME_INDEX + 1) * 256) vol = (CENTER_VOLUME_INDEX + 1) * 256 - 1;
+                current_loudness_coeffs = loudness_active_table[((uint16_t)vol) >> 8u];
+            } else {
+                current_loudness_coeffs = NULL;
+            }
+            return CONTROL_RESULT_OK;
+
+        case REQ_SET_LOUDNESS_REF: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < 40.0f) val = 40.0f;
+            if (val > 100.0f) val = 100.0f;
+            loudness_ref_spl = val;
+            loudness_recompute_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_SET_LOUDNESS_INTENSITY: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < 0.0f) val = 0.0f;
+            if (val > 200.0f) val = 200.0f;
+            loudness_intensity_pct = val;
+            loudness_recompute_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_SET_CROSSFEED:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            crossfeed_config.enabled = (payload[0] != 0);
+            crossfeed_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_CROSSFEED_PRESET:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            if (payload[0] > CROSSFEED_PRESET_CUSTOM) return CONTROL_RESULT_INVALID_VALUE;
+            crossfeed_config.preset = payload[0];
+            crossfeed_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_CROSSFEED_FREQ: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < CROSSFEED_FREQ_MIN) val = CROSSFEED_FREQ_MIN;
+            if (val > CROSSFEED_FREQ_MAX) val = CROSSFEED_FREQ_MAX;
+            crossfeed_config.custom_fc = val;
+            if (crossfeed_config.preset == CROSSFEED_PRESET_CUSTOM) {
+                crossfeed_update_pending = true;
+                return CONTROL_RESULT_ACCEPTED;
+            }
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_CROSSFEED_FEED: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < CROSSFEED_FEED_MIN) val = CROSSFEED_FEED_MIN;
+            if (val > CROSSFEED_FEED_MAX) val = CROSSFEED_FEED_MAX;
+            crossfeed_config.custom_feed_db = val;
+            if (crossfeed_config.preset == CROSSFEED_PRESET_CUSTOM) {
+                crossfeed_update_pending = true;
+                return CONTROL_RESULT_ACCEPTED;
+            }
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_CROSSFEED_ITD:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            crossfeed_config.itd_enabled = (payload[0] != 0);
+            crossfeed_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_LEVELLER_ENABLE:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            leveller_config.enabled = (payload[0] != 0);
+            leveller_update_pending = true;
+            leveller_reset_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_LEVELLER_AMOUNT: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < LEVELLER_AMOUNT_MIN) val = LEVELLER_AMOUNT_MIN;
+            if (val > LEVELLER_AMOUNT_MAX) val = LEVELLER_AMOUNT_MAX;
+            leveller_config.amount = val;
+            leveller_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_SET_LEVELLER_SPEED:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            if (payload[0] >= LEVELLER_SPEED_COUNT) return CONTROL_RESULT_INVALID_VALUE;
+            leveller_config.speed = payload[0];
+            leveller_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_LEVELLER_MAX_GAIN: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < LEVELLER_MAX_GAIN_MIN) val = LEVELLER_MAX_GAIN_MIN;
+            if (val > LEVELLER_MAX_GAIN_MAX) val = LEVELLER_MAX_GAIN_MAX;
+            leveller_config.max_gain_db = val;
+            leveller_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_SET_LEVELLER_LOOKAHEAD:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            leveller_config.lookahead = (payload[0] != 0);
+            leveller_update_pending = true;
+            leveller_reset_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_LEVELLER_GATE: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            float val;
+            memcpy(&val, payload, 4);
+            if (val < LEVELLER_GATE_MIN) val = LEVELLER_GATE_MIN;
+            if (val > LEVELLER_GATE_MAX) val = LEVELLER_GATE_MAX;
+            leveller_config.gate_threshold_db = val;
+            leveller_update_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_SET_MATRIX_ROUTE: {
+            if (payload_len < sizeof(MatrixRoutePacket)) return CONTROL_RESULT_INVALID_LENGTH;
+            MatrixRoutePacket pkt;
+            memcpy(&pkt, payload, sizeof(pkt));
+            if (pkt.input >= NUM_INPUT_CHANNELS || pkt.output >= NUM_OUTPUT_CHANNELS) {
+                return CONTROL_RESULT_INVALID_VALUE;
+            }
+            MatrixCrosspoint *xp = &matrix_mixer.crosspoints[pkt.input][pkt.output];
+            xp->enabled = pkt.enabled;
+            xp->phase_invert = pkt.phase_invert;
+            xp->gain_db = pkt.gain_db;
+            xp->gain_linear = powf(10.0f, pkt.gain_db / 20.0f);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_OUTPUT_ENABLE: {
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t out = w_value & 0xFF;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            bool want_enable = (payload[0] != 0);
+            if (want_enable) {
+                bool is_pdm = (out == NUM_OUTPUT_CHANNELS - 1);
+                bool is_core1_eq = (out >= CORE1_EQ_FIRST_OUTPUT && out <= CORE1_EQ_LAST_OUTPUT);
+                if (is_pdm) {
+                    for (int i = CORE1_EQ_FIRST_OUTPUT; i <= CORE1_EQ_LAST_OUTPUT; i++) {
+                        if (matrix_mixer.outputs[i].enabled) return CONTROL_RESULT_INVALID_VALUE;
+                    }
+                } else if (is_core1_eq && matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled) {
+                    return CONTROL_RESULT_INVALID_VALUE;
+                }
+            }
+            matrix_mixer.outputs[out].enabled = want_enable ? 1 : 0;
+            Core1Mode new_mode = derive_core1_mode();
+            if (new_mode != core1_mode) {
+                core1_mode = new_mode;
+#if ENABLE_SUB
+                pdm_set_enabled(new_mode == CORE1_MODE_PDM);
+#endif
+                __sev();
+            }
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_OUTPUT_GAIN: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t out = w_value & 0xFF;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            float db;
+            memcpy(&db, payload, 4);
+            matrix_mixer.outputs[out].gain_db = db;
+            matrix_mixer.outputs[out].gain_linear = powf(10.0f, db / 20.0f);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_OUTPUT_MUTE: {
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t out = w_value & 0xFF;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            matrix_mixer.outputs[out].mute = payload[0];
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_SET_OUTPUT_DELAY: {
+            if (payload_len < 4) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t out = w_value & 0xFF;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            float ms;
+            memcpy(&ms, payload, 4);
+            if (ms < 0) ms = 0;
+            matrix_mixer.outputs[out].delay_ms = ms;
+            channel_delays_ms[CH_OUT_1 + out] = ms;
+            dsp_update_delay_samples((float)audio_state.freq);
+            return CONTROL_RESULT_OK;
+        }
+
+        case REQ_PRESET_SET_NAME: {
+            if (payload_len == 0) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t slot = w_value & 0xFF;
+            if (slot >= PRESET_SLOTS) return CONTROL_RESULT_INVALID_VALUE;
+            memset(flash_set_name_buf, 0, sizeof(flash_set_name_buf));
+            size_t copy_len = payload_len < (PRESET_NAME_LEN - 1)
+                            ? payload_len : (PRESET_NAME_LEN - 1);
+            memcpy(flash_set_name_buf, payload, copy_len);
+            flash_set_name_slot = slot;
+            __dmb();
+            flash_set_name_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_PRESET_SET_STARTUP:
+            if (payload_len < 2) return CONTROL_RESULT_INVALID_LENGTH;
+            flash_set_startup_mode = payload[0];
+            flash_set_startup_slot = payload[1];
+            __dmb();
+            flash_set_startup_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_PRESET_SET_INCLUDE_PINS:
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            flash_set_include_pins_val = payload[0];
+            __dmb();
+            flash_set_include_pins_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+
+        case REQ_SET_MASTER_VOLUME_MODE: {
+            if (payload_len < 1) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t m = payload[0];
+            if (m > MASTER_VOLUME_MODE_WITH_PRESET) m = MASTER_VOLUME_MODE_INDEPENDENT;
+            flash_set_master_volume_mode_val = m;
+            __dmb();
+            flash_set_master_volume_mode_pending = true;
+            return CONTROL_RESULT_ACCEPTED;
+        }
+
+        case REQ_SET_CHANNEL_NAME: {
+            if (payload_len == 0) return CONTROL_RESULT_INVALID_LENGTH;
+            uint8_t ch = w_value & 0xFF;
+            if (ch >= NUM_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            memset(channel_names[ch], 0, PRESET_NAME_LEN);
+            size_t copy_len = payload_len < (PRESET_NAME_LEN - 1)
+                            ? payload_len : (PRESET_NAME_LEN - 1);
+            memcpy(channel_names[ch], payload, copy_len);
+            return CONTROL_RESULT_OK;
+        }
+    }
+
+    return CONTROL_RESULT_UNSUPPORTED;
+}
+
 // Derive Core 1 mode from current output enable state
 Core1Mode derive_core1_mode(void) {
     // PDM output (last) takes priority — checked first
@@ -1557,7 +1926,14 @@ static void vendor_cmd_packet(struct usb_endpoint *ep) {
         memcpy(vendor_rx_buf, buffer->data, buffer->data_len);
     }
 
-    // Process command based on saved request info
+    if (dspi_control_out(vendor_last_request, vendor_last_wValue,
+                         vendor_rx_buf, buffer->data_len) != CONTROL_RESULT_UNSUPPORTED) {
+        usb_start_empty_control_in_transfer_null_completion();
+        return;
+    }
+
+    // Fallback for legacy USB behavior while unsupported commands are moved to
+    // dspi_control_out().
     switch (vendor_last_request) {
         case REQ_SET_EQ_PARAM:
             if (buffer->data_len >= sizeof(EqParamPacket)) {
@@ -2016,7 +2392,12 @@ static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
 
 // Pin validation helpers
 static bool is_valid_gpio_pin(uint8_t pin) {
-    if (pin == 12) return false;                // UART TX
+    if (pin == 12) return false;                // Default UART TX reservation
+#if DSPi_UART_CONTROL_ENABLE
+    if (pin == DSPi_UART_CONTROL_TX_PIN || pin == DSPi_UART_CONTROL_RX_PIN) return false;
+    if (DSPi_UART_CONTROL_CTS_PIN >= 0 && pin == DSPi_UART_CONTROL_CTS_PIN) return false;
+    if (DSPi_UART_CONTROL_RTS_PIN >= 0 && pin == DSPi_UART_CONTROL_RTS_PIN) return false;
+#endif
     if (pin >= 23 && pin <= 25) return false;   // Power/LED
 #if PICO_RP2350
     return pin <= 29;
@@ -2159,6 +2540,614 @@ static void update_buffer_watermarks(void) {
     }
 }
 
+static ControlResult control_reply(uint8_t *response, uint16_t response_capacity,
+                                   uint16_t *response_len,
+                                   const void *data, uint16_t len) {
+    if (!response || !response_len) return CONTROL_RESULT_INVALID_VALUE;
+    if (len > response_capacity) return CONTROL_RESULT_BUFFER_TOO_SMALL;
+    if (len && data) memcpy(response, data, len);
+    *response_len = len;
+    return CONTROL_RESULT_OK;
+}
+
+static ControlResult control_reply_u8(uint8_t *response, uint16_t response_capacity,
+                                      uint16_t *response_len, uint8_t value) {
+    return control_reply(response, response_capacity, response_len, &value, 1);
+}
+
+static ControlResult control_reply_u16(uint8_t *response, uint16_t response_capacity,
+                                       uint16_t *response_len, uint16_t value) {
+    uint8_t buf[2] = { value & 0xFF, value >> 8 };
+    return control_reply(response, response_capacity, response_len, buf, sizeof(buf));
+}
+
+static ControlResult control_reply_u32(uint8_t *response, uint16_t response_capacity,
+                                       uint16_t *response_len, uint32_t value) {
+    return control_reply(response, response_capacity, response_len, &value, sizeof(value));
+}
+
+static ControlResult control_reply_float(uint8_t *response, uint16_t response_capacity,
+                                         uint16_t *response_len, float value) {
+    return control_reply(response, response_capacity, response_len, &value, sizeof(value));
+}
+
+ControlResult dspi_control_in(uint8_t request, uint16_t w_value, uint16_t w_length,
+                              uint8_t *response, uint16_t response_capacity,
+                              uint16_t *response_len) {
+    (void)w_length;
+
+    switch (request) {
+        case REQ_GET_PREAMP:
+            return control_reply_float(response, response_capacity, response_len, global_preamp_db[0]);
+
+        case REQ_GET_PREAMP_CH: {
+            uint8_t ch = (uint8_t)w_value;
+            if (ch >= NUM_INPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_float(response, response_capacity, response_len, global_preamp_db[ch]);
+        }
+
+        case REQ_GET_MASTER_VOLUME:
+            return control_reply_float(response, response_capacity, response_len, master_volume_db);
+
+        case REQ_GET_DELAY: {
+            uint8_t ch = (uint8_t)w_value;
+            if (ch >= NUM_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_float(response, response_capacity, response_len, channel_delays_ms[ch]);
+        }
+
+        case REQ_GET_BYPASS:
+            return control_reply_u8(response, response_capacity, response_len, bypass_master_eq ? 1 : 0);
+
+        case REQ_GET_CHANNEL_GAIN: {
+            uint8_t ch = (uint8_t)w_value;
+            if (ch >= 3) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_float(response, response_capacity, response_len, channel_gain_db[ch]);
+        }
+
+        case REQ_GET_CHANNEL_MUTE: {
+            uint8_t ch = (uint8_t)w_value;
+            if (ch >= 3) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_u8(response, response_capacity, response_len, channel_mute[ch] ? 1 : 0);
+        }
+
+        case REQ_GET_LOUDNESS:
+            return control_reply_u8(response, response_capacity, response_len, loudness_enabled ? 1 : 0);
+
+        case REQ_GET_LOUDNESS_REF:
+            return control_reply_float(response, response_capacity, response_len, loudness_ref_spl);
+
+        case REQ_GET_LOUDNESS_INTENSITY:
+            return control_reply_float(response, response_capacity, response_len, loudness_intensity_pct);
+
+        case REQ_GET_CROSSFEED:
+            return control_reply_u8(response, response_capacity, response_len, crossfeed_config.enabled ? 1 : 0);
+
+        case REQ_GET_CROSSFEED_PRESET:
+            return control_reply_u8(response, response_capacity, response_len, crossfeed_config.preset);
+
+        case REQ_GET_CROSSFEED_FREQ:
+            return control_reply_float(response, response_capacity, response_len, crossfeed_config.custom_fc);
+
+        case REQ_GET_CROSSFEED_FEED:
+            return control_reply_float(response, response_capacity, response_len, crossfeed_config.custom_feed_db);
+
+        case REQ_GET_CROSSFEED_ITD:
+            return control_reply_u8(response, response_capacity, response_len, crossfeed_config.itd_enabled ? 1 : 0);
+
+        case REQ_GET_LEVELLER_ENABLE:
+            return control_reply_u8(response, response_capacity, response_len, leveller_config.enabled ? 1 : 0);
+
+        case REQ_GET_LEVELLER_AMOUNT:
+            return control_reply_float(response, response_capacity, response_len, leveller_config.amount);
+
+        case REQ_GET_LEVELLER_SPEED:
+            return control_reply_u8(response, response_capacity, response_len, leveller_config.speed);
+
+        case REQ_GET_LEVELLER_MAX_GAIN:
+            return control_reply_float(response, response_capacity, response_len, leveller_config.max_gain_db);
+
+        case REQ_GET_LEVELLER_LOOKAHEAD:
+            return control_reply_u8(response, response_capacity, response_len, leveller_config.lookahead ? 1 : 0);
+
+        case REQ_GET_LEVELLER_GATE:
+            return control_reply_float(response, response_capacity, response_len, leveller_config.gate_threshold_db);
+
+        case REQ_GET_STATUS: {
+            if (w_value == 9) {
+                uint8_t buf[NUM_CHANNELS * 2 + 4];
+                for (int i = 0; i < NUM_CHANNELS; i++) {
+                    buf[i*2]     = global_status.peaks[i] & 0xFF;
+                    buf[i*2 + 1] = global_status.peaks[i] >> 8;
+                }
+                buf[NUM_CHANNELS * 2]     = global_status.cpu0_load;
+                buf[NUM_CHANNELS * 2 + 1] = global_status.cpu1_load;
+                buf[NUM_CHANNELS * 2 + 2] = global_status.clip_flags & 0xFF;
+                buf[NUM_CHANNELS * 2 + 3] = global_status.clip_flags >> 8;
+                return control_reply(response, response_capacity, response_len, buf, sizeof(buf));
+            }
+
+            uint32_t resp = 0;
+            switch (w_value) {
+                case 0: resp = (uint32_t)global_status.peaks[0] | ((uint32_t)global_status.peaks[1] << 16); break;
+                case 1: resp = (uint32_t)global_status.peaks[2] | ((uint32_t)global_status.peaks[3] << 16); break;
+                case 2: resp = (uint32_t)global_status.peaks[4] | ((uint32_t)global_status.cpu0_load << 16) | ((uint32_t)global_status.cpu1_load << 24); break;
+                case 3: resp = pdm_ring_overruns; break;
+                case 4: resp = pdm_ring_underruns; break;
+                case 5: resp = pdm_dma_overruns; break;
+                case 6: resp = pdm_dma_underruns; break;
+                case 7: resp = spdif_overruns; break;
+                case 8: resp = spdif_underruns; break;
+                case 10: resp = usb_audio_packets; break;
+                case 11: resp = usb_audio_alt_set; break;
+                case 12: resp = usb_audio_mounted; break;
+                case 13: resp = clock_get_hz(clk_sys); break;
+                case 14: resp = vreg_voltage_to_mv(vreg_get_voltage()); break;
+                case 15: resp = audio_state.freq; break;
+                case 16: resp = (uint32_t)read_temperature_cdeg(); break;
+                case 17: resp = audio_spdif_get_dma_starvations(); break;
+                case 18: resp = audio_spdif_get_dma_starvations_instance(0); break;
+                case 19: resp = audio_spdif_get_dma_starvations_instance(1); break;
+                case 20: resp = audio_spdif_get_dma_starvations_instance(2); break;
+                case 21: resp = audio_spdif_get_dma_starvations_instance(3); break;
+                case 22: resp = audio_ring.overrun_count; break;
+                default: return CONTROL_RESULT_INVALID_VALUE;
+            }
+            return control_reply_u32(response, response_capacity, response_len, resp);
+        }
+
+        case REQ_SAVE_PARAMS:
+            save_params_pending = true;
+            __dmb();
+            return control_reply_u8(response, response_capacity, response_len, FLASH_OK);
+
+        case REQ_LOAD_PARAMS: {
+            int result = flash_load_params();
+            return control_reply_u8(response, response_capacity, response_len, (uint8_t)result);
+        }
+
+        case REQ_FACTORY_RESET:
+            factory_reset_pending = true;
+            __dmb();
+            return control_reply_u8(response, response_capacity, response_len, FLASH_OK);
+
+        case REQ_GET_EQ_PARAM: {
+            uint8_t channel = (w_value >> 8) & 0xFF;
+            uint8_t band = (w_value >> 4) & 0x0F;
+            uint8_t param = w_value & 0x0F;
+            if (channel >= NUM_CHANNELS || band >= channel_band_counts[channel]) {
+                return CONTROL_RESULT_INVALID_VALUE;
+            }
+            uint32_t val_to_send = 0;
+            EqParamPacket *p = &filter_recipes[channel][band];
+            switch (param) {
+                case 0: val_to_send = (uint32_t)p->type; break;
+                case 1: memcpy(&val_to_send, &p->freq, 4); break;
+                case 2: memcpy(&val_to_send, &p->Q, 4); break;
+                case 3: memcpy(&val_to_send, &p->gain_db, 4); break;
+                default: return CONTROL_RESULT_INVALID_VALUE;
+            }
+            return control_reply_u32(response, response_capacity, response_len, val_to_send);
+        }
+
+        case REQ_GET_MATRIX_ROUTE: {
+            uint8_t input = (w_value >> 8) & 0xFF;
+            uint8_t output = w_value & 0xFF;
+            if (input >= NUM_INPUT_CHANNELS || output >= NUM_OUTPUT_CHANNELS) {
+                return CONTROL_RESULT_INVALID_VALUE;
+            }
+            MatrixCrosspoint *xp = &matrix_mixer.crosspoints[input][output];
+            MatrixRoutePacket pkt = {
+                .input = input,
+                .output = output,
+                .enabled = xp->enabled,
+                .phase_invert = xp->phase_invert,
+                .gain_db = xp->gain_db
+            };
+            return control_reply(response, response_capacity, response_len, &pkt, sizeof(pkt));
+        }
+
+        case REQ_GET_OUTPUT_ENABLE: {
+            uint8_t out = (uint8_t)w_value;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_u8(response, response_capacity, response_len, matrix_mixer.outputs[out].enabled);
+        }
+
+        case REQ_GET_OUTPUT_GAIN: {
+            uint8_t out = (uint8_t)w_value;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_float(response, response_capacity, response_len, matrix_mixer.outputs[out].gain_db);
+        }
+
+        case REQ_GET_OUTPUT_MUTE: {
+            uint8_t out = (uint8_t)w_value;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_u8(response, response_capacity, response_len, matrix_mixer.outputs[out].mute);
+        }
+
+        case REQ_GET_OUTPUT_DELAY: {
+            uint8_t out = (uint8_t)w_value;
+            if (out >= NUM_OUTPUT_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_float(response, response_capacity, response_len, matrix_mixer.outputs[out].delay_ms);
+        }
+
+        case REQ_GET_CORE1_MODE:
+            return control_reply_u8(response, response_capacity, response_len, (uint8_t)core1_mode);
+
+        case REQ_GET_CORE1_CONFLICT: {
+            uint8_t out = (uint8_t)w_value;
+            uint8_t conflict = 0;
+            if (out < NUM_OUTPUT_CHANNELS) {
+                bool is_pdm = (out == NUM_OUTPUT_CHANNELS - 1);
+                bool is_core1_eq = (out >= CORE1_EQ_FIRST_OUTPUT && out <= CORE1_EQ_LAST_OUTPUT);
+                if (is_pdm) {
+                    for (int i = CORE1_EQ_FIRST_OUTPUT; i <= CORE1_EQ_LAST_OUTPUT; i++) {
+                        if (matrix_mixer.outputs[i].enabled) { conflict = 1; break; }
+                    }
+                } else if (is_core1_eq && matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled) {
+                    conflict = 1;
+                }
+            }
+            return control_reply_u8(response, response_capacity, response_len, conflict);
+        }
+
+        case REQ_SET_OUTPUT_PIN: {
+            uint8_t out_idx = w_value & 0xFF;
+            uint8_t new_pin = (w_value >> 8) & 0xFF;
+            uint8_t status;
+
+            if (out_idx >= NUM_PIN_OUTPUTS) {
+                status = PIN_CONFIG_INVALID_OUTPUT;
+            } else if (!is_valid_gpio_pin(new_pin)) {
+                status = PIN_CONFIG_INVALID_PIN;
+            } else if (is_pin_in_use(new_pin, out_idx)) {
+                status = PIN_CONFIG_PIN_IN_USE;
+            } else if (new_pin == output_pins[out_idx]) {
+                status = PIN_CONFIG_SUCCESS;
+            } else if (out_idx < NUM_SPDIF_INSTANCES) {
+                if (output_types[out_idx] == OUTPUT_TYPE_I2S) {
+                    audio_i2s_instance_t *inst = i2s_instance_ptrs[out_idx];
+                    audio_i2s_set_enabled(inst, false);
+                    audio_i2s_change_data_pin(inst, new_pin);
+                    audio_i2s_set_enabled(inst, true);
+                } else {
+                    audio_spdif_instance_t *inst = spdif_instance_ptrs[out_idx];
+                    audio_spdif_set_enabled(inst, false);
+                    audio_spdif_change_pin(inst, new_pin);
+                    audio_spdif_set_enabled(inst, true);
+                }
+                output_pins[out_idx] = new_pin;
+                status = PIN_CONFIG_SUCCESS;
+            } else if (pdm_enabled || core1_mode == CORE1_MODE_PDM) {
+                status = PIN_CONFIG_OUTPUT_ACTIVE;
+            } else {
+                pdm_change_pin(new_pin);
+                output_pins[out_idx] = new_pin;
+                status = PIN_CONFIG_SUCCESS;
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_GET_OUTPUT_PIN: {
+            uint8_t out_idx = (uint8_t)w_value;
+            if (out_idx >= NUM_PIN_OUTPUTS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_u8(response, response_capacity, response_len, output_pins[out_idx]);
+        }
+
+        case REQ_GET_SERIAL:
+            return control_reply(response, response_capacity, response_len, usb_descriptor_str_serial, 16);
+
+        case REQ_GET_PLATFORM: {
+            uint8_t buf[4] = { PLATFORM_RP2040, (uint8_t)(FW_VERSION_BCD >> 8),
+                               (uint8_t)(FW_VERSION_BCD & 0xFF), NUM_OUTPUT_CHANNELS };
+#if PICO_RP2350
+            buf[0] = PLATFORM_RP2350;
+#endif
+            return control_reply(response, response_capacity, response_len, buf, sizeof(buf));
+        }
+
+        case REQ_CLEAR_CLIPS: {
+            uint16_t flags = global_status.clip_flags;
+            global_status.clip_flags = 0;
+            return control_reply_u16(response, response_capacity, response_len, flags);
+        }
+
+        case REQ_PRESET_SAVE: {
+            uint8_t slot = (uint8_t)w_value;
+            uint8_t status = PRESET_OK;
+            if (slot >= PRESET_SLOTS) {
+                status = PRESET_ERR_INVALID_SLOT;
+            } else {
+                pending_preset_save_slot = slot;
+                preset_save_pending = true;
+                __dmb();
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_PRESET_LOAD: {
+            uint8_t slot = (uint8_t)w_value;
+            uint8_t status = PRESET_OK;
+            if (slot >= PRESET_SLOTS) {
+                status = PRESET_ERR_INVALID_SLOT;
+            } else {
+                pending_preset_load_slot = slot;
+                preset_load_pending = true;
+                __dmb();
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_PRESET_DELETE: {
+            uint8_t slot = (uint8_t)w_value;
+            uint8_t status = PRESET_OK;
+            if (slot >= PRESET_SLOTS) {
+                status = PRESET_ERR_INVALID_SLOT;
+            } else {
+                preset_delete_mask |= (1u << slot);
+                __dmb();
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_PRESET_GET_NAME: {
+            uint8_t slot = (uint8_t)w_value;
+            char name[PRESET_NAME_LEN];
+            uint8_t result = preset_get_name(slot, name);
+            if (result != PRESET_OK) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply(response, response_capacity, response_len, name, PRESET_NAME_LEN);
+        }
+
+        case REQ_PRESET_GET_DIR: {
+            uint16_t occupied;
+            uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+            uint8_t buf[7];
+            preset_get_directory(&occupied, &startup, &def_slot,
+                                 &last_active, &inc_pins, &mv_mode);
+            buf[0] = occupied & 0xFF;
+            buf[1] = occupied >> 8;
+            buf[2] = startup;
+            buf[3] = def_slot;
+            buf[4] = last_active;
+            buf[5] = inc_pins;
+            buf[6] = mv_mode;
+            return control_reply(response, response_capacity, response_len, buf, sizeof(buf));
+        }
+
+        case REQ_PRESET_GET_STARTUP: {
+            uint16_t occupied;
+            uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+            uint8_t buf[3];
+            preset_get_directory(&occupied, &startup, &def_slot,
+                                 &last_active, &inc_pins, &mv_mode);
+            buf[0] = startup;
+            buf[1] = def_slot;
+            buf[2] = last_active;
+            return control_reply(response, response_capacity, response_len, buf, sizeof(buf));
+        }
+
+        case REQ_PRESET_GET_INCLUDE_PINS: {
+            uint16_t occupied;
+            uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+            preset_get_directory(&occupied, &startup, &def_slot,
+                                 &last_active, &inc_pins, &mv_mode);
+            return control_reply_u8(response, response_capacity, response_len, inc_pins);
+        }
+
+        case REQ_GET_MASTER_VOLUME_MODE: {
+            uint16_t occupied;
+            uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+            preset_get_directory(&occupied, &startup, &def_slot,
+                                 &last_active, &inc_pins, &mv_mode);
+            return control_reply_u8(response, response_capacity, response_len, mv_mode);
+        }
+
+        case REQ_GET_SAVED_MASTER_VOLUME:
+            return control_reply_float(response, response_capacity, response_len,
+                                       preset_get_saved_master_volume());
+
+        case REQ_SAVE_MASTER_VOLUME:
+            flash_save_master_volume_pending = true;
+            __dmb();
+            return control_reply_u8(response, response_capacity, response_len, PRESET_OK);
+
+        case REQ_PRESET_GET_ACTIVE:
+            return control_reply_u8(response, response_capacity, response_len, preset_get_active());
+
+        case REQ_GET_CHANNEL_NAME: {
+            uint8_t ch = w_value & 0xFF;
+            if (ch >= NUM_CHANNELS) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply(response, response_capacity, response_len,
+                                 channel_names[ch], PRESET_NAME_LEN);
+        }
+
+        case REQ_GET_BUFFER_STATS: {
+            BufferStatsPacket pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.num_spdif = NUM_SPDIF_INSTANCES;
+            pkt.flags = (pdm_enabled ? 0x01 : 0) | (sync_started ? 0x02 : 0);
+            pkt.sequence = buffer_stats_sequence++;
+            uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
+            for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                uint cons_free, cons_prepared, playing;
+                get_slot_consumer_stats(i, &cons_free, &cons_prepared, &playing);
+                pkt.spdif[i].consumer_free = (uint8_t)cons_free;
+                pkt.spdif[i].consumer_prepared = (uint8_t)cons_prepared;
+                pkt.spdif[i].consumer_playing = (uint8_t)playing;
+                uint cons_fill = (cons_free > consumer_capacity) ? 0 : (consumer_capacity - cons_free);
+                pkt.spdif[i].consumer_fill_pct = (uint8_t)(cons_fill * 100 / consumer_capacity);
+                pkt.spdif[i].consumer_min_fill_pct = spdif_consumer_min_fill_pct[i];
+                pkt.spdif[i].consumer_max_fill_pct = spdif_consumer_max_fill_pct[i];
+            }
+            if (pdm_enabled) {
+                pkt.pdm.dma_fill_pct = pdm_get_dma_fill_pct();
+                pkt.pdm.dma_min_fill_pct = pdm_dma_min_fill_pct;
+                pkt.pdm.dma_max_fill_pct = pdm_dma_max_fill_pct;
+                pkt.pdm.ring_fill_pct = pdm_get_ring_fill_pct();
+                pkt.pdm.ring_min_fill_pct = pdm_ring_min_fill_pct;
+                pkt.pdm.ring_max_fill_pct = pdm_ring_max_fill_pct;
+            }
+            return control_reply(response, response_capacity, response_len, &pkt, sizeof(pkt));
+        }
+
+        case REQ_RESET_BUFFER_STATS:
+            if (w_value & 0x01) reset_buffer_watermarks();
+            return control_reply_u8(response, response_capacity, response_len, 1);
+
+        case REQ_GET_USB_ERROR_STATS: {
+            extern volatile uint32_t usb_error_count;
+            extern volatile uint32_t usb_crc_error_count;
+            extern volatile uint32_t usb_bitstuff_error_count;
+            extern volatile uint32_t usb_rx_overflow_count;
+            extern volatile uint32_t usb_rx_timeout_count;
+            extern volatile uint32_t usb_data_seq_error_count;
+            typedef struct __attribute__((packed)) {
+                uint32_t total;
+                uint32_t crc;
+                uint32_t bitstuff;
+                uint32_t rx_overflow;
+                uint32_t rx_timeout;
+                uint32_t data_seq;
+            } UsbErrorStatsPacket;
+            UsbErrorStatsPacket pkt = {
+                .total = usb_error_count,
+                .crc = usb_crc_error_count,
+                .bitstuff = usb_bitstuff_error_count,
+                .rx_overflow = usb_rx_overflow_count,
+                .rx_timeout = usb_rx_timeout_count,
+                .data_seq = usb_data_seq_error_count,
+            };
+            return control_reply(response, response_capacity, response_len, &pkt, sizeof(pkt));
+        }
+
+        case REQ_RESET_USB_ERROR_STATS: {
+            extern volatile uint32_t usb_error_count;
+            extern volatile uint32_t usb_crc_error_count;
+            extern volatile uint32_t usb_bitstuff_error_count;
+            extern volatile uint32_t usb_rx_overflow_count;
+            extern volatile uint32_t usb_rx_timeout_count;
+            extern volatile uint32_t usb_data_seq_error_count;
+            usb_error_count = 0;
+            usb_crc_error_count = 0;
+            usb_bitstuff_error_count = 0;
+            usb_rx_overflow_count = 0;
+            usb_rx_timeout_count = 0;
+            usb_data_seq_error_count = 0;
+            return control_reply_u8(response, response_capacity, response_len, 1);
+        }
+
+        case REQ_SET_OUTPUT_TYPE: {
+            uint8_t slot = w_value & 0xFF;
+            uint8_t new_type = (w_value >> 8) & 0xFF;
+            uint8_t status;
+            if (slot >= NUM_SPDIF_INSTANCES) {
+                status = PIN_CONFIG_INVALID_OUTPUT;
+            } else if (new_type > 1) {
+                status = PIN_CONFIG_INVALID_PIN;
+            } else if (new_type == output_types[slot]) {
+                status = PIN_CONFIG_SUCCESS;
+            } else {
+                pending_output_types[slot] = new_type;
+                __dmb();
+                output_type_change_mask |= (1u << slot);
+                status = PIN_CONFIG_SUCCESS;
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_GET_OUTPUT_TYPE: {
+            uint8_t slot = (uint8_t)w_value;
+            if (slot >= NUM_SPDIF_INSTANCES) return CONTROL_RESULT_INVALID_VALUE;
+            return control_reply_u8(response, response_capacity, response_len, output_types[slot]);
+        }
+
+        case REQ_SET_I2S_BCK_PIN: {
+            uint8_t new_pin = (uint8_t)w_value;
+            uint8_t status;
+            if (!is_valid_gpio_pin(new_pin) || !is_valid_gpio_pin(new_pin + 1)) {
+                status = PIN_CONFIG_INVALID_PIN;
+            } else if (new_pin == i2s_bck_pin) {
+                status = PIN_CONFIG_SUCCESS;
+            } else {
+                bool any_i2s = false;
+                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                    if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
+                }
+                if (any_i2s) {
+                    status = PIN_CONFIG_OUTPUT_ACTIVE;
+                } else if (is_pin_in_use(new_pin, 0xFF) || is_pin_in_use(new_pin + 1, 0xFF)) {
+                    status = PIN_CONFIG_PIN_IN_USE;
+                } else {
+                    i2s_bck_pin = new_pin;
+                    status = PIN_CONFIG_SUCCESS;
+                }
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_GET_I2S_BCK_PIN:
+            return control_reply_u8(response, response_capacity, response_len, i2s_bck_pin);
+
+        case REQ_SET_MCK_ENABLE:
+            if (w_value != 0 && !i2s_mck_enabled) {
+                sanitize_mck_multiplier_for_rate(audio_state.freq);
+                audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+                audio_i2s_mck_set_enabled(true);
+                i2s_mck_enabled = true;
+            } else if (w_value == 0 && i2s_mck_enabled) {
+                audio_i2s_mck_set_enabled(false);
+                i2s_mck_enabled = false;
+            }
+            return control_reply_u8(response, response_capacity, response_len, PIN_CONFIG_SUCCESS);
+
+        case REQ_GET_MCK_ENABLE:
+            return control_reply_u8(response, response_capacity, response_len, i2s_mck_enabled ? 1 : 0);
+
+        case REQ_SET_MCK_PIN: {
+            uint8_t new_pin = (uint8_t)w_value;
+            uint8_t status;
+            if (!is_valid_gpio_pin(new_pin)) {
+                status = PIN_CONFIG_INVALID_PIN;
+            } else if (i2s_mck_enabled) {
+                status = PIN_CONFIG_OUTPUT_ACTIVE;
+            } else if (is_pin_in_use(new_pin, 0xFF)) {
+                status = PIN_CONFIG_PIN_IN_USE;
+            } else if (new_pin == i2s_mck_pin) {
+                status = PIN_CONFIG_SUCCESS;
+            } else {
+                audio_i2s_mck_change_pin(new_pin);
+                i2s_mck_pin = new_pin;
+                status = PIN_CONFIG_SUCCESS;
+            }
+            return control_reply_u8(response, response_capacity, response_len, status);
+        }
+
+        case REQ_GET_MCK_PIN:
+            return control_reply_u8(response, response_capacity, response_len, i2s_mck_pin);
+
+        case REQ_SET_MCK_MULTIPLIER: {
+            uint16_t raw = w_value;
+            if (raw > 1) return control_reply_u8(response, response_capacity, response_len, PIN_CONFIG_INVALID_PIN);
+            uint16_t mult = (raw == 1) ? 256 : 128;
+            if (!is_mck_multiplier_supported_for_rate(mult, audio_state.freq)) {
+                printf("Rejected MCK %ux at %lu Hz (unsupported)\n",
+                       (unsigned)mult, (unsigned long)audio_state.freq);
+                return control_reply_u8(response, response_capacity, response_len, PIN_CONFIG_INVALID_PIN);
+            }
+            i2s_mck_multiplier = mult;
+            if (i2s_mck_enabled) {
+                audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+            }
+            return control_reply_u8(response, response_capacity, response_len, PIN_CONFIG_SUCCESS);
+        }
+
+        case REQ_GET_MCK_MULTIPLIER:
+            sanitize_mck_multiplier_for_rate(audio_state.freq);
+            return control_reply_u8(response, response_capacity, response_len, mck_encode(i2s_mck_multiplier));
+    }
+
+    return CONTROL_RESULT_UNSUPPORTED;
+}
+
 static bool vendor_setup_request_handler(__unused struct usb_interface *interface, struct usb_setup_packet *setup) {
     setup = __builtin_assume_aligned(setup, 4);
 
@@ -2187,6 +3176,18 @@ static bool vendor_setup_request_handler(__unused struct usb_interface *interfac
     } else {
         // Device -> Host (GET requests)
         static uint8_t resp_buf[64];
+        uint16_t resp_len = 0;
+        ControlResult handled = dspi_control_in(setup->bRequest, setup->wValue,
+                                                setup->wLength, resp_buf,
+                                                sizeof(resp_buf), &resp_len);
+        if (handled == CONTROL_RESULT_OK || handled == CONTROL_RESULT_ACCEPTED) {
+            vendor_send_response(resp_buf, resp_len);
+            return true;
+        }
+        if (handled != CONTROL_RESULT_UNSUPPORTED &&
+            handled != CONTROL_RESULT_BUFFER_TOO_SMALL) {
+            return false;
+        }
 
         switch (setup->bRequest) {
             case REQ_GET_PREAMP: {

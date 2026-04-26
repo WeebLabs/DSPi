@@ -29,6 +29,8 @@ add_executable(DSPi
     main.c
     pdm_generator.c
     pdm_generator.h
+    uart_control.c
+    uart_control.h
     usb_audio.c
     usb_audio.h
     usb_descriptors.c
@@ -72,6 +74,7 @@ target_link_libraries(DSPi
     hardware_pwm
     hardware_flash
     hardware_adc
+    hardware_uart
     pico_audio_spdif_multi
     pico_audio_i2s_multi
     usb_device

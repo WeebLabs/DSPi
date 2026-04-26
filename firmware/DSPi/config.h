@@ -250,6 +250,49 @@ extern volatile uint32_t nominal_feedback_10_14;
 // System
 #define REQ_ENTER_BOOTLOADER        0xF0
 
+// ----------------------------------------------------------------------------
+// UART CONTROL TRANSPORT CONFIGURATION
+// ----------------------------------------------------------------------------
+
+// UART control is compiled in but disabled by default so existing builds keep
+// their current pin ownership.  Board builds can enable and place the transport
+// with -DDSPi_UART_CONTROL_ENABLE=1 and the pin/baud definitions below.
+#ifndef DSPi_UART_CONTROL_ENABLE
+#define DSPi_UART_CONTROL_ENABLE    0
+#endif
+
+#ifndef DSPi_UART_CONTROL_UART
+#define DSPi_UART_CONTROL_UART      0
+#endif
+
+#ifndef DSPi_UART_CONTROL_BAUD
+#define DSPi_UART_CONTROL_BAUD      115200
+#endif
+
+#ifndef DSPi_UART_CONTROL_TX_PIN
+#define DSPi_UART_CONTROL_TX_PIN    12
+#endif
+
+#ifndef DSPi_UART_CONTROL_RX_PIN
+#define DSPi_UART_CONTROL_RX_PIN    13
+#endif
+
+#ifndef DSPi_UART_CONTROL_CTS_PIN
+#define DSPi_UART_CONTROL_CTS_PIN   -1
+#endif
+
+#ifndef DSPi_UART_CONTROL_RTS_PIN
+#define DSPi_UART_CONTROL_RTS_PIN   -1
+#endif
+
+#ifndef DSPi_UART_CONTROL_LINE_MAX
+#define DSPi_UART_CONTROL_LINE_MAX  6144
+#endif
+
+#ifndef DSPi_UART_CONTROL_TIMEOUT_US
+#define DSPi_UART_CONTROL_TIMEOUT_US 100000
+#endif
+
 // Preset configuration
 #define PRESET_SLOTS                10
 #define PRESET_NAME_LEN             32

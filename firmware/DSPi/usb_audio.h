@@ -8,6 +8,16 @@
 
 #include "config.h"
 
+typedef enum {
+    CONTROL_RESULT_OK = 0,
+    CONTROL_RESULT_ACCEPTED = 1,
+    CONTROL_RESULT_UNSUPPORTED = 2,
+    CONTROL_RESULT_INVALID_REQUEST = 3,
+    CONTROL_RESULT_INVALID_VALUE = 4,
+    CONTROL_RESULT_INVALID_LENGTH = 5,
+    CONTROL_RESULT_BUFFER_TOO_SMALL = 6,
+} ControlResult;
+
 // ----------------------------------------------------------------------------
 // AUDIO STATE (exposed to Main)
 // ----------------------------------------------------------------------------
@@ -74,6 +84,17 @@ Core1Mode derive_core1_mode(void);
 
 void usb_sound_card_init(void);
 void audio_set_volume(int16_t volume);
+
+// Transport-neutral control request entry points.  USB keeps its vendor request
+// IDs and binary payloads; UART wraps the same IDs in ASCII framing.
+ControlResult dspi_control_out(uint8_t request, uint16_t w_value,
+                               const uint8_t *payload, uint16_t payload_len);
+ControlResult dspi_control_in(uint8_t request, uint16_t w_value, uint16_t w_length,
+                              uint8_t *response, uint16_t response_capacity,
+                              uint16_t *response_len);
+ControlResult dspi_control_bulk_get(uint8_t *response, uint16_t response_capacity,
+                                    uint16_t *response_len);
+ControlResult dspi_control_bulk_set(const uint8_t *payload, uint16_t payload_len);
 
 // USB audio ring buffer — main-loop entry points for decoupled DSP processing
 void usb_audio_drain_ring(void);   // Process all pending USB audio packets

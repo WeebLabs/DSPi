@@ -27,6 +27,7 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
   - [System Architecture](#system-architecture)
   - [Performance Tuning](#performance-tuning)
   - [USB Control Protocol](#usb-control-protocol)
+  - [UART Control Protocol](#uart-control-protocol)
   - [System Telemetry](#reqgetstatus-0x50---system-telemetry)
   - [Data Structures](#data-structures)
 - [Building from Source](#building-from-source)
@@ -53,6 +54,7 @@ It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss 
 *   **Configurable Output Pins:** All output GPIO pins (including I2S BCK/MCK) can be reassigned at runtime to suit custom PCB layouts, no reflashing required.
 *   **10-Slot Preset System:** Save, load, and manage up to 10 complete DSP configurations with user-defined names. Includes per-channel naming, configurable startup slot, and bulk parameter transfer for fast state synchronization.
 *   **Diagnostics:** Per-channel peak/clip metering, USB PHY error counters (CRC, bit-stuff, timeout, overflow, sequence), buffer fill statistics, S/PDIF DMA starvation counters per output slot, and CPU load reporting per core.
+*   **Optional UART Control:** A build-time configurable ASCII control transport can expose the same vendor request IDs and payloads used by USB to a trusted local control processor.
 *   **Firmware Update via USB:** A vendor command reboots the device into the UF2 bootloader, allowing the host app to push new firmware without a physical BOOTSEL press.
 
 ---
@@ -519,6 +521,22 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | `0xD6` | `REQ_SAVE_MASTER_VOLUME` | IN | 1 byte | Save live master volume to directory (mode 0 persistence) |
 | `0xD7` | `REQ_GET_SAVED_MASTER_VOLUME` | IN | 4 bytes | Read directory's saved master-volume value |
 | `0xF0` | `REQ_ENTER_BOOTLOADER` | IN | 1 byte | Reboot into UF2 bootloader for firmware update |
+
+### UART Control Protocol
+
+UART control is an optional build-time transport for trusted local control processors. It is disabled by default so existing boards keep their current GPIO ownership. Enable it with `DSPi_UART_CONTROL_ENABLE=1` and set the UART instance, TX/RX pins, baud rate, optional RTS/CTS pins, line length, and parser timeout with the `DSPi_UART_CONTROL_*` build definitions.
+
+The UART protocol is line-oriented ASCII over the same logical command surface as USB:
+
+| Command | Meaning |
+|---------|---------|
+| `PING` | Health check, returns `OK PONG` |
+| `G <request> [wValue] [wLength]` | Run an IN/action vendor request and return `OK <hex-response>` |
+| `S <request> [wValue] <hex-payload>` | Run an OUT vendor request and return `OK` or `OK ACCEPTED` |
+| `BGET` | Return the complete `WireBulkParams` state payload as hex |
+| `BSET <hex-WireBulkParams>` | Accept a complete bulk state payload and defer application to the main loop |
+
+Malformed commands return `ERR <code>`. The parser uses bounded buffers, explicit timeout and overflow recovery, and does not run flash erase/program operations directly from UART input handling.
 
 ### REQ_GET_STATUS (0x50) - System Telemetry
 

@@ -24,6 +24,7 @@
 18. [Master Volume](#master-volume)
 19. [Memory Layout](#memory-layout)
 20. [Performance Characteristics](#performance-characteristics)
+21. [UART Control Transport](#uart-control-transport)
 
 ---
 
@@ -46,6 +47,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 - Runtime pin reconfiguration
 - Full parameter persistence to flash
 - Vendor control interface (WinUSB/WCID) for real-time parameter control
+- Optional build-time UART control for a trusted local MCU
 
 **Firmware binary:** `copy_to_ram` — entire firmware executes from SRAM for deterministic latency.
 
@@ -66,6 +68,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |
 | `pdm_generator.c` | 2nd-order sigma-delta PDM modulator, Core 1 PDM mode |
 | `pdm_generator.h` | PDM API, ring buffer communication |
+| `uart_control.c` | Optional ASCII UART control transport and parser |
+| `uart_control.h` | UART control transport API for initialization and polling |
 | `crossfeed.c` | BS2B crossfeed filter (lowpass + allpass for ILD/ITD) |
 | `crossfeed.h` | Crossfeed API, presets, state structs |
 | `loudness.c` | ISO 226:2003 loudness curve computation, double-buffered tables |
@@ -1464,3 +1468,63 @@ Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Cor
 - Preset directory response is now 7 bytes (was 6) — byte 6 = `include_master_volume`
 - Slots with version < 12 default to 0 dB master volume (unity, no attenuation)
 - `WireMasterVolume` (16 bytes) section in `WireBulkParams` V6+
+
+---
+
+## UART Control Transport
+*Last updated: 2026-04-26*
+
+UART control is an optional second control transport intended for a trusted local MCU. It is disabled by default and enabled per board build with `DSPi_UART_CONTROL_ENABLE=1`.
+
+### Shared Command Boundary
+
+USB and UART share the same logical command surface:
+
+- `dspi_control_out()` handles binary OUT-style requests and schedules deferred main-loop work where required.
+- `dspi_control_in()` handles IN-style requests and action-style requests that return compact status bytes.
+- `dspi_control_bulk_get()` snapshots `WireBulkParams`.
+- `dspi_control_bulk_set()` copies a full `WireBulkParams` payload into `bulk_param_buf` and sets `bulk_params_pending`.
+
+USB still owns the original vendor wire format and EP0 streaming behavior. UART wraps the same request IDs, `wValue` values, and payload bytes in ASCII so the command vocabulary can later be reused by network or Bluetooth bridges.
+
+### ASCII Line Protocol
+
+| Command | Response |
+|---------|----------|
+| `PING` | `OK PONG` |
+| `G <request> [wValue] [wLength]` | `OK <hex-response>` |
+| `S <request> [wValue] <hex-payload>` | `OK` or `OK ACCEPTED` |
+| `BGET` | `OK <hex-WireBulkParams>` |
+| `BSET <hex-WireBulkParams>` | `OK ACCEPTED` |
+
+Errors are returned as `ERR <code>` with terse parser/control codes such as `PARSE`, `HEX`, `LEN`, `VALUE`, `UNSUPPORTED`, `OVERSIZE`, and `TIMEOUT`.
+
+### Parser State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Line: byte received
+    Line --> Line: byte received and buffer space remains
+    Line --> Dispatch: CR or LF
+    Dispatch --> Idle: response sent
+    Line --> Overflow: line buffer full
+    Overflow --> Idle: CR or LF / ERR OVERSIZE
+    Line --> Idle: timeout / ERR TIMEOUT
+```
+
+### Build-Time Configuration
+
+| Definition | Default | Meaning |
+|------------|---------|---------|
+| `DSPi_UART_CONTROL_ENABLE` | `0` | Enables UART control when set to `1` |
+| `DSPi_UART_CONTROL_UART` | `0` | UART instance, `0` or `1` |
+| `DSPi_UART_CONTROL_BAUD` | `115200` | UART baud rate |
+| `DSPi_UART_CONTROL_TX_PIN` | `12` | UART TX GPIO |
+| `DSPi_UART_CONTROL_RX_PIN` | `13` | UART RX GPIO |
+| `DSPi_UART_CONTROL_CTS_PIN` | `-1` | Optional CTS GPIO |
+| `DSPi_UART_CONTROL_RTS_PIN` | `-1` | Optional RTS GPIO |
+| `DSPi_UART_CONTROL_LINE_MAX` | `6144` | Maximum input line length, sized for bulk hex payloads |
+| `DSPi_UART_CONTROL_TIMEOUT_US` | `100000` | Partial-line parser timeout |
+
+When UART control is enabled, configured UART pins are rejected by runtime output-pin reassignment so control pins are not reused for audio outputs.

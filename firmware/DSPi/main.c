@@ -28,6 +28,7 @@
 #include "leveller.h"
 #include "bulk_params.h"
 #include "pico/audio_spdif.h"
+#include "uart_control.h"
 #include "usb_feedback_controller.h"
 
 // ----------------------------------------------------------------------------
@@ -729,6 +730,7 @@ int main(void) {
 #endif
 
     core0_init();
+    uart_control_init();
 
     // Enable watchdog
     watchdog_enable(8000, 1);
@@ -741,6 +743,10 @@ int main(void) {
         // USB ISR pushes raw packets into the ring; we run the full DSP
         // pipeline here in main-loop context instead of USB IRQ context.
         usb_audio_drain_ring();
+
+        // Drain UART control input.  This is a line-oriented control transport
+        // only; all state changes still route through the shared command layer.
+        uart_control_poll();
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,
