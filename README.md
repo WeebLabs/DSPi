@@ -4,6 +4,8 @@
 
 It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss army knife of audio for less than a cup of coffee".
 
+Feel free to join the [official Discord server](https://discord.gg/RCyqxAQ5xS) for development updates, discussion or to request assistance!
+
 ---
 
 ## Table of Contents
