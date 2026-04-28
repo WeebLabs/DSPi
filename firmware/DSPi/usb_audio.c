@@ -377,24 +377,101 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // PASS 1: USB byte decode → buf_l/buf_r + preamp
 #if PICO_RP2350
     {
-        float preamp_l = global_preamp_linear[0];
-        float preamp_r = global_preamp_linear[1];
-        const float inv_32768 = 1.0f / 32768.0f;
         if (bit_depth == 24) {
-            const uint8_t *p = (const uint8_t *)data;
+            //     input 32 bit word to 24 bit output packing
+            //        in0     in1      in2
+            //     +-------+-------+-------+
+            //       (beware of l-endian)
+            //     +-----+-----+-----+-----+
+            //        l1    r1    l2    r2
+
+            const uint32_t *in = (const uint32_t *)data;
+            float *out_l = &buf_l[0], *out_r = &buf_r[0];
             const float inv_8388608 = 1.0f / 8388608.0f;
-            for (uint32_t i = 0; i < sample_count; i++) {
-                int32_t left  = (int32_t)((uint32_t)p[2] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[0] << 8) >> 8;
-                int32_t right = (int32_t)((uint32_t)p[5] << 24 | (uint32_t)p[4] << 16 | (uint32_t)p[3] << 8) >> 8;
-                buf_l[i] = (float)left * inv_8388608 * preamp_l;
-                buf_r[i] = (float)right * inv_8388608 * preamp_r;
-                p += 6;
+            const float gain_l = inv_8388608 * global_preamp_linear[0];
+            const float gain_r = inv_8388608 * global_preamp_linear[1];
+
+            //unpack 3 32bit words into 4 24 bit l,r,l,r samples
+            for (uint32_t i = 0; i < sample_count/2; i++) {
+                int32_t i0 = *in++;
+                int32_t i1 = *in++;
+                int32_t i2 = *in++;
+                int32_t temp;
+                float l1, l2, r1, r2;
+
+                __asm__ volatile (
+                    "sbfx %[TEMP], %[I0], #0, #24\n\t"  //sign extend i0[23:0] to 32 bits
+                    "vmov %[L1], %4\n\t"
+                    "vcvt.f32.s32 %[L1], %[L1]\n\t"     // l1 result
+
+                    "sxth %[TEMP], %[I1]\n\t"           // extract and sign extend halfword i1[15:0]
+                    "lsl %[TEMP], %[TEMP], #8\n\t"      // shift left 8 bits
+                    "asr %[I0], %[I0], #24\n\t"         // shift i0 right 24 bits
+                    "bfi %[TEMP], %[I0], #0, #8\n\t"    // insert i0[7:0] into temp[7:0]
+                    "vmov %[R1], %[TEMP]\n\t"
+                    "vcvt.f32.s32 %[R1], %[R1]\n\t"     // r1 result
+
+                    "asr %[TEMP], %[I1], #8\n\t"        // arithmetic shift right 8 bits i1
+                    "bfi %[TEMP], %[I2], #24, #8\n\t"   // copy 8 lsb of i2 into temp[31:24]
+                    "asr %[TEMP], %[TEMP], #8\n\t"      // arithmetic shift right temp left 8
+                    "vmov %[L2], %[TEMP]\n\t"
+                    "vcvt.f32.s32 %[L2], %[L2]\n\t"     // l2 result
+
+                    "asr %[TEMP], %[I2], #8\n\t"        // arithmetic shift right i2[31:8] by 8 into temp
+                    "vmov %[R2], %[TEMP]\n\t"
+                    "vcvt.f32.s32 %[R2], %[R2]\n\t"     // r2 result
+
+                    : [L1] "=w" (l1),
+                    [R1] "=w" (r1),
+                    [L2] "=w" (l2),
+                    [R2] "=w" (r2),
+                    [TEMP] "=&r" (temp)
+                    : [I0] "r" (i0),
+                    [I1] "r" (i1),
+                    [I2] "r" (i2)
+                );
+
+                *out_l++ = l1 * gain_l;
+                *out_l++ = l2 * gain_l;
+                *out_r++ = r1 * gain_r;
+                *out_r++ = r2 * gain_r;
+            }
+            //if sample count is not divisible by 2 pick up the remaining l,r sample
+            if(sample_count % 2) {
+                int32_t i0 = *in++;
+                int32_t i1 = *in++;
+                int32_t temp;
+                float l1, r1;
+
+                __asm__ volatile (
+                    "sbfx %[TEMP], %[I0], #0, #24\n\t"  //sign extend i0[23:0] to 32 bits
+                    "vmov %[L1], %[TEMP]\n\t"
+                    "vcvt.f32.s32 %[L1], %[L1]\n\t"     // l1 result
+
+                    "sxth %[TEMP], %[I1]\n\t"           // extract and sign extend halfword i1[15:0]
+                    "lsl %[TEMP], %[TEMP], #8\n\t"      // shift left 8 bits
+                    "asr %[I0], %[I0], #24\n\t"         // shift i0 right 24 bits
+                    "bfi %[TEMP], %[I0], #0, #8\n\t"    // insert i0[7:0] into temp[7:0]
+                    "vmov %[R1], %[TEMP]\n\t"
+                    "vcvt.f32.s32 %[R1], %[R1]\n\t"     // r1 result
+
+                    : [L1] "=w" (l1),
+                    [R1] "=w" (r1),
+                    [TEMP] "=&r" (temp)
+                    : [I0] "r" (i0),
+                    [I1] "r" (i1)
+                );
+                *out_l++ = l1 * gain_l;
+                *out_r++ = r1 * gain_r;
             }
         } else {
             const int16_t *in = (const int16_t *)data;
+            const float inv_32768 = 1.0f / 32768.0f;
+            float gain_l = inv_32768 * global_preamp_linear[0];
+            float gain_r = inv_32768 * global_preamp_linear[1];
             for (uint32_t i = 0; i < sample_count; i++) {
-                buf_l[i] = (float)in[i*2] * inv_32768 * preamp_l;
-                buf_r[i] = (float)in[i*2+1] * inv_32768 * preamp_r;
+                buf_l[i] = (float)in[i*2] * gain_l;
+                buf_r[i] = (float)in[i*2+1] * gain_r;
             }
         }
     }
