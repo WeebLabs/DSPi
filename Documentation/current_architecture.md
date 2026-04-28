@@ -1032,7 +1032,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-04-11*
+*Last updated: 2026-04-28*
 
 ### Hardware
 
@@ -1102,10 +1102,25 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | 44.1 kHz family | 264.6 MHz (VCO 1058.4 MHz / 4) | 264.6 MHz (auto PLL) |
 | PLL config | Manual (`set_sys_clock_pll()`) | Automatic (`set_sys_clock_hz()`) |
 
+### SPDIF Input ASRC (when `SPDIF_USE_ASRC = 1`)
+
+| Feature | RP2040 | RP2350 |
+|---------|--------|--------|
+| Inter-phase blend | Linear (2 phases) | Cubic-Hermite / Catmull-Rom (4 phases) |
+| Coefficient format | Q30 int32 | float |
+| Phases × taps | 256 × 32 | 256 × 64 |
+| Pass-band edge | 0.70 · input_Nyquist (~16.8 kHz @ 48k) | 0.85 · input_Nyquist (~20.4 kHz @ 48k) |
+| Measured stop-band | -104 dB | -106 dB |
+| Pass-band ripple | 0.03 dB | 0.03 dB |
+| ROM size | 32 KB (RAM-placed `.time_critical`) | 64 KB (flash, XIP-cached) |
+| Inner-loop multiply | Software 32×32→32 (M0+ has only `MULS`) | M33 single-cycle FMA |
+| Core 0 cost @ 48 kHz | ~30–45 % (verify on bench) | ~20 % |
+| Optional fallback | `SPDIF_ASRC_RP2040_LOW_PRECISION 1` (Q15 single-cycle MULS, ~85 dB) | n/a |
+
 ---
 
 ## Memory Layout
-*Last updated: 2026-04-11*
+*Last updated: 2026-04-28*
 
 ### RP2040 (264 KB SRAM)
 
@@ -1121,12 +1136,16 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead | ~2 KB |
 | Per-channel preamp + master volume | ~48 B |
+| ASRC state + I/O staging (only when SPDIF_USE_ASRC=1) | ~3.5 KB |
+| ASRC Q31 coefficient table (RAM, only when SPDIF_USE_ASRC=1) | 32 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~90 KB** |
-| Code in RAM (.text copy_to_ram) | ~72 KB |
+| **Total BSS** | **~90 KB** (ASRC=0) / **~94 KB** (ASRC=1) |
+| Code in RAM (.text copy_to_ram) | ~72 KB (ASRC=0) / ~106 KB (ASRC=1) |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | SPDIF consumer pools (heap, 2 × 16 × 48 × 16) | ~24 KB |
 | Stack + remaining heap | ~42 KB |
+
+Measured `arm-none-eabi-size` totals: 197 KB (ASRC=0) → 235 KB (ASRC=1) — comfortable headroom in 264 KB SRAM.
 
 ### RP2350 (520 KB SRAM)
 
@@ -1141,12 +1160,15 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Channel names (11 × 32) | ~352 B |
 | Leveller state + lookahead | ~2 KB |
 | Per-channel preamp + master volume | ~48 B |
+| ASRC state + I/O staging (only when SPDIF_USE_ASRC=1) | ~3.5 KB |
 | Other BSS | ~24 KB |
-| **Total BSS** | **~210 KB** |
-| Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
+| **Total BSS** | **~154 KB** (ASRC=0) / **~158 KB** (ASRC=1) |
+| Code in RAM (.time_critical + copy_to_ram) | ~68 KB (+ ASRC float coefs in flash, see below) |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | SPDIF consumer pools (heap, 4 × 16 × 48 × 16) | ~48 KB |
 | Stack + remaining heap | ~200 KB |
+
+ASRC RP2350 uses a 64 KB float coefficient table that lives in **flash** (XIP cache holds one phase comfortably; no RAM impact). Measured `arm-none-eabi-size`: 258 KB total (ASRC=0) → 329 KB (ASRC=1, +65 KB text from coef table in flash).
 
 ### Flash Layout
 
@@ -1616,11 +1638,38 @@ typedef enum {
 - Loss: 10ms timeout
 - Audio extraction: FIFO → 24-bit decode → per-channel preamp → buf_l/buf_r → process_input_block()
 
-**Clock Servo**: PI controller in `spdif_input_update_clock_servo()` adjusts all output PIO dividers based on FIFO fill level (target 50%). Gains: KP=0.0005, KI=0.000005, deadband ±2 blocks. MCK divider is servoed alongside I2S data SM dividers when MCK is enabled, using `audio_i2s_mck_set_divider()` to keep master clock frequency-locked to the servoed output rate. *Last updated: 2026-04-12*
+**Clock Servo**: PI controller in `spdif_input_update_clock_servo()` adjusts all output PIO dividers based on FIFO fill level (target 50%). Gains: KP=0.0005, KI=0.000005, deadband ±2 blocks. MCK divider is servoed alongside I2S data SM dividers when MCK is enabled, using `audio_i2s_mck_set_divider()` to keep master clock frequency-locked to the servoed output rate. *(See "SPDIF Input ASRC Mode" below for the alternative topology.) Last updated: 2026-04-28*
 
 **Output Prefill**: On SPDIF lock acquisition, outputs are disabled and consumer buffers drained via `drain_and_disable_outputs()`. The pipeline then feeds real audio into consumer buffers while outputs are stopped. Once slot 0 consumer fill reaches 50% (8 of 16 buffers), outputs are started in sync via `enable_outputs_in_sync()`. This eliminates initial underruns after lock acquisition. Controlled by `spdif_prefilling` flag in `main.c`. *Last updated: 2026-04-12*
 
 **Files**: `spdif_input.h` (API + status struct), `spdif_input.c` (lifecycle, audio extraction, clock servo, status queries)
+
+### SPDIF Input ASRC Mode (optional)
+*Last updated: 2026-04-28*
+
+A polyphase-FIR asynchronous sample-rate converter is selectable at build time via `#define SPDIF_USE_ASRC 1` in `config.h` (default: 0 — legacy PIO-divider servo unchanged). When enabled, output PIO dividers are pinned at the nominal value for `audio_state.freq` and the conversion ratio is driven by the same kind of feedforward + fill-trim servo used by the USB feedback controller, with the **ASRC ratio as the actuator** instead of a USB feedback word.
+
+**Why opt in:** decouples all four output instances from the SPDIF transmitter's clock — eliminating output-divider slewing as a jitter source — and removes any source of slot-relative phase perturbation from clock recovery. Drift-tracking only: pipeline Fs continues to follow the detected SPDIF rate via the existing rate-change machinery, and the ASRC ratio stays within ±5000 ppm of 1.0 (typical ±50 ppm in steady state).
+
+**Files**: `asrc.h`, `asrc.c`, `asrc_coeffs_rp2350.h` (256×64 float, β=11.5, 64 KB flash), `asrc_coeffs_rp2040.h` (256×32 Q30, β=10.0, 32 KB RAM-placed via `.time_critical`), `scripts/gen_asrc_coeffs.py` (offline coefficient generator).
+
+**Algorithm:** Kaiser-windowed sinc polyphase prototype, per-phase normalized to unity DC gain. Inter-phase blending is platform-specific:
+- **RP2350** (single-cycle FMA on M33): cubic-Hermite (Catmull-Rom) blend of 4 adjacent phases. Basis functions: `h_-1 = -s/2 + s² - s³/2`, `h_0 = 1 - 5s²/2 + 3s³/2`, `h_+1 = s/2 + 2s² - 3s³/2`, `h_+2 = -s²/2 + s³/2` (sum identically 1 for all s — get any of these wrong and DC pass-through is broken). Measured stop-band -106 dB, pass-band ripple 0.03 dB to 0.85·input_Nyquist.
+- **RP2040** (no FPU, no SMULL on M0+): linear blend of 2 adjacent phases. **Q30 coefficients and samples** with software 32×32→32 multiply (`fast_mul_q30`, four `MULS` halves + shift). Q30 instead of Q31 keeps the cross-term sum (`ah·bl + al·bh`) inside int32 — at full Q31 inputs the sum reaches ±4·10⁹ and silently wraps, which produces constant metallic distortion on near-full-scale audio; halving to Q30 caps the sum at ±2.14·10⁹ and costs ~1 bit of precision (~−180 dB, negligible). Internal Q30↔Q31 conversion is a single shift at the asrc.c I/O boundary; the rest of the firmware sees Q31 left-justified int32. Measured stop-band -104 dB, pass-band ripple 0.03 dB to 0.70·input_Nyquist.
+
+The narrower RP2040 pass edge is dictated by the M0+ compute budget — the inner loop is the high-cost item on RP2040 (Verification §4 of the design plan).
+
+**Servo:** Rate feedforward `R_ff = Fs_in_meas / Fs_pipe_nom` (using the SPDIF library's 32 ms-averaged actual rate) plus a proportional fill trim (`KP_FILL = 6.25e-6` per buffer × `consumer_fill - 8`, deadband ±1, ±5000 ppm anti-windup clamp). Both pass through a single-pole LPF on the committed ratio with α = 1/64 per ~20 ms tick → τ ≈ 1.3 s. Pitch slew worst case ≈ 0.07 cents/s, three orders of magnitude below FM audibility (5–10 cents at 4–8 Hz). Mirrors the USB feedback controller's holdoff, deadband and clamp idioms.
+
+**Phase accumulator:** Q32.32 in int64. Per output sample, advance phase by R; on 32-bit wrap, consume one extra input sample. For ratio ≈ 1.0 + ppm, this is exactly one input per output ~99.99 % of the time.
+
+**Hot path placement:** `asrc_process()` runs on Core 0 inside `spdif_input_poll()`, between FIFO read and the existing format-conversion + preamp helper. Marked `__not_in_flash_func`. No Core 1 changes — the EQ-worker / PDM modes continue exactly as today; ASRC is upstream of `process_input_block()`.
+
+**Lifecycle:** `asrc_reset()` is invoked at SPDIF lock loss / lock acquire / rate change. `asrc_init(audio_state.freq)` re-arms after rate-change machinery has updated the pipeline rate (detected via a cached-rate compare in the poll loop). After reset, the first `ASRC_TAPS` input samples populate the kernel without producing output (priming); the servo's first valid cycle then lifts the mute.
+
+**Vendor commands:** `0xE6 REQ_GET_ASRC_RATIO_PPM` (int32), `0xE7 REQ_GET_ASRC_LOCK_STATE` (uint8 bitfield), `0xE8 REQ_GET_ASRC_OVERRUN` (uint32). All GET-only; advisory. Resolve to constants in non-ASRC builds (asrc.c provides empty stubs) so the host surface is stable.
+
+**Hard-constraint compliance:** Output slot alignment is preserved by construction — all output instances are written from `buf_out[ch][n]` inside a single `process_input_block(N)` call, and ASRC only varies `N` on the input side, identically across all slots. PIO dividers never move in ASRC mode.
 
 ### Vendor Commands
 
@@ -1632,6 +1681,9 @@ typedef enum {
 | 0xE3 | REQ_GET_SPDIF_RX_CH_STATUS | IN | Get IEC 60958 channel status (24 bytes) |
 | 0xE4 | REQ_SET_SPDIF_RX_PIN | IN* | Set SPDIF RX pin (wValue=pin, returns status byte) |
 | 0xE5 | REQ_GET_SPDIF_RX_PIN | IN | Get SPDIF RX pin (returns uint8_t) |
+| 0xE6 | REQ_GET_ASRC_RATIO_PPM | IN | (R−1.0)·1e6 as int32, advisory — meaningful only when SPDIF_USE_ASRC=1 |
+| 0xE7 | REQ_GET_ASRC_LOCK_STATE | IN | uint8 bitfield: bit0 primed, bit1 muted (returns 0 in non-ASRC builds) |
+| 0xE8 | REQ_GET_ASRC_OVERRUN | IN | Cumulative ASRC input-underrun count (uint32) |
 
 *0xE4 uses the immediate-response SET pattern (same as `REQ_SET_I2S_BCK_PIN`).
 

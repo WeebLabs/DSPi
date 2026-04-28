@@ -13,6 +13,7 @@
 #include "spdif_input.h"
 #include "audio_input.h"
 #include "audio_pipeline.h"
+#include "asrc.h"
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
@@ -234,6 +235,67 @@ bool spdif_input_check_rate_change(void) {
 // MAIN-LOOP POLL (called every iteration when SPDIF is active input)
 // ============================================================================
 
+// Format conversion + per-input preamp (one stereo sample).
+//
+// raw_l/r are signed int32 with 24-bit audio left-justified to bit 31
+// (≈ ±2^31 full-scale). The natural output format of both the SPDIF FIFO
+// subframe extraction below AND the ASRC, so the same helper feeds either.
+//
+// preamp_* are passed in by the caller, NOT read from globals here, so the
+// callers can hoist the volatile-global reads out of the per-sample loop —
+// otherwise the loop would issue two memory loads per iteration. This is
+// what the original (pre-ASRC) loop did inline; we preserve it.
+//
+// Q-format note (RP2040): the legacy path right-shifts by 4 and the rest of
+// the pipeline treats buf_l/r at that scale. We replicate it bit-for-bit
+// so non-ASRC builds remain byte-identical to today and the downstream Q28
+// EQ math is undisturbed.
+#if PICO_RP2350
+typedef float spdif_preamp_t;
+#else
+typedef int32_t spdif_preamp_t;
+#endif
+
+DSP_TIME_CRITICAL static inline void spdif_apply_preamp_one(uint32_t       idx,
+                                                            int32_t        raw_l,
+                                                            int32_t        raw_r,
+                                                            spdif_preamp_t preamp_l,
+                                                            spdif_preamp_t preamp_r)
+{
+#if PICO_RP2350
+    const float inv_2147483648 = 1.0f / 2147483648.0f;
+    buf_l[idx] = (float)raw_l * inv_2147483648 * preamp_l;
+    buf_r[idx] = (float)raw_r * inv_2147483648 * preamp_r;
+#else
+    int32_t q_l = raw_l >> 4;
+    int32_t q_r = raw_r >> 4;
+    buf_l[idx] = fast_mul_q28(q_l, preamp_l);
+    buf_r[idx] = fast_mul_q28(q_r, preamp_r);
+#endif
+}
+
+#if SPDIF_USE_ASRC
+#define ASRC_STAGING_SAMPLES 192u
+
+/* Last fs_pipe_nom passed to asrc_init(). When audio_state.freq changes
+ * (rate-change machinery has fired), we re-init ASRC. Tracked here, not
+ * inside asrc.c, so that asrc.c stays focused on the ratio servo and
+ * doesn't reach into pipeline globals. */
+static uint32_t asrc_last_fs = 0;
+
+static int32_t asrc_in_l[ASRC_STAGING_SAMPLES];
+static int32_t asrc_in_r[ASRC_STAGING_SAMPLES];
+static int32_t asrc_out_l[ASRC_STAGING_SAMPLES];
+static int32_t asrc_out_r[ASRC_STAGING_SAMPLES];
+static int32_t asrc_pending_l[ASRC_STAGING_SAMPLES];
+static int32_t asrc_pending_r[ASRC_STAGING_SAMPLES];
+static uint32_t asrc_pending_count = 0;
+
+static inline void asrc_clear_pending_input(void) {
+    asrc_pending_count = 0;
+}
+#endif
+
 DSP_TIME_CRITICAL
 uint32_t spdif_input_poll(void) {
     if (spdif_state == SPDIF_INPUT_INACTIVE)
@@ -247,6 +309,11 @@ uint32_t spdif_input_poll(void) {
         spdif_rx_detected_rate = 0;
         servo_skip_counter = 0;
         lock_debounce_polls = 0;
+#if SPDIF_USE_ASRC
+        /* Drop history & re-mute. The next lock acquire will re-init. */
+        asrc_reset();
+        asrc_clear_pending_input();
+#endif
         // Muting is handled by the main loop (sets preset_loading flag)
         return 0;
     }
@@ -268,6 +335,14 @@ uint32_t spdif_input_poll(void) {
         servo_skip_counter = 0;
         servo_cache_base_dividers(rate);
         lock_debounce_polls = 0;
+#if SPDIF_USE_ASRC
+        /* Snapshot pipeline rate (might still be the OLD rate at this
+         * point if rate-change is pending — the servo loop will catch up
+         * once perform_rate_change() runs and audio_state.freq updates). */
+        asrc_init(audio_state.freq);
+        asrc_clear_pending_input();
+        asrc_last_fs = audio_state.freq;
+#endif
 
         // Rate change will be handled by main loop via spdif_input_check_rate_change()
         return 0;
@@ -276,6 +351,18 @@ uint32_t spdif_input_poll(void) {
     // --- Only process audio when locked ---
     if (spdif_state != SPDIF_INPUT_LOCKED)
         return 0;
+
+#if SPDIF_USE_ASRC
+    /* If perform_rate_change() has changed audio_state.freq since our
+     * last init, re-init ASRC at the new pipeline rate. This is the
+     * single point where rate transitions land in ASRC mode — no extra
+     * hook in main.c is needed. */
+    if (audio_state.freq != asrc_last_fs) {
+        asrc_init(audio_state.freq);
+        asrc_clear_pending_input();
+        asrc_last_fs = audio_state.freq;
+    }
+#endif
 
     // Lock debounce: wait for FIFO to build up before processing
     if (lock_debounce_polls < LOCK_DEBOUNCE_THRESHOLD) {
@@ -286,8 +373,13 @@ uint32_t spdif_input_poll(void) {
     // --- Read FIFO and feed pipeline ---
     uint32_t fifo_count = spdif_rx_get_fifo_count();
     // Need at least one stereo pair (2 subframes)
+#if SPDIF_USE_ASRC
+    if (fifo_count < 2 && asrc_pending_count == 0)
+        return 0;
+#else
     if (fifo_count < 2)
         return 0;
+#endif
 
     // Read up to 192 stereo samples per poll (matching buf_l/buf_r size)
     uint32_t max_subframes = 192 * 2;  // 192 stereo samples = 384 subframes
@@ -295,16 +387,75 @@ uint32_t spdif_input_poll(void) {
     if (need > max_subframes) need = max_subframes;
     need &= ~1u;  // Round down to stereo pairs
 
-    // Apply preamp and fill buf_l/buf_r
+    /* Hoist preamp loads out of the per-sample loop. global_preamp_* are
+     * volatile (vendor commands write them from another context); without
+     * this the compiler would reload them every iteration. */
 #if PICO_RP2350
-    float preamp_l = global_preamp_linear[0];
-    float preamp_r = global_preamp_linear[1];
-    const float inv_2147483648 = 1.0f / 2147483648.0f;
+    const spdif_preamp_t preamp_l = global_preamp_linear[0];
+    const spdif_preamp_t preamp_r = global_preamp_linear[1];
 #else
-    int32_t preamp_l = global_preamp_mul[0];
-    int32_t preamp_r = global_preamp_mul[1];
+    const spdif_preamp_t preamp_l = global_preamp_mul[0];
+    const spdif_preamp_t preamp_r = global_preamp_mul[1];
 #endif
 
+#if SPDIF_USE_ASRC
+    /* ---------------- ASRC PATH ----------------
+     * Preserve input continuity across calls: when R < 1.0, ASRC can
+     * produce out_max samples while consuming fewer input samples. Those
+     * unconsumed samples have already been destructively read from the
+     * RX FIFO, so carry them forward and prepend them to the next call. */
+    uint32_t in_idx = 0;
+    for (; in_idx < asrc_pending_count && in_idx < ASRC_STAGING_SAMPLES; in_idx++) {
+        asrc_in_l[in_idx] = asrc_pending_l[in_idx];
+        asrc_in_r[in_idx] = asrc_pending_r[in_idx];
+    }
+    asrc_pending_count = 0;
+
+    uint32_t got = 0;
+    uint32_t fifo_need = need;
+    uint32_t fifo_room = (ASRC_STAGING_SAMPLES - in_idx) * 2u;
+    if (fifo_need > fifo_room) fifo_need = fifo_room;
+    fifo_need &= ~1u;
+
+    while (got < fifo_need && in_idx < ASRC_STAGING_SAMPLES) {
+        uint32_t *buf;
+        uint32_t n = spdif_rx_read_fifo(&buf, fifo_need - got);
+        if (n == 0) break;
+        for (uint32_t i = 0; i + 1 < n && in_idx < ASRC_STAGING_SAMPLES; i += 2) {
+            asrc_in_l[in_idx] = (int32_t)((buf[i]     & 0x0FFFFFF0u) << 4);
+            asrc_in_r[in_idx] = (int32_t)((buf[i + 1] & 0x0FFFFFF0u) << 4);
+            in_idx++;
+        }
+        got += n;
+    }
+
+    if (in_idx == 0) return 0;
+
+    unsigned in_consumed = 0;
+    unsigned n_out = asrc_process(asrc_in_l, asrc_in_r, in_idx,
+                                  asrc_out_l, asrc_out_r, ASRC_STAGING_SAMPLES,
+                                  &in_consumed);
+    if (in_consumed > in_idx) in_consumed = in_idx;
+
+    asrc_pending_count = in_idx - in_consumed;
+    for (uint32_t i = 0; i < asrc_pending_count; i++) {
+        asrc_pending_l[i] = asrc_in_l[in_consumed + i];
+        asrc_pending_r[i] = asrc_in_r[in_consumed + i];
+    }
+
+    if (n_out == 0) return 0;
+
+    for (unsigned i = 0; i < n_out; i++) {
+        spdif_apply_preamp_one(i, asrc_out_l[i], asrc_out_r[i],
+                               preamp_l, preamp_r);
+    }
+    process_input_block(n_out);
+    return n_out;
+#else
+    /* ---------------- LEGACY DIVIDER-SERVO PATH ----------------
+     * Identical to pre-ASRC behaviour — output PIO dividers track input
+     * rate (handled by spdif_input_update_clock_servo() below); samples
+     * pass straight from the FIFO through preamp/format into buf_l/buf_r. */
     uint32_t got = 0;
     uint32_t sample_idx = 0;
 
@@ -319,18 +470,8 @@ uint32_t spdif_input_poll(void) {
             // Shift left 4 to sign-extend into int32 full-scale
             int32_t raw_l = (int32_t)((buf[i]     & 0x0FFFFFF0u) << 4);
             int32_t raw_r = (int32_t)((buf[i + 1] & 0x0FFFFFF0u) << 4);
-
-#if PICO_RP2350
-            // Float: int32 full-scale → [-1.0, 1.0] with preamp
-            buf_l[sample_idx] = (float)raw_l * inv_2147483648 * preamp_l;
-            buf_r[sample_idx] = (float)raw_r * inv_2147483648 * preamp_r;
-#else
-            // Q28: int32 full-scale >> 4 → Q28, then apply preamp
-            int32_t q28_l = raw_l >> 4;
-            int32_t q28_r = raw_r >> 4;
-            buf_l[sample_idx] = fast_mul_q28(q28_l, preamp_l);
-            buf_r[sample_idx] = fast_mul_q28(q28_r, preamp_r);
-#endif
+            spdif_apply_preamp_one(sample_idx, raw_l, raw_r,
+                                   preamp_l, preamp_r);
             sample_idx++;
         }
         got += n;
@@ -341,6 +482,7 @@ uint32_t spdif_input_poll(void) {
     }
 
     return sample_idx;
+#endif
 }
 
 // ============================================================================
@@ -355,20 +497,32 @@ void spdif_input_update_clock_servo(void) {
     if (++servo_skip_counter < SERVO_UPDATE_INTERVAL) return;
     servo_skip_counter = 0;
 
-    // -----------------------------------------------------------------------
-    // Loop A: Rate-based divider (primary control)
-    // Use the library's measured actual input sample rate to compute the
-    // ideal output divider directly. No IIR needed — the library already
-    // averages over 8 blocks (~32ms at 48kHz).
-    // -----------------------------------------------------------------------
+    // Library's measured actual input rate. Used by both the legacy divider
+    // servo (as the primary control) AND the ASRC servo (as the rate
+    // feedforward). Sanity-bounded the same way in both modes.
     float actual_freq = spdif_rx_get_samp_freq_actual();
-    if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;  // Sanity check
+    if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;
+
+#if SPDIF_USE_ASRC
+    /* -------- ASRC servo path --------
+     * Output PIO dividers are pinned at the nominal value for
+     * audio_state.freq (set once on lock acquire by
+     * servo_cache_base_dividers()). We never touch them again — that's
+     * the whole point of ASRC mode: outputs run on the host crystal.
+     * Drive the ratio servo from rate FF + consumer-pool fill error.
+     */
+    uint8_t consumer_fill = get_slot_consumer_fill(0);
+    asrc_servo_tick(consumer_fill, actual_freq);
+    return;
+#else
+    /* -------- LEGACY DIVIDER-SERVO PATH (unchanged) -------- */
 
     uint32_t sys_clk = clock_get_hz(clk_sys);
     // No ceiling — precise float division lets the fill trim dither between
     // adjacent integer divider values to achieve sub-LSB rate matching.
     float spdif_div_f = (float)sys_clk / actual_freq;
     float i2s_div_f   = (float)sys_clk * 2.0f / actual_freq;
+    (void)i2s_div_f;  // unused — i2s divider derived from spdif divider × 2 below
 
     // -----------------------------------------------------------------------
     // Loop B: Consumer fill trim (proportional only, mirrors USB servo)
@@ -424,6 +578,7 @@ void spdif_input_update_clock_servo(void) {
             audio_i2s_mck_set_divider(mck_div);
         }
     }
+#endif  /* SPDIF_USE_ASRC */
 }
 
 // ============================================================================

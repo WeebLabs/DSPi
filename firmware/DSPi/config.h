@@ -79,6 +79,46 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define SPDIF_CONSUMER_BUFFER_COUNT 16  // Consumer buffers per SPDIF instance (DMA side)
 #define AUDIO_BUFFER_SAMPLES  192
 
+// ----------------------------------------------------------------------------
+// SPDIF INPUT — OPTIONAL ASRC MODE
+// ----------------------------------------------------------------------------
+//
+// SPDIF_USE_ASRC selects the SPDIF-input clock recovery topology:
+//
+//   0 (default): legacy PIO-divider servo — every output PIO clock is
+//                slewed to track the SPDIF transmitter's measured rate.
+//                Slot phase is preserved by forcing all dividers to move
+//                in lockstep, but the output clock contains the source's
+//                jitter and momentary phase perturbations from the
+//                divider servo itself.
+//
+//   1: insert a polyphase-FIR ASRC (asrc.c) between the SPDIF RX FIFO
+//      and the DSP pipeline. Output PIO dividers are pinned at the
+//      nominal value for audio_state.freq, and the ASRC ratio is driven
+//      by the same kind of feedforward+fill servo used by the USB feedback
+//      controller. Decouples the output side from the SPDIF transmitter's
+//      clock — cleaner output jitter, no slot perturbation from clock
+//      recovery — at the cost of additional CPU and ROM/RAM.
+//
+// SNR / CPU / ROM trade-off (measured at design time by gen_asrc_coeffs.py):
+//
+//   Platform | Phases × Taps | Stop-band | Pass-edge   | ROM      | Core 0 cost
+//   ---------+---------------+-----------+-------------+----------+------------
+//   RP2350   | 256 × 64 (Hermite, float) | -106 dB | 0.85·Fs/2 | 64 KB flash | ~20 % @ 48k
+//   RP2040   | 256 × 32 (linear, Q31)    | -104 dB | 0.70·Fs/2 | 32 KB RAM   | ~30–45 % @ 48k
+//
+// SPDIF_ASRC_RP2040_LOW_PRECISION is an RP2040-only escape hatch (default 0).
+// When set to 1, the inner loop falls back to single-cycle Q15×Q15 MULS,
+// dropping ~10 dB combined SNR for a >5× CPU reduction. Enable only if
+// the RP2040 timing budget (Verification §4 of the design plan) demands it.
+#ifndef SPDIF_USE_ASRC
+#define SPDIF_USE_ASRC 0
+#endif
+
+#ifndef SPDIF_ASRC_RP2040_LOW_PRECISION
+#define SPDIF_ASRC_RP2040_LOW_PRECISION 0
+#endif
+
 // DELAY CONFIGURATION
 // Per-platform maximum delay line length.  RP2040 has 264 KB SRAM total and
 // runs copy_to_ram, so the delay arrays (NUM_DELAY_CHANNELS × MAX_DELAY_SAMPLES
@@ -258,6 +298,14 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_SPDIF_RX_CH_STATUS  0xE3  // returns 24-byte IEC 60958 channel status (Phase 2)
 #define REQ_SET_SPDIF_RX_PIN        0xE4  // wValue = GPIO pin, returns status byte
 #define REQ_GET_SPDIF_RX_PIN        0xE5  // returns uint8_t
+
+// SPDIF Input ASRC Telemetry (only meaningful when SPDIF_USE_ASRC = 1).
+// All three are GET-only and advisory; firmware ignores them in non-ASRC builds
+// (returns 0 / nominal). They're used by the bench tests in the ASRC plan
+// to verify drift tracking and lock dynamics without bench instruments.
+#define REQ_GET_ASRC_RATIO_PPM      0xE6  // returns int32 = (R - 1.0) * 1e6
+#define REQ_GET_ASRC_LOCK_STATE     0xE7  // returns uint8_t bitfield: bit0 primed, bit1 muted
+#define REQ_GET_ASRC_OVERRUN        0xE8  // returns uint32_t cumulative input-underrun count
 
 // System
 #define REQ_ENTER_BOOTLOADER        0xF0

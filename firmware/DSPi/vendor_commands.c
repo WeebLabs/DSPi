@@ -22,6 +22,7 @@
 #include "loudness.h"
 #include "crossfeed.h"
 #include "leveller.h"
+#include "asrc.h"
 #include "bulk_params.h"
 #include "notify.h"
 #include "pdm_generator.h"
@@ -1420,6 +1421,35 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 UsbErrorStatsPacket pkt = {0};
                 memcpy(resp_buf, &pkt, sizeof(pkt));
                 vendor_send_response(resp_buf, sizeof(pkt));
+                return true;
+            }
+
+            // ----------------------------------------------------------------
+            // SPDIF Input ASRC Telemetry (GET-only; advisory)
+            //
+            // The bodies are unconditional but resolve to constants in
+            // non-ASRC builds (asrc.c provides empty stubs). This keeps the
+            // USB vendor surface stable across the SPDIF_USE_ASRC switch
+            // — the host app can always issue these requests; in non-ASRC
+            // mode they just read 0.
+            // ----------------------------------------------------------------
+            case REQ_GET_ASRC_RATIO_PPM: {
+                int32_t ppm = asrc_get_ratio_ppm();
+                memcpy(resp_buf, &ppm, sizeof(int32_t));
+                vendor_send_response(resp_buf, sizeof(int32_t));
+                return true;
+            }
+
+            case REQ_GET_ASRC_LOCK_STATE: {
+                resp_buf[0] = asrc_get_lock_flags();
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_ASRC_OVERRUN: {
+                uint32_t n = asrc_get_underrun_count();
+                memcpy(resp_buf, &n, sizeof(uint32_t));
+                vendor_send_response(resp_buf, sizeof(uint32_t));
                 return true;
             }
 
