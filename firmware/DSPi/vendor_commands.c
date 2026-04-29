@@ -1,17 +1,16 @@
 /*
  * vendor_commands.c — Vendor USB control request handlers for DSPi
  *
- * Phase 2 (TinyUSB): the legacy pico-extras setup/packet handlers have been
- * replaced by TinyUSB's stage-based tud_control_xfer flow.  All 30+ command
- * handlers inside the SET and GET switch statements are unchanged — they
- * continue to consume `vendor_rx_buf` / produce responses via
- * `vendor_send_response()`, which now trampolines into `tud_control_xfer()`.
+ * The command switch bodies are the shared executor for USB, I2C, and UART.
+ * USB still enters through TinyUSB's stage-based callback, while non-USB
+ * transports feed USB-shaped logical requests into the same executor API.
  *
  * All state DEFINITIONS remain in usb_audio.c; this file accesses them
  * via extern declarations in usb_audio.h.
  */
 
 #include "vendor_commands.h"
+#include "control_executor.h"
 #include "usb_audio.h"
 #include "audio_input.h"
 #include "spdif_input.h"
@@ -49,17 +48,14 @@ static uint8_t vendor_last_request = 0;
 static uint16_t vendor_last_wValue = 0;
 static uint16_t vendor_last_wLength = 0;
 
-// Captured during SETUP so vendor_send_response() can issue tud_control_xfer()
-// without every GET case having to plumb rhport + request through.
-static uint8_t _vendor_rhport;
-static tusb_control_request_t const *_vendor_current_req;
+static ControlResponse *_control_current_response;
 
 // Internal helpers exported via vendor_send_response() replacement.
 static void vendor_send_response(const void *data, uint16_t len);
 
 // Forward declarations: SET data-stage and GET dispatch.
-static void vendor_handle_set_data(tusb_control_request_t const *req);
-static bool vendor_handle_get(tusb_control_request_t const *req);
+static void vendor_handle_set_data(void);
+static bool vendor_handle_get(const ControlRequest *req, ControlResponse *response);
 
 // Shim type preserved from the pico-extras era so the SET handler case
 // bodies (which still read `buffer->data_len` and `buffer->data`) compile
@@ -212,12 +208,10 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
 // VENDOR SET HANDLER (moved from usb_audio.c)
 // ----------------------------------------------------------------------------
 
-static void vendor_handle_set_data(tusb_control_request_t const *req) {
-    (void)req;
-    // Shim for legacy handler bodies below.  The real payload was delivered
-    // into vendor_rx_buf by tud_control_xfer() during the DATA stage; we
-    // synthesize a local struct with the same shape as the pico-extras
-    // `buffer` the handlers used to read, so the case bodies stay unchanged.
+static void vendor_handle_set_data(void) {
+    // Shim for legacy handler bodies below.  The transport has already copied
+    // the payload into vendor_rx_buf; the local struct keeps the case bodies
+    // aligned with their original pico-extras buffer shape.
     vendor_buffer_t _buf = { vendor_rx_buf, vendor_last_wLength };
     vendor_buffer_t *buffer = &_buf;
     (void)buffer;
@@ -719,10 +713,12 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
 // VENDOR RESPONSE HELPER
 // ----------------------------------------------------------------------------
 
-// Send a control IN response from the current vendor GET handler.
-// Stashes the request + rhport at SETUP so case bodies can stay unchanged.
+// Publish a response from the current executor GET handler.  The transport
+// adapter owns the actual drain mechanics (EP0, I2C reads, or UART TX).
 static void vendor_send_response(const void *data, uint16_t len) {
-    tud_control_xfer(_vendor_rhport, _vendor_current_req, (void *)data, len);
+    if (!_control_current_response) return;
+    _control_current_response->data = (const uint8_t *)data;
+    _control_current_response->length = len;
 }
 
 // Legacy compatibility shim for the pico-extras helper that sent a small
@@ -740,10 +736,11 @@ static inline void usb_start_tiny_control_in_transfer(uint32_t val, uint16_t len
 // VENDOR GET DISPATCH
 // ----------------------------------------------------------------------------
 
-static bool vendor_handle_get(tusb_control_request_t const *req) {
+static bool vendor_handle_get(const ControlRequest *req, ControlResponse *response) {
     // Shim to let legacy case bodies reference `setup->...`.
-    tusb_control_request_t const *setup = req;
+    ControlRequest const *setup = req;
     (void)setup;
+    _control_current_response = response;
 
     // Some "SET" commands are dispatched through vendor_handle_get because
     // they carry all parameters in wValue and have no DATA stage (e.g.
@@ -1350,10 +1347,8 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 bulk_params_collect((WireBulkParams *)bulk_param_buf);
                 uint16_t len = sizeof(WireBulkParams);
                 if (setup->wLength < len) len = setup->wLength;
-                // tud_control_xfer handles EP0 chunking (including trailing ZLP
-                // on exact-multiple-of-64 transfers) internally.
-                return tud_control_xfer(_vendor_rhport, _vendor_current_req,
-                                         bulk_param_buf, len);
+                vendor_send_response(bulk_param_buf, len);
+                return true;
             }
 
             case REQ_GET_BUFFER_STATS: {
@@ -1435,13 +1430,11 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             // ----------------------------------------------------------------
 
             case REQ_ENTER_BOOTLOADER: {
-                // Send response before rebooting so the host sees success
+                // Tell the transport to send success before rebooting.
                 resp_buf[0] = 1;
                 vendor_send_response(resp_buf, 1);
-                // Brief delay to let the USB response complete
-                busy_wait_ms(100);
-                reset_usb_boot(0, 0);
-                // Never returns
+                response->enter_bootloader = true;
+                return true;
             }
 
             // ----------------------------------------------------------------
@@ -1665,20 +1658,99 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             case REQ_GET_SPDIF_RX_STATUS: {
                 SpdifRxStatusPacket status;
                 spdif_input_get_status(&status);
-                vendor_send_response(&status, sizeof(status));
+                memcpy(resp_buf, &status, sizeof(status));
+                vendor_send_response(resp_buf, sizeof(status));
                 return true;
             }
 
             case REQ_GET_SPDIF_RX_CH_STATUS: {
                 uint8_t ch_status[24];
                 spdif_input_get_channel_status(ch_status);
-                vendor_send_response(ch_status, 24);
+                memcpy(resp_buf, ch_status, 24);
+                vendor_send_response(resp_buf, 24);
                 return true;
             }
         }
 
+        _control_current_response = NULL;
         return false;
     }
+}
+
+// ----------------------------------------------------------------------------
+// SHARED CONTROL EXECUTOR
+// ----------------------------------------------------------------------------
+
+bool control_executor_prepare_out(const ControlRequest *request,
+                                  ControlOutBuffer *out) {
+    if (!request || !out || request->direction != CONTROL_DIR_OUT) return false;
+
+    memset(out, 0, sizeof(*out));
+
+    if (request->bRequest == REQ_SET_ALL_PARAMS &&
+        request->wLength == sizeof(WireBulkParams)) {
+        out->data = bulk_param_buf;
+        out->length = request->wLength;
+        return true;
+    }
+
+    if (request->wLength == 0) {
+        out->immediate_status = true;
+        return true;
+    }
+
+    if (request->wLength <= sizeof(vendor_rx_buf)) {
+        out->data = vendor_rx_buf;
+        out->length = request->wLength;
+        return true;
+    }
+
+    return false;
+}
+
+void control_executor_execute_out(const ControlRequest *request,
+                                  const uint8_t *payload,
+                                  uint16_t payload_len) {
+    if (!request || request->direction != CONTROL_DIR_OUT) return;
+    if (request->wLength == 0) return;
+    if (request->bRequest == REQ_SET_ALL_PARAMS) return;
+    if (payload_len > sizeof(vendor_rx_buf)) return;
+
+    vendor_last_request = request->bRequest;
+    vendor_last_wValue  = request->wValue;
+    vendor_last_wLength = payload_len;
+
+    if (payload && payload != vendor_rx_buf && payload_len > 0) {
+        memcpy(vendor_rx_buf, payload, payload_len);
+    }
+
+    vendor_handle_set_data();
+}
+
+void control_executor_commit_out(const ControlRequest *request) {
+    if (!request || request->direction != CONTROL_DIR_OUT) return;
+    if (request->bRequest == REQ_SET_ALL_PARAMS) {
+        bulk_params_pending = true;
+    }
+}
+
+bool control_executor_execute_in(const ControlRequest *request,
+                                 ControlResponse *response) {
+    if (!request || !response || request->direction != CONTROL_DIR_IN) return false;
+
+    memset(response, 0, sizeof(*response));
+    bool ok = vendor_handle_get(request, response);
+
+    _control_current_response = NULL;
+    notify_set_source(PARAM_SRC_UNKNOWN);
+    return ok;
+}
+
+void control_executor_enter_bootloader(void) {
+    // Brief delay preserves the legacy USB behavior: the success response is
+    // scheduled before reboot, and the reset waits long enough for it to drain.
+    busy_wait_ms(100);
+    reset_usb_boot(0, 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -1689,59 +1761,52 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
 
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
                                 tusb_control_request_t const *req) {
-    // Stash rhport + request so vendor_send_response() can complete the xfer
-    // without every case body having to plumb them through.
-    _vendor_rhport       = rhport;
-    _vendor_current_req  = req;
+    ControlRequest control_req = {
+        .direction = (req->bmRequestType_bit.direction == TUSB_DIR_IN)
+                   ? CONTROL_DIR_IN : CONTROL_DIR_OUT,
+        .bRequest = req->bRequest,
+        .wValue = req->wValue,
+        .wIndex = req->wIndex,
+        .wLength = req->wLength,
+    };
 
     if (stage == CONTROL_STAGE_SETUP) {
-        if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
-            // GET path — dispatches into the legacy switch.
-            bool ok = vendor_handle_get(req);
-            // Clear any source tag that the GET dispatcher set for embedded
-            // SETs — bleeding HOST_SET would misattribute unrelated writes
-            // that happen outside a dispatch bracket (e.g. timer callbacks).
-            notify_set_source(PARAM_SRC_UNKNOWN);
+        if (control_req.direction == CONTROL_DIR_IN) {
+            ControlResponse response;
+            bool ok = control_executor_execute_in(&control_req, &response);
+            if (ok) {
+                tud_control_xfer(rhport, req, (void *)response.data, response.length);
+                if (response.enter_bootloader) {
+                    control_executor_enter_bootloader();
+                }
+            }
             return ok;
         }
 
-        // SET path — schedule DATA stage receive.
-        vendor_last_request = req->bRequest;
-        vendor_last_wValue  = req->wValue;
-        vendor_last_wLength = req->wLength;
-
-        if (req->bRequest == REQ_SET_ALL_PARAMS &&
-            req->wLength == sizeof(WireBulkParams)) {
-            // Large bulk SET — tud_control_xfer handles EP0 chunking.
-            return tud_control_xfer(rhport, req, bulk_param_buf, req->wLength);
+        ControlOutBuffer out;
+        if (!control_executor_prepare_out(&control_req, &out)) {
+            return false;
         }
-
-        if (req->wLength == 0) {
-            // Zero-length SET — no DATA stage; ACK immediately.
+        if (out.immediate_status) {
             return tud_control_status(rhport, req);
         }
-
-        if (req->wLength <= sizeof(vendor_rx_buf)) {
-            return tud_control_xfer(rhport, req, vendor_rx_buf, req->wLength);
-        }
-
-        // Oversized SET we can't handle — STALL.
-        return false;
+        return tud_control_xfer(rhport, req, out.data, out.length);
     }
 
     if (stage == CONTROL_STAGE_DATA) {
         // SET data received — run the legacy command dispatcher.
-        if (req->bmRequestType_bit.direction == TUSB_DIR_OUT) {
-            vendor_handle_set_data(req);
+        if (control_req.direction == CONTROL_DIR_OUT) {
+            const uint8_t *payload = (req->bRequest == REQ_SET_ALL_PARAMS)
+                                   ? bulk_param_buf : vendor_rx_buf;
+            control_executor_execute_out(&control_req, payload, req->wLength);
         }
         return true;
     }
 
     if (stage == CONTROL_STAGE_ACK) {
         // Status-stage completed.  Signal the main loop to apply bulk SET.
-        if (req->bmRequestType_bit.direction == TUSB_DIR_OUT &&
-            req->bRequest == REQ_SET_ALL_PARAMS) {
-            bulk_params_pending = true;
+        if (control_req.direction == CONTROL_DIR_OUT) {
+            control_executor_commit_out(&control_req);
         }
     }
     return true;

@@ -52,7 +52,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-04-18*
+*Last updated: 2026-04-30*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -64,8 +64,11 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `tusb_config.h` | TinyUSB configuration (disables built-in classes; UAC1 handled by custom driver) |
 | `audio_pipeline.c` | Input-agnostic DSP pipeline (`process_input_block`): loudness, EQ, leveller, crossfeed, matrix mixer, per-output EQ/gain/delay, output encoding, buffer stats |
 | `audio_pipeline.h` | Pipeline entry point, shared buffer declarations (`buf_l`/`buf_r`/`buf_out`), buffer stats API |
-| `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, pin/MCK helpers, diagnostics). Public entry `vendor_control_xfer_cb(rhport, stage, req)` is invoked from `usb_audio.c`'s UAC1 class driver. |
-| `vendor_commands.h` | Vendor handler declarations, system stats and pin helper prototypes. |
+| `vendor_commands.c` | Shared control command executor plus TinyUSB vendor callback adapter (GET/SET dispatch, pin/MCK helpers, diagnostics). |
+| `vendor_commands.h` | TinyUSB callback declaration, system stats, and pin helper prototypes. |
+| `control_executor.h` | Transport-neutral USB-shaped request/response API used by USB, I2C, and UART control paths. |
+| `control_transport.c` | Optional I2C/UART control frame adapters and non-USB transaction state machines. |
+| `control_transport.h` | Main-loop init/tick API for optional non-USB control transports. |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
 | `dsp_pipeline.h` | Filter storage declarations, delay line API |
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |
@@ -146,8 +149,9 @@ Defined in `main.c`, function `core0_init()`:
 5. **Preset boot load** — `preset_boot_load()` always selects a preset. Reads preset directory, loads appropriate slot based on startup policy (specified default or last active). If the target slot is empty, applies factory defaults while keeping the slot selected. On first boot after upgrade, migrates legacy single-sector data into preset slot 0. A preset is always active — there is no "no preset" state.
    *Last updated: 2026-03-07*
 6. **Loudness table computation** — Pre-compute ISO 226 curves for all 61 volume steps
-7. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
-8. **Core 1 launch** — `multicore_launch_core1(pdm_core1_entry)`
+7. **Optional non-USB control init** — `control_transports_init()` enables I2C/UART adapters only when their build-time priorities are non-negative.
+8. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
+9. **Core 1 launch** — `multicore_launch_core1(pdm_core1_entry)`
 
 ### Main Loop
 
@@ -156,6 +160,7 @@ Defined in `main.c`, function `core0_init()`:
 - Sample rate change handling (PLL reclocking + filter recalculation)
 - Loudness table recomputation (background, double-buffered)
 - Crossfeed coefficient updates
+- Non-USB control transaction execution through `control_transports_tick()`
 - LED heartbeat toggle
 
 ---
@@ -164,13 +169,13 @@ Defined in `main.c`, function `core0_init()`:
 *Last updated: 2026-03-18*
 
 ### USB Stack
-*Last updated: 2026-04-18*
+*Last updated: 2026-04-30*
 
 **Library:** TinyUSB (vendored via Pico SDK) with a custom UAC1 class driver (`usb_audio.c`, registered via `usbd_app_driver_get_cb`). TinyUSB's built-in audio class driver is UAC2-only and is bypassed. See "TinyUSB Migration (Phase 1)" for details.
 
-**Error handling:** TinyUSB's USB IRQ handler receives bus-level error interrupts and increments internal counters. In Phase 1, the vendor-command hooks for `REQ_GET_USB_ERROR_STATS` / `REQ_RESET_USB_ERROR_STATS` are unreachable (vendor interface dropped); Phase 2 will re-expose these once the vendor interface is wired into TinyUSB.
+**Error handling:** TinyUSB's USB IRQ handler receives bus-level error interrupts and increments internal counters. The vendor-command hooks for `REQ_GET_USB_ERROR_STATS` / `REQ_RESET_USB_ERROR_STATS` are exposed through the shared control executor; TinyUSB currently returns zeroed stats because it does not expose the old per-category counters.
 
-**Interfaces (Phase 1):**
+**Interfaces:**
 1. **Audio Control (AC)** — Interface 0
 2. **Audio Streaming (AS)** — Interface 1
    - Alt 0: Zero-bandwidth (idle)
@@ -178,8 +183,10 @@ Defined in `main.c`, function `core0_init()`:
    - Alt 2: 24-bit PCM, 2 channels (44.1/48/96 kHz), wMaxPacketSize=582
    - EP OUT 0x01 (isochronous async): Audio data
    - EP IN 0x82 (isochronous feedback): 10.14 fixed-point rate, bRefresh=2 (4 ms)
+3. **Vendor Control/Notification** — Interface 2
+   - EP IN 0x83 (bulk): device-to-host notifications
 
-The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
+TinyUSB routes vendor-type control transfers directly to `tud_vendor_control_xfer_cb()` in `vendor_commands.c`. That callback now adapts EP0 setup/data/ack stages into `ControlRequest` calls against the shared executor. Optional I2C/UART control frames in `control_transport.c` use the same executor and preserve USB request fields, including the ignored `wIndex`.
 
 ### Sample-rate & Bit-depth Switching
 *Last updated: 2026-04-18*

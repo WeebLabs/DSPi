@@ -19,6 +19,7 @@
 #include "config.h"
 #include "audio_input.h"
 #include "audio_pipeline.h"
+#include "control_transport.h"
 #include "spdif_input.h"
 #include "spdif_rx.h"
 #include "dsp_pipeline.h"
@@ -873,6 +874,11 @@ void core0_init() {
     // Initialize SPDIF RX subsystem (no PIO/DMA resources claimed yet)
     spdif_input_init();
 
+    // Optional I2C/UART control links are disabled by default.  When a build
+    // enables them, their IRQ handlers only frame bytes; command execution
+    // still happens from the main loop through the shared control executor.
+    control_transports_init();
+
     // If the loaded preset has SPDIF as input source, start RX hardware.
     // Output remains muted until lock is acquired (handled in main loop).
     //
@@ -971,6 +977,11 @@ int main(void) {
             // Adjust output PIO dividers to track SPDIF input clock
             spdif_input_update_clock_servo();
         }
+
+        // Execute at most one accepted non-USB control transaction per loop.
+        // USB control remains serviced by TinyUSB above, but reaches the same
+        // command executor as these transports.
+        control_transports_tick();
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,

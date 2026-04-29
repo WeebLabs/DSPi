@@ -1,10 +1,9 @@
 /*
- * vendor_commands.h — Vendor USB control request handlers for DSPi
+ * vendor_commands.h — TinyUSB adapter and shared control helpers for DSPi
  *
- * Phase 2: adapted for TinyUSB.  The previous pico-extras `struct usb_interface`
- * / `struct usb_setup_packet` API is replaced by TinyUSB's stage-based
- * `tud_control_xfer` flow.  The DSPi UAC1 class driver (`usb_audio.c`) routes
- * vendor-class vendor-interface requests here via `vendor_control_xfer_cb`.
+ * The TinyUSB callback in vendor_commands.c adapts EP0 setup/data/ack stages
+ * to the shared executor declared in control_executor.h.  I2C and UART use the
+ * same executor through control_transport.c.
  */
 
 #ifndef VENDOR_COMMANDS_H

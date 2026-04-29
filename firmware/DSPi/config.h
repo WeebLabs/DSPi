@@ -112,6 +112,50 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Microsoft WCID Vendor Code
 #define MS_VENDOR_CODE      0x01
 
+// ----------------------------------------------------------------------------
+// NON-USB CONTROL TRANSPORT CONFIGURATION
+// ----------------------------------------------------------------------------
+
+// Non-USB transports are build-time integration options for controller MCUs.
+// A priority below zero removes the transport from the build.  When both are
+// enabled, the main loop executes the highest-priority accepted transaction
+// first and leaves the other transport waiting with its response/status state.
+#ifndef DSPI_CONTROL_I2C_PRIORITY
+#define DSPI_CONTROL_I2C_PRIORITY   (-1)
+#endif
+#ifndef DSPI_CONTROL_UART_PRIORITY
+#define DSPI_CONTROL_UART_PRIORITY  (-1)
+#endif
+
+#ifndef DSPI_CONTROL_I2C_INSTANCE
+#define DSPI_CONTROL_I2C_INSTANCE   0
+#endif
+#ifndef DSPI_CONTROL_I2C_ADDR
+#define DSPI_CONTROL_I2C_ADDR       0x2A
+#endif
+#ifndef DSPI_CONTROL_I2C_SDA_PIN
+#define DSPI_CONTROL_I2C_SDA_PIN    4
+#endif
+#ifndef DSPI_CONTROL_I2C_SCL_PIN
+#define DSPI_CONTROL_I2C_SCL_PIN    5
+#endif
+#ifndef DSPI_CONTROL_I2C_BAUD
+#define DSPI_CONTROL_I2C_BAUD       400000
+#endif
+
+#ifndef DSPI_CONTROL_UART_INSTANCE
+#define DSPI_CONTROL_UART_INSTANCE  0
+#endif
+#ifndef DSPI_CONTROL_UART_TX_PIN
+#define DSPI_CONTROL_UART_TX_PIN    12
+#endif
+#ifndef DSPI_CONTROL_UART_RX_PIN
+#define DSPI_CONTROL_UART_RX_PIN    13
+#endif
+#ifndef DSPI_CONTROL_UART_BAUD
+#define DSPI_CONTROL_UART_BAUD      1000000
+#endif
+
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
 #define REQ_GET_EQ_PARAM    0x43
