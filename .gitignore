@@ -26,6 +26,5 @@ __pycache__/
 # Ignore all markdown files except key docs
 *.md
 !README.md
-!Documentation/current_architecture.md
-!Documentation/Roadmap.md
-!Documentation/Features/*.md
+!Documentation/*.md
+!tools/*.md
