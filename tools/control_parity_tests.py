@@ -9,11 +9,14 @@ surface still has a handler in that executor.
 from __future__ import annotations
 
 import re
+import importlib.util
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FW = ROOT / "firmware" / "DSPi"
+TOOLS = ROOT / "tools"
 
 
 def read(path: Path) -> str:
@@ -85,25 +88,78 @@ def test_request_ids_are_covered_by_executor_switches() -> None:
 
 
 def test_required_plan_docs_exist_with_expected_headings() -> None:
-    expected = {
+    docs = {
+        "DESIGN.md": ["# Design"],
+        "TESTING.md": ["# Testing Strategy"],
+        "ROADMAP.md": ["# Roadmap", "## Now", "## Later", "## Completed"],
         "PLAN.md": [
-            "Roadmap alignment",
-            "Objective",
-            "Assumptions",
-            "Scenario mapping",
-            "Exit criteria",
-            "Promotion rule",
+            "# Plan",
+            "## Roadmap alignment",
+            "## Objective",
+            "## Assumptions",
+            "## Scenario mapping",
+            "## Exit criteria",
+            "## Promotion rule",
         ],
-        "DESIGN.md": ["Control interface architecture"],
-        "tests/TESTS.md": ["Control parity tests"],
-        "tests/SCENARIOS.md": ["Shared control executor parity"],
+        "tests/TESTS.md": ["# Tests"],
+        "tests/SCENARIOS.md": ["# Scenarios"],
     }
-    for rel, headings in expected.items():
-        text = read(ROOT / rel)
+    for relative, headings in docs.items():
+        content = read(ROOT / relative)
         for heading in headings:
-            assert f"## {heading}" in text or f"# {heading}" in text, (
-                f"{rel} missing heading {heading}"
-            )
+            assert heading in content, f"{relative} missing heading {heading}"
+
+
+def load_common_module():
+    path = TOOLS / "dspi_control_common.py"
+    spec = importlib.util.spec_from_file_location("dspi_control_common", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_raspberry_pi_scripts_exist() -> None:
+    for relative in [
+        "dspi_control_common.py",
+        "dspi_i2c_control_test.py",
+        "dspi_uart_control_test.py",
+        "dspi_control_examples.md",
+    ]:
+        assert (TOOLS / relative).exists(), f"missing Raspberry Pi tool {relative}"
+
+
+def test_raspberry_pi_frame_helper_matches_firmware_contract() -> None:
+    common = load_common_module()
+    frame = common.build_request(common.CONTROL_DIR_IN, common.REQ_GET_PLATFORM, length=4)
+    assert frame == b"DC\x01\x01\x7f\x00\x00\x00\x00\x04\x00"
+    assert common.parse_response_header(b"DC\x81\x00\x04\x00") == (common.CONTROL_STATUS_OK, 4)
+    assert common.REQ_SET_MASTER_VOLUME == 0xD2
+    assert common.REQ_GET_MASTER_VOLUME == 0xD3
+
+
+def test_raspberry_pi_docs_reference_scripts_and_checks() -> None:
+    examples = read(TOOLS / "dspi_control_examples.md")
+    tests_doc = read(ROOT / "tests" / "TESTS.md")
+    for token in [
+        "tools/dspi_i2c_control_test.py",
+        "tools/dspi_uart_control_test.py",
+        "REQ_GET_PLATFORM",
+        "REQ_SET_MASTER_VOLUME",
+        "REQ_GET_MASTER_VOLUME",
+        "REQ_GET_ALL_PARAMS",
+    ]:
+        assert token in examples, f"example docs missing {token}"
+    for token in [
+        "dspi_i2c_control_test.py",
+        "dspi_uart_control_test.py",
+        "REQ_SET_MASTER_VOLUME",
+        "REQ_GET_MASTER_VOLUME",
+        "REQ_GET_ALL_PARAMS",
+    ]:
+        assert token in tests_doc, f"tests docs missing {token}"
 
 
 def main() -> None:
@@ -113,6 +169,9 @@ def main() -> None:
         test_option_a_frame_shape_is_documented_in_code,
         test_request_ids_are_covered_by_executor_switches,
         test_required_plan_docs_exist_with_expected_headings,
+        test_raspberry_pi_scripts_exist,
+        test_raspberry_pi_frame_helper_matches_firmware_contract,
+        test_raspberry_pi_docs_reference_scripts_and_checks,
     ]
     for test in tests:
         test()
