@@ -181,6 +181,32 @@ Defined in `main.c`, function `core0_init()`:
 
 The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
 
+### Microsoft OS 2.0 Descriptors (auto-bind WinUSB)
+*Last updated: 2026-04-30*
+
+When the vendor interface is active, DSPi advertises Microsoft OS 2.0 Platform Capability Descriptors so Windows 8.1+ auto-binds `winusb.sys` to the vendor function on first plug-in — no Zadig step required.
+
+**Wire format additions:**
+- `device_descriptor.bcdUSB = 0x0210` (was `0x0200`) so Windows queries the BOS descriptor.
+- `device_descriptor.bDeviceClass / bDeviceSubClass / bDeviceProtocol = (0xEF, 0x02, 0x01)` (was all zeros) — the **IAD signaling triplet** required by the USB-IF IAD ECN whenever a device uses an Interface Association Descriptor. On Windows, this triplet causes `usbccgp.sys` to spawn a composite-device parent and apply per-function driver binding; without it, Windows inspects interface 0 (Audio Control) and may classify the whole device as Audio, breaking the per-function WinUSB binding our MS OS 2.0 Function Subset Header relies on. Matches every TinyUSB audio + IAD example.
+- BOS descriptor (`desc_bos`, 33 bytes total) with one Microsoft OS 2.0 Platform Capability descriptor (28 bytes), built from TinyUSB helpers `TUD_BOS_DESCRIPTOR` + `TUD_BOS_MS_OS_20_DESCRIPTOR`. Returned via `tud_descriptor_bos_cb()` in `usb_descriptors.c`.
+- MS OS 2.0 descriptor set (`desc_ms_os_20`, 178 bytes / 0xB2) consisting of:
+  - Set Header (10 bytes; `dwWindowsVersion = 0x06030000` = Win 8.1).
+  - Configuration Subset Header (8 bytes; configuration 0).
+  - Function Subset Header (8 bytes; `bFirstInterface = ITF_NUM_VENDOR = 2` — scopes WinUSB binding to the vendor function only, leaving the audio function on the OS audio class driver).
+  - Compatible ID Feature Descriptor (20 bytes; `WINUSB\0\0`).
+  - Registry Property Feature Descriptor (132 bytes; `DeviceInterfaceGUIDs` REG_MULTI_SZ = `{9D9B8609-E6D1-4FF0-92AF-403119CB7692}`).
+
+**Vendor request handler:** the existing `tud_vendor_control_xfer_cb` in `vendor_commands.c` has a top-of-SETUP dispatch for `bRequest == MS_VENDOR_CODE (0x01)`:
+- IN direction with `wIndex == 7` (per MS OS 2.0 spec — "GET MS OS 2.0 Descriptor Set") → return `desc_ms_os_20`.
+- Anything else with `bRequest == 0x01` (OUT direction, IN with `wIndex == 8` "SET_ALT_ENUMERATION", or unknown wIndex) → STALL.
+
+The branch sits before both the IN-direction `vendor_handle_get` dispatcher and the OUT-direction generic SET path, so `bRequest = 0x01` can never reach the legacy 0x42+ application-opcode range or be silently ACK'd. The literal 7 and 8 are MS OS 2.0 spec constants — TinyUSB doesn't expose them as named enums.
+
+**Host integration:** the host application must use the published GUID with `SetupDiGetClassDevs(&guid, …, DIGCF_DEVICEINTERFACE)` to enumerate DSPi on Windows. libusb 1.0 transparently uses the WinUSB backend behind the scenes; apps can also `WinUsb_Initialize` directly. The GUID is product-line-scoped and must not be changed without coordinated host-side updates and (for already-enumerated machines) re-enumeration via Device Manager → Uninstall device.
+
+**No MS OS 1.0 fallback:** Windows < 8.1 (EOL January 2023) sees DSPi as an unrecognised vendor function and still requires manual driver install. We're forward-only on Windows.
+
 ### Sample-rate & Bit-depth Switching
 *Last updated: 2026-04-18*
 

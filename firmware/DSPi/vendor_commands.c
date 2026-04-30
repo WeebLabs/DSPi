@@ -1695,6 +1695,34 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     _vendor_current_req  = req;
 
     if (stage == CONTROL_STAGE_SETUP) {
+        // ---- Microsoft OS 2.0 platform-capability vendor requests ----
+        // Windows 8.1+ sends these after reading our BOS descriptor:
+        //   bmRequestType=0xC0, bRequest=MS_VENDOR_CODE, wIndex=7  → return
+        //                       the descriptor set (advertises WinUSB +
+        //                       DeviceInterfaceGUID).
+        //   bmRequestType=0xC0, bRequest=MS_VENDOR_CODE, wIndex=8  → SET
+        //                       alt-enumeration; not supported, STALL.
+        //
+        // MS_VENDOR_CODE is reserved for Microsoft on the vendor-type
+        // request channel; STALL any OUT-direction or non-7 wIndex hit so
+        // the value can never accidentally route into vendor_handle_set_data
+        // or be silently ACK'd by the generic SET path below. Note this
+        // value (0x01) numerically aliases UAC1_REQ_SET_CUR but cannot
+        // collide because UAC1 is TUSB_REQ_TYPE_CLASS and reaches the audio
+        // class handler — vendor-type requests come here.
+        if (req->bRequest == MS_VENDOR_CODE) {
+            if (req->bmRequestType_bit.direction == TUSB_DIR_IN &&
+                req->wIndex == 7) {
+                return tud_control_xfer(rhport, req,
+                                        (void *)(uintptr_t)desc_ms_os_20,
+                                        (uint16_t)desc_ms_os_20_len);
+            }
+            // OUT-direction, wIndex=8 (SET_ALT_ENUMERATION), or anything
+            // else: STALL. Must run BEFORE vendor_handle_get / SET path so
+            // bRequest=0x01 can never hit the application dispatcher.
+            return false;
+        }
+
         if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
             // GET path — dispatches into the legacy switch.
             bool ok = vendor_handle_get(req);

@@ -109,7 +109,16 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define VENDOR_EP_SIZE      64
 #define VENDOR_EP_INTERVAL  10
 
-// Microsoft WCID Vendor Code
+// Microsoft OS 2.0 vendor request code — embedded in the BOS Platform
+// Capability descriptor. Windows 8.1+ uses it as the bRequest in
+// bmRequestType=0xC0 vendor-type GETs to fetch the MS OS 2.0 descriptor
+// set. Reserved for Microsoft; never reuse for application opcodes.
+//
+// Note: 0x01 also happens to be the value of UAC1_REQ_SET_CUR
+// (usb_descriptors.h). They cannot collide because UAC1 SET_CUR is
+// TUSB_REQ_TYPE_CLASS and reaches the audio class handler in usb_audio.c,
+// while MS OS 2.0 requests are TUSB_REQ_TYPE_VENDOR and reach
+// tud_vendor_control_xfer_cb in vendor_commands.c.
 #define MS_VENDOR_CODE      0x01
 
 // Vendor Request Commands (EP0 control transfers)

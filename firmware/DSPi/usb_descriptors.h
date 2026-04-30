@@ -1,14 +1,21 @@
 /*
- * USB Descriptors for DSPi — TinyUSB / UAC1
+ * USB Descriptors for DSPi — TinyUSB / UAC1 + Vendor + MS OS 2.0
  *
- * Phase 1: audio-only composite (AC + AS).  Vendor interface removed pending
- * Phase 2.  Configuration descriptor is a packed byte array built at compile
- * time; no LUFA structs.
+ * Composite device with three interfaces: Audio Control (0) + Audio
+ * Streaming (1) under an IAD bound to the OS audio class driver, plus a
+ * standalone Vendor interface (2, class 0xFF) auto-bound to WinUSB on
+ * Windows 8.1+ via Microsoft OS 2.0 Platform Capability descriptors.
+ *
+ * The configuration descriptor is a packed byte array built at compile
+ * time. The BOS descriptor and MS OS 2.0 descriptor set live in
+ * usb_descriptors.c and are returned via tud_descriptor_bos_cb and the
+ * vendor SETUP handler in vendor_commands.c.
  */
 
 #ifndef USB_DESCRIPTORS_H
 #define USB_DESCRIPTORS_H
 
+#include <stddef.h>  // size_t (for desc_ms_os_20_len)
 #include <stdint.h>
 
 #include "tusb.h"
@@ -110,5 +117,11 @@ extern const uint16_t usb_config_descriptor_len;
 // [1] = alt 2 (24-bit).
 extern const uint8_t *const usb_audio_data_ep_desc[2];
 extern const uint8_t *const usb_audio_fb_ep_desc[2];
+
+// MS OS 2.0 descriptor set (178 bytes).  Returned to the host on a vendor
+// SETUP request bRequest=MS_VENDOR_CODE wIndex=7 to advertise WinUSB binding
+// + DeviceInterfaceGUIDs for the vendor function.  Defined in usb_descriptors.c.
+extern const uint8_t desc_ms_os_20[];
+extern const size_t desc_ms_os_20_len;
 
 #endif // USB_DESCRIPTORS_H
