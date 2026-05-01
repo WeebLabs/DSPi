@@ -90,9 +90,6 @@ uint8_t preset_save_master_volume(void);
 // boot in mode 0).  Does not affect live state.
 float preset_get_saved_master_volume(void);
 
-// Set the SPDIF RX input GPIO pin (device-level, stored in directory).
-void preset_set_spdif_rx_pin(uint8_t pin);
-
 // Get the currently active preset slot (always 0-9).
 uint8_t preset_get_active(void);
 

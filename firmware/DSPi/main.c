@@ -1491,38 +1491,19 @@ int main(void) {
             }
         }
 
-        // Handle deferred SPDIF RX pin update. Two flags arrive together
-        // when the pin changes while RX is active:
-        //   * spdif_rx_pin_change_pending: stop/start the RX library so it
-        //     picks up the new spdif_rx_pin GPIO. RX teardown is too heavy
-        //     for the USB ISR vendor handler, so it's deferred here.
-        //   * flash_set_spdif_rx_pin_pending: persist the new pin to the
-        //     directory sector. Flash writes block IRQs for ~45 ms, so we
-        //     bracket the write with the RX stop/start to avoid the
-        //     blackout corrupting in-flight RX state — same pattern as
-        //     preset_load_pending around line 1242.
+        // Handle deferred SPDIF RX pin hot-swap. Set when spdif_rx_pin is
+        // updated (by vendor command, bulk params apply, or preset load)
+        // while INPUT_SOURCE_SPDIF is active. RX library teardown is too
+        // heavy for USB ISR context, so we run stop/start here.
+        // Persistence is now slot-scoped (REQ_PRESET_SAVE) — no flash
+        // write happens here.
         extern volatile bool spdif_rx_pin_change_pending;
-        if (flash_set_spdif_rx_pin_pending || spdif_rx_pin_change_pending) {
-            const bool need_flash   = flash_set_spdif_rx_pin_pending;
-            const bool need_restart = spdif_rx_pin_change_pending;
-            flash_set_spdif_rx_pin_pending = false;
+        if (spdif_rx_pin_change_pending) {
             spdif_rx_pin_change_pending = false;
-
-            bool suspended = false;
-            if (need_restart && active_input_source == INPUT_SOURCE_SPDIF &&
+            if (active_input_source == INPUT_SOURCE_SPDIF &&
                 spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
                 spdif_input_stop();
                 spdif_prefilling = false;
-                suspended = true;
-            }
-
-            if (need_flash) {
-                prepare_flash_write_operation();
-                preset_set_spdif_rx_pin(spdif_rx_pin);
-                complete_flash_write_operation_light();
-            }
-
-            if (suspended) {
                 // Restart on the new pin; outputs stay muted until lock
                 // is acquired (handled by the SPDIF polling block above).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);

@@ -189,9 +189,18 @@ typedef struct __attribute__((packed)) {
     // Per-channel preamp + Master volume (V12)
     float   preamp_db_per_ch[NUM_INPUT_CHANNELS];  // Per-input-channel preamp (dB)
     float   master_volume_db;                       // Device master volume (-128 mute, -127..0 dB)
-    // Input source selection (V13)
+    // Input source selection (V13) + SPDIF RX pin
+    //
+    // spdif_rx_pin claims one of V13's three padding bytes without changing
+    // the slot struct size, so existing V13 slots remain CRC-valid: their
+    // padding bytes were zero-initialised by collect_live_state's memset
+    // (line ~484), and apply_slot_to_live treats spdif_rx_pin == 0 as
+    // invalid and falls through to the live default — same effect as if
+    // the byte never existed. Forward saves write the live pin and the
+    // CRC is recomputed at save time.
     uint8_t input_source;            // InputSource enum (0=USB, 1=SPDIF)
-    uint8_t input_source_padding[3]; // Pad to 4-byte boundary
+    uint8_t spdif_rx_pin;            // SPDIF RX GPIO (0 = absent → use default)
+    uint8_t input_source_padding[2]; // Pad to 4-byte boundary
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -534,6 +543,10 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // Pin configuration (always stored, conditionally loaded)
     memcpy(slot->output_pins, output_pins, sizeof(slot->output_pins));
 
+    // SPDIF RX pin: stored alongside output_pins, loaded only when
+    // include_pins is true (matches output_pins discipline).
+    slot->spdif_rx_pin = spdif_rx_pin;
+
     // Channel names
     memcpy(slot->channel_names, channel_names, sizeof(slot->channel_names));
 
@@ -697,6 +710,30 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
             if (pin > 28) valid = false;
 #endif
             output_pins[i] = valid ? pin : default_pins[i];
+        }
+
+        // SPDIF RX pin (lives in the formerly-padding byte after V13's
+        // input_source field; see PresetSlot struct comment).  Validate
+        // with the same rule as output_pins; if invalid, leave the live
+        // value alone — pre-V13-with-rx-pin slots have 0 here, which
+        // fails validity, so the live boot-bootstrapped value (or current
+        // value) is preserved.  If valid AND it changed AND SPDIF input
+        // is currently active, schedule the hot-swap so the running RX
+        // library picks up the new GPIO.
+        {
+            uint8_t pin = slot->spdif_rx_pin;
+            bool valid = (pin > 0) && (pin <= 29) && (pin != 12) &&
+                         !(pin >= 23 && pin <= 25);
+#if !PICO_RP2350
+            if (pin > 28) valid = false;
+#endif
+            if (valid && pin != spdif_rx_pin) {
+                spdif_rx_pin = pin;
+                if (active_input_source == INPUT_SOURCE_SPDIF) {
+                    extern volatile bool spdif_rx_pin_change_pending;
+                    spdif_rx_pin_change_pending = true;
+                }
+            }
         }
     }
 
@@ -1002,12 +1039,6 @@ void preset_set_master_volume_mode(uint8_t mode) {
     if (mode > MASTER_VOLUME_MODE_WITH_PRESET) mode = MASTER_VOLUME_MODE_INDEPENDENT;
     dir_ensure();
     dir_cache.master_volume_mode = mode;
-    dir_flush();
-}
-
-void preset_set_spdif_rx_pin(uint8_t pin) {
-    dir_ensure();
-    dir_cache.spdif_rx_pin = pin;
     dir_flush();
 }
 

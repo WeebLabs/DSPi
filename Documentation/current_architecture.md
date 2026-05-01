@@ -1610,11 +1610,13 @@ typedef enum {
 
 ### SPDIF RX Pin
 
-- Default: GPIO 11 (`PICO_SPDIF_RX_PIN_DEFAULT`)
-- Device-level setting stored in `PresetDirectory` (not per-preset)
-- Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5)
-- **Hot-swap supported.** Pin can be changed while SPDIF input is active. The vendor handler validates the pin and queues two main-loop deferred operations: (1) `flash_set_spdif_rx_pin_pending` — persist to directory; (2) `spdif_rx_pin_change_pending` — bridge a `spdif_input_stop()` / `spdif_input_start()` cycle so the running RX library picks up the new GPIO. The combined main-loop handler stops RX first, performs the flash write under the resulting blackout-safe window (mirrors the `preset_load_pending` pattern at `main.c:1242+`), then restarts RX on the new pin. Outputs play silence during the brief stop/start gap; the SPDIF lock-acquisition polling block re-engages playback through its normal prefill handshake once the source re-locks.
-- The deferred restart is needed because the `pico_spdif_rx` library's teardown (program removal, IRQ handler removal, DMA channel unclaim) is not safe to perform from USB ISR context where the vendor handler runs.
+- Default: GPIO 11 (`PICO_SPDIF_RX_PIN_DEFAULT`).
+- **Slot-scoped persistence (matches `output_pins[]`).** `REQ_SET_SPDIF_RX_PIN` updates the live `spdif_rx_pin` global in RAM only; no implicit flash write. The user must `REQ_PRESET_SAVE` to capture the new pin in a preset slot. On `REQ_PRESET_LOAD`, the pin is restored from the slot if and only if the directory's `include_pins` flag is set — same gate as output pin loading.
+- Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5).
+- **On-flash layout:** `spdif_rx_pin` lives in one byte that V13 originally reserved as `input_source_padding[0]`. Reusing that byte keeps the `PresetSlot` size unchanged, so existing V13 presets remain CRC-valid (their padding bytes were zero-initialised, which fails GPIO validity and falls through to the live default — same observable behaviour as before this change).
+- **Boot-time bootstrap.** `preset_boot_load` still reads the directory's legacy `spdif_rx_pin` field as the initial live value. This means users upgrading from auto-flush firmware keep their previously-configured pin until they save a preset under the new firmware. After that, the slot's value drives behaviour and the directory field is no longer consulted on subsequent boots that load the same slot.
+- **Hot-swap supported.** Pin changes (from vendor command, bulk params apply, or preset load) while SPDIF input is active set `spdif_rx_pin_change_pending`; the main-loop deferred handler runs `spdif_input_stop()` → `prepare_pipeline_reset()` → `spdif_input_start()` so the running RX library picks up the new GPIO. Deferred to main loop because the `pico_spdif_rx` library's teardown (program removal, IRQ handler removal, DMA channel unclaim) is not safe to perform from USB ISR context.
+- **`bulk_params_apply` integration.** `WireInputConfig.spdif_rx_pin` is applied on bulk SET when `apply_pins == true`, mirroring how `output_pins[]` is applied. If the new pin differs from the current one and SPDIF input is active, the hot-swap fires.
 
 ### SPDIF RX Implementation
 

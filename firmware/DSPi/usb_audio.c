@@ -122,13 +122,11 @@ uint8_t flash_set_master_volume_mode_val = 0;
 // into the directory's independent field.  Value is read at dispatch time.
 volatile bool flash_save_master_volume_pending = false;
 
-// Deferred SPDIF RX pin directory update
-volatile bool flash_set_spdif_rx_pin_pending = false;
-
-// Deferred SPDIF RX hot-swap. Set by REQ_SET_SPDIF_RX_PIN when the pin
-// changes while INPUT_SOURCE_SPDIF is active — main loop bridges the
-// stop/start because spdif_rx library teardown is too heavy for the USB
-// ISR context where the vendor handler runs.
+// Deferred SPDIF RX hot-swap. Set when the spdif_rx_pin live global is
+// updated (by vendor command, bulk params apply, or preset load) while
+// INPUT_SOURCE_SPDIF is active — main loop bridges the stop/start
+// because spdif_rx library teardown is too heavy for the USB ISR
+// context where some of those updates originate.
 volatile bool spdif_rx_pin_change_pending = false;
 
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.

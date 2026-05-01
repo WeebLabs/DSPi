@@ -189,7 +189,7 @@ typedef struct __attribute__((packed)) {
 // ============================================================================
 typedef struct __attribute__((packed)) {
     uint8_t  input_source;           // InputSource enum (0=USB, 1=SPDIF)
-    uint8_t  spdif_rx_pin;          // SPDIF RX GPIO pin (informational, SET does not apply)
+    uint8_t  spdif_rx_pin;          // SPDIF RX GPIO pin (applied on SET when apply_pins=true)
     uint8_t  reserved[14];           // Future expansion (pad to 16 bytes)
 } WireInputConfig;                   // 16 bytes
 

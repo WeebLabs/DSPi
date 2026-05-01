@@ -295,6 +295,27 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
 #endif
             output_pins[i] = valid ? pin : default_pins[i];
         }
+
+        // SPDIF RX pin: apply on the same gate as output pins (V7+
+        // payloads only; V6 and earlier have no input_config section).
+        // If valid AND it changed, fire the hot-swap when SPDIF input
+        // is currently active so the running RX library picks up the
+        // new GPIO without requiring a vendor-command round trip.
+        if (in->header.format_version >= 7) {
+            uint8_t pin = in->input_config.spdif_rx_pin;
+            bool valid = (pin > 0) && (pin <= 29) && (pin != 12) &&
+                         !(pin >= 23 && pin <= 25);
+#if !PICO_RP2350
+            if (pin > 28) valid = false;
+#endif
+            if (valid && pin != spdif_rx_pin) {
+                spdif_rx_pin = pin;
+                if (active_input_source == INPUT_SOURCE_SPDIF) {
+                    extern volatile bool spdif_rx_pin_change_pending;
+                    spdif_rx_pin_change_pending = true;
+                }
+            }
+        }
     }
 
     // EQ bands

@@ -1650,12 +1650,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 } else if (is_pin_in_use(new_pin, 0xFF)) {
                     status = PIN_CONFIG_PIN_IN_USE;
                 } else {
+                    // RAM-only update.  Persistence is now slot-scoped:
+                    // the user must REQ_PRESET_SAVE to capture the new
+                    // pin in a preset slot, exactly like REQ_SET_OUTPUT_PIN.
                     spdif_rx_pin = new_pin;
-                    flash_set_spdif_rx_pin_pending = true;
                     if (active_input_source == INPUT_SOURCE_SPDIF) {
-                        // Hot-swap: defer the stop/start to main loop.
-                        // The flag handler combines this with the flash
-                        // write so RX is suspended across the blackout.
+                        // Hot-swap: defer the stop/start to main loop
+                        // because spdif_rx library teardown is too heavy
+                        // for USB ISR context.
                         extern volatile bool spdif_rx_pin_change_pending;
                         spdif_rx_pin_change_pending = true;
                     }
