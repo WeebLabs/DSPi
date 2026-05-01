@@ -1613,7 +1613,8 @@ typedef enum {
 - Default: GPIO 11 (`PICO_SPDIF_RX_PIN_DEFAULT`)
 - Device-level setting stored in `PresetDirectory` (not per-preset)
 - Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5)
-- Pin change rejected when SPDIF input is active
+- **Hot-swap supported.** Pin can be changed while SPDIF input is active. The vendor handler validates the pin and queues two main-loop deferred operations: (1) `flash_set_spdif_rx_pin_pending` — persist to directory; (2) `spdif_rx_pin_change_pending` — bridge a `spdif_input_stop()` / `spdif_input_start()` cycle so the running RX library picks up the new GPIO. The combined main-loop handler stops RX first, performs the flash write under the resulting blackout-safe window (mirrors the `preset_load_pending` pattern at `main.c:1242+`), then restarts RX on the new pin. Outputs play silence during the brief stop/start gap; the SPDIF lock-acquisition polling block re-engages playback through its normal prefill handshake once the source re-locks.
+- The deferred restart is needed because the `pico_spdif_rx` library's teardown (program removal, IRQ handler removal, DMA channel unclaim) is not safe to perform from USB ISR context where the vendor handler runs.
 
 ### SPDIF RX Implementation
 

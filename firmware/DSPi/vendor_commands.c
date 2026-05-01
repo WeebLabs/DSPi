@@ -1632,7 +1632,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             }
 
             case REQ_SET_SPDIF_RX_PIN: {
-                // Immediate-response SET (same pattern as SET_I2S_BCK_PIN).
+                // Hot-swappable: when SPDIF input is active, the main-loop
+                // handler stops the RX library, persists the new pin to the
+                // directory, and restarts on the new pin. While stopped,
+                // outputs play silence; on lock-acquisition the polling
+                // block's prefill handshake re-engages playback. Mirrors
+                // the preset_load_pending pattern at main.c:1242+ which
+                // also brackets a flash blackout with stop/start.
+                //
                 // wValue = new GPIO pin number.
                 uint8_t new_pin = (uint8_t)setup->wValue;
                 uint8_t status;
@@ -1640,13 +1647,18 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (new_pin == spdif_rx_pin) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
-                } else if (active_input_source == INPUT_SOURCE_SPDIF) {
-                    status = PIN_CONFIG_OUTPUT_ACTIVE;  // Can't change while RX active
                 } else if (is_pin_in_use(new_pin, 0xFF)) {
                     status = PIN_CONFIG_PIN_IN_USE;
                 } else {
                     spdif_rx_pin = new_pin;
                     flash_set_spdif_rx_pin_pending = true;
+                    if (active_input_source == INPUT_SOURCE_SPDIF) {
+                        // Hot-swap: defer the stop/start to main loop.
+                        // The flag handler combines this with the flash
+                        // write so RX is suspended across the blackout.
+                        extern volatile bool spdif_rx_pin_change_pending;
+                        spdif_rx_pin_change_pending = true;
+                    }
                     status = PIN_CONFIG_SUCCESS;
                     notify_param_write(offsetof(WireBulkParams, input_config.spdif_rx_pin),
                                        1, &spdif_rx_pin);

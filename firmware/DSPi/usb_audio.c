@@ -125,6 +125,12 @@ volatile bool flash_save_master_volume_pending = false;
 // Deferred SPDIF RX pin directory update
 volatile bool flash_set_spdif_rx_pin_pending = false;
 
+// Deferred SPDIF RX hot-swap. Set by REQ_SET_SPDIF_RX_PIN when the pin
+// changes while INPUT_SOURCE_SPDIF is active — main loop bridges the
+// stop/start because spdif_rx library teardown is too heavy for the USB
+// ISR context where the vendor handler runs.
+volatile bool spdif_rx_pin_change_pending = false;
+
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
 
