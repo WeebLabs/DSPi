@@ -78,7 +78,10 @@ extern volatile bool bulk_params_pending;
 extern volatile bool output_type_switch_in_progress;
 extern uint8_t bulk_param_buf[];
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
-void get_default_channel_name(int ch, char *buf);
+// Compute the canonical default name for a channel given input source and output slot types.
+// `output_types` may be NULL when `ch` is an input channel or PDM.
+void get_default_channel_name(int ch, uint8_t input_source,
+                              const uint8_t *output_types, char *buf);
 
 // Core 1 mode derivation (used by preset load and bulk params)
 Core1Mode derive_core1_mode(void);

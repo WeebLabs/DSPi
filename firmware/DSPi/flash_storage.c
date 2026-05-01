@@ -737,12 +737,14 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
         }
     }
 
-    // Channel names (V8+)
+    // Channel names (V8+).  Pre-V8 slots predate output_types (V9+) and
+    // input_source (V13+) too, so fall back to firmware boot defaults
+    // (INPUT_SOURCE_USB, all-SPDIF outputs via NULL output_types).
     if (slot->version >= 8) {
         memcpy(channel_names, slot->channel_names, sizeof(channel_names));
     } else {
         for (int ch = 0; ch < NUM_CHANNELS; ch++)
-            get_default_channel_name(ch, channel_names[ch]);
+            get_default_channel_name(ch, INPUT_SOURCE_USB, NULL, channel_names[ch]);
     }
 
     // I2S configuration (V9+)
@@ -1297,9 +1299,11 @@ static void apply_factory_defaults(void) {
     output_pins[2] = PICO_PDM_PIN;
 #endif
 
-    // Reset channel names to defaults
+    // Reset channel names to factory defaults (USB input, all-SPDIF outputs).
+    // active_input_source and output_types are reset to those values below;
+    // pass NULL for output_types so the function uses its all-SPDIF fallback.
     for (int ch = 0; ch < NUM_CHANNELS; ch++)
-        get_default_channel_name(ch, channel_names[ch]);
+        get_default_channel_name(ch, INPUT_SOURCE_USB, NULL, channel_names[ch]);
 
     // Reset I2S configuration
     {

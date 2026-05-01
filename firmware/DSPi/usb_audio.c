@@ -48,6 +48,7 @@
 #include "usb_audio_ring.h"
 #include "usb_feedback_controller.h"
 #include "vendor_commands.h"
+#include "audio_input.h"
 
 #include <stddef.h>  // offsetof
 
@@ -210,25 +211,35 @@ volatile bool leveller_bypassed = true;  // Fast bypass flag for audio callback
 // Per-channel user-configurable names
 char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 
-void get_default_channel_name(int ch, char *buf) {
+void get_default_channel_name(int ch, uint8_t input_source,
+                              const uint8_t *output_types, char *buf) {
     memset(buf, 0, PRESET_NAME_LEN);
-#if PICO_RP2350
-    static const char *defaults[] = {
-        "USB L", "USB R",
-        "SPDIF 1 L", "SPDIF 1 R", "SPDIF 2 L", "SPDIF 2 R",
-        "SPDIF 3 L", "SPDIF 3 R", "SPDIF 4 L", "SPDIF 4 R",
-        "PDM"
-    };
-#else
-    static const char *defaults[] = {
-        "USB L", "USB R",
-        "SPDIF 1 L", "SPDIF 1 R", "SPDIF 2 L", "SPDIF 2 R",
-        "PDM"
-    };
-#endif
-    if (ch >= 0 && ch < NUM_CHANNELS) {
-        strncpy(buf, defaults[ch], PRESET_NAME_LEN - 1);
+    if (ch < 0 || ch >= NUM_CHANNELS) return;
+
+    if (ch < NUM_INPUT_CHANNELS) {
+        const char *prefix;
+        switch (input_source) {
+            case INPUT_SOURCE_SPDIF: prefix = "SPDIF"; break;
+            case INPUT_SOURCE_USB:   /* fallthrough */
+            default:                 prefix = "USB";   break;
+        }
+        snprintf(buf, PRESET_NAME_LEN, "%s %c", prefix, (ch == 0) ? 'L' : 'R');
+        return;
     }
+
+    if (ch == NUM_CHANNELS - 1) {
+        strncpy(buf, "PDM", PRESET_NAME_LEN - 1);
+        return;
+    }
+
+    int slot_idx = (ch - NUM_INPUT_CHANNELS) / 2;
+    int side     = (ch - NUM_INPUT_CHANNELS) % 2;
+    uint8_t type = (output_types && slot_idx < NUM_SPDIF_INSTANCES)
+                       ? output_types[slot_idx]
+                       : OUTPUT_TYPE_SPDIF;
+    const char *prefix = (type == OUTPUT_TYPE_I2S) ? "I2S" : "SPDIF";
+    snprintf(buf, PRESET_NAME_LEN, "%s %d %c",
+             prefix, slot_idx + 1, (side == 0) ? 'L' : 'R');
 }
 
 // ---------------------------------------------------------------------------

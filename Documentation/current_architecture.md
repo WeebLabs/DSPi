@@ -942,6 +942,25 @@ The main loop handler for each operation follows the pattern:
 
 **Delete:** Engage mute → erase slot sector (feedback reset + re-mute) → update directory (feedback reset + re-mute) → if active slot: apply factory defaults + recalculate filters/delays + transition Core 1 mode (active slot selection unchanged)
 
+### Channel Names — Type/Source-Aware Defaults
+*Last updated: 2026-04-29*
+
+Default channel names are derived from current device state, not hard-coded:
+
+- **Input channels (0, 1):** labelled by `active_input_source` — `"USB L"/"USB R"` for `INPUT_SOURCE_USB`, `"SPDIF L"/"SPDIF R"` for `INPUT_SOURCE_SPDIF`. Future enums (I2S, ADAT) extend the switch in `get_default_channel_name()` (`usb_audio.c`).
+- **Output slot channels:** labelled by `output_types[slot]` — `"SPDIF N L/R"` for `OUTPUT_TYPE_SPDIF`, `"I2S N L/R"` for `OUTPUT_TYPE_I2S`, where N is 1-based slot index.
+- **PDM (last channel):** always `"PDM"`.
+
+`get_default_channel_name(int ch, uint8_t input_source, const uint8_t *output_types, char *buf)` (`usb_audio.c`) computes a default given a snapshot. `output_types` may be NULL (treated as all-SPDIF) for input/PDM channels or for fallback callers.
+
+**Auto-regen on retype/source change:** `process_type_switches` (`main.c`) and the input-source deferred handler (`main.c`) regenerate the affected channel names *only if the live name still matches the would-be old default*. User customisations like `"Living Room Sub"` are preserved by string-inequality. Regeneration emits `notify_param_write` so the host UI updates live. RAM-only on event; persistence is via `REQ_PRESET_SAVE`. State is consistent on power loss because both the type/source and the name live in the same slot.
+
+**Same persistence model as `output_pins[]` and `spdif_rx_pin`:** RAM-only changes that are persisted only when the user saves. Names are *not* gated by `include_pins` — they have their own slot bytes (V8+).
+
+**Heuristic note:** A user who renames a channel to the literal current default string (e.g., `"USB L"`) is treated as "default" and the name will re-default on the next event. Acceptable; the host UI can encourage non-default strings if stickiness matters.
+
+**Bulk SET semantics:** `bulk_params_apply` overwrites `channel_names[]` directly from the wire payload — host bulk-writes are authoritative and bypass the regen heuristic.
+
 ---
 
 ## Pin Configuration

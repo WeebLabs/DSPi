@@ -395,6 +395,26 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
+    // Regenerate default channel names for slots whose type is changing.
+    // Only overwrite names that still match the OLD default — user customisations
+    // are preserved by string-inequality.  RAM-only; persisted on REQ_PRESET_SAVE.
+    for (int slot = 0; slot < NUM_SPDIF_INSTANCES; slot++) {
+        if (current_types[slot] == target_types[slot]) continue;
+        for (int side = 0; side < 2; side++) {
+            int ch = NUM_INPUT_CHANNELS + slot * 2 + side;
+            char old_default[PRESET_NAME_LEN];
+            char new_default[PRESET_NAME_LEN];
+            get_default_channel_name(ch, active_input_source, current_types, old_default);
+            get_default_channel_name(ch, active_input_source, target_types, new_default);
+            if (strcmp(old_default, new_default) == 0) continue;
+            if (strcmp(channel_names[ch], old_default) != 0) continue;
+            memcpy(channel_names[ch], new_default, PRESET_NAME_LEN);
+            notify_param_write(
+                (uint16_t)(offsetof(WireBulkParams, channel_names.names) + ch * WIRE_NAME_LEN),
+                WIRE_NAME_LEN, channel_names[ch]);
+        }
+    }
+
     memcpy(output_types, target_types, NUM_SPDIF_INSTANCES);
 
     // Start/stop MCK based on whether any slot is now I2S
@@ -1464,6 +1484,25 @@ int main(void) {
                     // Reset DSP state to prevent stale SPDIF data leaking
                     leveller_reset_pending = true;
                     pipeline_reset_cpu_metering();
+                }
+
+                // Regenerate input-channel default names for the new source.
+                // Custom names are preserved by string-inequality.  RAM-only;
+                // persisted on REQ_PRESET_SAVE.
+                {
+                    extern uint8_t output_types[];
+                    for (int ch = 0; ch < NUM_INPUT_CHANNELS; ch++) {
+                        char old_default[PRESET_NAME_LEN];
+                        char new_default[PRESET_NAME_LEN];
+                        get_default_channel_name(ch, old_source, output_types, old_default);
+                        get_default_channel_name(ch, new_source, output_types, new_default);
+                        if (strcmp(old_default, new_default) == 0) continue;
+                        if (strcmp(channel_names[ch], old_default) != 0) continue;
+                        memcpy(channel_names[ch], new_default, PRESET_NAME_LEN);
+                        notify_param_write(
+                            (uint16_t)(offsetof(WireBulkParams, channel_names.names) + ch * WIRE_NAME_LEN),
+                            WIRE_NAME_LEN, channel_names[ch]);
+                    }
                 }
 
                 active_input_source = new_source;
