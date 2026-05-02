@@ -281,6 +281,21 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     usb_audio_drain_ring();
     prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
+    // Suspend SPDIF RX across the type-switch window.  The DMA IRQ disable
+    // below kills DMA_IRQ_1 servicing (which RX shares with SPDIF TX), and
+    // the alarm-pool decode-timeout alarms in pico_spdif_rx use a separate
+    // timer IRQ that can fire mid-transition and access PIO/DMA state we
+    // are mutating.  Stop cleanly here; restart at the end if it was running.
+    // If a caller already stopped RX (e.g. preset_load_pending across the
+    // flash blackout), state==INACTIVE and we leave it that way — caller
+    // is responsible for restart.
+    bool rx_was_running = (active_input_source == INPUT_SOURCE_SPDIF &&
+                           spdif_input_get_state() != SPDIF_INPUT_INACTIVE);
+    if (rx_was_running) {
+        spdif_input_stop();
+        spdif_prefilling = false;
+    }
+
     // Prevent DMA IRQ handlers from touching registries while we teardown/setup
     // instances and mutate hardware ownership.
     const uint spdif_dma_irq_num = DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ;
@@ -423,9 +438,13 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
     }
     if (any_i2s && i2s_mck_enabled) {
+        // Set divider BEFORE enabling the SM so MCK starts at the correct
+        // frequency.  Reversed order would briefly run MCK at the previous
+        // divider, causing a transient PLL relock chirp on connected DACs.
+        // Matches the REQ_SET_MCK_ENABLE vendor command order.
         sanitize_mck_multiplier_for_rate(audio_state.freq);
-        audio_i2s_mck_set_enabled(true);
         audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+        audio_i2s_mck_set_enabled(true);
     } else if (!any_i2s) {
         audio_i2s_mck_set_enabled(false);
     }
@@ -437,6 +456,15 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     output_type_switch_in_progress = false;
     if (usb_irq_was_enabled) {
         irq_set_enabled(USBCTRL_IRQ, true);
+    }
+
+    // Restart SPDIF RX if we suspended it above.  If active_input_source
+    // changed during the switch (rare — driven by deferred input_source
+    // change), skip restart — the input-source handler will manage it.
+    if (rx_was_running &&
+        active_input_source == INPUT_SOURCE_SPDIF &&
+        !input_source_change_pending) {
+        spdif_input_start();
     }
 
     printf("Type switch complete: mask=0x%02x\n", change_mask);
@@ -1220,14 +1248,11 @@ int main(void) {
                 // transitions Core 1 mode, and writes the directory to flash.
                 preset_load(pending_preset_load_slot);
 
-                // Restart SPDIF RX if we suspended it and the load didn't
-                // switch the active input source.  The main-loop lock-acq
-                // block will handle the drain + prefill handshake.
-                if (suspended_spdif &&
-                    active_input_source == INPUT_SOURCE_SPDIF &&
-                    !input_source_change_pending) {
-                    spdif_input_start();
-                }
+                // SPDIF RX restart is deferred until after process_type_switches
+                // (or the no-type-change branch) below.  Restarting here would
+                // race with process_type_switches' own RX management — RX
+                // would be torn down and re-acquired twice, doubling the audible
+                // glitch on a preset switch that also flips an output type.
 
                 // Presets can carry persisted raw MCK=0 (256x). Clamp invalid
                 // 96 kHz combinations and apply the effective MCK divider now
@@ -1252,6 +1277,9 @@ int main(void) {
                     // preset_load() already wrote new types to output_types[].
                     // Restore old types so process_type_switches() sees the
                     // delta correctly (it compares against output_types[]).
+                    // RX is INACTIVE here (we suspended it pre-flash), so
+                    // process_type_switches' own RX management is a no-op
+                    // for this caller — we restart RX once below.
                     uint8_t new_types[NUM_SPDIF_INSTANCES];
                     memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
                     memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
@@ -1267,6 +1295,16 @@ int main(void) {
                 } else {
                     // No type changes — just resync pipelines
                     complete_pipeline_reset();
+                }
+
+                // Restart SPDIF RX once, after all type-switch / pipeline
+                // work is done.  Skipped if the preset switched the input
+                // source — input_source_change_pending will manage RX
+                // when its handler fires below.
+                if (suspended_spdif &&
+                    active_input_source == INPUT_SOURCE_SPDIF &&
+                    !input_source_change_pending) {
+                    spdif_input_start();
                 }
             }
 
@@ -1421,6 +1459,17 @@ int main(void) {
         if (bulk_params_pending) {
             bulk_params_pending = false;
 
+            extern uint8_t output_types[];
+
+            // Snapshot current output types BEFORE apply so we can detect
+            // which slots need hardware reconfiguration afterward.  Without
+            // this, bulk SET would change output_types[] in RAM while the
+            // SPDIF/I2S hardware stayed in its previous configuration —
+            // slots flipped to I2S would keep emitting biphase-mark on the
+            // data pin, audible as loud noise on the wired-up I2S receiver.
+            uint8_t old_types[NUM_SPDIF_INSTANCES];
+            memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
+
             usb_audio_drain_ring();  // Process before full state swap
             prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
@@ -1452,6 +1501,33 @@ int main(void) {
                     pdm_set_enabled(new_mode == CORE1_MODE_PDM);
 #endif
                     __sev();
+                }
+
+                // Build change mask for slots whose type changed
+                uint8_t change_mask = 0;
+                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+                    if (output_types[i] != old_types[i])
+                        change_mask |= (1u << i);
+                }
+
+                if (change_mask) {
+                    // bulk_params_apply() already wrote new types to output_types[].
+                    // Restore old types so process_type_switches() sees the
+                    // delta correctly (it compares against output_types[]).
+                    uint8_t new_types[NUM_SPDIF_INSTANCES];
+                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
+                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
+                    process_type_switches(change_mask, new_types);
+                } else if (active_input_source == INPUT_SOURCE_SPDIF) {
+                    // SPDIF input: don't drain/re-enable the output pipeline.
+                    // Same rationale as the preset_load_pending path — draining
+                    // mid-prefill would force outputs to restart against empty
+                    // pools.  Just reset the feedback loop.
+                    reset_usb_feedback_loop();
+                } else {
+                    // No type changes — resync pipelines so the post-mute
+                    // restart is sample-aligned across all slots.
+                    complete_pipeline_reset();
                 }
             }
         }

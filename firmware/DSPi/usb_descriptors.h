@@ -25,7 +25,7 @@
 // USB IDs
 // ----------------------------------------------------------------------------
 
-#define USB_VENDOR_ID   0x2E8A
+#define USB_VENDOR_ID   0x2E8B
 #define USB_PRODUCT_ID  0xFEAA
 // Bump on descriptor-affecting changes so Windows re-reads instead of using
 // its cached descriptor.  0x0200 → 0x0201 for notification EP max-packet

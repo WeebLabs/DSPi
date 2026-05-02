@@ -1418,7 +1418,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_SPDIF_RX_PIN | 0xE5 | IN | Get SPDIF RX GPIO pin |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-04-09*
+*Last updated: 2026-05-02*
 
 Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
@@ -1428,7 +1428,7 @@ Transfers the complete DSP state in a single USB control transfer (~2832 bytes),
 
 **GET (0xA0):** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, then streams it out in 64-byte packets via `usb_stream_transfer`. ZLP appended if total length is a multiple of 64.
 
-**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, recalculates all filters and delays, then transitions Core 1 mode to match the new output enable state.
+**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: snapshots `output_types[]`, waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, recalculates all filters and delays, transitions Core 1 mode to match the new output enable state, then diffs the new `output_types[]` against the snapshot. If any slot's type changed, dispatches `process_type_switches()` to reconfigure SPDIF/I2S hardware (mirrors the `preset_load_pending` pattern); otherwise calls `complete_pipeline_reset()` to resync output streams (or `reset_usb_feedback_loop()` when SPDIF input is active, to avoid disrupting the prefill handshake).
 
 **Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.
 
@@ -1475,8 +1475,10 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - **No audio callback changes.** Core 1 remains output-type-agnostic.
 - **Pipeline reset API** (`main.c`): two-phase `prepare_pipeline_reset()` / `complete_pipeline_reset()` brackets any disruptive output work. `complete_pipeline_reset()` runs the entire drain → enable_sync → feedback reset sequence with interrupts disabled to prevent inter-slot fill offsets. I2S→S/PDIF switch restores the SPDIF connection before zeroing the I2S instance to prevent a dangling `producer_pool->connection` pointer.
 - **Boot-time I2S restoration:** `core0_init()` inspects `output_types[]` after `preset_boot_load()` and converts preset-saved I2S slots from the default SPDIF instances created by `usb_sound_card_init()`. For each I2S slot: disables SPDIF, unclaims the PIO SM, calls `audio_i2s_setup()` + `audio_i2s_connect_extra()`, and enables the I2S instance. MCK is started if any I2S slot exists and `i2s_mck_enabled` is set.
+- **MCK enable order:** `process_type_switches()` writes the MCK clkdiv via `audio_i2s_mck_update_frequency()` *before* calling `audio_i2s_mck_set_enabled(true)`, so the SM starts at the correct frequency rather than briefly running at the previous divider. Matches the `REQ_SET_MCK_ENABLE` vendor command order.
+- **SPDIF RX is suspended across `process_type_switches()`:** the function shares `DMA_IRQ_1` between SPDIF TX and `pico_spdif_rx`. Forcing the IRQ off mid-transition would silence RX DMA completion handling for the duration; RX decode-timeout alarms (separate timer IRQ) could also fire and access PIO/DMA state being mutated. The function snapshots RX state at entry, calls `spdif_input_stop()` if it was running, and restarts it after `complete_pipeline_reset()` finishes — guarded by `active_input_source == INPUT_SOURCE_SPDIF && !input_source_change_pending` so a deferred input-source switch isn't pre-empted. Callers that have already stopped RX (e.g. `preset_load_pending` across the flash blackout) see no double-stop because `state == INACTIVE` triggers the no-op path; those callers are responsible for their own restart, which `preset_load_pending` now does once at the end of its block rather than before `process_type_switches`.
 
-*Last updated: 2026-03-26*
+*Last updated: 2026-05-02*
 
 ### Clock Math at 307.2 MHz / 48 kHz
 
