@@ -260,6 +260,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOLUME_MODE_INDEPENDENT   0
 #define MASTER_VOLUME_MODE_WITH_PRESET   1
 
+// Per-Band Bypass Commands
+// wValue = (channel << 8) | band; payload = uint8_t (1 = bypass, anything else = active)
+#define REQ_SET_BAND_BYPASS         0xD8
+#define REQ_GET_BAND_BYPASS         0xD9
+
 // Audio Input Source Commands
 #define REQ_SET_INPUT_SOURCE        0xE0  // payload = uint8_t (InputSource enum)
 #define REQ_GET_INPUT_SOURCE        0xE1  // returns uint8_t
@@ -477,7 +482,7 @@ typedef struct __attribute__((packed)) {
     uint8_t channel;
     uint8_t band;
     uint8_t type;
-    uint8_t reserved;
+    uint8_t bypass;     // User bypass: exactly 1 = bypassed; any other value (0, 0xFF, …) = active
     float freq;
     float Q;
     float gain_db;

@@ -133,6 +133,9 @@ void bulk_params_collect(WireBulkParams *out) {
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         for (int b = 0; b < MAX_BANDS; b++) {
             out->eq[ch][b].type = filter_recipes[ch][b].type;
+            out->eq[ch][b].bypass = (filter_recipes[ch][b].bypass == 1) ? 1 : 0;
+            out->eq[ch][b].reserved[0] = 0;
+            out->eq[ch][b].reserved[1] = 0;
             out->eq[ch][b].freq = filter_recipes[ch][b].freq;
             out->eq[ch][b].q = filter_recipes[ch][b].Q;
             out->eq[ch][b].gain_db = filter_recipes[ch][b].gain_db;
@@ -324,6 +327,9 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             filter_recipes[ch][b].channel = ch;
             filter_recipes[ch][b].band = b;
             filter_recipes[ch][b].type = in->eq[ch][b].type;
+            // Normalize at the boundary: 0xFF padding from legacy hosts
+            // must not accidentally bypass the band.
+            filter_recipes[ch][b].bypass = (in->eq[ch][b].bypass == 1) ? 1 : 0;
             filter_recipes[ch][b].freq = in->eq[ch][b].freq;
             filter_recipes[ch][b].Q = in->eq[ch][b].q;
             filter_recipes[ch][b].gain_db = in->eq[ch][b].gain_db;

@@ -59,7 +59,12 @@ DSP_TIME_CRITICAL int32_t fast_mul_q28(int32_t a, int32_t b) {
 #endif
 
 void dsp_compute_coefficients(EqParamPacket *p, Biquad *bq, float sample_rate) {
-    if (is_filter_flat(p) || sample_rate == 0) {
+    // 0xFF-safe interpretation: bypass byte must be exactly 1 to bypass.
+    // Any other value (0, 0xFF padding from legacy hosts, garbage) leaves
+    // the band active.  See Documentation/Features/band_bypass_spec.md.
+    bool user_bypass = (p->bypass == 1);
+
+    if (user_bypass || is_filter_flat(p) || sample_rate == 0) {
         bq->bypass = true;
 #if PICO_RP2350
         bq->b0 = 1.0f; bq->b1 = 0.0f; bq->b2 = 0.0f; bq->a1 = 0.0f; bq->a2 = 0.0f;

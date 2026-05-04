@@ -623,6 +623,16 @@ static void apply_master_volume_from_mode(const PresetSlot *slot_or_null) {
 static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
     // EQ
     memcpy((void *)filter_recipes, slot->filter_recipes, sizeof(filter_recipes));
+    // Normalize the per-band bypass byte at the boundary.  Legacy presets
+    // saved before this field existed stored 0 in that slot (the old
+    // EqParamPacket.reserved); pre-existing 0 → not bypassed → safe.  The
+    // explicit normalization defends against garbage from any future code
+    // path or corrupted flash.  See Documentation/Features/band_bypass_spec.md.
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        for (int b = 0; b < MAX_BANDS; b++) {
+            filter_recipes[ch][b].bypass = (filter_recipes[ch][b].bypass == 1) ? 1 : 0;
+        }
+    }
 
     // Preamp — V12+ has per-channel values, older versions use single legacy field
     if (slot->version >= 12) {

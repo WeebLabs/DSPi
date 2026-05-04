@@ -232,12 +232,29 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
         case REQ_SET_EQ_PARAM:
             if (buffer->data_len >= sizeof(EqParamPacket)) {
                 memcpy((void*)&pending_packet, vendor_rx_buf, sizeof(EqParamPacket));
+                // Normalize bypass byte at the boundary so legacy hosts
+                // sending 0xFF padding cannot accidentally bypass the band.
+                pending_packet.bypass = (pending_packet.bypass == 1) ? 1 : 0;
                 if (pending_packet.channel < NUM_CHANNELS &&
                     pending_packet.band < channel_band_counts[pending_packet.channel]) {
                     eq_update_pending = true;
                 }
             }
             break;
+
+        case REQ_SET_BAND_BYPASS: {
+            // wValue = (channel << 8) | band; payload = 1 byte (1 = bypass, anything else = active)
+            uint8_t channel = (vendor_last_wValue >> 8) & 0xFF;
+            uint8_t band = vendor_last_wValue & 0xFF;
+            if (channel < NUM_CHANNELS && band < channel_band_counts[channel] &&
+                buffer->data_len >= 1) {
+                EqParamPacket p = filter_recipes[channel][band];
+                p.bypass = (vendor_rx_buf[0] == 1) ? 1 : 0;
+                memcpy((void*)&pending_packet, &p, sizeof(EqParamPacket));
+                eq_update_pending = true;
+            }
+            break;
+        }
 
         case REQ_SET_PREAMP:
             // Legacy: sets ALL input channels to the same preamp value.
@@ -999,6 +1016,18 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 return true;
             }
 
+            case REQ_GET_BAND_BYPASS: {
+                // wValue = (channel << 8) | band; returns 1 byte (0 or 1)
+                uint8_t channel = (setup->wValue >> 8) & 0xFF;
+                uint8_t band = setup->wValue & 0xFF;
+                if (channel < NUM_CHANNELS && band < channel_band_counts[channel]) {
+                    uint8_t v = (filter_recipes[channel][band].bypass == 1) ? 1 : 0;
+                    usb_start_tiny_control_in_transfer(v, 1);
+                    return true;
+                }
+                return false;
+            }
+
             case REQ_GET_EQ_PARAM: {
                 uint8_t channel = (setup->wValue >> 8) & 0xFF;
                 uint8_t band = (setup->wValue >> 4) & 0x0F;
@@ -1011,6 +1040,7 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                         case 1: memcpy(&val_to_send, &p->freq, 4); break;
                         case 2: memcpy(&val_to_send, &p->Q, 4); break;
                         case 3: memcpy(&val_to_send, &p->gain_db, 4); break;
+                        case 4: val_to_send = (p->bypass == 1) ? 1u : 0u; break;
                     }
                     usb_start_tiny_control_in_transfer(val_to_send, 4);
                     return true;

@@ -471,6 +471,26 @@ Where `g = tan(pi * freq / Fs)` and `A = 10^(gain_dB/40)`.
 
 **RP2040:** Completely unaffected. All SVF code is inside `#if PICO_RP2350` blocks.
 
+### Per-Band Bypass
+*Last updated: 2026-05-04*
+
+Each EQ band has a user-controllable bypass flag in `EqParamPacket.bypass` (config.h). When set to exactly `1` it forces `Biquad.bypass = true` inside `dsp_compute_coefficients()`, which causes the audio inner loops in `dsp_pipeline.c`, `dsp_process_rp2040.S`, `audio_pipeline.c`, and `pdm_generator.c` to skip the band entirely (`if (bq->bypass) continue;`). User bypass and the existing auto-bypass for `FILTER_FLAT` / zero-gain peaking/shelf filters share the same `Biquad.bypass` flag — `channel_bypassed[ch]` (true when *every* band on the channel is bypassed) automatically benefits, allowing the audio path to skip the entire channel.
+
+**0xFF safety:** the byte at offset 3 of `EqParamPacket` was previously named `reserved`. To stay backward-compatible with hosts that may zero-pad with `0xFF` rather than `0x00`, the firmware treats *only* the literal value `1` as bypass — every other value (0, 0xFF, 0x42, …) leaves the band active. Intake points (`REQ_SET_EQ_PARAM`, `REQ_SET_BAND_BYPASS`, bulk-params apply, flash preset load) normalize the byte to 0 or 1 so GET round-trips and the live recipe stay clean.
+
+**Wire format:** `WireBandParams.reserved[3]` was split into `bypass` (1 byte) + `reserved[2]` (still zero-padded). Same byte layout, no `WIRE_FORMAT_VERSION` bump needed.
+
+**Persistence:** `filter_recipes` is `memcpy`'d into `PresetSlot.filter_recipes` (flash_storage.c:500/625) so the bypass byte rides through preset save/load with no `SLOT_DATA_VERSION` bump. Legacy presets had `0` in that byte → they load as "active", preserving original behavior. `apply_slot_to_live()` re-normalizes after `memcpy` for defense-in-depth.
+
+**Vendor commands:**
+- `REQ_SET_EQ_PARAM` (0x42): host can set the byte directly inside the `EqParamPacket` payload.
+- `REQ_GET_EQ_PARAM` (0x43): added `param=4` → returns 1-byte bypass.
+- `REQ_SET_BAND_BYPASS` (0xD8) / `REQ_GET_BAND_BYPASS` (0xD9): direct toggle, `wValue = (channel<<8)|band`, payload/return = 1 byte.
+
+**CPU impact:** zero in the audio path (the `bq->bypass` check already existed); a bypassed band skips its biquad/SVF math, so user-bypass is a small *win* vs. an active band. One added byte comparison per coefficient recompute (only on user write or rate change).
+
+Spec: [`Documentation/Features/band_bypass_spec.md`](Features/band_bypass_spec.md).
+
 ### Band Counts
 
 | Platform | Master (ch 0-1) | Outputs | Max total biquads |

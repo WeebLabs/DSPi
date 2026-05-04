@@ -130,7 +130,8 @@ typedef struct __attribute__((packed)) {
 // ============================================================================
 typedef struct __attribute__((packed)) {
     uint8_t  type;                   // Filter type enum
-    uint8_t  reserved[3];
+    uint8_t  bypass;                 // 1 = user-bypassed, anything else = active. See band_bypass_spec.md.
+    uint8_t  reserved[2];            // Must be zero
     float    freq;                   // Hz
     float    q;                      // Q factor
     float    gain_db;                // dB

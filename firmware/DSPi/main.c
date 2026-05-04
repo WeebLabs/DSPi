@@ -1113,6 +1113,7 @@ int main(void) {
                 WireBandParams wbp;
                 memset(&wbp, 0, sizeof(wbp));
                 wbp.type = (uint8_t)p.type;
+                wbp.bypass = (p.bypass == 1) ? 1 : 0;
                 wbp.freq = p.freq;
                 wbp.q = p.Q;
                 wbp.gain_db = p.gain_db;
