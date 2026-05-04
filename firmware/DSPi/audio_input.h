@@ -16,13 +16,17 @@
 typedef enum {
     INPUT_SOURCE_USB   = 0,
     INPUT_SOURCE_SPDIF = 1,
-    // Future: INPUT_SOURCE_I2S = 2, INPUT_SOURCE_ADAT = 3
+    INPUT_SOURCE_I2S   = 2,
+    // Future: INPUT_SOURCE_ADAT = 3
 } InputSource;
 
-#define INPUT_SOURCE_MAX    INPUT_SOURCE_SPDIF   // Highest valid value
+#define INPUT_SOURCE_MAX    INPUT_SOURCE_I2S   // Highest valid value
 
 // Default SPDIF RX GPIO pin
 #define PICO_SPDIF_RX_PIN_DEFAULT  11
+
+// Default I2S DIN GPIO pin (overridable via REQ_SET_I2S_DIN_PIN)
+#define PICO_I2S_DIN_PIN_DEFAULT   18
 
 // SPDIF RX lock debounce — firmware constant, not configurable via vendor command.
 // After the library reports lock, wait this many ms before unmuting output.
@@ -33,6 +37,10 @@ extern volatile uint8_t active_input_source;
 
 // SPDIF RX pin (device-level setting, stored in PresetDirectory)
 extern uint8_t spdif_rx_pin;
+
+// I2S DIN pin (device-level setting, stored in PresetDirectory).
+// Defined in i2s_input.c.
+extern uint8_t i2s_din_pin;
 
 // Deferred input source switch (set by vendor command, handled in main loop)
 extern volatile bool input_source_change_pending;

@@ -20,6 +20,7 @@
 #include "audio_input.h"
 #include "audio_pipeline.h"
 #include "spdif_input.h"
+#include "i2s_input.h"
 #include "spdif_rx.h"
 #include "dsp_pipeline.h"
 #include "flash_clkdiv.h"
@@ -87,10 +88,16 @@ static void reset_usb_feedback_loop(void);
 static void prepare_pipeline_reset(uint32_t mute_samples);
 static void complete_pipeline_reset(void);
 
-// Forward declaration — definition further down.  perform_rate_change() needs
-// to check this to avoid tearing down a SPDIF lock-acquisition prefill in
-// progress.
+// Forward declarations — definitions further down. perform_rate_change()
+// needs to check these to avoid tearing down a prefill in progress.
 static bool spdif_prefilling;
+static bool i2s_prefilling;
+
+// MCK lifecycle helper — called from every transition that changes the
+// I2S participant set (output type change, input source change, boot).
+// If user has set i2s_mck_enabled and any I2S participant is active,
+// ensure MCK SM is running at the right Fs. Otherwise stop it.
+static void update_mck_for_i2s_state(void);
 
 // 96 kHz + 256x (24.576 MHz MCK) is unstable on current hardware/clocking, so
 // force 128x whenever that combination is encountered from persisted state.
@@ -100,6 +107,32 @@ static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
         i2s_mck_multiplier = 128u;
         printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
                (unsigned long)sample_rate_hz);
+    }
+}
+
+static void update_mck_for_i2s_state(void) {
+    extern uint8_t output_types[];
+    extern bool i2s_mck_enabled;
+    extern uint16_t i2s_mck_multiplier;
+
+    bool any_i2s = (active_input_source == INPUT_SOURCE_I2S);
+    for (int i = 0; i < NUM_SPDIF_INSTANCES && !any_i2s; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) any_i2s = true;
+    }
+
+    if (any_i2s && i2s_mck_enabled) {
+        // Set the divider BEFORE enabling the SM so MCK starts at the
+        // correct frequency.  Reversed order would briefly run MCK at the
+        // previous divider, causing a transient PLL relock chirp on
+        // connected DACs.  Matches the REQ_SET_MCK_ENABLE vendor command
+        // order.  When MCK is already running, only the divider is updated.
+        sanitize_mck_multiplier_for_rate(audio_state.freq);
+        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
+        if (!audio_i2s_mck_is_enabled()) {
+            audio_i2s_mck_set_enabled(true);
+        }
+    } else if (!any_i2s && audio_i2s_mck_is_enabled()) {
+        audio_i2s_mck_set_enabled(false);
     }
 }
 
@@ -149,18 +182,22 @@ static void perform_rate_change(uint32_t new_freq) {
         audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
     }
 
+    // RX divider is now updated as part of audio_i2s_update_all_frequencies()
+    // above (Phase 2.5: the library's clock-domain frequency update covers
+    // phantom + RX SMs in lockstep with TX). No separate i2s_input call.
+
     // Drain all consumer pools (old-rate audio) and restart outputs in sync
     // at the new PIO divider. The SPDIF wrap_consumer_take path would
     // otherwise update the divider lazily mid-stream with old-rate audio
     // still queued in each consumer pool.
     //
-    // Exception: if the SPDIF lock-acquisition block is currently prefilling
-    // the pools (spdif_prefilling == true), complete_pipeline_reset() would
-    // drain the half-filled pools and re-enable outputs against an empty
-    // pool — the exact underrun/pop the prefill handshake exists to prevent.
-    // Let the prefill block's own enable_outputs_in_sync() restart outputs
-    // when the 50 % fill threshold is reached instead.
-    if (!spdif_prefilling) {
+    // Exception: if a prefill is in progress (SPDIF lock acquisition or I2S
+    // startup), complete_pipeline_reset() would drain the half-filled pools
+    // and re-enable outputs against empty pools — the exact underrun/pop
+    // the prefill handshake exists to prevent. Let the prefill block's own
+    // enable_outputs_in_sync() restart outputs when the 50% fill threshold
+    // is reached instead.
+    if (!spdif_prefilling && !i2s_prefilling) {
         complete_pipeline_reset();
     }
 }
@@ -210,6 +247,9 @@ static void enable_outputs_in_sync(void);
 
 // SPDIF input prefill: outputs disabled while consumer buffers fill to 50%
 static bool spdif_prefilling = false;
+
+// I2S input prefill: same pattern as SPDIF, but Pico-master so no clock servo.
+static bool i2s_prefilling = false;
 
 // ---------------------------------------------------------------------------
 // process_type_switches — unified output type transition handler
@@ -269,14 +309,10 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     const bool usb_irq_was_enabled = irq_is_enabled(USBCTRL_IRQ);
     irq_set_enabled(USBCTRL_IRQ, false);
 
-    // Deterministic master policy: lowest-index active I2S slot is master.
-    int target_master_slot = -1;
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (target_types[i] == OUTPUT_TYPE_I2S) {
-            target_master_slot = i;
-            break;
-        }
-    }
+    // Master/slave roles are now elected internally by pico_audio_i2s_multi
+    // based on registry order — no per-call election here. The bulk of the
+    // teardown/setup loop runs inside a transaction so the library re-elects
+    // exactly once at commit (avoids redundant role swaps mid-loop).
 
     usb_audio_drain_ring();
     prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
@@ -338,6 +374,10 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
+    // Begin clock-domain transaction: defer election + sync-restart until
+    // all teardowns/setups in this batch are complete.
+    audio_i2s_clock_domain_begin_transaction();
+
     // ---- Pass 1: Teardown outgoing types ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (target_types[i] == current_types[i]) continue;  // No type change
@@ -361,45 +401,31 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
-    // ---- Pass 2: Setup final types and enforce deterministic master/slave roles ----
+    // ---- Pass 2: Setup new I2S instances; rebuild SPDIF on freed slots.
+    //              The library elects the master automatically based on
+    //              registry order. The clock_master field in i2s_cfg below
+    //              is ignored.
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         bool had_i2s = (current_types[i] == OUTPUT_TYPE_I2S);
         bool want_i2s = (target_types[i] == OUTPUT_TYPE_I2S);
 
-        if (want_i2s) {
-            bool want_master = (i == target_master_slot);
-            bool need_rebuild = !had_i2s;
-
-            if (had_i2s) {
-                audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-                if (!inst->consumer_pool || inst->clock_master != want_master) {
-                    if (inst->enabled) {
-                        audio_i2s_set_enabled(inst, false);
-                    }
-                    audio_i2s_teardown(inst);
-                    need_rebuild = true;
-                }
-            }
-
-            if (need_rebuild) {
-                audio_i2s_config_t i2s_cfg = {
-                    .data_pin = output_pins[i],
-                    .clock_pin_base = i2s_bck_pin,
-                    .dma_channel = i + 8,
-                    .pio_sm = i,
-                    .pio = PICO_AUDIO_SPDIF_PIO,
-                    .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
-                    .clock_master = want_master,
-                };
-                audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
-                audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
-                                        false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
-                if (had_i2s) {
-                    printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
-                }
-            }
-        } else if (had_i2s) {
-            // Setup SPDIF on slot where I2S was torn down
+        if (want_i2s && !had_i2s) {
+            // SPDIF → I2S: build a fresh I2S instance.
+            audio_i2s_config_t i2s_cfg = {
+                .data_pin = output_pins[i],
+                .clock_pin_base = i2s_bck_pin,
+                .dma_channel = i + 8,
+                .pio_sm = i,
+                .pio = PICO_AUDIO_SPDIF_PIO,
+                .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
+                .clock_master = false,  // ignored by library; election decides
+            };
+            audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
+            audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
+                                    false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+        } else if (!want_i2s && had_i2s) {
+            // I2S → SPDIF on a slot where the I2S instance was torn down
+            // in Pass 1. Re-claim the SPDIF SM and reconnect.
             audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
             pio_sm_claim(spdif_inst->pio, spdif_inst->pio_sm);
             audio_spdif_change_pin(spdif_inst, output_pins[i]);
@@ -408,6 +434,7 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                                       spdif_inst->consumer_pool);
             memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
         }
+        // want_i2s && had_i2s: no-op (existing I2S instance retained).
     }
 
     // Regenerate default channel names for slots whose type is changing.
@@ -432,22 +459,14 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 
     memcpy(output_types, target_types, NUM_SPDIF_INSTANCES);
 
-    // Start/stop MCK based on whether any slot is now I2S
-    bool any_i2s = false;
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
-    }
-    if (any_i2s && i2s_mck_enabled) {
-        // Set divider BEFORE enabling the SM so MCK starts at the correct
-        // frequency.  Reversed order would briefly run MCK at the previous
-        // divider, causing a transient PLL relock chirp on connected DACs.
-        // Matches the REQ_SET_MCK_ENABLE vendor command order.
-        sanitize_mck_multiplier_for_rate(audio_state.freq);
-        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-        audio_i2s_mck_set_enabled(true);
-    } else if (!any_i2s) {
-        audio_i2s_mck_set_enabled(false);
-    }
+    // Commit the clock-domain transaction: library elects master, manages
+    // phantom lifecycle, and sync-restarts any role-swapped TX SMs.
+    audio_i2s_clock_domain_commit_transaction();
+
+    // Re-evaluate MCK lifecycle now that the I2S participant set has changed.
+    // The helper sets the MCK divider before enabling the SM, preserving the
+    // ordering fix (audio_i2s_mck_update_frequency runs before set_enabled).
+    update_mck_for_i2s_state();
 
     // Restart all outputs in sync (handles both SPDIF and I2S instances)
     complete_pipeline_reset();
@@ -918,8 +937,9 @@ void core0_init() {
     multicore_launch_core1(pdm_core1_entry);
 #endif
 
-    // Initialize SPDIF RX subsystem (no PIO/DMA resources claimed yet)
+    // Initialize SPDIF RX and I2S RX subsystems (no PIO/DMA claimed yet)
     spdif_input_init();
+    i2s_input_init();
 
     // If the loaded preset has SPDIF as input source, start RX hardware.
     // Output remains muted until lock is acquired (handled in main loop).
@@ -937,6 +957,14 @@ void core0_init() {
     if (active_input_source == INPUT_SOURCE_SPDIF) {
         prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
         spdif_input_start();
+    } else if (active_input_source == INPUT_SOURCE_I2S) {
+        // Same prefill discipline: mute, start RX hardware, then the polling
+        // block transitions through STARTING → ACTIVE on first 50% fill.
+        prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+        i2s_input_start();
+        // Kick MCK on if the user wants it (i2s_input_start no longer
+        // auto-enables MCK in Phase 2.5 — lifecycle is centralized).
+        update_mck_for_i2s_state();
     }
 
     // Baseline the notification shadow from the fully-initialised live state.
@@ -998,9 +1026,10 @@ int main(void) {
                 spdif_prefilling = true;
             }
 
-            // Prefill: wait for consumer buffers to reach 50% before enabling outputs
+            // Prefill: wait for consumer buffers to reach SPDIF threshold
+            // (50% by default) before enabling outputs.  See SPDIF_PREFILL_BUFFER_COUNT.
             if (spdif_prefilling) {
-                if (get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                if (get_slot_consumer_fill(0) >= SPDIF_PREFILL_BUFFER_COUNT) {
                     enable_outputs_in_sync();
                     spdif_prefilling = false;
                 }
@@ -1018,6 +1047,37 @@ int main(void) {
 
             // Adjust output PIO dividers to track SPDIF input clock
             spdif_input_update_clock_servo();
+        }
+
+        // Poll I2S input when active (Pico-master — no clock servo needed,
+        // input rate ≡ output rate by construction since both derive from
+        // sys_clk via identical 24.8 dividers).
+        if (active_input_source == INPUT_SOURCE_I2S) {
+            I2sInputState rx_state = i2s_input_get_state();
+
+            // Startup handshake (mirror of SPDIF lock-acquisition path):
+            // engage prefill, drain outputs, wait for 50% fill, enable.
+            if (rx_state == I2S_INPUT_STARTING && preset_loading && !i2s_prefilling) {
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                i2s_prefilling = true;
+            }
+
+            if (i2s_prefilling) {
+                // I2S Pico-master shares sys_clk with outputs — input rate
+                // is locked to output rate by hardware, so the prefill only
+                // needs to absorb main-loop jitter, not clock drift.  Lower
+                // threshold than SPDIF (see I2S_PREFILL_BUFFER_COUNT).
+                if (get_slot_consumer_fill(0) >= I2S_PREFILL_BUFFER_COUNT) {
+                    enable_outputs_in_sync();
+                    i2s_prefilling = false;
+                    i2s_input_mark_active();  // STARTING → ACTIVE
+                }
+            }
+
+            // Drain ring → preamp → buf_l/buf_r → process_input_block
+            i2s_input_poll();
         }
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
@@ -1254,17 +1314,14 @@ int main(void) {
                 // would be torn down and re-acquired twice, doubling the audible
                 // glitch on a preset switch that also flips an output type.
 
-                // Presets can carry persisted raw MCK=0 (256x). Clamp invalid
-                // 96 kHz combinations and apply the effective MCK divider now
-                // so no-type-change loads still update clock state.
-                {
-                    extern bool i2s_mck_enabled;
-                    extern uint16_t i2s_mck_multiplier;
-                    if (i2s_mck_enabled) {
-                        sanitize_mck_multiplier_for_rate(audio_state.freq);
-                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-                    }
-                }
+                // Re-evaluate MCK lifecycle after the preset has updated
+                // i2s_mck_enabled and i2s_mck_multiplier. Handles both
+                // enable-state change (preset toggling MCK on/off) and
+                // frequency update. This is needed regardless of whether
+                // output types changed — if change_mask is non-zero the
+                // call below is redundant with the one inside
+                // process_type_switches, but the function is idempotent.
+                update_mck_for_i2s_state();
 
                 // Build change mask for slots whose type changed
                 uint8_t change_mask = 0;
@@ -1482,16 +1539,10 @@ int main(void) {
                 dsp_recalculate_all_filters(rate);
                 dsp_update_delay_samples(rate);
 
-                // Bulk apply can also update persisted MCK settings. Keep MCK
-                // clock state coherent even when output types are unchanged.
-                {
-                    extern bool i2s_mck_enabled;
-                    extern uint16_t i2s_mck_multiplier;
-                    if (i2s_mck_enabled) {
-                        sanitize_mck_multiplier_for_rate(audio_state.freq);
-                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-                    }
-                }
+                // Re-evaluate MCK lifecycle now that bulk apply may have
+                // changed i2s_mck_enabled, i2s_mck_multiplier, or the I2S
+                // participant set (output_types[] / active_input_source).
+                update_mck_for_i2s_state();
 
                 // Transition Core 1 mode to match new output enable state
                 Core1Mode new_mode = derive_core1_mode();
@@ -1560,6 +1611,14 @@ int main(void) {
                     // Reset DSP state to prevent stale SPDIF data leaking
                     leveller_reset_pending = true;
                     pipeline_reset_cpu_metering();
+                } else if (old_source == INPUT_SOURCE_I2S) {
+                    // I2S input doesn't move output dividers (Pico-master,
+                    // sys_clk-locked), so no perform_rate_change needed.
+                    // Tear down RX hardware and clkout-only master SM.
+                    i2s_input_stop();
+                    i2s_prefilling = false;
+                    leveller_reset_pending = true;
+                    pipeline_reset_cpu_metering();
                 }
 
                 // Regenerate input-channel default names for the new source.
@@ -1588,11 +1647,19 @@ int main(void) {
                     spdif_input_start();
                     // Don't complete_pipeline_reset yet — output stays muted
                     // until SPDIF lock is acquired (handled in polling block below)
+                } else if (new_source == INPUT_SOURCE_I2S) {
+                    i2s_input_start();
+                    // Output stays muted until prefill completes (handled in
+                    // the I2S polling block above).
                 } else {
                     // Switching to USB: flush stale ring data, complete reset
                     usb_audio_flush_ring();
                     complete_pipeline_reset();
                 }
+
+                // Re-evaluate MCK lifecycle now that the I2S participant
+                // set has changed (e.g. switching to/from I2S input).
+                update_mck_for_i2s_state();
 
                 printf("Input source: %u -> %u\n",
                        (unsigned)old_source, (unsigned)new_source);
@@ -1624,6 +1691,15 @@ int main(void) {
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
                 spdif_input_start();
             }
+        }
+
+        // Handle deferred I2S DIN pin directory update
+        extern volatile bool flash_set_i2s_din_pin_pending;
+        if (flash_set_i2s_din_pin_pending) {
+            flash_set_i2s_din_pin_pending = false;
+            prepare_flash_write_operation();
+            preset_set_i2s_din_pin(i2s_din_pin);
+            complete_flash_write_operation_light();
         }
 
         // LED heartbeat - toggle every ~1000 iterations

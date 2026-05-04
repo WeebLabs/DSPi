@@ -177,6 +177,7 @@ void bulk_params_collect(WireBulkParams *out) {
     // Input source configuration (V7+)
     out->input_config.input_source = active_input_source;
     out->input_config.spdif_rx_pin = spdif_rx_pin;
+    out->input_config.i2s_din_pin  = i2s_din_pin;
 }
 
 // ============================================================================

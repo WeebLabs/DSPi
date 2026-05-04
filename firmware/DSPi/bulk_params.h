@@ -187,10 +187,15 @@ typedef struct __attribute__((packed)) {
 // ============================================================================
 // Section 15: Input Source Configuration (16 bytes) — V7+
 // ============================================================================
+//
+// Note: i2s_din_pin was added in the same V7 byte-layout slot (previously
+// reserved[0]) without bumping WIRE_FORMAT_VERSION. Older firmware reads it
+// as zero, which the i2s_input subsystem treats as "use device default".
 typedef struct __attribute__((packed)) {
-    uint8_t  input_source;           // InputSource enum (0=USB, 1=SPDIF)
-    uint8_t  spdif_rx_pin;          // SPDIF RX GPIO pin (applied on SET when apply_pins=true)
-    uint8_t  reserved[14];           // Future expansion (pad to 16 bytes)
+    uint8_t  input_source;           // InputSource enum (0=USB, 1=SPDIF, 2=I2S)
+    uint8_t  spdif_rx_pin;          // SPDIF RX GPIO pin (applied on SET when apply_pins=true; slot-level)
+    uint8_t  i2s_din_pin;            // I2S DIN GPIO pin (device-level; informational here)
+    uint8_t  reserved[13];           // Future expansion (pad to 16 bytes)
 } WireInputConfig;                   // 16 bytes
 
 // ============================================================================

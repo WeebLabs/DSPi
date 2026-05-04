@@ -1,0 +1,94 @@
+;
+; Copyright (c) 2026 WeebLabs
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; I2S master clocks-only — drives BCK and LRCLK with no audio data output.
+;
+; Used when the Pico is the I2S clock master but no I2S output slot is
+; configured (e.g. all outputs are S/PDIF and an external I2S source is
+; clocked from the Pico for I2S input). Cycle-identical to audio_i2s_clkout
+; — same divider, same side-set timing, same frame structure — so any
+; TX/RX SM configured against the same divider stays bit-aligned.
+;
+; Pins:
+;   side-set 2  = BCK (bit 0) and LRCLK (bit 1)
+;   no out pins, no in pins, no FIFO usage
+;
+; Timing (must match audio_i2s_clkout exactly):
+;   2 PIO clocks per audio bit; 32 bits/channel * 2 channels = 64 bits/frame
+;   * 2 PIO clocks/bit = 128 PIO clocks per stereo frame.
+;
+;   PIO clock = Fs * 128
+;   BCK       = Fs * 64
+;   LRCLK     = Fs
+;
+;   Divider (24.8 fixed-point) = sys_clk * 2 / Fs — identical to clkout.
+;
+; SM is started without TX FIFO interaction; no DMA channel required.
+
+.program audio_i2s_clkout_only
+.side_set 2
+
+                    ;        /--- LRCLK (side-set bit 1)
+                    ;        |/-- BCLK  (side-set bit 0)
+bitloop0:           ;        ||
+    nop               side 0b00    ; Left frame, BCK falling
+    jmp x-- bitloop0  side 0b01    ; Left frame, BCK rising  (31 iterations)
+    nop               side 0b10    ; Last L bit, LRCLK rises (R frame next)
+    set x, 30         side 0b11    ; BCK rising, reload bit counter
+
+bitloop1:
+    nop               side 0b10    ; Right frame, BCK falling
+    jmp x-- bitloop1  side 0b11    ; Right frame, BCK rising (31 iterations)
+    nop               side 0b00    ; Last R bit, LRCLK falls (L frame next)
+public entry_point:
+    set x, 30         side 0b01    ; BCK rising, reload bit counter
+
+; Total: 8 instructions (same as audio_i2s_clkout). Entry point matches
+; audio_i2s_clkout's entry point exactly for cycle-identical sync starts.
+
+% c-sdk {
+
+// ---------------------------------------------------------------------------
+// audio_i2s_clkout_only_program_init — Configure a PIO state machine to drive
+// only BCK and LRCLK (no data output).
+//
+// Used when the Pico must provide I2S clocks to an external device (e.g. an
+// I2S ADC feeding I2S input) without any I2S output slot being active.
+//
+// Parameters:
+//   pio            — PIO block (any free block; clocks observed cross-PIO via
+//                    absolute wait gpio in input/output SMs)
+//   sm             — State machine index (0-3)
+//   offset         — Instruction memory offset from pio_add_program()
+//   clock_pin_base — GPIO for BCK; LRCLK is always clock_pin_base + 1
+//                    (PIO side-set hardware constraint)
+// ---------------------------------------------------------------------------
+static inline void audio_i2s_clkout_only_program_init(PIO pio, uint sm, uint offset,
+                                                       uint clock_pin_base) {
+    pio_gpio_init(pio, clock_pin_base);
+    pio_gpio_init(pio, clock_pin_base + 1);
+
+    pio_sm_config sm_config = audio_i2s_clkout_only_program_get_default_config(offset);
+
+    // BCK on side-set bit 0, LRCLK on side-set bit 1
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+
+    // No autopull / autopush — this SM doesn't touch FIFOs
+    pio_sm_init(pio, sm, offset, &sm_config);
+
+    // Pin directions: BCK + LRCLK as outputs
+    uint pin_mask = (3u << clock_pin_base);
+    pio_sm_set_pindirs_with_mask(pio, sm, pin_mask, pin_mask);
+
+    // Drive both clock pins low initially
+    pio_sm_set_pins(pio, sm, 0);
+
+    // Jump to entry point so the first frame begins with the L→R transition
+    // (same starting state as audio_i2s_clkout's entry_point).
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_clkout_only_offset_entry_point));
+}
+
+%}

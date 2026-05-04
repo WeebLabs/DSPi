@@ -112,10 +112,29 @@ typedef struct __attribute__((packed)) {
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
 } PresetDirectory_v1;
 
-// --- Preset Directory v2 (current, sector 0) ---
+// --- Preset Directory v2 (legacy — kept only for upgrade migration) ---
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;                        // == 2
+    uint16_t reserved;
+    uint32_t crc32;
+
+    uint8_t  startup_mode;
+    uint8_t  default_slot;
+    uint8_t  last_active_slot;
+    uint8_t  include_pins;
+
+    uint16_t slot_occupied;
+    uint8_t  master_volume_mode;
+    uint8_t  spdif_rx_pin;
+    float    master_volume_db;
+    char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
+} PresetDirectory_v2;
+
+// --- Preset Directory v3 (current, sector 0) ---
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
-    uint16_t version;                        // Directory format version (2)
+    uint16_t version;                        // Directory format version (3)
     uint16_t reserved;
     uint32_t crc32;                          // CRC over everything after this 12-byte header
 
@@ -131,9 +150,13 @@ typedef struct __attribute__((packed)) {
     uint8_t  spdif_rx_pin;                   // SPDIF RX GPIO pin, device-level (was padding[1])
     float    master_volume_db;               // Independent master volume (mode 0 at boot)
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
+
+    // V3 additions
+    uint8_t  i2s_din_pin;                    // I2S DIN GPIO pin, device-level
+    uint8_t  v3_padding[3];                  // Reserved (4-byte align for future fields)
 } PresetDirectory;
 
-#define DIR_VERSION_CURRENT  2
+#define DIR_VERSION_CURRENT  3
 
 // --- Preset Slot (sectors 1-10) ---
 typedef struct __attribute__((packed)) {
@@ -414,9 +437,35 @@ static bool dir_load_cache(void) {
         return true;
     }
 
+    if (flash_dir->version == 2) {
+        // Legacy v2 format — read with the old struct, validate v2 CRC,
+        // copy fields into the current struct, default new v3 fields, flush.
+        const PresetDirectory_v2 *v2 = (const PresetDirectory_v2 *)flash_dir;
+        const uint8_t *v2_data_start = (const uint8_t *)&v2->startup_mode;
+        size_t v2_data_len = sizeof(PresetDirectory_v2) - offsetof(PresetDirectory_v2, startup_mode);
+        if (crc32(v2_data_start, v2_data_len) != v2->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        dir_cache.startup_mode       = v2->startup_mode;
+        dir_cache.default_slot       = v2->default_slot;
+        dir_cache.last_active_slot   = v2->last_active_slot;
+        dir_cache.include_pins       = v2->include_pins;
+        dir_cache.slot_occupied      = v2->slot_occupied;
+        dir_cache.master_volume_mode = v2->master_volume_mode;
+        dir_cache.spdif_rx_pin       = v2->spdif_rx_pin;
+        dir_cache.master_volume_db   = v2->master_volume_db;
+        memcpy(dir_cache.slot_names, v2->slot_names, sizeof(dir_cache.slot_names));
+        dir_cache.i2s_din_pin        = PICO_I2S_DIN_PIN_DEFAULT;
+        dir_cache_valid = true;
+        (void)dir_flush();  // persist as v3
+        return true;
+    }
+
     if (flash_dir->version == 1) {
         // Legacy v1 format — read with the old struct, validate old CRC,
-        // then migrate to v2 in memory and flush.
+        // then migrate to v3 in memory and flush.
         const PresetDirectory_v1 *v1 = (const PresetDirectory_v1 *)flash_dir;
         const uint8_t *v1_data_start = (const uint8_t *)&v1->startup_mode;
         size_t v1_data_len = sizeof(PresetDirectory_v1) - offsetof(PresetDirectory_v1, startup_mode);
@@ -434,9 +483,11 @@ static bool dir_load_cache(void) {
                                          ? MASTER_VOLUME_MODE_WITH_PRESET
                                          : MASTER_VOLUME_MODE_INDEPENDENT;
         dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
+        dir_cache.spdif_rx_pin       = PICO_SPDIF_RX_PIN_DEFAULT;
+        dir_cache.i2s_din_pin        = PICO_I2S_DIN_PIN_DEFAULT;
         memcpy(dir_cache.slot_names, v1->slot_names, sizeof(dir_cache.slot_names));
         dir_cache_valid = true;
-        (void)dir_flush();  // persist as v2; if the flush fails, cache stays valid in RAM
+        (void)dir_flush();  // persist as v3; if the flush fails, cache stays valid in RAM
         return true;
     }
 
@@ -477,6 +528,7 @@ static void dir_ensure(void) {
     dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
     dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
     dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
+    dir_cache.i2s_din_pin = PICO_I2S_DIN_PIN_DEFAULT;
     dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
     strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
@@ -1044,6 +1096,14 @@ void preset_set_master_volume_mode(uint8_t mode) {
     dir_flush();
 }
 
+// SPDIF RX pin moved to slot-level (commit 4e3a129); preset_set_spdif_rx_pin
+// is intentionally absent.  I2S DIN remains device-level for now.
+void preset_set_i2s_din_pin(uint8_t pin) {
+    dir_ensure();
+    dir_cache.i2s_din_pin = pin;
+    dir_flush();
+}
+
 // Copy the live master volume into the directory's independent field and
 // persist.  Accepted in both modes — in mode 1 the value is dormant until
 // the user switches to mode 0.  Matches the deferred-flush machinery used
@@ -1113,6 +1173,7 @@ static bool migrate_legacy(void) {
     dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
     dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
     dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
+    dir_cache.i2s_din_pin = PICO_I2S_DIN_PIN_DEFAULT;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
     dir_cache_valid = true;
@@ -1134,6 +1195,15 @@ int preset_boot_load(void) {
             spdif_rx_pin = rx_pin;
         } else {
             spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
+        }
+
+        // Restore device-level I2S DIN pin from directory
+        uint8_t din_pin = dir_cache.i2s_din_pin;
+        if (din_pin > 0 && din_pin <= 29 && din_pin != 12 &&
+            !(din_pin >= 23 && din_pin <= 25)) {
+            i2s_din_pin = din_pin;
+        } else {
+            i2s_din_pin = PICO_I2S_DIN_PIN_DEFAULT;
         }
 
         // Directory exists — determine which slot to load

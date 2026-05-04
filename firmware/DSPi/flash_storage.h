@@ -90,6 +90,12 @@ uint8_t preset_save_master_volume(void);
 // boot in mode 0).  Does not affect live state.
 float preset_get_saved_master_volume(void);
 
+// Set the I2S DIN input GPIO pin (device-level, stored in directory).
+// SPDIF RX pin moved to slot-level in commit 4e3a129; I2S DIN remains
+// device-level for now — TODO: migrate I2S DIN to slot-level for
+// consistency with SPDIF RX.
+void preset_set_i2s_din_pin(uint8_t pin);
+
 // Get the currently active preset slot (always 0-9).
 uint8_t preset_get_active(void);
 

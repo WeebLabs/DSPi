@@ -103,7 +103,9 @@ typedef struct audio_i2s_config {
     uint8_t pio_sm;
     uint8_t pio;                // PIO block index (0, 1, or 2 on RP2350)
     uint8_t dma_irq;            // DMA IRQ index (0 or 1)
-    bool    clock_master;       // true = drive BCK/LRCLK (master), false = data only (slave)
+    bool    clock_master;       // [DEPRECATED, ignored] Election is internal:
+                                // lowest-index registered instance becomes
+                                // master; field retained only for ABI continuity.
 } audio_i2s_config_t;
 
 // ---------------------------------------------------------------------------
@@ -213,35 +215,258 @@ void audio_i2s_update_all_frequencies(uint32_t sample_freq);
 int8_t audio_i2s_get_clock_master_index(void);
 
 // ---------------------------------------------------------------------------
+// I2S clock domain — read-only views of the current BCK/LRCLK source
+// ---------------------------------------------------------------------------
+//
+// The clock domain is the (BCK, LRCLK, MCK, sample_freq) tuple that all
+// I2S TX and RX state machines share. Today the clocks are folded into the
+// first registered TX instance running audio_i2s_clkout (master mode);
+// future work may split them onto a dedicated SM or operate in slave mode.
+//
+// Callers that need to observe BCK/LRCLK from another PIO block (e.g. the
+// I2S input subsystem) should query these accessors rather than reaching
+// into the TX instance struct, so the abstraction can evolve without
+// breaking call sites.
+
+/** \brief I2S clock domain mode
+ * \ingroup pico_audio_i2s_multi
+ */
+typedef enum {
+    AUDIO_I2S_CLOCK_MODE_MASTER = 0,  ///< Pico drives BCK/LRCLK (and optional MCK)
+    AUDIO_I2S_CLOCK_MODE_SLAVE  = 1,  ///< External device drives BCK/LRCLK; PIO observes
+} audio_i2s_clock_mode_t;
+
+/** \brief Returns true iff a clock domain is currently active (any TX instance registered) */
+bool audio_i2s_clock_domain_is_active(void);
+
+/** \brief Current clock domain mode (always MASTER until slave-mode support lands) */
+audio_i2s_clock_mode_t audio_i2s_clock_domain_mode(void);
+
+/** \brief Absolute GPIO number of the BCK pin, or 0xFF if no clock domain is active */
+uint8_t audio_i2s_clock_domain_bck_pin(void);
+
+/** \brief Absolute GPIO number of the LRCLK pin (BCK + 1), or 0xFF if inactive */
+uint8_t audio_i2s_clock_domain_lrclk_pin(void);
+
+/** \brief Sample rate the clock domain is currently locked to, or 0 if inactive */
+uint32_t audio_i2s_clock_domain_sample_freq(void);
+
+// ---------------------------------------------------------------------------
+// Clock domain configuration and bulk-change transactions
+// ---------------------------------------------------------------------------
+//
+// The library tracks an I2S clock domain and runs an internal election on
+// every TX/RX setup/teardown to decide which SM drives BCK/LRCLK:
+//   - ≥1 TX registered: lowest-index TX runs `audio_i2s_clkout` (combined
+//     clocks + first-slot data). Other TX SMs run `audio_i2s_dataout`.
+//     RX SMs (when present) observe BCK/LRCLK via absolute `wait gpio`.
+//   - 0 TX, ≥1 RX: a phantom SM (configured via _configure below) runs
+//     `audio_i2s_clkout_only` to drive BCK/LRCLK on RX's behalf.
+//   - 0 TX, 0 RX: clock domain is idle; BCK/LRCLK are not driven.
+//
+// Callers do not specify master/slave roles directly; the library picks
+// the cheapest layout. The `clock_master` field in audio_i2s_config_t is
+// ignored.
+
+/** \brief Configure the clock domain — call once at boot, and again whenever
+ *         the BCK pin changes via vendor command.
+ *
+ * Stores the global BCK pin and the location reserved for the phantom SM
+ * (used only when a clkout-only fallback is needed). Idempotent; safe to
+ * call when no I2S participants are active.
+ *
+ * \param bck_pin           BCK GPIO; LRCLK is bck_pin + 1.
+ * \param phantom_pio_idx   PIO block (0/1/2) for the phantom SM.
+ * \param phantom_sm        State machine index (0-3) for the phantom SM.
+ */
+void audio_i2s_clock_domain_configure(uint8_t bck_pin,
+                                       uint8_t phantom_pio_idx,
+                                       uint8_t phantom_sm);
+
+/** \brief Begin a bulk-change transaction.
+ *
+ * Inside a transaction, audio_i2s_setup/teardown and audio_i2s_rx_setup/
+ * teardown register changes without immediately re-running the election.
+ * Election runs once at the matching commit. Nested transactions are
+ * supported (depth-counter); election runs only when depth returns to 0.
+ */
+void audio_i2s_clock_domain_begin_transaction(void);
+
+/** \brief Commit a bulk-change transaction.
+ *
+ * If this matches the outermost begin and any setup/teardown ran inside
+ * the transaction, the election runs and applies role/phantom changes.
+ * Sync-restarts any TX SMs whose role changed.
+ */
+void audio_i2s_clock_domain_commit_transaction(void);
+
+// ---------------------------------------------------------------------------
+// Clocks-only master — drives BCK/LRCLK without any audio data output
+// ---------------------------------------------------------------------------
+//
+// Used when I2S input is selected and no I2S TX output is configured. Mutually
+// exclusive with TX-master mode: caller must ensure no audio_i2s_instance has
+// clock_master=true before starting clocks-only.
+//
+// All four functions are no-ops if called in an inappropriate state.
+
+/** \brief Start the clocks-only master SM driving BCK/LRCLK from sys_clk
+ * \param pio_idx  PIO block (0/1/2) hosting the SM
+ * \param sm       State machine index (0-3)
+ * \param bck_pin  BCK GPIO; LRCLK is bck_pin+1 (PIO side-set constraint)
+ * \param fs       Sample rate in Hz
+ * \return true on success, false if a TX master is active or sm/pin invalid
+ */
+bool audio_i2s_clock_domain_clkout_only_start(uint8_t pio_idx, uint8_t sm,
+                                               uint8_t bck_pin, uint32_t fs);
+
+/** \brief Stop the clocks-only master SM and release BCK/LRCLK */
+void audio_i2s_clock_domain_clkout_only_stop(void);
+
+/** \brief True iff the clocks-only master SM is currently running */
+bool audio_i2s_clock_domain_clkout_only_is_active(void);
+
+/** \brief Update the clocks-only master divider for a new sample rate */
+void audio_i2s_clock_domain_clkout_only_set_frequency(uint32_t fs);
+
+// ---------------------------------------------------------------------------
+// I2S RX (input) — captures DIN synchronously with the clock domain
+// ---------------------------------------------------------------------------
+//
+// The RX SM observes BCK/LRCLK via absolute `wait gpio` so it can live on any
+// PIO block. The DMA writes captured samples into a caller-allocated ring
+// buffer in continuous wrap mode (single DMA channel, `set_ring` on the
+// write side; the consumer polls dma write_addr to know how many new samples
+// are available).
+//
+// Frame format: 32-bit-per-channel I2S, 24-bit audio left-justified MSB-first
+// (matches audio_i2s_clkout). Audio occupies bits [31:8] of each pushed word.
+//
+// Slot count (2 for stereo I2S, 4/8 for TDM) is stored in the instance for
+// future extensibility; Phase 2 supports stereo only.
+
+/** \brief Per-instance state for an I2S input
+ * \ingroup pico_audio_i2s_multi
+ */
+typedef struct audio_i2s_rx_instance {
+    PIO pio;                          // PIO block hosting the RX SM
+    uint8_t pio_sm;
+    uint8_t dma_channel;              // Single ring-wrapped DMA channel
+    uint8_t din_pin;                  // Audio data input GPIO
+    uint8_t slot_count;               // 2 (stereo I2S); 4/8 reserved for TDM
+    uint8_t slot_width_bits;          // 32 (24-in-32 left-justified default)
+    uint8_t reserved;
+    uint32_t freq;                    // Current sample rate
+    bool active;                      // SM enabled and DMA armed
+
+    // Caller-owned ring buffer (aligned to ring size).
+    uint32_t *ring;                   // Word-typed for stride convenience
+    uint32_t  ring_size_words;        // Power of 2 — DMA write-ring wraps here
+    uint8_t   ring_log2_bytes;        // log2 of ring size in bytes
+
+    // Tracking
+    uint32_t read_idx_words;          // Consumer's read position in ring
+} audio_i2s_rx_instance_t;
+
+/** \brief Configuration for an I2S input instance
+ * \ingroup pico_audio_i2s_multi
+ */
+typedef struct audio_i2s_rx_config {
+    uint8_t din_pin;                  // Audio data input GPIO
+    uint8_t pio_sm;                   // State machine index (0-3)
+    uint8_t pio;                      // PIO block index (0/1/2)
+    uint8_t dma_channel;              // DMA channel for ring writes
+    uint8_t slot_count;               // 2 = stereo I2S
+    uint8_t slot_width_bits;          // 32 = 24-in-32 left-justified default
+    uint8_t reserved[2];
+    uint32_t *ring;                   // Caller-allocated, aligned to ring size
+    uint32_t  ring_size_words;        // Power of 2 (e.g. 2048 = 8 KB)
+} audio_i2s_rx_config_t;
+
+/** \brief Set up the I2S input instance
+ *
+ * Claims the PIO SM and DMA channel, loads the input PIO program, patches
+ * absolute BCK/LRCLK pin operands, and configures DMA for ring-wrapped
+ * continuous write. Does not enable the SM — call audio_i2s_rx_set_enabled().
+ *
+ * The clock domain must already be driving BCK/LRCLK (either a TX master
+ * or audio_i2s_clock_domain_clkout_only_start()) before the SM is enabled,
+ * but the order of setup vs clock domain start is not constrained.
+ *
+ * \return true on success
+ */
+bool audio_i2s_rx_setup(audio_i2s_rx_instance_t *inst,
+                         const audio_i2s_rx_config_t *config,
+                         uint32_t sample_freq);
+
+/** \brief Enable/disable the I2S RX SM
+ *
+ * Enable: drains RX FIFO, arms DMA, jumps SM to entry point, enables SM.
+ * Disable: stops SM, aborts DMA.
+ */
+void audio_i2s_rx_set_enabled(audio_i2s_rx_instance_t *inst, bool enabled);
+
+/** \brief Update the RX SM divider for a new sample rate
+ *
+ * Caller should disable, call this, then re-enable. The first stereo frame
+ * after re-enable should be discarded by the consumer (handled in poll()).
+ */
+void audio_i2s_rx_set_frequency(audio_i2s_rx_instance_t *inst, uint32_t fs);
+
+/** \brief Tear down the I2S RX instance and release all hardware */
+void audio_i2s_rx_teardown(audio_i2s_rx_instance_t *inst);
+
+/** \brief Current DMA write position as a word index into the ring (0..ring_size_words-1) */
+uint32_t audio_i2s_rx_get_write_idx(const audio_i2s_rx_instance_t *inst);
+
+// ---------------------------------------------------------------------------
 // MCK (Master Clock) generator API
 // ---------------------------------------------------------------------------
+// MCK is generated by a hardware CLK_GPOUT block (no PIO state machine
+// required).  The chosen GPIO determines which clk_gpout instance is used;
+// see GPIO_TO_GPOUT_CLOCK_HANDLE in pico-sdk/hardware/clocks.h for the
+// pin-to-clock mapping.  On RP2040 the only DSPi-friendly GPOUT is GPIO 21
+// (gpout0); GPIOs 23-25 are also gpout-capable but reserved for power/LED.
+// RP2350 additionally exposes gpout0/gpout1 on GPIOs 13/15.
 
-/** \brief Set up the MCK generator on a PIO state machine
+/** \brief Capture the MCK GPIO pin (no hardware action yet)
  * \ingroup pico_audio_i2s_multi
  *
- * Loads the MCK toggle program and claims the specified SM.
- * MCK starts disabled; call audio_i2s_mck_set_enabled(true) to start.
+ * Records the pin number so subsequent set_enabled(true) calls know where
+ * to route the clk_gpout output.  MCK starts disabled — call
+ * audio_i2s_mck_update_frequency() to set the divider, then
+ * audio_i2s_mck_set_enabled(true) to start.
  *
- * Intended for PIO1 SM1 (SM0 is PDM output).
- *
- * \param pio PIO block (typically pio1)
- * \param sm  State machine index (typically 1)
- * \param pin GPIO for MCK output
+ * \param pin GPIO that maps to a clk_gpout instance (validate via
+ *            GPIO_TO_GPOUT_CLOCK_HANDLE macro before calling).
  */
-void audio_i2s_mck_setup(PIO pio, uint sm, uint pin);
+void audio_i2s_mck_setup(uint pin);
 
 /** \brief Enable or disable the MCK output
  * \ingroup pico_audio_i2s_multi
+ *
+ * On enable, configures the clk_gpout block (AUXSRC = clk_sys, current
+ * divider) and routes the GPIO pad mux to the clock output function.
+ * On disable, returns the GPIO pad to high-Z.  audio_i2s_mck_update_frequency
+ * must have been called at least once before the first enable.
  */
 void audio_i2s_mck_set_enabled(bool enabled);
 
 /** \brief Update MCK frequency for a new sample rate
  * \ingroup pico_audio_i2s_multi
  *
- * Computes the PIO clock divider for the given sample rate and multiplier.
- * If MCK is currently enabled, the frequency changes immediately.
+ * Computes the clk_gpout divider for the given sample rate and multiplier.
+ * If MCK is currently enabled, the divider register is updated live (the
+ * clk_gpout block accepts glitchless divider changes).
  *
- * \param sample_freq Sample rate in Hz (e.g., 48000)
+ * Divider math: divider_24.8 = sys_clk × 256 / (sample_freq × multiplier).
+ * At 307.2 MHz sys_clk:
+ *   48 kHz × 128× → divider 50.0 (integer, clean)
+ *   48 kHz × 256× → divider 25.0 (integer, clean — was fractional 12.5 with PIO)
+ *   96 kHz × 128× → divider 25.0 (integer, clean — was fractional 12.5 with PIO)
+ *   96 kHz × 256× → divider 12.5 (still fractional)
+ *
+ * \param sample_freq Sample rate in Hz (e.g. 48000)
  * \param multiplier  MCK multiplier: 128 or 256
  */
 void audio_i2s_mck_update_frequency(uint32_t sample_freq, uint32_t multiplier);
@@ -249,10 +474,10 @@ void audio_i2s_mck_update_frequency(uint32_t sample_freq, uint32_t multiplier);
 /** \brief Change the MCK GPIO pin
  * \ingroup pico_audio_i2s_multi
  *
- * MCK must be disabled before calling. The new pin takes effect
- * on the next audio_i2s_mck_set_enabled(true).
+ * MCK must be disabled before calling.  The new pin takes effect on the
+ * next audio_i2s_mck_set_enabled(true).
  *
- * \param new_pin New GPIO for MCK output
+ * \param new_pin New GPIO; must be a clk_gpout-capable pin.
  */
 void audio_i2s_mck_change_pin(uint new_pin);
 
@@ -262,15 +487,17 @@ uint8_t audio_i2s_mck_get_pin(void);
 /** \brief Check if MCK is currently enabled */
 bool audio_i2s_mck_is_enabled(void);
 
-/** \brief Set the MCK PIO clock divider directly (16.8 fixed-point)
+/** \brief Set the MCK clk_gpout divider directly (24.8 fixed-point)
  * \ingroup pico_audio_i2s_multi
  *
  * Used by the SPDIF input clock servo to keep MCK frequency-locked
- * to the servoed I2S data rate.
+ * to the servoed I2S data rate.  The 24.8 format matches the value
+ * written to CLK_GPOUTn_DIV (16-bit integer in [23:8] + 8-bit fraction
+ * in [7:0]).  Caller must compute as: sys_clk × 256 / target_MCK_hz.
  *
- * \param div_16_8 Clock divider in 16.8 fixed-point format
+ * \param div_24_8 Clock divider in 24.8 fixed-point format
  */
-void audio_i2s_mck_set_divider(uint32_t div_16_8);
+void audio_i2s_mck_set_divider(uint32_t div_24_8);
 
 #ifdef __cplusplus
 }

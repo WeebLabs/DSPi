@@ -1,0 +1,138 @@
+;
+; Copyright (c) 2026 WeebLabs
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; I2S input — captures DIN synchronously with the I2S clock domain.
+;
+; Cycle-identical to audio_i2s_clkout_only / audio_i2s_dataout: same divider
+; (sys_clk * 2 / Fs), same 2-PIO-clocks-per-bit cadence, same 32-bits-per-
+; channel * 2-channels = 128-PIO-clocks-per-stereo-frame structure.  Because
+; the input SM and the clock master both run from sys_clk on identical
+; integer dividers, they stay phase-locked indefinitely with zero drift.
+;
+; CRITICAL: every instruction must execute in exactly 1 PIO cycle — NO
+; [delay] modifiers anywhere in the steady-state loops. The structure
+; mirrors audio_i2s_dataout.pio (31-iter loop + post-loop in + reload set x)
+; so the per-frame cycle budget is exactly 128 from .wrap_target back to
+; .wrap, locked to the 128-cycle clock master.
+;
+; The SM uses absolute `wait gpio` on BCK and LRCLK so it can live on any
+; PIO block — it does not need to share a PIO block with whichever SM is
+; driving the clocks. The wait_gpio operands are patched at runtime via
+; pio_encode_wait_gpio() before the SM is enabled, so BCK/LRCLK pins remain
+; runtime-configurable without recompiling the program. The waits live
+; outside the .wrap_target loop so they only run on initial enable (or
+; explicit re-jump to entry_point); steady-state frames stay locked by
+; cycle-identity with the master, no per-frame re-sync overhead.
+;
+; Pin mapping:
+;   in_base = DIN (1 input pin) — set via sm_config_set_in_pins()
+;   wait gpio LRCLK and wait gpio BCK use absolute GPIO numbers
+;
+; Frame format: 32-bit-per-channel, 24-bit audio left-justified, MSB-first.
+; Audio occupies bits [31:8] of each pushed word; bits [7:0] are zero.
+;
+; Slot count is parameterized: x is loaded with (slot_bits - 2) before each
+; channel via the `set x, 30` instructions (31 loop iterations + 1 trailing
+; in = 32 bits). For TDM with different widths, patch the `set x, 30` ops
+; via pio_encode_set() before enable.
+;
+; First-frame discard: callers should drain the RX FIFO post-enable and
+; skip the first stereo pair, since the SM may have started mid-frame.
+; Once it hits the first LRCLK low edge, all subsequent samples are
+; aligned.
+
+.program audio_i2s_datain
+
+; The two `wait gpio` instructions below have placeholder operands that are
+; rewritten at runtime via pio_encode_wait_gpio() before the SM is enabled,
+; so the LRCLK / BCK GPIO numbers are fully configurable.  These waits run
+; only on initial enable (the .wrap loops past them every frame).
+public entry_point:
+    wait 0 pin 0                     ; placeholder: wait LRCLK low (start of L frame)
+    wait 1 pin 0                     ; placeholder: wait BCK rising (first bit of L frame)
+    set x, 30                        ; 31-iter counter for L slot's first 31 bits
+
+.wrap_target                          ; per-frame loop target (steady state)
+left_loop:
+    in pins, 1                       ; sample 1 bit; 2 PIO clocks per bit (matches master)
+    jmp x-- left_loop                ; 31 iterations samples L bits 1..31
+    in pins, 1                       ; sample bit 32 of L (autopush threshold reached → push L word)
+    set x, 30                        ; 31-iter counter for R slot
+right_loop:
+    in pins, 1                       ; R bits 1..31
+    jmp x-- right_loop
+    in pins, 1                       ; sample bit 32 of R (autopush → push R word)
+    set x, 30                        ; reload counter for next frame's L slot via .wrap
+.wrap                                 ; → .wrap_target (left_loop)
+
+; Total: 11 instructions.  Steady-state cycle count from .wrap_target to
+; .wrap (inclusive): 31*2 (left_loop) + 1 (in) + 1 (set) + 31*2 (right_loop)
+; + 1 (in) + 1 (set) = 128 cycles per stereo frame, matching the clock
+; master exactly.
+
+% c-sdk {
+
+#include "hardware/gpio.h"
+
+// ---------------------------------------------------------------------------
+// audio_i2s_datain_program_init — Configure a PIO state machine for I2S input.
+//
+// Patches the two leading `wait gpio` instructions to use absolute LRCLK and
+// BCK GPIO numbers, configures the SM (in_pins, autopush, FIFO joined RX),
+// and jumps the SM to entry_point. The caller must call pio_sm_set_enabled()
+// after init.
+//
+// Important: the absolute-pin wait operands write into the PIO's program
+// memory at the offsets corresponding to instructions 0 and 1 of this
+// program. Only one input SM should run on a given PIO block at a time
+// (otherwise the GPIO patches would conflict). The library serializes this
+// in audio_i2s_rx_instance_setup().
+//
+// Parameters:
+//   pio        — PIO block hosting this input SM
+//   sm         — State machine index (0-3)
+//   offset     — Instruction memory offset from pio_add_program()
+//   din_pin    — GPIO for serial audio data (input)
+//   bck_pin    — Absolute GPIO of the bit clock to observe
+//   lrclk_pin  — Absolute GPIO of the word clock to observe
+// ---------------------------------------------------------------------------
+static inline void audio_i2s_datain_program_init(PIO pio, uint sm, uint offset,
+                                                  uint din_pin,
+                                                  uint bck_pin, uint lrclk_pin) {
+    // Configure DIN pin as PIO input
+    pio_gpio_init(pio, din_pin);
+    gpio_set_pulls(din_pin, false, false);
+    gpio_set_dir(din_pin, GPIO_IN);
+
+    pio_sm_config sm_config = audio_i2s_datain_program_get_default_config(offset);
+
+    // Audio data input: one pin starting at din_pin
+    sm_config_set_in_pins(&sm_config, din_pin);
+
+    // MSB-first (shift_left=false), autopush at 32 bits
+    sm_config_set_in_shift(&sm_config, false, true, 32);
+
+    // Join FIFOs for RX (doubles RX depth to 8 words)
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_RX);
+
+    pio_sm_init(pio, sm, offset, &sm_config);
+
+    // DIN pin must be an input from the PIO's perspective
+    pio_sm_set_consecutive_pindirs(pio, sm, din_pin, 1, false);
+
+    // Patch the two leading `wait gpio` instructions with absolute pin numbers.
+    // pio_encode_wait_gpio() takes a polarity and absolute GPIO number.
+    pio->instr_mem[offset + 0] =
+        pio_encode_wait_gpio(false, lrclk_pin);   // wait 0 gpio LRCLK
+    pio->instr_mem[offset + 1] =
+        pio_encode_wait_gpio(true,  bck_pin);     // wait 1 gpio BCK
+
+    // Position the SM at the entry point so the first action is the LRCLK
+    // resync. (offset + entry_point lands us back at the patched waits.)
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_datain_offset_entry_point));
+}
+
+%}

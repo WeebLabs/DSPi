@@ -130,6 +130,9 @@ volatile bool flash_save_master_volume_pending = false;
 // context where some of those updates originate.
 volatile bool spdif_rx_pin_change_pending = false;
 
+// Deferred I2S DIN pin directory update
+volatile bool flash_set_i2s_din_pin_pending = false;
+
 // 4 KB aligned buffer shared between GET and SET bulk param transfers.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
 
@@ -1366,6 +1369,13 @@ void usb_sound_card_init(void) {
     matrix_init_defaults();
     reset_buffer_watermarks();
 
+    // Configure the I2S clock domain (BCK pin + phantom SM placement)
+    // before any I2S TX/RX setup. Election uses these to install the
+    // clkout-only fallback SM when only RX is registered.
+    audio_i2s_clock_domain_configure(i2s_bck_pin,
+                                      I2S_CLOCK_DOMAIN_PHANTOM_PIO_IDX,
+                                      I2S_CLOCK_DOMAIN_PHANTOM_SM);
+
     // S/PDIF Setup (this must happen before USB init to claim DMA channels)
     producer_pool_1 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
     producer_pool_2 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
@@ -1413,8 +1423,11 @@ void usb_sound_card_init(void) {
     producer_pools[3] = producer_pool_4;
 #endif
 
-    // MCK generator setup on PIO1 SM1 (starts disabled)
-    audio_i2s_mck_setup(pio1, 1, i2s_mck_pin);
+    // MCK generator setup — uses CLK_GPOUTn (hardware clock generator),
+    // not a PIO state machine.  Default pin is GPIO 21 (gpout0); other
+    // valid pins are validated by REQ_SET_MCK_PIN against
+    // GPIO_TO_GPOUT_CLOCK_HANDLE.  Starts disabled.
+    audio_i2s_mck_setup(i2s_mck_pin);
 
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
