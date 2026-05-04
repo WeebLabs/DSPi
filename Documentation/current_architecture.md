@@ -482,6 +482,10 @@ Each EQ band has a user-controllable bypass flag in `EqParamPacket.bypass` (conf
 
 **Persistence:** `filter_recipes` is `memcpy`'d into `PresetSlot.filter_recipes` (flash_storage.c:500/625) so the bypass byte rides through preset save/load with no `SLOT_DATA_VERSION` bump. Legacy presets had `0` in that byte → they load as "active", preserving original behavior. `apply_slot_to_live()` re-normalizes after `memcpy` for defense-in-depth.
 
+**Factory-default channel/band fix (2026-05-04):** `dsp_init_default_filters()` now writes `.channel = ch` and `.band = b` into every `filter_recipes` slot. Previously these fields stayed at BSS-zero, which caused `REQ_SET_BAND_BYPASS` to silently misroute writes to slot (0,0) since the handler copies the recipe (carrying the stale `.channel`/`.band`) into `pending_packet`, and the main-loop apply does `filter_recipes[p.channel][p.band] = p`. Symptom: bypass toggle didn't take effect on factory-defaulted bands until `REQ_SET_EQ_PARAM` rewrote the recipe with correct channel/band. `apply_slot_to_live()` (`flash_storage.c`) also normalizes `.channel` / `.band` after the recipe `memcpy` so old presets saved before the fix don't carry the bug into live state.
+
+**Factory defaults are now flat (2026-05-04):** `dsp_init_default_filters()` no longer installs the 80 Hz highpass on output channels nor the 80 Hz lowpass on the PDM sub. Every band starts as `FILTER_FLAT` with `freq = 1000`, `Q = 0.707`, `gain_db = 0`, `bypass = 0`. Crossover/sub configuration is now an explicit user choice via the host, not a baked-in default that the user has to discover and override.
+
 **Vendor commands:**
 - `REQ_SET_EQ_PARAM` (0x42): host can set the byte directly inside the `EqParamPacket` payload.
 - `REQ_GET_EQ_PARAM` (0x43): added `param=4` → returns 1-byte bypass.

@@ -198,26 +198,14 @@ void dsp_init_default_filters() {
 #else
             filters[ch][b].b0 = 1 << FILTER_SHIFT;
 #endif
+            filter_recipes[ch][b].channel = ch;
+            filter_recipes[ch][b].band = b;
             filter_recipes[ch][b].type = FILTER_FLAT;
             filter_recipes[ch][b].freq = 1000.0f;
             filter_recipes[ch][b].Q = 0.707f;
             filter_recipes[ch][b].gain_db = 0.0f;
         }
     }
-
-    // Default: highpass on S/PDIF outputs (main speakers)
-    EqParamPacket hp = { .type = FILTER_HIGHPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
-#if PICO_RP2350
-    for (int out = CH_OUT_1; out <= CH_OUT_8; out++) {
-#else
-    for (int out = CH_OUT_1; out <= CH_OUT_4; out++) {
-#endif
-        filter_recipes[out][0] = hp;
-    }
-
-    // Default: lowpass on PDM sub output
-    EqParamPacket lp = { .type = FILTER_LOWPASS, .freq = 80.0f, .Q = 0.707f, .gain_db = 0.0f };
-    filter_recipes[CH_OUT_SUB][0] = lp;
 }
 
 void dsp_update_delay_samples(float sample_rate) {

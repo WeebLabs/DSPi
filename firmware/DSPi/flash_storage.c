@@ -628,9 +628,15 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
     // EqParamPacket.reserved); pre-existing 0 → not bypassed → safe.  The
     // explicit normalization defends against garbage from any future code
     // path or corrupted flash.  See Documentation/Features/band_bypass_spec.md.
+    // Also normalize .channel/.band.  Presets saved before the
+    // dsp_init_default_filters() channel/band fix (or by any path that
+    // didn't fully populate the recipe) may have these at zero, which would
+    // cause REQ_SET_BAND_BYPASS to misroute writes to slot (0,0).
     for (int ch = 0; ch < NUM_CHANNELS; ch++) {
         for (int b = 0; b < MAX_BANDS; b++) {
             filter_recipes[ch][b].bypass = (filter_recipes[ch][b].bypass == 1) ? 1 : 0;
+            filter_recipes[ch][b].channel = ch;
+            filter_recipes[ch][b].band = b;
         }
     }
 
