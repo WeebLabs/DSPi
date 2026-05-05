@@ -178,7 +178,7 @@ MatrixMixer matrix_mixer = {0};
 
 // Loudness compensation state
 volatile bool loudness_enabled = false;
-volatile float loudness_ref_spl = 83.0f;
+volatile float loudness_ref_spl = 87.0f;
 volatile float loudness_intensity_pct = 100.0f;
 volatile bool loudness_recompute_pending = false;
 

@@ -1275,7 +1275,7 @@ static void apply_factory_defaults(void) {
 
     // Loudness
     loudness_enabled = false;
-    loudness_ref_spl = 83.0f;
+    loudness_ref_spl = 87.0f;
     loudness_intensity_pct = 100.0f;
     loudness_recompute_pending = true;
 

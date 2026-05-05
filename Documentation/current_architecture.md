@@ -846,7 +846,7 @@ ISO 226:2003 equal-loudness contour compensation to maintain perceived frequency
 
 ### Parameters
 
-- **Reference SPL:** 40-100 dB (default 83 dB)
+- **Reference SPL:** 40-100 dB (default 87 dB)
 - **Intensity:** 0-200% (default 100%)
 
 ### Table Architecture
