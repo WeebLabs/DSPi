@@ -11,21 +11,22 @@ static uint8_t active_buf = 0;
 
 // ----------------------------------------------------------------------------
 // ISO 226:2003 Constants for evaluation frequencies
-// We only need 2 frequencies: ~50 Hz (low shelf) and ~10 kHz (high shelf)
-// Constants from ISO 226:2003 Table 1
+// We only need 2 frequencies: ~50 Hz (low shelf) and ~10 kHz (high shelf).
+// Values are from ISO 226:2003 Annex Table 1.  Lu is signed (negative for
+// frequencies away from 1 kHz where the ear is less sensitive); the prior
+// firmware had Lu sign-flipped and αf at 10 kHz off by ~10%, which inflated
+// the contour-derived compensation by roughly 2.5×.
 // ----------------------------------------------------------------------------
 
-// ISO 226 Table 1 constants for 50 Hz
-// f=50: Tf=44.0, αf=0.432, Lu=80.4
+// ISO 226:2003 Table 1, f = 50 Hz: αf = 0.432, Lu = -15.9, Tf = 44.0
 #define ISO_50_TF   44.0f
 #define ISO_50_AF   0.432f
-#define ISO_50_LU   80.4f
+#define ISO_50_LU   (-15.9f)
 
-// ISO 226 Table 1 constants for 10000 Hz
-// f=10000: Tf=13.9, αf=0.301, Lu=17.8
+// ISO 226:2003 Table 1, f = 10000 Hz: αf = 0.271, Lu = -10.7, Tf = 13.9
 #define ISO_10K_TF  13.9f
-#define ISO_10K_AF  0.301f
-#define ISO_10K_LU  17.8f
+#define ISO_10K_AF  0.271f
+#define ISO_10K_LU  (-10.7f)
 
 // ----------------------------------------------------------------------------
 // ISO 226:2003 SPL calculation (Equations 1-2 from the standard)

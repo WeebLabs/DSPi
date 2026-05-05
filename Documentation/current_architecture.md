@@ -828,7 +828,7 @@ USB Input → Per-Ch Preamp → Loudness → Master EQ → Volume Leveller → C
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-03-02*
+*Last updated: 2026-05-05*
 
 ### Purpose
 
@@ -858,6 +858,39 @@ LoudnessCoeffs loudness_tables[2][61][2];  // [buffer][volume_step][biquad]
 
 - 61 volume steps: -60 dB to 0 dB (1 dB increments), index 0 = silent
 - Background computation writes inactive buffer, atomic pointer swap activates
+
+### ISO 226 Constants Correction (2026-05-05)
+
+Earlier firmware had three incorrect values in `loudness.c` claiming to be from ISO 226:2003 Table 1. They were not — `Lu` was sign-flipped at both evaluation points and `αf` at 10 kHz was off by ~10%. The contour difference produced by `iso226_spl()` came out almost flat (e.g. ~−0.14 dB SPL change at 50 Hz across a 20-phon step instead of the correct ~−15 dB), which made `compensation = freq_change − flat_change` ~ +20 dB instead of +5 dB. Net effect: the loudness compensation was ~2.5× too aggressive at both ends of the audio spectrum.
+
+| Constant | Old value | Correct ISO 226:2003 Table 1 |
+|---|---|---|
+| 50 Hz Tf | 44.0 ✓ | 44.0 |
+| 50 Hz αf | 0.432 ✓ | 0.432 |
+| 50 Hz Lu | +80.4 ✗ | **−15.9** |
+| 10 kHz Tf | 13.9 ✓ | 13.9 |
+| 10 kHz αf | 0.301 ✗ | **0.271** |
+| 10 kHz Lu | +17.8 ✗ | **−10.7** |
+
+After the fix, hand-computed shelf gains at `ref_spl = 80 dB`, `intensity = 100%` (rounded to 0.1 dB):
+
+| vol_idx | vol_db | effective_phon | 50 Hz boost (low shelf) | 10 kHz boost (high shelf) |
+|---|---|---|---|---|
+| 60 | 0 | 80 | 0.0 dB | 0.0 dB |
+| 50 | −10 | 70 | +4.1 dB | +0.7 dB |
+| 40 | −20 | 60 | +8.3 dB | +1.4 dB |
+| 30 | −30 | 50 | +12.2 dB | +2.0 dB |
+| 20 | −40 | 40 | +16.1 dB | +2.6 dB |
+| 10 | −50 | 30 | +19.6 dB | +2.8 dB |
+| 0 | −60 | 20 | +16.7 dB | −4.4 dB *(see note)* |
+
+These match the qualitative shape of published Fletcher–Munson / ISO 226 contour-derived loudness curves (e.g. Yamaha YPAO, Audyssey Dynamic EQ), which typically apply +6 to +15 dB of bass boost and +2 to +6 dB of treble boost at −20 to −30 dB attenuation from the reference level.
+
+*Note on the vol_idx = 0 entry:* `effective_phon` is clamped at 20 (ISO 226 isn't validated below 20 phon), but `flat_change` continues to use the clamped value as the contour reference. At deep attenuation the high-shelf comparison produces a small negative compensation. This is benign — the audio is effectively silent at vol_idx ≤ 5 — but if needed in future a `if (compensation < 0) compensation = 0;` guard in `loudness_compensation_db()` would cap it at zero.
+
+### Migration note for existing presets
+
+The wire format and persisted preset data are unchanged (only `intensity_pct` and `ref_spl` are stored, and they're applied through the corrected formula at runtime). Users who liked the prior intentionally-strong response can dial `intensity_pct` from 100 % up to ~250 % to roughly recover the old curve. A matching default of 100 % now corresponds to a defensible ISO-226-derived compensation rather than the previous over-boosted curve.
 
 ---
 
