@@ -1627,7 +1627,7 @@ Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Cor
 ---
 
 ## Audio Input Source System
-*Last updated: 2026-04-11*
+*Last updated: 2026-05-04*
 
 Abstraction layer enabling selection between multiple audio input sources. Currently supports USB (default) and SPDIF. Designed for future extensibility to I2S and ADAT inputs without restructuring.
 
@@ -1652,6 +1652,25 @@ typedef enum {
 - On switch: drain USB ring, `prepare_pipeline_reset()`, update `active_input_source`, `complete_pipeline_reset()`
 - When input is not USB, `usb_audio_drain_ring()` is skipped — USB enumeration stays active but audio data is silently dropped
 - SPDIF RX hardware only runs when SPDIF is the selected input source
+
+### USB Behavior While Non-USB Input is Active (2026-05-04)
+
+The device follows the always-accept architecture used by RME / UA / MOTU / Focusrite: when the user picks SPDIF (or any other future external source), the USB audio class interface stays fully enumerated, the iso OUT endpoint stays armed, and the SOF feedback endpoint keeps emitting valid timing — Windows usbaudio.sys and macOS CoreAudio see a normal, well-behaved UAC1 device at all times. The "switch" is purely a DSP routing decision; the host never knows.
+
+To prevent the host stream from disturbing the SPDIF audio path, several spots that previously assumed USB is always the active source are now gated:
+
+- **`uac1_apply_alt()` resync block (`usb_audio.c:927-950`)** — the `preset_loading = true` / `stream_restart_resync_pending = true` cascade only fires when `active_input_source == INPUT_SOURCE_USB`. Previously, every Windows audio-session open (e.g. touching the volume slider plays a notification ding) sent a `SET_INTERFACE alt=N` that triggered `complete_pipeline_reset()` inside `save_and_disable_interrupts()` and made the SPDIF input handler treat `preset_loading` as a lock-acquisition signal — yanking the outputs into prefill. The IRQ-disabled window also risked starving the `pico_spdif_rx` library's 10 ms decode-timeout alarm, causing lock loss after enough rapid alt-change cycles.
+- **ISR ring push (`usb_audio.c:1174`)** — `usb_audio_ring_push()` is gated on `active_input_source == INPUT_SOURCE_USB`. In SPDIF mode the ring would never be drained and `overrun_count` would climb continuously while Windows streamed silence to the playback device.
+- **Main-loop ring flush (`main.c:986-989`)** — when source isn't USB, the loop calls `usb_audio_flush_ring()` defensively to clear any packet pushed by the ISR in the brief window straddling an `active_input_source` change.
+- **SOF feedback (`usb_audio.c:1236-1248`)** — when source isn't USB, `feedback_10_14` is forced to `nominal_feedback_10_14` regardless of what the servo computed. Output DMA can be transiently stalled during SPDIF prefill / lock loss, which would let the servo emit zero or garbage feedback values; Windows usbaudio.sys treats catastrophic feedback drift as a device fault and resets the device (which also drops the bulk Console pipe).
+
+### Host Volume / Mute in Non-USB Mode (2026-05-04)
+
+`audio_set_volume()` (`usb_audio.c:350`) always records the host's last-set value into `audio_state.volume` so GET_CUR round-trips correctly, but bails out before touching `audio_state.vol_mul` or `current_loudness_coeffs` when source isn't USB. Mute application is gated symmetrically in the audio pipeline: `audio_pipeline.c:197` (RP2350 float) and `audio_pipeline.c:499` (RP2040 Q15) both guard `audio_state.mute` with `active_input_source == INPUT_SOURCE_USB`. Result: Windows volume slider and mute key have no audible effect during SPDIF playback.
+
+The SPDIF→USB transition in the deferred input-source switch handler (`main.c:1597-1604`) calls `audio_set_volume(audio_state.volume)` to thaw the cached host volume into the live gain path so Windows' last-seen slider position takes effect immediately when the user switches back.
+
+This matches the user's product-level decision; it differs from the industry-standard pattern (RME TotalMix / UA Apollo, where host volume continues to act as master output gain on external sources) on purpose.
 
 ### SPDIF RX Pin
 

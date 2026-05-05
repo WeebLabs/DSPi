@@ -348,7 +348,16 @@ static uint16_t db_to_vol[CENTER_VOLUME_INDEX + 1] = {
 #define VOLUME_RESOLUTION    ENCODE_DB(1)
 
 void audio_set_volume(int16_t volume) {
+    // Always record the host's last-set value so GET_CUR round-trips correctly
+    // — Windows compares what it read back against what it last wrote.
     audio_state.volume = volume;
+
+    // Host volume control is inert when USB isn't the DSP input source.  The
+    // SPDIF→USB transition in the input-source switch handler calls
+    // audio_set_volume(audio_state.volume) to thaw the cached value into the
+    // live gain path.
+    if (active_input_source != INPUT_SOURCE_USB) return;
+
     volume += CENTER_VOLUME_INDEX * 256;
     if (volume < 0) volume = 0;
     if (volume >= (CENTER_VOLUME_INDEX + 1) * 256) volume = (CENTER_VOLUME_INDEX + 1) * 256 - 1;
@@ -925,7 +934,15 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
     audio_ring_last_push_us = 0;
 
     if (active) {
-        if (need_resync) {
+        // Only run the resync cascade when USB is the active input source.
+        // In SPDIF (or any non-USB) mode, the host's stream is decorative —
+        // we keep the iso EPs up so the host stays happy, but we must not
+        // touch preset_loading (the SPDIF input handler treats that as a
+        // lock-acquisition signal and would yank the outputs) and must not
+        // queue stream_restart_resync_pending (which fires complete_pipeline_reset
+        // inside save_and_disable_interrupts() and could starve the SPDIF
+        // RX library's 10ms decode-timeout alarm).
+        if (need_resync && active_input_source == INPUT_SOURCE_USB) {
             // Engage the mute envelope immediately so any packets decoded
             // between here and the main-loop's full pipeline resync are
             // silenced. Main loop will honor stream_restart_resync_pending
@@ -1171,8 +1188,14 @@ static bool __not_in_flash_func(uac1_driver_xfer_cb)(uint8_t rhport, uint8_t ep_
             }
             audio_ring_last_push_us = now;
 
-            usb_audio_ring_push(&audio_ring, ep_out_buf,
-                                xferred_bytes > 0xFFFFu ? 0xFFFFu : (uint16_t)xferred_bytes);
+            // Only queue host audio when USB is the active DSP input source.
+            // In SPDIF mode the ring would never be drained, every push past
+            // the 4-slot ring fill would bump overrun_count for no reason,
+            // and (more importantly) the data would be discarded anyway.
+            if (active_input_source == INPUT_SOURCE_USB) {
+                usb_audio_ring_push(&audio_ring, ep_out_buf,
+                                    xferred_bytes > 0xFFFFu ? 0xFFFFu : (uint16_t)xferred_bytes);
+            }
         }
         // Re-arm regardless of this frame's success — iso transfers fail-open.
         if (uac1.ep_data_open) uac1_arm_data_out(rhport);
@@ -1235,8 +1258,18 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
 
     fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift, spdif0_consumer_fill);
 
-    uint32_t fb_10_14 = fb_ctrl_get_10_14(&fb_ctrl);
-    if (fb_10_14) feedback_10_14 = fb_10_14;
+    if (active_input_source != INPUT_SOURCE_USB) {
+        // In non-USB modes the host's stream is decorative.  Output DMA can
+        // be transiently stalled (SPDIF prefill window, lock loss) which
+        // would let the servo emit zero/garbage feedback values — Windows
+        // usbaudio.sys treats catastrophic feedback drift as a device fault
+        // and resets the device (which also drops the bulk Console pipe).
+        // Force exact nominal feedback while non-USB.
+        feedback_10_14 = nominal_feedback_10_14;
+    } else {
+        uint32_t fb_10_14 = fb_ctrl_get_10_14(&fb_ctrl);
+        if (fb_10_14) feedback_10_14 = fb_10_14;
+    }
 }
 
 // Runtime pin configuration

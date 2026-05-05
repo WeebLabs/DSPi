@@ -11,6 +11,7 @@
 
 #include "audio_pipeline.h"
 #include "usb_audio.h"
+#include "audio_input.h"
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "loudness.h"
@@ -194,7 +195,13 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // vol_mul: USB host volume (raw) — used for loudness compensation only.
     // vol_mul_master: host volume × master volume — used for output gain.
     // Keeping them separate ensures master volume never affects loudness curves.
-    float vol_mul = audio_state.mute ? 0.0f : (float)audio_state.vol_mul * inv_32768;
+    // Mute is honored only when USB is the active DSP input source — the host's
+    // mute key has no audible effect on SPDIF playback.  vol_mul itself is
+    // already frozen at the last USB-active value because audio_set_volume()
+    // bails before touching it when the source isn't USB.
+    bool host_active = (active_input_source == INPUT_SOURCE_USB);
+    float vol_mul = (audio_state.mute && host_active)
+                    ? 0.0f : (float)audio_state.vol_mul * inv_32768;
     vol_mul *= preset_mute_gain;
     float vol_mul_master = vol_mul * master_volume_linear;
 
@@ -496,7 +503,9 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // ------------------------------------------------------------------------
     // vol_mul: USB host volume (raw Q15) — used for loudness compensation only.
     // vol_mul_master: host volume × master volume (Q15) — used for output gain.
-    int32_t vol_mul = audio_state.mute ? 0 : audio_state.vol_mul;
+    // Mute is honored only when USB is the active input (see RP2350 path above).
+    bool host_active = (active_input_source == INPUT_SOURCE_USB);
+    int32_t vol_mul = (audio_state.mute && host_active) ? 0 : audio_state.vol_mul;
     int32_t preset_mute_gain_q15 = (int32_t)(preset_mute_gain * 32768.0f + 0.5f);
     if (preset_mute_gain_q15 < 0) preset_mute_gain_q15 = 0;
     if (preset_mute_gain_q15 > 32768) preset_mute_gain_q15 = 32768;

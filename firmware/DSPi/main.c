@@ -979,8 +979,13 @@ int main(void) {
         // Drain USB audio ring — highest priority (only when USB is active input).
         // USB ISR pushes raw packets into the ring; we run the full DSP
         // pipeline here in main-loop context instead of USB IRQ context.
+        // In non-USB modes, defensively flush so any packet pushed by the ISR
+        // in the brief window straddling an active_input_source change can't
+        // sit stale until the next USB→x switch.
         if (active_input_source == INPUT_SOURCE_USB) {
             usb_audio_drain_ring();
+        } else {
+            usb_audio_flush_ring();
         }
 
         // Poll SPDIF input when active
@@ -1593,6 +1598,14 @@ int main(void) {
                     // Switching to USB: flush stale ring data, complete reset
                     usb_audio_flush_ring();
                     complete_pipeline_reset();
+
+                    // Thaw the cached host volume.  audio_set_volume() bails
+                    // when source != USB, so any host SET_CUR Volume requests
+                    // received during SPDIF mode were recorded into
+                    // audio_state.volume but never applied to vol_mul or the
+                    // loudness coefficient pointer.  Re-applying here brings
+                    // the live gain path in line with what Windows last sent.
+                    audio_set_volume(audio_state.volume);
                 }
 
                 printf("Input source: %u -> %u\n",
