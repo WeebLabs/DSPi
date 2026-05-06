@@ -11,11 +11,10 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 firmware/build/*
-firmware/build-rp2350/*
-firmware/build-rp2040/*
-firmware/build_release/*
+firmware/build*
 firmware/eclipse_build/*
 /pico-sdk
+firmware/pico*
 /build
 .vscode
 
@@ -27,6 +26,5 @@ __pycache__/
 # Ignore all markdown files except key docs
 *.md
 !README.md
-!Documentation/current_architecture.md
-!Documentation/Roadmap.md
-!Documentation/Features/*.md
+!Documentation/*.md
+!tools/*.md

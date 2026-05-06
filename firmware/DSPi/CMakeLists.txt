@@ -17,6 +17,9 @@ add_executable(DSPi
     bulk_params.c
     bulk_params.h
     config.h
+    control_executor.h
+    control_transport.c
+    control_transport.h
     crossfeed.c
     crossfeed.h
     dcp_inline.h
@@ -87,10 +90,32 @@ target_compile_definitions(DSPi PRIVATE
     PICO_DEFAULT_UART_TX_PIN=12
 )
 
+foreach(dspi_control_define
+    DSPI_CONTROL_I2C_PRIORITY
+    DSPI_CONTROL_UART_PRIORITY
+    DSPI_CONTROL_I2C_INSTANCE
+    DSPI_CONTROL_I2C_ADDR
+    DSPI_CONTROL_I2C_SDA_PIN
+    DSPI_CONTROL_I2C_SCL_PIN
+    DSPI_CONTROL_I2C_BAUD
+    DSPI_CONTROL_UART_INSTANCE
+    DSPI_CONTROL_UART_TX_PIN
+    DSPI_CONTROL_UART_RX_PIN
+    DSPI_CONTROL_UART_BAUD
+)
+    if (DEFINED ${dspi_control_define})
+        target_compile_definitions(DSPi PRIVATE
+            ${dspi_control_define}=${${dspi_control_define}}
+        )
+    endif()
+endforeach()
+
 target_link_libraries(DSPi
     pico_stdlib
     pico_multicore
     pico_unique_id
+    hardware_i2c
+    hardware_uart
     hardware_pwm
     hardware_flash
     hardware_adc
