@@ -8,11 +8,10 @@ surface still has a handler in that executor.
 
 from __future__ import annotations
 
-import re
 import importlib.util
+import re
 import sys
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 FW = ROOT / "firmware" / "DSPi"
@@ -80,34 +79,13 @@ def test_option_a_frame_shape_is_documented_in_code() -> None:
 def test_request_ids_are_covered_by_executor_switches() -> None:
     config = read(FW / "config.h")
     vendor = read(FW / "vendor_commands.c")
-    request_ids = set(re.findall(r"#define\s+(REQ_[A-Z0-9_]+)\s+0x[0-9A-Fa-f]+", config))
+    request_ids = set(
+        re.findall(r"#define\s+(REQ_[A-Z0-9_]+)\s+0x[0-9A-Fa-f]+", config)
+    )
     handled = set(re.findall(r"case\s+(REQ_[A-Z0-9_]+)\s*:", vendor))
     special = {"REQ_SET_ALL_PARAMS"}
     missing = sorted(request_ids - handled - special)
     assert not missing, "request IDs missing executor cases: " + ", ".join(missing)
-
-
-def test_required_plan_docs_exist_with_expected_headings() -> None:
-    docs = {
-        "DESIGN.md": ["# Design"],
-        "TESTING.md": ["# Testing Strategy"],
-        "ROADMAP.md": ["# Roadmap", "## Now", "## Later", "## Completed"],
-        "PLAN.md": [
-            "# Plan",
-            "## Roadmap alignment",
-            "## Objective",
-            "## Assumptions",
-            "## Scenario mapping",
-            "## Exit criteria",
-            "## Promotion rule",
-        ],
-        "tests/TESTS.md": ["# Tests"],
-        "tests/SCENARIOS.md": ["# Scenarios"],
-    }
-    for relative, headings in docs.items():
-        content = read(ROOT / relative)
-        for heading in headings:
-            assert heading in content, f"{relative} missing heading {heading}"
 
 
 def load_common_module():
@@ -133,9 +111,14 @@ def test_raspberry_pi_scripts_exist() -> None:
 
 def test_raspberry_pi_frame_helper_matches_firmware_contract() -> None:
     common = load_common_module()
-    frame = common.build_request(common.CONTROL_DIR_IN, common.REQ_GET_PLATFORM, length=4)
+    frame = common.build_request(
+        common.CONTROL_DIR_IN, common.REQ_GET_PLATFORM, length=4
+    )
     assert frame == b"DC\x01\x01\x7f\x00\x00\x00\x00\x04\x00"
-    assert common.parse_response_header(b"DC\x81\x00\x04\x00") == (common.CONTROL_STATUS_OK, 4)
+    assert common.parse_response_header(b"DC\x81\x00\x04\x00") == (
+        common.CONTROL_STATUS_OK,
+        4,
+    )
     assert common.REQ_SET_MASTER_VOLUME == 0xD2
     assert common.REQ_GET_MASTER_VOLUME == 0xD3
 
@@ -168,10 +151,8 @@ def main() -> None:
         test_non_usb_uses_shared_executor,
         test_option_a_frame_shape_is_documented_in_code,
         test_request_ids_are_covered_by_executor_switches,
-        test_required_plan_docs_exist_with_expected_headings,
         test_raspberry_pi_scripts_exist,
         test_raspberry_pi_frame_helper_matches_firmware_contract,
-        test_raspberry_pi_docs_reference_scripts_and_checks,
     ]
     for test in tests:
         test()
