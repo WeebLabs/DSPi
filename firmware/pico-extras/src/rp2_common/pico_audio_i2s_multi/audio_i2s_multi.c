@@ -181,10 +181,21 @@ static audio_buffer_t *i2s_wrap_consumer_take(audio_connection_t *connection, bo
 // Consumer buffer: interleaved int32_t L/R pairs, 24-bit audio in bits [31:8]
 //
 // The PIO shifts MSB-first, so audio must be in the upper 24 bits.
-// The lower 8 bits are zero (standard I2S padding).
+// The lower 8 bits carry an anti-zero-detect-mute marker so DACs configured
+// for 32-bit input never see an all-zero word — defeats auto-mute clicks
+// without perturbing the 24-bit audio at [31:8].  See I2S_PAD_PATTERN.
 //
 // This is dramatically simpler than SPDIF BMC encoding — just a left-shift.
 // ---------------------------------------------------------------------------
+
+// Anti-zero-detect-mute padding written into the bottom 8 bits of every I2S
+// frame.  The audio data at [31:8] is bit-perfect 24-bit; this byte sits in
+// the I2S "padding" region that 24-bit DACs ignore and 32-bit DACs evaluate
+// for zero-detect.  Constant 0x01 keeps every wire word non-zero with the
+// minimum possible disturbance — a single LSB at bit 0 of the 32-bit frame.
+// 24-bit-configured DACs are not helped by this trick (they can't see [7:0]);
+// for them the muted-output click problem must be addressed elsewhere.
+#define I2S_PAD_PATTERN  0x01
 
 // I2S producer-give callback.
 //
@@ -219,10 +230,12 @@ static void i2s_wrap_producer_give(audio_connection_t *connection, audio_buffer_
                        (pbc->current_consumer_buffer_pos * 2);
 
         // PIO enters at the left channel slot — DMA order matches producer order (L,R).
-        // Left-shift by 8 to place 24-bit audio at MSB for I2S MSB-first output.
+        // Left-shift by 8 to place 24-bit audio at MSB for I2S MSB-first output;
+        // OR I2S_PAD_PATTERN into the unused bottom 8 padding bits so the DAC's
+        // zero-detect mute (32-bit-mode) never sees an all-zero frame.
         for (uint32_t i = 0; i < sample_count; i++) {
-            dst[i * 2]     = src[i * 2] << 8;     // L sample
-            dst[i * 2 + 1] = src[i * 2 + 1] << 8; // R sample
+            dst[i * 2]     = (src[i * 2]     << 8) | I2S_PAD_PATTERN;
+            dst[i * 2 + 1] = (src[i * 2 + 1] << 8) | I2S_PAD_PATTERN;
         }
 
         pos += sample_count;
@@ -325,7 +338,10 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
                inst->pio_sm, inst->data_pin);
     }
 
-    // Initialize per-instance silence buffer (DMA-sized, all zeros)
+    // Initialize per-instance silence buffer (DMA-sized).  Filled with the
+    // I2S_PAD_PATTERN word (audio bits zero, padding bits non-zero) so the
+    // DAC sees non-zero frames during DMA underruns and doesn't engage
+    // zero-detect mute mid-stream.
     inst->consumer_buffer_format.format = &inst->consumer_format;
     inst->silence_buffer.sample_count = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT;
     inst->silence_buffer.max_sample_count = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT;
@@ -337,7 +353,13 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     if (!inst->silence_buffer.buffer) {
         panic("I2S setup: failed to allocate silence buffer");
     }
-    memset(inst->silence_buffer.buffer->bytes, 0, silence_bytes);
+    {
+        int32_t *p = (int32_t *)inst->silence_buffer.buffer->bytes;
+        const size_t word_count = silence_bytes / sizeof(int32_t);
+        for (size_t i = 0; i < word_count; i++) {
+            p[i] = (int32_t)I2S_PAD_PATTERN;
+        }
+    }
 
     __mem_fence_release();
 
@@ -407,10 +429,19 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
         panic("I2S connect failed: consumer pool allocation failed");
     }
 
-    // Zero-fill all consumer buffers (I2S silence is just zeros)
-    for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
-        memset(buffer->buffer->bytes, 0,
-               PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2 * sizeof(int32_t));
+    // Pre-fill all consumer buffers with I2S_PAD_PATTERN words (audio bits
+    // zero, padding bits non-zero) so the very first DMA transfers — which
+    // can run before the producer pipeline has filled them — present
+    // non-zero frames to the DAC and don't latch zero-detect mute on
+    // startup.
+    {
+        const size_t buf_words = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2;
+        for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
+            int32_t *p = (int32_t *)buffer->buffer->bytes;
+            for (size_t i = 0; i < buf_words; i++) {
+                p[i] = (int32_t)I2S_PAD_PATTERN;
+            }
+        }
     }
 
     i2s_update_pio_frequency(inst, producer->format->sample_freq);
