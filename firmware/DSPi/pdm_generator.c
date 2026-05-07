@@ -436,10 +436,12 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         uint32_t work_start = time_us_32();
 
-        // Read work descriptor
+        // Read work descriptor — vol_mul_start / vol_mul_step encode the
+        // shared per-sample ramp (see audio_pipeline.c).
         float (*buf_out)[192] = core1_eq_work.buf_out;
         uint32_t sample_count = core1_eq_work.sample_count;
-        float vol_mul = core1_eq_work.vol_mul;
+        float vol_mul_start = core1_eq_work.vol_mul_start;
+        float vol_mul_step  = core1_eq_work.vol_mul_step;
 
         // Process EQ + gain for outputs assigned to Core 1
         extern MatrixMixer matrix_mixer;
@@ -454,15 +456,28 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 }
             }
 
-            // Combined gain + volume
-            float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                         : matrix_mixer.outputs[out].gain_linear * vol_mul;
-            if (gain == 0.0f) {
-                memset(buf_out[out], 0, sample_count * sizeof(float));
-            } else if (gain != 1.0f) {
+            // Combined gain + volume — per-sample linear ramp (step==0 in
+            // steady state falls back to the constant-gain path).
+            float matrix_gain = matrix_mixer.outputs[out].gain_linear;
+            float gain_start = matrix_mixer.outputs[out].mute ? 0.0f
+                               : matrix_gain * vol_mul_start;
+            float gain_step  = matrix_mixer.outputs[out].mute ? 0.0f
+                               : matrix_gain * vol_mul_step;
+            if (gain_step == 0.0f) {
+                if (gain_start == 0.0f) {
+                    memset(buf_out[out], 0, sample_count * sizeof(float));
+                } else if (gain_start != 1.0f) {
+                    float *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] *= gain_start;
+                }
+            } else {
                 float *dst = buf_out[out];
-                for (uint32_t i = 0; i < sample_count; i++)
+                float gain = gain_start;
+                for (uint32_t i = 0; i < sample_count; i++) {
                     dst[i] *= gain;
+                    gain += gain_step;
+                }
             }
         }
 
@@ -554,10 +569,12 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         uint32_t work_start = time_us_32();
 
-        // Read work descriptor
+        // Read work descriptor — vol_mul_start / vol_mul_step encode the
+        // shared per-sample Q15 ramp (see audio_pipeline.c).
         int32_t (*buf_out)[192] = core1_eq_work.buf_out;
         uint32_t sample_count = core1_eq_work.sample_count;
-        int32_t vol_mul = core1_eq_work.vol_mul;
+        int32_t vol_mul_start_q15 = core1_eq_work.vol_mul_start;
+        int32_t vol_mul_step_q15  = core1_eq_work.vol_mul_step;
         bool is_bypassed = bypass_master_eq;
 
         // Process EQ + gain for outputs assigned to Core 1
@@ -573,15 +590,28 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 }
             }
 
-            // Combined gain + volume (Q15)
-            int32_t gain = matrix_mixer.outputs[out].mute ? 0
-                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul);
-            if (gain == 0) {
-                memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+            // Combined gain + volume (Q15) — per-sample ramp; step==0 falls
+            // back to constant-gain path.
+            float matrix_gain_f = matrix_mixer.outputs[out].gain_linear;
+            int32_t gain_start = matrix_mixer.outputs[out].mute ? 0
+                                 : (int32_t)(matrix_gain_f * (float)vol_mul_start_q15);
+            int32_t gain_step  = matrix_mixer.outputs[out].mute ? 0
+                                 : (int32_t)(matrix_gain_f * (float)vol_mul_step_q15);
+            if (gain_step == 0) {
+                if (gain_start == 0) {
+                    memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+                } else {
+                    int32_t *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] = fast_mul_q15(dst[i], gain_start);
+                }
             } else {
                 int32_t *dst = buf_out[out];
-                for (uint32_t i = 0; i < sample_count; i++)
+                int32_t gain = gain_start;
+                for (uint32_t i = 0; i < sample_count; i++) {
                     dst[i] = fast_mul_q15(dst[i], gain);
+                    gain += gain_step;
+                }
             }
         }
 

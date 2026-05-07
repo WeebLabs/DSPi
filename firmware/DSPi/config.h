@@ -392,19 +392,27 @@ typedef enum {
 #endif
 
 // Core 1 EQ Worker Handshake
+//
+// vol_mul_start / vol_mul_step encode a per-sample linear ramp of the
+// master-scaled output volume across the packet.  Sample i is multiplied by
+// (vol_mul_start + i * vol_mul_step), giving click-free transitions when the
+// host adjusts USB volume, master volume, or mute. Both cores apply the same
+// ramp parameters so output slots stay phase-aligned (CLAUDE.md hard rule).
 typedef struct {
     volatile bool     work_ready;
     volatile bool     work_done;
 #if PICO_RP2350
     float           (*buf_out)[192];   // Pointer to buf_out array, set once at init
     uint32_t          sample_count;
-    float             vol_mul;
+    float             vol_mul_start;   // Master-scaled vol at sample 0
+    float             vol_mul_step;    // Per-sample increment
     uint32_t          delay_write_idx;  // Snapshot for Core 1 delay processing
     int32_t          *spdif_out[3];     // Pairs 1-3 output buffers (NULL = skip)
 #else
     int32_t         (*buf_out)[192];   // Pointer to buf_out array (Q28), set once at init
     uint32_t          sample_count;
-    int32_t           vol_mul;         // Q15 master volume
+    int32_t           vol_mul_start;   // Q15 master-scaled vol at sample 0
+    int32_t           vol_mul_step;    // Q15 per-sample increment
     uint32_t          delay_write_idx;
     int32_t          *spdif_out[1];    // SPDIF pair 2 output buffer (NULL = skip)
 #endif

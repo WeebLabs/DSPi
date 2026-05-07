@@ -81,6 +81,25 @@ static void update_buffer_watermarks(void);
 static inline void update_slot0_fill_fast(void);
 
 // ----------------------------------------------------------------------------
+// OUTPUT VOLUME RAMPING (host vol × master vol × preset_mute_gain)
+// ----------------------------------------------------------------------------
+//
+// USB host volume changes (and mute toggles, master volume changes,
+// preset_mute transitions) all funnel into a single composite gain that is
+// applied after per-output EQ.  Snapping that gain at packet boundaries
+// produces audible clicks because a typical 1 dB host step is a ~12% linear
+// jump.  We hold the previous packet's ending value and linearly interpolate
+// to the new target across the packet (sample 0 = prev, sample sample_count =
+// new target), giving a click-free ramp shared by every output.  Both Core 0
+// and Core 1 work from the same start+step, so per-output gains stay
+// proportional and output slots remain phase-aligned.
+#if PICO_RP2350
+static float vol_mul_master_prev = 0.0f;
+#else
+static int32_t vol_mul_master_prev_q15 = 0;
+#endif
+
+// ----------------------------------------------------------------------------
 // PRESET MUTE SMOOTHING
 // ----------------------------------------------------------------------------
 
@@ -192,18 +211,32 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // ------------------------------------------------------------------------
     const float inv_32768 = 1.0f / 32768.0f;
 
-    // vol_mul: USB host volume (raw) — used for loudness compensation only.
-    // vol_mul_master: host volume × master volume — used for output gain.
-    // Keeping them separate ensures master volume never affects loudness curves.
+    // vol_mul_master_target: composite output gain target for THIS packet
+    //   (host volume × preset_mute_gain × master volume).
+    // We linearly ramp from vol_mul_master_prev (last packet's ending value)
+    // to the new target across sample_count samples; in steady state the step
+    // is zero and the gain loops fall back to the original constant-gain
+    // fast-path (no extra per-sample work).
+    //
     // Mute is honored only when USB is the active DSP input source — the host's
-    // mute key has no audible effect on SPDIF playback.  vol_mul itself is
-    // already frozen at the last USB-active value because audio_set_volume()
-    // bails before touching it when the source isn't USB.
+    // mute key has no audible effect on SPDIF playback.  audio_state.vol_mul
+    // itself is already frozen at the last USB-active value because
+    // audio_set_volume() bails before touching it when the source isn't USB.
     bool host_active = (active_input_source == INPUT_SOURCE_USB);
-    float vol_mul = (audio_state.mute && host_active)
-                    ? 0.0f : (float)audio_state.vol_mul * inv_32768;
-    vol_mul *= preset_mute_gain;
-    float vol_mul_master = vol_mul * master_volume_linear;
+    float vol_mul_target = (audio_state.mute && host_active)
+                           ? 0.0f : (float)audio_state.vol_mul * inv_32768;
+    vol_mul_target *= preset_mute_gain;
+    float vol_mul_master_target = vol_mul_target * master_volume_linear;
+    float vol_mul_master_start  = vol_mul_master_prev;
+    float vol_mul_master_step   = (sample_count > 0)
+        ? (vol_mul_master_target - vol_mul_master_start) / (float)sample_count
+        : 0.0f;
+    // Only snap prev forward when this packet actually carried audio. A
+    // zero-length packet would otherwise eat the delta and force the next real
+    // packet to hard-snap from start==target, undoing the ramp.
+    if (sample_count > 0) {
+        vol_mul_master_prev = vol_mul_master_target;
+    }
 
     bool is_bypassed = bypass_master_eq;
 
@@ -313,9 +346,11 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     if (core1_mode == CORE1_MODE_EQ_WORKER) {
         // --- Dual-core path: Core 1 handles EQ+delay+SPDIF for outputs 2-7 ---
 
-        // Dispatch to Core 1
+        // Dispatch to Core 1 — both cores share the same vol ramp params so
+        // outputs assigned to either core stay phase-aligned.
         core1_eq_work.sample_count = sample_count;
-        core1_eq_work.vol_mul = vol_mul_master;  // Core 1 uses master-scaled volume
+        core1_eq_work.vol_mul_start = vol_mul_master_start;
+        core1_eq_work.vol_mul_step  = vol_mul_master_step;
         core1_eq_work.delay_write_idx = delay_write_idx;
         core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
         core1_eq_work.spdif_out[1] = audio_buf[2] ? (int32_t *)audio_buf[2]->buffer->bytes : NULL;
@@ -334,15 +369,30 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
                 }
             }
-            // Output gain uses vol_mul_master (host vol × master vol)
-            float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                         : matrix_mixer.outputs[out].gain_linear * vol_mul_master;
-            if (gain == 0.0f) {
-                memset(buf_out[out], 0, sample_count * sizeof(float));
-            } else if (gain != 1.0f) {
+            // Output gain ramps from gain_start → gain_start + N*step across the
+            // packet (host vol × master vol × preset_mute, scaled by per-output
+            // matrix gain).  In steady state step==0 and we drop into the same
+            // constant-gain branches as before — no per-sample overhead.
+            float matrix_gain = matrix_mixer.outputs[out].gain_linear;
+            float gain_start = matrix_mixer.outputs[out].mute ? 0.0f
+                               : matrix_gain * vol_mul_master_start;
+            float gain_step  = matrix_mixer.outputs[out].mute ? 0.0f
+                               : matrix_gain * vol_mul_master_step;
+            if (gain_step == 0.0f) {
+                if (gain_start == 0.0f) {
+                    memset(buf_out[out], 0, sample_count * sizeof(float));
+                } else if (gain_start != 1.0f) {
+                    float *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] *= gain_start;
+                }
+            } else {
                 float *dst = buf_out[out];
-                for (uint32_t i = 0; i < sample_count; i++)
+                float gain = gain_start;
+                for (uint32_t i = 0; i < sample_count; i++) {
                     dst[i] *= gain;
+                    gain += gain_step;
+                }
             }
         }
 
@@ -404,7 +454,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     } else {
         // --- Single-core path: all outputs on Core 0 ---
 
-        // EQ + gain
+        // EQ + gain (per-sample vol ramp, see Core 0 dual-core branch above for
+        // rationale; steady-state step==0 falls back to constant-gain path).
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -413,15 +464,26 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
                 }
             }
-            // Output gain uses vol_mul_master (host vol × master vol)
-            float gain = matrix_mixer.outputs[out].mute ? 0.0f
-                         : matrix_mixer.outputs[out].gain_linear * vol_mul_master;
-            if (gain == 0.0f) {
-                memset(buf_out[out], 0, sample_count * sizeof(float));
-            } else if (gain != 1.0f) {
+            float matrix_gain = matrix_mixer.outputs[out].gain_linear;
+            float gain_start = matrix_mixer.outputs[out].mute ? 0.0f
+                               : matrix_gain * vol_mul_master_start;
+            float gain_step  = matrix_mixer.outputs[out].mute ? 0.0f
+                               : matrix_gain * vol_mul_master_step;
+            if (gain_step == 0.0f) {
+                if (gain_start == 0.0f) {
+                    memset(buf_out[out], 0, sample_count * sizeof(float));
+                } else if (gain_start != 1.0f) {
+                    float *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] *= gain_start;
+                }
+            } else {
                 float *dst = buf_out[out];
-                for (uint32_t i = 0; i < sample_count; i++)
+                float gain = gain_start;
+                for (uint32_t i = 0; i < sample_count; i++) {
                     dst[i] *= gain;
+                    gain += gain_step;
+                }
             }
         }
 
@@ -501,16 +563,28 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // RP2040 BLOCK-BASED FIXED-POINT PIPELINE WITH MATRIX MIXER
     // 2 SPDIF stereo pairs + PDM sub, dual-core EQ worker
     // ------------------------------------------------------------------------
-    // vol_mul: USB host volume (raw Q15) — used for loudness compensation only.
-    // vol_mul_master: host volume × master volume (Q15) — used for output gain.
-    // Mute is honored only when USB is the active input (see RP2350 path above).
+    // Composite output gain target for THIS packet (host vol × preset_mute ×
+    // master vol, Q15).  See RP2350 branch above for the ramp rationale; on
+    // RP2040 the start/step values are int32 Q15 to keep the inner gain loop
+    // pure-integer.  Steady-state step==0 falls back to the original
+    // constant-gain branch — no per-sample overhead when nothing is moving.
+    // Mute is honored only when USB is the active input.
     bool host_active = (active_input_source == INPUT_SOURCE_USB);
     int32_t vol_mul = (audio_state.mute && host_active) ? 0 : audio_state.vol_mul;
     int32_t preset_mute_gain_q15 = (int32_t)(preset_mute_gain * 32768.0f + 0.5f);
     if (preset_mute_gain_q15 < 0) preset_mute_gain_q15 = 0;
     if (preset_mute_gain_q15 > 32768) preset_mute_gain_q15 = 32768;
     vol_mul = fast_mul_q15(vol_mul, preset_mute_gain_q15);
-    int32_t vol_mul_master = fast_mul_q15(vol_mul, master_volume_q15);
+    int32_t vol_mul_master_target = fast_mul_q15(vol_mul, master_volume_q15);
+    int32_t vol_mul_master_start_q15 = vol_mul_master_prev_q15;
+    int32_t vol_mul_master_step_q15 = (sample_count > 0)
+        ? (vol_mul_master_target - vol_mul_master_start_q15) / (int32_t)sample_count
+        : 0;
+    // Only snap prev forward when this packet actually carried audio (see
+    // matching guard in RP2350 branch above for rationale).
+    if (sample_count > 0) {
+        vol_mul_master_prev_q15 = vol_mul_master_target;
+    }
 
     bool is_bypassed = bypass_master_eq;
 
@@ -612,9 +686,11 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     if (core1_mode == CORE1_MODE_EQ_WORKER) {
         // --- Dual-core path: Core 0 handles pair 1, Core 1 handles pair 2 ---
 
-        // Dispatch to Core 1
+        // Dispatch to Core 1 — both cores share the same vol ramp params so
+        // outputs assigned to either core stay phase-aligned.
         core1_eq_work.sample_count = sample_count;
-        core1_eq_work.vol_mul = vol_mul_master;  // Core 1 uses master-scaled volume
+        core1_eq_work.vol_mul_start = vol_mul_master_start_q15;
+        core1_eq_work.vol_mul_step  = vol_mul_master_step_q15;
         core1_eq_work.delay_write_idx = delay_write_idx;
         core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
         core1_eq_work.work_done = false;
@@ -630,15 +706,27 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (!is_bypassed && !channel_bypassed[eq_ch])
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
             }
-            // Output gain uses vol_mul_master (host vol × master vol, Q15)
-            int32_t gain = matrix_mixer.outputs[out].mute ? 0
-                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul_master);
-            if (gain == 0) {
-                memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+            // Per-sample vol ramp; step==0 in steady state → constant-gain path.
+            float matrix_gain_f = matrix_mixer.outputs[out].gain_linear;
+            int32_t gain_start = matrix_mixer.outputs[out].mute ? 0
+                                 : (int32_t)(matrix_gain_f * (float)vol_mul_master_start_q15);
+            int32_t gain_step  = matrix_mixer.outputs[out].mute ? 0
+                                 : (int32_t)(matrix_gain_f * (float)vol_mul_master_step_q15);
+            if (gain_step == 0) {
+                if (gain_start == 0) {
+                    memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+                } else {
+                    int32_t *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] = fast_mul_q15(dst[i], gain_start);
+                }
             } else {
                 int32_t *dst = buf_out[out];
-                for (uint32_t i = 0; i < sample_count; i++)
+                int32_t gain = gain_start;
+                for (uint32_t i = 0; i < sample_count; i++) {
                     dst[i] = fast_mul_q15(dst[i], gain);
+                    gain += gain_step;
+                }
             }
         }
 
@@ -698,7 +786,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // --- Single-core path: all outputs on Core 0 ---
         uint32_t saved_delay_write_idx = delay_write_idx;
 
-        // EQ + gain (block-based)
+        // EQ + gain (block-based, per-sample vol ramp; step==0 in steady state
+        // → constant-gain path with no extra per-sample work).
         for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
             if (!matrix_mixer.outputs[out].enabled) continue;
             if (!matrix_mixer.outputs[out].mute) {
@@ -706,15 +795,26 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                 if (!is_bypassed && !channel_bypassed[eq_ch])
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
             }
-            // Output gain uses vol_mul_master (host vol × master vol, Q15)
-            int32_t gain = matrix_mixer.outputs[out].mute ? 0
-                           : (int32_t)(matrix_mixer.outputs[out].gain_linear * (float)vol_mul_master);
-            if (gain == 0) {
-                memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+            float matrix_gain_f = matrix_mixer.outputs[out].gain_linear;
+            int32_t gain_start = matrix_mixer.outputs[out].mute ? 0
+                                 : (int32_t)(matrix_gain_f * (float)vol_mul_master_start_q15);
+            int32_t gain_step  = matrix_mixer.outputs[out].mute ? 0
+                                 : (int32_t)(matrix_gain_f * (float)vol_mul_master_step_q15);
+            if (gain_step == 0) {
+                if (gain_start == 0) {
+                    memset(buf_out[out], 0, sample_count * sizeof(int32_t));
+                } else {
+                    int32_t *dst = buf_out[out];
+                    for (uint32_t i = 0; i < sample_count; i++)
+                        dst[i] = fast_mul_q15(dst[i], gain_start);
+                }
             } else {
                 int32_t *dst = buf_out[out];
-                for (uint32_t i = 0; i < sample_count; i++)
+                int32_t gain = gain_start;
+                for (uint32_t i = 0; i < sample_count; i++) {
                     dst[i] = fast_mul_q15(dst[i], gain);
+                    gain += gain_step;
+                }
             }
         }
 

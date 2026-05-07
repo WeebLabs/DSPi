@@ -261,10 +261,15 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 **v1 back-compat:** `update_master_volume` still pushes an 8-byte `MASTER_VOLUME` (0x01) event into the ring. Existing v1 host apps that only recognise byte 0 = 0x01 continue to work; v2 hosts receive the parallel PARAM_CHANGED event and dispatch by offset.
 
 ### Volume & Mute
+*Last updated: 2026-05-07*
 
 **Volume range:** -60 dB to 0 dB (1 dB resolution, 61 steps). Bottom step is fully silent. USB Audio Class 8.8 fixed-point dB encoding. Q15 lookup table (`db_to_vol[61]`) maps dB index to linear multiplier; index 0 = 0x0000 (silent), index 60 = 0x7FFF (unity).
 
-**Mute:** UAC1 Feature Unit MUTE control. When `audio_state.mute` is set, `vol_mul` is forced to zero in the audio callback (RP2350: 0.0f, RP2040: 0), silencing all outputs immediately.
+**Mute:** UAC1 Feature Unit MUTE control. When `audio_state.mute` is set, the per-packet target gain is forced to zero. The actual applied gain ramps to zero over the same per-sample envelope used for volume changes (see below), so mute toggles are click-free.
+
+**Per-sample output volume ramping (click-free transitions):** The composite output gain — host volume × `preset_mute_gain` × master volume — is linearly interpolated within each input packet from the previous packet's ending value (`vol_mul_master_prev`, file-scope state in `audio_pipeline.c`) to the new target. Both Core 0 and Core 1 receive the same `vol_mul_start` / `vol_mul_step` pair via `Core1EqWork` and apply identical per-sample ramps to their respective outputs, preserving inter-slot phase alignment (CLAUDE.md hard rule). When `vol_mul_step == 0` (steady state, no host adjustment in flight) the gain loops fall through to the original constant-gain branches (memset for zero, scalar multiply for non-unity, no-op for unity) — no per-sample overhead. RP2350 carries the ramp in float; RP2040 keeps it as Q15 int32 to avoid float→int conversion in the inner loop. The mechanism also smooths preset-mute transitions and master-volume changes, since they all funnel through the same composite gain. Zero-length packets do not advance `vol_mul_master_prev`, so a stray empty packet between two real packets cannot eat a pending volume delta.
+
+**Scope of click-free guarantee:** This ramp covers the output gain stage only. With loudness compensation enabled, `audio_set_volume()` swaps `current_loudness_coeffs` to a new table entry on every host volume step, and the SVF/biquad filter state continues from the previous coefficients — producing a small frequency-response transient at each step. With loudness disabled (or when the user does not change volume), the path is fully click-free; with loudness enabled, the broadband gain click is gone but a faint per-step zipper artifact can remain on signal-rich content.
 
 ### Asynchronous Feedback Endpoint
 *Last updated: 2026-04-18*
@@ -1099,11 +1104,13 @@ typedef struct {
     volatile bool work_done;
 #if PICO_RP2350
     float (*buf_out)[192];
-    float vol_mul;
+    float vol_mul_start;       // Master-scaled vol at sample 0 (linear ramp)
+    float vol_mul_step;        // Per-sample increment
     int16_t *spdif_out[3];
 #else
     int32_t (*buf_out)[192];
-    int32_t vol_mul;          // Q15 master volume
+    int32_t vol_mul_start;     // Q15 master-scaled vol at sample 0
+    int32_t vol_mul_step;      // Q15 per-sample increment
     int16_t *spdif_out[1];
 #endif
     uint32_t sample_count;
