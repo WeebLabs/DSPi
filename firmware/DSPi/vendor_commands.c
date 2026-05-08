@@ -15,6 +15,7 @@
 #include "usb_audio.h"
 #include "audio_input.h"
 #include "spdif_input.h"
+#include "lg_sound_sync.h"
 #include "audio_pipeline.h"
 #include "config.h"
 #include "dsp_pipeline.h"
@@ -718,6 +719,19 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                     __dmb();
                     input_source_change_pending = true;
                 }
+            }
+            break;
+        }
+
+        case REQ_SET_LG_SOUND_SYNC_ENABLE: {
+            // Payload: 1 byte (0 = off, anything else = on).
+            // The setter handles its own PARAM_CHANGED emit and the
+            // demote/restore side-effects on enabled→disabled.  No
+            // flash write here — flash persistence happens on
+            // REQ_SAVE_PRESET (matches the loudness/crossfeed/leveller
+            // toggle pattern).
+            if (buffer->data_len >= 1) {
+                lg_sound_sync_set_enabled(vendor_rx_buf[0] != 0);
             }
             break;
         }
@@ -1717,6 +1731,24 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 uint8_t ch_status[24];
                 spdif_input_get_channel_status(ch_status);
                 vendor_send_response(ch_status, 24);
+                return true;
+            }
+
+            case REQ_GET_LG_SOUND_SYNC_ENABLE: {
+                resp_buf[0] = lg_sound_sync_get_enabled() ? 1u : 0u;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_LG_SOUND_SYNC_STATUS: {
+                /* Snapshot via the module's status getter so the host
+                 * sees a coherent struct (the getter brackets the read
+                 * with a brief IRQ disable to avoid torn fields).
+                 * Static so it outlives the EP0 transfer — control
+                 * transfers are serialised by TinyUSB. */
+                static LgSoundSyncStatus status;
+                lg_sound_sync_get_status(&status);
+                vendor_send_response(&status, sizeof(status));
                 return true;
             }
         }

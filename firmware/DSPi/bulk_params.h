@@ -29,7 +29,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       7   // V7: input source configuration
+#define WIRE_FORMAT_VERSION       8   // V8: LG Sound Sync (per-preset)
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -195,6 +195,28 @@ typedef struct __attribute__((packed)) {
 } WireInputConfig;                   // 16 bytes
 
 // ============================================================================
+// Section 16: LG Sound Sync (16 bytes) — V8+
+// ============================================================================
+//
+// Per-preset toggle plus runtime observation of LG TV's volume/mute output.
+// Only `enabled` is honored on bulk SET; `present`, `volume`, `muted` are
+// runtime-only fields produced by the detection state machine and ignored
+// on SET (a host pushing them would be claiming knowledge it cannot have).
+//
+// See Documentation/Features/lg_sound_sync_spec.md for protocol decoding,
+// the detection hysteresis, and the host volume integration.  The struct
+// layout intentionally matches LgSoundSyncStatus (lg_sound_sync.h) so the
+// vendor REQ_GET_LG_SOUND_SYNC_STATUS response and the WireBulkParams
+// section share one source of truth — no parallel field-list to drift.
+typedef struct __attribute__((packed)) {
+    uint8_t  enabled;                // 0/1 — user gate, honored on bulk SET
+    uint8_t  present;                // 0/1 — detection state, read-only
+    uint8_t  volume;                 // 0..100 (or 0xFF if never decoded), read-only
+    uint8_t  muted;                  // 0/1 — last decoded mute, read-only
+    uint8_t  reserved[12];           // Pad to 16 bytes (future fields here)
+} WireLgSoundSync;                   // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -213,7 +235,8 @@ typedef struct __attribute__((packed)) {
     WirePreampConfig    preamp;                                            //   16
     WireMasterVolume    master_volume;                                     //   16
     WireInputConfig     input_config;                                      //   16
-} WireBulkParams;                    // Total: 2912 bytes
+    WireLgSoundSync     lg_sound_sync;                                     //   16
+} WireBulkParams;                    // Total: 2928 bytes (V8)
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 

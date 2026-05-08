@@ -21,6 +21,7 @@
 #include "audio_pipeline.h"
 #include "spdif_input.h"
 #include "spdif_rx.h"
+#include "lg_sound_sync.h"
 #include "dsp_pipeline.h"
 #include "flash_clkdiv.h"
 #include "flash_storage.h"
@@ -921,6 +922,13 @@ void core0_init() {
     // Initialize SPDIF RX subsystem (no PIO/DMA resources claimed yet)
     spdif_input_init();
 
+    // Initialize the LG Sound Sync state machine.  Must come AFTER
+    // preset_boot_load() (which sets s_enabled from the loaded slot via
+    // apply_slot_to_live → lg_sound_sync_set_enabled) so the streaks/
+    // last-decoded fields are zeroed without clobbering the just-loaded
+    // user preference.  s_enabled is intentionally not reset here. */
+    lg_sound_sync_init();
+
     // If the loaded preset has SPDIF as input source, start RX hardware.
     // Output remains muted until lock is acquired (handled in main loop).
     //
@@ -975,6 +983,11 @@ int main(void) {
         // deferred from update_master_volume() to here so we never call
         // usbd_edpt_xfer from within a control-transfer DATA stage.
         usb_notify_tick();
+
+        // LG Sound Sync detection tick — internally throttled and
+        // gated on (feature enabled && SPDIF input && SPDIF locked).
+        // Cheap on the not-applicable path; safe to call every loop.
+        lg_sound_sync_tick();
 
         // Drain USB audio ring — highest priority (only when USB is active input).
         // USB ISR pushes raw packets into the ring; we run the full DSP
@@ -1588,6 +1601,13 @@ int main(void) {
                 }
 
                 active_input_source = new_source;
+
+                // Notify the LG Sound Sync module of the source change.
+                // On a switch away from SPDIF it demotes to absent without
+                // touching vol_mul (the audio_set_volume() thaw below
+                // handles vol_mul on USB transitions); on a switch into
+                // SPDIF it re-arms the streaks for fresh detection.
+                lg_sound_sync_on_input_source_change(active_input_source);
 
                 // Start new source hardware
                 if (new_source == INPUT_SOURCE_SPDIF) {

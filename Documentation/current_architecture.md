@@ -22,8 +22,9 @@
 16. [RP2040 vs RP2350 Comparison](#rp2040-vs-rp2350-comparison)
 17. [Per-Channel Input Preamp](#per-channel-input-preamp)
 18. [Master Volume](#master-volume)
-19. [Memory Layout](#memory-layout)
-20. [Performance Characteristics](#performance-characteristics)
+19. [LG Sound Sync](#lg-sound-sync)
+20. [Memory Layout](#memory-layout)
+21. [Performance Characteristics](#performance-characteristics)
 
 ---
 
@@ -77,6 +78,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `loudness.h` | Loudness API, coefficient structs |
 | `leveller.c` | Volume leveller (feedforward RMS compressor) |
 | `leveller.h` | Volume leveller API, state/config structs |
+| `lg_sound_sync.c` | LG Sound Sync detection state machine + apply path (drives host volume from LG-decoded TV remote) |
+| `lg_sound_sync.h` | LG Sound Sync API, status struct, default constant |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
 | `flash_storage.h` | Flash storage API |
 | `bulk_params.c` | Bulk parameter collect/apply (wire format ↔ live state) |
@@ -1480,13 +1483,16 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_SPDIF_RX_CH_STATUS | 0xE3 | IN | Get IEC 60958 channel status (24 bytes) |
 | REQ_SET_SPDIF_RX_PIN | 0xE4 | IN* | Set SPDIF RX GPIO pin (wValue=pin, returns status) |
 | REQ_GET_SPDIF_RX_PIN | 0xE5 | IN | Get SPDIF RX GPIO pin |
+| REQ_SET_LG_SOUND_SYNC_ENABLE | 0xE6 | OUT | Set LG Sound Sync enable flag (per-preset; live until REQ_SAVE_PRESET) |
+| REQ_GET_LG_SOUND_SYNC_ENABLE | 0xE7 | IN | Get LG Sound Sync enable flag |
+| REQ_GET_LG_SOUND_SYNC_STATUS | 0xE8 | IN | Get 16-byte LgSoundSyncStatus (enabled/present/volume/muted + reserved) |
 
 ### Bulk Parameter Transfer
 *Last updated: 2026-05-02*
 
 Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 7) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), and input source config (`WireInputConfig`, 16 bytes). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 8) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), and LG Sound Sync (`WireLgSoundSync`, 16 bytes). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
 
 **Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
 
@@ -1573,10 +1579,14 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - `SLOT_DATA_VERSION` = 10: adds leveller fields (16 bytes)
 - `SLOT_DATA_VERSION` = 11: changes `i2s_mck_multiplier` encoding from raw uint8_t (128 = 128x, 0 = 256x) to enum-style (0 = 128x, 1 = 256x); internal storage is `uint16_t`
 - `SLOT_DATA_VERSION` = 12: adds `preamp_db_per_ch[NUM_INPUT_CHANNELS]` and `master_volume_db`; legacy `preamp_db` still populated for backward compat
+- `SLOT_DATA_VERSION` = 13: adds `input_source` + `spdif_rx_pin` (consuming V12 padding bytes; size unchanged)
+- `SLOT_DATA_VERSION` = 14: adds `lg_sound_sync_enabled` (uint8_t) + 3 bytes trailing padding for `WireLgSoundSync` future fields
 - `WIRE_FORMAT_VERSION` = 3: adds `WireI2SConfig` (16 bytes) to `WireBulkParams`
 - `WIRE_FORMAT_VERSION` = 4: adds `WireLevellerConfig` (16 bytes) to `WireBulkParams` (total 2864 bytes)
 - `WIRE_FORMAT_VERSION` = 5: changes `mck_multiplier` wire encoding in `WireI2SConfig` from raw value to enum-style (0 = 128x, 1 = 256x)
 - `WIRE_FORMAT_VERSION` = 6: adds `WirePreampConfig` (16 bytes) and `WireMasterVolume` (16 bytes) to `WireBulkParams`
+- `WIRE_FORMAT_VERSION` = 7: adds `WireInputConfig` (16 bytes) — input source + SPDIF RX pin
+- `WIRE_FORMAT_VERSION` = 8: adds `WireLgSoundSync` (16 bytes) — LG Sound Sync per-preset gate + runtime status
 - Backward compatible: V<9 slots default to all-S/PDIF; V9-V10 slots use old MCK encoding; V<12 slots use single preamp value for all channels, default master volume 0 dB; older wire payloads accepted without new fields
 
 ### BSS Impact
@@ -1775,6 +1785,92 @@ This matches the user's product-level decision; it differs from the industry-sta
 - Factory reset sets `active_input_source = INPUT_SOURCE_USB`
 - `WireInputConfig` (16 bytes) section in `WireBulkParams` V7+
 - SPDIF RX pin stored in `PresetDirectory` (consumed existing padding byte, no directory format change)
+
+---
+
+## LG Sound Sync
+*Last updated: 2026-05-08*
+
+LG Sound Sync (optical) is a one-way side-channel that LG televisions multiplex onto their TOSLINK output: specific bytes of the IEC 60958 channel-status field carry the TV's current volume (0–100) and mute state. When DSPi locks an LG-Sound-Sync-marked SPDIF source and the feature is enabled, the TV remote becomes a host-volume control for DSPi. Spec doc: `Documentation/Features/lg_sound_sync_spec.md`.
+
+### Why this drives host volume (not master volume)
+
+Loudness compensation is keyed off the *raw user-perceived* vol_index (the same one `db_to_vol[]` indexes), not the device-side master ceiling. Driving host volume keeps the SPL/loudness loop coherent: lowering the TV vol drops SPL and the loudness EQ retunes its equal-loudness contour for the new reference. If Sound Sync drove master volume instead, loudness would compensate against a stale reference and over-emphasise bass + treble at low TV volumes.
+
+### Module: `lg_sound_sync.c/h`
+
+A single self-contained module owns detection and application. Public surface:
+
+- `lg_sound_sync_init()` — boot-time RAM reset (does not touch the user-loaded enable flag).
+- `lg_sound_sync_tick()` — main-loop tick, internally throttled to one channel-status poll every 50 ms. Cheap on the disabled / non-SPDIF path.
+- `lg_sound_sync_set_enabled(bool)` / `lg_sound_sync_get_enabled()` — user gate.
+- `lg_sound_sync_get_status(LgSoundSyncStatus *)` — IRQ-safe snapshot of `enabled`, `present`, `volume` (0..100 or 0xFF sentinel), `muted`.
+- `lg_sound_sync_on_input_source_change(uint8_t)` — main.c hook; demotes to absent on switch away from SPDIF, re-arms streaks on switch into SPDIF.
+- `lg_sound_sync_on_preset_loaded()` — flash_storage.c hook; resets streaks so detection re-evaluates against the freshly loaded `enabled` flag.
+
+### Protocol decoding (LSB-first c_bits[24])
+
+| Test                          | Meaning                          |
+|-------------------------------|----------------------------------|
+| `(cs[16] & 0x0F) == 0x0F`     | Signature nibble 0 (low byte 16) |
+| `cs[17] == 0x04`              | Signature byte 1                 |
+| `cs[18] == 0x8A`              | Signature byte 2                 |
+
+When the signature is present, volume/mute are recovered from bytes 15 + 16:
+
+```c
+uint8_t vol_byte = ((cs[15] & 0x0F) << 4) | ((cs[16] & 0xF0) >> 4);
+bool    muted    = (vol_byte & 0x80) != 0;
+uint8_t volume   = vol_byte & 0x7F;   // 0..100, clamped at 100
+```
+
+### Detection state machine
+
+Asymmetric hysteresis on consecutive-poll streak counts:
+
+| Threshold              | Polls | Time   | Rationale                                                                                                                  |
+|------------------------|-------|--------|----------------------------------------------------------------------------------------------------------------------------|
+| `LG_PRESENT_THRESHOLD` | 3     | 150 ms | Fast rise — user gets responsive control as soon as Sound Sync starts. Below human "instant" perceptual threshold.        |
+| `LG_ABSENT_THRESHOLD`  | 10    | 500 ms | Slow fall — single corrupted CS block or brief signal hiccup must not snap vol_mul back to USB-cached value mid-listening. |
+
+The tick early-exits on `(!enabled || active_input_source != SPDIF || !LOCKED)` and demotes to absent on each. Only when locked and enabled does it actually read `c_bits[24]` via `spdif_input_get_channel_status()` and feed the streak counters.
+
+Once present, **every** signature-positive poll re-decodes and re-applies (not just the rising edge), so `lg_sound_sync_on_preset_loaded()` can reset streaks without freezing vol_mul for 150 ms while it re-acquires.
+
+### Apply path (vol_mul + loudness)
+
+Application funnels through a new helper `apply_vol_index_to_audio()` (in `usb_audio.c`) that updates both `audio_state.vol_mul` AND `current_loudness_coeffs` in lock-step. `audio_set_volume()` (USB host slider) was refactored to call the same helper so all volume owners go through one funnel. Click-free transitions are inherited from the audio pipeline's existing per-packet ramp — no module-side smoothing.
+
+LG vol → vol_index mapping is proportional with rounded division: `vol_index = (lg_vol × 60 + 50) / 100`. Endpoints land cleanly (LG 0 → silent, LG 100 → unity) and intermediate steps approximate 1 dB each, matching `db_to_vol[]`'s shape.
+
+Mute is implemented as a direct `vol_mul = 0` write. Loudness coefficients are intentionally **not** zeroed on mute — keeping them at the previous vol_index means unmuting from this state has no one-packet coefficient-mismatch transient.
+
+When the module demotes from PRESENT to ABSENT (feature disabled, or signature lost), it restores vol_mul by recomputing the vol_index from the cached `audio_state.volume` and re-applying. The arithmetic is duplicated from `audio_set_volume()` (kept in sync deliberately — adding a public helper for that one slice would dilute the audio-set abstraction).
+
+### Persistence (per-preset)
+
+The `enabled` flag lives in `PresetSlot` (V14), not `PresetDirectory`. This matches the per-preset treatment of every other "what does the audio path do here" toggle (loudness, leveller, crossfeed, master EQ bypass). Different listening profiles can want different Sound Sync behavior — a "Headphone" preset may not want TV vol takeover, a "TV Listening" preset wants it on.
+
+- `SLOT_DATA_VERSION` 14 adds `lg_sound_sync_enabled` (uint8_t) to `PresetSlot` (with 3 bytes of trailing padding).
+- Pre-V14 slots default to the firmware constant `LG_SOUND_SYNC_DEFAULT_ENABLED` = 0 — non-LG users see no behavior change after firmware update.
+- `apply_factory_defaults()` resets the live flag to the firmware default; the slot's stored value is unchanged (factory reset does not rewrite the active slot).
+- `WireLgSoundSync` (16 bytes) section in `WireBulkParams` V8+; bulk SET honors only `enabled`, the runtime fields are read-only.
+
+### Vendor commands
+
+| Code | Command                       | Direction | Description                                              |
+|------|-------------------------------|-----------|----------------------------------------------------------|
+| 0xE6 | REQ_SET_LG_SOUND_SYNC_ENABLE  | OUT       | Set the enable flag (uint8_t payload). Live-only — flash persists on `REQ_SAVE_PRESET`. |
+| 0xE7 | REQ_GET_LG_SOUND_SYNC_ENABLE  | IN        | Get the enable flag (returns uint8_t).                  |
+| 0xE8 | REQ_GET_LG_SOUND_SYNC_STATUS  | IN        | Get the full 16-byte `LgSoundSyncStatus` struct.        |
+
+### Notifications
+
+Standard `NOTIFY_EVT_PARAM_CHANGED` events on the WireBulkParams offset of each changed field (`enabled`, `present`, `volume`, `muted`). Field-granular so host UIs can subscribe at any granularity; the notify-ring's coalesce stage collapses rapid LG-vol changes naturally.
+
+### Output-slot alignment
+
+The feature touches only `audio_state.vol_mul` and `current_loudness_coeffs`. It does **not** call `complete_pipeline_reset()`, `prepare_pipeline_reset()`, or any DMA / PIO / pool reset. Output slot alignment is preserved across every Sound Sync transition (enable/disable, present/absent, volume/mute change, input source switch, preset load, factory reset) per the CLAUDE.md hard constraint.
 
 ---
 

@@ -36,6 +36,7 @@
 #include "pdm_generator.h"
 #include "usb_feedback_controller.h"
 #include "leveller.h"
+#include "lg_sound_sync.h"
 #include "notify.h"
 
 #include "hardware/flash.h"
@@ -71,7 +72,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       13   // V13: input source selection
+#define SLOT_DATA_VERSION       14   // V14: LG Sound Sync per-preset toggle
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -201,6 +202,13 @@ typedef struct __attribute__((packed)) {
     uint8_t input_source;            // InputSource enum (0=USB, 1=SPDIF)
     uint8_t spdif_rx_pin;            // SPDIF RX GPIO (0 = absent → use default)
     uint8_t input_source_padding[2]; // Pad to 4-byte boundary
+    // LG Sound Sync per-preset toggle (V14).  Treated as a bool: 0 = off,
+    // anything else = on.  Pre-V14 slots have whatever was in the trailing
+    // padding (typically 0 from collect_live_state's memset, but flash that
+    // was never written would be 0xFF).  apply_slot_to_live() handles the
+    // version gate so pre-V14 reads default to LG_SOUND_SYNC_DEFAULT_ENABLED.
+    uint8_t lg_sound_sync_enabled;
+    uint8_t lg_sound_sync_padding[3];
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -580,6 +588,12 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // Input source (V13)
     slot->input_source = active_input_source;
 
+    // LG Sound Sync (V14) — per-preset feature gate.  Live state captured
+    // here; the runtime fields (present/volume/muted) are deliberately NOT
+    // saved because they're observations of an external device and have no
+    // meaning across a preset save/load cycle.
+    slot->lg_sound_sync_enabled = lg_sound_sync_get_enabled() ? 1 : 0;
+
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
     size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
@@ -821,6 +835,24 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
         }
     }
     // V12 and earlier: leave input source at current value (USB by default)
+
+    // LG Sound Sync per-preset toggle (V14+).  Pre-V14 slots fall back to
+    // the firmware default (off), so existing user presets continue to
+    // behave exactly as they always did until the user explicitly enables
+    // the feature and re-saves.  Using the public setter here is correct:
+    //   - We're inside preset_load's notify_begin_bulk() bracket, so the
+    //     PARAM_CHANGED it emits is suppressed (BULK_INVALIDATED at end
+    //     covers it).
+    //   - The setter's side-effects (demote+restore on disable, streak
+    //     reset on enable) are exactly what we want when a preset load
+    //     changes the gate.
+    //   - lg_sound_sync_on_preset_loaded() below handles the streaks-reset
+    //     case where the gate did NOT change but the TV state may have.
+    bool lg_en = (slot->version >= 14)
+                     ? (slot->lg_sound_sync_enabled != 0)
+                     : (LG_SOUND_SYNC_DEFAULT_ENABLED != 0);
+    lg_sound_sync_set_enabled(lg_en);
+    lg_sound_sync_on_preset_loaded();
 }
 
 // ============================================================================
@@ -1347,6 +1379,14 @@ static void apply_factory_defaults(void) {
 
     // Input source: default to USB
     active_input_source = INPUT_SOURCE_USB;
+
+    // LG Sound Sync — reset to firmware default (off).  Run through the
+    // public setter so any side-effects (demote, restore vol_mul) fire
+    // correctly if the feature happened to be active at the moment of
+    // factory reset.  Inside flash_factory_reset() this is bracketed by
+    // notify_begin_bulk(PARAM_SRC_FACTORY) so the PARAM_CHANGED is
+    // suppressed in favor of the single trailing BULK_INVALIDATED.
+    lg_sound_sync_set_enabled(LG_SOUND_SYNC_DEFAULT_ENABLED != 0);
 }
 
 void flash_factory_reset(void) {

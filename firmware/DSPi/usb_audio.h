@@ -159,6 +159,23 @@ extern volatile bool sync_started;
 void update_preamp(uint8_t ch, float db);
 void update_master_volume(float db);
 
+// Apply a vol_index in [0..CENTER_VOLUME_INDEX] to the live audio path.
+// Updates audio_state.vol_mul (consumed click-free by the audio pipeline's
+// per-packet ramp) and refreshes current_loudness_coeffs when loudness is
+// enabled.  Does NOT touch audio_state.volume — the caller owns the question
+// of whether the host's reported volume value is changing or merely being
+// re-applied.
+//
+// Single funnel for every owner of the user-perceived volume (USB host
+// slider via audio_set_volume(), LG Sound Sync via lg_sound_sync.c, etc.) so
+// loudness compensation always tracks the same quantity that drives vol_mul.
+//
+// Main-loop only.  vol_mul is a 16-bit field that on RP2040 is not single-
+// instruction atomic relative to the audio pipeline reading it; the existing
+// pipeline code tolerates that races through the per-packet ramp, but the
+// design intent is for this to be called from the main thread.
+void apply_vol_index_to_audio(uint8_t vol_index);
+
 // ----------------------------------------------------------------------------
 // API
 // ----------------------------------------------------------------------------

@@ -273,6 +273,14 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_SPDIF_RX_PIN        0xE4  // wValue = GPIO pin, returns status byte
 #define REQ_GET_SPDIF_RX_PIN        0xE5  // returns uint8_t
 
+// LG Sound Sync (optical) Commands.  Per-preset feature: gate is stored in
+// PresetSlot, vendor SET only updates live state — flash persistence happens
+// on REQ_SAVE_PRESET (matching loudness/crossfeed/leveller toggle semantics).
+// See Documentation/Features/lg_sound_sync_spec.md.
+#define REQ_SET_LG_SOUND_SYNC_ENABLE  0xE6  // payload = uint8_t (0 = off, 1 = on)
+#define REQ_GET_LG_SOUND_SYNC_ENABLE  0xE7  // returns uint8_t
+#define REQ_GET_LG_SOUND_SYNC_STATUS  0xE8  // returns 16-byte LgSoundSyncStatus
+
 // System
 #define REQ_ENTER_BOOTLOADER        0xF0
 

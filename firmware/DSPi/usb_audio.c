@@ -347,6 +347,30 @@ static uint16_t db_to_vol[CENTER_VOLUME_INDEX + 1] = {
 #define MAX_VOLUME           ENCODE_DB(0)
 #define VOLUME_RESOLUTION    ENCODE_DB(1)
 
+// Apply a vol_index to the live audio path (vol_mul + loudness coeffs).
+// See usb_audio.h for the contract.  Extracted from audio_set_volume() so
+// alternative volume owners (LG Sound Sync, future controllers) can drive
+// the same internal state — keeping loudness compensation aligned with
+// whatever ultimately sets vol_mul.
+void apply_vol_index_to_audio(uint8_t vol_index) {
+    // Defensive clamp: db_to_vol[] and loudness_active_table[] are sized
+    // exactly CENTER_VOLUME_INDEX+1.  A bad vol_index from a corrupt mapping
+    // would otherwise read out-of-bounds; the cost of one branch here is
+    // negligible vs. the consequences.
+    if (vol_index > CENTER_VOLUME_INDEX) vol_index = CENTER_VOLUME_INDEX;
+
+    audio_state.vol_mul = db_to_vol[vol_index];
+
+    // Loudness compensation is keyed off the *raw* user-perceived volume.
+    // Anything that changes vol_mul must also re-point the coefficient
+    // table or the equal-loudness contour will compensate against a stale
+    // reference level.  Pointer swap is atomic on both Cortex-M0+ and M33;
+    // a worst-case stale read by the audio pipeline is one packet (~1 ms).
+    if (loudness_enabled && loudness_active_table) {
+        current_loudness_coeffs = loudness_active_table[vol_index];
+    }
+}
+
 void audio_set_volume(int16_t volume) {
     // Always record the host's last-set value so GET_CUR round-trips correctly
     // — Windows compares what it read back against what it last wrote.
@@ -355,19 +379,14 @@ void audio_set_volume(int16_t volume) {
     // Host volume control is inert when USB isn't the DSP input source.  The
     // SPDIF→USB transition in the input-source switch handler calls
     // audio_set_volume(audio_state.volume) to thaw the cached value into the
-    // live gain path.
+    // live gain path.  When SPDIF is selected, LG Sound Sync (if active) owns
+    // vol_mul instead — see lg_sound_sync.c.
     if (active_input_source != INPUT_SOURCE_USB) return;
 
     volume += CENTER_VOLUME_INDEX * 256;
     if (volume < 0) volume = 0;
     if (volume >= (CENTER_VOLUME_INDEX + 1) * 256) volume = (CENTER_VOLUME_INDEX + 1) * 256 - 1;
-    uint8_t vol_index = ((uint16_t)volume) >> 8u;
-    audio_state.vol_mul = db_to_vol[vol_index];
-
-    // Update loudness compensation coefficients for this volume step
-    if (loudness_enabled && loudness_active_table) {
-        current_loudness_coeffs = loudness_active_table[vol_index];
-    }
+    apply_vol_index_to_audio((uint8_t)(((uint16_t)volume) >> 8u));
 }
 
 // ----------------------------------------------------------------------------

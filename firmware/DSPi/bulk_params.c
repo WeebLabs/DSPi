@@ -16,6 +16,7 @@
 #include "usb_audio.h"
 #include "crossfeed.h"
 #include "leveller.h"
+#include "lg_sound_sync.h"
 #include "notify.h"
 
 #include <string.h>
@@ -180,6 +181,20 @@ void bulk_params_collect(WireBulkParams *out) {
     // Input source configuration (V7+)
     out->input_config.input_source = active_input_source;
     out->input_config.spdif_rx_pin = spdif_rx_pin;
+
+    // LG Sound Sync (V8+).  All four fields are filled here so a single
+    // GET round-trips both the user toggle and the runtime observation.
+    // bulk_params_apply() honors only `enabled`; the other three are
+    // produced by the detection state machine and have no meaningful
+    // host-pushable value.
+    {
+        LgSoundSyncStatus s;
+        lg_sound_sync_get_status(&s);
+        out->lg_sound_sync.enabled = s.enabled;
+        out->lg_sound_sync.present = s.present;
+        out->lg_sound_sync.volume  = s.volume;
+        out->lg_sound_sync.muted   = s.muted;
+    }
 }
 
 // ============================================================================
@@ -205,9 +220,11 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     if (in->header.num_output_channels != NUM_OUTPUT_CHANNELS)
         return -3;
     // Accept payload sizes from V2 through current.
-    // V2: no I2S/leveller/preamp/master/input.  V3-V5: no preamp/master/input.
-    // V6: no input.  V7: current full size.
-    uint16_t v6_size = sizeof(WireBulkParams) - sizeof(WireInputConfig);
+    // V2: no I2S/leveller/preamp/master/input/lg_sound_sync.
+    // V3-V5: no preamp/master/input/lg_sound_sync.
+    // V6: no input/lg_sound_sync.  V7: no lg_sound_sync.  V8: current full size.
+    uint16_t v7_size = sizeof(WireBulkParams) - sizeof(WireLgSoundSync);
+    uint16_t v6_size = v7_size - sizeof(WireInputConfig);
     uint16_t v5_size = v6_size - sizeof(WirePreampConfig) - sizeof(WireMasterVolume);
     uint16_t v2_size = v5_size - sizeof(WireI2SConfig) - sizeof(WireLevellerConfig);
     if (in->header.payload_length < v2_size ||
@@ -411,6 +428,16 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             __dmb();
             input_source_change_pending = true;
         }
+    }
+
+    // LG Sound Sync (V8+ payloads).  Only `enabled` is honored — the
+    // other three fields are runtime observations the host cannot
+    // push.  Using the public setter ensures any side-effects (demote
+    // on disable, streak reset on enable) fire correctly; the
+    // PARAM_CHANGED notification it emits is suppressed by the bulk
+    // bracket and replaced by a single BULK_INVALIDATED at end.
+    if (in->header.format_version >= 8) {
+        lg_sound_sync_set_enabled(in->lg_sound_sync.enabled != 0);
     }
 
     // Close the bulk bracket — emits BULK_INVALIDATED(source=BULK_SET).
