@@ -182,7 +182,14 @@ volatile float loudness_ref_spl = 87.0f;
 volatile float loudness_intensity_pct = 100.0f;
 volatile bool loudness_recompute_pending = false;
 
-const LoudnessCoeffs *current_loudness_coeffs = NULL;
+const LoudnessCoeffs *volatile current_loudness_coeffs = NULL;
+
+// See header for the rationale.  Default 0 (silent) matches vol_mul's
+// BSS-zero state at boot before audio_set_volume() runs; first
+// audio_set_volume() / apply_vol_index_to_audio() updates this in
+// lock-step with vol_mul, and from then on it is the single source of
+// truth for "what user-perceived volume is currently active".
+volatile uint8_t effective_vol_index = 0;
 
 // Crossfeed state
 volatile CrossfeedConfig crossfeed_config = {
@@ -360,6 +367,15 @@ void apply_vol_index_to_audio(uint8_t vol_index) {
     if (vol_index > CENTER_VOLUME_INDEX) vol_index = CENTER_VOLUME_INDEX;
 
     audio_state.vol_mul = db_to_vol[vol_index];
+
+    // Track the active vol_index so the loudness re-enable / table-recompute
+    // paths can re-key against the *current* value rather than recomputing
+    // it from audio_state.volume — which is wrong when an alternative
+    // volume owner (e.g. LG Sound Sync on SPDIF input) is driving vol_mul.
+    // Written before the coeff swap so a future Core 1 reader of
+    // effective_vol_index never sees an index that's "ahead" of the
+    // coefficients it is paired with.
+    effective_vol_index = vol_index;
 
     // Loudness compensation is keyed off the *raw* user-perceived volume.
     // Anything that changes vol_mul must also re-point the coefficient

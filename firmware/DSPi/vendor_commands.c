@@ -349,11 +349,16 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             if (buffer->data_len >= 1) {
                 loudness_enabled = (vendor_rx_buf[0] != 0);
                 if (loudness_enabled && loudness_active_table) {
-                    // Re-select coefficients for current volume
-                    int16_t vol = audio_state.volume + CENTER_VOLUME_INDEX * 256;
-                    if (vol < 0) vol = 0;
-                    if (vol >= (CENTER_VOLUME_INDEX + 1) * 256) vol = (CENTER_VOLUME_INDEX + 1) * 256 - 1;
-                    current_loudness_coeffs = loudness_active_table[((uint16_t)vol) >> 8u];
+                    // Re-select coefficients for the *active* volume.  Reading
+                    // effective_vol_index (set in lock-step with vol_mul by
+                    // apply_vol_index_to_audio) ensures the coefficient table
+                    // matches whatever currently drives vol_mul — the USB host
+                    // slider, LG Sound Sync, or any future volume owner —
+                    // rather than the USB-cached audio_state.volume which is
+                    // frozen during SPDIF playback.
+                    uint8_t idx = effective_vol_index;
+                    if (idx > CENTER_VOLUME_INDEX) idx = CENTER_VOLUME_INDEX;
+                    current_loudness_coeffs = loudness_active_table[idx];
                 } else {
                     current_loudness_coeffs = NULL;
                 }

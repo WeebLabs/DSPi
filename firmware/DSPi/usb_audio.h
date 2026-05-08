@@ -46,7 +46,21 @@ extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
 extern volatile bool loudness_recompute_pending;
-extern const LoudnessCoeffs *current_loudness_coeffs;
+// Pointer-typed `volatile` (qualifier on the pointer itself, not the
+// pointee) — the audio pipeline reads this every packet, and any write
+// from apply_vol_index_to_audio() must not be hoisted/cached across
+// the read by the optimiser even when both sides live in the same TU.
+extern const LoudnessCoeffs *volatile current_loudness_coeffs;
+
+// The vol_index most recently applied to vol_mul + loudness coefficients.
+// Single source of truth for "what user-perceived volume is active right
+// now", used by the loudness re-enable and loudness-table-recompute paths
+// so they re-key the coefficient pointer at the *actual* current vol_index
+// — not the USB-cached audio_state.volume, which would be wrong when an
+// alternative volume owner (LG Sound Sync) is driving vol_mul on SPDIF
+// input.  Initialised to 0 (silent) at boot — matches the BSS-zero state
+// of vol_mul before audio_set_volume() runs on first USB enumeration.
+extern volatile uint8_t effective_vol_index;
 
 // Crossfeed
 #include "crossfeed.h"

@@ -201,14 +201,17 @@ typedef struct __attribute__((packed)) {
     // CRC is recomputed at save time.
     uint8_t input_source;            // InputSource enum (0=USB, 1=SPDIF)
     uint8_t spdif_rx_pin;            // SPDIF RX GPIO (0 = absent → use default)
-    uint8_t input_source_padding[2]; // Pad to 4-byte boundary
-    // LG Sound Sync per-preset toggle (V14).  Treated as a bool: 0 = off,
-    // anything else = on.  Pre-V14 slots have whatever was in the trailing
-    // padding (typically 0 from collect_live_state's memset, but flash that
-    // was never written would be 0xFF).  apply_slot_to_live() handles the
-    // version gate so pre-V14 reads default to LG_SOUND_SYNC_DEFAULT_ENABLED.
+    // LG Sound Sync per-preset toggle (V14).  Claims one of V13's two
+    // padding bytes WITHOUT changing the slot struct size, so existing
+    // V13 slots remain CRC-valid: their padding bytes were zero-initialised
+    // by collect_live_state's memset, and apply_slot_to_live() gates the
+    // read on `slot->version >= 14` so pre-V14 reads ignore this byte
+    // entirely and fall through to LG_SOUND_SYNC_DEFAULT_ENABLED.  This
+    // mirrors the V12→V13 trick where `spdif_rx_pin` consumed one of V12's
+    // padding bytes — the established pattern for adding bytes without
+    // breaking CRC compatibility on already-saved user presets.
     uint8_t lg_sound_sync_enabled;
-    uint8_t lg_sound_sync_padding[3];
+    uint8_t input_source_padding[1]; // Reserved for future use (1 byte left)
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -851,6 +854,18 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
     bool lg_en = (slot->version >= 14)
                      ? (slot->lg_sound_sync_enabled != 0)
                      : (LG_SOUND_SYNC_DEFAULT_ENABLED != 0);
+    /* Two calls, two responsibilities — keep both:
+     *   set_enabled() handles the enable-bit transition and its side-
+     *     effects (notify, streak reset on dis→en, demote+restore on
+     *     en→dis).  No-op when the loaded slot's enabled matches live.
+     *   on_preset_loaded() resets the detection streaks unconditionally
+     *     so the next tick re-evaluates the signature even when the
+     *     enable bit didn't change.  The TV may have changed state
+     *     during the preset transition, so volume/muted observed
+     *     before the load are non-authoritative.
+     * Dropping either call introduces a subtle bug — the redundancy in
+     * the en→dis case (both demote) is harmless and well worth the
+     * clarity of having each function own its single concern. */
     lg_sound_sync_set_enabled(lg_en);
     lg_sound_sync_on_preset_loaded();
 }

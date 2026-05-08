@@ -21,8 +21,18 @@
 
 #include <string.h>
 #include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
+#include <assert.h>  // _Static_assert
 
 #include "hardware/sync.h"  // __dmb()
+
+// LgSoundSyncStatus (lg_sound_sync.h, used by REQ_GET_LG_SOUND_SYNC_STATUS)
+// and WireLgSoundSync (this file's WireBulkParams section) must have
+// identical wire layout — bulk_params_collect() field-copies between them
+// and the host SDK consumes both via the same parser.  If they ever drift
+// (someone adds a field to one but not the other), this static assert
+// fails at compile time before silent struct mismatches reach runtime.
+_Static_assert(sizeof(WireLgSoundSync) == sizeof(LgSoundSyncStatus),
+               "WireLgSoundSync and LgSoundSyncStatus must have identical layout");
 
 // External variables (defined in usb_audio.c)
 extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
@@ -431,12 +441,22 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     }
 
     // LG Sound Sync (V8+ payloads).  Only `enabled` is honored — the
-    // other three fields are runtime observations the host cannot
-    // push.  Using the public setter ensures any side-effects (demote
-    // on disable, streak reset on enable) fire correctly; the
-    // PARAM_CHANGED notification it emits is suppressed by the bulk
-    // bracket and replaced by a single BULK_INVALIDATED at end.
-    if (in->header.format_version >= 8) {
+    // other three fields are runtime observations the host cannot push.
+    // Using the public setter ensures any side-effects (demote on
+    // disable, streak reset on enable) fire correctly; the PARAM_CHANGED
+    // notification it emits is suppressed by the bulk bracket and
+    // replaced by a single BULK_INVALIDATED at end.
+    //
+    // Defense-in-depth size check: the version gate alone is not enough
+    // — a sender could legally claim format_version=8 with a payload
+    // length short of the V8 size, in which case in->lg_sound_sync would
+    // straddle the end of the actually-transferred bytes and we'd read
+    // bulk_param_buf garbage from a prior transfer.  Today the dispatcher
+    // gates wLength == sizeof(WireBulkParams), but that's one refactor
+    // away from being relaxed (e.g. for forward-compat smaller V8s),
+    // so guard here too.  Keeps the apply contract self-defending.
+    if (in->header.format_version >= 8 &&
+        in->header.payload_length >= sizeof(WireBulkParams)) {
         lg_sound_sync_set_enabled(in->lg_sound_sync.enabled != 0);
     }
 

@@ -926,7 +926,20 @@ void core0_init() {
     // preset_boot_load() (which sets s_enabled from the loaded slot via
     // apply_slot_to_live → lg_sound_sync_set_enabled) so the streaks/
     // last-decoded fields are zeroed without clobbering the just-loaded
-    // user preference.  s_enabled is intentionally not reset here. */
+    // user preference.  s_enabled is intentionally not reset here.
+    //
+    // Note on notification ordering: any notify_param_write() calls
+    // emitted from preset_boot_load()'s apply path land in the still-
+    // zeroed notify ring before notify_init() runs, then are silently
+    // discarded when notify_init() resets head/tail. This is the
+    // established pattern (every per-preset setting has the same
+    // shape) and is benign — the post-init shadow is rebaselined
+    // from final live state via bulk_params_collect, so the host
+    // never sees a stale value. If a future change moves any
+    // ring-consumer to run before notify_init(), preset_boot_load()
+    // should be wrapped in notify_begin_bulk(PARAM_SRC_PRESET) to
+    // collapse the otherwise-many discarded entries into one tagged
+    // BULK_INVALIDATED. */
     lg_sound_sync_init();
 
     // If the loaded preset has SPDIF as input source, start RX hardware.
@@ -1180,9 +1193,20 @@ int main(void) {
         if (loudness_recompute_pending) {
             loudness_recompute_pending = false;
             loudness_recompute_table(loudness_ref_spl, loudness_intensity_pct, (float)audio_state.freq);
-            // Update coefficient pointer for current volume
+            // Re-key the active coefficient pointer at the current
+            // vol_index.  effective_vol_index is set in lock-step with
+            // vol_mul by apply_vol_index_to_audio(), so this picks up
+            // whatever volume owner is currently active (USB host slider,
+            // LG Sound Sync, …) without disturbing vol_mul itself.  The
+            // previous formulation (audio_set_volume(audio_state.volume))
+            // early-returned during SPDIF playback and left the coefficient
+            // pointer dangling at the pre-recompute table, an audible
+            // defect when the user adjusted ref SPL or intensity while
+            // playing through SPDIF.
             if (loudness_enabled && loudness_active_table) {
-                audio_set_volume(audio_state.volume);
+                uint8_t idx = effective_vol_index;
+                if (idx > CENTER_VOLUME_INDEX) idx = CENTER_VOLUME_INDEX;
+                current_loudness_coeffs = loudness_active_table[idx];
             }
         }
 
