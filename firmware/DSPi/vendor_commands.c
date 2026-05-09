@@ -294,6 +294,32 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             }
             break;
 
+        case REQ_SET_USER_VOLUME:
+            // Vendor-channel user-perceived volume.  Same field as the UAC1
+            // host slider (audio_state.volume); update_user_volume() applies
+            // it to vol_mul + the loudness coefficient pointer regardless of
+            // input source so equal-loudness compensation tracks the change
+            // even during SPDIF playback.  Payload: 4 bytes (float dB).
+            if (buffer->data_len >= 4) {
+                float db;
+                memcpy(&db, vendor_rx_buf, 4);
+                update_user_volume(db);
+            }
+            break;
+
+        case REQ_SET_USER_MUTE:
+            // Vendor-channel mute.  Distinct from audio_state.mute (UAC1) —
+            // the pipeline ORs them, but UAC1 mute is USB-gated while this
+            // flag is always honored.  Symmetric with REQ_SET_USER_VOLUME's
+            // always-apply contract.  Payload: 1 byte (0/1).
+            if (buffer->data_len >= 1) {
+                user_mute = (vendor_rx_buf[0] != 0);
+                uint8_t v = user_mute ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, user_volume.user_mute),
+                                   sizeof(uint8_t), &v);
+            }
+            break;
+
         case REQ_SET_DELAY: {
             uint8_t ch = vendor_last_wValue & 0xFF;
             if (ch < NUM_CHANNELS && buffer->data_len >= 4) {
@@ -817,6 +843,27 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 float db = master_volume_db;
                 memcpy(resp_buf, &db, 4);
                 vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_USER_VOLUME: {
+                // Returns the user-perceived volume (same field UAC1 reports
+                // via GET_CUR) as a float dB.  audio_state.volume is in 8.8
+                // fixed-point dB; divide by 256 to recover the real value.
+                // Range: [-CENTER_VOLUME_INDEX, 0] dB.
+                float db = (float)audio_state.volume / 256.0f;
+                memcpy(resp_buf, &db, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_USER_MUTE: {
+                // Returns the vendor-channel user_mute flag (NOT
+                // audio_state.mute — that's UAC1's, queryable via UAC1
+                // GET_CUR).  The two have different gating semantics; surface
+                // each via its own native interface.
+                resp_buf[0] = user_mute ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
                 return true;
             }
 
@@ -1820,8 +1867,15 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
         vendor_last_wLength = req->wLength;
 
         if (req->bRequest == REQ_SET_ALL_PARAMS &&
-            req->wLength == sizeof(WireBulkParams)) {
+            req->wLength >= WIRE_BULK_PARAMS_MIN_SIZE &&
+            req->wLength <= sizeof(WireBulkParams)) {
             // Large bulk SET — tud_control_xfer handles EP0 chunking.
+            // Range gate (not strict equality) so older hosts keep working
+            // across wire-format bumps: a V8 host sending wLength=v8_size
+            // (now smaller than sizeof(WireBulkParams) after V9 added
+            // WireUserVolume) still lands here.  bulk_params_apply()'s own
+            // header.format_version + payload_length checks decide which
+            // sections are honored — see bulk_params.c apply path.
             return tud_control_xfer(rhport, req, bulk_param_buf, req->wLength);
         }
 

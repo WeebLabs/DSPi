@@ -264,11 +264,25 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 **v1 back-compat:** `update_master_volume` still pushes an 8-byte `MASTER_VOLUME` (0x01) event into the ring. Existing v1 host apps that only recognise byte 0 = 0x01 continue to work; v2 hosts receive the parallel PARAM_CHANGED event and dispatch by offset.
 
 ### Volume & Mute
-*Last updated: 2026-05-07*
+*Last updated: 2026-05-08 (user volume persistence)*
 
 **Volume range:** -60 dB to 0 dB (1 dB resolution, 61 steps). Bottom step is fully silent. USB Audio Class 8.8 fixed-point dB encoding. Q15 lookup table (`db_to_vol[61]`) maps dB index to linear multiplier; index 0 = 0x0000 (silent), index 60 = 0x7FFF (unity).
 
-**Mute:** UAC1 Feature Unit MUTE control. When `audio_state.mute` is set, the per-packet target gain is forced to zero. The actual applied gain ramps to zero over the same per-sample envelope used for volume changes (see below), so mute toggles are click-free.
+**User volume — multiple owners, one source of truth:** `audio_state.volume` (and `audio_state.mute`) hold the user-perceived volume/mute. Three controllers can drive these fields, all funneling through the same `apply_vol_index_to_audio()` helper so `vol_mul` and the loudness coefficient pointer always move in lock-step:
+
+1. **UAC1 host slider/mute** (`audio_set_volume()` / UAC1 Feature Unit MUTE) — primary controller while USB is the active input source. `audio_set_volume()` early-returns its apply path when `active_input_source != INPUT_SOURCE_USB`, so a host adjustment during SPDIF playback is cached but inert.
+2. **LG Sound Sync** (`lg_sound_sync.c`) — owns `vol_mul` and re-keys the loudness pointer while SPDIF input is active and an LG TV is producing optical TC values.
+3. **Vendor channel** (`REQ_SET_USER_VOLUME` / `REQ_SET_USER_MUTE`) — `update_user_volume()` always applies, regardless of input source, so an external control surface or app can drive user volume during non-USB playback. Caller-side conventions (e.g. "Console only writes during non-USB input") are not enforced by the firmware. While LG Sound Sync is locked, its next ~20 ms poll will overwrite the vendor write — that's intentional ownership during LG-driven playback.
+
+**Mute (two flags, different gating):**
+- `audio_state.mute` — UAC1 Feature Unit MUTE control. **USB-gated:** the OS mute key has no audible effect when the active input is not USB, so the host can't accidentally silence SPDIF playback. `audio_state.vol_mul` itself is already frozen at the last USB-active value because `audio_set_volume()` bails before touching it when source != USB.
+- `user_mute` — vendor-channel mute (`REQ_SET_USER_MUTE`). **Always honored, no input-source guard** — symmetric with `REQ_SET_USER_VOLUME`'s always-apply contract. An external control surface that mutes via the vendor channel expects audio to actually go silent.
+
+The pipeline ORs them: `muted = (audio_state.mute && host_active) || user_mute`. Either flag forces the per-packet target gain to zero; the apply then ramps to zero over the per-sample envelope used for volume changes (see below), so mute toggles are click-free regardless of which flag triggered them. `REQ_GET_USER_MUTE` returns `user_mute` only — UAC1's mute remains queryable via UAC1 GET_CUR (each surface owns its native interface).
+
+Note that `audio_state.volume` does NOT need a parallel field for the same reason — the volume value itself is source-agnostic; the gating lives inside `audio_set_volume()`'s apply path, not on the field.
+
+**Persistence:** User volume IS saved per-preset as of `SLOT_DATA_VERSION` = 15 — stored as a single-byte `user_vol_index` (range [0, CENTER_VOLUME_INDEX]) consuming the last V14 padding byte. Restore on preset load funnels through `update_user_volume()` (so `vol_mul`, the loudness coefficient pointer, the LG apply-cache invalidation, and the v2 notify all run via the single helper). Pre-V15 slots leave user volume UNTOUCHED on load — asymmetric vs master volume which falls back to a directory value, but there is no directory-level fallback for user volume; the user wasn't expecting that legacy preset to set their listening level. `user_mute` is NOT persisted (session-only, cleared on factory reset) — matches the existing user-mute design contract.
 
 **Per-sample output volume ramping (click-free transitions):** The composite output gain — host volume × `preset_mute_gain` × master volume — is linearly interpolated within each input packet from the previous packet's ending value (`vol_mul_master_prev`, file-scope state in `audio_pipeline.c`) to the new target. Both Core 0 and Core 1 receive the same `vol_mul_start` / `vol_mul_step` pair via `Core1EqWork` and apply identical per-sample ramps to their respective outputs, preserving inter-slot phase alignment (CLAUDE.md hard rule). When `vol_mul_step == 0` (steady state, no host adjustment in flight) the gain loops fall through to the original constant-gain branches (memset for zero, scalar multiply for non-unity, no-op for unity) — no per-sample overhead. RP2350 carries the ramp in float; RP2040 keeps it as Q15 int32 to avoid float→int conversion in the inner loop. The mechanism also smooths preset-mute transitions and master-volume changes, since they all funnel through the same composite gain. Zero-length packets do not advance `vol_mul_master_prev`, so a stray empty packet between two real packets cannot eat a pending volume delta.
 
@@ -1377,7 +1391,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-04-09*
+*Last updated: 2026-05-08*
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
@@ -1477,6 +1491,10 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_MASTER_VOLUME_MODE | 0xD5 | IN | Get master volume persistence mode |
 | REQ_SAVE_MASTER_VOLUME | 0xD6 | IN | Persist live master volume to directory's independent field (mode 0 source) |
 | REQ_GET_SAVED_MASTER_VOLUME | 0xD7 | IN | Get the directory's independent master volume |
+| REQ_SET_USER_VOLUME | 0xDA | OUT | Set user-perceived volume (float dB, [-CENTER_VOLUME_INDEX, 0]); shares `audio_state.volume` with UAC1 host slider, always applies regardless of input source so loudness compensation tracks the change |
+| REQ_GET_USER_VOLUME | 0xDB | IN | Get user-perceived volume (float dB) |
+| REQ_SET_USER_MUTE | 0xDC | OUT | Set vendor-channel `user_mute` flag (1 byte 0/1); always honored regardless of input source. Distinct from `audio_state.mute` (UAC1) which is USB-gated; pipeline ORs them. |
+| REQ_GET_USER_MUTE | 0xDD | IN | Get vendor-channel `user_mute` (UAC1 mute is read via UAC1 GET_CUR) |
 | REQ_SET_INPUT_SOURCE | 0xE0 | OUT | Set active input source (0=USB, 1=SPDIF) |
 | REQ_GET_INPUT_SOURCE | 0xE1 | IN | Get active input source |
 | REQ_GET_SPDIF_RX_STATUS | 0xE2 | IN | Get SPDIF RX status (16-byte SpdifRxStatusPacket) |
@@ -1488,11 +1506,11 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_LG_SOUND_SYNC_STATUS | 0xE8 | IN | Get 16-byte LgSoundSyncStatus (enabled/present/volume/muted + reserved) |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-05-02*
+*Last updated: 2026-05-08*
 
-Transfers the complete DSP state in a single USB control transfer (~2832 bytes), replacing dozens of individual vendor requests.
+Transfers the complete DSP state in a single USB control transfer (~2944 bytes at V9), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 8) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), and LG Sound Sync (`WireLgSoundSync`, 16 bytes). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 9) — packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), and user volume/mute (`WireUserVolume`, 16 bytes — V9: float `user_volume_db` mirrors `audio_state.volume`, `user_mute` mirrors the vendor mute flag, both honored on bulk SET via `update_user_volume()` and a direct `user_mute` store; per-field notify is suppressed by the bulk bracket). All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 bands). Unused entries zero-padded.
 
 **Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
 
@@ -1581,6 +1599,7 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - `SLOT_DATA_VERSION` = 12: adds `preamp_db_per_ch[NUM_INPUT_CHANNELS]` and `master_volume_db`; legacy `preamp_db` still populated for backward compat
 - `SLOT_DATA_VERSION` = 13: adds `input_source` + `spdif_rx_pin` (consuming V12 padding bytes; size unchanged)
 - `SLOT_DATA_VERSION` = 14: adds `lg_sound_sync_enabled` (uint8_t) + 3 bytes trailing padding for `WireLgSoundSync` future fields
+- `SLOT_DATA_VERSION` = 15: adds `user_vol_index` (uint8_t, range [0, CENTER_VOLUME_INDEX]) consuming the LAST V14 padding byte. Pre-V15 slots leave user volume UNTOUCHED on load (asymmetric vs master volume's "fall back to directory" behavior — there is no directory-level fallback for user volume; the user wasn't expecting that preset to set their listening level when they originally saved it). Stored as vol_index rather than float dB because the audio path quantizes to integer dB anyway (`apply_vol_index_to_audio` truncates the 8-bit fractional part of `audio_state.volume`), so single-byte storage is lossless for the actual audio behavior. Restore funnels through `update_user_volume()` so vol_mul + loudness coefficient pointer + LG cache invalidation + v2 notify all happen via the single helper. **THIS IS THE LAST AVAILABLE PADDING BYTE** — future preset additions will need either struct growth (with explicit migration of pre-V15 slots) or directory-level storage in the master-volume "independent" pattern.
 - `WIRE_FORMAT_VERSION` = 3: adds `WireI2SConfig` (16 bytes) to `WireBulkParams`
 - `WIRE_FORMAT_VERSION` = 4: adds `WireLevellerConfig` (16 bytes) to `WireBulkParams` (total 2864 bytes)
 - `WIRE_FORMAT_VERSION` = 5: changes `mck_multiplier` wire encoding in `WireI2SConfig` from raw value to enum-style (0 = 128x, 1 = 256x)

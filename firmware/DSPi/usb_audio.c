@@ -49,6 +49,7 @@
 #include "usb_feedback_controller.h"
 #include "vendor_commands.h"
 #include "audio_input.h"
+#include "lg_sound_sync.h"
 
 #include <stddef.h>  // offsetof
 
@@ -151,6 +152,11 @@ volatile float global_preamp_linear[NUM_INPUT_CHANNELS]   = {[0 ... NUM_INPUT_CH
 volatile float master_volume_db       = MASTER_VOL_DEFAULT_DB;
 volatile float master_volume_linear   = 0.1f;
 volatile int32_t master_volume_q15    = 3277;
+
+// Vendor-channel user mute.  See header for the semantic split between this
+// and audio_state.mute (UAC1 mute).  Default false at boot — the device should
+// power on audible; subsequent vendor SET writes drive it.  Not persisted.
+volatile bool user_mute = false;
 
 // ----------------------------------------------------------------------------
 // Notification (bulk IN) state.  The wire-level ring, coalescing, and shadow
@@ -299,6 +305,55 @@ void update_master_volume(float db) {
 // PARAM_CHANGED events instead.  Safe to call from any main-thread context.
 void usb_notify_master_volume(float db) {
     notify_push_master_volume_v1(db);
+}
+
+// See header for the contract.  Implementation mirrors audio_set_volume()'s
+// arithmetic (CENTER_VOLUME_INDEX shift, clamp, 8-bit truncation to vol_index)
+// minus the "if (active_input_source != INPUT_SOURCE_USB) return" guard, so
+// vendor / hardware-control writes of user-perceived volume always reach
+// vol_mul + the loudness coefficient pointer — keeping equal-loudness
+// compensation aligned with the actual volume the listener hears regardless of
+// which input is currently routed.  When LG Sound Sync is locked on SPDIF, its
+// next ~20 ms poll will overwrite this; that's intentional ownership during
+// LG-driven playback.
+//
+// audio_state.volume is written in the same 8.8-fixed-point dB encoding UAC1
+// uses, so a subsequent UAC1 GET_CUR returns the same value (Windows compares
+// what it last read against what the device reports — keeping these consistent
+// avoids a needless re-write loop when both controllers coexist).
+//
+// Main-loop only — softfloat (powf, lrintf) is permitted here because no
+// DSP_TIME_CRITICAL caller exists; vendor handlers and bulk_params_apply()
+// invoke this exclusively from the main thread.
+void update_user_volume(float db) {
+    if (!isfinite(db)) return;  // Reject NaN/Inf — would propagate through entire audio path
+    if (db < -(float)CENTER_VOLUME_INDEX) db = -(float)CENTER_VOLUME_INDEX;
+    if (db > 0.0f) db = 0.0f;
+
+    int16_t v = (int16_t)lrintf(db * 256.0f);
+    audio_state.volume = v;
+
+    int32_t vol = (int32_t)v + (int32_t)CENTER_VOLUME_INDEX * 256;
+    if (vol < 0) vol = 0;
+    int32_t hi = ((int32_t)CENTER_VOLUME_INDEX + 1) * 256 - 1;
+    if (vol > hi) vol = hi;
+    apply_vol_index_to_audio((uint8_t)((uint32_t)vol >> 8u));
+
+    // Invalidate LG Sound Sync's apply cache.  Without this, if LG is locked
+    // on SPDIF and its TV-decoded vol_index happens to match what we just
+    // wrote, the next LG poll will coalesce-skip and leave our apply in
+    // place — silently breaking the documented "LG always wins during
+    // SPDIF" invariant.  Cheap (single int store inside the LG module).
+    lg_sound_sync_invalidate_apply_cache();
+
+    // Notify v2 hosts that audio_state.volume moved.  WireBulkParams field
+    // is float dB (matches GET_CUR convention), so re-derive the post-clamp
+    // value rather than re-reading audio_state.volume — avoids a roundtrip
+    // through 8.8 quantization that would always look like a "change" to
+    // hosts comparing bytes.
+    float notify_db = (float)v / 256.0f;
+    notify_param_write(offsetof(WireBulkParams, user_volume.user_volume_db),
+                       sizeof(float), &notify_db);
 }
 
 // Called once per main-loop iteration from main.c.  Also handles the initial

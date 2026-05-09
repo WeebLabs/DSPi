@@ -251,6 +251,22 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
 #define MASTER_VOL_DEFAULT_DB       (-20.0f)   // Power-on / fresh-device default
 
+// User Volume Commands.  Mirror UAC1 host volume/mute, but as a vendor channel
+// so non-USB controllers (e.g. Console while SPDIF input is active, an external
+// hardware control surface) can drive the same value the OS slider would.
+// Same `audio_state.volume` / `audio_state.mute` fields are touched, so a vendor
+// SET is observable via UAC1 GET_CUR and vice versa — single source of truth for
+// "user-perceived volume", which is what loudness compensation keys against.
+//
+// SET always applies (no input-source guard): writes audio_state.volume and
+// drives apply_vol_index_to_audio() so vol_mul + the loudness coefficient table
+// move together.  Caller-side convention (e.g. "Console only writes when USB
+// input is inactive") is enforced by the caller, not the firmware.
+#define REQ_SET_USER_VOLUME         0xDA  // payload = float dB (clamped to [-CENTER_VOLUME_INDEX, 0])
+#define REQ_GET_USER_VOLUME         0xDB  // returns float dB (audio_state.volume / 256)
+#define REQ_SET_USER_MUTE           0xDC  // payload = uint8_t (0/1)
+#define REQ_GET_USER_MUTE           0xDD  // returns uint8_t (0/1)
+
 // Master Volume Persistence Modes
 // Mode 0 (default): master volume is independent of presets. REQ_SAVE_MASTER_VOLUME
 //   stores it in the directory sector; it's applied at boot and on factory reset.

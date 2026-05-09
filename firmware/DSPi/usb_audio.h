@@ -41,6 +41,16 @@ extern volatile float master_volume_db;
 extern volatile float master_volume_linear;
 extern volatile int32_t master_volume_q15;
 
+// Vendor-channel user mute (REQ_SET_USER_MUTE).  Separate from audio_state.mute
+// because the two have different gating semantics: UAC1 mute is USB-gated by the
+// audio pipeline (the OS mute key must not silence SPDIF playback), whereas the
+// vendor channel always applies — symmetric with REQ_SET_USER_VOLUME's
+// always-apply contract.  Pipeline ORs them: muted = (audio_state.mute &&
+// host_active) || user_mute.  audio_state.volume IS shared with UAC1 because the
+// volume value itself is source-agnostic (the gating is inside the apply call,
+// not the field), so no parallel field is needed for volume.
+extern volatile bool user_mute;
+
 // Loudness compensation
 extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
@@ -172,6 +182,16 @@ extern volatile bool sync_started;
 
 void update_preamp(uint8_t ch, float db);
 void update_master_volume(float db);
+
+// Update the user-perceived volume — same quantity the UAC1 host slider drives.
+// Writes audio_state.volume in 8.8-fixed-point dB encoding so a subsequent UAC1
+// GET_CUR roundtrips the same value, then unconditionally calls
+// apply_vol_index_to_audio() so vol_mul AND the loudness-coefficient pointer
+// follow.  Bypasses the input-source guard inside audio_set_volume() —
+// vendor/hardware-control callers want the change applied immediately, not
+// silently cached for a future SPDIF→USB switch.  Caller-side conventions
+// (e.g. "Console only writes during non-USB input") are not enforced here.
+void update_user_volume(float db);
 
 // Apply a vol_index in [0..CENTER_VOLUME_INDEX] to the live audio path.
 // Updates audio_state.vol_mul (consumed click-free by the audio pipeline's

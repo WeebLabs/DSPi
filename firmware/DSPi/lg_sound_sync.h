@@ -114,4 +114,14 @@ void lg_sound_sync_on_input_source_change(uint8_t new_source);
  * + bulk_invalidated already drive the host to re-read all fields. */
 void lg_sound_sync_on_preset_loaded(void);
 
+/* Invalidate the internal "last applied vol_index" coalesce cache so the
+ * next LG poll unconditionally re-applies its decoded value, even if it
+ * matches what the cache last saw.  Called by any other owner of vol_mul
+ * (REQ_SET_USER_VOLUME via update_user_volume()) that bypasses LG —
+ * without this, a vendor write that happens to match the LG-cached
+ * vol_index would leave the vendor value in place rather than letting
+ * LG reassert ownership on its next poll.  Cheap (single int store);
+ * safe to call from any main-thread context. */
+void lg_sound_sync_invalidate_apply_cache(void);
+
 #endif /* LG_SOUND_SYNC_H */

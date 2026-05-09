@@ -218,12 +218,26 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // is zero and the gain loops fall back to the original constant-gain
     // fast-path (no extra per-sample work).
     //
-    // Mute is honored only when USB is the active DSP input source — the host's
-    // mute key has no audible effect on SPDIF playback.  audio_state.vol_mul
-    // itself is already frozen at the last USB-active value because
-    // audio_set_volume() bails before touching it when the source isn't USB.
+    // Mute sources:
+    //   1. UAC1 host MUTE control (audio_state.mute) — USB-gated so the OS
+    //      mute key can't silence SPDIF playback.  audio_state.vol_mul itself
+    //      is already frozen at the last USB-active value because
+    //      audio_set_volume() bails before touching it when source != USB.
+    //   2. REQ_SET_USER_MUTE vendor channel (user_mute) — always honored, no
+    //      input-source guard.  Symmetric with REQ_SET_USER_VOLUME's
+    //      always-apply contract: an external control surface that mutes via
+    //      the vendor channel expects audio to actually go silent.
+    //
+    // Snapshot both flags (and active_input_source via host_active) into
+    // locals so the OR is over a consistent view — protects against any
+    // future move of vendor handlers off the main loop.  Today these all
+    // live on Core 0 so a torn read is impossible, but the snapshot is one
+    // ldr per packet and pays for itself in clarity.
+    bool s_uac_mute  = audio_state.mute;
+    bool s_user_mute = user_mute;
     bool host_active = (active_input_source == INPUT_SOURCE_USB);
-    float vol_mul_target = (audio_state.mute && host_active)
+    bool muted = (s_uac_mute && host_active) || s_user_mute;
+    float vol_mul_target = muted
                            ? 0.0f : (float)audio_state.vol_mul * inv_32768;
     vol_mul_target *= preset_mute_gain;
     float vol_mul_master_target = vol_mul_target * master_volume_linear;
@@ -568,9 +582,13 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // RP2040 the start/step values are int32 Q15 to keep the inner gain loop
     // pure-integer.  Steady-state step==0 falls back to the original
     // constant-gain branch — no per-sample overhead when nothing is moving.
-    // Mute is honored only when USB is the active input.
+    // See RP2350 branch above for mute-source rationale (UAC1 USB-gated +
+    // vendor always-applies, ORed) and the snapshot-into-locals discipline.
+    bool s_uac_mute  = audio_state.mute;
+    bool s_user_mute = user_mute;
     bool host_active = (active_input_source == INPUT_SOURCE_USB);
-    int32_t vol_mul = (audio_state.mute && host_active) ? 0 : audio_state.vol_mul;
+    bool muted = (s_uac_mute && host_active) || s_user_mute;
+    int32_t vol_mul = muted ? 0 : audio_state.vol_mul;
     int32_t preset_mute_gain_q15 = (int32_t)(preset_mute_gain * 32768.0f + 0.5f);
     if (preset_mute_gain_q15 < 0) preset_mute_gain_q15 = 0;
     if (preset_mute_gain_q15 > 32768) preset_mute_gain_q15 = 32768;

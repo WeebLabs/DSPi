@@ -38,6 +38,7 @@
 #include "leveller.h"
 #include "lg_sound_sync.h"
 #include "notify.h"
+#include "bulk_params.h"     // WireBulkParams offsets for user_mute notify
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -72,7 +73,7 @@
 #define LEGACY_MAGIC            0x44535031  // "DSP1" (original format)
 
 // Current data version for preset slot contents
-#define SLOT_DATA_VERSION       14   // V14: LG Sound Sync per-preset toggle
+#define SLOT_DATA_VERSION       15   // V15: User volume vol_index per-preset
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -211,7 +212,22 @@ typedef struct __attribute__((packed)) {
     // padding bytes — the established pattern for adding bytes without
     // breaking CRC compatibility on already-saved user presets.
     uint8_t lg_sound_sync_enabled;
-    uint8_t input_source_padding[1]; // Reserved for future use (1 byte left)
+    // User volume vol_index (V15).  Claims V14's last padding byte using
+    // the same trick as lg_sound_sync_enabled — pre-V15 slots have it
+    // zero-initialised, and apply_slot_to_live gates the read on
+    // `slot->version >= 15` so pre-V15 loads do NOT touch user volume
+    // (preserving the listening level the user had set, rather than
+    // surprise-muting on legacy preset load).  Stored as vol_index
+    // (range [0, CENTER_VOLUME_INDEX]) rather than float dB because the
+    // audio path quantizes to integer dB anyway (apply_vol_index_to_audio
+    // truncates the 8-bit fractional part of audio_state.volume), so
+    // single-byte storage is lossless for the actual audio behavior; the
+    // fractional dB that Windows uses for UAC1 GET_CUR roundtrip is
+    // rebuilt from the index at load time.  THIS IS THE LAST AVAILABLE
+    // PADDING BYTE — future preset additions will need either struct
+    // growth (with explicit migration of pre-V15 slots) or directory-
+    // level storage in the master-volume "independent" pattern.
+    uint8_t user_vol_index;
 } PresetSlot;
 
 // --- Legacy single-sector format (for migration) ---
@@ -597,6 +613,19 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // meaning across a preset save/load cycle.
     slot->lg_sound_sync_enabled = lg_sound_sync_get_enabled() ? 1 : 0;
 
+    // User volume (V15) — vol_index in [0, CENTER_VOLUME_INDEX].  Same shift
+    // arithmetic as audio_set_volume(): audio_state.volume is signed 8.8 dB
+    // with the slider's zero point at the centre, so add CENTER*256, clamp,
+    // and truncate the 8-bit fractional to recover the index that the audio
+    // path actually uses (db_to_vol[] lookup).
+    {
+        int32_t vol = (int32_t)audio_state.volume + (int32_t)CENTER_VOLUME_INDEX * 256;
+        if (vol < 0) vol = 0;
+        int32_t hi = ((int32_t)CENTER_VOLUME_INDEX + 1) * 256 - 1;
+        if (vol > hi) vol = hi;
+        slot->user_vol_index = (uint8_t)((uint32_t)vol >> 8u);
+    }
+
     // Compute CRC over the data section (everything after the 12-byte header)
     const uint8_t *data_start = (const uint8_t *)&slot->filter_recipes;
     size_t data_len = sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes);
@@ -868,6 +897,28 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
      * clarity of having each function own its single concern. */
     lg_sound_sync_set_enabled(lg_en);
     lg_sound_sync_on_preset_loaded();
+
+    // User volume (V15+).  Pre-V15 slots leave user volume UNTOUCHED — the
+    // user wasn't expecting that preset to set their listening level when
+    // they originally saved it, so don't surprise them on load.  Asymmetric
+    // vs master volume, which always applies a value (independent or per-
+    // preset) — but master volume's "default" is the directory's saved value,
+    // which user volume doesn't have.  When this hook IS taken, route the
+    // restore through update_user_volume() so vol_mul + the loudness
+    // coefficient pointer + the LG cache invalidation + the v2 notify all
+    // happen via the single funnel — same path REQ_SET_USER_VOLUME uses.
+    // The notify's PARAM_CHANGED is suppressed by the surrounding bulk
+    // bracket; BULK_INVALIDATED at notify_end_bulk() covers it.
+    if (slot->version >= 15) {
+        uint8_t idx = slot->user_vol_index;
+        if (idx > CENTER_VOLUME_INDEX) idx = CENTER_VOLUME_INDEX;
+        // Reconstruct integer dB from the saved index.  Lossless against the
+        // index storage; fractional dB in audio_state.volume is rebuilt as
+        // exactly N.0 dB (which is what apply_vol_index_to_audio uses anyway
+        // since it truncates the fractional).
+        float db = (float)((int32_t)idx - (int32_t)CENTER_VOLUME_INDEX);
+        update_user_volume(db);
+    }
 }
 
 // ============================================================================
@@ -1309,6 +1360,21 @@ static void apply_factory_defaults(void) {
     // Notifications are emitted via update_master_volume() inside
     // apply_master_volume_db().
     apply_master_volume_from_mode(NULL);
+
+    // Vendor user mute — session-only flag (not persisted); clear on factory
+    // reset so a previously-asserted vendor mute doesn't leave the device
+    // silent with no UI handle on it.  When called from flash_factory_reset()
+    // and preset_load() the surrounding bulk bracket suppresses this notify
+    // and emits BULK_INVALIDATED instead; from preset_delete() (active-slot
+    // branch) and preset_boot_load() the notify fires bare — same pattern as
+    // the pre-existing master-volume / lg-sound-sync notifies in those paths.
+    // Defensive guard avoids a no-op notify when already false.
+    if (user_mute) {
+        user_mute = false;
+        uint8_t v = 0;
+        notify_param_write(offsetof(WireBulkParams, user_volume.user_mute),
+                           sizeof(uint8_t), &v);
+    }
 
     // Bypass
     bypass_master_eq = false;

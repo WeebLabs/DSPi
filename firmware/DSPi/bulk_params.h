@@ -29,7 +29,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       8   // V8: LG Sound Sync (per-preset)
+#define WIRE_FORMAT_VERSION       9   // V9: WireUserVolume (vendor user volume/mute)
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -217,6 +217,26 @@ typedef struct __attribute__((packed)) {
 } WireLgSoundSync;                   // 16 bytes
 
 // ============================================================================
+// Section 17: User Volume / Mute (16 bytes) — V9+
+// ============================================================================
+//
+// Vendor-channel user-perceived volume + mute.  `user_volume_db` mirrors the
+// same quantity the UAC1 host slider drives (`audio_state.volume`), expressed
+// here as float dB to match every other dB field in this packet.  `user_mute`
+// is the standalone vendor mute (NOT audio_state.mute — they have different
+// gating semantics in the audio pipeline; see Documentation/current_architecture.md
+// "Volume & Mute").  Both fields are honored on bulk SET and roundtrip
+// independently of UAC1 mute state.
+//
+// Layout fixed at 16 bytes for forward compatibility — extending in the
+// future just shrinks `reserved`, leaving offsets stable.
+typedef struct __attribute__((packed)) {
+    float    user_volume_db;         // [-CENTER_VOLUME_INDEX, 0] dB; clamped on apply
+    uint8_t  user_mute;              // 0/1 — vendor mute, always honored regardless of input source
+    uint8_t  reserved[11];           // Pad to 16 bytes (future fields here)
+} WireUserVolume;                    // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -236,9 +256,26 @@ typedef struct __attribute__((packed)) {
     WireMasterVolume    master_volume;                                     //   16
     WireInputConfig     input_config;                                      //   16
     WireLgSoundSync     lg_sound_sync;                                     //   16
-} WireBulkParams;                    // Total: 2928 bytes (V8)
+    WireUserVolume      user_volume;                                       //   16
+} WireBulkParams;                    // Total: 2944 bytes (V9)
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
+
+// Smallest bulk SET payload accepted — corresponds to V2 (pre-I2S, pre-leveller,
+// pre-preamp, pre-master, pre-input, pre-LG, pre-user-volume).  Kept in lockstep
+// with the size-compat chain inside bulk_params_apply(): every section appended
+// after V2 shows up as a subtraction here.  The dispatcher gate (vendor_commands.c
+// REQ_SET_ALL_PARAMS branch) and the apply path's lower bound must agree on this
+// number, so it lives in the header rather than being recomputed in two places.
+#define WIRE_BULK_PARAMS_MIN_SIZE \
+    (sizeof(WireBulkParams)            \
+     - sizeof(WireUserVolume)          \
+     - sizeof(WireLgSoundSync)         \
+     - sizeof(WireInputConfig)         \
+     - sizeof(WirePreampConfig)        \
+     - sizeof(WireMasterVolume)        \
+     - sizeof(WireI2SConfig)           \
+     - sizeof(WireLevellerConfig))
 
 // Buffer size for USB stream transfer (must be power of 2, >= WIRE_BULK_PARAMS_SIZE)
 #define WIRE_BULK_BUF_SIZE     4096

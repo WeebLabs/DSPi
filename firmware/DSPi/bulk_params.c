@@ -41,6 +41,7 @@ extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
 extern volatile float master_volume_db;
 extern volatile float master_volume_linear;
 extern volatile int32_t master_volume_q15;
+extern volatile bool user_mute;
 extern volatile float channel_gain_db[3];
 extern volatile int32_t channel_gain_mul[3];
 extern volatile float channel_gain_linear[3];
@@ -205,6 +206,12 @@ void bulk_params_collect(WireBulkParams *out) {
         out->lg_sound_sync.volume  = s.volume;
         out->lg_sound_sync.muted   = s.muted;
     }
+
+    // User volume / mute (V9+).  audio_state.volume is in 8.8 fixed-point
+    // dB; convert to float so the wire field matches the vendor command's
+    // float dB convention and every other dB field in this packet.
+    out->user_volume.user_volume_db = (float)audio_state.volume / 256.0f;
+    out->user_volume.user_mute      = user_mute ? 1 : 0;
 }
 
 // ============================================================================
@@ -230,14 +237,21 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     if (in->header.num_output_channels != NUM_OUTPUT_CHANNELS)
         return -3;
     // Accept payload sizes from V2 through current.
-    // V2: no I2S/leveller/preamp/master/input/lg_sound_sync.
-    // V3-V5: no preamp/master/input/lg_sound_sync.
-    // V6: no input/lg_sound_sync.  V7: no lg_sound_sync.  V8: current full size.
-    uint16_t v7_size = sizeof(WireBulkParams) - sizeof(WireLgSoundSync);
+    // V2: no I2S/leveller/preamp/master/input/lg_sound_sync/user_volume.
+    // V3-V5: no preamp/master/input/lg_sound_sync/user_volume.
+    // V6: no input/lg_sound_sync/user_volume.  V7: no lg_sound_sync/user_volume.
+    // V8: no user_volume.  V9: current full size.  The lower bound is shared
+    // with the dispatcher gate via WIRE_BULK_PARAMS_MIN_SIZE in bulk_params.h
+    // (== v2_size); per-section locals below are kept for the defense-in-depth
+    // size checks each section uses to refuse a short payload that claims a
+    // newer format_version.
+    uint16_t v8_size = sizeof(WireBulkParams) - sizeof(WireUserVolume);
+    uint16_t v7_size = v8_size - sizeof(WireLgSoundSync);
     uint16_t v6_size = v7_size - sizeof(WireInputConfig);
     uint16_t v5_size = v6_size - sizeof(WirePreampConfig) - sizeof(WireMasterVolume);
-    uint16_t v2_size = v5_size - sizeof(WireI2SConfig) - sizeof(WireLevellerConfig);
-    if (in->header.payload_length < v2_size ||
+    (void)v7_size; (void)v6_size;  // Currently only v5_size and v8_size are referenced
+                                    // by apply gates below; keep the chain for documentation.
+    if (in->header.payload_length < WIRE_BULK_PARAMS_MIN_SIZE ||
         in->header.payload_length > sizeof(WireBulkParams))
         return -4;
 
@@ -456,8 +470,22 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     // away from being relaxed (e.g. for forward-compat smaller V8s),
     // so guard here too.  Keeps the apply contract self-defending.
     if (in->header.format_version >= 8 &&
-        in->header.payload_length >= sizeof(WireBulkParams)) {
+        in->header.payload_length >= v8_size) {
         lg_sound_sync_set_enabled(in->lg_sound_sync.enabled != 0);
+    }
+
+    // User volume + mute (V9+ payloads).  Routed through update_user_volume()
+    // so the same clamp/encode/apply funnel runs as on REQ_SET_USER_VOLUME
+    // (vol_mul + loudness coefficient pointer move together, LG cache is
+    // invalidated).  user_mute is a plain bool so the apply is just a
+    // store + notify_param_write, suppressed by the bulk bracket.
+    if (in->header.format_version >= 9 &&
+        in->header.payload_length >= sizeof(WireBulkParams)) {
+        update_user_volume(in->user_volume.user_volume_db);
+        user_mute = (in->user_volume.user_mute != 0);
+        uint8_t mv = user_mute ? 1 : 0;
+        notify_param_write(offsetof(WireBulkParams, user_volume.user_mute),
+                           sizeof(uint8_t), &mv);
     }
 
     // Close the bulk bracket — emits BULK_INVALIDATED(source=BULK_SET).

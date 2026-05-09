@@ -469,3 +469,12 @@ void lg_sound_sync_on_preset_loaded(void) {
         leave_present(/*restore_host_vol=*/true);
     }
 }
+
+void lg_sound_sync_invalidate_apply_cache(void) {
+    /* See header for why this exists.  Single store, no IRQ disable
+     * needed — the only reader is the next apply_lg_state() call from
+     * the polling tick, which runs in the same main-thread context as
+     * any caller of this hook.  The audio pipeline never reads
+     * s_last_applied_vol_index. */
+    s_last_applied_vol_index = -1;
+}
