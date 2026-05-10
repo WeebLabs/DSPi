@@ -21,15 +21,23 @@ DSPi will:
 
 Sound Sync drives the same internal control as the USB host volume slider, **not** the device master volume. This is required so loudness compensation — which is keyed off the *raw* host volume index — continues to track perceived loudness correctly when the user changes TV volume. If Sound Sync drove master volume instead, loudness would be flat against TV-volume changes and would compensate the wrong reference point.
 
-The relationship is:
+### 1.3 Volume ownership model ("option 2")
 
-| Input source | What sets `audio_state.vol_mul` (and loudness coeffs) |
-|--------------|--------------------------------------------------------|
-| USB         | `audio_set_volume()` from UAC1 SET_CUR (host slider)   |
-| SPDIF + Sound Sync **inactive** | The cached USB host value (frozen at last set) |
-| SPDIF + Sound Sync **active**   | `lg_sound_sync` writing the LG-decoded volume |
+LG drives the **user-facing volume** directly: `audio_state.volume` (the host's cached UAC1 value), `vol_mul` (the audio path), and the `WireUserVolume.user_volume_db` notify all move together. Mute drives `user_mute` (the vendor mute flag, OR'd with UAC1 mute by the audio pipeline). The host UI's main volume widget tracks TV remote presses with no special-case binding — it just listens to the existing `user_volume.user_volume_db` notification.
+
+Implementation funnel: `lg_sound_sync.c` calls `update_user_volume(db)` (in `usb_audio.c`), which is the same single funnel used by `REQ_SET_USER_VOLUME` and the bulk-params apply path. That funnel writes `audio_state.volume`, calls `apply_vol_index_to_audio()`, repoints loudness coefficients, invalidates the LG apply-cache, and pushes the user-volume notify — atomically from the main thread.
+
+Trade-off accepted: when SPDIF input switches back to USB or LG demotes, `audio_state.volume` stays wherever LG last set it. There is **no thaw cache**. The OS may re-issue UAC1 SET_CUR with its remembered per-device volume on enumeration / default-device-change events; for DSPi-internal input switches the user's slider position simply picks up from LG's last value. This is a deliberate UX choice — the dual-widget alternative (separate "user volume" and "effective volume" indicators) was rejected as more confusing than the occasional volume-stays-where-LG-left-it surprise.
+
+| Input source | What sets `audio_state.volume` and `vol_mul` |
+|--------------|----------------------------------------------|
+| USB         | `audio_set_volume()` from UAC1 SET_CUR (host slider) |
+| SPDIF + Sound Sync **inactive** | Last value set by anyone (no implicit thaw) |
+| SPDIF + Sound Sync **active**   | `lg_sound_sync` → `update_user_volume()` (LG-decoded) |
 
 Master volume (the device-side ceiling, `0xD2`/`0xD3`) is not affected by Sound Sync at all.
+
+Mute ownership is symmetric. While present, LG drives `user_mute`. On demote, LG-imposed mute is cleared (so the user isn't stuck silent if the TV stops broadcasting) but a mute the user set manually before LG took over is preserved (`s_lg_imposed_mute` tracks the distinction).
 
 ---
 
@@ -116,7 +124,28 @@ The doc shows that mute also toggles bit 3 of `cs[10]` (a redundant copy at CS b
 
 When the TV is muted, the volume value is preserved in the lower 7 bits — i.e., unmuting restores the same level. The implementation honors this by not destroying the held volume on mute.
 
-### 2.6 What the protocol does *not* offer
+### 2.6 Per-model byte-position layouts
+
+The HiFiBerry analysis was performed on a relatively recent LG model (call it the **"new" layout**: signature at bytes 16/17/18, volume at bytes 15/16). Empirical testing on a 2017 LG B7 OLED revealed a second layout used by older sets: **the same signature and volume nibbles, but at byte positions mirrored around the middle of the 24-byte channel-status block.**
+
+| Field           | New layout (HiFiBerry)        | B7-era layout                 | Mirror axis |
+|-----------------|-------------------------------|-------------------------------|-------------|
+| Signature `F`   | `cs[16] & 0x0F == 0x0F`       | `cs[7] & 0x0F == 0x0F`        | 16 ↔ 7      |
+| Signature `04`  | `cs[17] == 0x04`              | `cs[6] == 0x04`               | 17 ↔ 6      |
+| Signature `8A`  | `cs[18] == 0x8A`              | `cs[5] == 0x8A`               | 18 ↔ 5      |
+| Vol high nibble | `cs[15] & 0x0F`               | `cs[8] & 0x0F`                | 15 ↔ 8      |
+| Vol low nibble  | `(cs[16] & 0xF0) >> 4`        | `(cs[7] & 0xF0) >> 4`         | 16 ↔ 7      |
+
+The nibble layout *within* each byte is unchanged; only the byte indices are mirrored (`N ↔ 23-N`). B7-era verification (TV vol = 3, unmuted; TV vol = 26, unmuted):
+
+| Reported TV vol | `cs[7]` | `cs[8]` | Decoded `vol_byte` | Mute | Vol  |
+|-----------------|---------|---------|--------------------|------|------|
+| 3               | `0x3F`  | `0x00`  | `0x03`             | 0    | 3 ✓  |
+| 26              | `0xAF`  | `0x01`  | `0x1A`             | 0    | 26 ✓ |
+
+`lg_sound_sync.c` carries both layouts in the `LG_LAYOUTS[]` table. `lg_match_layout()` tries each in order and returns the first match (or NULL). Adding a third layout for a future model variant is a one-struct-literal change. Detection cost is 3 byte comparisons per layout × short-circuit, evaluated once per `LG_POLL_INTERVAL_US` — negligible.
+
+### 2.7 What the protocol does *not* offer
 
 - No back-channel — the TV cannot see whether DSPi acknowledged anything.
 - No discrete pairing/handshake — Sound Sync presence is purely "did we see the signature".

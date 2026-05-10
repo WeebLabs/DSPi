@@ -161,20 +161,13 @@ int16_t read_temperature_cdeg(void) {
 uint8_t  mck_encode(uint16_t val) { return (val == 256) ? 1 : 0; }
 uint16_t mck_decode(uint8_t raw)  { return (raw == 1) ? 256 : 128; }
 
-// 96 kHz + 256x requires a 24.576 MHz MCK derived from a highly fractional
-// divider on the current fixed sys_clk plan. On real hardware this mode has
-// proven unreliable (lock loss / silence), so clamp to 128x for 96 kHz+.
-bool is_mck_multiplier_supported_for_rate(uint16_t mult, uint32_t sample_rate_hz) {
-    return !(mult == 256u && sample_rate_hz >= 96000u);
-}
-
-void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
-    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 256u) {
-        i2s_mck_multiplier = 128u;
-        printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
-               (unsigned long)sample_rate_hz);
-    }
-}
+// Note: the previous PIO-toggle MCK had a 96 kHz × 256× clamp here because
+// the fractional 6.25 divider made that combo unreliable.  CLK_GPOUTn gives
+// us 12.5 at 96 kHz × 256× — still fractional, but stable enough on real
+// hardware that we no longer pre-emptively clamp.  All the other 256×
+// combinations we used to reject (48 kHz × 256×, 96 kHz × 128×) are now
+// integer dividers with GPOUT.  See audio_i2s_multi.c MCK section for the
+// reference table.
 
 // ----------------------------------------------------------------------------
 // PIN VALIDATION HELPERS (moved from usb_audio.c)
@@ -1636,7 +1629,12 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             case REQ_SET_MCK_ENABLE: {
                 bool enable = (setup->wValue != 0);
                 if (enable && !i2s_mck_enabled) {
-                    sanitize_mck_multiplier_for_rate(audio_state.freq);
+                    // Order matters: divider must be loaded *before* the
+                    // GPOUTn block is enabled so the DAC sees a valid clock
+                    // on the first cycle.  Reversing the order would briefly
+                    // run MCK at whatever DIV value the GPOUTn block had
+                    // before, causing a transient PLL-relock chirp on
+                    // connected DACs.
                     audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
                     audio_i2s_mck_set_enabled(true);
                     i2s_mck_enabled = true;
@@ -1661,6 +1659,20 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 uint8_t new_pin = (uint8_t)setup->wValue;
                 uint8_t status;
                 if (!is_valid_gpio_pin(new_pin)) {
+                    status = PIN_CONFIG_INVALID_PIN;
+                }
+                // GPOUT-capability check: MCK is now driven by hardware
+                // CLK_GPOUTn, so the GPIO must map to one of clk_gpout0..3.
+                // GPIO_TO_GPOUT_CLOCK_HANDLE() is the SDK macro that returns
+                // the matching clk_gpoutN enum value for valid pins or the
+                // supplied default for non-GPOUT pins.  We pass clk_sys as
+                // the sentinel: a result of clk_sys means "no GPOUTn for
+                // this pin on this platform" — reject it.
+                //
+                // RP2040 GPOUT pins: 21 (only one not blocked by
+                //   is_valid_gpio_pin); 23-25 are board-reserved.
+                // RP2350 GPOUT pins: 13, 15, 21 (all unblocked).
+                else if (GPIO_TO_GPOUT_CLOCK_HANDLE(new_pin, clk_sys) == clk_sys) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (i2s_mck_enabled) {
                     status = PIN_CONFIG_OUTPUT_ACTIVE;
@@ -1692,13 +1704,11 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 if (raw > 1) { resp_buf[0] = PIN_CONFIG_INVALID_PIN; vendor_send_response(resp_buf, 1); return true; }
                 uint16_t mult = (raw == 1) ? 256 : 128;
 
-                if (!is_mck_multiplier_supported_for_rate(mult, audio_state.freq)) {
-                    printf("Rejected MCK %ux at %lu Hz (unsupported)\n",
-                           (unsigned)mult, (unsigned long)audio_state.freq);
-                    resp_buf[0] = PIN_CONFIG_INVALID_PIN;
-                    vendor_send_response(resp_buf, 1);
-                    return true;
-                }
+                // No per-rate multiplier rejection here anymore — CLK_GPOUTn
+                // gives integer dividers at 48 kHz × {128×, 256×} and at
+                // 96 kHz × 128×, and a stable 12.5 fractional divider at
+                // 96 kHz × 256×.  See audio_i2s_multi.c MCK section for the
+                // full divider table.
                 i2s_mck_multiplier = mult;
                 if (i2s_mck_enabled) {
                     audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
@@ -1713,7 +1723,6 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             }
 
             case REQ_GET_MCK_MULTIPLIER: {
-                sanitize_mck_multiplier_for_rate(audio_state.freq);
                 resp_buf[0] = mck_encode(i2s_mck_multiplier);
                 vendor_send_response(resp_buf, 1);
                 return true;

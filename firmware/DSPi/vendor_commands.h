@@ -33,9 +33,9 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude);
 uint8_t  mck_encode(uint16_t val);
 uint16_t mck_decode(uint8_t raw);
 
-// MCK multiplier validation and clamping
-bool is_mck_multiplier_supported_for_rate(uint16_t mult, uint32_t sample_rate_hz);
-void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz);
+// (Removed: is_mck_multiplier_supported_for_rate / sanitize_mck_multiplier_for_rate.
+//  CLK_GPOUTn-driven MCK no longer needs the 96 kHz × 256× clamp — see the
+//  comment block above mck_encode in vendor_commands.c.)
 
 // Ring buffer accessor (audio_ring is static in usb_audio.c)
 uint32_t usb_audio_ring_overrun_count(void);

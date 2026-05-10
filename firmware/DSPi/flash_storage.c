@@ -42,11 +42,13 @@
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
+#include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 
 #include <string.h>
 #include <math.h>    // powf(), isfinite() for master volume (db_to_linear() clamps at -60 dB)
+#include <stdio.h>   // printf() for MCK migration warning
 
 // ============================================================================
 // FLASH GEOMETRY
@@ -819,8 +821,26 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
         if (slot->version >= 9) {
             memcpy(output_types, slot->output_types, NUM_SPDIF_INSTANCES);
             i2s_bck_pin = slot->i2s_bck_pin;
-            i2s_mck_pin = slot->i2s_mck_pin;
-            i2s_mck_enabled = (slot->i2s_mck_enabled != 0);
+
+            // MCK pin migration: MCK is now driven by hardware CLK_GPOUTn,
+            // so the stored pin must map to clk_gpout0..3 on this platform.
+            // Typical case: an RP2040 board loading a preset that was
+            // saved on RP2350 with mck_pin = 13 (clk_gpout0 on RP2350,
+            // but no GPOUTn mapping on RP2040).  In that case we fall
+            // back to the platform default and force MCK off so the user
+            // sees the change rather than getting silent dead clock.
+            if (GPIO_TO_GPOUT_CLOCK_HANDLE(slot->i2s_mck_pin, clk_sys) == clk_sys) {
+                printf("Preset MCK pin %u not GPOUT-capable on this platform; "
+                       "resetting to default %u and disabling MCK\n",
+                       (unsigned)slot->i2s_mck_pin,
+                       (unsigned)PICO_I2S_MCK_PIN);
+                i2s_mck_pin = PICO_I2S_MCK_PIN;
+                i2s_mck_enabled = false;
+            } else {
+                i2s_mck_pin = slot->i2s_mck_pin;
+                i2s_mck_enabled = (slot->i2s_mck_enabled != 0);
+            }
+
             if (slot->version >= 11) {
                 // V11+: 0=128x, 1=256x
                 i2s_mck_multiplier = (slot->i2s_mck_multiplier == 1) ? 256 : 128;

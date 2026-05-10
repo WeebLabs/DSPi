@@ -93,13 +93,21 @@ static uint64_t s_last_poll_us   = 0;     /* throttle reference                 
 static uint8_t  s_last_volume = LG_VOLUME_NEVER_SEEN;
 static bool     s_last_muted  = false;
 
-/* Last vol_index actually written through apply_vol_index_to_audio().
+/* Last vol_index actually written through update_user_volume().
  * Used to coalesce no-op writes — the LG poll fires every 50 ms but
- * the user only changes volume on remote presses, so most polls
- * decode the same value as the last.  The pipeline ramp handles real
- * changes click-free; the coalesce just avoids redundant pointer
- * loads in loudness coefficient swap. */
+ * the user only changes volume on remote presses, so most polls decode
+ * the same value as the last.  Coalescing avoids redundant
+ * audio_state.volume writes and the per-write user_volume notify
+ * (which would otherwise fire 20× per second of TV silence). */
 static int16_t  s_last_applied_vol_index = -1;   /* -1 = none yet */
+
+/* Tracks whether the *current* user_mute state was imposed by LG (vs.
+ * set manually by the user via REQ_SET_USER_MUTE).  On leave_present
+ * we clear user_mute only if LG owned it; otherwise the user's
+ * deliberate mute is preserved across the demote.  Set true when LG
+ * drives user_mute false→true, cleared when LG drives true→false or
+ * when leave_present clears the LG-imposed mute. */
+static bool     s_lg_imposed_mute = false;
 
 /* ------------------------------------------------------------------ */
 /* Pure helpers                                                        */
@@ -124,27 +132,71 @@ static inline uint8_t lg_vol_to_vol_index(uint8_t lg_vol) {
     return idx;
 }
 
-/* Decode the LG signature from a 24-byte channel-status array.  Returns
- * true iff bytes 16/17/18 carry the fixed F-04-8A pattern.  See spec §2.3
- * for the bit-level derivation; bottom line is that this 5-nibble pattern
- * is only present when an LG TV is broadcasting Sound Sync, has not been
- * observed on any non-LG source, and is robust against single-bit flips
- * because the hysteresis state machine requires LG_PRESENT_THRESHOLD
- * consecutive matches before declaring presence. */
-static inline bool lg_signature_present(const uint8_t cs[24]) {
-    return ((cs[16] & 0x0Fu) == 0x0Fu)
-        && (cs[17] == 0x04u)
-        && (cs[18] == 0x8Au);
+/* LG model layouts.
+ *
+ * HiFiBerry's reference analysis (see spec §2.3) places the Sound Sync
+ * signature at CS bytes 16/17/18 with the volume nibbles spanning
+ * cs[15] low + cs[16] high.  This matches newer LG TVs.
+ *
+ * The 2017 LG B7 (and likely contemporaries) lay the same data at
+ * positions mirrored around the middle of the 24-byte block:
+ *   byte 18 ↔ byte 5,  byte 17 ↔ byte 6,  byte 16 ↔ byte 7,  byte 15 ↔ byte 8.
+ * The nibble layout *within* each byte is unchanged; only the byte
+ * positions are mirrored.  Empirically verified at TV vol = 3 and 26
+ * (see spec §2.6).
+ *
+ * lg_match_layout() tries each layout in order and returns the first
+ * match (or NULL).  The detection state machine treats "any layout
+ * matched" as "signature present"; the matched layout is plumbed
+ * through to the volume decoder so the right offsets are used.  The
+ * matcher is cheap (3 byte comparisons per layout, short-circuit) and
+ * runs only once per LG_POLL_INTERVAL_US, so the cost of supporting
+ * multiple layouts is negligible. */
+typedef struct {
+    uint8_t sig_a;   /* index where (byte & 0x0F) == 0x0F */
+    uint8_t sig_b;   /* index where byte == 0x04 */
+    uint8_t sig_c;   /* index where byte == 0x8A */
+    uint8_t vol_hi;  /* index whose low nibble is the volume byte's high nibble */
+    uint8_t vol_lo;  /* index whose high nibble is the volume byte's low nibble */
+} LgLayout;
+
+/* HiFiBerry layout (newer LG models). */
+static const LgLayout LG_LAYOUT_NEW = {
+    .sig_a = 16, .sig_b = 17, .sig_c = 18,
+    .vol_hi = 15, .vol_lo = 16,
+};
+
+/* B7-era layout (mirror around byte 11.5). */
+static const LgLayout LG_LAYOUT_B7 = {
+    .sig_a = 7, .sig_b = 6, .sig_c = 5,
+    .vol_hi = 8, .vol_lo = 7,
+};
+
+static const LgLayout *const LG_LAYOUTS[] = { &LG_LAYOUT_NEW, &LG_LAYOUT_B7 };
+#define LG_LAYOUT_COUNT  (sizeof(LG_LAYOUTS) / sizeof(LG_LAYOUTS[0]))
+
+/* Return the matching layout (NULL if none).  Order is "newer first" so
+ * a TV that happens to populate both layouts (none observed in the wild)
+ * would prefer the layout HiFiBerry's analysis was based on. */
+static inline const LgLayout *lg_match_layout(const uint8_t cs[24]) {
+    for (size_t i = 0; i < LG_LAYOUT_COUNT; i++) {
+        const LgLayout *L = LG_LAYOUTS[i];
+        if (((cs[L->sig_a] & 0x0Fu) == 0x0Fu)
+            && (cs[L->sig_b] == 0x04u)
+            && (cs[L->sig_c] == 0x8Au)) {
+            return L;
+        }
+    }
+    return NULL;
 }
 
-/* Decode volume + mute from CS bytes 15 and 16.
- * vol_byte = (cs[15] low nibble) << 4 | (cs[16] high nibble), where bit 7
- * is the mute flag and bits 6:0 are the volume 0..100.  See spec §2.4
- * for the empirical verification table. */
-static inline void lg_decode_volume(const uint8_t cs[24],
+/* Decode volume + mute using the offsets from the matched layout.
+ * vol_byte = (cs[vol_hi] low nibble) << 4 | (cs[vol_lo] high nibble),
+ * where bit 7 is the mute flag and bits 6:0 are the volume 0..100. */
+static inline void lg_decode_volume(const uint8_t cs[24], const LgLayout *L,
                                      uint8_t *out_vol, bool *out_muted) {
-    uint8_t vol_byte = (uint8_t)(((cs[15] & 0x0Fu) << 4) |
-                                 ((cs[16] & 0xF0u) >> 4));
+    uint8_t vol_byte = (uint8_t)(((cs[L->vol_hi] & 0x0Fu) << 4) |
+                                 ((cs[L->vol_lo] & 0xF0u) >> 4));
     *out_muted = (vol_byte & 0x80u) != 0u;
     uint8_t v = (uint8_t)(vol_byte & 0x7Fu);
     if (v > 100u) v = 100u;   /* defensive — values >100 unobserved */
@@ -155,57 +207,56 @@ static inline void lg_decode_volume(const uint8_t cs[24],
 /* Apply path                                                          */
 /* ------------------------------------------------------------------ */
 
-/* Recompute the vol_index that the cached USB host volume would map to
- * and apply it.  Matches the arithmetic in audio_set_volume() exactly
- * (kept in sync deliberately — see comment at the source).
- *
- * Used when transitioning from PRESENT to ABSENT to "hand vol_mul back"
- * to whatever the OS slider last set.  We can't just call
- * audio_set_volume(audio_state.volume) because that early-returns on
- * non-USB input — exactly what we don't want here. */
-static void restore_host_volume_to_audio_path(void) {
-    int16_t cached = (int16_t)audio_state.volume;
-    /* Same shift as audio_set_volume: dB 0.5-resolution signed →
-     * unsigned 8.8 with the slider's zero point at the centre. */
-    int32_t v = (int32_t)cached + (int32_t)CENTER_VOLUME_INDEX * 256;
-    if (v < 0) v = 0;
-    int32_t hi = ((int32_t)CENTER_VOLUME_INDEX + 1) * 256 - 1;
-    if (v > hi) v = hi;
-    apply_vol_index_to_audio((uint8_t)((uint32_t)v >> 8u));
-}
-
 /* Apply LG-decoded state to the audio path.  Called only while
- * s_present is true.  Click-free transitions are guaranteed by the
- * audio pipeline's per-packet ramp — this function just writes the
- * target. */
+ * s_present is true.  Drives BOTH the user-facing volume
+ * (audio_state.volume + user_volume notify) AND the audio path
+ * (vol_mul + loudness coeffs) through update_user_volume() — a single
+ * funnel for every owner of the user-perceived volume.  Mute drives
+ * user_mute (the vendor mute, gates audio without touching volume).
+ *
+ * This is "option 2" from the LG-volume design discussion: LG drives
+ * the host's user-volume slider directly so the UI single-widget
+ * display tracks TV remote presses.  Trade-off accepted: when SPDIF
+ * input switches back to USB or LG demotes, audio_state.volume stays
+ * wherever LG left it (no thaw cache).  The OS may re-issue UAC1
+ * SET_CUR with its own remembered per-device volume on enumeration or
+ * default-device change events; for DSPi-internal input switches the
+ * user's slider position simply picks up from LG's last value.
+ *
+ * Click-free transitions are guaranteed by the audio pipeline's per-
+ * packet ramp — this function just writes the target. */
 static void apply_lg_state(uint8_t lg_vol, bool lg_mute) {
     uint8_t vol_index = lg_vol_to_vol_index(lg_vol);
 
-    if (lg_mute) {
-        /* Hard mute: drive vol_mul to zero directly.  The pipeline ramp
-         * will glide from the current target down to 0 over the next
-         * packet (~1 ms at 48 kHz) — click-free.  Loudness coefficients
-         * are intentionally NOT zeroed: holding them at the previous
-         * vol_index means unmuting from this state has no one-packet
-         * coefficient-mismatch transient.  (Audio is silent during mute
-         * anyway, so the held coefficients are not heard.)
-         *
-         * Sentinel `-1` forces the next non-mute call into the
-         * "vol_index < 0" branch below, guaranteeing re-apply even when
-         * the post-mute vol_index matches the pre-mute one.  Without
-         * this, an LG mute → unmute at the same TV vol would coalesce
-         * away the apply and leave vol_mul stuck at 0. */
-        audio_state.vol_mul = 0;
-        s_last_applied_vol_index = -1;
-    } else if (vol_index != (uint8_t)s_last_applied_vol_index ||
-               s_last_applied_vol_index < 0) {
-        /* Coalesce: the LG poll re-reads the same byte while no remote
-         * button is pressed.  apply_vol_index_to_audio is cheap (one
-         * array load + a pointer swap) but skipping the no-op write
-         * keeps the pipeline's prev/target ramp from spuriously re-
-         * computing across no-change packets. */
-        apply_vol_index_to_audio(vol_index);
+    /* Volume.  Coalesce no-op writes — at 50 ms poll cadence with no
+     * remote button presses, every poll decodes the same value.  Each
+     * non-coalesced apply pushes a user_volume notify; without
+     * coalescing we'd flood the host with 20 redundant notifies/sec.
+     *
+     * update_user_volume() invalidates s_last_applied_vol_index to -1
+     * (so external vendor writes can break our cache).  We immediately
+     * re-establish the cache to the value we just wrote so subsequent
+     * matching polls coalesce. */
+    if (vol_index != (uint8_t)s_last_applied_vol_index ||
+        s_last_applied_vol_index < 0) {
+        float db = (float)((int32_t)vol_index - (int32_t)CENTER_VOLUME_INDEX);
+        update_user_volume(db);
         s_last_applied_vol_index = (int16_t)vol_index;
+    }
+
+    /* Mute.  Drives user_mute (the vendor mute, OR'd with audio_state.mute
+     * in the audio pipeline).  Tracks `s_lg_imposed_mute` so leave_present
+     * can clear LG-imposed mute on demote without clobbering a mute the
+     * user set manually before LG took over.  When LG is present LG owns
+     * mute on the SPDIF path: an LG-driven unmute clears whatever the
+     * mute source was, mirroring how LG-driven volume overrides any
+     * vendor SET_USER_VOLUME. */
+    if (lg_mute != user_mute) {
+        user_mute = lg_mute;
+        s_lg_imposed_mute = lg_mute;
+        uint8_t v = lg_mute ? 1u : 0u;
+        notify_param_write(offsetof(WireBulkParams, user_volume.user_mute),
+                           sizeof(uint8_t), &v);
     }
 }
 
@@ -263,20 +314,37 @@ static void enter_present(uint8_t lg_vol, bool lg_mute) {
     }
 }
 
-/* Demote PRESENT → ABSENT, optionally restoring the cached USB host
- * volume.  We don't always restore: when the input source has just
- * switched away from SPDIF, the input-source-change handler in main.c
- * has its own thaw path (audio_set_volume(audio_state.volume)) and
- * calling our restore here would either duplicate that work or fight
- * against it. */
+/* Demote PRESENT → ABSENT.  Per the option-2 design, we do NOT
+ * restore the previously-cached USB host volume — audio_state.volume
+ * stays wherever LG last set it.  The OS may re-issue UAC1 SET_CUR
+ * with its remembered per-device volume on enumeration or default-
+ * device-change; for DSPi-internal input switches the user's slider
+ * position simply picks up from LG's last value.  The
+ * `restore_host_vol` parameter is retained on the signature for
+ * source-compat with existing callers but is now ignored.
+ *
+ * We DO clear LG-imposed mute so the user isn't stuck silent when the
+ * TV stops broadcasting Sound Sync (e.g., TV powers off, TOSLINK
+ * unplugged).  s_lg_imposed_mute distinguishes mutes LG drove from
+ * mutes the user set manually via REQ_SET_USER_MUTE — the latter are
+ * preserved across the demote. */
 static void leave_present(bool restore_host_vol) {
+    (void)restore_host_vol;  /* vestigial — see comment above */
     if (!s_present) return;
     s_present = false;
     s_present_streak = 0;
     s_last_applied_vol_index = -1;
-    if (restore_host_vol) {
-        restore_host_volume_to_audio_path();
+
+    if (s_lg_imposed_mute && user_mute) {
+        user_mute = false;
+        s_lg_imposed_mute = false;
+        uint8_t v = 0u;
+        notify_param_write(offsetof(WireBulkParams, user_volume.user_mute),
+                           sizeof(uint8_t), &v);
+    } else {
+        s_lg_imposed_mute = false;
     }
+
     notify_runtime_field(off_present(), 0u);
     /* Note: we do NOT clear s_last_volume / s_last_muted on demote.
      * They reflect the last value the LG TV broadcast — useful info
@@ -331,7 +399,8 @@ void lg_sound_sync_tick(void) {
     uint8_t cs[24];
     spdif_input_get_channel_status(cs);
 
-    if (lg_signature_present(cs)) {
+    const LgLayout *layout = lg_match_layout(cs);
+    if (layout != NULL) {
         s_absent_streak = 0;
         if (s_present_streak < 0xFFu) s_present_streak++;
 
@@ -347,7 +416,7 @@ void lg_sound_sync_tick(void) {
          * identical-value case at the ring level). */
         if (s_present || s_present_streak >= LG_PRESENT_THRESHOLD) {
             uint8_t lg_vol; bool lg_mute;
-            lg_decode_volume(cs, &lg_vol, &lg_mute);
+            lg_decode_volume(cs, layout, &lg_vol, &lg_mute);
             enter_present(lg_vol, lg_mute);
         }
     } else {
@@ -375,6 +444,7 @@ void lg_sound_sync_init(void) {
     s_last_volume    = LG_VOLUME_NEVER_SEEN;
     s_last_muted     = false;
     s_last_applied_vol_index = -1;
+    s_lg_imposed_mute = false;
 }
 
 void lg_sound_sync_set_enabled(bool en) {

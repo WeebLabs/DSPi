@@ -413,11 +413,15 @@ void spdif_input_update_clock_servo(void) {
     }
 
     // MCK servo: keep master clock frequency-locked to the servoed I2S data rate.
-    // MCK divider (16.8) = sys_clk × 128 / (actual_freq × multiplier)
+    // MCK is now driven by CLK_GPOUTn, so the divider is the direct 24.8 form
+    // (no ÷2 for a PIO toggle — see audio_i2s_multi.c MCK section):
+    //     div_24.8 = sys_clk × 256 / (actual_freq × multiplier)
+    // The previous PIO-toggle math used × 128 in the numerator, which now
+    // would write half the correct divider and run MCK at 2× the target.
     extern bool i2s_mck_enabled;
     extern uint16_t i2s_mck_multiplier;
     if (i2s_mck_enabled && i2s_mck_multiplier > 0) {
-        float mck_div_f = (float)sys_clk * 128.0f / (actual_freq * (float)i2s_mck_multiplier);
+        float mck_div_f = (float)sys_clk * 256.0f / (actual_freq * (float)i2s_mck_multiplier);
         uint32_t mck_div = (uint32_t)(mck_div_f * (1.0f + fill_trim) + 0.5f);
         if (mck_div != last_mck_div) {
             last_mck_div = mck_div;

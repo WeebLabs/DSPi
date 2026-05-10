@@ -1536,8 +1536,12 @@ void usb_sound_card_init(void) {
     producer_pools[3] = producer_pool_4;
 #endif
 
-    // MCK generator setup on PIO1 SM1 (starts disabled)
-    audio_i2s_mck_setup(pio1, 1, i2s_mck_pin);
+    // MCK generator setup — uses hardware CLK_GPOUTn, not a PIO state machine.
+    // Default pin is GPIO 13 on RP2350 (clk_gpout0) and GPIO 21 on RP2040
+    // (also clk_gpout0); see config.h for the rationale and the per-platform
+    // GPOUT-capable pin set.  setup() only records the pin; the actual GPOUT
+    // block is configured on the first audio_i2s_mck_set_enabled(true) call.
+    audio_i2s_mck_setup(i2s_mck_pin);
 
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
     irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);

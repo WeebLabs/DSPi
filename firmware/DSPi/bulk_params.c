@@ -23,7 +23,8 @@
 #include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
 #include <assert.h>  // _Static_assert
 
-#include "hardware/sync.h"  // __dmb()
+#include "hardware/sync.h"    // __dmb()
+#include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
 
 // LgSoundSyncStatus (lg_sound_sync.h, used by REQ_GET_LG_SOUND_SYNC_STATUS)
 // and WireLgSoundSync (this file's WireBulkParams section) must have
@@ -393,8 +394,22 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         extern uint16_t i2s_mck_multiplier;
         memcpy(output_types, in->i2s_config.output_types, NUM_SPDIF_INSTANCES);
         i2s_bck_pin = in->i2s_config.bck_pin;
-        i2s_mck_pin = in->i2s_config.mck_pin;
-        i2s_mck_enabled = (in->i2s_config.mck_enabled != 0);
+
+        // MCK pin migration mirrors flash_storage.c apply_slot_to_live():
+        // CLK_GPOUTn requires the pin to map to clk_gpout0..3 on this
+        // platform.  An RP2040 receiving a bulk payload from an RP2350
+        // host (or vice versa) can have an mck_pin that is invalid on
+        // this side — fall back to the platform default and disable
+        // MCK so the user-visible failure mode is "MCK off" rather than
+        // "MCK on a dead pin".
+        if (GPIO_TO_GPOUT_CLOCK_HANDLE(in->i2s_config.mck_pin, clk_sys) == clk_sys) {
+            i2s_mck_pin = PICO_I2S_MCK_PIN;
+            i2s_mck_enabled = false;
+        } else {
+            i2s_mck_pin = in->i2s_config.mck_pin;
+            i2s_mck_enabled = (in->i2s_config.mck_enabled != 0);
+        }
+
         if (in->header.format_version >= 5) {
             // V5+: 0=128x, 1=256x
             i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 1) ? 256 : 128;

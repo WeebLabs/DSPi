@@ -93,16 +93,11 @@ static void complete_pipeline_reset(void);
 // progress.
 static bool spdif_prefilling;
 
-// 96 kHz + 256x (24.576 MHz MCK) is unstable on current hardware/clocking, so
-// force 128x whenever that combination is encountered from persisted state.
-static void sanitize_mck_multiplier_for_rate(uint32_t sample_rate_hz) {
-    extern uint16_t i2s_mck_multiplier;
-    if (sample_rate_hz >= 96000u && i2s_mck_multiplier == 256u) {
-        i2s_mck_multiplier = 128u;
-        printf("MCK 256x not supported at %lu Hz; forcing 128x\n",
-               (unsigned long)sample_rate_hz);
-    }
-}
+// (Previously a sanitize_mck_multiplier_for_rate() helper lived here that
+// force-clamped 96 kHz × 256× to 128× because the old PIO-toggle MCK had
+// a 6.25 fractional divider in that combo.  CLK_GPOUTn gives 12.5 there —
+// still fractional but stable on real hardware — so the clamp has been
+// removed.  See audio_i2s_multi.c MCK section for the full divider table.)
 
 static void perform_rate_change(uint32_t new_freq) {
     switch (new_freq) { case 44100: case 48000: case 96000: break; default: new_freq = 44100; }
@@ -142,11 +137,12 @@ static void perform_rate_change(uint32_t new_freq) {
     // master/slave divider mismatch from lazy per-instance callbacks)
     audio_i2s_update_all_frequencies(new_freq);
 
-    // Update MCK frequency for new sample rate (if enabled)
+    // Update MCK frequency for new sample rate (if enabled).  No per-rate
+    // multiplier sanitization — CLK_GPOUTn handles every Fs × multiplier
+    // combination this firmware supports.
     extern bool i2s_mck_enabled;
     extern uint16_t i2s_mck_multiplier;
     if (i2s_mck_enabled) {
-        sanitize_mck_multiplier_for_rate(new_freq);
         audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
     }
 
@@ -439,11 +435,12 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
     }
     if (any_i2s && i2s_mck_enabled) {
-        // Set divider BEFORE enabling the SM so MCK starts at the correct
-        // frequency.  Reversed order would briefly run MCK at the previous
-        // divider, causing a transient PLL relock chirp on connected DACs.
-        // Matches the REQ_SET_MCK_ENABLE vendor command order.
-        sanitize_mck_multiplier_for_rate(audio_state.freq);
+        // Set divider BEFORE enabling the GPOUTn block so MCK starts at the
+        // correct frequency.  Reversed order would briefly run MCK at the
+        // previous divider, causing a transient PLL relock chirp on
+        // connected DACs.  Matches the REQ_SET_MCK_ENABLE vendor command
+        // order.  No multiplier sanitization needed — CLK_GPOUTn handles
+        // every Fs × multiplier combination.
         audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
         audio_i2s_mck_set_enabled(true);
     } else if (!any_i2s) {
@@ -844,6 +841,21 @@ void core0_init() {
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
+
+    // Sync MCK library state with the just-loaded globals.  usb_sound_card_init()
+    // (above) called audio_i2s_mck_setup() with the boot-default pin; if the
+    // preset specifies a different mck_pin or wants mck_enabled=true, the
+    // library would otherwise drive the wrong pin (or fail to start) once
+    // process_type_switches() below tries to enable MCK.  This is the
+    // sole boot-time apply-path sync point.
+    {
+        extern uint8_t  i2s_mck_pin;
+        extern bool     i2s_mck_enabled;
+        extern uint16_t i2s_mck_multiplier;
+        audio_i2s_mck_apply_state(i2s_mck_pin, i2s_mck_enabled,
+                                  audio_state.freq, i2s_mck_multiplier);
+    }
+
     {
         uint32_t flags = save_and_disable_interrupts();
         dsp_recalculate_all_filters(48000.0f);
@@ -1297,16 +1309,21 @@ int main(void) {
                 // would be torn down and re-acquired twice, doubling the audible
                 // glitch on a preset switch that also flips an output type.
 
-                // Presets can carry persisted raw MCK=0 (256x). Clamp invalid
-                // 96 kHz combinations and apply the effective MCK divider now
-                // so no-type-change loads still update clock state.
+                // Sync MCK library state with the freshly-applied preset
+                // globals.  Handles three transitions in one call:
+                //   • mck_pin changed → disable, change_pin, (re-)enable
+                //   • mck_enabled flipped → start or stop on current pin
+                //   • mck_enabled unchanged but multiplier/Fs changed →
+                //     glitchless DIV reload
+                // Any subsequent process_type_switches() may still gate
+                // MCK off if no I2S slots end up active, which is the
+                // pre-existing "auto-disable when no I2S" behaviour.
                 {
-                    extern bool i2s_mck_enabled;
+                    extern uint8_t  i2s_mck_pin;
+                    extern bool     i2s_mck_enabled;
                     extern uint16_t i2s_mck_multiplier;
-                    if (i2s_mck_enabled) {
-                        sanitize_mck_multiplier_for_rate(audio_state.freq);
-                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-                    }
+                    audio_i2s_mck_apply_state(i2s_mck_pin, i2s_mck_enabled,
+                                              audio_state.freq, i2s_mck_multiplier);
                 }
 
                 // Build change mask for slots whose type changed
@@ -1525,15 +1542,15 @@ int main(void) {
                 dsp_recalculate_all_filters(rate);
                 dsp_update_delay_samples(rate);
 
-                // Bulk apply can also update persisted MCK settings. Keep MCK
-                // clock state coherent even when output types are unchanged.
+                // Sync MCK library state with the freshly-applied bulk
+                // globals — same rationale and three-transition coverage
+                // as the preset_load_pending block above.
                 {
-                    extern bool i2s_mck_enabled;
+                    extern uint8_t  i2s_mck_pin;
+                    extern bool     i2s_mck_enabled;
                     extern uint16_t i2s_mck_multiplier;
-                    if (i2s_mck_enabled) {
-                        sanitize_mck_multiplier_for_rate(audio_state.freq);
-                        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-                    }
+                    audio_i2s_mck_apply_state(i2s_mck_pin, i2s_mck_enabled,
+                                              audio_state.freq, i2s_mck_multiplier);
                 }
 
                 // Transition Core 1 mode to match new output enable state
