@@ -280,12 +280,6 @@ static inline uint16_t off_enabled(void) {
 static inline uint16_t off_present(void) {
     return (uint16_t)offsetof(WireBulkParams, lg_sound_sync.present);
 }
-static inline uint16_t off_volume(void) {
-    return (uint16_t)offsetof(WireBulkParams, lg_sound_sync.volume);
-}
-static inline uint16_t off_muted(void) {
-    return (uint16_t)offsetof(WireBulkParams, lg_sound_sync.muted);
-}
 
 /* ------------------------------------------------------------------ */
 /* State transitions                                                   */
@@ -296,19 +290,16 @@ static void enter_present(uint8_t lg_vol, bool lg_mute) {
     s_present = true;
     apply_lg_state(lg_vol, lg_mute);
 
-    /* Order of notifications: volume + muted first, then present last.
-     * This way a host UI that subscribes only to `present` and re-reads
-     * all fields on the rising edge sees consistent values.  Hosts that
-     * subscribe to individual fields naturally see them all updated by
-     * the time `present=1` arrives. */
-    if (lg_vol != s_last_volume) {
-        s_last_volume = lg_vol;
-        notify_runtime_field(off_volume(), lg_vol);
-    }
-    if (lg_mute != s_last_muted) {
-        s_last_muted = lg_mute;
-        notify_runtime_field(off_muted(), lg_mute ? 1u : 0u);
-    }
+    /* Track last seen LG vol/mute for REQ_GET_LG_SOUND_SYNC_STATUS, but
+     * do not push per-field notifies.  The corresponding user-volume /
+     * user-mute changes are notified by update_user_volume() inside
+     * apply_lg_state() — pushing additional lg_sound_sync.volume and
+     * lg_sound_sync.muted notifies would duplicate the same event in
+     * different units, doubling wire chatter during TV remote presses.
+     * Hosts that want the raw 0..100 LG vol can poll the status struct. */
+    s_last_volume = lg_vol;
+    s_last_muted  = lg_mute;
+
     if (!was_present) {
         notify_runtime_field(off_present(), 1u);
     }
