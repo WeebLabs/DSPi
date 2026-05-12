@@ -503,10 +503,132 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
     __dmb();
 }
 
-// Phase 2: drain all consumer pipelines, restart outputs in sync, reset
-// USB feedback.  The entire sequence runs with interrupts disabled so that
-// USB audio packets cannot produce into already-drained pools (which would
-// create a persistent inter-slot fill offset).
+// Per-slot teardown: stop the output PIO SM, mask the channel's DMA IRQ,
+// abort the DMA, return the playing_buffer to the consumer pool, drain the
+// consumer pipeline, then re-arm the channel IRQ.  Safe to call with main
+// interrupts ENABLED, via a layered protection chain:
+//
+//   1. audio_*_set_enabled(inst, false) halts the PIO state machine,
+//      stopping DREQ-driven DMA progress.  This is NOT the IRQ-skip
+//      gate — the shared DMA IRQ handlers in audio_spdif.c:412-442 and
+//      audio_i2s_multi.c:504-524 do NOT read inst->enabled; they gate
+//      on dma_irqn_get_channel_status() (i.e. the post-mask `ints`
+//      register).  The `enabled` flag governs whether the audio path
+//      produces into the producer pool, not whether the IRQ handler
+//      services completions.
+//
+//   2. dma_irqn_set_channel_enabled(false) masks this channel's IRQ
+//      bit in irq_ctrl[irq_index].inte.  After this point the shared
+//      handler reads dma_irqn_get_channel_status as 0 for this channel
+//      and skips it — even if the underlying raw completion bit fires.
+//      THIS is the actual race protection.
+//
+//   3. dma_channel_abort() is a HW-level stop with a busy-wait for
+//      completion.  Critically: there is a brief window between step 1
+//      (SM stop) and step 2 (IRQ mask) where the IRQ handler CAN
+//      still fire if the last DMA word completed at exactly that
+//      instant.  In that window the racing handler may have called
+//      give_audio_buffer(playing_buffer) + audio_start_dma_transfer()
+//      — populating playing_buffer again and starting a fresh DMA.
+//      The abort here kills any such re-started DMA cleanly.
+//
+//   4. The `if (inst->playing_buffer) give_audio_buffer(...)` check
+//      AFTER the abort is NOT redundant — it handles the race in (3).
+//      Removing it would leak a buffer and (on re-enable) play stale
+//      audio.  Future maintainers: do not "simplify" this.
+//
+//   5. *_reset_consumer_pipeline() drains the prepared list back to
+//      the free list.  Safe because the channel IRQ is masked (the
+//      only writer to this consumer pool from IRQ context); the spin-
+//      lock inside the pool ops is the cross-with-main-thread guard.
+//
+//   6. dma_irqn_acknowledge_channel() clears any stale `ints` bit set
+//      during the (3) race window BEFORE re-arming the line, so no
+//      spurious post-reset interrupt fires.
+//
+// Concurrent producers that DON'T race here:
+//   - USB audio class ISR (usb_audio.c:1286 → usb_audio_ring_push) only
+//     pushes to the SPSC audio_ring.  Never touches consumer pools.
+//   - USB SOF ISR (usb_audio.c:1315-1363) reads inst->words_consumed +
+//     inst->current_transfer_words; these are written only from the
+//     DMA IRQ handler.  With the channel IRQ masked, they're stable.
+//   - Core 1 is idle: prepare_pipeline_reset() spin-waited for
+//     work_done, and preset_loading=true blocks new dispatch from
+//     process_audio_packet.  PDM mode (if active) operates on its own
+//     ring/DMA and never touches output pools.
+static void teardown_output_slot(int slot_idx) {
+    extern uint8_t output_types[];
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+
+    if (output_types[slot_idx] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot_idx];
+        if (!inst || !inst->consumer_pool) return;
+
+        if (inst->enabled) audio_i2s_set_enabled(inst, false);
+        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+        dma_channel_abort(inst->dma_channel);
+        if (inst->playing_buffer) {
+            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+            inst->playing_buffer = NULL;
+        }
+        i2s_reset_consumer_pipeline(inst);
+        dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot_idx];
+        if (!inst || !inst->consumer_pool) return;
+
+        if (inst->enabled) audio_spdif_set_enabled(inst, false);
+        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
+        dma_channel_abort(inst->dma_channel);
+        if (inst->playing_buffer) {
+            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
+            inst->playing_buffer = NULL;
+        }
+        spdif_reset_consumer_pipeline(inst);
+        dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
+    }
+}
+
+// Three-phase pipeline reset.  The IRQ-disabled critical section in
+// Phase 2 is intentionally tiny — only the synchronized PIO SM start
+// needs atomicity (preserves CLAUDE.md's slot-alignment invariant for
+// single-type configs).  Phase 1 (per-slot teardown) and Phase 3 (USB
+// feedback reset) run with interrupts enabled.
+//
+// Why keep blackout small: USB audio class ISRs continue to drain
+// packets into the audio_ring throughout Phase 1, eliminating a ~1 ms
+// USB starvation window that previously compounded the audible I2S DAC
+// click on input-source switches.
+//
+// Phase 2 outer save_and_disable_interrupts wraps BOTH library calls
+// (audio_spdif_enable_sync + audio_i2s_enable_sync).  Although each
+// library has its own inner save_and_disable_interrupts around its
+// pio_enable_sm_mask_in_sync call, the outer wrap exists to bracket
+// the cross-type SPDIF<->I2S boundary: without it, a stale DMA IRQ or
+// SOF could fire between the two enable_sync calls and either disturb
+// USB feedback baselining or let one type's just-primed DMA complete
+// an extra transfer before the other type's clocks start, producing a
+// 1-frame inter-type skew.  Do NOT split this critical section across
+// the two calls "to shrink it further" — it would silently break
+// mixed-output configs and the regression would only surface on
+// installations actually running both output types.
+//
+// KNOWN RACE (B1, lg_sound_sync-style benign): Phase 3's
+// reset_usb_feedback_loop() performs ~8 non-atomic field writes to
+// fb_ctrl, which the SOF ISR reads/writes every 1 ms.  An SOF firing
+// mid-reset can observe a transiently inconsistent fb_ctrl struct
+// (e.g. rate_valid=true with stale last_total_words) and compute a
+// garbage delta.  Impact is bounded by FB_OUTER_CLAMP_Q16: at most one
+// wire-feedback packet (1 ms) is off by ±1 sample/frame — well within
+// the UAC1 host's normal jitter envelope.  Verified inaudible in
+// listening tests.  Moving Phase 3 back inside the Phase 2 bracket
+// would close the race (cost: ~8 extra stores in the IRQ-disabled
+// section).  Left outside intentionally to keep blackout minimal; if
+// fb_ctrl gains additional writers or the clamps are tightened, this
+// decision should be revisited.
 static void complete_pipeline_reset(void) {
     extern uint8_t output_types[];
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
@@ -517,105 +639,40 @@ static void complete_pipeline_reset(void) {
     uint spdif_count = 0;
     uint i2s_count = 0;
 
-    uint32_t flags = save_and_disable_interrupts();
-
+    // Phase 1: per-slot teardown — interrupts enabled.
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        teardown_output_slot(i);
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
-
-            if (inst->enabled) {
-                audio_i2s_set_enabled(inst, false);
-            }
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-
-            i2s_reset_consumer_pipeline(inst);
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
-
-            i2s_sync[i2s_count++] = inst;
+            if (inst && inst->consumer_pool) i2s_sync[i2s_count++] = inst;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
-
-            if (inst->enabled) {
-                audio_spdif_set_enabled(inst, false);
-            }
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-
-            spdif_reset_consumer_pipeline(inst);
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
-
-            spdif_sync[spdif_count++] = inst;
+            if (inst && inst->consumer_pool) spdif_sync[spdif_count++] = inst;
         }
     }
 
-    if (spdif_count) {
-        audio_spdif_enable_sync(spdif_sync, spdif_count);
-    }
-    if (i2s_count) {
-        audio_i2s_enable_sync(i2s_sync, i2s_count);
-    }
-
-    reset_usb_feedback_loop();
-
+    // Phase 2: tiny IRQ-disabled section — synchronized PIO start.
+    // See block comment above for why this wraps BOTH enable_sync calls.
+    uint32_t flags = save_and_disable_interrupts();
+    if (spdif_count) audio_spdif_enable_sync(spdif_sync, spdif_count);
+    if (i2s_count) audio_i2s_enable_sync(i2s_sync, i2s_count);
     restore_interrupts(flags);
+
+    // Phase 3: USB feedback reset.  See B1 note in block comment above
+    // for the (bounded) race with the SOF ISR.
+    reset_usb_feedback_loop();
 }
 
 // Disable all outputs, abort DMA, drain consumer pipelines. Outputs stay
 // disabled so consumer buffers can be prefilled before starting playback.
 // Counterpart: enable_outputs_in_sync().
+//
+// Like complete_pipeline_reset(), runs the per-slot teardown with main
+// interrupts ENABLED — see teardown_output_slot() for the safety argument.
 static void drain_and_disable_outputs(void) {
-    extern uint8_t output_types[];
-    extern audio_spdif_instance_t *spdif_instance_ptrs[];
-    extern audio_i2s_instance_t *i2s_instance_ptrs[];
-
-    uint32_t flags = save_and_disable_interrupts();
-
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_I2S) {
-            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
-
-            if (inst->enabled) audio_i2s_set_enabled(inst, false);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-            i2s_reset_consumer_pipeline(inst);
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
-        } else {
-            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
-
-            if (inst->enabled) audio_spdif_set_enabled(inst, false);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-            spdif_reset_consumer_pipeline(inst);
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
-        }
+        teardown_output_slot(i);
     }
-
-    restore_interrupts(flags);
 }
 
 // Enable all outputs in sync. Call after consumer buffers have been prefilled.
