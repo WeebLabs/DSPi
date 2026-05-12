@@ -22,6 +22,7 @@
 #include "spdif_input.h"
 #include "spdif_rx.h"
 #include "lg_sound_sync.h"
+#include "dac_hw_mute.h"
 #include "dsp_pipeline.h"
 #include "flash_clkdiv.h"
 #include "flash_storage.h"
@@ -491,7 +492,15 @@ static void reset_usb_feedback_loop(void) {
 // ---------------------------------------------------------------------------
 
 // Phase 1: prepare for disruptive pipeline work.
-// Waits for Core 1 EQ worker to finish, then engages the audio mute.
+// Waits for Core 1 EQ worker to finish, engages the audio soft-mute
+// envelope, then asserts the DAC hardware mute (if configured) and
+// holds for the user-configured hold_ms.  The order is intentional:
+// soft envelope first so the I²S DMA tail is ramping toward zero;
+// hardware mute second so the DAC chip's analog output is silenced
+// by its own internal ramp before the caller stops BCK/LRCLK.
+// Together they cover both failure modes — data discontinuity at the
+// DMA tail AND analog DC-step on clock cessation.  Hardware mute is
+// a no-op when disabled (zero-cost when not configured).
 static void prepare_pipeline_reset(uint32_t mute_samples) {
     if (core1_mode == CORE1_MODE_EQ_WORKER) {
         while (core1_eq_work.work_ready && !core1_eq_work.work_done)
@@ -501,6 +510,7 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
     preset_mute_counter = mute_samples;
     preset_loading = true;
     __dmb();
+    dac_hw_mute_assert();
 }
 
 // Per-slot teardown: stop the output PIO SM, mask the channel's DMA IRQ,
@@ -661,6 +671,15 @@ static void complete_pipeline_reset(void) {
     // Phase 3: USB feedback reset.  See B1 note in block comment above
     // for the (bounded) race with the SOF ISR.
     reset_usb_feedback_loop();
+
+    // Phase 4: release hardware mute.  Order is critical: clocks must
+    // be running (Phase 2 completed) BEFORE the mute pin de-asserts,
+    // so the DAC's analog ramp-up happens with valid clocks.  If
+    // release_ms > 0 this also dwells briefly to let the DAC's
+    // analog stage settle before the audio pipeline's soft envelope
+    // ramps back up (which happens naturally as preset_loading
+    // clears).  No-op when feature disabled.
+    dac_hw_mute_release();
 }
 
 // Disable all outputs, abort DMA, drain consumer pipelines. Outputs stay
@@ -899,6 +918,18 @@ void core0_init() {
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
 
+    // DAC hardware mute init.  Must come AFTER preset_boot_load() so the
+    // directory's persisted config (mute pin assignments, polarity, hold
+    // time) is available; the config arrives via preset_get_dac_hw_mute()
+    // which reads dir_cache.  Claims GPIOs and drives them to un-muted
+    // level per polarity.  No-op when feature is disabled in flash
+    // (factory-fresh state).
+    {
+        DacHwMuteConfig hw;
+        preset_get_dac_hw_mute(&hw);
+        dac_hw_mute_init(&hw);
+    }
+
     // Sync MCK library state with the just-loaded globals.  usb_sound_card_init()
     // (above) called audio_i2s_mck_setup() with the boot-default pin; if the
     // preset specifies a different mck_pin or wants mck_enabled=true, the
@@ -1071,6 +1102,11 @@ int main(void) {
         // Cheap on the not-applicable path; safe to call every loop.
         lg_sound_sync_tick();
 
+        // DAC hardware-mute deadline check — releases the async test
+        // pulse on schedule.  Single byte load + branch when no test
+        // is in flight (the steady state).
+        dac_hw_mute_tick();
+
         // Drain USB audio ring — highest priority (only when USB is active input).
         // USB ISR pushes raw packets into the ring; we run the full DSP
         // pipeline here in main-loop context instead of USB IRQ context.
@@ -1197,6 +1233,39 @@ int main(void) {
                 prepare_flash_write_operation();
                 preset_save_master_volume();
                 complete_flash_write_operation_light();
+            }
+
+            // DAC hardware mute config update (deferred from USB ISR).
+            // dac_hw_mute_set_config does validation, applies live pin
+            // claims, writes the directory (~45 ms flash), and emits the
+            // wire-format notify so other connected hosts see the new
+            // state.  prepare_flash_write_operation brackets so SPDIF RX
+            // and other peripherals survive the flash blackout.
+            extern volatile bool flash_set_dac_hw_mute_pending;
+            extern DacHwMuteConfig flash_set_dac_hw_mute_val;
+            if (flash_set_dac_hw_mute_pending) {
+                DacHwMuteConfig hw;
+                uint32_t f = save_and_disable_interrupts();
+                memcpy(&hw, (const void *)&flash_set_dac_hw_mute_val, sizeof(hw));
+                flash_set_dac_hw_mute_pending = false;
+                restore_interrupts(f);
+                prepare_flash_write_operation();
+                (void)dac_hw_mute_set_config(&hw);
+                complete_flash_write_operation_light();
+            }
+
+            // DAC hardware mute test pulse — starts asynchronously and
+            // releases via dac_hw_mute_tick() on the main loop's normal
+            // cadence.  A synchronous busy-wait here would block the
+            // audio drain and starve SPDIF/I²S outputs (~48 ms producer-
+            // pool depth at 48 kHz) — see dac_hw_mute.c for the design
+            // note.
+            extern volatile bool dac_hw_mute_test_pending;
+            if (dac_hw_mute_test_pending) {
+                uint32_t f = save_and_disable_interrupts();
+                dac_hw_mute_test_pending = false;
+                restore_interrupts(f);
+                (void)dac_hw_mute_test_start();
             }
         }
 

@@ -120,6 +120,20 @@ uint8_t flash_set_include_pins_val = 0;
 volatile bool flash_set_master_volume_mode_pending = false;
 uint8_t flash_set_master_volume_mode_val = 0;
 
+// Deferred DAC hardware-mute config update.  USB ISR copies the 16-byte
+// payload into flash_set_dac_hw_mute_val and sets the pending flag; main
+// loop drains, validates, persists to flash directory, and applies the
+// pin claims.  The blocking flash write (~45 ms) must run from main-loop
+// context to avoid stalling USB.
+#include "dac_hw_mute.h"  // DacHwMuteConfig
+volatile bool flash_set_dac_hw_mute_pending = false;
+DacHwMuteConfig flash_set_dac_hw_mute_val = {0};
+
+// Deferred DAC hardware-mute test pulse.  The test asserts mute for ~1 s
+// then releases, used to verify the pin number and polarity at install
+// time.  Synchronous (1 s busy-wait) so it must defer to main loop.
+volatile bool dac_hw_mute_test_pending = false;
+
 // Deferred REQ_SAVE_MASTER_VOLUME — captures current live master_volume_db
 // into the directory's independent field.  Value is read at dispatch time.
 volatile bool flash_save_master_volume_pending = false;

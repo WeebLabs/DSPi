@@ -281,6 +281,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_BAND_BYPASS         0xD8
 #define REQ_GET_BAND_BYPASS         0xD9
 
+// DAC Hardware Mute Commands (board-level — see dac_hw_mute.h)
+#define REQ_SET_DAC_HW_MUTE_CONFIG  0xEA  // payload = 16-byte DacHwMuteConfig
+#define REQ_GET_DAC_HW_MUTE_CONFIG  0xEB  // returns 16-byte DacHwMuteConfig
+#define REQ_TEST_DAC_HW_MUTE        0xEC  // no payload; pulses mute ~1s
+
 // Audio Input Source Commands
 #define REQ_SET_INPUT_SOURCE        0xE0  // payload = uint8_t (InputSource enum)
 #define REQ_GET_INPUT_SOURCE        0xE1  // returns uint8_t

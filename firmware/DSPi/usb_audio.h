@@ -153,6 +153,15 @@ extern volatile bool flash_set_master_volume_mode_pending;
 extern uint8_t flash_set_master_volume_mode_val;
 extern volatile bool flash_save_master_volume_pending;
 
+// DAC hardware mute deferred state.  See usb_audio.c for documentation.
+// Declared here as forward-declared opaque-pointer-style — the full type
+// (DacHwMuteConfig from dac_hw_mute.h) is included in usb_audio.c.  This
+// header avoids dragging dac_hw_mute.h into every translation unit that
+// includes usb_audio.h.
+struct DacHwMuteConfig;
+extern volatile bool flash_set_dac_hw_mute_pending;
+extern volatile bool dac_hw_mute_test_pending;
+
 extern volatile bool flash_set_spdif_rx_pin_pending;
 
 extern volatile bool save_params_pending;

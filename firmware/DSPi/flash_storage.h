@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "config.h"
+#include "dac_hw_mute.h"   // DacHwMuteConfig (stored in PresetDirectory)
 
 // Legacy result codes (used by flash_save_params / flash_load_params)
 #define FLASH_OK            0
@@ -89,6 +90,12 @@ uint8_t preset_save_master_volume(void);
 // Read the directory's independent master-volume field (the value applied at
 // boot in mode 0).  Does not affect live state.
 float preset_get_saved_master_volume(void);
+
+// DAC hardware mute config (board-level, directory-stored — V3+).  Both setter
+// and getter are synchronous and main-loop only.  The setter assumes the
+// caller has already validated the config (dac_hw_mute_set_config does this).
+void preset_set_dac_hw_mute(const DacHwMuteConfig *cfg);
+void preset_get_dac_hw_mute(DacHwMuteConfig *out);
 
 // Get the currently active preset slot (always 0-9).
 uint8_t preset_get_active(void);

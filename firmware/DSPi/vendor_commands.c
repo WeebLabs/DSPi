@@ -16,6 +16,7 @@
 #include "audio_input.h"
 #include "spdif_input.h"
 #include "lg_sound_sync.h"
+#include "dac_hw_mute.h"
 #include "audio_pipeline.h"
 #include "config.h"
 #include "dsp_pipeline.h"
@@ -199,6 +200,9 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
     if (i2s_mck_enabled && pin == i2s_mck_pin) return true;
     // Check SPDIF RX input pin
     if (pin == spdif_rx_pin) return true;
+    // Check DAC hardware-mute pins (board-level config, may be unset
+    // — owns_pin returns false when feature is disabled).
+    if (dac_hw_mute_owns_pin(pin)) return true;
     return false;
 }
 
@@ -710,6 +714,26 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
                 flash_set_master_volume_mode_val = m;
                 __dmb();
                 flash_set_master_volume_mode_pending = true;
+            }
+            break;
+        }
+
+        case REQ_SET_DAC_HW_MUTE_CONFIG: {
+            // Payload: 16-byte DacHwMuteConfig.  Deferred to main loop —
+            // validation, pin claim, flash write, and notify all happen
+            // in dac_hw_mute_set_config() which can run for tens of ms
+            // (flash erase + program).  Validation failures are silently
+            // swallowed by the deferred handler — the immediate vendor
+            // response cannot wait for it.  Hosts that need a definitive
+            // success/failure should follow up with REQ_GET_DAC_HW_MUTE_CONFIG
+            // and compare against what they sent.
+            if (buffer->data_len >= sizeof(DacHwMuteConfig)) {
+                extern volatile bool flash_set_dac_hw_mute_pending;
+                extern DacHwMuteConfig flash_set_dac_hw_mute_val;
+                memcpy((void *)&flash_set_dac_hw_mute_val,
+                       vendor_rx_buf, sizeof(DacHwMuteConfig));
+                __dmb();
+                flash_set_dac_hw_mute_pending = true;
             }
             break;
         }
@@ -1810,6 +1834,43 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 static LgSoundSyncStatus status;
                 lg_sound_sync_get_status(&status);
                 vendor_send_response(&status, sizeof(status));
+                return true;
+            }
+
+            case REQ_GET_DAC_HW_MUTE_CONFIG: {
+                /* Return the live DAC hardware-mute config.  The module's
+                 * live mirror always matches the flash directory's
+                 * persisted value (set together inside dac_hw_mute_set_config).
+                 * Static so the buffer outlives the EP0 DATA stage. */
+                static DacHwMuteConfig hw;
+                dac_hw_mute_get_config(&hw);
+                vendor_send_response(&hw, sizeof(hw));
+                return true;
+            }
+
+            case REQ_TEST_DAC_HW_MUTE: {
+                /* Pulse the mute pin for ~1 s so the installer can
+                 * confirm pin number + polarity by ear (audio cuts out
+                 * then returns).  The actual pulse runs from the main
+                 * loop because it busy-waits 1 s — the USB ISR cannot
+                 * block that long.  We respond immediately with the
+                 * status that would be returned synchronously
+                 * (PIN_CONFIG_SUCCESS if enabled, PIN_CONFIG_INVALID_OUTPUT
+                 * otherwise).  The actual audible pulse follows when the
+                 * main loop drains dac_hw_mute_test_pending. */
+                static DacHwMuteConfig hw;
+                dac_hw_mute_get_config(&hw);
+                uint8_t status;
+                if (hw.enabled == 0) {
+                    status = PIN_CONFIG_INVALID_OUTPUT;
+                } else {
+                    extern volatile bool dac_hw_mute_test_pending;
+                    dac_hw_mute_test_pending = true;
+                    __dmb();
+                    status = PIN_CONFIG_SUCCESS;
+                }
+                resp_buf[0] = status;
+                vendor_send_response(resp_buf, 1);
                 return true;
             }
         }

@@ -17,6 +17,7 @@
 #include "crossfeed.h"
 #include "leveller.h"
 #include "lg_sound_sync.h"
+#include "dac_hw_mute.h"
 #include "notify.h"
 
 #include <string.h>
@@ -213,6 +214,15 @@ void bulk_params_collect(WireBulkParams *out) {
     // float dB convention and every other dB field in this packet.
     out->user_volume.user_volume_db = (float)audio_state.volume / 256.0f;
     out->user_volume.user_mute      = user_mute ? 1 : 0;
+
+    // DAC hardware mute (V10+).  Pulled from the module's live config
+    // (which mirrors the flash directory's stored value).  The struct
+    // layout matches WireDacHwMute byte-for-byte so we can copy directly.
+    {
+        DacHwMuteConfig hw;
+        dac_hw_mute_get_config(&hw);
+        memcpy(&out->dac_hw_mute, &hw, sizeof(out->dac_hw_mute));
+    }
 }
 
 // ============================================================================
@@ -238,19 +248,21 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     if (in->header.num_output_channels != NUM_OUTPUT_CHANNELS)
         return -3;
     // Accept payload sizes from V2 through current.
-    // V2: no I2S/leveller/preamp/master/input/lg_sound_sync/user_volume.
-    // V3-V5: no preamp/master/input/lg_sound_sync/user_volume.
-    // V6: no input/lg_sound_sync/user_volume.  V7: no lg_sound_sync/user_volume.
-    // V8: no user_volume.  V9: current full size.  The lower bound is shared
-    // with the dispatcher gate via WIRE_BULK_PARAMS_MIN_SIZE in bulk_params.h
-    // (== v2_size); per-section locals below are kept for the defense-in-depth
-    // size checks each section uses to refuse a short payload that claims a
-    // newer format_version.
-    uint16_t v8_size = sizeof(WireBulkParams) - sizeof(WireUserVolume);
+    // V2: no I2S/leveller/preamp/master/input/lg_sound_sync/user_volume/dac_hw_mute.
+    // V3-V5: no preamp/master/input/lg_sound_sync/user_volume/dac_hw_mute.
+    // V6: no input/lg_sound_sync/user_volume/dac_hw_mute.
+    // V7: no lg_sound_sync/user_volume/dac_hw_mute.
+    // V8: no user_volume/dac_hw_mute.  V9: no dac_hw_mute.  V10: current full size.
+    // The lower bound is shared with the dispatcher gate via WIRE_BULK_PARAMS_MIN_SIZE
+    // in bulk_params.h (== v2_size); per-section locals below are kept for the
+    // defense-in-depth size checks each section uses to refuse a short payload
+    // that claims a newer format_version.
+    uint16_t v9_size = sizeof(WireBulkParams) - sizeof(WireDacHwMute);
+    uint16_t v8_size = v9_size - sizeof(WireUserVolume);
     uint16_t v7_size = v8_size - sizeof(WireLgSoundSync);
     uint16_t v6_size = v7_size - sizeof(WireInputConfig);
     uint16_t v5_size = v6_size - sizeof(WirePreampConfig) - sizeof(WireMasterVolume);
-    (void)v7_size; (void)v6_size;  // Currently only v5_size and v8_size are referenced
+    (void)v7_size; (void)v6_size;  // Currently only v5_size, v8_size, v9_size are referenced
                                     // by apply gates below; keep the chain for documentation.
     if (in->header.payload_length < WIRE_BULK_PARAMS_MIN_SIZE ||
         in->header.payload_length > sizeof(WireBulkParams))
@@ -495,12 +507,29 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     // invalidated).  user_mute is a plain bool so the apply is just a
     // store + notify_param_write, suppressed by the bulk bracket.
     if (in->header.format_version >= 9 &&
-        in->header.payload_length >= sizeof(WireBulkParams)) {
+        in->header.payload_length >= v9_size) {
         update_user_volume(in->user_volume.user_volume_db);
         user_mute = (in->user_volume.user_mute != 0);
         uint8_t mv = user_mute ? 1 : 0;
         notify_param_write(offsetof(WireBulkParams, user_volume.user_mute),
                            sizeof(uint8_t), &mv);
+    }
+
+    // DAC hardware mute (V10+).  Funnel through dac_hw_mute_set_config()
+    // so validation, persistence, and pin re-claim all run consistently
+    // with the vendor-command path.  An invalid config in the payload
+    // (out-of-range pin, collision, bad timing) is silently ignored —
+    // the bulk SET dispatcher has no per-section error channel, so this
+    // matches every other section that "best-effort applies" what it
+    // can.  Bulk SETs that include a dac_hw_mute section that fails
+    // validation leave the previous config in place.
+    if (in->header.format_version >= 10 &&
+        in->header.payload_length >= sizeof(WireBulkParams)) {
+        DacHwMuteConfig hw;
+        _Static_assert(sizeof(hw) == sizeof(in->dac_hw_mute),
+                       "WireDacHwMute and DacHwMuteConfig must match");
+        memcpy(&hw, &in->dac_hw_mute, sizeof(hw));
+        (void)dac_hw_mute_set_config(&hw);
     }
 
     // Close the bulk bracket — emits BULK_INVALIDATED(source=BULK_SET).

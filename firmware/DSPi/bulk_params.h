@@ -29,7 +29,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION       9   // V9: WireUserVolume (vendor user volume/mute)
+#define WIRE_FORMAT_VERSION      10   // V10: + WireDacHwMute (DAC hardware mute pin config)
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -237,6 +237,24 @@ typedef struct __attribute__((packed)) {
 } WireUserVolume;                    // 16 bytes
 
 // ============================================================================
+// Section 18: DAC Hardware Mute (16 bytes) — V10+
+// ============================================================================
+//
+// Board-level configuration for an external DAC's MUTE pin.  Wire-stable
+// layout that matches `DacHwMuteConfig` in dac_hw_mute.h exactly so the
+// dispatcher can memcpy between them.  See dac_hw_mute.h and
+// Documentation/Features/dac_hardware_mute_spec.md for field semantics.
+typedef struct __attribute__((packed)) {
+    uint8_t  enabled;                // 0 = feature off, 1 = on
+    uint8_t  active_low;             // 1 = assert LOW to mute, 0 = assert HIGH
+    uint8_t  pin;                    // GPIO; 0xFF = no pin
+    uint8_t  reserved0;              // alignment for hold_ms
+    uint16_t hold_ms;                // mute-attack hold before clock-stop
+    uint16_t release_ms;             // dwell after un-mute
+    uint8_t  reserved[8];            // zero-fill
+} WireDacHwMute;                     // 16 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -257,7 +275,8 @@ typedef struct __attribute__((packed)) {
     WireInputConfig     input_config;                                      //   16
     WireLgSoundSync     lg_sound_sync;                                     //   16
     WireUserVolume      user_volume;                                       //   16
-} WireBulkParams;                    // Total: 2944 bytes (V9)
+    WireDacHwMute       dac_hw_mute;                                       //   16
+} WireBulkParams;                    // Total: 2960 bytes (V10)
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 
@@ -269,6 +288,7 @@ typedef struct __attribute__((packed)) {
 // number, so it lives in the header rather than being recomputed in two places.
 #define WIRE_BULK_PARAMS_MIN_SIZE \
     (sizeof(WireBulkParams)            \
+     - sizeof(WireDacHwMute)           \
      - sizeof(WireUserVolume)          \
      - sizeof(WireLgSoundSync)         \
      - sizeof(WireInputConfig)         \

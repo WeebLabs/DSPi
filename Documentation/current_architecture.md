@@ -1822,6 +1822,70 @@ This matches the user's product-level decision; it differs from the industry-sta
 
 ---
 
+## DAC Hardware Mute
+*Last updated: 2026-05-12*
+
+Configurable GPIO line that drives a hardware mute pin on an external I²S DAC (PCM5102A XSMT, WM8741 MUTEB, AK4493 SMUTE, etc.). Asserted before `complete_pipeline_reset()` halts the I²S state machine, so the DAC sees its analog output ramp to silence under its own internal control while BCK/LRCLK are still running — eliminating the audible thump that occurs when clocks stop mid-cycle with non-silent data in the DMA buffer. Spec doc: `Documentation/Features/dac_hardware_mute_spec.md`.
+
+**Scope:** hardware pin only. Register-based mute (I²C/SPI) for ES9038Q2M, CS43198, modern AKM is explicitly out of scope — those chips ship with internal soft-mute and Popguard-style protection that mitigates the same problem chip-side.
+
+### Module: `dac_hw_mute.c/h`
+
+Self-contained module owning pin claim, lifecycle, persistence, and notify. Same structural pattern as `lg_sound_sync.c`, `leveller.c`, `crossfeed.c`.
+
+- `dac_hw_mute_init(const DacHwMuteConfig *)` — called once from `core0_init()` after `preset_boot_load()` so the persisted config applies at boot. Idempotent (re-init releases old pins then claims new).
+- `dac_hw_mute_set_config(const DacHwMuteConfig *)` — validates (pin range, conflict, no internal duplicates, hold/release range), persists to directory via `preset_set_dac_hw_mute()`, applies live pin claim, emits `WireBulkParams.dac_hw_mute` notify. Main-loop only (blocks ~45 ms for flash write).
+- `dac_hw_mute_assert()` / `_release()` — pipeline-reset lifecycle hooks. Drive all claimed pins to muted / un-muted per polarity. Busy-wait `hold_ms` / `release_ms`. No-op when feature disabled.
+- `dac_hw_mute_owns_pin(uint8_t pin)` — pin-conflict gate used by `is_pin_in_use()` in `vendor_commands.c`. Other pin-setting commands reject pins this module owns.
+- `dac_hw_mute_run_test_pulse()` — 1-second mute pulse for install verification (`REQ_TEST_DAC_HW_MUTE`).
+
+### Integration with pipeline reset
+
+`prepare_pipeline_reset()` engages the soft envelope (preset_loading + preset_mute_counter) then calls `dac_hw_mute_assert()`. Order: soft envelope first so the I²S DMA tail is ramping toward zero; hardware mute second so the DAC's analog stage is silenced by its own internal ramp before clocks stop. The two layers cover different failure modes — data discontinuity at the DMA tail AND analog DC-step on clock cessation.
+
+`complete_pipeline_reset()` adds a Phase 4: after `reset_usb_feedback_loop()`, calls `dac_hw_mute_release()`. Clocks restarted first (Phase 2) → mute released → DAC analog ramp-up happens with valid clocks. Optional `release_ms` dwell before returning.
+
+### Configuration model
+
+`DacHwMuteConfig` (16 bytes, dac_hw_mute.h):
+- `enabled` (0/1) — feature gate
+- `active_low` (0/1) — assert level polarity (most DACs use active-low: PCM5102A XSMT, WM8741 MUTEB)
+- `pin` — single GPIO that drives the DAC's MUTE input; `0xFF` = no pin (feature effectively disabled). One pin only, because `complete_pipeline_reset()` is a global event that disables and re-enables ALL output slots together — per-slot mute pins would give no behavioural benefit. Installations with multiple separate DACs wire their MUTE inputs together to one RP2 GPIO externally; the firmware sees one pin regardless of topology.
+- `hold_ms` (1..500) — busy-wait after assert. Sized to cover the DAC's internal soft-ramp at the lowest supported sample rate.
+- `release_ms` (0..500) — optional dwell after un-mute before the pipeline's soft envelope resumes.
+- `reserved` bytes — zero-fill padding to 16 bytes; NOT earmarked for register-mute (out of scope).
+
+### Persistence (directory, not per-preset)
+
+Board-level attribute. Lives in `PresetDirectory.dac_hw_mute` (V3+). `DIR_VERSION_CURRENT` bumped from 2 → 3 with v2→v3 migration in `dir_load_cache()` (zero-fills the new field — feature off — identical to factory-fresh).
+
+### Vendor commands
+
+| Code | Command                      | Direction | Description |
+|------|------------------------------|-----------|-------------|
+| 0xEA | REQ_SET_DAC_HW_MUTE_CONFIG   | OUT       | 16-byte `DacHwMuteConfig` payload. Deferred to main loop (`flash_set_dac_hw_mute_pending`); validate + persist + apply. |
+| 0xEB | REQ_GET_DAC_HW_MUTE_CONFIG   | IN        | Returns 16-byte live `DacHwMuteConfig`. |
+| 0xEC | REQ_TEST_DAC_HW_MUTE         | IN        | Triggers ~1 s mute pulse for installer verification. Returns `PIN_CONFIG_*` status. |
+
+### Wire format
+
+`WireDacHwMute` (16 bytes, byte-for-byte compatible with `DacHwMuteConfig`) in `WireBulkParams` V10+. Bulk apply funnels through `dac_hw_mute_set_config()` — same validation as the vendor-command path.
+
+### Memory / CPU cost
+
+| Item | RP2040 | RP2350 |
+|------|--------|--------|
+| `dac_hw_mute.c/.h` text | ~5 KB | ~4.6 KB |
+| BSS (live config + pin-claimed + flags) | ~170 B | ~170 B |
+| Flash directory growth | +16 B | +16 B |
+| Wire format growth | +16 B (V9 → V10) | same |
+| Audio-path overhead (enabled or disabled) | **0 cycles** in inner DSP loop | 0 |
+| Pipeline-reset overhead (enabled) | + `hold_ms` busy-wait + optional `release_ms` | same |
+
+The audio-path zero-overhead is critical: the inner DSP loops never see this feature. All work happens in the pipeline-reset handler, which fires on lifecycle events only — never per-packet.
+
+---
+
 ## LG Sound Sync
 *Last updated: 2026-05-10*
 

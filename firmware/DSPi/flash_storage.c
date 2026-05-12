@@ -116,10 +116,32 @@ typedef struct __attribute__((packed)) {
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
 } PresetDirectory_v1;
 
-// --- Preset Directory v2 (current, sector 0) ---
+// --- Preset Directory v2 (legacy snapshot used by v2→v3 migration) ---
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t crc32;
+    uint8_t  startup_mode;
+    uint8_t  default_slot;
+    uint8_t  last_active_slot;
+    uint8_t  include_pins;
+    uint16_t slot_occupied;
+    uint8_t  master_volume_mode;
+    uint8_t  spdif_rx_pin;
+    float    master_volume_db;
+    char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
+} PresetDirectory_v2;
+
+// --- Preset Directory v3 (current, sector 0) ---
+// V3 appends the DacHwMuteConfig field (16 bytes) so users can configure a
+// DAC hardware-mute GPIO that gets asserted during pipeline reset to
+// suppress the audible click when I²S BCK/LRCLK stop mid-cycle.  The mute
+// config is a board-level attribute (pin numbers + polarity + timing), not a
+// listening profile, so it lives in the directory rather than per-preset.
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
-    uint16_t version;                        // Directory format version (2)
+    uint16_t version;                        // Directory format version (3)
     uint16_t reserved;
     uint32_t crc32;                          // CRC over everything after this 12-byte header
 
@@ -135,9 +157,12 @@ typedef struct __attribute__((packed)) {
     uint8_t  spdif_rx_pin;                   // SPDIF RX GPIO pin, device-level (was padding[1])
     float    master_volume_db;               // Independent master volume (mode 0 at boot)
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
+
+    // V3 addition: DAC hardware mute pin configuration (board-level).
+    DacHwMuteConfig dac_hw_mute;             // 16 bytes; enabled=0 by default
 } PresetDirectory;
 
-#define DIR_VERSION_CURRENT  2
+#define DIR_VERSION_CURRENT  3
 
 // --- Preset Slot (sectors 1-10) ---
 typedef struct __attribute__((packed)) {
@@ -443,9 +468,39 @@ static bool dir_load_cache(void) {
         return true;
     }
 
+    if (flash_dir->version == 2) {
+        // V2 → V3 migration.  Read with the old struct, validate the v2
+        // CRC over the v2-sized data range, then copy fields forward
+        // and zero-init the V3 dac_hw_mute config (feature off).  Flush
+        // immediately so the next boot reads the V3 layout directly.
+        const PresetDirectory_v2 *v2 = (const PresetDirectory_v2 *)flash_dir;
+        const uint8_t *v2_data_start = (const uint8_t *)&v2->startup_mode;
+        size_t v2_data_len = sizeof(PresetDirectory_v2) - offsetof(PresetDirectory_v2, startup_mode);
+        if (crc32(v2_data_start, v2_data_len) != v2->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        dir_cache.startup_mode       = v2->startup_mode;
+        dir_cache.default_slot       = v2->default_slot;
+        dir_cache.last_active_slot   = v2->last_active_slot;
+        dir_cache.include_pins       = v2->include_pins;
+        dir_cache.slot_occupied      = v2->slot_occupied;
+        dir_cache.master_volume_mode = v2->master_volume_mode;
+        dir_cache.spdif_rx_pin       = v2->spdif_rx_pin;
+        dir_cache.master_volume_db   = v2->master_volume_db;
+        memcpy(dir_cache.slot_names, v2->slot_names, sizeof(dir_cache.slot_names));
+        // dac_hw_mute already zeroed by the memset above → enabled = 0,
+        // feature off, no pin claims.  Identical to factory-fresh state.
+        dir_cache_valid = true;
+        (void)dir_flush();
+        return true;
+    }
+
     if (flash_dir->version == 1) {
         // Legacy v1 format — read with the old struct, validate old CRC,
-        // then migrate to v2 in memory and flush.
+        // then migrate forward to V3 in memory and flush.  Same field-copy
+        // logic as the v2 path with v1's slightly different field set.
         const PresetDirectory_v1 *v1 = (const PresetDirectory_v1 *)flash_dir;
         const uint8_t *v1_data_start = (const uint8_t *)&v1->startup_mode;
         size_t v1_data_len = sizeof(PresetDirectory_v1) - offsetof(PresetDirectory_v1, startup_mode);
@@ -464,8 +519,9 @@ static bool dir_load_cache(void) {
                                          : MASTER_VOLUME_MODE_INDEPENDENT;
         dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
         memcpy(dir_cache.slot_names, v1->slot_names, sizeof(dir_cache.slot_names));
+        // dac_hw_mute zeroed by memset → feature off (factory-fresh).
         dir_cache_valid = true;
-        (void)dir_flush();  // persist as v2; if the flush fails, cache stays valid in RAM
+        (void)dir_flush();  // persist as V3; if the flush fails, cache stays valid in RAM
         return true;
     }
 
@@ -1176,6 +1232,23 @@ void preset_set_master_volume_mode(uint8_t mode) {
     dir_ensure();
     dir_cache.master_volume_mode = mode;
     dir_flush();
+}
+
+// DAC hardware mute persistence.  Mirrors the include_pins / master_volume_mode
+// setters: synchronous, main-loop only, writes the directory sector and
+// blocks for the ~45 ms flash erase+program.  Caller (dac_hw_mute_set_config)
+// must have already validated the config — no validation here.
+void preset_set_dac_hw_mute(const DacHwMuteConfig *cfg) {
+    if (!cfg) return;
+    dir_ensure();
+    memcpy(&dir_cache.dac_hw_mute, cfg, sizeof(dir_cache.dac_hw_mute));
+    dir_flush();
+}
+
+void preset_get_dac_hw_mute(DacHwMuteConfig *out) {
+    if (!out) return;
+    dir_ensure();
+    memcpy(out, &dir_cache.dac_hw_mute, sizeof(*out));
 }
 
 // Copy the live master volume into the directory's independent field and
