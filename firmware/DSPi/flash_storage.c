@@ -328,6 +328,7 @@ volatile uint32_t preset_mute_counter = 0;
 
 // Forward declaration — defined in LEGACY API section
 static void apply_factory_defaults(void);
+static inline void dir_apply_dac_hw_mute_defaults(void);  // defined below
 
 // RAM-cached copy of the directory — updated on every directory write and
 // loaded once at boot.  Avoids repeated flash reads for queries.
@@ -490,8 +491,10 @@ static bool dir_load_cache(void) {
         dir_cache.spdif_rx_pin       = v2->spdif_rx_pin;
         dir_cache.master_volume_db   = v2->master_volume_db;
         memcpy(dir_cache.slot_names, v2->slot_names, sizeof(dir_cache.slot_names));
-        // dac_hw_mute already zeroed by the memset above → enabled = 0,
-        // feature off, no pin claims.  Identical to factory-fresh state.
+        // dac_hw_mute: feature disabled, but pin/polarity/timing pre-set
+        // to PCM5102A-friendly defaults so the user only has to flip
+        // enabled=1 if their wiring matches the common case.
+        dir_apply_dac_hw_mute_defaults();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -519,7 +522,9 @@ static bool dir_load_cache(void) {
                                          : MASTER_VOLUME_MODE_INDEPENDENT;
         dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
         memcpy(dir_cache.slot_names, v1->slot_names, sizeof(dir_cache.slot_names));
-        // dac_hw_mute zeroed by memset → feature off (factory-fresh).
+        // dac_hw_mute: feature disabled, but pin/polarity/timing pre-set
+        // to PCM5102A-friendly defaults — see v2→v3 path above.
+        dir_apply_dac_hw_mute_defaults();
         dir_cache_valid = true;
         (void)dir_flush();  // persist as V3; if the flush fails, cache stays valid in RAM
         return true;
@@ -528,6 +533,22 @@ static bool dir_load_cache(void) {
     // Unknown future version — treat as invalid.
     dir_cache_valid = false;
     return false;
+}
+
+// Populate dir_cache.dac_hw_mute with factory defaults.  enabled = 0 so
+// the feature stays off until the user explicitly turns it on, but pin /
+// polarity / hold time get sensible defaults (GPIO 11, active-low,
+// 5 ms hold — works out-of-the-box for the most common PCM5102A
+// breakout).  Used by all three directory-init paths: fresh-flash
+// (dir_ensure), v2→v3 migration, and v1→v3 migration.
+static inline void dir_apply_dac_hw_mute_defaults(void) {
+    dir_cache.dac_hw_mute.enabled    = 0;
+    dir_cache.dac_hw_mute.active_low = DAC_HW_MUTE_DEFAULT_ACTIVE_LOW;
+    dir_cache.dac_hw_mute.pin        = DAC_HW_MUTE_DEFAULT_PIN;
+    dir_cache.dac_hw_mute.reserved0  = 0;
+    dir_cache.dac_hw_mute.hold_ms    = DAC_HW_MUTE_DEFAULT_HOLD_MS;
+    dir_cache.dac_hw_mute.release_ms = DAC_HW_MUTE_DEFAULT_RELEASE_MS;
+    memset(dir_cache.dac_hw_mute.reserved, 0, sizeof(dir_cache.dac_hw_mute.reserved));
 }
 
 // Write the RAM-cached directory back to flash.
@@ -565,6 +586,10 @@ static void dir_ensure(void) {
     dir_cache.slot_occupied = 0;             // All slots empty
     // Slot 0 gets a default name; others are empty (already zeroed by memset)
     strncpy(dir_cache.slot_names[0], "Default", PRESET_NAME_LEN - 1);
+    // dac_hw_mute: feature disabled, but pin/polarity/timing pre-set
+    // to PCM5102A-friendly defaults so users with the common DAC only
+    // have to flip enabled=1.
+    dir_apply_dac_hw_mute_defaults();
     dir_cache_valid = true;
     // Don't flush yet — will be flushed on first preset save
 }
