@@ -73,6 +73,8 @@ def svf_coefficients(filter_type, fc, Q, gain_db, Fs):
     elif ft == 'bandpass':
         # Tool-only: normalise peak to unity (RBJ constant-skirt-gain BP).
         m0, m1, m2 = 0.0, k, 0.0
+    elif ft == 'allpass':
+        m0, m1, m2 = 1.0, -2.0 * k, 0
     else:
         raise ValueError(f"Unknown filter type: {filter_type}")
 
