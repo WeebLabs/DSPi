@@ -130,6 +130,13 @@ def rbj_coefficients(filter_type, fc, Q, gain_db, Fs):
         a0 = (A + 1) - (A - 1) * cs + sqA2
         a1 = 2 * ((A - 1) - (A + 1) * cs)
         a2 = (A + 1) - (A - 1) * cs - sqA2
+    elif ft == 'allpass':
+        b0 = 1 - alpha
+        b1 = -2 * cs
+        b2 = 1 + alpha
+        a0 = 1 + alpha
+        a1 = -2 * cs
+        a2 = 1 - alpha
     else:
         raise ValueError(f"Unknown filter type: {filter_type}")
     return (b0, b1, b2, a0, a1, a2)
