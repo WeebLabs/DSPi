@@ -1757,8 +1757,9 @@ The SPDIF→USB transition in the deferred input-source switch handler (`main.c:
 This matches the user's product-level decision; it differs from the industry-standard pattern (RME TotalMix / UA Apollo, where host volume continues to act as master output gain on external sources) on purpose.
 
 ### SPDIF RX Pin
+*Last updated: 2026-05-15*
 
-- Default: GPIO 11 (`PICO_SPDIF_RX_PIN_DEFAULT`).
+- Default: GPIO 5 (`PICO_SPDIF_RX_PIN_DEFAULT`). Moved off GPIO 11 to avoid colliding with `DAC_HW_MUTE_DEFAULT_PIN`; GPIO 5 is unclaimed by any default output, the UART, or the I²S pins, so the SPDIF RX defaults stop blocking a fresh-install enable of the DAC hardware-mute feature.
 - **Slot-scoped persistence (matches `output_pins[]`).** `REQ_SET_SPDIF_RX_PIN` updates the live `spdif_rx_pin` global in RAM only; no implicit flash write. The user must `REQ_PRESET_SAVE` to capture the new pin in a preset slot. On `REQ_PRESET_LOAD`, the pin is restored from the slot if and only if the directory's `include_pins` flag is set — same gate as output pin loading.
 - Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5).
 - **On-flash layout:** `spdif_rx_pin` lives in one byte that V13 originally reserved as `input_source_padding[0]`. Reusing that byte keeps the `PresetSlot` size unchanged, so existing V13 presets remain CRC-valid (their padding bytes were zero-initialised, which fails GPIO validity and falls through to the live default — same observable behaviour as before this change).
