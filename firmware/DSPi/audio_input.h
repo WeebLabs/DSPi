@@ -21,8 +21,11 @@ typedef enum {
 
 #define INPUT_SOURCE_MAX    INPUT_SOURCE_SPDIF   // Highest valid value
 
-// Default SPDIF RX GPIO pin
-#define PICO_SPDIF_RX_PIN_DEFAULT  11
+// Default SPDIF RX GPIO pin.  GPIO 5 sits just below the output-pin
+// neighborhood (SPDIF outs on 6-9, PDM on 10) and is unused by any
+// default output, leaving GPIO 11 free for the DAC hardware-mute
+// default (see DAC_HW_MUTE_DEFAULT_PIN in dac_hw_mute.h).
+#define PICO_SPDIF_RX_PIN_DEFAULT  5
 
 // SPDIF RX lock debounce — firmware constant, not configurable via vendor command.
 // After the library reports lock, wait this many ms before unmuting output.

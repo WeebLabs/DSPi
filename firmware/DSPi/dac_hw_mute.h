@@ -71,9 +71,10 @@
  * effect when the user explicitly sets `enabled=1` via vendor command;
  * at-boot behavior is unchanged for users who never enable the feature.
  * If GPIO 11 is in use by the time the user enables the feature
- * (e.g., a custom preset reassigned an output to 11), the runtime
- * pin-conflict check in dac_hw_mute_set_config() rejects with
- * PIN_CONFIG_PIN_IN_USE and the user picks another. */
+ * (e.g., a custom preset reassigned an output to 11 or moved
+ * spdif_rx_pin to 11), the runtime pin-conflict check in
+ * dac_hw_mute_set_config() rejects with PIN_CONFIG_PIN_IN_USE and the
+ * user picks another. */
 #define DAC_HW_MUTE_DEFAULT_PIN  11u
 
 /* Reasonable defaults for the most common DAC chip (PCM5102A on
