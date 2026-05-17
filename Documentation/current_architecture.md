@@ -225,7 +225,7 @@ Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switc
 **`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-04-19*
+*Last updated: 2026-05-17 (added PARAM_SRC_UAC1 = 7 for UAC1 Feature Unit writes)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
@@ -252,8 +252,9 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 | 4 | FACTORY | `flash_factory_reset()` |
 | 5 | GPIO | Future hardware knob/encoder handlers |
 | 6 | INTERNAL | Firmware-initiated (clamps, auto-recalc) |
+| 7 | UAC1 | UAC1 Feature Unit SET_CUR data-stage handler in `usb_audio.c` (OS volume slider writes via standard audio class control transfers) |
 
-**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in `vendor_commands.c` (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`.
+**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in `vendor_commands.c` (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`. **UAC1 Feature Unit VOLUME SET_CUR** (`usb_audio.c` data-stage handler) also emits a PARAM_CHANGED on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1`, so v2 hosts see OS volume slider movements on the same field they already listen to for `REQ_SET_USER_VOLUME` (tagged `PARAM_SRC_HOST_SET`) and LG Sound Sync writes — `audio_state.volume` is shared across all three controllers and the notify field mirrors it source-agnostically, while the distinct source byte lets hosts attribute the change to the right controller. UAC1 Feature Unit MUTE has no notify (no parallel WireBulkParams field — `user_volume.user_mute` represents the *vendor* mute with different gating semantics, not `audio_state.mute`).
 
 **Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `REQ_GET_ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
@@ -264,13 +265,13 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 **v1 back-compat:** `update_master_volume` still pushes an 8-byte `MASTER_VOLUME` (0x01) event into the ring. Existing v1 host apps that only recognise byte 0 = 0x01 continue to work; v2 hosts receive the parallel PARAM_CHANGED event and dispatch by offset.
 
 ### Volume & Mute
-*Last updated: 2026-05-08 (user volume persistence)*
+*Last updated: 2026-05-17 (UAC1 SET_CUR volume now emits PARAM_CHANGED tagged PARAM_SRC_UAC1)*
 
 **Volume range:** -60 dB to 0 dB (1 dB resolution, 61 steps). Bottom step is fully silent. USB Audio Class 8.8 fixed-point dB encoding. Q15 lookup table (`db_to_vol[61]`) maps dB index to linear multiplier; index 0 = 0x0000 (silent), index 60 = 0x7FFF (unity).
 
 **User volume — multiple owners, one source of truth:** `audio_state.volume` (and `audio_state.mute`) hold the user-perceived volume/mute. Three controllers can drive these fields, all funneling through the same `apply_vol_index_to_audio()` helper so `vol_mul` and the loudness coefficient pointer always move in lock-step:
 
-1. **UAC1 host slider/mute** (`audio_set_volume()` / UAC1 Feature Unit MUTE) — primary controller while USB is the active input source. `audio_set_volume()` early-returns its apply path when `active_input_source != INPUT_SOURCE_USB`, so a host adjustment during SPDIF playback is cached but inert.
+1. **UAC1 host slider/mute** (`audio_set_volume()` / UAC1 Feature Unit MUTE) — primary controller while USB is the active input source. `audio_set_volume()` early-returns its apply path when `active_input_source != INPUT_SOURCE_USB`, so a host adjustment during SPDIF playback is cached but inert. UAC1 SET_CUR VOLUME emits a `PARAM_CHANGED` on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1` (distinct from `PARAM_SRC_HOST_SET`, which tags `REQ_SET_USER_VOLUME` from EP0) — same field, different source byte, so vendor-channel host UIs track OS slider movements live and can attribute them to the OS rather than themselves. **Important edge case:** the emit also fires when the host writes during non-USB input (where the value is cached but audibly inert) — the notify field semantically tracks "OS slider position", not "what the listener is hearing", and the source byte lets a host disambiguate UAC1 vs LG writes if it needs both. UAC1 Feature Unit MUTE does NOT emit (no parallel WireBulkParams field — see "Mute" below).
 2. **LG Sound Sync** (`lg_sound_sync.c`) — owns `vol_mul` and re-keys the loudness pointer while SPDIF input is active and an LG TV is producing optical TC values.
 3. **Vendor channel** (`REQ_SET_USER_VOLUME` / `REQ_SET_USER_MUTE`) — `update_user_volume()` always applies, regardless of input source, so an external control surface or app can drive user volume during non-USB playback. Caller-side conventions (e.g. "Console only writes during non-USB input") are not enforced by the firmware. While LG Sound Sync is locked, its next ~20 ms poll will overwrite the vendor write — that's intentional ownership during LG-driven playback.
 

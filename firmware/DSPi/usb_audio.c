@@ -1237,7 +1237,23 @@ static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
             } else if (uac1.pending_cs == UAC1_FU_CTRL_VOLUME) {
                 int16_t v;
                 memcpy(&v, uac1_ctrl_buf, sizeof(v));
+                // PARAM_SRC_UAC1 distinguishes OS-slider writes from vendor
+                // EP0 (PARAM_SRC_HOST_SET) and LG Sound Sync writes on the
+                // same shared field — hosts that watch user_volume.user_volume_db
+                // can attribute the change correctly.
+                notify_set_source(PARAM_SRC_UAC1);
                 audio_set_volume(v);
+                // Mirror update_user_volume()'s emit so v2 hosts see the
+                // OS volume slider move on the same WireBulkParams field
+                // they listen to for vendor-channel writes.  Clamp to the
+                // documented apply range; the dB the listener actually
+                // hears is what the device should report.
+                float notify_db = (float)v / 256.0f;
+                if (notify_db < -(float)CENTER_VOLUME_INDEX) notify_db = -(float)CENTER_VOLUME_INDEX;
+                if (notify_db > 0.0f) notify_db = 0.0f;
+                notify_param_write(offsetof(WireBulkParams, user_volume.user_volume_db),
+                                   sizeof(float), &notify_db);
+                notify_set_source(PARAM_SRC_UNKNOWN);
             }
         } else if (uac1.pending_recipient == TUSB_REQ_RCPT_ENDPOINT) {
             if (uac1.pending_cs == UAC1_EP_CTRL_SAMPLING_FREQ) {
