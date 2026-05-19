@@ -325,9 +325,11 @@ uint32_t spdif_input_poll(void) {
             buf_l[sample_idx] = (float)raw_l * inv_2147483648 * preamp_l;
             buf_r[sample_idx] = (float)raw_r * inv_2147483648 * preamp_r;
 #else
-            // Q28: int32 full-scale >> 4 → Q28, then apply preamp
-            int32_t q28_l = raw_l >> 4;
-            int32_t q28_r = raw_r >> 4;
+            // Q28: int32 full-scale >> 2 -> Q28, then apply preamp.
+            // Matches the RP2040 USB 24-bit path (net 24-bit sample << 6),
+            // so the later Q28 -> int24 output shift preserves unity gain.
+            int32_t q28_l = raw_l >> 2;
+            int32_t q28_r = raw_r >> 2;
             buf_l[sample_idx] = fast_mul_q28(q28_l, preamp_l);
             buf_r[sample_idx] = fast_mul_q28(q28_r, preamp_r);
 #endif

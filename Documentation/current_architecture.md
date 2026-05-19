@@ -352,13 +352,13 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 The `process_input_block()` function reads from `buf_l[]`/`buf_r[]` arrays (extern, defined in `audio_pipeline.c`, filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly. Buffer statistics helpers (`get_slot_consumer_fill()`, `get_slot_consumer_stats()`, `reset_buffer_watermarks()`) also live in `audio_pipeline.c`.
 
 ### RP2350 Float Pipeline
-*Last updated: 2026-04-11*
+*Last updated: 2026-05-19*
 
 All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
 | Stage | Description |
 |-------|-------------|
-| Input conversion | int16 → float, per-channel preamp gain (`global_preamp_mul[ch]`) |
+| Input conversion | USB int16/24-bit or SPDIF RX 24-bit → float full-scale, per-channel preamp gain (`global_preamp_linear[ch]`) |
 | Loudness | 2 SVF shelf filters (low shelf + high shelf), volume-dependent |
 | Master EQ | Block-based `dsp_process_channel_block()`, 10 bands per channel, hybrid SVF/biquad |
 | Volume Leveller | Upward RMS compressor on master L/R with gain-reduction limiter (float throughout) |
@@ -367,11 +367,11 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 | Output EQ | Block-based, 10 bands per output (Core 0: outputs 0-1, Core 1: outputs 2-7) |
 | Output gain | Per-output gain × host volume × master volume |
 | Delay | Float circular buffers, 2048 samples max (42ms at 48kHz) |
-| SPDIF output | Float → int16 conversion, 4 stereo pairs |
+| SPDIF output | Float → int24 conversion, 4 stereo pairs |
 | PDM output | Float → Q28 for sigma-delta modulation |
 
 ### RP2040 Fixed-Point Pipeline
-*Last updated: 2026-04-11*
+*Last updated: 2026-05-19*
 
 Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixed-point (28 fractional bits). 2 S/PDIF stereo pairs + 1 PDM sub (5 output channels).
 
@@ -379,7 +379,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 
 | Stage | Description |
 |-------|-------------|
-| Input conversion | int16 → Q28 (shift left 14), per-channel preamp via `fast_mul_q28()` (`global_preamp_mul[ch]`) — block loop to `buf_l[192]`, `buf_r[192]` |
+| Input conversion | USB int16 → Q28 (`<< 14`), USB/SPDIF RX 24-bit → Q28 (`sample << 6`), per-channel preamp via `fast_mul_q28()` (`global_preamp_mul[ch]`) — block loop to `buf_l[192]`, `buf_r[192]` |
 | Loudness | 2 biquads per-sample via `fast_mul_q28()` (Q28 coefficients, state coupling) |
 | Master EQ | **Block-based** `dsp_process_channel_block()`, 10 bands per channel |
 | Volume Leveller | Upward RMS compressor on master L/R with gain-reduction limiter (Q28 envelope + float gain) |
@@ -393,7 +393,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 | Output EQ | **Block-based** `dsp_process_channel_block()`, 10 bands per output |
 | Output gain + volume | Combined Q15 multiply via `fast_mul_q15()` (output gain × host volume × master volume) |
 | Delay | int32 circular buffers, 2048 samples max (42ms at 48kHz) |
-| SPDIF output | Q28 → int16 (shift right 14 with rounding), 2 stereo pairs |
+| SPDIF output | Q28 → int24 (`>> 6` with rounding), 2 stereo pairs |
 | PDM output | Q28 direct to sigma-delta modulator (single-core fallback only) |
 
 **Dual-core mode:** Core 0 handles input pipeline + matrix mix + SPDIF pair 1 (outputs 0-1), Core 1 handles SPDIF pair 2 (outputs 2-3) — both cores process per-output EQ, gain, delay, and S/PDIF conversion in parallel. PDM sub (output 4) runs on Core 1 in PDM mode; PDM and EQ worker outputs (2-3) are mutually exclusive.
@@ -651,6 +651,7 @@ Each 192-frame audio block carries channel status bits and a Z preamble at frame
 - **Static assert:** `PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0` enforced at compile time.
 
 ### 24-bit Output Encoding
+*Last updated: 2026-05-19*
 
 The USB input supports both 16-bit and 24-bit PCM via two alternate settings on the Audio Streaming interface. The host OS selects the desired bit depth; a runtime variable (`usb_input_bit_depth`) tracks the active format and branches the input conversion accordingly. With 24-bit input and 24-bit SPDIF output, the full precision signal path is maintained end-to-end. The DSP pipeline operates at >16-bit precision internally (float on RP2350, Q28 fixed-point on RP2040).
 
@@ -659,6 +660,7 @@ The USB input supports both 16-bit and 24-bit PCM via two alternate settings on 
 **Input conversion (24-bit):**
 - **RP2350:** 3-byte little-endian → sign-extended int32 → float via `÷ 8388608.0f`
 - **RP2040:** 3-byte little-endian → Q28 via left-justify and `>> 2` (net `<< 6`); same full-scale as 16-bit (`<< 14`)
+- **SPDIF RX:** extracted 24-bit samples follow the same internal full-scale convention: RP2350 sign-extends to int32 full-scale and divides by `2147483648.0f`; RP2040 shifts the sign-extended full-scale word by `>> 2` into Q28, matching the USB 24-bit `sample << 6` path so unity processing survives the later Q28 `>> 6` output conversion.
 
 - **RP2350:** `float → int32_t` via `(int32_t)(sample * 8388607.0f)` (24-bit full-scale)
 - **RP2040:** `Q28 → int24` via `clip_s24((sample + (1 << 5)) >> 6)` (shift right 6 with rounding)
@@ -1159,7 +1161,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-04-11*
+*Last updated: 2026-05-19*
 
 ### Hardware
 
@@ -1187,6 +1189,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | S/PDIF outputs | 2 pairs | 4 pairs |
 | USB input bit depth | 16-bit or 24-bit (alt setting) | 16-bit or 24-bit (alt setting) |
 | S/PDIF bit depth | 24-bit | 24-bit |
+| S/PDIF input conversion | 24-bit sign-extended full-scale → Q28 via `>> 2` (equivalent to `sample << 6`) | 24-bit sign-extended full-scale → float via `÷ 2147483648.0f` |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
 | Volume leveller | Q28 envelope + float gain | Float throughout |
 | EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |
@@ -1769,6 +1772,7 @@ This matches the user's product-level decision; it differs from the industry-sta
 - **`bulk_params_apply` integration.** `WireInputConfig.spdif_rx_pin` is applied on bulk SET when `apply_pins == true`, mirroring how `output_pins[]` is applied. If the new pin differs from the current one and SPDIF input is active, the hot-swap fires.
 
 ### SPDIF RX Implementation
+*Last updated: 2026-05-19*
 
 **Library**: Forked from `elehobica/pico_spdif_rx` v0.9.3 at `firmware/pico-extras/src/rp2_common/pico_spdif_rx/`.
 
@@ -1793,7 +1797,7 @@ This matches the user's product-level decision; it differs from the industry-sta
 - INACTIVE → ACQUIRING → LOCKED → RELOCKING (on signal loss) → LOCKED (on re-lock)
 - Lock: ~64ms library internal stability + firmware debounce polls
 - Loss: 10ms timeout
-- Audio extraction: FIFO → 24-bit decode → per-channel preamp → buf_l/buf_r → process_input_block()
+- Audio extraction: FIFO → 24-bit decode → per-channel preamp → buf_l/buf_r → process_input_block(). RP2040 scales decoded samples into Q28 with the same `sample << 6` full-scale convention as USB 24-bit input; RP2350 scales to float full-scale.
 
 **Clock Servo**: PI controller in `spdif_input_update_clock_servo()` adjusts all output PIO dividers based on FIFO fill level (target 50%). Gains: KP=0.0005, KI=0.000005, deadband ±2 blocks. MCK divider is servoed alongside I2S data SM dividers when MCK is enabled, using `audio_i2s_mck_set_divider()` to keep master clock frequency-locked to the servoed output rate. *Last updated: 2026-04-12*
 
