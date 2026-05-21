@@ -1139,6 +1139,17 @@ int main(void) {
                 if (get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
                     enable_outputs_in_sync();
                     spdif_prefilling = false;
+                    // Release the DAC hardware mute that prepare_pipeline_reset()
+                    // asserted on the USB→SPDIF switch (or boot-into-SPDIF, or
+                    // re-lock after lock loss).  The SPDIF lock-acquisition flow
+                    // intentionally skips complete_pipeline_reset() so output stays
+                    // muted until lock + prefill complete; without this release the
+                    // XSMT pin would stay asserted indefinitely and the DAC's analog
+                    // stage would never un-mute.  Order matches complete_pipeline_reset()
+                    // Phase 4: clocks running (enable_outputs_in_sync above) BEFORE
+                    // the mute pin de-asserts, so the DAC's analog ramp-up happens
+                    // with valid BCK/LRCLK.
+                    dac_hw_mute_release();
                 }
             }
 

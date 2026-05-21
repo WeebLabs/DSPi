@@ -1829,7 +1829,7 @@ This matches the user's product-level decision; it differs from the industry-sta
 ---
 
 ## DAC Hardware Mute
-*Last updated: 2026-05-12*
+*Last updated: 2026-05-21*
 
 Configurable GPIO line that drives a hardware mute pin on an external I²S DAC (PCM5102A XSMT, WM8741 MUTEB, AK4493 SMUTE, etc.). Asserted before `complete_pipeline_reset()` halts the I²S state machine, so the DAC sees its analog output ramp to silence under its own internal control while BCK/LRCLK are still running — eliminating the audible thump that occurs when clocks stop mid-cycle with non-silent data in the DMA buffer. Spec doc: `Documentation/Features/dac_hardware_mute_spec.md`.
 
@@ -1850,6 +1850,8 @@ Self-contained module owning pin claim, lifecycle, persistence, and notify. Same
 `prepare_pipeline_reset()` engages the soft envelope (preset_loading + preset_mute_counter) then calls `dac_hw_mute_assert()`. Order: soft envelope first so the I²S DMA tail is ramping toward zero; hardware mute second so the DAC's analog stage is silenced by its own internal ramp before clocks stop. The two layers cover different failure modes — data discontinuity at the DMA tail AND analog DC-step on clock cessation.
 
 `complete_pipeline_reset()` adds a Phase 4: after `reset_usb_feedback_loop()`, calls `dac_hw_mute_release()`. Clocks restarted first (Phase 2) → mute released → DAC analog ramp-up happens with valid clocks. Optional `release_ms` dwell before returning.
+
+**SPDIF lock-acquisition path also releases the mute.** The USB→SPDIF switch (and boot-into-SPDIF, and SPDIF rx-pin hot-swap, and SPDIF re-lock after lock loss) does NOT call `complete_pipeline_reset()` — output must stay muted until SPDIF achieves lock and the consumer pool prefills. The lock-acquisition flow in the main loop replicates the relevant phases (`drain_and_disable_outputs()` → wait for lock + prefill → `enable_outputs_in_sync()`), then calls `dac_hw_mute_release()` directly to mirror Phase 4. Without this release, the XSMT pin asserted by the earlier `prepare_pipeline_reset()` would stay asserted indefinitely and the DAC's analog stage would never un-mute — the only way to recover would be to toggle the feature off/on so `dac_hw_mute_init()` re-drove the pin to the un-muted level.
 
 ### Configuration model
 
