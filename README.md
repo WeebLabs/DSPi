@@ -423,7 +423,7 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | Code | Name | Direction | Payload | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | `0x42` | `REQ_SET_EQ_PARAM` | OUT | 16 bytes | Upload filter parameters |
-| `0x43` | `REQ_GET_EQ_PARAM` | IN | 16 bytes | Read filter parameters |
+| `0x43` | `REQ_GET_EQ_PARAM` | IN | **4 bytes** | Read one filter parameter. `wValue = (channel << 8) \| (band << 4) \| param` where `param`: `0`=type, `1`=freq, `2`=Q, `3`=gain. |
 | `0x44` | `REQ_SET_PREAMP` | OUT | 4 bytes | Set global gain (float dB) |
 | `0x45` | `REQ_GET_PREAMP` | IN | 4 bytes | Get global gain |
 | `0x46` | `REQ_SET_BYPASS` | OUT | 1 byte | Bypass Master EQ (1=On, 0=Off) |
@@ -567,6 +567,8 @@ struct __attribute__((packed)) {
     float gain_db;
 }
 ```
+
+> **Note on `REQ_GET_EQ_PARAM`:** Unlike `REQ_SET_EQ_PARAM`, the GET request returns **one field at a time**. Encode the desired field in the low nibble of `wValue` (`param = 0..3`) and read back 4 bytes. Four requests are required to reconstruct a full band.
 
 **Matrix Route Packet (8 bytes):**
 ```c
