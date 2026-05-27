@@ -4,15 +4,17 @@
 
 ## Summary
 
-This note documents a behavioral discrepancy in how **master volume** is handled
-when a preset is loaded in **independent** mode (`MASTER_VOLUME_MODE_INDEPENDENT`),
-and a fix that has been applied to the **STM32H723 port** but **not** to this
-(RP2040/RP2350) firmware.
+This note documents how **master volume** is handled when a preset is loaded in
+**independent** mode (`MASTER_VOLUME_MODE_INDEPENDENT`). The bug described below
+was first fixed in the STM32H723 port and has now been **ported back to the
+RP2040/RP2350 firmware**.
 
-> **Status on RP:** unchanged — RP still exhibits the behavior described under
-> "Current RP behavior". This is a known divergence, recorded here so the two
-> codebases don't silently drift without explanation. Decide deliberately
-> whether to port the STM32 fix back.
+> **Status on RP:** **fixed**. `apply_master_volume_from_mode()` now takes an
+> `is_boot` flag; in independent mode it is a no-op at runtime so the live
+> master volume survives every preset load. `apply_factory_defaults()` no
+> longer touches master volume — the preset-context callers (`preset_load`,
+> `preset_delete`, `preset_boot_load`) own that decision, and
+> `flash_factory_reset()` deliberately leaves the ceiling intact.
 
 ## The contract
 
@@ -40,27 +42,27 @@ defaults for *everything* (EQ flat, delays zero, …), its master volume is the
 power-on default (`MASTER_VOL_DEFAULT_DB`, −20 dB), **not** the directory's
 independent value (which is a mode-0 concept and has no meaning in mode 1).
 
-## Current RP behavior (the bug)
+## Prior RP behavior (the bug, now fixed)
 
-`apply_master_volume_from_mode()` in `firmware/DSPi/flash_storage.c` is called
-unconditionally on every load path, including runtime `preset_load()`
-(around line 1099) and inside `apply_factory_defaults()`. In independent mode
-that helper applies `dir_cache.master_volume_db` — the last value persisted by
+Previously, `apply_master_volume_from_mode()` in `firmware/DSPi/flash_storage.c`
+was called unconditionally on every load path, including runtime `preset_load()`
+and inside `apply_factory_defaults()`. In independent mode that helper applied
+`dir_cache.master_volume_db` — the last value persisted by
 `REQ_SAVE_MASTER_VOLUME` (0xD6).
 
-Net effect: **every runtime preset load (empty or occupied) snaps the live
+Net effect: **every runtime preset load (empty or occupied) snapped the live
 master volume to the last-saved directory value**, even though the user may have
-changed the live value since. This violates "loading a preset never changes it".
+changed the live value since. This violated "loading a preset never changes it".
 
 Confirmed on STM32 hardware before the fix (raw USB, console not involved):
 saved baseline −5 dB, live set to −25 dB (unsaved), load any preset → live
 reverted to −5 dB. Boot restore itself was correct; only runtime loads misbehaved.
 
-## The STM32 fix
+## The fix (applied on both STM32 and RP)
 
-In `firmware/STM32/Core/Src/flash_storage.c`, `apply_master_volume_from_mode()`
-is the single source of truth for "what master volume becomes when the preset
-context changes", and every context-changing path calls it consistently:
+`apply_master_volume_from_mode()` is now the single source of truth for "what
+master volume becomes when the preset context changes", and every
+context-changing path calls it consistently:
 
 1. `apply_master_volume_from_mode(slot_or_null, is_boot)`:
    - with-preset: a V12+ slot uses its own value; any context without one (empty
@@ -77,18 +79,19 @@ context changes", and every context-changing path calls it consistently:
    `flash_factory_reset()` deliberately does **not** call it (not a context
    switch → ceiling left intact).
 
-Verified on hardware: with-preset load of a configured slot restores the slot
-value; with-preset load of an empty slot (and active-slot delete) gives −20 dB;
-independent-mode loads leave the live value untouched; boot restore still works.
+Verified on STM32 hardware: with-preset load of a configured slot restores the
+slot value; with-preset load of an empty slot (and active-slot delete) gives
+−20 dB; independent-mode loads leave the live value untouched; boot restore
+still works.
 
-## Porting back to RP
+## RP port (now applied)
 
-The changes apply almost verbatim — `apply_master_volume_from_mode`,
+The port followed the STM32 changes almost verbatim — `apply_master_volume_from_mode`,
 `apply_factory_defaults`, `preset_load`, `preset_delete`, and the
 `preset_boot_load` call sites are structurally identical between the two trees.
 The one extra consideration on RP is the deferred/main-loop preset machinery
 (`preset_load` is reached via the pending-flag path in `main.c`), but the
-master-volume application points are the same functions, so the fix is
-mechanical. The deliberate policy decisions to preserve when porting: factory
-reset leaves master volume untouched, and an empty/legacy slot in with-preset
-mode uses the −20 dB factory default (not the directory value).
+master-volume application points are the same functions, so the change was
+mechanical. Preserved policy decisions: factory reset leaves master volume
+untouched, and an empty/legacy slot in with-preset mode uses the −20 dB
+factory default (not the directory value).

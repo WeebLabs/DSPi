@@ -1672,7 +1672,7 @@ The input preamp is per-channel rather than a single global value. Each USB inpu
 ---
 
 ## Master Volume
-*Last updated: 2026-04-26*
+*Last updated: 2026-05-27*
 
 ### Overview
 
@@ -1707,10 +1707,19 @@ Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Cor
 - `SLOT_DATA_VERSION` 12 adds `master_volume_db` to `PresetSlot`
 - Directory-level `master_volume_mode` (default 0 = independent): mode 0 saves/restores master volume from a directory field decoupled from presets; mode 1 saves/restores it as part of each preset (legacy behavior)
 - Preset directory response is 7 bytes — byte 6 = `master_volume_mode`
-- Factory default master volume = `MASTER_VOL_DEFAULT_DB` (-20 dB) — applied at boot when the directory is fresh, on factory reset, and on legacy migration
+- Factory default master volume = `MASTER_VOL_DEFAULT_DB` (-20 dB) — applied at boot when the directory is fresh, and on legacy migration
 - `apply_master_volume_db()` in `flash_storage.c` delegates to `update_master_volume()` so all paths emit host notifications
 - Slots with version < 12 default to 0 dB master volume (unity, no attenuation)
 - `WireMasterVolume` (16 bytes) section in `WireBulkParams` V6+
+
+### Preset Context vs Factory Reset (2026-05-27)
+
+Master volume is re-derived on every preset *context* change (preset load, active-slot delete, boot) via `apply_master_volume_from_mode(slot_or_null, is_boot)` — the single source of truth for "what master volume becomes when the context changes":
+
+- **with-preset mode (1):** a V12+ slot uses its own `master_volume_db`; any context without one (empty slot, legacy pre-V12 preset, NULL) gets `MASTER_VOL_DEFAULT_DB` (−20 dB).
+- **independent mode (0):** boot re-applies the saved directory value; **runtime is a no-op** so the live value survives every preset load. This honors the console contract "loading a preset never changes it" — see `Documentation/Features/master_volume_independent_load.md`.
+
+`apply_factory_defaults()` deliberately does **not** touch master volume — it resets only the DSP processing chain. The context callers (`preset_load`, `preset_delete` active-slot branch, `preset_boot_load`) invoke `apply_master_volume_from_mode()` after the chain reset. `flash_factory_reset()` is not a context switch and does not call the helper, so the master-volume ceiling survives factory reset in both modes.
 
 ---
 

@@ -725,22 +725,34 @@ static void apply_master_volume_db(float db) {
     update_master_volume(db);
 }
 
-// Decide which dB value to apply to master volume based on current mode.
-//   mode 0 (independent): use dir_cache.master_volume_db, which was set
-//     either by a prior REQ_SAVE_MASTER_VOLUME or by fresh-directory init.
-//   mode 1 (per-preset):  use slot->master_volume_db if available (V12+).
-//     Falls back to the directory value for older slots so we never leave
-//     the live globals at a stale value from a previous load.
-// `slot_or_null` may be NULL (e.g. factory-defaults path with no slot).
-static void apply_master_volume_from_mode(const PresetSlot *slot_or_null) {
-    float db;
-    if (dir_cache.master_volume_mode == MASTER_VOLUME_MODE_WITH_PRESET
-        && slot_or_null && slot_or_null->version >= 12) {
-        db = slot_or_null->master_volume_db;
-    } else {
-        db = dir_cache.master_volume_db;
+// Re-derive the live master volume for a given preset *context*.  This is the
+// single source of truth for what master volume becomes whenever the active
+// preset context changes (preset load, active-slot delete, boot).  Callers that
+// only reset the DSP processing chain without switching context (factory reset)
+// must NOT call it — they leave the master-volume ceiling intact.
+//
+//   mode 1 (per-preset): master volume travels with the preset.  A configured
+//     V12+ slot carries its own value; any context without a per-preset value
+//     (an empty slot, or a legacy pre-V12 preset) is "factory defaults" and so
+//     gets the power-on default — exactly as EQ resets to flat, delays to zero.
+//   mode 0 (independent): master volume is decoupled from presets.  Only a BOOT
+//     restore re-applies the saved device-level value; runtime context changes
+//     leave the live value untouched, honoring the console contract "loading a
+//     preset never changes it".  See
+//     Documentation/Features/master_volume_independent_load.md.
+//
+// `slot_or_null` is the loaded slot, or NULL for an empty/factory-default
+// context.  `is_boot` is true only on the power-on restore path.
+static void apply_master_volume_from_mode(const PresetSlot *slot_or_null,
+                                          bool is_boot) {
+    if (dir_cache.master_volume_mode == MASTER_VOLUME_MODE_WITH_PRESET) {
+        bool slot_has_value = slot_or_null && slot_or_null->version >= 12;
+        apply_master_volume_db(slot_has_value ? slot_or_null->master_volume_db
+                                              : MASTER_VOL_DEFAULT_DB);
+    } else if (is_boot) {
+        apply_master_volume_db(dir_cache.master_volume_db);
     }
-    apply_master_volume_db(db);
+    // Independent mode + runtime: intentionally a no-op (live value survives).
 }
 
 // Apply a validated PresetSlot to the live DSP state.
@@ -1087,6 +1099,7 @@ uint8_t preset_load(uint8_t slot) {
     notify_push_preset_loaded(slot);
     notify_begin_bulk(PARAM_SRC_PRESET);
 
+    const PresetSlot *loaded_slot = NULL;
     if (dir_cache.slot_occupied & (1u << slot)) {
         // Slot has user data — validate and load it
         const PresetSlot *s = validate_slot(slot);
@@ -1096,11 +1109,15 @@ uint8_t preset_load(uint8_t slot) {
             return PRESET_ERR_CRC;
         }
         apply_slot_to_live(s, dir_cache.include_pins != 0);
-        apply_master_volume_from_mode(s);
+        loaded_slot = s;
     } else {
         // Slot not configured — apply factory defaults
         apply_factory_defaults();
     }
+    // Runtime context switch: re-derive master volume for the loaded context
+    // (loaded_slot, or NULL for the empty/factory-default case).  In
+    // independent mode this is a no-op so the live value survives.
+    apply_master_volume_from_mode(loaded_slot, false);
 
     // Recalculate filters and delays for the current sample rate
     extern volatile AudioState audio_state;
@@ -1180,6 +1197,10 @@ uint8_t preset_delete(uint8_t slot) {
         __dmb();
 
         apply_factory_defaults();
+        // The active preset context is now empty — re-derive master volume the
+        // same way loading an empty preset does (with-preset => factory default,
+        // independent => untouched).
+        apply_master_volume_from_mode(NULL, false);
 
         extern volatile AudioState audio_state;
         float rate = (float)audio_state.freq;
@@ -1385,11 +1406,12 @@ int preset_boot_load(void) {
         }
 
         // Load the slot: user data if occupied, factory defaults if empty
+        const PresetSlot *boot_slot = NULL;
         if ((dir_cache.slot_occupied & (1u << target_slot))) {
             const PresetSlot *s = validate_slot(target_slot);
             if (s) {
                 apply_slot_to_live(s, dir_cache.include_pins != 0);
-                apply_master_volume_from_mode(s);
+                boot_slot = s;
             } else {
                 // Corrupt data — fall back to factory defaults
                 apply_factory_defaults();
@@ -1397,6 +1419,9 @@ int preset_boot_load(void) {
         } else {
             apply_factory_defaults();
         }
+        // Boot restore: always re-apply master volume per mode (independent =>
+        // saved directory value, with-preset => slot value, NULL => default).
+        apply_master_volume_from_mode(boot_slot, true);
 
         dir_cache.last_active_slot = target_slot;
         return FLASH_OK;
@@ -1408,10 +1433,10 @@ int preset_boot_load(void) {
         const PresetSlot *s = validate_slot(0);
         if (s) {
             apply_slot_to_live(s, false);  // Legacy migration: don't override pins
-            apply_master_volume_from_mode(s);
         } else {
             apply_factory_defaults();
         }
+        apply_master_volume_from_mode(s, true);  // boot restore (s==NULL on fail)
         return FLASH_OK;
     }
 
@@ -1419,6 +1444,7 @@ int preset_boot_load(void) {
     dir_ensure();
     dir_flush();
     apply_factory_defaults();
+    apply_master_volume_from_mode(NULL, true);  // boot restore (default value)
     return FLASH_OK;
 }
 
@@ -1472,12 +1498,13 @@ static void apply_factory_defaults(void) {
         global_preamp_linear[i]  = 1.0f;
     }
 
-    // Master volume — defer to the mode-aware helper so mode 0 restores the
-    // directory's independent value instead of always stomping to unity.
-    // (Mode 1 with slot_or_null=NULL also falls back to the directory value.)
-    // Notifications are emitted via update_master_volume() inside
-    // apply_master_volume_db().
-    apply_master_volume_from_mode(NULL);
+    // Master volume is intentionally NOT touched here.  This resets only the
+    // DSP processing chain; the master-volume ceiling is owned exclusively by
+    // apply_master_volume_from_mode(), which the preset-*context* callers
+    // (preset_load / preset_delete / preset_boot_load) invoke after this
+    // returns.  flash_factory_reset() deliberately does not, so a factory reset
+    // leaves the ceiling intact.  See
+    // Documentation/Features/master_volume_independent_load.md.
 
     // Vendor user mute — session-only flag (not persisted); clear on factory
     // reset so a previously-asserted vendor mute doesn't leave the device
