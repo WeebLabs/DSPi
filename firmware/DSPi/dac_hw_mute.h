@@ -22,17 +22,15 @@
  * INTEGRATION SEAMS (main.c):
  *   - core0_init() → dac_hw_mute_init(&dir_cache.dac_hw_mute) once
  *     after preset_boot_load() so the loaded config applies at boot.
- *   - prepare_pipeline_reset() → dac_hw_mute_wait_soft_envelope() then
- *     dac_hw_mute_assert() AFTER engaging the existing soft-mute
- *     envelope.  Order rationale: soft envelope first so the DAC's
- *     last DMA-fed sample before assert is silent; hardware mute
- *     second so the DAC's internal soft-ramp starts from already-
- *     silent amplitude rather than mid-amplitude.  Both layers
- *     protect against different failure modes (data path vs. clock
- *     path).
+ *   - prepare_pipeline_reset() → dac_hw_mute_assert() AFTER engaging
+ *     the existing soft-mute envelope.  The software envelope handles
+ *     the data path; the hardware mute hold gives the DAC's analog
+ *     stage time to ramp down before clocks stop.
  *   - complete_pipeline_reset() → dac_hw_mute_release() AFTER the
- *     synchronized PIO SM start so the DAC sees clocks restarted then
- *     mute released — analog ramp-up happens with valid clocks.
+ *     synchronized PIO SM start so the DAC sees clocks restarted
+ *     before the mute pin is deasserted.  If release_ms is non-zero,
+ *     the pin remains asserted until dac_hw_mute_tick() reaches the
+ *     release deadline.
  *
  * ZERO-COST WHEN DISABLED: every public entry point early-exits if
  * cfg.enabled == 0.  The audio-path inner loops never call this
@@ -89,8 +87,9 @@
  * at least 1 when the feature is enabled — a 0-ms hold would defeat
  * the whole purpose (we'd stop clocks before the DAC's analog ramp
  * completed).  500 ms is well above any datasheet-published ramp.
- * release_ms 0 means "no dwell" — the audio pipeline's soft envelope
- * handles the un-mute ramp naturally as preset_loading clears. */
+ * release_ms 0 means "release as soon as clocks are running again";
+ * non-zero keeps the pin asserted after clock restart without
+ * blocking the main loop. */
 #define DAC_HW_MUTE_HOLD_MS_MIN      1u
 #define DAC_HW_MUTE_HOLD_MS_MAX      500u
 #define DAC_HW_MUTE_RELEASE_MS_MIN   0u
@@ -123,7 +122,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  pin;                      /* GPIO; DAC_HW_MUTE_PIN_NONE = no pin */
     uint8_t  reserved0;                /* alignment for hold_ms */
     uint16_t hold_ms;                  /* mute-attack hold before clock-stop */
-    uint16_t release_ms;               /* dwell after un-mute before resume */
+    uint16_t release_ms;               /* post-clock-restart hold before unmute */
     uint8_t  reserved[8];              /* zero-fill */
 } DacHwMuteConfig;
 
@@ -197,13 +196,14 @@ void dac_hw_mute_get_config(DacHwMuteConfig *out);
  * harmless re-drive of the same pin levels. */
 void dac_hw_mute_assert(void);
 
-/* Drive all configured mute pins to "un-muted" per polarity.  Called
- * from complete_pipeline_reset() AFTER the synchronized PIO SM start,
- * so the DAC sees valid clocks the moment its analog ramp-up begins.
- * If release_ms > 0, busy-waits before returning to give the DAC's
- * analog stage time to settle before the audio pipeline's own
- * envelope un-mutes (which happens naturally when preset_loading
- * clears).  Safe to call when feature disabled (no-op). */
+/* Begin release of the pipeline-reset hardware mute.  Called from
+ * complete_pipeline_reset() AFTER the synchronized PIO SM start, so
+ * the DAC sees valid clocks before its mute pin deasserts.  If
+ * release_ms == 0, deasserts immediately.  If release_ms > 0, leaves
+ * the pin asserted, records a deadline, and returns; dac_hw_mute_tick()
+ * deasserts the pin later so the main loop can keep draining SPDIF/USB
+ * audio while the external DAC remains muted.  Safe to call when
+ * feature disabled (no-op). */
 void dac_hw_mute_release(void);
 
 /* ----- Diagnostics / vendor test ----- */
@@ -215,7 +215,7 @@ void dac_hw_mute_release(void);
 bool dac_hw_mute_is_asserted(void);
 
 /* Begin an asynchronous ~1 second test mute pulse.  Asserts the
- * mute pin immediately and records a release deadline; returns
+ * mute pin immediately and records a test deadline; returns
  * without blocking.  The release fires from dac_hw_mute_tick()
  * called by the main loop on its normal cadence — so the audio
  * pipeline keeps draining the USB ring and feeding the SPDIF/I²S
@@ -232,11 +232,11 @@ bool dac_hw_mute_is_asserted(void);
  * extended. */
 uint8_t dac_hw_mute_test_start(void);
 
-/* Main-loop tick.  Cheap when no test is active (one variable load +
- * branch).  When a test is in flight and the deadline has passed,
- * releases the mute pin.  Call once per main-loop iteration alongside
- * usb_notify_tick() / lg_sound_sync_tick().  Same threading model:
- * single-producer (main thread only). */
+/* Main-loop tick.  Cheap when no deadline is active (two loads +
+ * branches).  Clears expired diagnostic-test and pipeline-release
+ * holds.  Call once per main-loop iteration alongside usb_notify_tick()
+ * / lg_sound_sync_tick().  Same threading model: single-producer
+ * (main thread only). */
 void dac_hw_mute_tick(void);
 
 /* Returns true iff `pin` is currently claimed by this module.  Used

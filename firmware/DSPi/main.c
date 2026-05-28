@@ -492,15 +492,15 @@ static void reset_usb_feedback_loop(void) {
 // ---------------------------------------------------------------------------
 
 // Phase 1: prepare for disruptive pipeline work.
-// Waits for Core 1 EQ worker to finish, engages the audio soft-mute
+// Waits for Core 1 EQ worker to finish, arms the audio soft-mute
 // envelope, then asserts the DAC hardware mute (if configured) and
 // holds for the user-configured hold_ms.  The order is intentional:
-// soft envelope first so the I²S DMA tail is ramping toward zero;
-// hardware mute second so the DAC chip's analog output is silenced
-// by its own internal ramp before the caller stops BCK/LRCLK.
-// Together they cover both failure modes — data discontinuity at the
-// DMA tail AND analog DC-step on clock cessation.  Hardware mute is
-// a no-op when disabled (zero-cost when not configured).
+// the software mute state is visible before disruptive work begins,
+// and the hardware mute gives the DAC chip's analog output time to
+// ramp down before the caller stops BCK/LRCLK.  Together they cover
+// both failure modes — data-path discontinuity and analog DC-step on
+// clock cessation.  Hardware mute is a no-op when disabled (zero-cost
+// when not configured).
 static void prepare_pipeline_reset(uint32_t mute_samples) {
     if (core1_mode == CORE1_MODE_EQ_WORKER) {
         while (core1_eq_work.work_ready && !core1_eq_work.work_done)
@@ -672,13 +672,11 @@ static void complete_pipeline_reset(void) {
     // for the (bounded) race with the SOF ISR.
     reset_usb_feedback_loop();
 
-    // Phase 4: release hardware mute.  Order is critical: clocks must
-    // be running (Phase 2 completed) BEFORE the mute pin de-asserts,
-    // so the DAC's analog ramp-up happens with valid clocks.  If
-    // release_ms > 0 this also dwells briefly to let the DAC's
-    // analog stage settle before the audio pipeline's soft envelope
-    // ramps back up (which happens naturally as preset_loading
-    // clears).  No-op when feature disabled.
+    // Phase 4: begin hardware-mute release.  Order is critical: clocks
+    // must be running (Phase 2 completed) BEFORE the mute pin deasserts.
+    // If release_ms > 0, dac_hw_mute_release() leaves the pin asserted
+    // and returns; dac_hw_mute_tick() deasserts it later so the input
+    // pipeline keeps draining while the DAC remains muted.
     dac_hw_mute_release();
 }
 
@@ -1102,9 +1100,9 @@ int main(void) {
         // Cheap on the not-applicable path; safe to call every loop.
         lg_sound_sync_tick();
 
-        // DAC hardware-mute deadline check — releases the async test
-        // pulse on schedule.  Single byte load + branch when no test
-        // is in flight (the steady state).
+        // DAC hardware-mute deadline check — releases async test pulses
+        // and post-clock-restart release holds on schedule.  Two loads +
+        // branches when no deadline is in flight (the steady state).
         dac_hw_mute_tick();
 
         // Drain USB audio ring — highest priority (only when USB is active input).
@@ -1147,8 +1145,8 @@ int main(void) {
                     // XSMT pin would stay asserted indefinitely and the DAC's analog
                     // stage would never un-mute.  Order matches complete_pipeline_reset()
                     // Phase 4: clocks running (enable_outputs_in_sync above) BEFORE
-                    // the mute pin de-asserts, so the DAC's analog ramp-up happens
-                    // with valid BCK/LRCLK.
+                    // mute release begins, so either immediate deassert or the
+                    // delayed release_ms deadline happens with valid BCK/LRCLK.
                     dac_hw_mute_release();
                 }
             }

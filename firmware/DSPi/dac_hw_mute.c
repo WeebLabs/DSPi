@@ -23,10 +23,16 @@
  *     subsystem.  Driving a level would briefly assert mute on a
  *     freshly-released pin which is wasteful.
  *
- *   - Busy-waits use time_us_64() with tight_loop_contents() so the
- *     ARM WFE hint can fire.  sleep_ms() is avoided because we run
- *     inside deferred pipeline-reset blocks where sleep_ms() could
- *     yield to other deferred work and recursively trigger a reset.
+ *   - The pre-clock-stop hold uses time_us_64() with
+ *     tight_loop_contents() so the ARM WFE hint can fire.  sleep_ms()
+ *     is avoided because we run inside deferred pipeline-reset blocks
+ *     where sleep_ms() could yield to other deferred work and
+ *     recursively trigger a reset.
+ *
+ *   - The post-clock-restart release hold is asynchronous: the mute
+ *     pin remains asserted, a deadline is recorded, and the main-loop
+ *     dac_hw_mute_tick() deasserts later.  This keeps the SPDIF
+ *     in-to-out path draining while the external DAC remains muted.
  *
  *   - Persistence is via flash_storage.c's directory cache.  This
  *     module does not directly touch flash — dac_hw_mute_set_config()
@@ -57,13 +63,6 @@ extern uint8_t i2s_mck_pin;
 extern bool    i2s_mck_enabled;
 extern uint8_t spdif_rx_pin;
 
-/* The soft-mute envelope counter — defined in flash_storage.c (the
- * historical home of the preset_loading mute machinery).  We read it
- * here in the busy-wait helper to know when the audio path has
- * finished ramping data to zero. */
-extern volatile uint32_t preset_mute_counter;
-extern volatile bool     preset_loading;
-
 /* ----------------------------------------------------------------- */
 /* File-scope state                                                   */
 /* ----------------------------------------------------------------- */
@@ -80,14 +79,23 @@ static DacHwMuteConfig s_cfg;
  * call. */
 static bool s_pin_claimed = false;
 
-/* Whether mute is currently asserted.  Used by
- * dac_hw_mute_is_asserted() and to short-circuit redundant
- * assert/release calls during the test-pulse path. */
+/* Whether mute is currently asserted on the physical/logical output.
+ * Used by dac_hw_mute_is_asserted(). */
 static bool s_asserted = false;
+
+/* Pipeline-reset lifecycle latch.  Set by dac_hw_mute_assert() and
+ * cleared by dac_hw_mute_release().  While true, the pin remains
+ * asserted indefinitely regardless of diagnostic-test deadlines. */
+static bool s_lifecycle_asserted = false;
+
+/* Asynchronous post-clock-restart release deadline.  0 = no delayed
+ * lifecycle release in flight.  When non-zero, the pin remains muted
+ * until dac_hw_mute_tick() observes the deadline has passed. */
+static uint64_t s_lifecycle_release_us = 0;
 
 /* Asynchronous test-pulse deadline.  0 = no test in flight.  When
  * non-zero, dac_hw_mute_tick() compares against time_us_64() each
- * iteration and releases the mute pin once the deadline has passed.
+ * iteration and releases the test hold once the deadline has passed.
  * Async design (rather than a blocking 1-second busy-wait) is
  * essential — a busy-wait in the test path would block the main
  * loop, starving usb_audio_drain_ring() and producing an audible
@@ -147,14 +155,37 @@ static bool collides_with_other_subsystem(uint8_t pin) {
     return false;
 }
 
-/* Drive the configured mute pin to `level`.  Used by both assert
- * (level = muted_level()) and release (level = unmuted_level()).  No-op
- * when the pin isn't claimed — keeps assert/release branch-free of
- * "is the feature even on" checks (the caller's enabled check is the
- * single gate). */
+/* Drive the configured mute pin to `level`.  Used by refresh_pin_assertion()
+ * for both assert (level = muted_level()) and release (level =
+ * unmuted_level()).  No-op when the pin isn't claimed. */
 static inline void drive_pin(bool level) {
     if (!s_pin_claimed) return;
     gpio_put(s_cfg.pin, level);
+}
+
+/* Return a non-zero absolute deadline `delay_us` in the future.  Zero
+ * is the "no deadline" sentinel, so avoid returning it on the
+ * vanishingly unlikely 64-bit wrap boundary. */
+static uint64_t make_deadline_us(uint64_t delay_us) {
+    uint64_t deadline = time_us_64() + delay_us;
+    return deadline == 0 ? 1 : deadline;
+}
+
+/* Apply the OR of every reason the mute pin should remain asserted.
+ * This prevents a diagnostic test expiry from unmuting during a
+ * pipeline reset, and prevents a pipeline release expiry from ending
+ * an in-flight test pulse. */
+static void refresh_pin_assertion(void) {
+    if (s_cfg.enabled == 0 || !s_pin_claimed) {
+        s_asserted = false;
+        return;
+    }
+
+    bool should_assert = s_lifecycle_asserted ||
+                         (s_lifecycle_release_us != 0) ||
+                         (s_test_release_us != 0);
+    drive_pin(should_assert ? muted_level() : unmuted_level());
+    s_asserted = should_assert;
 }
 
 /* Busy-wait `wait_ms` milliseconds using time_us_64().  Inserted
@@ -215,6 +246,9 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
     if (!cfg || cfg->enabled == 0) {
         memset(&s_cfg, 0, sizeof(s_cfg));
         s_asserted = false;
+        s_lifecycle_asserted = false;
+        s_lifecycle_release_us = 0;
+        s_test_release_us = 0;
         return;
     }
     memcpy(&s_cfg, cfg, sizeof(s_cfg));
@@ -227,6 +261,9 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
         claim_pin(s_cfg.pin);
     }
     s_asserted = false;
+    s_lifecycle_asserted = false;
+    s_lifecycle_release_us = 0;
+    s_test_release_us = 0;
 }
 
 uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg) {
@@ -278,25 +315,29 @@ void dac_hw_mute_get_config(DacHwMuteConfig *out) {
 /* ----------------------------------------------------------------- */
 
 void dac_hw_mute_assert(void) {
-    if (s_cfg.enabled == 0) return;
+    if (s_cfg.enabled == 0 || !s_pin_claimed) return;
     /* Drive pin first, THEN wait — the DAC's ramp clock starts at
      * the edge of the pin transition, so any hold cycles spent
-     * before the drive are wasted. */
-    drive_pin(muted_level());
-    s_asserted = true;
+     * before the drive are wasted.  A new lifecycle assert supersedes
+     * any previous delayed lifecycle release. */
+    s_lifecycle_asserted = true;
+    s_lifecycle_release_us = 0;
+    refresh_pin_assertion();
     mute_busy_wait_ms(s_cfg.hold_ms);
 }
 
 void dac_hw_mute_release(void) {
-    if (s_cfg.enabled == 0) return;
-    drive_pin(unmuted_level());
-    s_asserted = false;
-    /* Optional dwell — most DAC chips ramp back to normal level
-     * quickly enough that release_ms = 0 is fine; users with
-     * sensitive analog paths can add a few ms to let the DAC's
-     * internal ramp-up finish before the audio pipeline's soft
-     * envelope un-mutes. */
-    mute_busy_wait_ms(s_cfg.release_ms);
+    if (s_cfg.enabled == 0 || !s_pin_claimed) return;
+    if (!s_lifecycle_asserted) return;
+
+    s_lifecycle_asserted = false;
+    if (s_cfg.release_ms == 0) {
+        s_lifecycle_release_us = 0;
+    } else {
+        s_lifecycle_release_us =
+            make_deadline_us((uint64_t)s_cfg.release_ms * 1000ull);
+    }
+    refresh_pin_assertion();
 }
 
 /* ----------------------------------------------------------------- */
@@ -319,26 +360,31 @@ uint8_t dac_hw_mute_test_start(void) {
 
     /* Assert immediately, record release deadline.  dac_hw_mute_tick()
      * polls the deadline from the main loop. */
-    drive_pin(muted_level());
-    s_asserted = true;
-    s_test_release_us = time_us_64() + DAC_HW_MUTE_TEST_DURATION_US;
+    s_test_release_us = make_deadline_us(DAC_HW_MUTE_TEST_DURATION_US);
+    refresh_pin_assertion();
     return PIN_CONFIG_SUCCESS;
 }
 
 void dac_hw_mute_tick(void) {
-    /* Hot path is "no test active" — single byte load + branch. */
-    if (s_test_release_us == 0) return;
-    if ((int64_t)(s_test_release_us - time_us_64()) > 0) return;
+    /* Hot path is "no deadline active" — two loads + branches. */
+    if (s_test_release_us == 0 && s_lifecycle_release_us == 0) return;
 
-    /* Deadline reached — release.  Note we don't honor release_ms
-     * here: this is a diagnostic pulse, not a pipeline-reset
-     * release, and the audio path has been running throughout (not
-     * waiting to ramp the soft envelope back up).  An extra dwell
-     * would just delay the audible "audio is back" without adding
-     * any protection. */
-    drive_pin(unmuted_level());
-    s_asserted = false;
-    s_test_release_us = 0;
+    uint64_t now = time_us_64();
+    bool changed = false;
+
+    if (s_test_release_us != 0 &&
+        (int64_t)(s_test_release_us - now) <= 0) {
+        s_test_release_us = 0;
+        changed = true;
+    }
+
+    if (s_lifecycle_release_us != 0 &&
+        (int64_t)(s_lifecycle_release_us - now) <= 0) {
+        s_lifecycle_release_us = 0;
+        changed = true;
+    }
+
+    if (changed) refresh_pin_assertion();
 }
 
 bool dac_hw_mute_owns_pin(uint8_t pin) {

@@ -250,7 +250,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  pin;                    // GPIO; 0xFF = no pin
     uint8_t  reserved0;              // alignment for hold_ms
     uint16_t hold_ms;                // mute-attack hold before clock-stop
-    uint16_t release_ms;             // dwell after un-mute
+    uint16_t release_ms;             // post-clock-restart hold before unmute
     uint8_t  reserved[8];            // zero-fill
 } WireDacHwMute;                     // 16 bytes
 
