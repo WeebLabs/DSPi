@@ -25,7 +25,13 @@
  *   - prepare_pipeline_reset() → dac_hw_mute_assert() AFTER engaging
  *     the existing soft-mute envelope.  The software envelope handles
  *     the data path; the hardware mute hold gives the DAC's analog
- *     stage time to ramp down before clocks stop.
+ *     stage time to ramp down before clocks stop.  assert() is
+ *     non-blocking — it drives the pin and arms a hold deadline only.
+ *   - The hold is enforced by the caller, non-blockingly: the main loop
+ *     defers the clock-stopping work (complete_pipeline_reset() teardown,
+ *     process_type_switches(), or drain_and_disable_outputs()) until
+ *     dac_hw_mute_hold_elapsed() returns true, so audio keeps draining
+ *     during the hold instead of busy-waiting.
  *   - complete_pipeline_reset() → dac_hw_mute_release() AFTER the
  *     synchronized PIO SM start so the DAC sees clocks restarted
  *     before the mute pin is deasserted.  If release_ms is non-zero,
@@ -189,12 +195,22 @@ void dac_hw_mute_get_config(DacHwMuteConfig *out);
 
 /* ----- Pipeline-reset lifecycle hooks ----- */
 
-/* Drive all configured mute pins to "muted" per polarity, then busy-
- * wait hold_ms so the DAC's internal soft-ramp completes before the
- * caller stops the I²S clocks.  Safe to call when feature disabled
- * (no-op).  Idempotent — calling assert while already asserted is a
- * harmless re-drive of the same pin levels. */
+/* Drive the configured mute pin to "muted" per polarity and arm the
+ * pre-clock-stop hold deadline.  NON-BLOCKING: returns immediately; the
+ * caller must poll dac_hw_mute_hold_elapsed() and defer the clock-stop
+ * until it returns true.  Safe to call when feature disabled (no-op).
+ * Idempotent — calling assert while already asserted is a harmless
+ * re-drive of the same pin level and does NOT re-arm (extend) the hold,
+ * so the main-loop reset gate can call it every iteration while it waits
+ * without the deadline ever slipping out of reach. */
 void dac_hw_mute_assert(void);
+
+/* Returns true once the hold armed by dac_hw_mute_assert() has elapsed —
+ * i.e. it is safe to stop the output clocks.  Also returns true when the
+ * feature is disabled, no pin is claimed, or no hold is armed (hold_ms ==
+ * 0), keeping callers zero-latency in the common (feature-off) case.
+ * Cheap: one byte load + (when armed) one 64-bit compare. */
+bool dac_hw_mute_hold_elapsed(void);
 
 /* Begin release of the pipeline-reset hardware mute.  Called from
  * complete_pipeline_reset() AFTER the synchronized PIO SM start, so

@@ -1838,7 +1838,7 @@ This matches the user's product-level decision; it differs from the industry-sta
 ---
 
 ## DAC Hardware Mute
-*Last updated: 2026-05-28*
+*Last updated: 2026-05-29*
 
 Configurable GPIO line that drives a hardware mute pin on an external I²S DAC (PCM5102A XSMT, WM8741 MUTEB, AK4493 SMUTE, etc.). Asserted before `complete_pipeline_reset()` halts the I²S state machine, so the DAC sees its analog output ramp to silence under its own internal control while BCK/LRCLK are still running — eliminating the audible thump that occurs when clocks stop mid-cycle with non-silent data in the DMA buffer. Spec doc: `Documentation/Features/dac_hardware_mute_spec.md`.
 
@@ -1850,7 +1850,8 @@ Self-contained module owning pin claim, lifecycle, persistence, and notify. Same
 
 - `dac_hw_mute_init(const DacHwMuteConfig *)` — called once from `core0_init()` after `preset_boot_load()` so the persisted config applies at boot. Idempotent (re-init releases old pins then claims new).
 - `dac_hw_mute_set_config(const DacHwMuteConfig *)` — validates (pin range, conflict, no internal duplicates, hold/release range), persists to directory via `preset_set_dac_hw_mute()`, applies live pin claim, emits `WireBulkParams.dac_hw_mute` notify. Main-loop only (blocks ~45 ms for flash write).
-- `dac_hw_mute_assert()` / `_release()` — pipeline-reset lifecycle hooks. Assert drives the claimed pin to muted polarity and busy-waits `hold_ms` before clocks stop. Release starts after clocks restart: `release_ms == 0` deasserts immediately, while `release_ms > 0` keeps the pin asserted, records a deadline, and returns.
+- `dac_hw_mute_assert()` / `_release()` — pipeline-reset lifecycle hooks. Assert drives the claimed pin to muted polarity and arms the `hold_ms` deadline; it is **non-blocking** (no busy-wait) and idempotent (re-asserting does not re-arm/extend the hold). Release starts after clocks restart: `release_ms == 0` deasserts immediately, while `release_ms > 0` keeps the pin asserted, records a deadline, and returns.
+- `dac_hw_mute_hold_elapsed()` — barrier predicate the caller polls before stopping clocks: true once the armed hold has elapsed (or the feature is off / no hold armed). Lets the assert→clock-stop hold run asynchronously instead of as a main-loop-stalling busy-wait.
 - `dac_hw_mute_tick()` — main-loop deadline service for diagnostic test pulses and delayed pipeline releases. When a release deadline expires, it deasserts the pin only if no other mute reason is active.
 - `dac_hw_mute_owns_pin(uint8_t pin)` — pin-conflict gate used by `is_pin_in_use()` in `vendor_commands.c`. Other pin-setting commands reject pins this module owns.
 - `dac_hw_mute_test_start()` — asynchronous 1-second mute pulse for install verification (`REQ_TEST_DAC_HW_MUTE`).
@@ -1858,6 +1859,14 @@ Self-contained module owning pin claim, lifecycle, persistence, and notify. Same
 ### Integration with pipeline reset
 
 `prepare_pipeline_reset()` arms the soft envelope (`preset_loading + preset_mute_counter`) then calls `dac_hw_mute_assert()`. Order: software mute state is visible before disruptive work begins; hardware mute second gives the DAC's analog stage time to ramp down before clocks stop. The two layers cover different failure modes — data-path discontinuity and analog DC-step on clock cessation.
+
+**The hold is asynchronous — the main loop never busy-waits.** `dac_hw_mute_assert()` only arms a deadline; the hold is enforced at the *clock-stop boundary*, which splits into two cases:
+- **Synchronous reset handlers** (preset load, factory reset, bulk params, rate change, stream restart, output-type switch, input-source switch) stop clocks in the same iteration they start. Each gates its body on `pipeline_reset_ready()` — a thin helper = `dac_hw_mute_assert()` + `dac_hw_mute_hold_elapsed()`. While the hold is incomplete the body is skipped and the pending flag is left set, so the loop falls through and keeps servicing audio; the handler retries next iteration. The idempotent assert (no hold re-arm) makes calling the gate every iteration safe. **The gate engages only the hardware mute, never `preset_loading`:** `preset_loading` also triggers the earlier SPDIF lock-acquisition block, and holding it true across the wait would make that block run `drain_and_disable_outputs()` on the same iteration the body re-enables outputs — a double `enable_outputs_in_sync()` with no teardown between, breaking slot alignment. The body's own `prepare_pipeline_reset()` sets `preset_loading` at the proper time (right before teardown), preserving the SPDIF block's original ordering (it reacts on the *next* iteration, after the body's `complete`).
+- **SPDIF lock/prefill path** already defers `drain_and_disable_outputs()` (its clock-stop) to a post-lock iteration; it adds `&& dac_hw_mute_hold_elapsed()` to that block's condition so even an instant re-lock still honors the hold. (These Category-B sites assert via `prepare_pipeline_reset()` directly, so they do set `preset_loading` — the block's trigger.)
+
+`perform_rate_change()` and `process_type_switches()` keep their internal `prepare_pipeline_reset()` calls; reached from an already-gated handler these are harmless idempotent re-engages, and their teardown runs after the hold. Flash writes (inherently ≈45 ms IRQ-off blocking) fold the hold into their existing fade-settle loop rather than gating. The boot-time `process_type_switches()` (before the main loop, no audio) proceeds without a hold.
+
+Previously the hold was a `time_us_64()` busy-wait inside `dac_hw_mute_assert()`; it stalled the main loop for up to `hold_ms`, starving the SPDIF in-to-out path and delaying boot-into-SPDIF and input-source switches. The async barrier removes that stall while preserving the exact teardown/synchronized-restart sequence (inter-slot phase alignment unchanged).
 
 `complete_pipeline_reset()` adds a Phase 4: after `reset_usb_feedback_loop()`, calls `dac_hw_mute_release()`. Clocks restarted first (Phase 2), then release begins. With `release_ms == 0`, the mute pin deasserts immediately. With `release_ms > 0`, the pin remains asserted until `dac_hw_mute_tick()` observes the deadline; the main loop keeps draining USB/SPDIF audio during the hold, so consumer buffers do not pile up behind a busy-wait.
 
@@ -1869,7 +1878,7 @@ Self-contained module owning pin claim, lifecycle, persistence, and notify. Same
 - `enabled` (0/1) — feature gate
 - `active_low` (0/1) — assert level polarity (most DACs use active-low: PCM5102A XSMT, WM8741 MUTEB)
 - `pin` — single GPIO that drives the DAC's MUTE input; `0xFF` = no pin (feature effectively disabled). One pin only, because `complete_pipeline_reset()` is a global event that disables and re-enables ALL output slots together — per-slot mute pins would give no behavioural benefit. Installations with multiple separate DACs wire their MUTE inputs together to one RP2 GPIO externally; the firmware sees one pin regardless of topology.
-- `hold_ms` (1..500) — busy-wait after assert. Sized to cover the DAC's internal soft-ramp at the lowest supported sample rate.
+- `hold_ms` (1..500) — pre-clock-stop hold after assert, enforced asynchronously (caller polls `dac_hw_mute_hold_elapsed()`; no busy-wait). Sized to cover the DAC's internal soft-ramp at the lowest supported sample rate.
 - `release_ms` (0..500) — optional post-clock-restart hold before the mute pin deasserts. Implemented asynchronously from `dac_hw_mute_tick()`, not as a busy-wait.
 - `reserved` bytes — zero-fill padding to 16 bytes; NOT earmarked for register-mute (out of scope).
 

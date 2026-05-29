@@ -1,6 +1,6 @@
 # DAC Hardware Mute Support — Implementation Spec
 
-*Last updated: 2026-05-28*
+*Last updated: 2026-05-29*
 *Status: implemented*
 *Platforms: RP2040 + RP2350*
 
@@ -117,9 +117,15 @@ void dac_hw_mute_get_config(DacHwMuteConfig *out);
 // Lifecycle hooks — called from main.c's pipeline reset.  Safe to call
 // when feature disabled (no-op).
 //
-// _assert(): drive the configured mute pin to "muted" and busy-wait
-// hold_ms so the DAC's internal soft ramp completes before clocks stop.
+// _assert(): drive the configured mute pin to "muted" and arm the hold
+// deadline.  NON-BLOCKING — the caller polls _hold_elapsed() and defers
+// the clock-stop until it returns true.  Idempotent: re-asserting does not
+// re-arm (extend) the hold, so the main-loop gate may call it every loop.
 void dac_hw_mute_assert(void);
+
+// _hold_elapsed(): true once the hold armed by _assert() has elapsed (or
+// the feature is off / no hold armed) — i.e. it is safe to stop clocks.
+bool dac_hw_mute_hold_elapsed(void);
 
 // _release(): begin release after clocks have restarted. If
 // release_ms == 0, deasserts immediately. If release_ms > 0, leaves
@@ -154,6 +160,7 @@ static DacHwMuteConfig s_cfg;
 static bool            s_pin_claimed;     // pin gpio_init'd + driven OUT
 static bool            s_asserted;        // current physical/logical output
 static bool            s_lifecycle_asserted;
+static uint64_t        s_lifecycle_hold_us;     // pre-clock-stop hold deadline
 static uint64_t        s_lifecycle_release_us;
 static uint64_t        s_test_release_us;
 ```
@@ -171,11 +178,50 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
     preset_loading = true;
     __dmb();
 
-    // (NEW) assert hardware mute and busy-wait hold_ms. Software mute
-    // state is visible before disruptive work begins; hardware mute
-    // gives the DAC analog stage time to ramp down before clocks stop.
+    // (NEW) assert hardware mute and arm the hold deadline. NON-BLOCKING:
+    // software mute state is visible before disruptive work begins; the
+    // hardware mute gives the DAC analog stage time to ramp down, enforced
+    // by the caller deferring the clock-stop (see gate below).
     dac_hw_mute_assert();
 }
+
+// Synchronous reset handlers (preset/factory/bulk/rate/stream/output-type/
+// input-source) stop clocks in the SAME iteration they start, so they gate
+// on this helper instead of busy-waiting the hold:
+//
+//   if (some_pending && pipeline_reset_ready()) {
+//       some_pending = false;
+//       ... usb_audio_drain_ring(); prepare_pipeline_reset(N); ...
+//   }
+//
+// While the hold is incomplete the body is skipped and the pending flag is
+// left set; the main loop keeps draining audio and the handler retries next
+// iteration.  dac_hw_mute_assert() is idempotent (does not re-arm/extend the
+// hold once asserted), so calling the gate every iteration is safe.
+//
+// CRITICAL: the gate engages ONLY the DAC hardware mute, NOT the soft-mute
+// flag (preset_loading).  preset_loading also triggers the SPDIF lock-
+// acquisition block, which runs EARLIER in the loop; holding it true across
+// the wait would make that block fire drain_and_disable_outputs() on the very
+// iteration the hold elapses — before the body's complete_pipeline_reset() —
+// leaving spdif_prefilling set so the prefill path re-enables a second time
+// with no teardown between, double-starting the SPDIF DMA and breaking inter-
+// slot alignment.  The handler body's own prepare_pipeline_reset() engages the
+// soft mute at the proper time (right before teardown), so the SPDIF block
+// keeps its original ordering (reacts on the NEXT iteration, after complete).
+static bool pipeline_reset_ready(void) {
+    dac_hw_mute_assert();
+    return dac_hw_mute_hold_elapsed();
+}
+
+// The SPDIF lock-acquisition path already defers its clock-stop
+// (drain_and_disable_outputs) to a later iteration; it just adds the same
+// barrier so a fast re-lock still honors the hold.  This guards the
+// Category-B sites that assert via prepare_pipeline_reset() directly
+// (boot-into-SPDIF, lock-loss, RX-pin swap), which DO set preset_loading:
+//
+//   if (LOCKED && preset_loading && !prefilling && dac_hw_mute_hold_elapsed())
+//       drain_and_disable_outputs(); ...
 
 static void complete_pipeline_reset(void) {
     // (existing) per-slot teardown — main IRQs enabled
@@ -200,18 +246,26 @@ static void complete_pipeline_reset(void) {
 }
 ```
 
-### 4.4 Hold/release timing
+### 4.4 Hold/release timing — both asynchronous
 
-`hold_ms` inside `_assert()` uses a `time_us_64()`-based busy-wait, not `sleep_ms()`. Reasons:
+Neither `hold_ms` nor `release_ms` is a busy-wait. Both are deadlines polled from the main loop, so audio servicing (USB ring drain, SPDIF poll, feedback) never stalls while the DAC ramps.
 
-- We're already inside a deferred pipeline-reset block. `sleep_ms()` would yield to other deferred work, which could trigger a nested pipeline reset (recursion).
-- The wait is bounded by the configured 500 ms maximum.
-- Audio is intentionally muted during this pre-clock-stop barrier.
-- `tight_loop_contents()` is invoked inside the wait loop so the WFE hint can fire if the platform supports it.
+**Hold (`hold_ms`, pre-clock-stop):** `_assert()` drives the pin to muted, records `s_lifecycle_hold_us = now + hold_ms`, and returns. The barrier is enforced at the *clock-stop boundary*, which falls into two cases:
 
-`release_ms` is not a busy-wait. `_release()` runs after clocks restart; if `release_ms > 0`, it keeps the mute pin asserted, records a deadline, and returns. `dac_hw_mute_tick()` later deasserts the pin. This keeps the SPDIF in-to-out path draining and prevents consumer buffers from filling during a long external mute release hold.
+- **Synchronous handlers** (preset/factory/bulk/rate/stream/output-type/input-source) stop clocks in the same iteration they start. They gate their body on `pipeline_reset_ready()` (= `dac_hw_mute_assert()` + `dac_hw_mute_hold_elapsed()`); until the hold elapses the body is skipped, the pending flag stays set, and the loop keeps draining audio. The idempotent assert (no hold re-arm on re-assert) makes calling it every iteration safe — the deadline never slips out of reach. The gate engages **only** the hardware mute — it must NOT set `preset_loading`, because that flag also drives the earlier SPDIF lock-acquisition block; holding it true across the wait would make that block tear down outputs on the same iteration the body re-enables them (a double-enable that breaks slot alignment — see §4.3). The body's own `prepare_pipeline_reset()` engages the soft mute at the right moment (right before teardown), which also fences Core 1 after the body's final `usb_audio_drain_ring()`.
+- **SPDIF lock/prefill path** (boot-into-SPDIF, USB→SPDIF, re-lock, RX-pin swap) already defers its clock-stop (`drain_and_disable_outputs()`) to a later iteration that waits for lock. These sites assert via `prepare_pipeline_reset()` directly (so they DO set `preset_loading`, the block's trigger); adding `&& dac_hw_mute_hold_elapsed()` to that block's condition guarantees the hold even on an instant re-lock, at the cost of a few extra non-blocking poll iterations.
 
-Both lifecycle helpers early-exit if the feature is disabled or no pin is claimed.
+During the hold the hardware mute pin is asserted (the DAC ramps to silence) while the rest of the pipeline keeps playing normally; the soft mute and clock-stop happen together when the body runs after the hold. This is correct because the hold exists solely to give the *DAC's analog stage* its head start — every other output is muted (soft) and torn down atomically by the body, exactly as without the feature.
+
+A blocking busy-wait here was the previous design; it stalled the main loop for up to `hold_ms`, starving the SPDIF in-to-out path and delaying boot-into-SPDIF / input-source switches. Removing it is the whole point of this revision.
+
+**Release (`release_ms`, post-clock-restart):** `_release()` runs after clocks restart; if `release_ms > 0` it keeps the pin asserted, records `s_lifecycle_release_us`, and returns. `dac_hw_mute_tick()` deasserts later, keeping the SPDIF in-to-out path draining during a long release hold.
+
+**Flash writes** (`prepare_flash_write_operation()`) are inherently blocking (≈45 ms IRQ-off), so there is nothing to yield to. The hold is folded into the existing fade-settle loop, which runs until both the settle window and `dac_hw_mute_hold_elapsed()` are satisfied — adding no blocking beyond `max(settle, hold)` and keeping the pipeline fed throughout. When not streaming the loop is skipped (no audio ⇒ no clock-stop thump ⇒ no hold needed).
+
+**Boot output-type switch** (`process_type_switches()` from `core0_init()`, before the main loop) runs with no audio playing, so its clock-stop cannot thump; it proceeds without a hold. This is the one path where the hold is intentionally not enforced, and it is harmless because there is no signal to protect.
+
+All lifecycle helpers early-exit (treating the hold as already elapsed) if the feature is disabled or no pin is claimed.
 
 ### 4.5 Pin claim / validation
 
@@ -327,7 +381,7 @@ The mute pin fires regardless of slot output type — it's tied to the pipeline-
 | Flash directory growth | +16 B |
 | Wire format growth | +16 B (V9 → V10) |
 | Audio-path overhead (feature disabled or enabled) | **0 cycles, 0 branches** in the inner DSP loop |
-| Pipeline-reset overhead (feature enabled) | + `hold_ms` busy-wait (typically 5–100 ms); `release_ms` is asynchronous |
+| Pipeline-reset overhead (feature enabled) | `hold_ms` and `release_ms` are both asynchronous (deadline-polled); the main loop keeps draining audio throughout. Only inherently-blocking flash writes absorb the hold into their existing settle window. |
 
 The audio-path zero-overhead is critical: the inner DSP loops never see this feature. All work happens in the pipeline-reset handler, which fires on lifecycle events only — never per-packet.
 
@@ -338,7 +392,7 @@ The audio-path zero-overhead is critical: the inner DSP loops never see this fea
 1. **Feature disabled (default), baseline:** verify no audible regression on existing input-switch path. Same pops as today on PCM5102A; clean on S/PDIF.
 2. **Feature enabled with valid pin, PCM5102A board:** verify input-switch pop eliminated. Scope on DAC AC-output cap should show ramp-to-silence over ~2 ms before BCK stops, instead of mid-amplitude cutoff.
 3. **`hold_ms` = 0:** confirm pop returns (proves the hold is doing its job — minus one).
-4. **`hold_ms` = 500 ms:** confirm input-switch takes 500+ ms but no audible artifacts beyond delay.
+4. **`hold_ms` = 500 ms:** confirm the un-mute is delayed 500+ ms with no audible artifacts beyond the delay, **and that the main loop never stalls** — USB stays responsive (host control requests answered, no enumeration hiccup) and SPDIF input keeps draining throughout the hold (no consumer-fill growth / RX FIFO overflow). This is the non-blocking-hold regression check.
 5. **Polarity inverted (`active_low` flipped):** confirm DAC stays muted permanently. Re-flip, confirm normal operation. (Proves polarity is honored.)
 6. **Pin conflict rejection:** try setting mute pin to GPIO 6 (S/PDIF out slot 0). Expect `PIN_CONFIG_PIN_IN_USE`.
 7. **Bulk apply:** send V10 bulk_params with dac_hw_mute section, confirm config takes effect identically to vendor command path.
@@ -350,6 +404,8 @@ The audio-path zero-overhead is critical: the inner DSP loops never see this fea
 13. **`REQ_SET_OUTPUT_PIN` to currently-claimed mute pin:** confirm rejection with `PIN_CONFIG_PIN_IN_USE`.
 14. **AK4493 with ATS=11 (11 ms ramp) and `hold_ms`=20:** verify no pop. Set `hold_ms`=5, verify pop returns.
 15. **`release_ms` with SPDIF input:** set a nonzero release hold, switch/relock SPDIF, and confirm the mute pin remains asserted for the configured period while `spdif_input_poll()` continues feeding output buffers without consumer fill growth.
+16. **Non-blocking hold on SPDIF paths (`hold_ms` = 200):** boot into a preset whose default source is SPDIF, and separately switch USB→SPDIF at runtime. Scope the mute pin: assert→clock-stop gap must be ≥ `hold_ms` on every run, and the main loop must keep servicing USB/SPDIF during the hold (the reported symptom — boot/switch no longer blocks).
+17. **Fast SPDIF re-lock honors the hold:** with SPDIF already present and stable, force a brief re-lock (e.g. momentary source toggle) so lock returns within a few ms. Confirm `drain_and_disable_outputs()` still waits for `dac_hw_mute_hold_elapsed()` — the assert→clock-stop gap stays ≥ `hold_ms` even though lock was near-instant.
 
 ---
 

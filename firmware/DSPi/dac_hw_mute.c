@@ -23,15 +23,18 @@
  *     subsystem.  Driving a level would briefly assert mute on a
  *     freshly-released pin which is wasteful.
  *
- *   - The pre-clock-stop hold uses time_us_64() with
- *     tight_loop_contents() so the ARM WFE hint can fire.  sleep_ms()
- *     is avoided because we run inside deferred pipeline-reset blocks
- *     where sleep_ms() could yield to other deferred work and
- *     recursively trigger a reset.
+ *   - The pre-clock-stop hold is asynchronous: dac_hw_mute_assert()
+ *     drives the pin to muted and records a deadline (s_lifecycle_hold_us)
+ *     but does NOT wait.  The caller polls dac_hw_mute_hold_elapsed() from
+ *     the main loop and only stops the output clocks once it returns true,
+ *     so audio servicing (USB ring drain, SPDIF poll) keeps running while
+ *     the DAC's analog stage ramps down.  A blocking busy-wait here would
+ *     stall the main loop — starving the SPDIF in-to-out path and delaying
+ *     boot-into-SPDIF / input-source switches by up to hold_ms.
  *
- *   - The post-clock-restart release hold is asynchronous: the mute
- *     pin remains asserted, a deadline is recorded, and the main-loop
- *     dac_hw_mute_tick() deasserts later.  This keeps the SPDIF
+ *   - The post-clock-restart release hold is asynchronous in the same way:
+ *     the mute pin remains asserted, a deadline is recorded, and the main-
+ *     loop dac_hw_mute_tick() deasserts later.  This keeps the SPDIF
  *     in-to-out path draining while the external DAC remains muted.
  *
  *   - Persistence is via flash_storage.c's directory cache.  This
@@ -50,7 +53,6 @@
 
 #include "hardware/gpio.h"
 #include "pico/time.h"         /* time_us_64 */
-#include "pico/stdlib.h"       /* tight_loop_contents */
 
 #include <stddef.h>
 #include <string.h>
@@ -87,6 +89,17 @@ static bool s_asserted = false;
  * cleared by dac_hw_mute_release().  While true, the pin remains
  * asserted indefinitely regardless of diagnostic-test deadlines. */
 static bool s_lifecycle_asserted = false;
+
+/* Asynchronous pre-clock-stop hold deadline.  0 = no hold armed (feature
+ * disabled or hold_ms == 0).  When non-zero, dac_hw_mute_hold_elapsed()
+ * reports the hold incomplete until time_us_64() reaches the deadline.
+ * The hold gives the DAC's analog stage time to ramp to silence BEFORE
+ * the caller stops the output clocks.  It is armed once per lifecycle
+ * (on the un-asserted -> asserted transition in dac_hw_mute_assert()) so
+ * the main-loop reset gate, which re-asserts every iteration while it
+ * waits, cannot push the deadline forward indefinitely.  Mirrors the
+ * asynchronous design of s_lifecycle_release_us below. */
+static uint64_t s_lifecycle_hold_us = 0;
 
 /* Asynchronous post-clock-restart release deadline.  0 = no delayed
  * lifecycle release in flight.  When non-zero, the pin remains muted
@@ -188,20 +201,6 @@ static void refresh_pin_assertion(void) {
     s_asserted = should_assert;
 }
 
-/* Busy-wait `wait_ms` milliseconds using time_us_64().  Inserted
- * tight_loop_contents() so the WFE hint can fire if the CPU supports
- * it.  Early-exit on wait_ms == 0 keeps callers branch-free.  Caller
- * is responsible for ensuring the wait runs in a context where
- * busy-waiting is acceptable (i.e. inside the deferred pipeline-reset
- * block where audio is muted regardless). */
-static void mute_busy_wait_ms(uint32_t wait_ms) {
-    if (wait_ms == 0) return;
-    uint64_t deadline = time_us_64() + (uint64_t)wait_ms * 1000ull;
-    while ((int64_t)(deadline - time_us_64()) > 0) {
-        tight_loop_contents();
-    }
-}
-
 /* Release the currently-claimed pin back to high-Z input state.
  * Used by init (when re-applying a new config) and by set_config when
  * the feature is being disabled.  Operates on s_cfg.pin only when
@@ -247,6 +246,7 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
         memset(&s_cfg, 0, sizeof(s_cfg));
         s_asserted = false;
         s_lifecycle_asserted = false;
+        s_lifecycle_hold_us = 0;
         s_lifecycle_release_us = 0;
         s_test_release_us = 0;
         return;
@@ -262,6 +262,7 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
     }
     s_asserted = false;
     s_lifecycle_asserted = false;
+    s_lifecycle_hold_us = 0;
     s_lifecycle_release_us = 0;
     s_test_release_us = 0;
 }
@@ -316,14 +317,24 @@ void dac_hw_mute_get_config(DacHwMuteConfig *out) {
 
 void dac_hw_mute_assert(void) {
     if (s_cfg.enabled == 0 || !s_pin_claimed) return;
-    /* Drive pin first, THEN wait — the DAC's ramp clock starts at
-     * the edge of the pin transition, so any hold cycles spent
-     * before the drive are wasted.  A new lifecycle assert supersedes
-     * any previous delayed lifecycle release. */
+    /* Drive pin first — the DAC's ramp clock starts at the edge of the pin
+     * transition.  Arm the hold deadline ONLY on a fresh lifecycle (the
+     * un-asserted -> asserted transition): the pipeline-reset gate calls
+     * this every main-loop iteration while it waits for the hold, and
+     * re-arming each call would push the deadline forward forever so it
+     * could never elapse.  A new lifecycle assert supersedes any previous
+     * delayed lifecycle release. */
+    if (!s_lifecycle_asserted) {
+        s_lifecycle_hold_us = (s_cfg.hold_ms == 0)
+            ? 0
+            : make_deadline_us((uint64_t)s_cfg.hold_ms * 1000ull);
+    }
     s_lifecycle_asserted = true;
     s_lifecycle_release_us = 0;
     refresh_pin_assertion();
-    mute_busy_wait_ms(s_cfg.hold_ms);
+    /* No busy-wait: the hold is enforced asynchronously by the caller
+     * polling dac_hw_mute_hold_elapsed() from the main loop, so audio
+     * servicing continues while the DAC's analog stage ramps down. */
 }
 
 void dac_hw_mute_release(void) {
@@ -331,6 +342,10 @@ void dac_hw_mute_release(void) {
     if (!s_lifecycle_asserted) return;
 
     s_lifecycle_asserted = false;
+    /* End the hold episode so the next assert arms a fresh deadline and
+     * dac_hw_mute_hold_elapsed() does not report a stale (already-passed)
+     * hold from this lifecycle. */
+    s_lifecycle_hold_us = 0;
     if (s_cfg.release_ms == 0) {
         s_lifecycle_release_us = 0;
     } else {
@@ -338,6 +353,16 @@ void dac_hw_mute_release(void) {
             make_deadline_us((uint64_t)s_cfg.release_ms * 1000ull);
     }
     refresh_pin_assertion();
+}
+
+bool dac_hw_mute_hold_elapsed(void) {
+    /* No hold to honor when the feature is off, no pin is claimed, or no
+     * hold deadline is armed (hold_ms == 0 / not yet asserted).  Returning
+     * true in these cases keeps the pipeline-reset gate zero-latency when
+     * the feature is disabled — the common case. */
+    if (s_cfg.enabled == 0 || !s_pin_claimed) return true;
+    if (s_lifecycle_hold_us == 0) return true;
+    return (int64_t)(s_lifecycle_hold_us - time_us_64()) <= 0;
 }
 
 /* ----------------------------------------------------------------- */

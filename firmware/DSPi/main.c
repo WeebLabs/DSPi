@@ -513,6 +513,49 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
     dac_hw_mute_assert();
 }
 
+// Non-blocking pre-clock-stop barrier for the synchronous reset handlers.
+//
+// These handlers (preset load, factory reset, bulk params, rate change,
+// stream restart, output-type switch, input source switch) stop the output
+// clocks in the SAME main-loop iteration that they start — so they cannot
+// busy-wait the DAC hardware-mute hold without stalling the loop (starving
+// usb_audio_drain_ring() / SPDIF polling).  Instead each such handler gates
+// its body on this helper:
+//
+//     if (some_pending && pipeline_reset_ready()) {
+//         some_pending = false;
+//         ... usb_audio_drain_ring(); prepare_pipeline_reset(N); ...
+//         ... disruptive work + complete_pipeline_reset() ...
+//     }
+//
+// While the hold has not elapsed the body is skipped and the pending flag is
+// left set, so the main loop falls through and keeps servicing audio; the
+// handler retries next iteration.  dac_hw_mute_assert() is idempotent (it does
+// not re-arm/extend the hold once asserted), so calling the gate every
+// iteration during the wait is safe and cheap and the deadline never slips.
+// Returns true immediately when the feature is disabled or hold_ms == 0.
+//
+// IMPORTANT — the gate engages ONLY the DAC hardware mute, NOT the soft-mute
+// flag (preset_loading).  preset_loading also triggers the SPDIF lock-
+// acquisition block, which runs EARLIER in the main loop; if the gate held
+// preset_loading true across the wait, that block would fire
+// drain_and_disable_outputs() on the very iteration the hold elapses — before
+// the handler body's complete_pipeline_reset() — leaving spdif_prefilling set
+// so the prefill path re-enables a second time with no teardown between, which
+// double-starts the SPDIF DMA and breaks inter-slot alignment.  By engaging
+// only the hardware mute here, the body's own prepare_pipeline_reset() sets
+// preset_loading at the proper time (right before teardown) exactly as it did
+// before this feature, so the SPDIF block keeps its original ordering (it
+// reacts on the NEXT iteration, after the body's complete).  The hardware mute
+// alone is what must lead the clock-stop; every other output keeps playing
+// until the body runs.  The body's prepare also fences Core 1 after the body's
+// final usb_audio_drain_ring().  The body's complete_pipeline_reset() (or the
+// SPDIF lock-block release) owns the matching dac_hw_mute_release().
+static bool pipeline_reset_ready(void) {
+    dac_hw_mute_assert();
+    return dac_hw_mute_hold_elapsed();
+}
+
 // Per-slot teardown: stop the output PIO SM, mask the channel's DMA IRQ,
 // abort the DMA, return the playing_buffer to the consumer pool, drain the
 // consumer pipeline, then re-arm the channel IRQ.  Safe to call with main
@@ -767,13 +810,25 @@ static void prepare_flash_write_operation(void) {
     // until the envelope reaches zero.  Prior to this fix, the settle loop
     // only drained the USB ring — for SPDIF input the RX FIFO filled and
     // overflowed and the output pools drained, producing post-save pops.
+    //
+    // The loop also absorbs the DAC hardware-mute hold armed by
+    // prepare_pipeline_reset() above: it runs until BOTH the settle window
+    // and dac_hw_mute_hold_elapsed() are satisfied, so the DAC has its full
+    // ramp time before complete_flash_write_operation_*() stops the clocks.
+    // Flash writes are inherently blocking (≈45 ms IRQ-off), so unlike the
+    // deferred main-loop reset handlers there is nothing to yield to here —
+    // folding the hold into the existing settle wait adds no blocking beyond
+    // max(settle, hold), and keeps the pipeline fed throughout.  When not
+    // streaming the loop is skipped: there is no audio, so no clock-stop
+    // thump and no hold to honor.
     extern volatile bool sync_started;
     bool usb_streaming   = (active_input_source == INPUT_SOURCE_USB) && sync_started;
     bool spdif_streaming = (active_input_source == INPUT_SOURCE_SPDIF) &&
                            (spdif_input_get_state() == SPDIF_INPUT_LOCKED);
     if (usb_streaming || spdif_streaming) {
         uint64_t start_us = time_us_64();
-        while ((time_us_64() - start_us) < FLASH_WRITE_FADE_SETTLE_US) {
+        while ((time_us_64() - start_us) < FLASH_WRITE_FADE_SETTLE_US
+               || !dac_hw_mute_hold_elapsed()) {
             if (active_input_source == INPUT_SOURCE_USB) {
                 usb_audio_drain_ring();
             } else {
@@ -1121,8 +1176,17 @@ int main(void) {
         if (active_input_source == INPUT_SOURCE_SPDIF) {
             SpdifInputState rx_state = spdif_input_get_state();
 
-            // Handle lock acquisition: drain outputs, prefill, then start
-            if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling) {
+            // Handle lock acquisition: drain outputs, prefill, then start.
+            // Gated on dac_hw_mute_hold_elapsed() so the DAC hardware-mute
+            // hold armed by prepare_pipeline_reset() (on the USB->SPDIF
+            // switch, boot-into-SPDIF, or re-lock) completes BEFORE
+            // drain_and_disable_outputs() stops the output clocks.  In the
+            // normal case lock takes far longer than hold_ms so this is
+            // already satisfied; the guard only adds a few non-blocking
+            // poll iterations on an instant re-lock.  Returns true with
+            // zero latency when the feature is disabled.
+            if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling
+                    && dac_hw_mute_hold_elapsed()) {
                 spdif_input_check_rate_change();
                 // Disable outputs and drain consumer buffers so they can
                 // be prefilled with real audio before playback begins.
@@ -1328,8 +1392,11 @@ int main(void) {
             restore_interrupts(flags);
         }
 
-        // Handle sample rate changes
-        if (rate_change_pending) {
+        // Handle sample rate changes.  Gated on the non-blocking DAC
+        // hardware-mute hold; perform_rate_change()'s own
+        // prepare_pipeline_reset() then engages the soft mute + Core 1 fence
+        // and re-asserts the (already-held) hardware mute idempotently.
+        if (rate_change_pending && pipeline_reset_ready()) {
             uint32_t r = pending_rate;
             rate_change_pending = false;
             usb_audio_drain_ring();  // Process old-rate packets before clock switch
@@ -1380,13 +1447,17 @@ int main(void) {
         // pipelines so consumer fill/phase starts aligned after host re-prime.
         {
             extern volatile bool stream_restart_resync_pending;
-            if (stream_restart_resync_pending) {
+            if (stream_restart_resync_pending && pipeline_reset_ready()) {
                 stream_restart_resync_pending = false;
                 __dmb();
 
                 usb_audio_drain_ring();   // Process remaining packets
                 usb_audio_flush_ring();   // Discard stale data from previous stream
 
+                // Engage the soft mute and fence Core 1 (the drains above
+                // re-dispatch it) before the synchronized teardown/restart.
+                // The gate held the DAC hardware mute; this re-asserts it
+                // idempotently (hold not re-armed).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
                 complete_pipeline_reset();
                 printf("USB stream restart: outputs resynced\n");
@@ -1406,7 +1477,7 @@ int main(void) {
             extern volatile uint8_t pending_preset_load_slot;
             extern volatile uint8_t pending_preset_save_slot;
 
-            if (preset_load_pending) {
+            if (preset_load_pending && pipeline_reset_ready()) {
                 preset_load_pending = false;
                 __dmb();
 
@@ -1418,6 +1489,9 @@ int main(void) {
                 memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
 
                 usb_audio_drain_ring();
+                // Engage the soft mute and fence Core 1 after the drain.  The
+                // gate held the DAC hardware mute; this re-asserts it
+                // idempotently (hold not re-armed).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
                 // Tear down SPDIF RX across the flash write (preset_load's
@@ -1580,7 +1654,7 @@ int main(void) {
             }
 
             extern volatile bool factory_reset_pending;
-            if (factory_reset_pending) {
+            if (factory_reset_pending && pipeline_reset_ready()) {
                 factory_reset_pending = false;
                 __dmb();
 
@@ -1592,6 +1666,10 @@ int main(void) {
                 memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
 
                 usb_audio_drain_ring();
+                // Engage the soft mute and fence Core 1 after the drain before
+                // mutating shared DSP state (delay-line zeroing below touches
+                // buffers Core 1 reads).  Gate held the DAC hardware mute;
+                // idempotent re-assert (hold not re-armed).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
                 flash_factory_reset();
@@ -1642,7 +1720,11 @@ int main(void) {
             extern volatile uint8_t output_type_change_mask;
             extern volatile uint8_t pending_output_types[];
 
-            if (output_type_change_mask) {
+            // Gated on the non-blocking DAC hardware-mute hold.
+            // process_type_switches()'s own prepare_pipeline_reset() then
+            // engages the soft mute + Core 1 fence and re-asserts the
+            // (already-held) hardware mute; its teardown runs after the hold.
+            if (output_type_change_mask && pipeline_reset_ready()) {
                 uint8_t mask = output_type_change_mask;
                 output_type_change_mask = 0;
                 __dmb();
@@ -1651,7 +1733,7 @@ int main(void) {
         }
 
         // Handle bulk parameter SET (deferred from USB IRQ)
-        if (bulk_params_pending) {
+        if (bulk_params_pending && pipeline_reset_ready()) {
             bulk_params_pending = false;
 
             extern uint8_t output_types[];
@@ -1666,6 +1748,10 @@ int main(void) {
             memcpy(old_types, output_types, NUM_SPDIF_INSTANCES);
 
             usb_audio_drain_ring();  // Process before full state swap
+            // Engage the soft mute and fence Core 1 after the drain before
+            // bulk_params_apply() mutates coefficients / matrix state Core 1
+            // reads.  Gate held the DAC hardware mute; idempotent re-assert
+            // (hold not re-armed).
             prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
             // Apply the received parameters (pin config gated by include_pins setting)
@@ -1729,14 +1815,24 @@ int main(void) {
 
         // Handle deferred input source switch
         if (input_source_change_pending) {
-            input_source_change_pending = false;
-            __dmb();
-
             uint8_t new_source = pending_input_source;
             uint8_t old_source = active_input_source;
+            bool real_switch = (new_source != old_source) && input_source_valid(new_source);
 
-            if (new_source != old_source && input_source_valid(new_source)) {
+            if (!real_switch) {
+                // No-op request (same / invalid source): consume without
+                // engaging the mute so a redundant switch can't arm the
+                // hardware mute and leave it asserted forever.
+                input_source_change_pending = false;
+                __dmb();
+            } else if (pipeline_reset_ready()) {
+                input_source_change_pending = false;
+                __dmb();
+
                 usb_audio_drain_ring();
+                // Engage the soft mute and fence Core 1 after the drain before
+                // the source teardown.  Gate held the DAC hardware mute;
+                // idempotent re-assert (hold not re-armed).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
                 // Stop old source hardware
