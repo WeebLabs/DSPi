@@ -910,6 +910,23 @@ static inline void complete_flash_write_operation_light(void) {
     // Symmetry with prepare_flash_write_operation(): restart SPDIF RX if
     // it was suspended for the blackout.
     resume_spdif_after_flash();
+
+    // Release the DAC hardware mute that prepare_flash_write_operation()
+    // asserted.  Mirrors complete_flash_write_operation_full()'s source split.
+    // The light path never tears down outputs, so their PIO clocks (BCK/LRCLK)
+    // ran continuously through the flash blackout — for USB input the clocks
+    // are live, so the pin can deassert now (the soft envelope is still
+    // settling, so the DAC un-mutes into silence/ramp, not a step).  Without
+    // this, a metadata-only write (preset rename, startup policy, include_pins,
+    // master-volume mode/save, DAC-mute config) would leave the mute pin
+    // asserted indefinitely and the DAC silent until the next reset that
+    // releases it.  For SPDIF input, resume_spdif_after_flash() restarted RX
+    // and the lock-acquisition prefill path releases the mute after re-lock
+    // (output must stay muted until valid SPDIF audio flows again), so we must
+    // NOT release early here.
+    if (active_input_source != INPUT_SOURCE_SPDIF) {
+        dac_hw_mute_release();
+    }
 }
 
 void core0_init() {
