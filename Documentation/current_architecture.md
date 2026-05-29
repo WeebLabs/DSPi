@@ -996,7 +996,7 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 ### Legacy API Redirect
 
 - `REQ_SAVE_PARAMS` (0x51): saves to the active preset slot
-- `REQ_LOAD_PARAMS` (0x52): reloads the active preset slot
+- `REQ_LOAD_PARAMS` (0x52): reloads the active preset slot — **DEPRECATED, do not use.** Runs the load (incl. flash write) synchronously in the control/IRQ handler with no SPDIF-RX teardown or Core 1 fence, so it crashes the device when SPDIF is the active input. Intentionally left unfixed; the DSPi Console host was migrated to the deferred, SPDIF-safe `REQ_PRESET_LOAD` (0x91) for "Revert to Saved" (`~/DSPi Console` `loadParams()` → `loadPreset()`). New hosts should use `REQ_PRESET_LOAD`. The 0x52 address is effectively free and **may be repurposed** for a future vendor command (drop the handler in `vendor_commands.c` and reassign in `config.h`).
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
 ### Preset-Switch Mute & Pipeline Reset
@@ -1409,7 +1409,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_DELAY | 0x49 | IN | Get channel delay |
 | REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
-| REQ_LOAD_PARAMS | 0x52 | OUT | Load params from flash |
+| REQ_LOAD_PARAMS | 0x52 | OUT | **DEPRECATED** — legacy synchronous load; crashes on SPDIF input. Use REQ_PRESET_LOAD (0x91). Address may be repurposed. |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
 | REQ_SET_CHANNEL_GAIN | 0x54 | OUT | Set legacy channel gain |
 | REQ_GET_CHANNEL_GAIN | 0x55 | IN | Get legacy channel gain |

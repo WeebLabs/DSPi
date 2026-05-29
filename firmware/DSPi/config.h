@@ -132,6 +132,16 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_DELAY       0x49
 #define REQ_GET_STATUS      0x50
 #define REQ_SAVE_PARAMS     0x51
+// REQ_LOAD_PARAMS (0x52): DEPRECATED legacy "revert to saved" command.
+// Runs flash_load_params() -> preset_load() (incl. the dir_flush flash write)
+// SYNCHRONOUSLY in the USB control/IRQ handler, without stopping SPDIF RX or
+// fencing Core 1 — so it crashes the device when SPDIF is the active input
+// (the RX decode-timeout alarm tears down DMA/PIO during the ~45 ms flash
+// blackout).  Intentionally NOT fixed: the DSPi Console host has been migrated
+// to the deferred, SPDIF-safe REQ_PRESET_LOAD (0x91) for "Revert to Saved",
+// and any new host should do the same.  This address (0x52) is effectively
+// free and MAY BE REPURPOSED for a new vendor command in the future — if so,
+// drop the handler below and reassign here.
 #define REQ_LOAD_PARAMS     0x52
 #define REQ_FACTORY_RESET   0x53
 #define REQ_SET_CHANNEL_GAIN 0x54

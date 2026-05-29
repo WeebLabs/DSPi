@@ -1068,6 +1068,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             }
 
             case REQ_LOAD_PARAMS: {
+                // DEPRECATED — see config.h note on REQ_LOAD_PARAMS (0x52).
+                // This runs flash_load_params() -> preset_load() (with its
+                // flash write) SYNCHRONOUSLY here in control/IRQ context with
+                // no SPDIF-RX teardown or Core 1 fence, which crashes the core
+                // on SPDIF input.  Left unfixed by design: the host now uses
+                // the deferred REQ_PRESET_LOAD (0x91) instead.  Do NOT add new
+                // callers; this command + its address may be repurposed later.
+                //
                 // flash_load_params() routes through preset_load(), which
                 // handles filter recalculation, delay updates, and mute
                 // internally — no need to duplicate here.
