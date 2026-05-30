@@ -174,6 +174,7 @@ extern volatile uint16_t preset_delete_mask;
 
 extern volatile uint8_t output_type_change_mask;
 extern volatile uint8_t pending_output_types[];
+extern volatile uint8_t output_pin_change_mask;
 extern volatile bool stream_restart_resync_pending;
 
 // Sync state (used by vendor GET handler for buffer stats)

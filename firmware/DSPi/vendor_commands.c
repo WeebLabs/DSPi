@@ -1243,19 +1243,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     // No-op: pin unchanged
                     status = PIN_CONFIG_SUCCESS;
                 } else if (out_idx < NUM_SPDIF_INSTANCES) {
-                    // Output slot: disable → change pin → re-enable
-                    if (output_types[out_idx] == OUTPUT_TYPE_I2S) {
-                        audio_i2s_instance_t *inst = i2s_instance_ptrs[out_idx];
-                        audio_i2s_set_enabled(inst, false);
-                        audio_i2s_change_data_pin(inst, new_pin);
-                        audio_i2s_set_enabled(inst, true);
-                    } else {
-                        audio_spdif_instance_t *inst = spdif_instance_ptrs[out_idx];
-                        audio_spdif_set_enabled(inst, false);
-                        audio_spdif_change_pin(inst, new_pin);
-                        audio_spdif_set_enabled(inst, true);
-                    }
+                    // SPDIF/I2S slot: record the target pin (RAM-only, like
+                    // spdif_rx_pin) and flag the slot.  process_pin_changes() in
+                    // the main loop applies it through a muted, synchronized
+                    // pipeline reset, so the moved slot restarts in phase with
+                    // the others — a live in-ISR restart would not.
+                    extern volatile uint8_t output_pin_change_mask;
                     output_pins[out_idx] = new_pin;
+                    output_pin_change_mask |= (1u << out_idx);
                     status = PIN_CONFIG_SUCCESS;
                 } else {
                     // PDM output (out_idx == 4): must be disabled first

@@ -71,6 +71,9 @@ volatile bool bulk_params_pending = false;
 // Per-slot bitmask supports back-to-back requests without dropping any.
 volatile uint8_t output_type_change_mask = 0;                   // Bit N = slot N has pending change
 volatile uint8_t pending_output_types[NUM_SPDIF_INSTANCES];     // New type per slot
+// Output data-pin reassignment (SPDIF/I2S slots) — deferred to main loop so the
+// change runs through a muted, synchronized pipeline reset (preserves alignment).
+volatile uint8_t output_pin_change_mask = 0;                    // Bit N = slot N has pending pin change
 // USB stream restart (alt 0 -> alt > 0) — deferred to main loop for safe pipeline re-lock
 volatile bool stream_restart_resync_pending = false;
 

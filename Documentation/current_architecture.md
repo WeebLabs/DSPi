@@ -1073,15 +1073,15 @@ Default channel names are derived from current device state, not hard-coded:
 | 25 | LED | Heartbeat |
 
 ### Runtime Reconfiguration
-*Last updated: 2026-02-15*
+*Last updated: 2026-05-30*
 
 Vendor commands `REQ_SET_OUTPUT_PIN` (0x7C) / `REQ_GET_OUTPUT_PIN` (0x7D).
 
-**Constraints:** Valid GPIO range, not in use by another output, not reserved (12, 23-25).
+**Constraints:** Valid GPIO range, not reserved (12, 23-25), and not in use by another output, the I2S BCK/LRCLK or MCK pin, the SPDIF RX pin, or the DAC hardware-mute pin (`is_pin_in_use`).
 
-**S/PDIF:** Can change while enabled — live pin swap via disable → `audio_spdif_change_pin()` → re-enable. The change_pin function masks DMA IRQ generation for the channel before aborting the DMA, preventing the high-priority DMA IRQ handler from starting a new transfer that would conflict with the PIO SM reinitialization. Any stale DMA completion flag is cleared before unmasking.
+**S/PDIF and I2S slots:** Deferred to the main loop, not applied in the USB ISR. `REQ_SET_OUTPUT_PIN` writes the target into `output_pins[out_idx]` (RAM-only, like `spdif_rx_pin`) and sets a bit in `output_pin_change_mask`; the main-loop gate (shared `pipeline_reset_ready()` hold) then runs `process_pin_changes(mask)`. That helper mirrors `process_type_switches`: `prepare_pipeline_reset()` (soft mute + Core 1 fence + DAC hardware-mute assert) → suspend SPDIF RX if running → `drain_and_disable_outputs()` → `audio_spdif_change_pin()` / `audio_i2s_change_data_pin()` on each flagged slot while disabled → `complete_pipeline_reset()` for the **synchronized** restart of all slots → restart RX. The synchronized restart is the point: a moved slot re-enters in phase with the others, preserving the inviolable inter-slot sample alignment. (The prior implementation restarted only the changed slot live in the ISR, which clicked and left that slot phase-misaligned until the next full reset.) `change_pin` masks the channel's DMA IRQ before aborting the DMA so the handler can't start a conflicting transfer during PIO SM reinit, and clears any stale completion flag before unmasking. Back-to-back requests accumulate in the mask and apply in one batch. Persistence is slot-scoped — `REQ_PRESET_SAVE` captures the new pin (gated by `include_pins`).
 
-**PDM:** Must be disabled first, rebuilds PIO config.
+**PDM:** Applied inline (must be disabled first; rebuilds PIO config). PDM has no running audio to realign at change time, so it needs no deferral or synchronized restart.
 
 ---
 

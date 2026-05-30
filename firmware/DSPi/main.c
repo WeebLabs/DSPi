@@ -469,6 +469,72 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     printf("Type switch complete: mask=0x%02x\n", change_mask);
 }
 
+// ---------------------------------------------------------------------------
+// process_pin_changes — deferred output data-pin reassignment for SPDIF/I2S
+//
+// Reconfigures the data GPIO of one or more output slots, then restarts ALL
+// slots in sync via complete_pipeline_reset() so inter-slot sample alignment
+// is preserved (CLAUDE.md invariant) — the moved slot re-enters in phase with
+// the rest.  Structure mirrors process_type_switches: mute, quiesce, mutate
+// pins while disabled, synchronized restart.  Deferred from the vendor command
+// so the soft mute + DAC hardware-mute hold run without blocking the USB ISR.
+//
+// mask: bit N = slot N's output_pins[N] differs from its live data pin.
+// ---------------------------------------------------------------------------
+static void process_pin_changes(uint8_t mask) {
+    if (mask == 0) return;
+
+    extern uint8_t output_types[];
+    extern uint8_t output_pins[];
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+
+    usb_audio_drain_ring();
+    prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+
+    // Suspend SPDIF RX across the reconfiguration: its decode-timeout alarm can
+    // fire mid-mutation and touch shared DMA/PIO state.  Restart at the end if
+    // it was running.  Mirrors process_type_switches.
+    bool rx_was_running = (active_input_source == INPUT_SOURCE_SPDIF &&
+                           spdif_input_get_state() != SPDIF_INPUT_INACTIVE);
+    if (rx_was_running) {
+        spdif_input_stop();
+        spdif_prefilling = false;
+    }
+
+    // Disable every slot before mutating any pin — change_pin asserts !enabled.
+    drain_and_disable_outputs();
+
+    // Apply the new pin to each flagged slot while it is disabled.  Skip if it
+    // already matches the live pin (e.g. a set-then-revert before this ran).
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (!(mask & (1u << i))) continue;
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->consumer_pool && inst->data_pin != output_pins[i])
+                audio_i2s_change_data_pin(inst, output_pins[i]);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->consumer_pool && inst->pin != output_pins[i])
+                audio_spdif_change_pin(inst, output_pins[i]);
+        }
+    }
+
+    // Synchronized restart of all slots (also resets USB feedback and releases
+    // the DAC hardware mute on USB input; for SPDIF input the lingering
+    // preset_loading hands release to the lock-acquisition prefill block).
+    complete_pipeline_reset();
+
+    // Restart SPDIF RX if we suspended it (unless the source changed mid-op).
+    if (rx_was_running &&
+        active_input_source == INPUT_SOURCE_SPDIF &&
+        !input_source_change_pending) {
+        spdif_input_start();
+    }
+
+    printf("Pin change complete: mask=0x%02x\n", mask);
+}
+
 // Reset USB async feedback loop state after disruptive output pipeline events
 // (type switch, global resync, stream activation).
 static void reset_usb_feedback_loop(void) {
@@ -516,7 +582,8 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
 // Non-blocking pre-clock-stop barrier for the synchronous reset handlers.
 //
 // These handlers (preset load, factory reset, bulk params, rate change,
-// stream restart, output-type switch, input source switch) stop the output
+// stream restart, output-type switch, output-pin change, input source switch)
+// stop the output
 // clocks in the SAME main-loop iteration that they start — so they cannot
 // busy-wait the DAC hardware-mute hold without stalling the loop (starving
 // usb_audio_drain_ring() / SPDIF polling).  Instead each such handler gates
@@ -1765,6 +1832,19 @@ int main(void) {
                 output_type_change_mask = 0;
                 __dmb();
                 process_type_switches(mask, (const uint8_t *)pending_output_types);
+            }
+        }
+
+        // Handle deferred output data-pin reassignment (SPDIF/I2S slots).
+        // Gated on the DAC hardware-mute hold like the other reset handlers;
+        // process_pin_changes() mutes, repins, and restarts all slots in sync.
+        {
+            extern volatile uint8_t output_pin_change_mask;
+            if (output_pin_change_mask && pipeline_reset_ready()) {
+                uint8_t mask = output_pin_change_mask;
+                output_pin_change_mask = 0;
+                __dmb();
+                process_pin_changes(mask);
             }
         }
 
