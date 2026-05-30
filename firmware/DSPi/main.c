@@ -877,6 +877,33 @@ static void resume_spdif_after_flash(void) {
     spdif_input_start();
 }
 
+// Source-split release of the hardware mute that prepare_pipeline_reset()
+// asserted: the single canonical home of the rule deciding whether a completion
+// path may deassert the DAC mute itself, or must leave it for the SPDIF
+// lock-acquisition prefill block to release.
+//
+//   - USB input: the output PIO clocks are live when this runs (the light/
+//     metadata path never stopped them; complete_pipeline_reset() on the full
+//     path just restarted them in sync), so the pin can deassert now.  The soft
+//     envelope is still settling, so the DAC un-mutes into silence/ramp, not a
+//     step.
+//   - SPDIF input: output must stay muted until valid SPDIF audio flows again.
+//     The lock-acquisition prefill block (main loop) re-enables outputs after
+//     re-lock and owns the matching dac_hw_mute_release(); deasserting here
+//     would un-mute the DAC into pre-lock silence.
+//
+// Completion paths that run a full pipeline reset on USB
+// (complete_flash_write_operation_full()) release implicitly inside
+// complete_pipeline_reset() and need not call this.  It exists for completion
+// paths that keep outputs running through the operation — today the
+// light/metadata flash path — where the release is otherwise easy to forget
+// (its omission once left the DAC silent indefinitely; see git 833a51a).
+static inline void release_hw_mute_if_outputs_live(void) {
+    if (active_input_source != INPUT_SOURCE_SPDIF) {
+        dac_hw_mute_release();
+    }
+}
+
 // Full completion path: drain/restart all output consumer pipelines and reset
 // feedback state. Use this for operations that materially affect runtime audio
 // continuity (preset save/delete and legacy save command compatibility path).
@@ -893,7 +920,9 @@ static void complete_flash_write_operation_full(void) {
         // intact to play out silence as DMA resumes.  We skip
         // complete_pipeline_reset() — draining the pools here would force
         // outputs to restart against an empty pool, causing pops and
-        // uneven inter-slot fill.
+        // uneven inter-slot fill.  The hardware mute is likewise left asserted
+        // (the lock-acquisition prefill path releases it after re-lock — the
+        // SPDIF half of release_hw_mute_if_outputs_live()'s rule).
         reset_usb_feedback_loop();
         return;
     }
@@ -912,21 +941,11 @@ static inline void complete_flash_write_operation_light(void) {
     resume_spdif_after_flash();
 
     // Release the DAC hardware mute that prepare_flash_write_operation()
-    // asserted.  Mirrors complete_flash_write_operation_full()'s source split.
-    // The light path never tears down outputs, so their PIO clocks (BCK/LRCLK)
-    // ran continuously through the flash blackout — for USB input the clocks
-    // are live, so the pin can deassert now (the soft envelope is still
-    // settling, so the DAC un-mutes into silence/ramp, not a step).  Without
-    // this, a metadata-only write (preset rename, startup policy, include_pins,
-    // master-volume mode/save, DAC-mute config) would leave the mute pin
-    // asserted indefinitely and the DAC silent until the next reset that
-    // releases it.  For SPDIF input, resume_spdif_after_flash() restarted RX
-    // and the lock-acquisition prefill path releases the mute after re-lock
-    // (output must stay muted until valid SPDIF audio flows again), so we must
-    // NOT release early here.
-    if (active_input_source != INPUT_SOURCE_SPDIF) {
-        dac_hw_mute_release();
-    }
+    // asserted (USB input only; for SPDIF the lock-acquisition prefill path
+    // owns it).  See release_hw_mute_if_outputs_live() for the full rule —
+    // omitting this once left the DAC silent indefinitely after a metadata-only
+    // write while EMC was enabled on USB input.
+    release_hw_mute_if_outputs_live();
 }
 
 void core0_init() {
