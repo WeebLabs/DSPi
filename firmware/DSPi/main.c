@@ -1775,6 +1775,20 @@ int main(void) {
                 // idempotent re-assert (hold not re-armed).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
+                // Tear down SPDIF RX across the reset (recalc + delay-line
+                // zeroing mutate state the live RX path consumes; its decode-
+                // timeout alarm IRQ can fire mid-mutation).  Same hazard/guard
+                // as preset_load_pending and bulk_params_pending.  Restarted
+                // at the end (or by process_type_switches if types changed and
+                // RX is still down — it leaves caller-stopped RX alone).
+                bool suspended_spdif = false;
+                if (active_input_source == INPUT_SOURCE_SPDIF &&
+                    spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
+                    spdif_input_stop();
+                    spdif_prefilling = false;
+                    suspended_spdif = true;
+                }
+
                 flash_factory_reset();
                 dsp_recalculate_all_filters((float)audio_state.freq);
                 dsp_update_delay_samples((float)audio_state.freq);
@@ -1814,6 +1828,14 @@ int main(void) {
                     process_type_switches(change_mask, new_types);
                 } else {
                     complete_pipeline_reset();
+                }
+
+                // Restart SPDIF RX if we suspended it above (skip if an input-
+                // source change is pending — that handler manages RX).
+                if (suspended_spdif &&
+                    active_input_source == INPUT_SOURCE_SPDIF &&
+                    !input_source_change_pending) {
+                    spdif_input_start();
                 }
             }
         }
@@ -1869,6 +1891,22 @@ int main(void) {
             // reads.  Gate held the DAC hardware mute; idempotent re-assert
             // (hold not re-armed).
             prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+
+            // Tear down SPDIF RX across the full-state swap.  bulk_params_apply()
+            // + dsp_recalculate_all_filters() mutate the very coefficients/matrix
+            // the live SPDIF input path consumes, and pico_spdif_rx's decode-
+            // timeout alarm IRQ can fire mid-mutation and touch PIO/DMA state we
+            // are reconfiguring — the same hazard preset_load_pending guards. Left
+            // running, this races the swap and faults the core (8s watchdog reset).
+            // Restarted once at the end (or by the input-source handler if the
+            // bulk payload changed the source).
+            bool suspended_spdif = false;
+            if (active_input_source == INPUT_SOURCE_SPDIF &&
+                spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
+                spdif_input_stop();
+                spdif_prefilling = false;
+                suspended_spdif = true;
+            }
 
             // Apply the received parameters (pin config gated by include_pins setting)
             uint16_t _occ; uint8_t _m, _d, _la, inc_pins, _inc_mv;
@@ -1926,6 +1964,16 @@ int main(void) {
                     // restart is sample-aligned across all slots.
                     complete_pipeline_reset();
                 }
+            }
+
+            // Restart SPDIF RX if we suspended it above (outside the err==0
+            // guard so a rejected payload still restores RX).  Skip if the
+            // bulk payload queued an input-source change — that handler owns
+            // RX restart then.  Mirrors preset_load_pending.
+            if (suspended_spdif &&
+                active_input_source == INPUT_SOURCE_SPDIF &&
+                !input_source_change_pending) {
+                spdif_input_start();
             }
         }
 

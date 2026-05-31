@@ -1000,9 +1000,11 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
 ### Preset-Switch Mute & Pipeline Reset
-*Last updated: 2026-04-01*
+*Last updated: 2026-05-31 (bulk-apply & factory-reset now suspend SPDIF RX across the swap)*
 
 All preset operations (load, save, delete) are **deferred from the USB IRQ to the main loop** via pending flags (`preset_load_pending`, `preset_save_pending`, `preset_delete_pending` in `usb_audio.c`). This avoids running flash operations inside the USB ISR (which would cause a ~45ms interrupt blackout inside an interrupt handler) and allows proper pipeline reset bracketing.
+
+**SPDIF-RX suspend across disruptive state swaps (required when SPDIF is the active input).** Any deferred handler that mutates the live DSP state (coefficients, matrix, delays, output types/pins) or tears down output slots must first stop the SPDIF receiver and restart it afterward. While RX runs, `pico_spdif_rx`'s decode-timeout alarm fires on a separate timer IRQ and can touch PIO/DMA state mid-mutation; left running, this races the swap and faults the core, which the 8-second `watchdog_enable()` then resets (RAM is re-initialised, so `buffer_stats_sequence` resets to ~0 — the signature of this reboot). `preset_load_pending`, `process_type_switches`, and `process_pin_changes` have always bracketed RX this way. The `bulk_params_pending` (`REQ_SET_ALL_PARAMS` / 0xA1) and `factory_reset_pending` (`REQ_FACTORY_RESET` / 0x53) handlers were **missing this bracket** and would reboot the device when applied with SPDIF input active (intermittent, ~4/6 under repeated `0xA1`). Both now mirror `preset_load`: after `prepare_pipeline_reset()`, `if (active_input_source == INPUT_SOURCE_SPDIF && spdif_input_get_state() != SPDIF_INPUT_INACTIVE) { spdif_input_stop(); spdif_prefilling = false; }`, and at the end restart via `spdif_input_start()` (guarded by `!input_source_change_pending`, since a bulk-applied source change defers RX management to that handler). `process_type_switches` leaves caller-stopped RX alone (`rx_was_running` check), so the change-mask path doesn't double-start. Verified: 0/10 reboots on `0xA1` with SPDIF locked after the fix (was 4/6).
 
 The main loop handler for each operation follows the pattern:
 1. `usb_audio_drain_ring()` — process in-flight audio packets
