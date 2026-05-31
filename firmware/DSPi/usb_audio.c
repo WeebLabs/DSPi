@@ -1428,6 +1428,21 @@ static audio_i2s_instance_t i2s_instance_4 = {0};
 audio_i2s_instance_t *i2s_instance_ptrs[NUM_SPDIF_INSTANCES];
 struct audio_buffer_pool *producer_pools[NUM_SPDIF_INSTANCES];
 
+// Per-slot static consumer-pool storage (BSS). One pool per output slot, shared by
+// the slot's S/PDIF and I2S instances and reused across output-type switches — sized
+// for the largest type (S/PDIF, stride PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES); I2S
+// (stride 8) under-fills each block. No heap, so the linker budgets it at build time
+// and the previous output-retype alloc/free (and its fragmentation/OOM risk) is gone.
+#define SLOT_CONSUMER_DATA_BYTES_PER_BUF \
+    (PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT * PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES)
+static audio_buffer_pool_t slot_consumer_pool_store[NUM_SPDIF_INSTANCES];
+static audio_buffer_t      slot_consumer_buffers[NUM_SPDIF_INSTANCES][SPDIF_CONSUMER_BUFFER_COUNT];
+static mem_buffer_t        slot_consumer_mems[NUM_SPDIF_INSTANCES][SPDIF_CONSUMER_BUFFER_COUNT];
+static uint8_t             slot_consumer_data[NUM_SPDIF_INSTANCES][SPDIF_CONSUMER_BUFFER_COUNT * SLOT_CONSUMER_DATA_BYTES_PER_BUF];
+audio_buffer_pool_t *slot_consumer_pools[NUM_SPDIF_INSTANCES];  // shared per-slot pools (used on retype)
+_Static_assert(PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES <= PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES,
+               "shared per-slot consumer pool is sized for S/PDIF; I2S frames must fit");
+
 // I2S clock configuration
 uint8_t i2s_bck_pin = PICO_I2S_BCK_PIN;     // BCK GPIO; LRCLK = BCK + 1
 uint8_t i2s_mck_pin = PICO_I2S_MCK_PIN;     // MCK GPIO
@@ -1530,19 +1545,29 @@ void usb_sound_card_init(void) {
     producer_pool_4 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
 #endif
 
-    // Setup S/PDIF instances
+    // Build one static consumer pool per slot, sized for the largest output type.
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        audio_consumer_pool_init_static(&slot_consumer_pool_store[i],
+                                        slot_consumer_buffers[i], slot_consumer_mems[i],
+                                        slot_consumer_data[i], SPDIF_CONSUMER_BUFFER_COUNT,
+                                        PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT,
+                                        PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES);
+        slot_consumer_pools[i] = &slot_consumer_pool_store[i];
+    }
+
+    // Setup S/PDIF instances (connect_extra re-formats the slot's shared pool for S/PDIF)
     audio_spdif_setup(&spdif_instance_1, &audio_format_48k, &spdif_config_1);
-    audio_spdif_connect_extra(&spdif_instance_1, producer_pool_1, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+    audio_spdif_connect_extra(&spdif_instance_1, producer_pool_1, false, slot_consumer_pools[0], NULL);
 
     audio_spdif_setup(&spdif_instance_2, &audio_format_48k, &spdif_config_2);
-    audio_spdif_connect_extra(&spdif_instance_2, producer_pool_2, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+    audio_spdif_connect_extra(&spdif_instance_2, producer_pool_2, false, slot_consumer_pools[1], NULL);
 
 #if PICO_RP2350
     audio_spdif_setup(&spdif_instance_3, &audio_format_48k, &spdif_config_3);
-    audio_spdif_connect_extra(&spdif_instance_3, producer_pool_3, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+    audio_spdif_connect_extra(&spdif_instance_3, producer_pool_3, false, slot_consumer_pools[2], NULL);
 
     audio_spdif_setup(&spdif_instance_4, &audio_format_48k, &spdif_config_4);
-    audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+    audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, slot_consumer_pools[3], NULL);
 #endif
 
     // Populate instance pointer arrays for pin/type config commands

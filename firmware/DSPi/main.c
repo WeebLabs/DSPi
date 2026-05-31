@@ -234,6 +234,7 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     extern uint8_t output_pins[];
     extern uint8_t i2s_bck_pin;
     extern struct audio_buffer_pool *producer_pools[];
+    extern struct audio_buffer_pool *slot_consumer_pools[];  // shared per-slot static pools
     extern bool i2s_mck_enabled;
     extern uint16_t i2s_mck_multiplier;
 
@@ -390,8 +391,9 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                     .clock_master = want_master,
                 };
                 audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
+                // Re-formats the slot's shared static consumer pool for I2S (no alloc).
                 audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
-                                        false, SPDIF_CONSUMER_BUFFER_COUNT, NULL);
+                                        false, slot_consumer_pools[i], NULL);
                 if (had_i2s) {
                     printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
                 }
@@ -401,9 +403,11 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
             audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
             pio_sm_claim(spdif_inst->pio, spdif_inst->pio_sm);
             audio_spdif_change_pin(spdif_inst, output_pins[i]);
-            audio_complete_connection(&spdif_inst->connection.core,
-                                      producer_pools[i],
-                                      spdif_inst->consumer_pool);
+            // Re-formats the slot's shared static consumer pool back to S/PDIF
+            // (re-points buffers + re-fills IEC-60958 framing) and re-wires the
+            // connection — no alloc/free. The pool was last formatted for I2S.
+            audio_spdif_connect_extra(spdif_inst, producer_pools[i], false,
+                                      slot_consumer_pools[i], NULL);
             memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
         }
     }

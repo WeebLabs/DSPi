@@ -1237,7 +1237,22 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## Memory Layout
-*Last updated: 2026-04-11*
+*Last updated: 2026-05-31 (consumer pools moved heap -> static BSS, shared per slot)*
+
+> **Static consumer pools (2026-05-31).** The per-output-slot consumer buffer pool
+> is now a single statically-allocated (BSS) pool per slot, **shared by the slot's
+> S/PDIF and I2S instances and reused across output-type switches** — sized for the
+> largest type (S/PDIF, stride `PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES` = 16; I2S
+> under-fills each 768-byte block). Previously each output-type instance malloc'd
+> (and the I2S side freed) its own pool, so a slot that had been both types held two
+> pools and a both-slots-I2S config on RP2040 overran the ~60 KB heap (`malloc`→NULL
+> crash). The shared static pool removes the second allocation, makes the footprint
+> deterministic and link-time-budgeted (a BSS overflow now fails the build, not the
+> field), and eliminates retype heap churn/fragmentation. Built via
+> `audio_consumer_pool_init_static()` at boot and re-pointed per connect via
+> `audio_consumer_pool_reformat()` (pico_audio); `*_connect_extra()` now take the pool
+> as a parameter. Producer pools remain heap (allocated once at boot, never churn).
+> Per-instance silence buffers are likewise static (embedded in the instance struct).
 
 ### RP2040 (264 KB SRAM)
 
@@ -1253,12 +1268,12 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead | ~2 KB |
 | Per-channel preamp + master volume | ~48 B |
+| Consumer pools + silence (static, 2 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~27 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~90 KB** |
-| Code in RAM (.text copy_to_ram) | ~72 KB |
+| **Total BSS** | **~116 KB** (measured) |
+| Code in RAM (.text copy_to_ram) | ~114 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
-| SPDIF consumer pools (heap, 2 × 16 × 48 × 16) | ~24 KB |
-| Stack + remaining heap | ~42 KB |
+| Stack + remaining heap | ~6 KB |
 
 ### RP2350 (520 KB SRAM)
 
@@ -1273,12 +1288,12 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Channel names (11 × 32) | ~352 B |
 | Leveller state + lookahead | ~2 KB |
 | Per-channel preamp + master volume | ~48 B |
+| Consumer pools + silence (static, 4 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~55 KB |
 | Other BSS | ~24 KB |
-| **Total BSS** | **~210 KB** |
-| Code in RAM (.time_critical + copy_to_ram) | ~68 KB |
+| **Total BSS** | **~206 KB** (measured) |
+| Code in RAM (.time_critical + copy_to_ram) | ~109 KB |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
-| SPDIF consumer pools (heap, 4 × 16 × 48 × 16) | ~48 KB |
-| Stack + remaining heap | ~200 KB |
+| Stack + remaining heap | ~150 KB |
 
 ### Flash Layout
 

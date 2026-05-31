@@ -62,6 +62,12 @@ extern "C" {
 #define PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT 48u
 #endif
 
+// Bytes per stereo frame in the S/PDIF consumer buffer (2 x sizeof(spdif_subframe_t)).
+// This is the largest output-type consumer stride, so it sizes the shared per-slot
+// consumer pool's data blocks (I2S, stride 8, under-fills them). Asserted against the
+// real type in audio_spdif.c.
+#define PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES 16u
+
 // Allow use of pico_audio driver without actually doing anything much
 #ifndef PICO_AUDIO_SPDIF_NOOP
 #ifdef PICO_AUDIO_NOOP
@@ -111,7 +117,9 @@ typedef struct audio_spdif_instance {
     audio_format_t consumer_format;
     audio_buffer_format_t consumer_buffer_format;
     audio_buffer_t silence_buffer;
-    audio_buffer_pool_t *consumer_pool;
+    mem_buffer_t silence_mem;                   // static backing for silence_buffer (no heap)
+    uint8_t silence_data[PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT * PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES];
+    audio_buffer_pool_t *consumer_pool;         // shared per-slot static pool (assigned by caller)
 
     // Embedded connection
     struct producer_pool_blocking_give_connection connection;
@@ -139,30 +147,19 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
                                         const audio_format_t *intended_audio_format,
                                         const audio_spdif_config_t *config);
 
-/** \brief Connect a producer pool to an S/PDIF instance with a pass-through connection
- * \ingroup audio_spdif
- */
-bool audio_spdif_connect_thru(audio_spdif_instance_t *inst,
-                              audio_buffer_pool_t *producer,
-                              audio_connection_t *connection);
-
-/** \brief Connect a producer pool to an S/PDIF instance using the default connection
- * \ingroup audio_spdif
- */
-bool audio_spdif_connect(audio_spdif_instance_t *inst, audio_buffer_pool_t *producer);
-
 /** \brief Connect a producer pool to an S/PDIF instance with extra options
  * \ingroup audio_spdif
  *
  * \param inst The S/PDIF instance
  * \param producer The producer buffer pool
  * \param buffer_on_give If true, buffer on give side
- * \param buffer_count Number of consumer buffers to allocate
+ * \param consumer_pool Caller-owned consumer pool (re-formatted for S/PDIF here);
+ *                      enables one static pool to be reused across output types
  * \param connection Optional custom connection (NULL for default)
  */
 bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
                                audio_buffer_pool_t *producer,
-                               bool buffer_on_give, uint buffer_count,
+                               bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
                                audio_connection_t *connection);
 
 /** \brief Enable or disable an S/PDIF output instance

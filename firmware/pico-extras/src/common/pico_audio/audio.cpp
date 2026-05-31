@@ -273,6 +273,55 @@ void audio_free_buffer_pool(audio_buffer_pool_t *pool) {
     free(pool);
 }
 
+void audio_consumer_pool_init_static(audio_buffer_pool_t *pool, audio_buffer_t *buffers,
+                                     mem_buffer_t *mems, uint8_t *data, int count,
+                                     int sample_count, int stride_bytes) {
+    const size_t block = (size_t)sample_count * (size_t)stride_bytes;
+    for (int i = 0; i < count; i++) {
+        mems[i].bytes = data + (size_t)i * block;
+        mems[i].size = block;
+        mems[i].flags = 0;
+        buffers[i].buffer = &mems[i];
+        buffers[i].format = NULL;                 // applied by audio_consumer_pool_reformat()
+        buffers[i].sample_count = 0;
+        buffers[i].max_sample_count = (uint32_t)sample_count;
+        buffers[i].user_data = 0;
+        buffers[i].next = (i != count - 1) ? &buffers[i + 1] : NULL;
+    }
+    pool->type = audio_buffer_pool::ac_consumer;
+    pool->format = NULL;                          // applied by reformat()
+    pool->buffers = buffers;
+    pool->buffer_count = (uint16_t)count;
+    pool->buffer_sample_count = (uint16_t)sample_count;
+    pool->free_list_spin_lock = spin_lock_init(SPINLOCK_ID_AUDIO_FREE_LIST_LOCK);
+    pool->free_list = buffers;
+    pool->prepared_list_spin_lock = spin_lock_init(SPINLOCK_ID_AUDIO_PREPARED_LISTS_LOCK);
+    pool->prepared_list = NULL;
+    pool->prepared_list_tail = NULL;
+    pool->connection = &connection_default;
+}
+
+void audio_consumer_pool_reformat(audio_buffer_pool_t *pool, const audio_buffer_format_t *format,
+                                  int sample_count) {
+    audio_assert(pool && pool->buffers);
+    const uint16_t count = pool->buffer_count;
+    // Reclaims ALL buffers unconditionally — caller must have quiesced the pool
+    // (no in-flight/DMA buffers), so this cannot strand or double-list a buffer.
+    for (uint16_t i = 0; i < count; i++) {
+        audio_assert((size_t)sample_count * format->sample_stride <= pool->buffers[i].buffer->size);
+        pool->buffers[i].format = format;
+        pool->buffers[i].sample_count = 0;
+        pool->buffers[i].max_sample_count = (uint32_t)sample_count;
+        pool->buffers[i].user_data = 0;
+        pool->buffers[i].next = (i != count - 1) ? &pool->buffers[i + 1] : NULL;
+    }
+    pool->format = format->format;
+    pool->buffer_sample_count = (uint16_t)sample_count;
+    pool->free_list = &pool->buffers[0];
+    pool->prepared_list = NULL;
+    pool->prepared_list_tail = NULL;
+}
+
 void audio_complete_connection(audio_connection_t *connection, audio_buffer_pool_t *producer_pool,
                                audio_buffer_pool_t *consumer_pool) {
     assert(producer_pool->type == audio_buffer_pool::ac_producer);

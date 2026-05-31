@@ -98,6 +98,11 @@ static inline uint get_channel_status_bit(uint subframe_idx) {
 // ---------------------------------------------------------------------------
 
 // each buffer is pre-filled with preambles, channel status, and silence
+// The shared per-slot consumer pool sizes its data blocks to this; keep it in
+// sync with the real subframe size.
+_Static_assert(PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES == 2 * sizeof(spdif_subframe_t),
+               "PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES must equal the stereo subframe stride");
+
 static void init_spdif_buffer(audio_buffer_t *buffer, uint start_pos) {
     assert(buffer->max_sample_count <= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
     spdif_subframe_t *p = (spdif_subframe_t *)buffer->buffer->bytes;
@@ -189,7 +194,10 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
     inst->silence_buffer.max_sample_count = PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
     inst->silence_buffer.format = &inst->consumer_buffer_format;
 
-    inst->silence_buffer.buffer = pico_buffer_alloc(PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT * 2 * sizeof(spdif_subframe_t));
+    inst->silence_mem.bytes = inst->silence_data;       // static backing — no heap
+    inst->silence_mem.size = sizeof(inst->silence_data);
+    inst->silence_mem.flags = 0;
+    inst->silence_buffer.buffer = &inst->silence_mem;
     init_spdif_buffer(&inst->silence_buffer, 0);
     inst->subframe_position = 0;
 
@@ -291,19 +299,9 @@ SPDIF_TIME_CRITICAL static void wrap_producer_give(audio_connection_t *connectio
 // audio_spdif_connect_*
 // ---------------------------------------------------------------------------
 
-bool audio_spdif_connect_thru(audio_spdif_instance_t *inst,
-                              audio_buffer_pool_t *producer,
-                              audio_connection_t *connection) {
-    return audio_spdif_connect_extra(inst, producer, true, 2, connection);
-}
-
-bool audio_spdif_connect(audio_spdif_instance_t *inst, audio_buffer_pool_t *producer) {
-    return audio_spdif_connect_thru(inst, producer, NULL);
-}
-
 bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
                                audio_buffer_pool_t *producer,
-                               bool buffer_on_give, uint buffer_count,
+                               bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
                                audio_connection_t *connection) {
     printf("Connecting PIO S/PDIF audio\n");
 
@@ -315,10 +313,15 @@ bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
     inst->consumer_buffer_format.format = &inst->consumer_format;
     inst->consumer_buffer_format.sample_stride = 2 * sizeof(spdif_subframe_t);
 
-    inst->consumer_pool = audio_new_consumer_pool(&inst->consumer_buffer_format, buffer_count, PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT);
+    // Reuse the caller's pool (one static pool per slot, shared with this slot's
+    // I2S instance) — re-point its buffers at the S/PDIF format and reclaim them
+    // all to the free list. No alloc/free across output-type switches.
+    inst->consumer_pool = consumer_pool;
+    audio_consumer_pool_reformat(consumer_pool, &inst->consumer_buffer_format,
+                                 PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT);
     {
         uint pos = 0;
-        for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
+        for (audio_buffer_t *buffer = consumer_pool->free_list; buffer; buffer = buffer->next) {
             init_spdif_buffer(buffer, pos);
             pos += PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
             if (pos >= PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) pos = 0;

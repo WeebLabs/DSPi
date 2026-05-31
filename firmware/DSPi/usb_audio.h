@@ -119,6 +119,7 @@ extern uint8_t output_types[];
 extern struct audio_spdif_instance *spdif_instance_ptrs[];
 extern struct audio_i2s_instance *i2s_instance_ptrs[];
 extern struct audio_buffer_pool *producer_pools[];
+extern struct audio_buffer_pool *slot_consumer_pools[];  // shared per-slot static consumer pools
 
 // Producer pool aliases (individual named, used by pipeline)
 extern struct audio_buffer_pool *producer_pool_1;

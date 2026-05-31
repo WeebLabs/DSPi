@@ -51,6 +51,10 @@ extern "C" {
 /** Samples per DMA transfer — matches SPDIF for pipeline compatibility */
 #define PICO_AUDIO_I2S_DMA_SAMPLE_COUNT 48u
 
+/** Bytes per stereo frame in the I2S consumer buffer (2 x int32). Must not exceed
+ *  PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES, which sizes the shared per-slot pool. */
+#define PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES 8u
+
 // ---------------------------------------------------------------------------
 // Instance structure
 // ---------------------------------------------------------------------------
@@ -83,7 +87,9 @@ typedef struct audio_i2s_instance {
     audio_format_t consumer_format;
     audio_buffer_format_t consumer_buffer_format;
     audio_buffer_t silence_buffer;
-    audio_buffer_pool_t *consumer_pool;
+    mem_buffer_t silence_mem;                   // static backing for silence_buffer (no heap)
+    uint8_t silence_data[PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES];
+    audio_buffer_pool_t *consumer_pool;         // shared per-slot static pool (assigned by caller)
 
     // Embedded connection (uses container_of to recover instance pointer)
     struct producer_pool_blocking_give_connection connection;
@@ -131,19 +137,20 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
 /** \brief Connect a producer pool to an I2S instance with extra options
  * \ingroup pico_audio_i2s_multi
  *
- * Creates the consumer buffer pool and establishes the producer-to-consumer
- * connection. The connection callback left-shifts 24-bit samples into 32-bit
- * I2S frames (MSB-aligned).
+ * Re-formats the caller's consumer pool for I2S and establishes the
+ * producer-to-consumer connection. The connection callback left-shifts 24-bit
+ * samples into 32-bit I2S frames (MSB-aligned).
  *
  * \param inst           The I2S instance
  * \param producer       The producer buffer pool (PCM_S32, stride 8)
  * \param buffer_on_give If true, buffer on give side
- * \param buffer_count   Number of consumer buffers to allocate
+ * \param consumer_pool  Caller-owned consumer pool (re-formatted for I2S here);
+ *                       enables one static pool to be reused across output types
  * \param connection     Optional custom connection (NULL for default)
  */
 bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
                               audio_buffer_pool_t *producer,
-                              bool buffer_on_give, uint buffer_count,
+                              bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
                               audio_connection_t *connection);
 
 /** \brief Enable or disable an I2S output instance

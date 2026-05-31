@@ -207,6 +207,11 @@ static audio_buffer_t *i2s_wrap_consumer_take(audio_connection_t *connection, bo
 // for them the muted-output click problem must be addressed elsewhere.
 #define I2S_PAD_PATTERN  0x01
 
+// The shared per-slot consumer pool sizes its data blocks to the S/PDIF stride;
+// the I2S stride must fit within that. Pin it to the real frame size here.
+_Static_assert(PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES == 2 * sizeof(int32_t),
+               "PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES must equal the stereo I2S frame stride");
+
 // I2S producer-give callback.
 //
 // Follows the same pattern as SPDIF's stereo_to_spdif_producer_give_s32():
@@ -357,12 +362,12 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->silence_buffer.max_sample_count = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT;
     inst->silence_buffer.format = &inst->consumer_buffer_format;
 
-    // I2S silence: 48 samples × 2 channels × 4 bytes = 384 bytes
-    const size_t silence_bytes = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2 * sizeof(int32_t);
-    inst->silence_buffer.buffer = pico_buffer_alloc(silence_bytes);
-    if (!inst->silence_buffer.buffer) {
-        panic("I2S setup: failed to allocate silence buffer");
-    }
+    // I2S silence: 48 samples × 2 channels × 4 bytes = 384 bytes, static backing (no heap)
+    const size_t silence_bytes = sizeof(inst->silence_data);
+    inst->silence_mem.bytes = inst->silence_data;
+    inst->silence_mem.size = silence_bytes;
+    inst->silence_mem.flags = 0;
+    inst->silence_buffer.buffer = &inst->silence_mem;
     {
         int32_t *p = (int32_t *)inst->silence_buffer.buffer->bytes;
         const size_t word_count = silence_bytes / sizeof(int32_t);
@@ -417,7 +422,7 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
 
 bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
                               audio_buffer_pool_t *producer,
-                              bool buffer_on_give, uint buffer_count,
+                              bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
                               audio_connection_t *connection) {
     printf("Connecting PIO I2S audio (SM%d, data GPIO %d, BCK GPIO %d)\n",
            inst->pio_sm, inst->data_pin, inst->clock_pin_base);
@@ -431,13 +436,13 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
     inst->consumer_buffer_format.format = &inst->consumer_format;
     inst->consumer_buffer_format.sample_stride = 2 * sizeof(int32_t);  // 8 bytes
 
-    // Create consumer pool: buffer_count buffers × DMA_SAMPLE_COUNT samples
-    inst->consumer_pool = audio_new_consumer_pool(&inst->consumer_buffer_format,
-                                                   buffer_count,
-                                                   PICO_AUDIO_I2S_DMA_SAMPLE_COUNT);
-    if (!inst->consumer_pool) {
-        panic("I2S connect failed: consumer pool allocation failed");
-    }
+    // Reuse the caller's pool (one static pool per slot, shared with this slot's
+    // S/PDIF instance) — re-point its buffers at the I2S format and reclaim them
+    // all to the free list. No alloc/free across output-type switches.
+    assert(consumer_pool);
+    inst->consumer_pool = consumer_pool;
+    audio_consumer_pool_reformat(consumer_pool, &inst->consumer_buffer_format,
+                                 PICO_AUDIO_I2S_DMA_SAMPLE_COUNT);
 
     // Pre-fill all consumer buffers with I2S_PAD_PATTERN words (audio bits
     // zero, padding bits non-zero) so the very first DMA transfers — which
@@ -446,7 +451,7 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
     // startup.
     {
         const size_t buf_words = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2;
-        for (audio_buffer_t *buffer = inst->consumer_pool->free_list; buffer; buffer = buffer->next) {
+        for (audio_buffer_t *buffer = consumer_pool->free_list; buffer; buffer = buffer->next) {
             int32_t *p = (int32_t *)buffer->buffer->bytes;
             for (size_t i = 0; i < buf_words; i++) {
                 p[i] = (int32_t)I2S_PAD_PATTERN;
@@ -732,24 +737,11 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     inst->connection.core.producer_pool = NULL;
     inst->connection.core.consumer_pool = NULL;
 
-    // Free dynamic consumer pool allocations. Without this, repeated
-    // output-type switching leaks heap and eventually crashes setup paths.
-    if (inst->consumer_pool) {
-        audio_free_buffer_pool(inst->consumer_pool);
-        inst->consumer_pool = NULL;
-    }
-
-    // Free per-instance silence buffer allocated by setup().
-    if (inst->silence_buffer.buffer) {
-        free(inst->silence_buffer.buffer->bytes);
-        inst->silence_buffer.buffer->bytes = NULL;
-        inst->silence_buffer.buffer->size = 0;
-        free(inst->silence_buffer.buffer);
-        inst->silence_buffer.buffer = NULL;
-    }
-    inst->silence_buffer.sample_count = 0;
-    inst->silence_buffer.max_sample_count = 0;
-    inst->silence_buffer.format = NULL;
+    // The consumer pool is a caller-owned static pool shared with this slot's
+    // S/PDIF instance — do NOT free it; just detach. It is re-formatted on the
+    // next connect (output-type switch). The silence buffer is backed by static
+    // instance storage (inst->silence_mem/silence_data) — also nothing to free.
+    inst->consumer_pool = NULL;
 
     // Release data pin
     gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);

@@ -140,6 +140,31 @@ audio_buffer_pool_t *audio_new_consumer_pool(audio_buffer_format_t *format, int 
  */
 void audio_free_buffer_pool(audio_buffer_pool_t *pool);
 
+/*! \brief Wire a consumer pool from caller-provided (e.g. static/BSS) storage.
+ *  \ingroup pico_audio
+ *
+ * No heap allocation. The caller owns \p pool, \p buffers[count], \p mems[count]
+ * and \p data (>= count * sample_count * stride_bytes). Each buffer's mem block is
+ * sample_count * stride_bytes bytes — pass the stride of the LARGEST format the
+ * pool will ever carry, so smaller formats simply under-fill each block. The
+ * per-connection format is applied later by audio_consumer_pool_reformat().
+ */
+void audio_consumer_pool_init_static(audio_buffer_pool_t *pool, audio_buffer_t *buffers,
+                                     mem_buffer_t *mems, uint8_t *data, int count,
+                                     int sample_count, int stride_bytes);
+
+/*! \brief Re-point a quiesced consumer pool at \p format and return every buffer
+ *         to the free list, so one pool can back successive formats (e.g. an
+ *         output-type switch) with no alloc/free.
+ *  \ingroup pico_audio
+ *
+ * The caller must quiesce the pool first (no in-flight/DMA buffers). Asserts the
+ * backing block is large enough for \p format. Safe for both malloc'd and static
+ * pools.
+ */
+void audio_consumer_pool_reformat(audio_buffer_pool_t *pool, const audio_buffer_format_t *format,
+                                  int sample_count);
+
 /*! \brief Allocate and initialise an audio wrapping buffer
  *  \ingroup pico_audio
  *
