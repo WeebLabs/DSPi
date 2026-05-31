@@ -101,9 +101,11 @@ def matrix_crosspoint_roundtrip(dev, profile, chk):
     chk.eq(en, 1, "route enabled")
     chk.eq(ph, 0, "route phase")
     chk.approx(gain, -3.0, 1e-3, "route gain")
-    # Phase invert + extreme (unclamped) gain.
-    dev.set(OP.SET_MATRIX_ROUTE, _route_packet(1, 5, 1, 1, 30.0))
-    _, _, en2, ph2, gain2 = _get_route(dev, 1, 5)
+    # Phase invert + extreme (unclamped) gain on the last valid output (platform-relative:
+    # 4 on RP2040, 8 on RP2350 — output index must be < num_output_channels).
+    out = profile.num_output_channels - 1
+    dev.set(OP.SET_MATRIX_ROUTE, _route_packet(1, out, 1, 1, 30.0))
+    _, _, en2, ph2, gain2 = _get_route(dev, 1, out)
     chk.eq(ph2, 1, "phase invert set")
     chk.approx(gain2, 30.0, 1e-3, "gain +30 stored verbatim (no clamp)")
 
