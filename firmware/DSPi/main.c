@@ -1379,16 +1379,26 @@ int main(void) {
                 }
             }
 
-            extern volatile bool flash_set_include_pins_pending;
-            if (flash_set_include_pins_pending) {
+            extern volatile bool flash_set_output_config_mode_pending;
+            if (flash_set_output_config_mode_pending) {
                 uint8_t val;
                 uint32_t f = save_and_disable_interrupts();
-                extern uint8_t flash_set_include_pins_val;
-                val = flash_set_include_pins_val;
-                flash_set_include_pins_pending = false;
+                extern uint8_t flash_set_output_config_mode_val;
+                val = flash_set_output_config_mode_val;
+                flash_set_output_config_mode_pending = false;
                 restore_interrupts(f);
                 prepare_flash_write_operation();
-                preset_set_include_pins(val);
+                preset_set_output_config_mode(val);
+                complete_flash_write_operation_light();
+            }
+
+            extern volatile bool flash_save_output_config_pending;
+            if (flash_save_output_config_pending) {
+                uint32_t f = save_and_disable_interrupts();
+                flash_save_output_config_pending = false;
+                restore_interrupts(f);
+                prepare_flash_write_operation();
+                preset_save_output_config();
                 complete_flash_write_operation_light();
             }
 
@@ -1912,10 +1922,14 @@ int main(void) {
                 suspended_spdif = true;
             }
 
-            // Apply the received parameters (pin config gated by include_pins setting)
-            uint16_t _occ; uint8_t _m, _d, _la, inc_pins, _inc_mv;
-            preset_get_directory(&_occ, &_m, &_d, &_la, &inc_pins, &_inc_mv);
-            int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf, inc_pins != 0);
+            // Apply the received parameters.  Pin config is applied only in
+            // with-preset mode (output_config_mode == 1); in independent mode the
+            // device-global IO is left to apply_output_config_from_mode / the
+            // explicit REQ_SAVE_OUTPUT_CONFIG, so a bulk push doesn't stomp it.
+            uint16_t _occ; uint8_t _m, _d, _la, oc_mode, _mv_mode;
+            preset_get_directory(&_occ, &_m, &_d, &_la, &oc_mode, &_mv_mode);
+            int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf,
+                                        oc_mode == OUTPUT_CONFIG_MODE_WITH_PRESET);
             if (err == 0) {
                 float rate = (float)audio_state.freq;
                 dsp_recalculate_all_filters(rate);

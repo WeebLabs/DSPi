@@ -6,7 +6,7 @@
 #include "config.h"
 #include "dac_hw_mute.h"   // DacHwMuteConfig (stored in PresetDirectory)
 
-// Legacy result codes (used by flash_save_params / flash_load_params)
+// Legacy result codes (used by flash_save_params and the preset/boot API)
 #define FLASH_OK            0
 #define FLASH_ERR_WRITE     1
 #define FLASH_ERR_NO_DATA   2
@@ -18,9 +18,6 @@
 
 // Save current live state to the active preset slot (or slot 0 if none active).
 int flash_save_params(void);
-
-// Reload the active preset slot from flash.
-int flash_load_params(void);
 
 // Reset live state to factory defaults.  Does NOT erase presets.
 // The active preset slot is unchanged (still selected, now running defaults).
@@ -63,11 +60,11 @@ uint8_t preset_set_name(uint8_t slot, const char *name);
 //   - startup_mode:        PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
 //   - default_slot:        slot loaded in SPECIFIED mode (0-9)
 //   - last_active:         last slot that was loaded/saved (always 0-9)
-//   - include_pins:        whether preset load restores pin config (0/1)
+//   - output_config_mode:  OUTPUT_CONFIG_MODE_INDEPENDENT (0) or _WITH_PRESET (1)
 //   - master_volume_mode:  MASTER_VOLUME_MODE_INDEPENDENT (0) or _WITH_PRESET (1)
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,
-                          uint8_t *include_pins, uint8_t *master_volume_mode);
+                          uint8_t *output_config_mode, uint8_t *master_volume_mode);
 
 // Set startup behavior.
 //   mode: PRESET_STARTUP_SPECIFIED or PRESET_STARTUP_LAST_ACTIVE
@@ -75,8 +72,17 @@ void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
 // Returns PRESET_OK or PRESET_ERR_INVALID_SLOT.
 uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot);
 
-// Set whether preset load/save includes pin configuration.
-void preset_set_include_pins(uint8_t include);
+// Set the physical IO/output-config persistence mode (OUTPUT_CONFIG_MODE_*):
+// whether output pins/types, I2S MCK/BCK and the SPDIF RX pin travel with
+// presets (WITH_PRESET) or are stored device-global (INDEPENDENT).  Values
+// outside the valid range clamp to INDEPENDENT.
+void preset_set_output_config_mode(uint8_t mode);
+
+// Copy the live physical IO config into the directory's device-global block and
+// persist (the explicit "save output config" for INDEPENDENT mode).  Accepted
+// in both modes; dormant in WITH_PRESET.  Returns PRESET_OK or
+// PRESET_ERR_FLASH_WRITE.  Mirrors preset_save_master_volume().
+uint8_t preset_save_output_config(void);
 
 // Set the master-volume persistence mode (0 = independent, 1 = per-preset).
 // Values outside the valid range are clamped to INDEPENDENT.

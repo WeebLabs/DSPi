@@ -132,17 +132,17 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_DELAY       0x49
 #define REQ_GET_STATUS      0x50
 #define REQ_SAVE_PARAMS     0x51
-// REQ_LOAD_PARAMS (0x52): DEPRECATED legacy "revert to saved" command.
-// Runs flash_load_params() -> preset_load() (incl. the dir_flush flash write)
-// SYNCHRONOUSLY in the USB control/IRQ handler, without stopping SPDIF RX or
-// fencing Core 1 — so it crashes the device when SPDIF is the active input
-// (the RX decode-timeout alarm tears down DMA/PIO during the ~45 ms flash
-// blackout).  Intentionally NOT fixed: the DSPi Console host has been migrated
-// to the deferred, SPDIF-safe REQ_PRESET_LOAD (0x91) for "Revert to Saved",
-// and any new host should do the same.  This address (0x52) is effectively
-// free and MAY BE REPURPOSED for a new vendor command in the future — if so,
-// drop the handler below and reassign here.
-#define REQ_LOAD_PARAMS     0x52
+// REQ_SAVE_OUTPUT_CONFIG (0x52): persist the live physical IO/output configuration
+// (output pins, output types, I2S MCK/BCK, SPDIF RX pin) into the directory's
+// device-global block.  Used in OUTPUT_CONFIG_MODE_INDEPENDENT (the "stored
+// independently, like master volume" mode); accepted but dormant in WITH_PRESET
+// mode.  No payload.
+//
+// Reassigned from the former REQ_LOAD_PARAMS — a deprecated synchronous "revert
+// to saved" that ran flash_load_params()->preset_load() in the USB control/IRQ
+// handler without stopping SPDIF RX or fencing Core 1, crashing the device on
+// SPDIF input.  Hosts use the deferred, SPDIF-safe REQ_PRESET_LOAD (0x91) instead.
+#define REQ_SAVE_OUTPUT_CONFIG  0x52
 #define REQ_FACTORY_RESET   0x53
 #define REQ_SET_CHANNEL_GAIN 0x54
 #define REQ_GET_CHANNEL_GAIN 0x55
@@ -201,8 +201,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_PRESET_GET_DIR          0x95
 #define REQ_PRESET_SET_STARTUP      0x96
 #define REQ_PRESET_GET_STARTUP      0x97
-#define REQ_PRESET_SET_INCLUDE_PINS 0x98
-#define REQ_PRESET_GET_INCLUDE_PINS 0x99
+// Output-config persistence mode (was REQ_PRESET_SET/GET_INCLUDE_PINS).  Selects
+// whether the physical IO/output config travels with presets or is device-global.
+#define REQ_SET_OUTPUT_CONFIG_MODE  0x98  // payload = uint8_t mode (see OUTPUT_CONFIG_MODE_*)
+#define REQ_GET_OUTPUT_CONFIG_MODE  0x99  // returns uint8_t mode
 #define REQ_PRESET_GET_ACTIVE       0x9A
 #define REQ_SET_CHANNEL_NAME        0x9B
 #define REQ_GET_CHANNEL_NAME        0x9C
@@ -285,6 +287,19 @@ extern volatile uint32_t nominal_feedback_10_14;
 //   preset load — same as the old include_master_volume=1 behavior.
 #define MASTER_VOLUME_MODE_INDEPENDENT   0
 #define MASTER_VOLUME_MODE_WITH_PRESET   1
+
+// Output (Physical IO) Configuration Persistence Modes
+// Governs the device's physical IO/routing: output pins, output types (SPDIF/I2S),
+// I2S MCK/BCK, and the SPDIF RX pin.  Same 0/1 convention as the master-volume
+// modes, so the legacy include_pins directory byte (default 1) maps straight onto
+// it with no value migration.
+// Mode 1 (WITH_PRESET, default): IO config travels with presets — stored in each
+//   slot, applied on load.  (Today's behavior.)
+// Mode 0 (INDEPENDENT): IO config is device-global — REQ_SAVE_OUTPUT_CONFIG stores
+//   it in the directory; it is applied at boot and preset load/factory reset never
+//   touch it.  Mirrors the master-volume independent mode.
+#define OUTPUT_CONFIG_MODE_INDEPENDENT   0
+#define OUTPUT_CONFIG_MODE_WITH_PRESET   1
 
 // Per-Band Bypass Commands
 // wValue = (channel << 8) | band; payload = uint8_t (1 = bypass, anything else = active)

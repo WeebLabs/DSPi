@@ -695,12 +695,15 @@ static void vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
         }
 
-        case REQ_PRESET_SET_INCLUDE_PINS: {
-            // Deferred to main loop — flash write in dir_flush().
+        case REQ_SET_OUTPUT_CONFIG_MODE: {
+            // Set physical IO/output-config persistence mode (0 = independent,
+            // 1 = with-preset).  Deferred to main loop — flash write in dir_flush().
             if (buffer->data_len >= 1) {
-                flash_set_include_pins_val = vendor_rx_buf[0];
+                uint8_t m = vendor_rx_buf[0];
+                if (m > OUTPUT_CONFIG_MODE_WITH_PRESET) m = OUTPUT_CONFIG_MODE_INDEPENDENT;
+                flash_set_output_config_mode_val = m;
                 __dmb();
-                flash_set_include_pins_pending = true;
+                flash_set_output_config_mode_pending = true;
             }
             break;
         }
@@ -1067,20 +1070,15 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 return true;
             }
 
-            case REQ_LOAD_PARAMS: {
-                // DEPRECATED — see config.h note on REQ_LOAD_PARAMS (0x52).
-                // This runs flash_load_params() -> preset_load() (with its
-                // flash write) SYNCHRONOUSLY here in control/IRQ context with
-                // no SPDIF-RX teardown or Core 1 fence, which crashes the core
-                // on SPDIF input.  Left unfixed by design: the host now uses
-                // the deferred REQ_PRESET_LOAD (0x91) instead.  Do NOT add new
-                // callers; this command + its address may be repurposed later.
-                //
-                // flash_load_params() routes through preset_load(), which
-                // handles filter recalculation, delay updates, and mute
-                // internally — no need to duplicate here.
-                int result = flash_load_params();
-                usb_start_tiny_control_in_transfer(result, 1);
+            case REQ_SAVE_OUTPUT_CONFIG: {
+                // Action-style command (repurposed dead 0x52): persist the live
+                // physical IO config into the directory's device-global block —
+                // the explicit "save output config" for INDEPENDENT mode.
+                // Mirrors REQ_SAVE_MASTER_VOLUME: 1-byte status response, flash
+                // write deferred to the main loop.
+                flash_save_output_config_pending = true;
+                __dmb();
+                usb_start_tiny_control_in_transfer(PRESET_OK, 1);
                 return true;
             }
 
@@ -1388,18 +1386,18 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 //   [2]   startup_mode
                 //   [3]   default_slot
                 //   [4]   last_active_slot
-                //   [5]   include_pins
+                //   [5]   output_config_mode (0 = independent, 1 = with-preset)
                 //   [6]   master_volume_mode (0 = independent, 1 = per-preset)
                 uint16_t occupied;
-                uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+                uint8_t startup, def_slot, last_active, oc_mode, mv_mode;
                 preset_get_directory(&occupied, &startup, &def_slot,
-                                     &last_active, &inc_pins, &mv_mode);
+                                     &last_active, &oc_mode, &mv_mode);
                 resp_buf[0] = occupied & 0xFF;
                 resp_buf[1] = occupied >> 8;
                 resp_buf[2] = startup;
                 resp_buf[3] = def_slot;
                 resp_buf[4] = last_active;
-                resp_buf[5] = inc_pins;
+                resp_buf[5] = oc_mode;
                 resp_buf[6] = mv_mode;
                 vendor_send_response(resp_buf, 7);
                 return true;
@@ -1418,12 +1416,12 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 return true;
             }
 
-            case REQ_PRESET_GET_INCLUDE_PINS: {
+            case REQ_GET_OUTPUT_CONFIG_MODE: {
                 uint16_t occupied;
-                uint8_t startup, def_slot, last_active, inc_pins, mv_mode;
+                uint8_t startup, def_slot, last_active, oc_mode, mv_mode;
                 preset_get_directory(&occupied, &startup, &def_slot,
-                                     &last_active, &inc_pins, &mv_mode);
-                resp_buf[0] = inc_pins;
+                                     &last_active, &oc_mode, &mv_mode);
+                resp_buf[0] = oc_mode;
                 vendor_send_response(resp_buf, 1);
                 return true;
             }

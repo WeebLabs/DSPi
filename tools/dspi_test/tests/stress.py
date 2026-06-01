@@ -9,8 +9,9 @@ Stress / fuzz group.
     must no-op/clamp/accept, never crash.
 
 Scale with --stress N (default light pass).  All opcodes here are live, non-flash
-params; flash writers, pin/type/input switches, and 0xF0/0x52 are excluded.
-Global snapshot restore returns all mutated params afterwards.
+params; flash writers (incl. 0x52 REQ_SAVE_OUTPUT_CONFIG), pin/type/input
+switches, and 0xF0 are excluded.  Global snapshot restore returns all mutated
+params afterwards.
 """
 
 import random
@@ -22,7 +23,7 @@ from ..framework import test
 # Opcodes that must never be fuzzed: actions / SET-via-wValue / flash / bootloader.
 _FUZZ_GET_DENY = {
     0xF0,  # ENTER_BOOTLOADER
-    0x52, 0x51, 0x53,             # LOAD/SAVE/FACTORY (legacy)
+    0x52, 0x51, 0x53,             # SAVE_OUTPUT_CONFIG / SAVE_PARAMS / FACTORY_RESET (flash/action)
     0x90, 0x91, 0x92,             # preset save/load/delete
     0xD6,                         # save master volume
     0x83, 0xB1, 0xB3,             # clear clips / reset stats (mutate)

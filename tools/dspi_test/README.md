@@ -25,7 +25,7 @@ app. Run from the repo root so `config.h` opcode parsing works.
 python3 -m tools.dspi_test.run
 
 # Include flash-writing tests (preset save/load/delete, names, startup,
-# include-pins, master-volume save, DAC-mute config). Budget-capped & restored:
+# output-config mode/save, master-volume save, DAC-mute config). Budget-capped & restored:
 python3 -m tools.dspi_test.run --allow-flash
 
 # Also run the one-shot factory-reset test:
@@ -79,8 +79,9 @@ Exit code is `0` only if there are no `FAIL`/`ERROR` results.
   long enough that the host resets the bus — recoverable, and the count is
   reported).
 - **Exclusions.** `0xF0 ENTER_BOOTLOADER` is never sent (would drop the device
-  to BOOTSEL). `0x52 LOAD_PARAMS` is quarantined (deprecated; crashes on SPDIF
-  input). Both appear as documented SKIPs.
+  to BOOTSEL); it appears as a documented SKIP. (`0x52` is no longer excluded —
+  the dead `LOAD_PARAMS` was repurposed as `REQ_SAVE_OUTPUT_CONFIG`, a safe
+  action covered by `output_config_save`.)
 
 ## Layout
 

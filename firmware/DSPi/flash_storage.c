@@ -98,6 +98,22 @@ typedef struct __attribute__((packed)) {
     float delay_ms;
 } FlashOutputChannel;
 
+// Device-global physical IO/output configuration (directory V4).  Single source
+// of truth for output pins/types, I2S MCK/BCK and the SPDIF RX pin while
+// output_config_mode == OUTPUT_CONFIG_MODE_INDEPENDENT.  Fixed-size (platform-
+// independent) so the directory layout/CRC stays stable across RP2040/RP2350;
+// only the first NUM_PIN_OUTPUTS / NUM_SPDIF_INSTANCES entries are meaningful.
+typedef struct __attribute__((packed)) {
+    uint8_t output_pins[8];          // GPIO per pin-output (SPDIF/I2S/PDM)
+    uint8_t output_types[4];         // Per-slot: 0=S/PDIF, 1=I2S
+    uint8_t i2s_bck_pin;             // BCK GPIO; LRCLK = BCK + 1
+    uint8_t i2s_mck_pin;             // MCK GPIO
+    uint8_t i2s_mck_enabled;         // MCK on/off (0 or 1)
+    uint8_t i2s_mck_multiplier;      // 0 = 128x, 1 = 256x
+    uint8_t spdif_rx_pin;            // SPDIF RX GPIO (device-level)
+    uint8_t reserved[3];
+} FlashOutputConfig;                 // 20 bytes
+
 // --- Preset Directory v1 (legacy — kept only for upgrade migration) ---
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -133,15 +149,40 @@ typedef struct __attribute__((packed)) {
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
 } PresetDirectory_v2;
 
-// --- Preset Directory v3 (current, sector 0) ---
-// V3 appends the DacHwMuteConfig field (16 bytes) so users can configure a
+// --- Preset Directory v3 (snapshot — kept only for v3→v4 migration) ---
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t crc32;
+    uint8_t  startup_mode;
+    uint8_t  default_slot;
+    uint8_t  last_active_slot;
+    uint8_t  include_pins;                    // → output_config_mode in V4
+    uint16_t slot_occupied;
+    uint8_t  master_volume_mode;
+    uint8_t  spdif_rx_pin;
+    float    master_volume_db;
+    char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
+    DacHwMuteConfig dac_hw_mute;
+} PresetDirectory_v3;
+
+// --- Preset Directory v4 (current, sector 0) ---
+// V3 appended the DacHwMuteConfig field (16 bytes) so users can configure a
 // DAC hardware-mute GPIO that gets asserted during pipeline reset to
 // suppress the audible click when I²S BCK/LRCLK stop mid-cycle.  The mute
 // config is a board-level attribute (pin numbers + polarity + timing), not a
 // listening profile, so it lives in the directory rather than per-preset.
+//
+// V4 repurposes the former `include_pins` byte as `output_config_mode` (same
+// byte/offset, 1:1 value mapping → no migration of the value) and appends a
+// device-global FlashOutputConfig block.  Together they let the device's whole
+// physical IO config either travel with presets (WITH_PRESET, default) or be
+// stored once here and applied at boot (INDEPENDENT) — mirroring the
+// master-volume independent/with-preset mechanism.
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
-    uint16_t version;                        // Directory format version (3)
+    uint16_t version;                        // Directory format version (4)
     uint16_t reserved;
     uint32_t crc32;                          // CRC over everything after this 12-byte header
 
@@ -149,20 +190,23 @@ typedef struct __attribute__((packed)) {
     uint8_t  startup_mode;                   // PRESET_STARTUP_SPECIFIED or _LAST_ACTIVE
     uint8_t  default_slot;                   // Slot to load in SPECIFIED mode (0-9)
     uint8_t  last_active_slot;               // Last loaded/saved slot (always 0-9)
-    uint8_t  include_pins;                   // Whether preset load restores pin config
+    uint8_t  output_config_mode;             // OUTPUT_CONFIG_MODE_* (was include_pins; 1↔WITH_PRESET, 0↔INDEPENDENT)
 
     // Slot metadata
     uint16_t slot_occupied;                  // Bitmask: bit N = slot N has valid data
     uint8_t  master_volume_mode;             // MASTER_VOLUME_MODE_INDEPENDENT or _WITH_PRESET (was include_master_volume)
-    uint8_t  spdif_rx_pin;                   // SPDIF RX GPIO pin, device-level (was padding[1])
+    uint8_t  spdif_rx_pin;                   // SPDIF RX GPIO pin, device-level (legacy; superseded by output_config.spdif_rx_pin)
     float    master_volume_db;               // Independent master volume (mode 0 at boot)
     char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];  // 32-byte NUL-terminated names
 
     // V3 addition: DAC hardware mute pin configuration (board-level).
     DacHwMuteConfig dac_hw_mute;             // 16 bytes; enabled=0 by default
+
+    // V4 addition: device-global physical IO config (INDEPENDENT mode store).
+    FlashOutputConfig output_config;         // 20 bytes
 } PresetDirectory;
 
-#define DIR_VERSION_CURRENT  3
+#define DIR_VERSION_CURRENT  4
 
 // --- Preset Slot (sectors 1-10) ---
 typedef struct __attribute__((packed)) {
@@ -313,6 +357,15 @@ extern volatile bool leveller_update_pending;
 extern volatile bool leveller_reset_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
+// Physical IO config live globals (defined in usb_audio.c; spdif_rx_pin and
+// active_input_source come from audio_input.h).  Owned by the output_config_mode
+// mechanism below.
+extern uint8_t  output_types[];
+extern uint8_t  i2s_bck_pin;
+extern uint8_t  i2s_mck_pin;
+extern bool     i2s_mck_enabled;
+extern uint16_t i2s_mck_multiplier;
+extern volatile bool spdif_rx_pin_change_pending;
 extern char channel_names[NUM_CHANNELS][PRESET_NAME_LEN];
 extern volatile uint32_t feedback_10_14;
 extern volatile uint32_t nominal_feedback_10_14;
@@ -329,6 +382,7 @@ volatile uint32_t preset_mute_counter = 0;
 // Forward declaration — defined in LEGACY API section
 static void apply_factory_defaults(void);
 static inline void dir_apply_dac_hw_mute_defaults(void);  // defined below
+static void io_config_defaults(FlashOutputConfig *cfg);    // defined below (IO config section)
 
 // RAM-cached copy of the directory — updated on every directory write and
 // loaded once at boot.  Avoids repeated flash reads for queries.
@@ -469,6 +523,41 @@ static bool dir_load_cache(void) {
         return true;
     }
 
+    if (flash_dir->version == 3) {
+        // V3 → V4 migration.  Validate the v3 CRC, copy fields forward, and
+        // seed the new device-global output_config from firmware IO defaults.
+        // The former include_pins byte maps 1:1 onto output_config_mode
+        // (1 → WITH_PRESET, 0 → INDEPENDENT).  In the default WITH_PRESET case
+        // output_config is unused (boot applies the slot's IO).  Only a device
+        // that had the non-default include_pins=0 lands in INDEPENDENT mode and
+        // boots to default routing until the user re-saves via
+        // REQ_SAVE_OUTPUT_CONFIG; the device-level SPDIF RX pin is carried into
+        // the block so it survives regardless.
+        const PresetDirectory_v3 *v3 = (const PresetDirectory_v3 *)flash_dir;
+        const uint8_t *v3_data_start = (const uint8_t *)&v3->startup_mode;
+        size_t v3_data_len = sizeof(PresetDirectory_v3) - offsetof(PresetDirectory_v3, startup_mode);
+        if (crc32(v3_data_start, v3_data_len) != v3->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        dir_cache.startup_mode       = v3->startup_mode;
+        dir_cache.default_slot       = v3->default_slot;
+        dir_cache.last_active_slot   = v3->last_active_slot;
+        dir_cache.output_config_mode = v3->include_pins;   // 1:1 value mapping
+        dir_cache.slot_occupied      = v3->slot_occupied;
+        dir_cache.master_volume_mode = v3->master_volume_mode;
+        dir_cache.spdif_rx_pin       = v3->spdif_rx_pin;
+        dir_cache.master_volume_db   = v3->master_volume_db;
+        memcpy(dir_cache.slot_names, v3->slot_names, sizeof(dir_cache.slot_names));
+        dir_cache.dac_hw_mute        = v3->dac_hw_mute;    // carry forward as-is
+        io_config_defaults(&dir_cache.output_config);
+        dir_cache.output_config.spdif_rx_pin = v3->spdif_rx_pin;  // keep device RX pin
+        dir_cache_valid = true;
+        (void)dir_flush();
+        return true;
+    }
+
     if (flash_dir->version == 2) {
         // V2 → V3 migration.  Read with the old struct, validate the v2
         // CRC over the v2-sized data range, then copy fields forward
@@ -485,7 +574,7 @@ static bool dir_load_cache(void) {
         dir_cache.startup_mode       = v2->startup_mode;
         dir_cache.default_slot       = v2->default_slot;
         dir_cache.last_active_slot   = v2->last_active_slot;
-        dir_cache.include_pins       = v2->include_pins;
+        dir_cache.output_config_mode = v2->include_pins;   // 1:1 value mapping
         dir_cache.slot_occupied      = v2->slot_occupied;
         dir_cache.master_volume_mode = v2->master_volume_mode;
         dir_cache.spdif_rx_pin       = v2->spdif_rx_pin;
@@ -495,6 +584,8 @@ static bool dir_load_cache(void) {
         // to PCM5102A-friendly defaults so the user only has to flip
         // enabled=1 if their wiring matches the common case.
         dir_apply_dac_hw_mute_defaults();
+        io_config_defaults(&dir_cache.output_config);      // V4 device-global IO
+        dir_cache.output_config.spdif_rx_pin = v2->spdif_rx_pin;  // keep device RX pin
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -515,7 +606,7 @@ static bool dir_load_cache(void) {
         dir_cache.startup_mode       = v1->startup_mode;
         dir_cache.default_slot       = v1->default_slot;
         dir_cache.last_active_slot   = v1->last_active_slot;
-        dir_cache.include_pins       = v1->include_pins;
+        dir_cache.output_config_mode = v1->include_pins;   // 1:1 value mapping
         dir_cache.slot_occupied      = v1->slot_occupied;
         dir_cache.master_volume_mode = v1->include_master_volume
                                          ? MASTER_VOLUME_MODE_WITH_PRESET
@@ -525,8 +616,9 @@ static bool dir_load_cache(void) {
         // dac_hw_mute: feature disabled, but pin/polarity/timing pre-set
         // to PCM5102A-friendly defaults — see v2→v3 path above.
         dir_apply_dac_hw_mute_defaults();
+        io_config_defaults(&dir_cache.output_config);      // V4 device-global IO (v1 has no RX pin)
         dir_cache_valid = true;
-        (void)dir_flush();  // persist as V3; if the flush fails, cache stays valid in RAM
+        (void)dir_flush();  // persist as V4; if the flush fails, cache stays valid in RAM
         return true;
     }
 
@@ -579,7 +671,7 @@ static void dir_ensure(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;     // Default to slot 0
-    dir_cache.include_pins = 1;              // Include pins in preset load by default
+    dir_cache.output_config_mode = OUTPUT_CONFIG_MODE_WITH_PRESET;  // IO travels with presets by default
     dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
     dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
     dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
@@ -590,8 +682,162 @@ static void dir_ensure(void) {
     // to PCM5102A-friendly defaults so users with the common DAC only
     // have to flip enabled=1.
     dir_apply_dac_hw_mute_defaults();
+    io_config_defaults(&dir_cache.output_config);  // V4 device-global IO defaults
     dir_cache_valid = true;
     // Don't flush yet — will be flushed on first preset save
+}
+
+// ============================================================================
+// PHYSICAL IO / OUTPUT CONFIG
+// ============================================================================
+//
+// The device's physical IO/routing — output pins, output types (SPDIF/I2S),
+// I2S MCK/BCK, and the SPDIF RX pin — is owned by the output_config_mode
+// mechanism, the exact analog of the master-volume independent/with-preset
+// mechanism.  Whether it travels with presets (WITH_PRESET, default) or is a
+// device-global value stored in the directory (INDEPENDENT) is selected by
+// dir_cache.output_config_mode.  A single snapshot/apply path is shared by the
+// per-slot and device-global sources so the two cannot diverge.  Input source
+// (USB vs SPDIF) is NOT part of this block — it stays per-preset.
+
+// True if `pin` is a usable output/RX GPIO on this platform.  (0 is allowed for
+// output pins; the SPDIF RX path additionally rejects 0 as "absent".)
+static bool io_pin_valid(uint8_t pin) {
+    bool valid = (pin <= 29) && (pin != 12) && !(pin >= 23 && pin <= 25);
+#if !PICO_RP2350
+    if (pin > 28) valid = false;
+#endif
+    return valid;
+}
+
+// Firmware IO factory defaults: all-SPDIF outputs, default pins, MCK off,
+// default SPDIF RX pin.  Matches apply_factory_defaults' former IO block.
+static void io_config_defaults(FlashOutputConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->output_pins[0] = PICO_AUDIO_SPDIF_PIN;
+    cfg->output_pins[1] = PICO_SPDIF_PIN_2;
+#if PICO_RP2350
+    cfg->output_pins[2] = PICO_SPDIF_PIN_3;
+    cfg->output_pins[3] = PICO_SPDIF_PIN_4;
+    cfg->output_pins[4] = PICO_PDM_PIN;
+#else
+    cfg->output_pins[2] = PICO_PDM_PIN;
+#endif
+    // output_types[] all 0 (S/PDIF) from memset
+    cfg->i2s_bck_pin        = PICO_I2S_BCK_PIN;
+    cfg->i2s_mck_pin        = PICO_I2S_MCK_PIN;
+    cfg->i2s_mck_enabled    = 0;
+    cfg->i2s_mck_multiplier = 0;             // 0 = 128x
+    cfg->spdif_rx_pin       = PICO_SPDIF_RX_PIN_DEFAULT;
+}
+
+// Snapshot the live IO globals into cfg (for REQ_SAVE_OUTPUT_CONFIG).
+static void io_config_from_live(FlashOutputConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    for (int i = 0; i < NUM_PIN_OUTPUTS; i++)     cfg->output_pins[i]  = output_pins[i];
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) cfg->output_types[i] = output_types[i];
+    cfg->i2s_bck_pin        = i2s_bck_pin;
+    cfg->i2s_mck_pin        = i2s_mck_pin;
+    cfg->i2s_mck_enabled    = i2s_mck_enabled ? 1 : 0;
+    cfg->i2s_mck_multiplier = (i2s_mck_multiplier == 256) ? 1 : 0;  // 0=128x, 1=256x
+    cfg->spdif_rx_pin       = spdif_rx_pin;
+}
+
+// Extract a slot's IO config into cfg, honoring the slot's data version
+// (output_pins V6+, output_types/I2S V9+ with the V11+ multiplier encoding,
+// spdif_rx_pin V13+).  Fields the slot predates fall back to defaults; the
+// SPDIF RX pin baselines from the device-level value (so a device-level pin set
+// on a pre-V13 preset still survives) and a valid per-preset pin overrides it.
+static void io_config_from_slot(const PresetSlot *slot, FlashOutputConfig *cfg) {
+    io_config_defaults(cfg);
+    cfg->spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;  // device-level baseline
+    if (slot->version >= 6) {
+        for (int i = 0; i < NUM_PIN_OUTPUTS; i++) cfg->output_pins[i] = slot->output_pins[i];
+    }
+    if (slot->version >= 9) {
+        for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) cfg->output_types[i] = slot->output_types[i];
+        cfg->i2s_bck_pin     = slot->i2s_bck_pin;
+        cfg->i2s_mck_pin     = slot->i2s_mck_pin;
+        cfg->i2s_mck_enabled = slot->i2s_mck_enabled ? 1 : 0;
+        // V11+ stores 0=128x/1=256x; V9-V10 stored raw (128, or 0 meaning 256).
+        if (slot->version >= 11)
+            cfg->i2s_mck_multiplier = (slot->i2s_mck_multiplier == 1) ? 1 : 0;
+        else
+            cfg->i2s_mck_multiplier = (slot->i2s_mck_multiplier == 0) ? 1 : 0;
+    }
+    if (slot->version >= 13 && slot->spdif_rx_pin != 0)
+        cfg->spdif_rx_pin = slot->spdif_rx_pin;
+}
+
+// Apply a FlashOutputConfig to the live IO globals.  Validates pins (invalid →
+// platform default), checks MCK GPOUT-capability (falls back + disables MCK if
+// the pin can't drive clk_gpoutN here), and — if the SPDIF RX pin changed while
+// RX is the active input — schedules the running RX library's GPIO hot-swap.
+// Sets output_types[]/i2s_* that the boot setup and the main loop's pipeline
+// reset consume; it does NOT itself reconfigure hardware.  Input source is
+// deliberately untouched.
+static void io_config_apply(const FlashOutputConfig *cfg) {
+    static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
+#if PICO_RP2350
+        PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
+#else
+        PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_PDM_PIN
+#endif
+    };
+    for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
+        uint8_t pin = cfg->output_pins[i];
+        output_pins[i] = io_pin_valid(pin) ? pin : default_pins[i];
+    }
+
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) output_types[i] = cfg->output_types[i];
+    i2s_bck_pin = cfg->i2s_bck_pin;
+
+    // MCK pin must map to clk_gpoutN on this platform (see the V9 apply note);
+    // otherwise reset to default and force MCK off so the change is visible.
+    if (GPIO_TO_GPOUT_CLOCK_HANDLE(cfg->i2s_mck_pin, clk_sys) == clk_sys) {
+        printf("Output-config MCK pin %u not GPOUT-capable on this platform; "
+               "resetting to default %u and disabling MCK\n",
+               (unsigned)cfg->i2s_mck_pin, (unsigned)PICO_I2S_MCK_PIN);
+        i2s_mck_pin = PICO_I2S_MCK_PIN;
+        i2s_mck_enabled = false;
+    } else {
+        i2s_mck_pin = cfg->i2s_mck_pin;
+        i2s_mck_enabled = (cfg->i2s_mck_enabled != 0);
+    }
+    i2s_mck_multiplier = (cfg->i2s_mck_multiplier == 1) ? 256 : 128;
+
+    // SPDIF RX pin (reject 0 = "absent"; hot-swap if it changed while RX active).
+    if (cfg->spdif_rx_pin != 0 && io_pin_valid(cfg->spdif_rx_pin) &&
+        cfg->spdif_rx_pin != spdif_rx_pin) {
+        spdif_rx_pin = cfg->spdif_rx_pin;
+        if (active_input_source == INPUT_SOURCE_SPDIF)
+            spdif_rx_pin_change_pending = true;
+    }
+}
+
+// Re-derive the live physical IO config for a preset *context* change — the
+// exact analog of apply_master_volume_from_mode().  IO is sourced ONLY here;
+// apply_slot_to_live() / apply_factory_defaults() no longer touch it.
+//
+//   WITH_PRESET: IO travels with the preset.  A configured slot supplies it; an
+//     empty/factory-default context (slot_or_null == NULL) gets firmware
+//     defaults — exactly as EQ resets to flat.
+//   INDEPENDENT: IO is device-global.  Only a BOOT restore re-applies the saved
+//     directory block; runtime context changes leave the live IO untouched, so
+//     loading a preset never re-wires outputs.
+//
+// `slot_or_null` is the loaded slot, or NULL for an empty/factory context.
+// `is_boot` is true only on the power-on restore path.
+static void apply_output_config_from_mode(const PresetSlot *slot_or_null, bool is_boot) {
+    FlashOutputConfig cfg;
+    if (dir_cache.output_config_mode == OUTPUT_CONFIG_MODE_WITH_PRESET) {
+        if (slot_or_null) io_config_from_slot(slot_or_null, &cfg);
+        else              io_config_defaults(&cfg);
+        io_config_apply(&cfg);
+    } else if (is_boot) {
+        io_config_apply(&dir_cache.output_config);
+    }
+    // INDEPENDENT + runtime: intentionally a no-op (live IO survives).
 }
 
 // ============================================================================
@@ -650,11 +896,11 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
         slot->matrix_outputs[out].delay_ms = matrix_mixer.outputs[out].delay_ms;
     }
 
-    // Pin configuration (always stored, conditionally loaded)
+    // Pin configuration (always stored; loaded per output_config_mode —
+    // WITH_PRESET applies it, INDEPENDENT ignores it in favor of the directory).
     memcpy(slot->output_pins, output_pins, sizeof(slot->output_pins));
 
-    // SPDIF RX pin: stored alongside output_pins, loaded only when
-    // include_pins is true (matches output_pins discipline).
+    // SPDIF RX pin: stored alongside output_pins, applied per output_config_mode.
     slot->spdif_rx_pin = spdif_rx_pin;
 
     // Channel names
@@ -756,12 +1002,13 @@ static void apply_master_volume_from_mode(const PresetSlot *slot_or_null,
 }
 
 // Apply a validated PresetSlot to the live DSP state.
-// `include_pins` controls whether pin config is restored.
-// Master volume is *not* touched here — callers invoke
-// apply_master_volume_from_mode() separately after this returns, so mode
-// changes don't require a preset reload to take effect.
+// Physical IO config (output pins/types, I2S MCK/BCK, SPDIF RX pin) and master
+// volume are *not* touched here — callers invoke apply_output_config_from_mode()
+// and apply_master_volume_from_mode() separately after this returns, so each is
+// sourced per its own mode (per-preset vs device-global) without requiring a
+// preset reload to take effect.
 // Does NOT trigger filter recalculation — caller must do that.
-static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
+static void apply_slot_to_live(const PresetSlot *slot) {
     // EQ
     memcpy((void *)filter_recipes, slot->filter_recipes, sizeof(filter_recipes));
     // Normalize the per-band bypass byte at the boundary.  Legacy presets
@@ -848,51 +1095,9 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
         channel_delays_ms[CH_OUT_1 + out] = slot->matrix_outputs[out].delay_ms;
     }
 
-    // Pin configuration (conditional)
-    if (include_pins) {
-#if PICO_RP2350
-        static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
-            PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
-            PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
-        };
-#else
-        static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
-            PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_PDM_PIN
-        };
-#endif
-        for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
-            uint8_t pin = slot->output_pins[i];
-            bool valid = (pin <= 29) && (pin != 12) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
-            output_pins[i] = valid ? pin : default_pins[i];
-        }
-
-        // SPDIF RX pin (lives in the formerly-padding byte after V13's
-        // input_source field; see PresetSlot struct comment).  Validate
-        // with the same rule as output_pins; if invalid, leave the live
-        // value alone — pre-V13-with-rx-pin slots have 0 here, which
-        // fails validity, so the live boot-bootstrapped value (or current
-        // value) is preserved.  If valid AND it changed AND SPDIF input
-        // is currently active, schedule the hot-swap so the running RX
-        // library picks up the new GPIO.
-        {
-            uint8_t pin = slot->spdif_rx_pin;
-            bool valid = (pin > 0) && (pin <= 29) && (pin != 12) &&
-                         !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
-            if (valid && pin != spdif_rx_pin) {
-                spdif_rx_pin = pin;
-                if (active_input_source == INPUT_SOURCE_SPDIF) {
-                    extern volatile bool spdif_rx_pin_change_pending;
-                    spdif_rx_pin_change_pending = true;
-                }
-            }
-        }
-    }
+    // Pin configuration, output types, I2S MCK/BCK and the SPDIF RX pin are
+    // applied by apply_output_config_from_mode() (per output_config_mode), not
+    // here — see the PHYSICAL IO / OUTPUT CONFIG section above.
 
     // Channel names (V8+).  Pre-V8 slots predate output_types (V9+) and
     // input_source (V13+) too, so fall back to firmware boot defaults
@@ -904,52 +1109,7 @@ static void apply_slot_to_live(const PresetSlot *slot, bool include_pins) {
             get_default_channel_name(ch, INPUT_SOURCE_USB, NULL, channel_names[ch]);
     }
 
-    // I2S configuration (V9+)
-    {
-        extern uint8_t output_types[];
-        extern uint8_t i2s_bck_pin;
-        extern uint8_t i2s_mck_pin;
-        extern bool    i2s_mck_enabled;
-        extern uint16_t i2s_mck_multiplier;
-        if (slot->version >= 9) {
-            memcpy(output_types, slot->output_types, NUM_SPDIF_INSTANCES);
-            i2s_bck_pin = slot->i2s_bck_pin;
-
-            // MCK pin migration: MCK is now driven by hardware CLK_GPOUTn,
-            // so the stored pin must map to clk_gpout0..3 on this platform.
-            // Typical case: an RP2040 board loading a preset that was
-            // saved on RP2350 with mck_pin = 13 (clk_gpout0 on RP2350,
-            // but no GPOUTn mapping on RP2040).  In that case we fall
-            // back to the platform default and force MCK off so the user
-            // sees the change rather than getting silent dead clock.
-            if (GPIO_TO_GPOUT_CLOCK_HANDLE(slot->i2s_mck_pin, clk_sys) == clk_sys) {
-                printf("Preset MCK pin %u not GPOUT-capable on this platform; "
-                       "resetting to default %u and disabling MCK\n",
-                       (unsigned)slot->i2s_mck_pin,
-                       (unsigned)PICO_I2S_MCK_PIN);
-                i2s_mck_pin = PICO_I2S_MCK_PIN;
-                i2s_mck_enabled = false;
-            } else {
-                i2s_mck_pin = slot->i2s_mck_pin;
-                i2s_mck_enabled = (slot->i2s_mck_enabled != 0);
-            }
-
-            if (slot->version >= 11) {
-                // V11+: 0=128x, 1=256x
-                i2s_mck_multiplier = (slot->i2s_mck_multiplier == 1) ? 256 : 128;
-            } else {
-                // V9-V10: raw value stored (128 or 0 for 256)
-                i2s_mck_multiplier = (slot->i2s_mck_multiplier == 0) ? 256 : slot->i2s_mck_multiplier;
-            }
-        } else {
-            // Default: all S/PDIF, no I2S/MCK
-            memset(output_types, 0, NUM_SPDIF_INSTANCES);
-            i2s_bck_pin = PICO_I2S_BCK_PIN;
-            i2s_mck_pin = PICO_I2S_MCK_PIN;
-            i2s_mck_enabled = false;
-            i2s_mck_multiplier = 128;
-        }
-    }
+    // I2S/output-type config moved to apply_output_config_from_mode() (above).
 
     // Volume Leveller (V10+)
     if (slot->version >= 10) {
@@ -1108,16 +1268,18 @@ uint8_t preset_load(uint8_t slot) {
             notify_end_bulk();
             return PRESET_ERR_CRC;
         }
-        apply_slot_to_live(s, dir_cache.include_pins != 0);
+        apply_slot_to_live(s);
         loaded_slot = s;
     } else {
         // Slot not configured — apply factory defaults
         apply_factory_defaults();
     }
-    // Runtime context switch: re-derive master volume for the loaded context
-    // (loaded_slot, or NULL for the empty/factory-default case).  In
-    // independent mode this is a no-op so the live value survives.
+    // Runtime context switch: re-derive master volume AND physical IO config for
+    // the loaded context (loaded_slot, or NULL for the empty/factory case).  In
+    // each subsystem's independent mode this is a no-op so the live value
+    // survives — loading a preset never changes a device-global setting.
     apply_master_volume_from_mode(loaded_slot, false);
+    apply_output_config_from_mode(loaded_slot, false);
 
     // Recalculate filters and delays for the current sample rate
     extern volatile AudioState audio_state;
@@ -1197,10 +1359,11 @@ uint8_t preset_delete(uint8_t slot) {
         __dmb();
 
         apply_factory_defaults();
-        // The active preset context is now empty — re-derive master volume the
-        // same way loading an empty preset does (with-preset => factory default,
-        // independent => untouched).
+        // The active preset context is now empty — re-derive master volume and
+        // physical IO the same way loading an empty preset does (with-preset =>
+        // factory default, independent => untouched).
         apply_master_volume_from_mode(NULL, false);
+        apply_output_config_from_mode(NULL, false);
 
         extern volatile AudioState audio_state;
         float rate = (float)audio_state.freq;
@@ -1244,13 +1407,13 @@ uint8_t preset_set_name(uint8_t slot, const char *name) {
 
 void preset_get_directory(uint16_t *slot_occupied, uint8_t *startup_mode,
                           uint8_t *default_slot, uint8_t *last_active,
-                          uint8_t *include_pins, uint8_t *master_volume_mode) {
+                          uint8_t *output_config_mode, uint8_t *master_volume_mode) {
     dir_ensure();
     *slot_occupied      = dir_cache.slot_occupied;
     *startup_mode       = dir_cache.startup_mode;
     *default_slot       = dir_cache.default_slot;
     *last_active        = dir_cache.last_active_slot;
-    *include_pins       = dir_cache.include_pins;
+    *output_config_mode = dir_cache.output_config_mode;
     *master_volume_mode = dir_cache.master_volume_mode;
 }
 
@@ -1267,9 +1430,10 @@ uint8_t preset_set_startup(uint8_t mode, uint8_t default_slot) {
     return PRESET_OK;
 }
 
-void preset_set_include_pins(uint8_t include) {
+void preset_set_output_config_mode(uint8_t mode) {
+    if (mode > OUTPUT_CONFIG_MODE_WITH_PRESET) mode = OUTPUT_CONFIG_MODE_INDEPENDENT;
     dir_ensure();
-    dir_cache.include_pins = include ? 1 : 0;
+    dir_cache.output_config_mode = mode;
     dir_flush();
 }
 
@@ -1280,7 +1444,7 @@ void preset_set_master_volume_mode(uint8_t mode) {
     dir_flush();
 }
 
-// DAC hardware mute persistence.  Mirrors the include_pins / master_volume_mode
+// DAC hardware mute persistence.  Mirrors the output_config_mode / master_volume_mode
 // setters: synchronous, main-loop only, writes the directory sector and
 // blocks for the ~45 ms flash erase+program.  Caller (dac_hw_mute_set_config)
 // must have already validated the config — no validation here.
@@ -1313,6 +1477,20 @@ uint8_t preset_save_master_volume(void) {
 float preset_get_saved_master_volume(void) {
     dir_ensure();
     return dir_cache.master_volume_db;
+}
+
+// Snapshot the live physical IO config into the directory's device-global block
+// and persist.  This is the explicit "save output config" action for INDEPENDENT
+// mode (REQ_SAVE_OUTPUT_CONFIG); accepted in both modes — in WITH_PRESET it is
+// dormant until the user switches to INDEPENDENT.  Mirrors
+// preset_save_master_volume().  Also keeps the legacy device-level spdif_rx_pin
+// field in sync so directory reads stay coherent.
+uint8_t preset_save_output_config(void) {
+    dir_ensure();
+    io_config_from_live(&dir_cache.output_config);
+    dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
+    if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
+    return PRESET_OK;
 }
 
 uint8_t preset_get_active(void) {
@@ -1362,12 +1540,13 @@ static bool migrate_legacy(void) {
     dir_cache.startup_mode = PRESET_STARTUP_SPECIFIED;
     dir_cache.default_slot = 0;
     dir_cache.last_active_slot = 0;
-    dir_cache.include_pins = 1;
+    dir_cache.output_config_mode = OUTPUT_CONFIG_MODE_WITH_PRESET;
     dir_cache.master_volume_mode = MASTER_VOLUME_MODE_INDEPENDENT;
     dir_cache.master_volume_db   = MASTER_VOL_DEFAULT_DB;
     dir_cache.spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
     dir_cache.slot_occupied = 0x0001;  // Slot 0 occupied
     strncpy(dir_cache.slot_names[0], "Migrated", PRESET_NAME_LEN - 1);
+    io_config_defaults(&dir_cache.output_config);  // V4 device-global IO defaults
     dir_cache_valid = true;
 
     if (dir_flush() != 0) {
@@ -1380,14 +1559,8 @@ static bool migrate_legacy(void) {
 int preset_boot_load(void) {
     // Try to load the preset directory from flash
     if (dir_load_cache()) {
-        // Restore device-level SPDIF RX pin from directory
-        uint8_t rx_pin = dir_cache.spdif_rx_pin;
-        if (rx_pin > 0 && rx_pin <= 29 && rx_pin != 12 &&
-            !(rx_pin >= 23 && rx_pin <= 25)) {
-            spdif_rx_pin = rx_pin;
-        } else {
-            spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
-        }
+        // The SPDIF RX pin (and the rest of the physical IO config) is restored
+        // by apply_output_config_from_mode() below, per output_config_mode.
 
         // Directory exists — determine which slot to load
         uint8_t target_slot;
@@ -1410,7 +1583,7 @@ int preset_boot_load(void) {
         if ((dir_cache.slot_occupied & (1u << target_slot))) {
             const PresetSlot *s = validate_slot(target_slot);
             if (s) {
-                apply_slot_to_live(s, dir_cache.include_pins != 0);
+                apply_slot_to_live(s);
                 boot_slot = s;
             } else {
                 // Corrupt data — fall back to factory defaults
@@ -1419,9 +1592,11 @@ int preset_boot_load(void) {
         } else {
             apply_factory_defaults();
         }
-        // Boot restore: always re-apply master volume per mode (independent =>
-        // saved directory value, with-preset => slot value, NULL => default).
+        // Boot restore: re-apply master volume AND physical IO per mode
+        // (independent => saved directory value, with-preset => slot value,
+        // NULL => firmware defaults).
         apply_master_volume_from_mode(boot_slot, true);
+        apply_output_config_from_mode(boot_slot, true);
 
         dir_cache.last_active_slot = target_slot;
         return FLASH_OK;
@@ -1432,11 +1607,12 @@ int preset_boot_load(void) {
         // Migration succeeded; slot 0 is now populated.  Load it.
         const PresetSlot *s = validate_slot(0);
         if (s) {
-            apply_slot_to_live(s, false);  // Legacy migration: don't override pins
+            apply_slot_to_live(s);
         } else {
             apply_factory_defaults();
         }
-        apply_master_volume_from_mode(s, true);  // boot restore (s==NULL on fail)
+        apply_master_volume_from_mode(s, true);   // boot restore (s==NULL on fail)
+        apply_output_config_from_mode(s, true);
         return FLASH_OK;
     }
 
@@ -1444,7 +1620,8 @@ int preset_boot_load(void) {
     dir_ensure();
     dir_flush();
     apply_factory_defaults();
-    apply_master_volume_from_mode(NULL, true);  // boot restore (default value)
+    apply_master_volume_from_mode(NULL, true);   // boot restore (default value)
+    apply_output_config_from_mode(NULL, true);
     return FLASH_OK;
 }
 
@@ -1470,21 +1647,10 @@ int flash_save_params(void) {
     }
 }
 
-int flash_load_params(void) {
-    dir_ensure();
-
-    uint8_t slot = dir_cache.last_active_slot;
-    if (slot >= PRESET_SLOTS) {
-        slot = 0;
-    }
-
-    uint8_t result = preset_load(slot);
-    switch (result) {
-        case PRESET_OK:            return FLASH_OK;
-        case PRESET_ERR_CRC:       return FLASH_ERR_CRC;
-        default:                   return FLASH_ERR_WRITE;
-    }
-}
+// flash_load_params() (the legacy synchronous "revert to saved") was removed
+// when its only caller — the deprecated REQ_LOAD_PARAMS (0x52) — was repurposed
+// as REQ_SAVE_OUTPUT_CONFIG.  Hosts use the deferred, SPDIF-safe REQ_PRESET_LOAD
+// (0x91) instead.
 
 // Reset the live DSP state to factory defaults.
 // Does NOT modify the directory or active slot tracking.
@@ -1562,36 +1728,17 @@ static void apply_factory_defaults(void) {
         matrix_mixer.outputs[out].gain_linear = 1.0f;
     }
 
-    // Reset pin configuration
-    output_pins[0] = PICO_AUDIO_SPDIF_PIN;
-    output_pins[1] = PICO_SPDIF_PIN_2;
-#if PICO_RP2350
-    output_pins[2] = PICO_SPDIF_PIN_3;
-    output_pins[3] = PICO_SPDIF_PIN_4;
-    output_pins[4] = PICO_PDM_PIN;
-#else
-    output_pins[2] = PICO_PDM_PIN;
-#endif
+    // Physical IO config (output pins/types, I2S MCK/BCK, SPDIF RX pin) is NOT
+    // reset here — it is owned by apply_output_config_from_mode(), which the
+    // preset-context callers invoke after this returns (WITH_PRESET → firmware
+    // IO defaults; INDEPENDENT → device-global value preserved).  Mirrors how
+    // master volume is left to apply_master_volume_from_mode().
 
     // Reset channel names to factory defaults (USB input, all-SPDIF outputs).
-    // active_input_source and output_types are reset to those values below;
-    // pass NULL for output_types so the function uses its all-SPDIF fallback.
+    // active_input_source is reset below; pass NULL for output_types so the
+    // function uses its all-SPDIF fallback for naming purposes.
     for (int ch = 0; ch < NUM_CHANNELS; ch++)
         get_default_channel_name(ch, INPUT_SOURCE_USB, NULL, channel_names[ch]);
-
-    // Reset I2S configuration
-    {
-        extern uint8_t output_types[];
-        extern uint8_t i2s_bck_pin;
-        extern uint8_t i2s_mck_pin;
-        extern bool    i2s_mck_enabled;
-        extern uint16_t i2s_mck_multiplier;
-        memset(output_types, 0, NUM_SPDIF_INSTANCES);  // All S/PDIF
-        i2s_bck_pin = PICO_I2S_BCK_PIN;
-        i2s_mck_pin = PICO_I2S_MCK_PIN;
-        i2s_mck_enabled = false;
-        i2s_mck_multiplier = 128;
-    }
 
     // Volume Leveller
     leveller_config.enabled = LEVELLER_DEFAULT_ENABLED;
@@ -1620,5 +1767,11 @@ void flash_factory_reset(void) {
     // and the host sees exactly one BULK_INVALIDATED(source=FACTORY).
     notify_begin_bulk(PARAM_SRC_FACTORY);
     apply_factory_defaults();
+    // Physical IO: WITH_PRESET => reset to firmware defaults (matches the old
+    // factory-reset behavior); INDEPENDENT => leave the device-global config
+    // intact (a DSP factory reset shouldn't wipe device-level wiring — same
+    // philosophy as leaving the master-volume ceiling intact).
+    dir_ensure();
+    apply_output_config_from_mode(NULL, false);
     notify_end_bulk();
 }

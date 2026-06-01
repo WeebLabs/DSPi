@@ -116,8 +116,11 @@ volatile bool flash_set_startup_pending = false;
 uint8_t flash_set_startup_mode = 0;
 uint8_t flash_set_startup_slot = 0;
 
-volatile bool flash_set_include_pins_pending = false;
-uint8_t flash_set_include_pins_val = 0;
+// Deferred output_config_mode directory update + explicit IO-config save
+// (flash writes must happen on the main loop, not in the USB ISR).
+volatile bool flash_set_output_config_mode_pending = false;
+uint8_t flash_set_output_config_mode_val = 0;
+volatile bool flash_save_output_config_pending = false;
 
 // Deferred master_volume_mode directory update (flash write must happen on main loop)
 volatile bool flash_set_master_volume_mode_pending = false;

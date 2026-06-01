@@ -5,7 +5,8 @@ Non-flash: invalid-slot in-band errors, name/dir/startup/active reads, channel
 name round-trip (RAM), bulk GET/SET round-trip + version/size guards.
 
 Flash-gated (--allow-flash): preset save/load/delete lifecycle, preset name,
-startup, include-pins — all bracketed and restored, using one scratch slot.
+startup, output-config mode + save — all bracketed and restored, using one
+scratch slot.
 """
 
 import struct
@@ -24,7 +25,7 @@ def _dir(dev):
     return {
         "occupied": d[0] | (d[1] << 8),
         "startup_mode": d[2], "default_slot": d[3], "active": d[4],
-        "include_pins": d[5], "mv_mode": d[6],
+        "output_config_mode": d[5], "mv_mode": d[6],
     }
 
 
@@ -61,17 +62,17 @@ def preset_invalid_slot_inband(dev, profile, chk):
 
 @test("presets")
 def preset_name_and_dir_reads(dev, profile, chk):
-    """0x93 name (STALL slot>=10), 0x95 dir (7B), 0x97 startup (3B), 0x99 include-pins, 0x9A active."""
+    """0x93 name (STALL slot>=10), 0x95 dir (7B), 0x97 startup (3B), 0x99 output-config mode, 0x9A active."""
     chk.eq(len(dev.get(OP.PRESET_GET_NAME, 32, wvalue=0)), 32, "preset 0 name 32B")
     chk.stalls(lambda: dev.get(OP.PRESET_GET_NAME, 32, wvalue=PRESET_SLOTS), "name slot=10 STALL")
     d = _dir(dev)
     chk.member(d["startup_mode"], (0, 1), "startup mode")
     chk.in_range(d["default_slot"], 0, PRESET_SLOTS - 1, "default slot")
     chk.in_range(d["active"], 0, PRESET_SLOTS - 1, "active slot")
-    chk.member(d["include_pins"], (0, 1), "include_pins")
+    chk.member(d["output_config_mode"], (0, 1), "output_config_mode")
     chk.member(d["mv_mode"], (0, 1), "mv mode")
     chk.eq(len(dev.get(OP.PRESET_GET_STARTUP, 3)), 3, "startup 3B")
-    chk.member(dev.get_u8(OP.PRESET_GET_INCLUDE_PINS), (0, 1), "include-pins byte")
+    chk.member(dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), (0, 1), "output-config-mode byte")
     chk.in_range(dev.get_u8(OP.PRESET_GET_ACTIVE), 0, PRESET_SLOTS - 1, "active byte")
 
 
@@ -235,14 +236,75 @@ def preset_startup_roundtrip(dev, profile, chk):
         dev.wait_ready()
 
 
-@test("presets", mutating=True, flash=2)
-def preset_include_pins_roundtrip(dev, profile, chk):
-    """0x98/0x99 include-pins flag round-trips through flash and is restored."""
-    orig = dev.get_u8(OP.PRESET_GET_INCLUDE_PINS)
+@test("presets", mutating=True, flash=3)
+def output_config_mode_roundtrip(dev, profile, chk):
+    """0x98/0x99 output-config mode round-trips {0,1}; value > 1 clamps to independent (writes directory; flash)."""
+    orig = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
     try:
-        dev.set_u8(OP.PRESET_SET_INCLUDE_PINS, 0 if orig else 1)
-        chk.ok(_poll(lambda: dev.get_u8(OP.PRESET_GET_INCLUDE_PINS), 0 if orig else 1),
-               "include-pins toggled")
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
+        chk.ok(_poll(lambda: dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), 1), "mode 1 (with-preset)")
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
+        chk.ok(_poll(lambda: dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), 0), "mode 0 (independent)")
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 5)
+        chk.ok(_poll(lambda: dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), 0), "mode 5 clamps to independent")
     finally:
-        dev.set_u8(OP.PRESET_SET_INCLUDE_PINS, orig)
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig)
+        dev.wait_ready()
+
+
+@test("presets", mutating=True, flash=1)
+def output_config_save(dev, profile, chk):
+    """0x52 REQ_SAVE_OUTPUT_CONFIG (repurposed dead LOAD_PARAMS) persists live IO to the device-global block; accepted, mode untouched."""
+    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
+    ack = dev.get(OP.SAVE_OUTPUT_CONFIG, 1)            # re-saves current live IO (idempotent)
+    chk.eq(ack[0], PRESET_OK, "save-output-config accepted (PRESET_OK)")
+    dev.wait_ready()
+    chk.eq(dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), orig_mode, "persistence mode unchanged by save")
+
+
+@test("presets", mutating=True, flash=10)
+def output_config_independent_isolation(dev, profile, chk):
+    """Core behavior: in INDEPENDENT mode a preset load leaves live IO untouched; in WITH_PRESET it applies the slot's IO.
+
+    Marker is the MCK multiplier (0/1) — part of the IO config block but inert
+    while MCK is off, so it flips the assertion without disturbing live audio.
+    """
+    scratch = _scratch_slot(dev)
+    if scratch is None:
+        chk.note("all preset slots occupied — skipping output-config isolation test")
+        return
+    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
+    orig_active = dev.get_u8(OP.PRESET_GET_ACTIVE)
+    orig_mult = dev.get_u8(OP.GET_MCK_MULTIPLIER)
+    m_slot = 1 - orig_mult          # multiplier baked into the scratch preset
+    m_live = orig_mult              # different live value set before each load
+    try:
+        # Build a scratch preset whose stored MCK multiplier = m_slot.
+        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=m_slot)
+        chk.eq(dev.get(OP.PRESET_SAVE, 1, wvalue=scratch)[0], PRESET_OK, "scratch preset saved")
+        chk.ok(_poll(lambda: (_dir(dev)["occupied"] >> scratch) & 1, 1), "scratch occupied")
+
+        # INDEPENDENT: a load must NOT touch live IO.
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
+        dev.wait_ready()
+        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=m_live)   # live differs from the slot
+        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
+        dev.wait_ready()
+        chk.eq(dev.get_u8(OP.GET_MCK_MULTIPLIER), m_live,
+               "independent: preset load left live MCK multiplier unchanged")
+
+        # WITH_PRESET: a load DOES apply the slot's IO.
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
+        dev.wait_ready()
+        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=m_live)   # reset live to differ again
+        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
+        dev.wait_ready()
+        chk.ok(_poll(lambda: dev.get_u8(OP.GET_MCK_MULTIPLIER), m_slot),
+               "with-preset: preset load applied the slot's MCK multiplier")
+    finally:
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig_mode)
+        dev.get(OP.PRESET_LOAD, 1, wvalue=orig_active)     # restore active slot + live state
+        dev.wait_ready()
+        dev.get(OP.PRESET_DELETE, 1, wvalue=scratch)       # scratch no longer active -> safe
+        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=orig_mult)
         dev.wait_ready()

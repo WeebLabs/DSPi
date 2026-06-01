@@ -5,7 +5,7 @@ Cross-cutting contract & coverage suites that span the whole command surface.
   * unknown_opcode_stalls         — unused opcodes hit the default case => STALL.
   * index_ceiling_stalls          — the (differing) GET index ceilings all STALL.
   * all_gets_respond              — every pure-read GET opcode returns data, no crash.
-  * quarantine_*                  — 0xF0 / 0x52 documented as excluded (never sent).
+  * quarantine_enter_bootloader   — 0xF0 documented as excluded (never sent).
 """
 
 from ..device import OP, OPCODE_NAME, Stall
@@ -104,8 +104,6 @@ def quarantine_enter_bootloader(dev, profile, chk):
     """0xF0 ENTER_BOOTLOADER is intentionally NEVER transmitted (drops device to BOOTSEL)."""
     raise Skip("excluded by policy: would re-enumerate device into BOOTSEL and end the session")
 
-
-@test("crosscut")
-def quarantine_load_params(dev, profile, chk):
-    """0x52 LOAD_PARAMS is deprecated and crashes the core on SPDIF input — never executed."""
-    raise Skip("excluded by policy: deprecated, runs synchronously and crashes on active SPDIF input")
+# (Former quarantine_load_params removed: 0x52 was the deprecated LOAD_PARAMS and
+#  is now REQ_SAVE_OUTPUT_CONFIG — a safe action command covered by
+#  presets.output_config_save.)

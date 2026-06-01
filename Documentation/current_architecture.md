@@ -336,7 +336,7 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 
 **Ring overruns:** Separate `audio_ring.overrun_count` counter (distinct from `spdif_overruns`). Queryable via `REQ_GET_STATUS` wValue=22.
 
-**Deferred flash SET commands:** `REQ_PRESET_SET_NAME`, `REQ_PRESET_SET_STARTUP`, `REQ_PRESET_SET_INCLUDE_PINS` use separate pending flags per command type. Main loop copies payload under brief interrupt-off (~1µs) to prevent ISR/thread race, then drains ring and executes the flash write. GET-style flash commands (SAVE/LOAD/DELETE) remain synchronous in the vendor handler with real result codes.
+**Deferred flash SET commands:** `REQ_PRESET_SET_NAME`, `REQ_PRESET_SET_STARTUP`, `REQ_SET_OUTPUT_CONFIG_MODE` (and the action-style `REQ_SAVE_OUTPUT_CONFIG`) use separate pending flags per command type. Main loop copies payload under brief interrupt-off (~1µs) to prevent ISR/thread race, then drains ring and executes the flash write. GET-style flash commands (SAVE/LOAD/DELETE) remain synchronous in the vendor handler with real result codes.
 
 ### Packet Flow
 *Last updated: 2026-04-18*
@@ -945,19 +945,28 @@ Last 12 sectors (48 KB) of flash:
 | 1-10 | -44 KB to -8 KB | `0x44535033` ("DSP3") | Preset Slots 0-9 (full DSP state) |
 | 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
 
-### Preset Directory Fields
+### Preset Directory Fields (Version 4)
+*Last updated: 2026-06-01*
+
+`DIR_VERSION_CURRENT` = 4. V4 renamed the former `include_pins` byte to
+`output_config_mode` (same offset, 1:1 value mapping) and appended the
+device-global `FlashOutputConfig` block; `dir_load_cache()` migrates V1/V2/V3
+forward (seeding `output_config` from firmware IO defaults, carrying the device
+SPDIF RX pin into the block). See `Documentation/Features/output_config_independent_load.md`.
 
 | Field | Description |
 |-------|-------------|
 | startup_mode | 0 = load specified default, 1 = load last active |
 | default_slot | Slot to load in "specified default" mode (0-9) |
 | last_active_slot | Last slot loaded/saved (always 0-9) |
-| include_pins | Whether preset load/save includes pin config (0/1, default 0) |
+| output_config_mode | Physical IO persistence mode (was `include_pins`): 1 = with preset (default), 0 = independent (device-global). Governs output pins/types, I2S MCK/BCK, SPDIF RX pin. |
 | slot_occupied | 16-bit bitmask (bit N = slot N has valid data) |
 | master_volume_mode | 0 = independent (default, mode 0 saved-to-directory), 1 = with preset (was include_master_volume) |
-| spdif_rx_pin | Device-level SPDIF RX GPIO pin |
+| spdif_rx_pin | Device-level SPDIF RX GPIO pin (legacy; superseded by `output_config.spdif_rx_pin`) |
 | master_volume_db | Independent master volume (mode 0 source); float, default -20 dB |
 | slot_names[10][32] | 32-byte NUL-terminated names per slot |
+| dac_hw_mute | DAC hardware-mute config (V3+, board-level) |
+| output_config | Device-global `FlashOutputConfig` (V4+): output pins/types, I2S BCK/MCK pin/enable/multiplier, SPDIF RX pin — the source of truth in independent mode |
 
 ### Preset Slot Data (Version 12)
 *Last updated: 2026-04-09*
@@ -996,7 +1005,7 @@ On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is 
 ### Legacy API Redirect
 
 - `REQ_SAVE_PARAMS` (0x51): saves to the active preset slot
-- `REQ_LOAD_PARAMS` (0x52): reloads the active preset slot — **DEPRECATED, do not use.** Runs the load (incl. flash write) synchronously in the control/IRQ handler with no SPDIF-RX teardown or Core 1 fence, so it crashes the device when SPDIF is the active input. Intentionally left unfixed; the DSPi Console host was migrated to the deferred, SPDIF-safe `REQ_PRESET_LOAD` (0x91) for "Revert to Saved" (`~/DSPi Console` `loadParams()` → `loadPreset()`). New hosts should use `REQ_PRESET_LOAD`. The 0x52 address is effectively free and **may be repurposed** for a future vendor command (drop the handler in `vendor_commands.c` and reassign in `config.h`).
+- `REQ_LOAD_PARAMS` (0x52): **removed and the opcode repurposed** as `REQ_SAVE_OUTPUT_CONFIG` (2026-06-01). It was a deprecated synchronous "revert to saved" that crashed on SPDIF input; hosts use the deferred, SPDIF-safe `REQ_PRESET_LOAD` (0x91) instead. See the Output-Config Persistence section.
 - `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
 
 ### Preset-Switch Mute & Pipeline Reset
@@ -1039,7 +1048,7 @@ Default channel names are derived from current device state, not hard-coded:
 
 **Auto-regen on retype/source change:** `process_type_switches` (`main.c`) and the input-source deferred handler (`main.c`) regenerate the affected channel names *only if the live name still matches the would-be old default*. User customisations like `"Living Room Sub"` are preserved by string-inequality. Regeneration emits `notify_param_write` so the host UI updates live. RAM-only on event; persistence is via `REQ_PRESET_SAVE`. State is consistent on power loss because both the type/source and the name live in the same slot.
 
-**Same persistence model as `output_pins[]` and `spdif_rx_pin`:** RAM-only changes that are persisted only when the user saves. Names are *not* gated by `include_pins` — they have their own slot bytes (V8+).
+**Same persistence model as `output_pins[]` and `spdif_rx_pin`:** RAM-only changes that are persisted only when the user saves. Names are *not* part of the physical-IO config block (`output_config_mode`) — they have their own slot bytes (V8+) and always travel with presets.
 
 **Heuristic note:** A user who renames a channel to the literal current default string (e.g., `"USB L"`) is treated as "default" and the name will re-default on the next event. Acceptable; the host UI can encourage non-default strings if stickiness matters.
 
@@ -1081,7 +1090,7 @@ Vendor commands `REQ_SET_OUTPUT_PIN` (0x7C) / `REQ_GET_OUTPUT_PIN` (0x7D).
 
 **Constraints:** Valid GPIO range, not reserved (12, 23-25), and not in use by another output, the I2S BCK/LRCLK or MCK pin, the SPDIF RX pin, or the DAC hardware-mute pin (`is_pin_in_use`).
 
-**S/PDIF and I2S slots:** Deferred to the main loop, not applied in the USB ISR. `REQ_SET_OUTPUT_PIN` writes the target into `output_pins[out_idx]` (RAM-only, like `spdif_rx_pin`) and sets a bit in `output_pin_change_mask`; the main-loop gate (shared `pipeline_reset_ready()` hold) then runs `process_pin_changes(mask)`. That helper mirrors `process_type_switches`: `prepare_pipeline_reset()` (soft mute + Core 1 fence + DAC hardware-mute assert) → suspend SPDIF RX if running → `drain_and_disable_outputs()` → `audio_spdif_change_pin()` / `audio_i2s_change_data_pin()` on each flagged slot while disabled → `complete_pipeline_reset()` for the **synchronized** restart of all slots → restart RX. The synchronized restart is the point: a moved slot re-enters in phase with the others, preserving the inviolable inter-slot sample alignment. (The prior implementation restarted only the changed slot live in the ISR, which clicked and left that slot phase-misaligned until the next full reset.) `change_pin` masks the channel's DMA IRQ before aborting the DMA so the handler can't start a conflicting transfer during PIO SM reinit, and clears any stale completion flag before unmasking. Back-to-back requests accumulate in the mask and apply in one batch. Persistence is slot-scoped — `REQ_PRESET_SAVE` captures the new pin (gated by `include_pins`).
+**S/PDIF and I2S slots:** Deferred to the main loop, not applied in the USB ISR. `REQ_SET_OUTPUT_PIN` writes the target into `output_pins[out_idx]` (RAM-only, like `spdif_rx_pin`) and sets a bit in `output_pin_change_mask`; the main-loop gate (shared `pipeline_reset_ready()` hold) then runs `process_pin_changes(mask)`. That helper mirrors `process_type_switches`: `prepare_pipeline_reset()` (soft mute + Core 1 fence + DAC hardware-mute assert) → suspend SPDIF RX if running → `drain_and_disable_outputs()` → `audio_spdif_change_pin()` / `audio_i2s_change_data_pin()` on each flagged slot while disabled → `complete_pipeline_reset()` for the **synchronized** restart of all slots → restart RX. The synchronized restart is the point: a moved slot re-enters in phase with the others, preserving the inviolable inter-slot sample alignment. (The prior implementation restarted only the changed slot live in the ISR, which clicked and left that slot phase-misaligned until the next full reset.) `change_pin` masks the channel's DMA IRQ before aborting the DMA so the handler can't start a conflicting transfer during PIO SM reinit, and clears any stale completion flag before unmasking. Back-to-back requests accumulate in the mask and apply in one batch. Persistence follows `output_config_mode`: in with-preset mode the pin travels with the preset (`REQ_PRESET_SAVE` captures it, applied on load); in independent mode it is device-global (`REQ_SAVE_OUTPUT_CONFIG` persists it, applied at boot).
 
 **PDM:** Applied inline (must be disabled first; rebuilds PIO config). PDM has no running audio to realign at change time, so it needs no deferral or synchronized restart.
 
@@ -1426,7 +1435,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_GET_DELAY | 0x49 | IN | Get channel delay |
 | REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
-| REQ_LOAD_PARAMS | 0x52 | OUT | **DEPRECATED** — legacy synchronous load; crashes on SPDIF input. Use REQ_PRESET_LOAD (0x91). Address may be repurposed. |
+| REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config to the directory's device-global block (independent mode; was the deprecated REQ_LOAD_PARAMS) |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
 | REQ_SET_CHANNEL_GAIN | 0x54 | OUT | Set legacy channel gain |
 | REQ_GET_CHANNEL_GAIN | 0x55 | IN | Get legacy channel gain |
@@ -1470,11 +1479,11 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 | REQ_PRESET_DELETE | 0x92 | IN | Delete preset slot (wValue=slot) |
 | REQ_PRESET_GET_NAME | 0x93 | IN | Get 32-byte preset name (wValue=slot) |
 | REQ_PRESET_SET_NAME | 0x94 | OUT | Set preset name (wValue=slot, payload=32 bytes) |
-| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (7 bytes: byte 6 = master_volume_mode) |
+| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (7 bytes: byte 5 = output_config_mode, byte 6 = master_volume_mode) |
 | REQ_PRESET_SET_STARTUP | 0x96 | OUT | Set startup mode + default slot (2 bytes) |
 | REQ_PRESET_GET_STARTUP | 0x97 | IN | Get startup config (3 bytes) |
-| REQ_PRESET_SET_INCLUDE_PINS | 0x98 | OUT | Set include-pins flag (1 byte) |
-| REQ_PRESET_GET_INCLUDE_PINS | 0x99 | IN | Get include-pins flag (1 byte) |
+| REQ_SET_OUTPUT_CONFIG_MODE | 0x98 | OUT | Set physical IO persistence mode: 1 = with-preset, 0 = independent (1 byte, was include-pins) |
+| REQ_GET_OUTPUT_CONFIG_MODE | 0x99 | IN | Get physical IO persistence mode (1 byte) |
 | REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, always 0-9) |
 | REQ_SET_CHANNEL_NAME | 0x9B | OUT | Set channel name (wValue=channel, payload=1-32 bytes) |
 | REQ_GET_CHANNEL_NAME | 0x9C | IN | Get channel name (wValue=channel, returns 32 bytes) |
@@ -1537,7 +1546,7 @@ Transfers the complete DSP state in a single USB control transfer (~2944 bytes a
 
 **GET (0xA0):** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, then streams it out in 64-byte packets via `usb_stream_transfer`. ZLP appended if total length is a multiple of 64.
 
-**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: snapshots `output_types[]`, waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with `include_pins` from preset directory, recalculates all filters and delays, transitions Core 1 mode to match the new output enable state, then diffs the new `output_types[]` against the snapshot. If any slot's type changed, dispatches `process_type_switches()` to reconfigure SPDIF/I2S hardware (mirrors the `preset_load_pending` pattern); otherwise calls `complete_pipeline_reset()` to resync output streams (or `reset_usb_feedback_loop()` when SPDIF input is active, to avoid disrupting the prefill handshake).
+**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: snapshots `output_types[]`, waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with pin application gated on `output_config_mode` (applied only in with-preset mode; independent mode leaves device-global IO to `REQ_SAVE_OUTPUT_CONFIG`), recalculates all filters and delays, transitions Core 1 mode to match the new output enable state, then diffs the new `output_types[]` against the snapshot. If any slot's type changed, dispatches `process_type_switches()` to reconfigure SPDIF/I2S hardware (mirrors the `preset_load_pending` pattern); otherwise calls `complete_pipeline_reset()` to resync output streams (or `reset_usb_feedback_loop()` when SPDIF input is active, to avoid disrupting the prefill handshake).
 
 **Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.
 
@@ -1790,7 +1799,7 @@ This matches the user's product-level decision; it differs from the industry-sta
 *Last updated: 2026-05-15*
 
 - Default: GPIO 5 (`PICO_SPDIF_RX_PIN_DEFAULT`). Moved off GPIO 11 to avoid colliding with `DAC_HW_MUTE_DEFAULT_PIN`; GPIO 5 is unclaimed by any default output, the UART, or the I²S pins, so the SPDIF RX defaults stop blocking a fresh-install enable of the DAC hardware-mute feature.
-- **Slot-scoped persistence (matches `output_pins[]`).** `REQ_SET_SPDIF_RX_PIN` updates the live `spdif_rx_pin` global in RAM only; no implicit flash write. The user must `REQ_PRESET_SAVE` to capture the new pin in a preset slot. On `REQ_PRESET_LOAD`, the pin is restored from the slot if and only if the directory's `include_pins` flag is set — same gate as output pin loading.
+- **Persistence follows `output_config_mode` (matches `output_pins[]`).** `REQ_SET_SPDIF_RX_PIN` updates the live `spdif_rx_pin` global in RAM only; no implicit flash write. In with-preset mode the user `REQ_PRESET_SAVE`s to capture the pin in a slot (restored on load); in independent mode `REQ_SAVE_OUTPUT_CONFIG` persists it to the device-global block (applied at boot). The RX pin is part of the physical-IO config block, applied by `apply_output_config_from_mode()`.
 - Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5).
 - **On-flash layout:** `spdif_rx_pin` lives in one byte that V13 originally reserved as `input_source_padding[0]`. Reusing that byte keeps the `PresetSlot` size unchanged, so existing V13 presets remain CRC-valid (their padding bytes were zero-initialised, which fails GPIO validity and falls through to the live default — same observable behaviour as before this change).
 - **Boot-time bootstrap.** `preset_boot_load` still reads the directory's legacy `spdif_rx_pin` field as the initial live value. This means users upgrading from auto-flush firmware keep their previously-configured pin until they save a preset under the new firmware. After that, the slot's value drives behaviour and the directory field is no longer consulted on subsequent boots that load the same slot.
@@ -1889,7 +1898,7 @@ Previously the hold was a `time_us_64()` busy-wait inside `dac_hw_mute_assert()`
 
 **SPDIF lock-acquisition path also releases the mute.** The USB→SPDIF switch (and boot-into-SPDIF, and SPDIF rx-pin hot-swap, and SPDIF re-lock after lock loss) does NOT call `complete_pipeline_reset()` — output must stay muted until SPDIF achieves lock and the consumer pool prefills. The lock-acquisition flow in the main loop replicates the relevant phases (`drain_and_disable_outputs()` → wait for lock + prefill → `enable_outputs_in_sync()`), then calls `dac_hw_mute_release()` directly to mirror Phase 4. If `release_ms > 0`, the pin remains asserted while `spdif_input_poll()` continues feeding the output buffers; without this release path, the XSMT pin asserted by the earlier `prepare_pipeline_reset()` would stay asserted indefinitely and the DAC's analog stage would never un-mute.
 
-**Flash-write completion paths release the mute too.** Both `complete_flash_write_operation_full()` (preset save/delete) and `complete_flash_write_operation_light()` (metadata-only writes: preset rename, startup policy, include_pins, master-volume mode/save, DAC-mute config) assert the mute via `prepare_flash_write_operation()` → `prepare_pipeline_reset()` and must release it. Both follow the same source split, whose single canonical home is the `release_hw_mute_if_outputs_live()` helper (`main.c`): for **USB input** the mute deasserts now (full path implicitly inside `complete_pipeline_reset()`; light path via `release_hw_mute_if_outputs_live()`, since the light path never tore down outputs, so PIO clocks ran continuously through the blackout and the deassert is clock-safe); for **SPDIF input** both skip the release and let the lock-acquisition prefill path own it after RX re-locks. Omitting the light-path release would leave the DAC silent indefinitely after a metadata-only write while EMC is enabled on USB input — the helper exists partly to keep that easy-to-forget release (the bug fixed in git 833a51a) in one named, documented place; the full path's SPDIF skip and the lock-acquisition release are the other two expressions of the same rule and cross-reference it.
+**Flash-write completion paths release the mute too.** Both `complete_flash_write_operation_full()` (preset save/delete) and `complete_flash_write_operation_light()` (metadata-only writes: preset rename, startup policy, output-config mode/save, master-volume mode/save, DAC-mute config) assert the mute via `prepare_flash_write_operation()` → `prepare_pipeline_reset()` and must release it. Both follow the same source split, whose single canonical home is the `release_hw_mute_if_outputs_live()` helper (`main.c`): for **USB input** the mute deasserts now (full path implicitly inside `complete_pipeline_reset()`; light path via `release_hw_mute_if_outputs_live()`, since the light path never tore down outputs, so PIO clocks ran continuously through the blackout and the deassert is clock-safe); for **SPDIF input** both skip the release and let the lock-acquisition prefill path own it after RX re-locks. Omitting the light-path release would leave the DAC silent indefinitely after a metadata-only write while EMC is enabled on USB input — the helper exists partly to keep that easy-to-forget release (the bug fixed in git 833a51a) in one named, documented place; the full path's SPDIF skip and the lock-acquisition release are the other two expressions of the same rule and cross-reference it.
 
 ### Configuration model
 

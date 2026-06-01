@@ -4,15 +4,16 @@ after, so a run leaves the DSPi exactly as it was found.
 
 Primary restore primitive is the bulk parameter blob (REQ_GET_ALL_PARAMS /
 REQ_SET_ALL_PARAMS), which round-trips all *live* DSP state with ZERO flash
-writes.  Directory/preset metadata (startup mode, include_pins, master-volume
-mode, saved master volume, slot names/occupancy, active slot) is NOT in the bulk
-blob — those are captured separately and only ever rewritten by the flash-gated
-tests, which restore what they touch.  This module also captures them so a
-restore helper is available and so the final report can flag any drift.
+writes.  Directory/preset metadata (startup mode, output-config mode, master-
+volume mode, saved master volume, slot names/occupancy, active slot) is NOT in
+the bulk blob — those are captured separately and only ever rewritten by the
+flash-gated tests, which restore what they touch.  This module also captures them
+so a restore helper is available and so the final report can flag any drift.
 
-Note: bulk SET applies output *pins* only when the directory's include_pins flag
-is set.  Tests that move pins/types restore them inline; this is the backstop
-for everything else.
+Note: bulk GET/SET round-trips live IO (pins/types/MCK/RX pin) regardless of the
+output-config mode — that mode only governs preset save/load and boot, not the
+live snapshot.  Tests that move pins/types restore them inline; this is the
+backstop for everything else.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ class Snapshot:
     bulk: bytes                       # full REQ_GET_ALL_PARAMS blob
     directory: bytes                  # REQ_PRESET_GET_DIR (7 bytes)
     startup: bytes                    # REQ_PRESET_GET_STARTUP (3 bytes)
-    include_pins: int
+    output_config_mode: int           # REQ_GET_OUTPUT_CONFIG_MODE
     mv_mode: int                      # REQ_GET_MASTER_VOLUME_MODE
     saved_mv: float                   # REQ_GET_SAVED_MASTER_VOLUME
     master_vol: float                 # REQ_GET_MASTER_VOLUME (live)
@@ -60,7 +61,7 @@ def capture(dev: DspiDevice, profile) -> Snapshot:
         bulk=bulk,
         directory=directory,
         startup=dev.get(OP.PRESET_GET_STARTUP, 3),
-        include_pins=dev.get_u8(OP.PRESET_GET_INCLUDE_PINS),
+        output_config_mode=dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE),
         mv_mode=dev.get_u8(OP.GET_MASTER_VOLUME_MODE),
         saved_mv=dev.get_f32(OP.GET_SAVED_MASTER_VOLUME),
         master_vol=dev.get_f32(OP.GET_MASTER_VOLUME),
