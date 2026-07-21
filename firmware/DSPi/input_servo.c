@@ -4,9 +4,11 @@
  * Extracted from the SPDIF input servo so ADAT input (slave clock mode) can
  * reuse it unchanged. Two control terms, mirroring the USB feedback servo:
  *   Loop A: the measured input rate sets the ideal output dividers directly.
- *   Loop B: slot 0 consumer fill provides a small proportional trim that
- *           dithers the divider rounding across LSB boundaries for sub-LSB
- *           rate matching (fill target 50% = 8 of 16 buffers, deadband 2).
+ *   Loop B: slot 0 consumer fill trims the dividers: a deadbanded
+ *           proportional term (|error| > 2 buffers) for disturbances plus
+ *           a slow clamped integrator (see SERVO_FILL_KI) that centres
+ *           the fill on exactly 8 of 16 buffers by dithering the divider
+ *           rounding across LSB boundaries for sub-LSB average rate.
  * The I2S divider is forced to exactly 2x the SPDIF divider so independent
  * rounding cannot make the two output types drift apart.
  *
@@ -37,10 +39,38 @@
 
 #define SERVO_FILL_KP  0.0005f   // Fill-level proportional gain
 
+// Slow fill-centering integrator. The proportional term is deadbanded
+// (|error| > 2) to avoid divider churn, so with an exact rate term the
+// fill parks wherever the enable transient or the divider rounding
+// residual (up to half an LSB, 78 ppm at 48 kHz) leaves it, e.g. the
+// ADAT slave 37% limit cycle. The integrator runs everywhere, including
+// inside the deadband, and accumulates until the trim crosses a divider
+// rounding boundary; at steady state it holds the average residual and
+// the divider dithers between adjacent LSBs with the duty needed to
+// centre the fill at 8 buffers.
+//
+// Gain choice (per ~20 ms servo tick, per buffer of error): the trim to
+// fill loop is a single integrator (plant gain Fs/48 buffers per second
+// per unit trim), so pure integral action limit-cycles; KI is sized so
+// that cycle has ~1 buffer amplitude, the same magnitude as the existing
+// production/consumption wobble, with worst-case divider steps ~13 s
+// apart. Raising KI shrinks convergence time but steps the divider more
+// often; this value favours DAC kindness.
+//
+// The clamp bounds authority to ~2 LSB at 48 kHz: enough to cancel the
+// worst half-LSB rounding residual at every supported rate with margin,
+// small enough that windup from transient bogus fill reads (type
+// switches report 0) cannot push a persistent rate offset.
+#define SERVO_FILL_KI     2.0e-7f  // per tick per buffer of fill error
+#define SERVO_FILL_ICLAMP 3.2e-4f  // ~2 divider LSB at 48 kHz
+
 // Last written dividers; skip PIO writes when unchanged
 static uint32_t last_spdif_div = 0;
 static uint32_t last_i2s_div = 0;
 static uint32_t last_mck_div = 0;
+
+// Fill-centering integrator state (dimensionless rate trim)
+static float fill_trim_integral = 0.0f;
 
 // Apply a divider (16.8 fixed-point) to a PIO SM
 static inline void set_divider(PIO pio, uint sm, uint32_t div_16_8) {
@@ -64,6 +94,13 @@ uint32_t input_servo_apply(float actual_freq) {
         // Positive error (overfull) → negative trim → reduce divider → speed up outputs
         fill_trim = -(float)fill_error / 16.0f * SERVO_FILL_KP;
     }
+
+    // Centering integrator (see SERVO_FILL_KI): always active so the fill
+    // converges on 8 buffers instead of parking inside the deadband.
+    fill_trim_integral += -(float)fill_error * SERVO_FILL_KI;
+    if (fill_trim_integral >  SERVO_FILL_ICLAMP) fill_trim_integral =  SERVO_FILL_ICLAMP;
+    if (fill_trim_integral < -SERVO_FILL_ICLAMP) fill_trim_integral = -SERVO_FILL_ICLAMP;
+    fill_trim += fill_trim_integral;
 
     uint32_t spdif_div = (uint32_t)(spdif_div_f * (1.0f + fill_trim) + 0.5f);
     uint32_t i2s_div   = spdif_div * 2;
@@ -114,6 +151,7 @@ void input_servo_reset(void) {
     last_spdif_div = 0;
     last_i2s_div = 0;
     last_mck_div = 0;
+    fill_trim_integral = 0.0f;
 }
 
 uint32_t input_servo_current_divider(void) {
