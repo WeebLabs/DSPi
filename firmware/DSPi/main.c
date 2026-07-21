@@ -1018,29 +1018,63 @@ static void i2s_slave_gate_on_lrclk(void) {
     while (gpio_get(lrclk))  { if (time_us_64() > deadline) return; }
 }
 
+// Start every prepared output slot SM in ONE pio_enable_sm_mask_in_sync
+// write.  Shared by complete_pipeline_reset (Phase 2) and
+// enable_outputs_in_sync; there is deliberately no other start path for
+// output slots, so mixed-type start behavior cannot diverge again.
+//
+// Why one mask write: both output types live on PICO_AUDIO_SPDIF_PIO
+// (asserted below), so a combined mask starts SPDIF and I2S SM clocks in
+// the same sys_clk cycle AND resets their fractional clkdiv accumulators
+// together.  The previous non-slave path issued two group starts
+// (audio_spdif_enable_sync then audio_i2s_enable_sync) with the I2S DMA
+// priming between them, which left a fixed few-microsecond inter-type
+// start skew and unsynchronized divider phase at fractional rates.
+// Single-type configs are unchanged (the mask degenerates to one group).
+//
+// In I2S clock-slave mode the write is additionally gated on an external
+// LRCLK edge after both types are primed (only when an extclk I2S slot
+// exists; up to ~35 us with IRQs off) so the gate-to-start latency cannot
+// smear the extclk program's one-frame discard across a frame boundary
+// at 96 kHz.
+//
+// Caller must hold interrupts disabled across this call: the DMAs primed
+// by the prepare calls sit stalled against their stopped SMs (the 8-word
+// PIO TX FIFO absorbs the head of the transfer), and a stale DMA IRQ or
+// SOF firing between prime and start could complete an extra transfer for
+// one type before the clocks run, producing a 1-frame inter-type skew.
+static void start_output_slots_in_sync(audio_spdif_instance_t *spdif_sync[], uint spdif_count,
+                                       audio_i2s_instance_t *i2s_sync[], uint i2s_count) {
+    uint32_t mask = 0;
+    PIO out_pio = NULL;
+    if (spdif_count) {
+        mask |= audio_spdif_enable_sync_prepare(spdif_sync, spdif_count);
+        out_pio = spdif_sync[0]->pio;
+    }
+    if (i2s_count) {
+        assert(!out_pio || i2s_sync[0]->pio == out_pio);
+        mask |= audio_i2s_enable_sync_prepare(i2s_sync, i2s_count);
+        out_pio = i2s_sync[0]->pio;
+        if (i2s_slave_mode_active()) i2s_slave_gate_on_lrclk();
+    }
+    if (mask) pio_enable_sm_mask_in_sync(out_pio, mask);
+}
+
 // Three-phase pipeline reset.  The IRQ-disabled critical section in
-// Phase 2 is intentionally tiny — only the synchronized PIO SM start
-// needs atomicity (preserves CLAUDE.md's slot-alignment invariant for
-// single-type configs).  Phase 1 (per-slot teardown) and Phase 3 (USB
-// feedback reset) run with interrupts enabled.
+// Phase 2 is intentionally tiny; only the synchronized PIO SM start
+// needs atomicity (preserves CLAUDE.md's slot-alignment invariant).
+// Phase 1 (per-slot teardown) and Phase 3 (USB feedback reset) run with
+// interrupts enabled.
 //
 // Why keep blackout small: USB audio class ISRs continue to drain
 // packets into the audio_ring throughout Phase 1, eliminating a ~1 ms
 // USB starvation window that previously compounded the audible I2S DAC
 // click on input-source switches.
 //
-// Phase 2 outer save_and_disable_interrupts wraps BOTH library calls
-// (audio_spdif_enable_sync + audio_i2s_enable_sync).  Although each
-// library has its own inner save_and_disable_interrupts around its
-// pio_enable_sm_mask_in_sync call, the outer wrap exists to bracket
-// the cross-type SPDIF<->I2S boundary: without it, a stale DMA IRQ or
-// SOF could fire between the two enable_sync calls and either disturb
-// USB feedback baselining or let one type's just-primed DMA complete
-// an extra transfer before the other type's clocks start, producing a
-// 1-frame inter-type skew.  Do NOT split this critical section across
-// the two calls "to shrink it further" — it would silently break
-// mixed-output configs and the regression would only surface on
-// installations actually running both output types.
+// Phase 2's save_and_disable_interrupts wraps the prime-and-start helper
+// (start_output_slots_in_sync); see its comment for why prime and start
+// must be atomic.  Do NOT shrink this critical section; the regression
+// would only surface on installations actually running both output types.
 //
 // KNOWN RACE (B1, lg_sound_sync-style benign): Phase 3's
 // reset_usb_feedback_loop() performs ~8 non-atomic field writes to
@@ -1077,33 +1111,10 @@ static void complete_pipeline_reset(void) {
         }
     }
 
-    // Phase 2: tiny IRQ-disabled section — synchronized PIO start.
-    // See block comment above for why this wraps BOTH enable_sync calls.
-    //
-    // I2S clock-slave mode instead primes both output types first, gates on
-    // an external LRCLK edge (only when an extclk I2S slot exists; up to
-    // ~35 us with IRQs off), and starts every slot in ONE mask write, so the
-    // gate-to-start latency cannot smear the extclk program's one-frame
-    // discard across a frame boundary at 96 kHz.  Both types share
-    // PICO_AUDIO_SPDIF_PIO, so a combined mask is valid.
+    // Phase 2: tiny IRQ-disabled section; synchronized single-mask PIO
+    // start for every slot of both types (see start_output_slots_in_sync).
     uint32_t flags = save_and_disable_interrupts();
-    if (i2s_slave_mode_active()) {
-        uint32_t mask = 0;
-        PIO out_pio = NULL;
-        if (spdif_count) {
-            mask |= audio_spdif_enable_sync_prepare(spdif_sync, spdif_count);
-            out_pio = spdif_sync[0]->pio;
-        }
-        if (i2s_count) {
-            mask |= audio_i2s_enable_sync_prepare(i2s_sync, i2s_count);
-            out_pio = i2s_sync[0]->pio;
-            i2s_slave_gate_on_lrclk();
-        }
-        if (mask) pio_enable_sm_mask_in_sync(out_pio, mask);
-    } else {
-        if (spdif_count) audio_spdif_enable_sync(spdif_sync, spdif_count);
-        if (i2s_count) audio_i2s_enable_sync(i2s_sync, i2s_count);
-    }
+    start_output_slots_in_sync(spdif_sync, spdif_count, i2s_sync, i2s_count);
     restore_interrupts(flags);
 
     // Phase 3: USB feedback reset.  See B1 note in block comment above
@@ -1195,25 +1206,9 @@ static void enable_outputs_in_sync(void) {
         }
     }
 
-    // Slave-mode gated combined start: same rationale and structure as
-    // complete_pipeline_reset Phase 2.
-    if (i2s_slave_mode_active()) {
-        uint32_t mask = 0;
-        PIO out_pio = NULL;
-        if (spdif_count) {
-            mask |= audio_spdif_enable_sync_prepare(spdif_sync, spdif_count);
-            out_pio = spdif_sync[0]->pio;
-        }
-        if (i2s_count) {
-            mask |= audio_i2s_enable_sync_prepare(i2s_sync, i2s_count);
-            out_pio = i2s_sync[0]->pio;
-            i2s_slave_gate_on_lrclk();
-        }
-        if (mask) pio_enable_sm_mask_in_sync(out_pio, mask);
-    } else {
-        if (spdif_count) audio_spdif_enable_sync(spdif_sync, spdif_count);
-        if (i2s_count) audio_i2s_enable_sync(i2s_sync, i2s_count);
-    }
+    // Synchronized single-mask start for both types; slave-mode LRCLK
+    // gating is handled inside (see start_output_slots_in_sync).
+    start_output_slots_in_sync(spdif_sync, spdif_count, i2s_sync, i2s_count);
 
     restore_interrupts(flags);
 
