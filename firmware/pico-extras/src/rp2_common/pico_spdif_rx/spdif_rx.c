@@ -140,6 +140,12 @@ static bool stable_done = false;
 static bool irq_handler_registered = false;  // DSPi patch: track our own handler registration
 static spdif_rx_pio_program_t* current_pg;
 static int block_count;
+// DSPi patch: seqlock-published {decoded block count, IRQ entry timestamp}
+// pair for the input servo's long-window rate measurement (odd seq = write
+// in progress). See spdif_rx_get_block_ref().
+static volatile uint32_t block_ref_seq = 0;
+static volatile uint32_t block_ref_count = 0;
+static volatile uint64_t block_ref_time_us = 0;
 static uint64_t prev_time_us = 0;
 static uint32_t waiting_start_time_ms = 0;
 static uint32_t block_interval[NUM_AVE];
@@ -762,6 +768,18 @@ void __isr __time_critical_func(spdif_rx_dma_irq_handler)()
         samp_freq = sf;
     }
     block_count++;
+    // DSPi patch: publish {completed block count, this IRQ's entry timestamp}
+    // as a coherent pair. While stable and block-aligned every block is exactly
+    // SPDIF_BLOCK_SIZE sub frames, so deltas of this pair give an exact
+    // samples-over-time rate with only IRQ-latency jitter at the endpoints;
+    // the 8-block interval average above telescopes to two timestamps ~32 ms
+    // apart and is far too jittery for long-term rate estimation.
+    block_ref_seq++;
+    __dmb();
+    block_ref_count = (uint32_t)block_count;
+    block_ref_time_us = now_us;
+    __dmb();
+    block_ref_seq++;
     if (proc_dma0) {
         uint32_t done_ptr = _dma_done_and_restart(gcfg.dma_channel0, &dma_config0);
         _check_block(_to_buff_ptr(done_ptr));
@@ -837,6 +855,22 @@ float spdif_rx_get_samp_freq_actual()
     return samp_freq_actual;
 }
 
+// DSPi patch: coherent snapshot of the decoded-block count and the entry
+// timestamp of the DMA IRQ that completed that block. Seqlock read; safe
+// against the IRQ writer from thread context on either core.
+void spdif_rx_get_block_ref(uint32_t* block_cnt, uint64_t* time_us)
+{
+    uint32_t s1, s2;
+    do {
+        s1 = block_ref_seq;
+        __dmb();
+        *block_cnt = block_ref_count;
+        *time_us = block_ref_time_us;
+        __dmb();
+        s2 = block_ref_seq;
+    } while ((s1 & 1u) || s1 != s2);
+}
+
 spdif_rx_samp_freq_t spdif_rx_get_samp_freq()
 {
     return samp_freq;
@@ -869,8 +903,95 @@ uint32_t spdif_rx_get_fifo_count()
     } else {
         fifo_count = buff_wr_done_ptr + SPDIF_RX_FIFO_SIZE * 2 - buff_rd_ptr;
     }
+    // DSPi patch: a live-tail consumer (spdif_rx_read_fifo_live) may advance
+    // buff_rd_ptr past buff_wr_done_ptr, which wraps the subtraction above to
+    // a huge value. Report 0 instead; this also keeps the IRQ overflow check
+    // from spuriously disposing a block.
+    if (fifo_count > SPDIF_RX_FIFO_SIZE) fifo_count = 0;
     restore_interrupts(save);
     return fifo_count;
+}
+
+// DSPi patch: number of words the in-flight DMA transfer has already written
+// into the block that starts at done_snapshot. Identified by probing which
+// channel's write address lies inside that block; a channel that is queued,
+// just-completed, or mid-reconfigure points at another block base and is
+// excluded. In the completion-to-IRQ window neither channel matches and the
+// result is 0 (safe undercount; the words publish via done_ptr instead).
+// Call with interrupts disabled so done_snapshot stays the live block base.
+static uint32_t _fifo_inflight_words(uint32_t done_snapshot)
+{
+    uint32_t base_idx = done_snapshot % SPDIF_RX_FIFO_SIZE;
+    const uint8_t chs[2] = { gcfg.dma_channel0, gcfg.dma_channel1 };
+    for (int i = 0; i < 2; i++) {
+        uint32_t addr = dma_channel_hw_addr(chs[i])->write_addr;
+        uint32_t off = (addr - (uint32_t)fifo_buff) / sizeof(uint32_t);
+        uint32_t delta = (off + SPDIF_RX_FIFO_SIZE - base_idx) % SPDIF_RX_FIFO_SIZE;
+        // Withhold the most recently claimed word: WRITE_ADDR advances when
+        // the write is issued, which is not proof the data is visible to a
+        // core read yet. Handing out that word delivers one-lap-stale ring
+        // content; with the pair round-down in the callers a phantom word
+        // always lands in the R position (L-completing phantoms get
+        // stripped), i.e. a right-channel-only crackle. Cost: one word of
+        // extra latency (~10 us at 48 kHz).
+        if (delta < SPDIF_BLOCK_SIZE) return (delta > 0) ? (delta - 1u) : 0u;
+    }
+    return 0;
+}
+
+// DSPi patch: live available count = (done_ptr advanced by the in-flight
+// words) minus the read pointer, all in the mod-(2*FIFO_SIZE) pointer space.
+// NOT published-count + in-flight: once the reader has consumed into the
+// in-flight block (rd ahead of done_ptr), that formulation counts the same
+// words twice and lets the reader run past the DMA write position into
+// stale ring data. Interrupts must be disabled by the caller.
+static uint32_t _fifo_live_count_locked(void)
+{
+    uint32_t live_wr = _ptr_inc(buff_wr_done_ptr,
+                                _fifo_inflight_words(buff_wr_done_ptr));
+    uint32_t avail = (live_wr + SPDIF_RX_FIFO_SIZE * 2 - buff_rd_ptr) %
+                     (SPDIF_RX_FIFO_SIZE * 2);
+    // rd momentarily ahead of live_wr (completion-to-IRQ window reports the
+    // in-flight words as 0): treat as empty rather than a huge wrapped count.
+    if (avail > SPDIF_RX_FIFO_SIZE) avail = 0;
+    return avail;
+}
+
+// DSPi patch: fifo count including the in-flight block's landed words.
+uint32_t spdif_rx_get_fifo_count_live()
+{
+    uint32_t save = save_and_disable_interrupts();
+    uint32_t count = _fifo_live_count_locked();
+    restore_interrupts(save);
+    return count;
+}
+
+// DSPi patch: spdif_rx_read_fifo, but allowed to consume into the in-flight
+// block (word-granular delivery for the DSPi input path). The words returned
+// are always already written by DMA; sync/parity of the in-flight block are
+// simply not yet verified, which matches the caller's lock-drop handling.
+uint32_t spdif_rx_read_fifo_live(uint32_t** buff, uint32_t req_count)
+{
+    uint32_t save = save_and_disable_interrupts();
+    uint32_t get_count = req_count;
+    // Never hand out a half stereo pair: the live tail can land mid-pair, and
+    // an odd truncation would advance the read pointer by an odd word count,
+    // permanently swapping L/R for a pair-consuming caller. A lone odd word
+    // just waits for its partner (at most one sample period).
+    uint32_t fifo_count = _fifo_live_count_locked() & ~1u;
+    if (get_count > fifo_count) {
+        get_count = fifo_count;
+    }
+    if ((buff_rd_ptr % SPDIF_RX_FIFO_SIZE) + get_count <= SPDIF_RX_FIFO_SIZE) { // cannot take due to the end of fifo_buff
+        *buff = _to_buff_ptr(buff_rd_ptr);
+        buff_rd_ptr = _ptr_inc(buff_rd_ptr, get_count);
+    } else {
+        get_count = SPDIF_RX_FIFO_SIZE - (buff_rd_ptr % SPDIF_RX_FIFO_SIZE);
+        *buff = _to_buff_ptr(buff_rd_ptr);
+        buff_rd_ptr = _ptr_inc(buff_rd_ptr, get_count);
+    }
+    restore_interrupts(save);
+    return get_count;
 }
 
 uint32_t spdif_rx_read_fifo(uint32_t** buff, uint32_t req_count)

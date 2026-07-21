@@ -13,6 +13,16 @@
  * The I2S slave servo is NOT built on this: edge-locked I2S output slots
  * consume at exactly the external rate, so it must trim from the first
  * SPDIF-type slot only and never writes I2S/MCK dividers (see i2s_input.c).
+ *
+ * FUTURE FIX (belt and braces, not yet implemented): slew-limit the applied
+ * divider to +-1 LSB per call. With the long-window estimators upstream
+ * (ADAT slave, SPDIF input) the rate term is already sub-LSB stable, so the
+ * limit would rarely engage, but it would hard-bound output clock wander
+ * (DAC PLL kindness) for every current and future caller regardless of
+ * estimator quality. Needs care at (re)lock: the first apply after
+ * input_servo_reset() must still jump straight to the target divider, not
+ * slew from the nominal one. See "Clock Servo" in
+ * Documentation/current_architecture.md.
  */
 
 #include "input_servo.h"

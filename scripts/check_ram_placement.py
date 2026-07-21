@@ -93,8 +93,10 @@ COMMON = [
     # Steady-state servo and SPDIF-input poll path.
     ("clock_get_hz", False),
     ("audio_i2s_mck_set_divider", False),
-    ("spdif_rx_read_fifo", False),
-    ("spdif_rx_get_fifo_count", False),
+    # Live-tail variants; the plain read_fifo/get_fifo_count are internal-only
+    # since the input path went word-granular and may be inlined/gc'd away.
+    ("spdif_rx_read_fifo_live", False),
+    ("spdif_rx_get_fifo_count_live", False),
     # Notify ring: drained from the USB ISR while parameters change.
     ("notify_has_pending_for", False),
     ("notify_peek_next_for", False),

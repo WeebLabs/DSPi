@@ -43,6 +43,25 @@
 // (~156 ppm at 96kHz) takes ~19s to exhaust headroom, so gentle gains suffice.
 #define SERVO_UPDATE_INTERVAL 1000      // Main loop iterations between servo updates (~20ms)
 
+// Long-window rate measurement (mirrors the ADAT slave dual-anchor scheme in
+// adat_input.c). The library's samp_freq_actual is an 8-block moving average
+// of DMA IRQ intervals; the average telescopes to two IRQ timestamps only
+// ~32 ms apart (16 ms at 96 kHz), so a few us of IRQ latency jitter is
+// 100+ ppm of rate noise. Fed raw to the servo that slams the 16.8 output
+// dividers (1 LSB = 156 ppm at 48 kHz) across several LSBs every tick, which
+// bounces the consumer fill and frequency-modulates the outgoing SPDIF
+// carrier. Instead: count decoded blocks (exactly 192 frames each while
+// stable) against the completing IRQ's entry timestamp, via the coherent
+// {count, time} pair the library publishes (spdif_rx_get_block_ref). Anchors
+// rotate every SERVO_LONG_HALF_US, so the steady-state span is 8-16 s and
+// endpoint jitter is well under 1 ppm. The count-based rate is trusted once
+// the span reaches SERVO_LONG_MIN_US (~10 ppm noise at 1 s, still far below
+// one divider LSB); an IIR-smoothed library estimate bridges the first
+// second after lock.
+#define SERVO_LONG_MIN_US   1000000ull  // min anchor span for count-based rate
+#define SERVO_LONG_HALF_US  8000000ull  // anchor rotation half-period
+#define SERVO_SMOOTH_ALPHA  0.25f       // bridge-estimate IIR coefficient
+
 // ============================================================================
 // STATE
 // ============================================================================
@@ -65,6 +84,11 @@ static uint8_t spdif_loss_count = 0;
 
 // Clock servo state
 static uint32_t servo_skip_counter = 0;
+static uint64_t servo_long_us[2];       // dual-anchor timestamps
+static uint32_t servo_long_blocks[2];   // dual-anchor decoded-block counts
+static bool     servo_long_valid = false;
+static float    servo_hz_long = 0.0f;   // count-based long-window rate
+static float    servo_hz_smooth = 0.0f; // IIR-smoothed bridge estimate
 
 // Debounce: after lock, wait this many main-loop polls with sufficient
 // FIFO fill before declaring ready to unmute
@@ -122,6 +146,20 @@ static void __not_in_flash_func(on_lost_stable_callback)(void) {
 // Set once when lock is acquired; servo applies fractional adjustments to these.
 static uint32_t spdif_tx_base_divider = 0;  // sys_clk / sample_freq
 static uint32_t i2s_tx_base_divider = 0;    // sys_clk * 2 / sample_freq
+
+// Re-anchor the long-window rate measurement and clear the bridge estimate.
+// Call when lock is (re)acquired; the library republishes the {count, time}
+// pair every block IRQ, so the snapshot read here is at most one block old.
+static void servo_meas_arm(void) {
+    uint32_t blocks;
+    uint64_t t_us;
+    spdif_rx_get_block_ref(&blocks, &t_us);
+    servo_long_us[0] = servo_long_us[1] = t_us;
+    servo_long_blocks[0] = servo_long_blocks[1] = blocks;
+    servo_long_valid = false;
+    servo_hz_long = 0.0f;
+    servo_hz_smooth = 0.0f;
+}
 
 // Compute and cache the base dividers for all output types at a given sample rate.
 static void servo_cache_base_dividers(uint32_t sample_freq) {
@@ -188,6 +226,7 @@ void spdif_input_start(void) {
     servo_skip_counter = 0;
     spdif_tx_base_divider = 0;
     i2s_tx_base_divider = 0;
+    servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
     input_servo_reset();  // force a full divider rewrite after (re)lock
     lock_debounce_polls = 0;
 
@@ -271,6 +310,7 @@ uint32_t spdif_input_poll(void) {
         spdif_state = SPDIF_INPUT_LOCKED;
         servo_skip_counter = 0;
         servo_cache_base_dividers(rate);
+        servo_meas_arm();
         lock_debounce_polls = 0;
 
         // Rate change will be handled by main loop via spdif_input_check_rate_change()
@@ -288,9 +328,26 @@ uint32_t spdif_input_poll(void) {
     }
 
     // --- Read FIFO and feed pipeline ---
-    uint32_t fifo_count = spdif_rx_get_fifo_count();
-    // Need at least one stereo pair (2 subframes)
-    if (fifo_count < 2)
+    // Live-tail read (ADAT-ring style): count and consume the words the
+    // in-flight DMA block transfer has already written, not just completed
+    // blocks. Block-granular release (384 subframes = 4 consumer buffers in
+    // one poll, every 4 ms at 48 kHz) made the consumer fill sawtooth across
+    // 4 buffers at block rate even with a perfectly stable servo; word-
+    // granular delivery moves the fill smoothly like the ADAT DMA ring does.
+    uint32_t fifo_count = spdif_rx_get_fifo_count_live();
+
+    // Batch into ~1 ms granules (the pipeline's native USB-packet cadence).
+    // Word-granular availability is what keeps the consumer fill smooth, but
+    // processing the few frames that land per main-loop iteration lets
+    // process_input_block()'s fixed cost (producer pool takes/gives, gain
+    // ramp + filter state setup, core metering) dominate: 54% CPU0 measured
+    // on hardware at 48 kHz from sliver-sized calls, 9% batched. Waiting for
+    // a ~1 ms granule restores the USB-like call profile and also keeps every
+    // consumer buffer carrying a full payload, so the 16-buffer fill count
+    // keeps meaning ~16 ms of real cushion.
+    uint32_t min_subframes = (audio_state.freq / 1000) * 2;
+    if (min_subframes < 2) min_subframes = 2;
+    if (fifo_count < min_subframes)
         return 0;
 
     // Read up to 192 stereo samples per poll (matching buf_l/buf_r size)
@@ -314,7 +371,7 @@ uint32_t spdif_input_poll(void) {
 
     while (got < need) {
         uint32_t *buf;
-        uint32_t n = spdif_rx_read_fifo(&buf, need - got);
+        uint32_t n = spdif_rx_read_fifo_live(&buf, need - got);
         if (n == 0) break;  // Underrun or wrap boundary
 
         for (uint32_t i = 0; i + 1 < n; i += 2) {
@@ -358,14 +415,46 @@ void spdif_input_update_clock_servo(void) {
     if (spdif_state != SPDIF_INPUT_LOCKED || spdif_tx_base_divider == 0)
         return;
 
+    // Signal-loss pending but not yet processed by the poll (the flag is set
+    // from IRQ, so it can land between this iteration's poll and servo
+    // calls). The newest decoded blocks may then be partial or corrupt and
+    // the FIFO is draining; skip rather than servo on either. The poll drops
+    // lock on the next iteration.
+    if (spdif_rx_lost_flag) return;
+
     // Rate-limit: crystal drift is slow (ppm), no need to run every iteration.
     if (++servo_skip_counter < SERVO_UPDATE_INTERVAL) return;
     servo_skip_counter = 0;
 
-    // Rate measurement: the library's measured actual input sample rate.
-    // No IIR needed; the library already averages over 8 blocks (~32ms at
-    // 48kHz). Divider math and PIO/MCK writes are shared (input_servo.c).
-    input_servo_apply(spdif_rx_get_samp_freq_actual());
+    // Bridge estimate: IIR-smoothed library measurement, only used until the
+    // long window is valid (see the SERVO_LONG_* comment for why the raw
+    // value is too jittery to apply directly).
+    float lib_hz = spdif_rx_get_samp_freq_actual();
+    if (servo_hz_smooth == 0.0f) servo_hz_smooth = lib_hz;
+    else servo_hz_smooth += SERVO_SMOOTH_ALPHA * (lib_hz - servo_hz_smooth);
+
+    // Long window: exact decoded-block count between two IRQ-timestamped
+    // anchors (dual-anchor rotation, adat_input.c pattern). A lock drop
+    // re-arms the anchors, so counts never span a library block_count reset.
+    uint32_t blocks;
+    uint64_t t_us;
+    spdif_rx_get_block_ref(&blocks, &t_us);
+    if (t_us - servo_long_us[1] >= SERVO_LONG_HALF_US) {
+        servo_long_us[0] = servo_long_us[1];
+        servo_long_blocks[0] = servo_long_blocks[1];
+        servo_long_us[1] = t_us;
+        servo_long_blocks[1] = blocks;
+    }
+    uint64_t span = t_us - servo_long_us[0];
+    if (span >= SERVO_LONG_MIN_US) {
+        uint32_t delta_blocks = blocks - servo_long_blocks[0];
+        servo_hz_long = (float)delta_blocks * (float)(SPDIF_BLOCK_SIZE / 2) *
+                        1e6f / (float)span;
+        servo_long_valid = true;
+    }
+
+    // Divider math and PIO/MCK writes are shared (input_servo.c).
+    input_servo_apply(servo_long_valid ? servo_hz_long : servo_hz_smooth);
 }
 
 uint32_t spdif_input_current_tx_divider(void) {
@@ -386,7 +475,14 @@ void spdif_input_get_status(SpdifRxStatusPacket *out) {
 
     if (spdif_state != SPDIF_INPUT_INACTIVE) {
         out->parity_errors = spdif_rx_get_parity_err_count();
-        uint32_t fifo_count = spdif_rx_get_fifo_count();
+        // Live count: with live-tail consumption the completed-block count
+        // reads ~0 permanently, which would make this stat meaningless. Only
+        // probe the DMA while LOCKED; during acquisition the channels may be
+        // running the library's capture phase into a different buffer and the
+        // in-flight probe would report garbage.
+        uint32_t fifo_count = (spdif_state == SPDIF_INPUT_LOCKED)
+                                  ? spdif_rx_get_fifo_count_live()
+                                  : spdif_rx_get_fifo_count();
         out->fifo_fill_pct = (uint16_t)((fifo_count * 100u) / SPDIF_RX_FIFO_SIZE);
     }
 
