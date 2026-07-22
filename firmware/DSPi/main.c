@@ -21,6 +21,7 @@
 #include "audio_pipeline.h"
 #include "spdif_input.h"
 #include "soft_vcxo.h"
+#include "clock_diag.h"
 #include "i2s_input.h"
 #include "spdif_rx.h"
 #include "lg_sound_sync.h"
@@ -1520,6 +1521,10 @@ void core0_init() {
     // timer 0 and PWM pacer slice before any dynamic DMA claims below.
     soft_vcxo_init();
 
+    // Bench clock/audio-path diagnostics: enable the TX starvation monitors
+    // and seed the timing baselines.  No-op when DSPI_CLOCK_DIAG is 0.
+    clock_diag_init();
+
     // [CRITICAL FIX]
     // Initialize USB/SPDIF *BEFORE* PDM.
     // SPDIF requires DMA Channel 0 (hardcoded in config).
@@ -1782,6 +1787,11 @@ int main(void) {
     while (1) {
         // Update watchdog
         watchdog_update();
+
+        // Bench diagnostics: cheap per-iteration sampling (fc0 service, loop
+        // gap, min consumer fill, PWM-pacer movement).  No-op when the flag
+        // is 0.
+        clock_diag_sample();
 
         // TinyUSB device task — processes enumeration, control transfers, and
         // deferred bus events.  Must be called at least once per main-loop
@@ -3513,6 +3523,10 @@ int main(void) {
                 i2s_input_start(i2s_input_should_be_master());
             }
         }
+
+        // Bench diagnostics: once-per-second CLKDIAG console dump (internally
+        // throttled).  No-op when DSPI_CLOCK_DIAG is 0.
+        clock_diag_poll();
 
         // LED heartbeat - toggle every ~1000 iterations
         static uint32_t loop_counter = 0;

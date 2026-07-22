@@ -26,6 +26,7 @@ add_executable(DSPi
     control_surfaces_ir.c
     control_surfaces_ir.h
     control_surfaces_nouns.c
+    clock_diag.c
     crossfeed.c
     crossfeed.h
     crossover.c

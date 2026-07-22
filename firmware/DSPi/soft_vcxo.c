@@ -64,6 +64,22 @@ static uint32_t fbdivs_addr = (uint32_t)(uintptr_t)fbdivs;
 static bool  vcxo_ready = false;
 static float vcxo_ppm = 0.0f;
 
+#if DSPI_CLOCK_DIAG
+// Diagnostic aggregates (see soft_vcxo_get_diag).  Written only from
+// soft_vcxo_set_ppm (plain stores, no locking); read from the main loop.
+static float    diag_min_ppm = 0.0f;
+static float    diag_max_ppm = 0.0f;
+static uint32_t diag_set_calls = 0;
+static uint32_t diag_clamp_sats = 0;
+static uint32_t diag_sign_changes = 0;
+static uint32_t diag_pulse_hz = 0;
+static uint32_t diag_pwm_wrap = 0x10000u;
+static uint16_t diag_pwm_div = 128;
+static uint8_t  diag_fbdiv0 = SOFT_VCXO_FBDIV_NOM;
+static bool     diag_parked = true;
+static int8_t   diag_last_sign = 0;
+#endif
+
 void soft_vcxo_init(void) {
     // The tune constants assume the 307.2 MHz (fbdiv 128, postdiv 5/1)
     // clock plan; stay inert on the RP2350 low-clock boot fallback.
@@ -114,13 +130,40 @@ void soft_vcxo_init(void) {
 DSP_TIME_CRITICAL
 void soft_vcxo_set_ppm(float ppm) {
     if (!vcxo_ready) return;
-    if (ppm >  SOFT_VCXO_MAX_PPM) ppm =  SOFT_VCXO_MAX_PPM;
-    if (ppm < -SOFT_VCXO_MAX_PPM) ppm = -SOFT_VCXO_MAX_PPM;
+#if DSPI_CLOCK_DIAG && SOFT_VCXO_DIAG_FORCE_PARK
+    // A/B: force every command to 0 so the servo still runs but the PLL never
+    // moves.  Persistent cutouts with this on exonerate the VCXO (H1/H5).
+    ppm = 0.0f;
+#endif
+    if (ppm >  SOFT_VCXO_MAX_PPM) { ppm =  SOFT_VCXO_MAX_PPM;
+#if DSPI_CLOCK_DIAG
+        diag_clamp_sats++;
+#endif
+    } else if (ppm < -SOFT_VCXO_MAX_PPM) { ppm = -SOFT_VCXO_MAX_PPM;
+#if DSPI_CLOCK_DIAG
+        diag_clamp_sats++;
+#endif
+    }
     vcxo_ppm = ppm;
+
+#if DSPI_CLOCK_DIAG
+    diag_set_calls++;
+    if (ppm < diag_min_ppm) diag_min_ppm = ppm;
+    if (ppm > diag_max_ppm) diag_max_ppm = ppm;
+    int8_t sign = (ppm > 0.0f) ? 1 : (ppm < 0.0f ? -1 : 0);
+    if (sign != 0 && diag_last_sign != 0 && sign != diag_last_sign)
+        diag_sign_changes++;
+    if (sign != 0) diag_last_sign = sign;
+#endif
 
     float freq = (ppm >= 0.0f ? ppm : -ppm) * SOFT_VCXO_HZ_PER_PPM;
     if (freq < SOFT_VCXO_MIN_HZ) {
         fbdivs[0] = SOFT_VCXO_FBDIV_NOM;    // park: pulses become no-ops
+#if DSPI_CLOCK_DIAG
+        diag_parked = true;
+        diag_fbdiv0 = SOFT_VCXO_FBDIV_NOM;
+        diag_pulse_hz = 0;
+#endif
         return;
     }
     fbdivs[0] = (ppm > 0.0f) ? SOFT_VCXO_FBDIV_NOM + 1u
@@ -135,8 +178,36 @@ void soft_vcxo_set_ppm(float ppm) {
     if (wrap < 4u) wrap = 4u;
     pwm_set_clkdiv_int_frac4(SOFT_VCXO_PWM_SLICE, (uint8_t)div, 0);
     pwm_set_wrap(SOFT_VCXO_PWM_SLICE, (uint16_t)(wrap - 1u));
+
+#if DSPI_CLOCK_DIAG
+    diag_parked = false;
+    diag_fbdiv0 = (uint8_t)fbdivs[0];
+    diag_pwm_div = (uint16_t)div;
+    diag_pwm_wrap = wrap;
+    diag_pulse_hz = SOFT_VCXO_SYS_HZ / (div * wrap);
+#endif
 }
 
 float soft_vcxo_current_ppm(void) {
     return vcxo_ppm;
 }
+
+#if DSPI_CLOCK_DIAG
+void soft_vcxo_get_diag(SoftVcxoDiag *out) {
+    out->last_ppm     = vcxo_ppm;
+    out->min_ppm      = diag_min_ppm;
+    out->max_ppm      = diag_max_ppm;
+    out->set_calls    = diag_set_calls;
+    out->clamp_sats   = diag_clamp_sats;
+    out->sign_changes = diag_sign_changes;
+    out->pulse_hz     = diag_pulse_hz;
+    out->pwm_div      = diag_pwm_div;
+    out->pwm_wrap     = diag_pwm_wrap;
+    out->fbdiv0       = diag_fbdiv0;
+    out->parked       = diag_parked;
+    // Reset the windowed min/max to the current command so the next dump
+    // reflects only the intervening interval.
+    diag_min_ppm = vcxo_ppm;
+    diag_max_ppm = vcxo_ppm;
+}
+#endif

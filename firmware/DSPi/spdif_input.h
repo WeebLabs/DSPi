@@ -65,4 +65,19 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 // Returns true if rate change was needed
 bool spdif_input_check_rate_change(void);
 
+#include "config.h"
+#if DSPI_CLOCK_DIAG
+// Rate-estimator internals for the CLKDIAG dump (no getter existed for the
+// servo statics).  which_long is true when the long-window count-based rate
+// is in use, false while the IIR bridge estimate covers the first ~1 s.
+typedef struct {
+    float    hz_long;      // count-based long-window rate estimate
+    float    hz_smooth;    // IIR bridge estimate
+    bool     which_long;   // true = hz_long applied, false = hz_smooth
+    uint32_t span_ms;      // long-window anchor span in ms
+} SpdifServoDiag;
+
+void spdif_input_get_servo_diag(SpdifServoDiag *out);
+#endif // DSPI_CLOCK_DIAG
+
 #endif // SPDIF_INPUT_H

@@ -89,6 +89,9 @@ static uint32_t servo_long_blocks[2];   // dual-anchor decoded-block counts
 static bool     servo_long_valid = false;
 static float    servo_hz_long = 0.0f;   // count-based long-window rate
 static float    servo_hz_smooth = 0.0f; // IIR-smoothed bridge estimate
+#if DSPI_CLOCK_DIAG
+static uint32_t servo_long_span_ms = 0; // last long-window anchor span (ms)
+#endif
 
 // Debounce: after lock, wait this many main-loop polls with sufficient
 // FIFO fill before declaring ready to unmute
@@ -434,6 +437,9 @@ void spdif_input_update_clock_servo(void) {
         servo_long_blocks[1] = blocks;
     }
     uint64_t span = t_us - servo_long_us[0];
+#if DSPI_CLOCK_DIAG
+    servo_long_span_ms = (uint32_t)(span / 1000u);
+#endif
     if (span >= SERVO_LONG_MIN_US) {
         uint32_t delta_blocks = blocks - servo_long_blocks[0];
         servo_hz_long = (float)delta_blocks * (float)(SPDIF_BLOCK_SIZE / 2) *
@@ -494,3 +500,12 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes) {
         memset(out_24_bytes, 0, 24);
     }
 }
+
+#if DSPI_CLOCK_DIAG
+void spdif_input_get_servo_diag(SpdifServoDiag *out) {
+    out->hz_long    = servo_hz_long;
+    out->hz_smooth  = servo_hz_smooth;
+    out->which_long = servo_long_valid;
+    out->span_ms    = servo_long_span_ms;
+}
+#endif

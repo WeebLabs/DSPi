@@ -233,6 +233,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_SERIAL              0x7E
 #define REQ_GET_PLATFORM            0x7F
 
+// Clock / audio-path diagnostics (read-only snapshot; DSPI_CLOCK_DIAG builds
+// only).  Returns the packed ClockDiagPacket latched by the 1 Hz clock_diag
+// poll.  0x80/0x81 stay free.
+#define REQ_GET_CLOCK_DIAG          0x82
+
 // Clip Detection Commands
 #define REQ_CLEAR_CLIPS             0x83
 
@@ -649,6 +654,24 @@ typedef struct __attribute__((packed)) {
 #define SOFT_VCXO_PWM_SLICE         7
 #endif
 #define SOFT_VCXO_DMA_TIMER         0
+
+// ---------------------------------------------------------------------------
+// Clock / audio-path diagnostics (bench instrumentation)
+// ---------------------------------------------------------------------------
+// Master switch for the CLKDIAG serial console dump (clock_diag.c) and all the
+// diagnostic statics/getters it reads (soft_vcxo.c, input_servo.c,
+// spdif_input.c).  Everything is compiled out when 0; set 0 for release.
+#define DSPI_CLOCK_DIAG            1
+
+// A/B switches, default 0, honored in soft_vcxo.c / input_servo.c only when
+// DSPI_CLOCK_DIAG is 1.  Both leave the servo running so its commands are still
+// visible in the dump; they only cut the actuation or the accumulation:
+//   FORCE_PARK: soft_vcxo_set_ppm clamps every command to 0 (PLL never moves).
+//     If cutouts persist with this on, the VCXO/PLL is exonerated (H1/H5).
+//   FREEZE_INTEGRATOR: input_servo.c skips integrator accumulation (isolates
+//     integrator windup/oscillation, H2).
+#define SOFT_VCXO_DIAG_FORCE_PARK        0
+#define SOFT_VCXO_DIAG_FREEZE_INTEGRATOR 0
 
 // Number of configurable outputs (SPDIF + PDM)
 #if PICO_RP2350

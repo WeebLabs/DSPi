@@ -90,6 +90,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `soft_vcxo.h` | Soft VCXO API (`soft_vcxo_init` / `soft_vcxo_set_ppm` / `soft_vcxo_current_ppm`) |
 | `input_servo.c` | Shared clock servo for externally clocked inputs: ppm feed-forward + deadbanded P + centering integrator, actuates the soft VCXO |
 | `input_servo.h` | Input servo API (`input_servo_apply` / `input_servo_reset`) |
+| `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
+| `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
 | `flash_storage.h` | Flash storage API |
 | `bulk_params.c` | Bulk parameter collect/apply (wire format ↔ live state) |
@@ -255,6 +257,28 @@ Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switc
 **`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
 
 **Nominal SPDIF divider restore (`restore_nominal_spdif_dividers()`, main.c):** since the soft-VCXO overhaul the input clock servos no longer trim any output divider; they pull `sys_clk` in ppm instead (see "Soft VCXO" and "Clock Servo"), so every SPDIF TX SM always runs its nominal `ceil(sys/f)` divider and the old trim-outlives-its-servo hazard (a servoed divider left displaced after the input stopped, dragging ADAT out of alignment with the slots it mirrors) is gone by construction. `restore_nominal_spdif_dividers()` is retained as one of the nominal-divider owner paths: `perform_rate_change()` still calls it (via `audio_spdif_apply_pio_frequency()`, a public wrapper in the SPDIF library) to reprogram every SPDIF-type slot to the new rate's nominal divider, and the two equal-rate paths that skip `perform_rate_change()` (the source-switch-away-from-I2S branch and the slave-to-master clock-mode flip) call it too; it is idempotent when the dividers already sit at nominal. All SPDIF slots receive the same divider, so inter-slot alignment is unaffected. *Last updated: 2026-07-22*
+
+### Clock Diagnostics (bench instrument)
+*Last updated: 2026-07-22*
+
+`clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and a read-only `REQ_GET_CLOCK_DIAG` (0x82) vendor GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf output is otherwise discarded). Gated entirely by `DSPI_CLOCK_DIAG` (config.h, default 1 for bench; set 0 for release, which compiles everything to no-op inlines and makes `REQ_GET_CLOCK_DIAG` return a zero-length response). `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
+
+Two A/B switches (config.h, default 0, honored only under the flag): `SOFT_VCXO_DIAG_FORCE_PARK` makes `soft_vcxo_set_ppm()` clamp every command to 0 (the servo still computes and its intent is still logged, but the PLL never moves; persistent cutouts then exonerate the VCXO), and `SOFT_VCXO_DIAG_FREEZE_INTEGRATOR` makes `input_servo.c` skip integrator accumulation (isolates integrator windup/oscillation).
+
+The dump is six-to-eight lines, each prefixed `CLKDIAG ` for grepping:
+
+- `sysclk:` fc0-measured sys_clk `hz`/`min`/`max`, derived `ppm` offset vs 307.2 MHz `[min..max]`, sample count `n`, PLL `lock` bit. (fc0 is otherwise unused in the tree.)
+- `vcxo:` last commanded `ppm[min..max]`, `park` state, commanded `fbdiv0` (127/128/129), effective `pulseHz`, PWM `div`/`wrap`, cumulative `set`/`clamp`/`sflip` (sign-flip) counts, live `fbdivLive` (pll_sys `fbdiv_int`), PLL `cs` lock.
+- `vcxoloop:` PULSE and PACE DMA channel `busy`/`en`/`tcr` (transfer count remaining, from the debug registers)/PULSE `rd` addr/PACE `ctdreq` (DREQ counter), plus the PWM pacer `pwmctr` and its `moves` count since last dump (loop-alive evidence).
+- `servo:` measured input `in` Hz, `ff` feed-forward ppm, total `tot[min..max]` ppm, integrator `int` ppm, `ferr` fill error, `slot` used, `ticks`.
+- `slots:` per output slot: type (spd/i2s), current `fill`/`min` since dump, `starv` (per-instance consumer-empty DMA starts = silence-buffer substitutions, from the TX libraries' pre-existing starvation monitors, enabled here), `dwc` (delta words_consumed = TX DMA throughput; drops to 0 on a stalled channel).
+- `pdm:` (when PDM enabled) ring/dma fill, `ringur` (ring-empty silence insertions) / `dmaur` (write-behind-read) underruns.
+- `input:` SPDIF RX `st` state, `rate`, `lk`/`ls` lock/loss counts, `par` parity errors, `fifo` fill %, estimator `hzL`/`hzS` (long-window count vs IIR bridge) and which is in `use`, long-window `span`.
+- `loop:` worst main-loop `gapmax` since last dump.
+
+Starvation counters are the authoritative instantaneous-empty signal (H3): the TX-library increment already existed in each DMA IRQ path (guarded by a runtime monitor bool that `clock_diag_init()` turns on); no new IRQ-path code was added. All `clock_diag.*`, plus the diagnostic getters in `soft_vcxo.c`/`input_servo.c`/`spdif_input.c`, live in flash and run only from the main loop.
+
+The `REQ_GET_CLOCK_DIAG` (0x82) snapshot is a packed little-endian `ClockDiagPacket` (`clock_diag.h`, version byte = 1) carrying every dump field: ppm values are centi-ppm (ppm times 100), frequencies flagged `_mhz` are milli-Hz, per-slot arrays are sized `NUM_SPDIF_INSTANCES` with a `num_slots` count. `clock_diag_poll()` latches it each second next to the printf; `clock_diag_get_snapshot()` copies it for the handler. Tearing is acceptable (both the poll and the control transfer run on the core 0 main loop). Host decoder: `tools`-adjacent `clkdiag_poll.py` polls it at 1 Hz. *Last updated: 2026-07-22.*
 
 ### Multichannel USB Input + Per-Input EQ/Metering (RP2350)
 *Last updated: 2026-07-10 (crossfeed moved to per-output-pair stage; no longer bypassed in multichannel)*
@@ -2595,6 +2619,7 @@ op state ~400 B).
 | REQ_GET_OUTPUT_PIN | 0x7D | IN | Get output GPIO pin |
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID (0=RP2040, 1=RP2350) |
+| REQ_GET_CLOCK_DIAG | 0x82 | IN | Get packed ClockDiagPacket clock/audio-path snapshot (DSPI_CLOCK_DIAG builds; zero-length otherwise). See Clock Diagnostics |
 | REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
 | REQ_SET_CS_BINDING | 0x84 | OUT | Set a Control Surfaces binding (wValue=slot 0-15, payload=24-byte CsBinding, required; short payload = INVALID_VALUE); apply-live-only preview, deferred, poll 0x87; persist via REQ_CS_SAVE (see Control Surfaces) |
 | REQ_GET_CS_BINDING | 0x85 | IN | Get the live 24-byte CsBinding for a slot (wValue=slot) |

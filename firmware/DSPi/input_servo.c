@@ -52,6 +52,12 @@
 // Integrator state, as a dimensionless rate trim (1e-6 = 1 ppm).
 static float fill_trim_integral = 0.0f;
 
+#if DSPI_CLOCK_DIAG
+// Diagnostic snapshot (see input_servo_get_diag).  Plain stores from the
+// servo tick; windowed min/max total ppm reset on read.
+static InputServoDiag diag_servo = { .fill_slot = -1 };
+#endif
+
 DSP_TIME_CRITICAL
 void input_servo_apply(float actual_freq, int fill_slot) {
     if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;
@@ -72,9 +78,17 @@ void input_servo_apply(float actual_freq, int fill_slot) {
     // that transient.
     if (ppm > 2000.0f || ppm < -2000.0f) return;
 
+#if DSPI_CLOCK_DIAG
+    float diag_ff = ppm;
+    int32_t diag_fill_error = 0;
+#endif
+
     if (fill_slot >= 0) {
         // Positive error (overfull) means consumers lag; speed sys_clk up.
         int32_t fill_error = (int32_t)get_slot_consumer_fill((uint)fill_slot) - 8;
+#if DSPI_CLOCK_DIAG
+        diag_fill_error = fill_error;
+#endif
 
         float fill_trim = 0.0f;
         if (fill_error > 2 || fill_error < -2)
@@ -82,12 +96,26 @@ void input_servo_apply(float actual_freq, int fill_slot) {
 
         // Centering integrator: always active so the fill converges on 8
         // buffers instead of parking inside the deadband.
+#if !(DSPI_CLOCK_DIAG && SOFT_VCXO_DIAG_FREEZE_INTEGRATOR)
         fill_trim_integral += (float)fill_error * SERVO_FILL_KI;
         if (fill_trim_integral >  SERVO_FILL_ICLAMP) fill_trim_integral =  SERVO_FILL_ICLAMP;
         if (fill_trim_integral < -SERVO_FILL_ICLAMP) fill_trim_integral = -SERVO_FILL_ICLAMP;
+#endif
 
         ppm += (fill_trim + fill_trim_integral) * 1e6f;
     }
+
+#if DSPI_CLOCK_DIAG
+    diag_servo.actual_freq  = actual_freq;
+    diag_servo.ppm_ff       = diag_ff;
+    diag_servo.ppm_total    = ppm;
+    diag_servo.integral_ppm = fill_trim_integral * 1e6f;
+    diag_servo.fill_error   = diag_fill_error;
+    diag_servo.fill_slot    = fill_slot;
+    if (ppm < diag_servo.ppm_min) diag_servo.ppm_min = ppm;
+    if (ppm > diag_servo.ppm_max) diag_servo.ppm_max = ppm;
+    diag_servo.ticks++;
+#endif
 
     soft_vcxo_set_ppm(ppm);
 }
@@ -96,3 +124,11 @@ void input_servo_reset(void) {
     fill_trim_integral = 0.0f;
     soft_vcxo_set_ppm(0.0f);
 }
+
+#if DSPI_CLOCK_DIAG
+void input_servo_get_diag(InputServoDiag *out) {
+    *out = diag_servo;
+    diag_servo.ppm_min = diag_servo.ppm_total;
+    diag_servo.ppm_max = diag_servo.ppm_total;
+}
+#endif

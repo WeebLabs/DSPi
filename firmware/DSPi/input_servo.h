@@ -23,4 +23,25 @@ void input_servo_apply(float actual_freq, int fill_slot);
 // starts or stops and when lock is (re)acquired.
 void input_servo_reset(void);
 
+#include "config.h"
+#if DSPI_CLOCK_DIAG
+// Per-tick servo snapshot for the CLKDIAG dump.  ppm fields are the last
+// computed term; min/max total ppm are windowed (reset on read).  Written
+// only from input_servo_apply (plain stores); read from the main loop.
+typedef struct {
+    float    actual_freq;   // measured input rate fed in
+    float    ppm_ff;        // feed-forward ppm
+    float    ppm_total;     // total commanded ppm (ff + fill)
+    float    ppm_min;       // min total ppm since last read
+    float    ppm_max;       // max total ppm since last read
+    float    integral_ppm;  // integrator value, in ppm
+    int32_t  fill_error;    // consumer fill minus centre (8)
+    int32_t  fill_slot;     // slot used for fill term (-1 = rate only)
+    uint32_t ticks;         // total servo ticks that actuated (cumulative)
+} InputServoDiag;
+
+// Fill *out and reset the windowed min/max total ppm.  Main-loop context.
+void input_servo_get_diag(InputServoDiag *out);
+#endif // DSPI_CLOCK_DIAG
+
 #endif // INPUT_SERVO_H
