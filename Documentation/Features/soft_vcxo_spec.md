@@ -145,16 +145,27 @@ integrator never has to hold it. `sys_nominal` is `clock_get_hz(clk_sys)`,
 which by convention keeps reporting 307.2 MHz; all nominal-divider math
 everywhere stays nominal, only the physical clock moves.
 
-Fill terms (only when `fill_slot >= 0`), same plant and gains as before,
-signs flipped to ppm convention (overfull consumer = outputs too slow =
-positive ppm = speed sys_clk up):
+Fill terms (only when `fill_slot >= 0`), in ppm convention (overfull
+consumer = outputs too slow = positive ppm = speed sys_clk up). Retuned
+2026-07-22 after the first hardware capture; the original divider-servo
+gains, expressed on a continuous actuator, limit-cycled the integrator
+between its clamp rails (-15..+50 ppm, ~100 s period, ~10 ppm/s slews)
+on zero true error, and the external DAC receiver PLL unlocked on the
+slews ("fill locked at 50-56% but the DAC cuts out"). Because fill
+responds to a rate trim through an integration and is quantized to
+whole buffers, a micro limit cycle is structural; the tuning makes it
+harmless instead of pretending to remove it:
 
-- Deadbanded P: `|fill_error| > 2` buffers, KP = 5e-4 (as a dimensionless
-  rate trim; x1e6 = ppm).
-- Centering integrator: always active, KI = 2e-7/tick/buffer, clamp
-  +-5e-5 (+-50 ppm). The old +-2-LSB (+-320 ppm) clamp existed to cancel
-  divider rounding; the feed-forward now does that exactly, so the clamp
-  shrank to bound windup from transient bogus fill reads.
+- P: continuous beyond a 2-buffer deadband, 1.5 ppm per buffer beyond
+  the edge (bounded ~+-9 ppm at the fill extremes).
+- Centering integrator: accumulates only on NONZERO fill error (a
+  centred fill cannot pump it), 0.005 ppm/tick per buffer, clamp
+  +-10 ppm (bounds the cycle amplitude; also covers a few percent of
+  tune-ratio gain error against a worst-case +-100 ppm source).
+- Global slew limiter: the total command moves at most 0.5 ppm per
+  ~20 ms tick (~25 ppm/s), so output carriers never step faster than
+  downstream receiver PLLs track. `input_servo_reset()` also zeroes the
+  limiter state.
 
 A guard skips the tick when `|ppm_ff| > 2000`: that only happens if a
 caller applied against the wrong pipeline rate.
@@ -294,7 +305,16 @@ I2S RX 5-8, spare 9-10, VCXO 11-12, ADAT out 13-14, ADAT in 15.
   ~100x, and it matched analytic within 1%, consistent with per-channel
   DREQ credits being cleared on channel trigger. It stays on the RP2040
   bench checklist since that platform has not been measured.
-- **Pending hardware tests**: RP2040 fbdiv dithering (bench was RP2350);
-  tracking soak at 44.1/48/96 k for SPDIF, ADAT slave, and I2S slave on
-  both platforms; RP2350 8-channel I2S input (ENDLESS ring conversion);
-  CS PWM LED conflict rejection on RP2040 slice 7.
+- First full-firmware hardware capture (2026-07-22, RP2350, SPDIF input
+  48 k, 130 s via REQ_GET_CLOCK_DIAG): PLL locked throughout, measured
+  sys_clk tracks the commanded ppm 1:1, VCXO DMA/PWM loop alive, zero
+  slot starvation at 192 kwords/s, input locked with zero parity errors,
+  main-loop gaps under 0.5 ms. The same capture exposed the integrator
+  limit cycle described in 3.1 (fixed by the retune); the mechanism
+  itself performed exactly as designed.
+- **Pending hardware tests**: post-retune soak confirming the DAC holds
+  lock (commanded ppm should sit near the feed-forward, integrator
+  within +-10 ppm, slews <= 0.5 ppm/tick); RP2040 fbdiv dithering (bench
+  was RP2350); tracking soak at 44.1/48/96 k for SPDIF, ADAT slave, and
+  I2S slave on both platforms; RP2350 8-channel I2S input (ENDLESS ring
+  conversion); CS PWM LED conflict rejection on RP2040 slice 7.

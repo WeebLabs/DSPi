@@ -13,9 +13,12 @@
  *           against the programmed nominal divider (ceil, identical to
  *           the TX library) so divider rounding is cancelled here rather
  *           than left to the integrator.
- *   Loop B: consumer-fill trim; a deadbanded (|error| > 2 buffers)
- *           proportional term for disturbances plus a slow clamped
- *           integrator that centres the fill on exactly 8 of 16 buffers.
+ *   Loop B: consumer-fill trim; a proportional term (continuous beyond a
+ *           2-buffer deadband) for disturbances plus a slow clamped
+ *           integrator, gated on nonzero fill error, that holds the fill
+ *           at 8 of 16 buffers to within the +-1 buffer quantization.
+ * The total command is slew-limited per tick before actuation (see the
+ * Loop B gain comment for the hardware findings behind the tuning).
  *
  * The I2S slave servo shares this module too (it passes the first
  * SPDIF-type slot as fill reference): with no divider writes left, the
@@ -30,27 +33,36 @@
 
 #include "hardware/clocks.h"
 
-#define SERVO_FILL_KP  0.0005f   // Fill-level proportional gain
-
-// Slow fill-centering integrator. The proportional term is deadbanded
-// (|error| > 2 buffers), so without an integral term the fill would park
-// wherever the enable transient leaves it inside the deadband. The
-// integrator accumulates the residual ppm (estimator bias, feed-forward
-// gain error) and pulls the fill onto exactly 8 buffers.
+// Loop B gains, retuned 2026-07-22 after the first hardware capture.
 //
-// Gain: the trim-to-fill plant is a single integrator (Fs/48 buffers per
-// second per unit trim), so pure integral action limit-cycles; KI keeps
-// that cycle at ~1 buffer amplitude, the same magnitude as the normal
-// production/consumption wobble.
+// The original gains were carried over from the divider servo, where the
+// 156 ppm-per-LSB actuator quantization hid almost all integrator motion
+// (sub-LSB wander never reached the outputs). On the continuous VCXO the
+// same gains expressed directly: the bench log showed the integrator
+// limit-cycling rail to rail (-15..+50 ppm, ~100 s period, ~10 ppm/s
+// slews) on ZERO true error, driven purely by the +-1 buffer fill
+// quantization, and the external DAC receiver PLL unlocked on the slews.
 //
-// Clamp: +-50 ppm of authority. The feed-forward absorbs divider rounding
-// exactly, so the integrator only ever holds small residuals; the clamp
-// bounds windup from transient bogus fill reads (type switches report 0).
-#define SERVO_FILL_KI     2.0e-7f  // per tick per buffer of fill error
-#define SERVO_FILL_ICLAMP 5.0e-5f  // +-50 ppm
+// Structure note: fill responds to a rate trim through an integration
+// (ppm -> fill slew), so integral action on the quantized fill can never
+// fully settle; a micro limit cycle is inherent. The tuning therefore
+// aims to make that cycle harmless rather than pretend to remove it:
+//   - the integrator only accumulates on a NONZERO fill error, so it
+//     cannot pump while the fill sits centred;
+//   - its clamp bounds the cycle amplitude to +-10 ppm (also enough
+//     margin for a few percent of VCXO tune-ratio error on a worst-case
+//     +-100 ppm source);
+//   - a global slew limiter caps the commanded ppm change per tick, so
+//     the carrier never steps faster than a receiver PLL tracks.
+#define SERVO_FILL_DEADBAND      2      // buffers; P engages beyond this
+#define SERVO_FILL_KP_PPM        1.5f   // ppm per buffer beyond the deadband
+#define SERVO_FILL_KI_PPM        0.005f // ppm per tick per buffer (ferr != 0)
+#define SERVO_FILL_ICLAMP_PPM    10.0f
+#define SERVO_SLEW_PPM_PER_TICK  0.5f   // ~25 ppm/s at the ~20 ms tick
 
-// Integrator state, as a dimensionless rate trim (1e-6 = 1 ppm).
-static float fill_trim_integral = 0.0f;
+// Integrator state and last slew-limited command, both in ppm.
+static float fill_integral_ppm = 0.0f;
+static float last_cmd_ppm = 0.0f;
 
 #if DSPI_CLOCK_DIAG
 // Diagnostic snapshot (see input_servo_get_diag).  Plain stores from the
@@ -90,26 +102,38 @@ void input_servo_apply(float actual_freq, int fill_slot) {
         diag_fill_error = fill_error;
 #endif
 
-        float fill_trim = 0.0f;
-        if (fill_error > 2 || fill_error < -2)
-            fill_trim = (float)fill_error / 16.0f * SERVO_FILL_KP;
+        // P: continuous beyond the deadband (no jump at the edge).
+        float p_ppm = 0.0f;
+        if (fill_error > SERVO_FILL_DEADBAND)
+            p_ppm = (float)(fill_error - SERVO_FILL_DEADBAND) * SERVO_FILL_KP_PPM;
+        else if (fill_error < -SERVO_FILL_DEADBAND)
+            p_ppm = (float)(fill_error + SERVO_FILL_DEADBAND) * SERVO_FILL_KP_PPM;
 
-        // Centering integrator: always active so the fill converges on 8
-        // buffers instead of parking inside the deadband.
+        // I: only on a nonzero error, so a centred fill cannot pump it.
 #if !(DSPI_CLOCK_DIAG && SOFT_VCXO_DIAG_FREEZE_INTEGRATOR)
-        fill_trim_integral += (float)fill_error * SERVO_FILL_KI;
-        if (fill_trim_integral >  SERVO_FILL_ICLAMP) fill_trim_integral =  SERVO_FILL_ICLAMP;
-        if (fill_trim_integral < -SERVO_FILL_ICLAMP) fill_trim_integral = -SERVO_FILL_ICLAMP;
+        if (fill_error != 0) {
+            fill_integral_ppm += (float)fill_error * SERVO_FILL_KI_PPM;
+            if (fill_integral_ppm >  SERVO_FILL_ICLAMP_PPM) fill_integral_ppm =  SERVO_FILL_ICLAMP_PPM;
+            if (fill_integral_ppm < -SERVO_FILL_ICLAMP_PPM) fill_integral_ppm = -SERVO_FILL_ICLAMP_PPM;
+        }
 #endif
 
-        ppm += (fill_trim + fill_trim_integral) * 1e6f;
+        ppm += p_ppm + fill_integral_ppm;
     }
+
+    // Slew limiter: bound the commanded step per tick so the output
+    // carriers never move faster than downstream receiver PLLs track.
+    if (ppm > last_cmd_ppm + SERVO_SLEW_PPM_PER_TICK)
+        ppm = last_cmd_ppm + SERVO_SLEW_PPM_PER_TICK;
+    else if (ppm < last_cmd_ppm - SERVO_SLEW_PPM_PER_TICK)
+        ppm = last_cmd_ppm - SERVO_SLEW_PPM_PER_TICK;
+    last_cmd_ppm = ppm;
 
 #if DSPI_CLOCK_DIAG
     diag_servo.actual_freq  = actual_freq;
     diag_servo.ppm_ff       = diag_ff;
     diag_servo.ppm_total    = ppm;
-    diag_servo.integral_ppm = fill_trim_integral * 1e6f;
+    diag_servo.integral_ppm = fill_integral_ppm;
     diag_servo.fill_error   = diag_fill_error;
     diag_servo.fill_slot    = fill_slot;
     if (ppm < diag_servo.ppm_min) diag_servo.ppm_min = ppm;
@@ -121,7 +145,8 @@ void input_servo_apply(float actual_freq, int fill_slot) {
 }
 
 void input_servo_reset(void) {
-    fill_trim_integral = 0.0f;
+    fill_integral_ppm = 0.0f;
+    last_cmd_ppm = 0.0f;
     soft_vcxo_set_ppm(0.0f);
 }
 
