@@ -60,6 +60,8 @@ add_executable(DSPi
     psybass.h
     siggen.c
     siggen.h
+    soft_vcxo.c
+    soft_vcxo.h
     spdif_input.c
     spdif_input.h
     uart_control.c

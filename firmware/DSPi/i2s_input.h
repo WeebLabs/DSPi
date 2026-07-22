@@ -116,10 +116,6 @@ bool i2s_slave_check_rate_change(void);
 I2sSlaveState i2s_slave_get_state(void);
 uint32_t i2s_slave_get_detected_rate(void);
 
-// Last servo-applied SPDIF TX divider (16.8), 0 unless LOCKED. Consumed by
-// adat_output_resync() so ADAT re-arms on the servoed divider.
-uint32_t i2s_slave_current_tx_divider(void);
-
 void i2s_slave_get_status(I2sSlaveStatusPacket *out);
 
 #endif // I2S_INPUT_H

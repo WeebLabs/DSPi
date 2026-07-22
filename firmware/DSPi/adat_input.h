@@ -82,10 +82,6 @@ bool adat_input_check_rate_change(void);
 // the RX cell period and re-sync, or park with rate_ok = false above 48 kHz.
 void adat_input_on_rate_change(uint32_t freq);
 
-// Last servo-applied SPDIF TX divider (16.8), 0 unless slave mode + LOCKED.
-// Consumed by adat_output_resync() so ADAT TX re-arms on the servoed divider.
-uint32_t adat_input_current_tx_divider(void);
-
 AdatInputState adat_input_get_state(void);
 uint32_t adat_input_get_detected_rate(void);
 void adat_input_get_status(AdatInputStatusPacket *out);

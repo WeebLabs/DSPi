@@ -65,10 +65,6 @@ void adat_output_resync(void);
 // while false (host stream stopped) the cushion free-runs on silence.
 void adat_output_set_stream_active(bool active);
 
-// SPDIF-input clock servo hook: apply the same 16.8 divider the S/PDIF TX SMs
-// run (ADAT's PIO clock is likewise 256*Fs).  0 clears the override.
-void adat_output_servo_divider(uint32_t div_16_8);
-
 // Main-loop service: slaved/idle silence top-up and deferred local resync.
 void adat_output_task(void);
 

@@ -634,6 +634,22 @@ typedef struct __attribute__((packed)) {
 #define PICO_SPDIF_RX_DMA_CH1      5
 #endif
 
+// Soft VCXO (system PLL fractional trim, soft_vcxo.c): two explicit DMA
+// channels, DMA timer 0, and one PWM slice used purely as a DREQ pacer
+// (no GPIO).  RP2350 slice 8 has no bondable GPIO on RP2350A, so it can
+// never conflict; RP2040 slice 7 (GPIOs 14/15) is guarded against in the
+// control-surface PWM LED bind path.
+#if PICO_RP2350
+#define SOFT_VCXO_DMA_PULSE        11
+#define SOFT_VCXO_DMA_PACE         12
+#define SOFT_VCXO_PWM_SLICE         8
+#else
+#define SOFT_VCXO_DMA_PULSE        10
+#define SOFT_VCXO_DMA_PACE         11
+#define SOFT_VCXO_PWM_SLICE         7
+#endif
+#define SOFT_VCXO_DMA_TIMER         0
+
 // Number of configurable outputs (SPDIF + PDM)
 #if PICO_RP2350
 #define NUM_SPDIF_INSTANCES         4

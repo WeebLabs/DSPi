@@ -221,9 +221,13 @@ static uint32_t i2s_compute_divider(uint32_t sample_freq) {
     uint32_t system_clock_frequency = clock_get_hz(clk_sys);
     assert(system_clock_frequency < 0x40000000);
 
-    // divider = sys_clk * 2 / sample_freq (ceiling division to match SPDIF rounding)
-    uint64_t num = (uint64_t)system_clock_frequency * 2;
-    uint32_t divider = (uint32_t)((num + sample_freq - 1) / sample_freq);
+    // divider = exactly 2x the SPDIF TX divider ceil(sys_clk / sample_freq),
+    // NOT ceil(sys_clk * 2 / sample_freq): the two can differ by one LSB
+    // (e.g. 176.4 kHz), and a divider RATIO error is a rate offset between
+    // output types that no common sys_clk trim (soft VCXO) can correct.
+    // Identical at every currently supported rate.
+    uint32_t divider = 2u * (system_clock_frequency / sample_freq +
+                             (system_clock_frequency % sample_freq != 0));
     assert(divider < 0x1000000);
     return divider;
 }

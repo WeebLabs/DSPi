@@ -21,13 +21,15 @@
  *   - PIO: PICO_SPDIF_RX_PIO, SM I2S_RX_SM_BASE + pair (SM 2 on RP2040,
  *     SMs 0..3 on RP2350), claimed only while running.  Free whenever SPDIF
  *     RX is inactive (inputs are switched, never mixed).
- *   - DMA: pair p uses channels I2S_RX_DMA_BASE + 2p (data) and +2p+1
- *     (reload) in an IRQ-less infinite ring: the data channel moves PIO RX
- *     FIFO words into a power-of-2-aligned ring (write-address wrap) and
- *     chains to the reload channel, which rewrites the data channel's write
- *     address with the ring base and retriggers it.  Zero IRQs, so capture
- *     survives IRQ-disabled windows.  Pair 0 reuses the SPDIF RX channels;
- *     higher pairs use channels freed by the SPDIF/I2S TX DMA-sharing work.
+ *   - DMA: an IRQ-less infinite ring per pair, moving PIO RX FIFO words
+ *     into a power-of-2-aligned ring (write-address wrap).  RP2350: one
+ *     ENDLESS-mode data channel per pair (I2S_RX_DMA_BASE + p); the wrap
+ *     makes it self-sustaining, no reload channel (mirrors the ADAT RX
+ *     ring).  RP2040 (no ENDLESS mode): pair 0 uses I2S_RX_DMA_BASE (data)
+ *     and +1 (reload); the data channel chains to the reload channel,
+ *     which rewrites its write address and retriggers it.  Zero IRQs, so
+ *     capture survives IRQ-disabled windows.  Pair 0 reuses the SPDIF RX
+ *     channels (free whenever SPDIF input is inactive).
  *
  * Inter-channel alignment: all pairs are enabled on the same cycle
  * (pio_enable_sm_mask_in_sync), so every pair latches the same first frame
@@ -50,6 +52,7 @@
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "notify.h"
+#include "input_servo.h"
 
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
@@ -58,7 +61,6 @@
 #include "pico/stdlib.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
-#include "adat_output.h"
 
 #include "i2s_input.pio.h"
 
@@ -79,14 +81,18 @@
 #define I2S_RX_SM_BASE      2
 #endif
 
-// DMA channels: pair p uses (base + 2p) for data and (base + 2p + 1) for
-// reload.  Pair 0 reuses the SPDIF RX channels (free whenever SPDIF input is
-// inactive); higher pairs use channels the SPDIF/I2S TX DMA-sharing work freed
-// (RP2350: 7..12 for pairs 1..3).  PICO_SPDIF_RX_DMA_CH1 == CH0 + 1 keeps
-// pair 0 == CH0/CH1.
+// DMA channels.  RP2350: pair p uses one ENDLESS-mode channel (base + p),
+// so pairs 0..3 sit on 5..8 and 9..12 stay free (11/12 are the soft
+// VCXO's).  RP2040: pair 0 uses (base) data + (base + 1) reload.  Pair 0
+// reuses the SPDIF RX channels (free whenever SPDIF input is inactive).
 #define I2S_RX_DMA_BASE     PICO_SPDIF_RX_DMA_CH0
-_Static_assert(I2S_RX_DMA_BASE + 2 * I2S_RX_MAX_PAIRS <= NUM_DMA_CHANNELS,
-               "I2S RX DMA channel range exceeds the DMA channel count");
+#if PICO_RP2350
+_Static_assert(I2S_RX_DMA_BASE + I2S_RX_MAX_PAIRS <= SOFT_VCXO_DMA_PULSE,
+               "I2S RX DMA channels collide with the soft VCXO pair");
+#else
+_Static_assert(I2S_RX_DMA_BASE + 2 * I2S_RX_MAX_PAIRS <= SOFT_VCXO_DMA_PULSE,
+               "I2S RX DMA channels collide with the soft VCXO pair");
+#endif
 
 // Ring sizing (per pair): must be a power of 2 (DMA address wrap) and even
 // (L/R parity).  At 96 kHz stereo (192k words/s) this is ~5 ms of headroom on
@@ -130,9 +136,11 @@ typedef struct {
     uint8_t   sm;          // PIO state machine index
     uint8_t   data_pin;    // this pair's serial-data GPIO (captured at start)
     uint8_t   dma_data;    // PIO RXF -> ring
-    uint8_t   dma_reload;  // re-arms dma_data (the race-free self-retriggering ring)
+#if !PICO_RP2350
+    uint8_t   dma_reload;  // re-arms dma_data (RP2040 has no ENDLESS mode)
+#endif
     uint32_t *ring;        // -> i2s_rx_ring[p]
-    uintptr_t ring_base;   // stable source word for the reload channel (= ring addr)
+    uintptr_t ring_base;   // ring address anchor (RP2040: reload source word)
     uint32_t  rd_word;     // software read index into this pair's ring (whole pairs)
 } I2sRxPair;
 
@@ -189,11 +197,12 @@ static struct pio_program i2s_slave_prog = {
 // HELPERS
 // ============================================================================
 
-// 24.8 fixed-point divider for the clock-master role; identical ceiling
-// math to the I2S TX library so input BCK matches output BCK exactly.
+// 24.8 fixed-point divider for the clock-master role; identical math to
+// the I2S TX library (2x the SPDIF ceiling divider, see
+// i2s_compute_divider) so input BCK matches output BCK exactly.
 static uint32_t rx_master_divider_24_8(uint32_t sample_freq) {
-    uint64_t num = (uint64_t)clock_get_hz(clk_sys) * 2u;
-    return (uint32_t)((num + sample_freq - 1) / sample_freq);
+    uint32_t sys = clock_get_hz(clk_sys);
+    return 2u * (sys / sample_freq + (sys % sample_freq != 0));
 }
 
 // Patch the 5-bit GPIO index field of a `wait gpio` instruction.
@@ -243,8 +252,24 @@ static void load_slave_program(bool checked) {
     i2s_slave_offset = pio_add_program(i2s_rx_pio, &i2s_slave_prog);
 }
 
-// Set up one pair's IRQ-less ring (data channel + self-retriggering reload).
+// Set up one pair's IRQ-less ring.
 static void start_pair_dma_ring(const I2sRxPair *pr) {
+#if PICO_RP2350
+    // Data channel: PIO RX FIFO -> ring, write-address wrap + ENDLESS
+    // transfer count; self-sustaining with no reload channel (mirrors the
+    // ADAT RX ring in adat_input.c).
+    dma_channel_config ca = dma_channel_get_default_config(pr->dma_data);
+    channel_config_set_transfer_data_size(&ca, DMA_SIZE_32);
+    channel_config_set_read_increment(&ca, false);
+    channel_config_set_write_increment(&ca, true);
+    channel_config_set_ring(&ca, true, I2S_RX_RING_BITS);
+    channel_config_set_dreq(&ca, pio_get_dreq(i2s_rx_pio, pr->sm, false));
+    dma_channel_set_config(pr->dma_data, &ca, false);
+    dma_channel_set_read_addr(pr->dma_data, &i2s_rx_pio->rxf[pr->sm], false);
+    dma_channel_set_write_addr(pr->dma_data, pr->ring, false);
+    dma_channel_set_trans_count(pr->dma_data,
+                                dma_encode_endless_transfer_count(), true);
+#else
     // Reload channel: one word, no increments, chain-to-self.  Each completion
     // of the data channel chains here; this writes the ring base into the data
     // channel's write-address trigger alias, which also reloads its transfer
@@ -269,28 +294,36 @@ static void start_pair_dma_ring(const I2sRxPair *pr) {
     dma_channel_configure(pr->dma_data, &ca,
                           pr->ring, &i2s_rx_pio->rxf[pr->sm],
                           I2S_RX_RING_WORDS, true);
+#endif
 }
 
-// Race-free teardown of every pair's self-retriggering ring.
+// Race-free teardown of every pair's ring.
 //
-// Each data channel chains to its reload channel, and the reload channel
-// re-triggers the data channel by writing its al2_write_addr_trig.  Aborting
-// these naively (sequential dma_channel_abort calls) lets one channel re-arm
-// the other in the gap, so dma_channel_abort's `while (BUSY)` spin never
-// returns (watchdog reset) or a channel is left live after unclaim.
+// RP2350: ENDLESS-mode data channels only; a single grouped abort is enough.
 //
-// Break the loops deterministically: first disarm every data channel's chain
-// via the non-triggering CTRL alias (point chain_to at itself), then abort all
-// channels in a single dma_hw->abort write so none can re-arm another.  The
-// bounded guard degrades a hardware quirk to a clean stop rather than a hang.
+// RP2040: each data channel chains to its reload channel, and the reload
+// channel re-triggers the data channel by writing its al2_write_addr_trig.
+// Aborting these naively (sequential dma_channel_abort calls) lets one
+// channel re-arm the other in the gap, so dma_channel_abort's `while (BUSY)`
+// spin never returns (watchdog reset) or a channel is left live after
+// unclaim.  Break the loops deterministically: first disarm every data
+// channel's chain via the non-triggering CTRL alias (point chain_to at
+// itself), then abort all channels in a single dma_hw->abort write so none
+// can re-arm another.  The bounded guard degrades a hardware quirk to a
+// clean stop rather than a hang.
 static void stop_all_dma_rings(void) {
     uint32_t abort_mask = 0;
     for (uint8_t p = 0; p < i2s_n_pairs; p++) {
         const I2sRxPair *pr = &i2s_pairs[p];
+#if PICO_RP2350
+        // ENDLESS channels have no chain loop; a plain abort suffices.
+        abort_mask |= (1u << pr->dma_data);
+#else
         hw_write_masked(&dma_hw->ch[pr->dma_data].al1_ctrl,
                         (uint32_t)pr->dma_data << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB,
                         DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS);
         abort_mask |= (1u << pr->dma_data) | (1u << pr->dma_reload);
+#endif
     }
 
     dma_hw->abort = abort_mask;
@@ -299,8 +332,11 @@ static void stop_all_dma_rings(void) {
     while (guard--) {
         bool any_busy = false;
         for (uint8_t p = 0; p < i2s_n_pairs; p++) {
-            if ((dma_hw->ch[i2s_pairs[p].dma_data].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) ||
-                (dma_hw->ch[i2s_pairs[p].dma_reload].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS)) {
+            if ((dma_hw->ch[i2s_pairs[p].dma_data].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS)
+#if !PICO_RP2350
+                || (dma_hw->ch[i2s_pairs[p].dma_reload].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS)
+#endif
+                ) {
                 any_busy = true;
                 break;
             }
@@ -308,6 +344,13 @@ static void stop_all_dma_rings(void) {
         if (!any_busy) break;
         tight_loop_contents();
     }
+
+#if PICO_RP2350
+    // Leave ENDLESS mode so a stale encoded count can't confuse a future
+    // NORMAL-mode reuse of these channels (mirrors adat_input_stop).
+    for (uint8_t p = 0; p < i2s_n_pairs; p++)
+        dma_channel_hw_addr(i2s_pairs[p].dma_data)->transfer_count = 0;
+#endif
 }
 
 // Build the SM enable bitmask for the active pairs.
@@ -323,8 +366,9 @@ static inline uint32_t i2s_sm_mask(void) {
 
 void i2s_input_init(void) {
     i2s_state = I2S_INPUT_INACTIVE;
-    // Ring addresses are fixed for the life of the program; the per-pair
-    // ring_base is the stable source the reload DMA channel reads.
+    // Ring addresses are fixed for the life of the program; ring_base
+    // anchors the write-pointer math (and, on RP2040, is the stable source
+    // word the reload DMA channel reads).
     for (uint8_t p = 0; p < I2S_RX_MAX_PAIRS; p++) {
         i2s_pairs[p].ring = i2s_rx_ring[p];
         i2s_pairs[p].ring_base = (uintptr_t)i2s_rx_ring[p];
@@ -347,7 +391,7 @@ void i2s_input_start(bool clock_master) {
     if (i2s_role_extclk) clock_master = false;
 
     // Number of stereo pairs = active channels / 2, clamped to the platform
-    // maximum.  Each pair claims one SM, two DMA channels and one data pin.
+    // maximum.  Each pair claims one SM, its DMA channel(s) and one data pin.
     uint8_t pairs = (uint8_t)(i2s_input_channels / 2u);
     if (pairs < 1) pairs = 1;
     if (pairs > I2S_RX_MAX_PAIRS) pairs = I2S_RX_MAX_PAIRS;
@@ -362,20 +406,28 @@ void i2s_input_start(bool clock_master) {
         I2sRxPair *pr = &i2s_pairs[p];
         pr->sm         = (uint8_t)(I2S_RX_SM_BASE + p);
         pr->data_pin   = i2s_rx_pin[p];
+#if PICO_RP2350
+        pr->dma_data   = (uint8_t)(I2S_RX_DMA_BASE + p);
+#else
         pr->dma_data   = (uint8_t)(I2S_RX_DMA_BASE + 2u * p);
         pr->dma_reload = (uint8_t)(I2S_RX_DMA_BASE + 2u * p + 1u);
+#endif
         pr->rd_word    = 0;
 
         pio_sm_claim(i2s_rx_pio, pr->sm);
         dma_channel_claim(pr->dma_data);
+#if !PICO_RP2350
         dma_channel_claim(pr->dma_reload);
+#endif
 
         // Defensive: SPDIF RX shares the low channels on DMA_IRQ_1; clear any
         // stale per-channel IRQ enables since these rings run IRQ-less.
         dma_irqn_set_channel_enabled(PICO_SPDIF_RX_DMA_IRQ, pr->dma_data, false);
-        dma_irqn_set_channel_enabled(PICO_SPDIF_RX_DMA_IRQ, pr->dma_reload, false);
         dma_irqn_acknowledge_channel(PICO_SPDIF_RX_DMA_IRQ, pr->dma_data);
+#if !PICO_RP2350
+        dma_irqn_set_channel_enabled(PICO_SPDIF_RX_DMA_IRQ, pr->dma_reload, false);
         dma_irqn_acknowledge_channel(PICO_SPDIF_RX_DMA_IRQ, pr->dma_reload);
+#endif
 
         // Data pin: input path only.  pio_gpio_init sets pad IE and clears the
         // RP2350 pad isolation latch; the SM never drives it (pindir input).
@@ -546,7 +598,9 @@ void i2s_input_stop(void) {
         gpio_set_dir(pr->data_pin, GPIO_IN);
         pio_sm_unclaim(i2s_rx_pio, pr->sm);
         dma_channel_unclaim(pr->dma_data);
+#if !PICO_RP2350
         dma_channel_unclaim(pr->dma_reload);
+#endif
     }
 
     if (i2s_role_extclk) i2s_slave_disarm();
@@ -713,9 +767,9 @@ void i2s_input_prefill_silence(uint32_t frames) {
 // Fast window (~32 ms): rate snap and lock/loss decisions, ~30 ppm precision.
 // Long window (8-16 s dual anchor): servo rate reference, ~0.1 ppm; precise
 // enough that ADAT stays rate-locked even with no SPDIF slot fill to observe.
-// Fill trim: proportional trim from the first SPDIF-type slot's consumer
-// fill.  Edge-locked I2S slots consume at exactly the external rate, so
-// their fill can never expose SPDIF divider error; slot 0 alone is NOT a
+// Fill trim: from the first SPDIF-type slot's consumer fill (shared terms
+// in input_servo.c).  Edge-locked I2S slots consume at exactly the external
+// rate, so their fill carries no clock information; slot 0 alone is NOT a
 // valid reference here, unlike the SPDIF input servo.
 
 #define I2S_SLAVE_WINDOW_US         32000u     // fast measurement window
@@ -723,7 +777,6 @@ void i2s_input_prefill_silence(uint32_t frames) {
 #define I2S_SLAVE_LOCK_WINDOWS      2          // agreeing windows needed to lock
 #define I2S_SLAVE_LONG_HALF_US      8000000ull // long-window anchor rotation
 #define I2S_SLAVE_SERVO_INTERVAL    1000       // main-loop iterations (~20 ms)
-#define I2S_SLAVE_SERVO_FILL_KP     0.0005f    // mirrors the SPDIF input servo
 
 static volatile I2sSlaveState i2s_slave_state = I2S_SLAVE_INACTIVE;
 static uint8_t  i2s_slave_lock_count = 0;      // cumulative since boot
@@ -752,7 +805,6 @@ static float    meas_hz_long;
 
 // Servo
 static uint32_t i2s_slave_servo_skip = 0;
-static uint32_t i2s_slave_last_div = 0;
 
 // Poll-gap watchdog: a main-loop stall longer than the ring-fill time can
 // wrap the DMA write pointer a whole ring between polls, silently losing
@@ -780,7 +832,7 @@ static void i2s_slave_arm(void) {
     lock_agree = 0;
     long_valid = false;
     i2s_slave_servo_skip = 0;
-    i2s_slave_last_div = 0;
+    input_servo_reset();
     i2s_slave_state = I2S_SLAVE_ACQUIRING;
     notify_push_i2s_slave_state(I2S_SLAVE_ACQUIRING, 0);
 }
@@ -789,7 +841,7 @@ static void i2s_slave_disarm(void) {
     i2s_slave_state = I2S_SLAVE_INACTIVE;
     i2s_slave_detected_rate = 0;
     meas_measured_hz = 0;
-    i2s_slave_last_div = 0;
+    input_servo_reset();   // park the VCXO; no longer tracking
     notify_push_i2s_slave_state(I2S_SLAVE_INACTIVE, 0);
 }
 
@@ -947,7 +999,7 @@ void i2s_slave_poll(void) {
                 long_us[0] = long_us[1] = now;
                 long_words[0] = long_words[1] = meas_total_words;
                 long_valid = false;
-                i2s_slave_last_div = 0;   // force a full divider rewrite
+                input_servo_reset();   // fresh integrator for the new lock
                 notify_push_i2s_slave_state(I2S_SLAVE_LOCKED, snapped);
             }
         } else {
@@ -975,50 +1027,33 @@ DSP_TIME_CRITICAL
 void i2s_slave_update_clock_servo(void) {
     if (i2s_slave_state != I2S_SLAVE_LOCKED) return;
 
+    // Hold off until the deferred rate change has landed: the servo's ppm
+    // feed-forward is computed against the current pipeline rate's nominal
+    // divider (see input_servo.c).
+    if (i2s_slave_detected_rate == 0 ||
+        i2s_slave_detected_rate != audio_state.freq) return;
+
     if (++i2s_slave_servo_skip < I2S_SLAVE_SERVO_INTERVAL) return;
     i2s_slave_servo_skip = 0;
 
     float actual = long_valid ? meas_hz_long : meas_hz_smooth;
-    if (actual < 20000.0f || actual > 200000.0f) return;
 
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-    float spdif_div_f = (float)sys_clk / actual;
-
+    // Fill reference: first SPDIF-type slot (see section comment). All
+    // SPDIF slots consume in lockstep, so one slot's fill represents them
+    // all.  With no SPDIF slot (-1) the long-window rate term alone holds
+    // the sys_clk-domain outputs (~0.1 ppm).  Edge-locked I2S output slots
+    // follow the external clock directly and need no servo at all.
     extern uint8_t output_types[];
     extern struct audio_spdif_instance *spdif_instance_ptrs[];
-
-    // Fill trim from the first SPDIF-type slot (see section comment).
-    // All SPDIF slots share one divider and consume in lockstep, so one
-    // slot's fill represents them all.  With no SPDIF slot the long-window
-    // rate alone holds ADAT (~0.1 ppm).
-    float fill_trim = 0.0f;
+    int fill_slot = -1;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
-            int32_t fill_error = (int32_t)get_slot_consumer_fill(i) - 8;
-            if (fill_error > 2 || fill_error < -2)
-                fill_trim = -(float)fill_error / 16.0f * I2S_SLAVE_SERVO_FILL_KP;
+            fill_slot = i;
             break;
         }
     }
 
-    uint32_t spdif_div = (uint32_t)(spdif_div_f * (1.0f + fill_trim) + 0.5f);
-    if (spdif_div == i2s_slave_last_div) return;
-    i2s_slave_last_div = spdif_div;
-
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
-            pio_sm_set_clkdiv_int_frac(spdif_instance_ptrs[i]->pio,
-                                       spdif_instance_ptrs[i]->pio_sm,
-                                       spdif_div >> 8, spdif_div & 0xFF);
-        }
-    }
-
-#if PICO_RP2350
-    // ADAT runs the same 256*Fs PIO clock as SPDIF TX; identical divider.
-    adat_output_servo_divider(spdif_div);
-#endif
-    // No I2S output divider writes (external-clock SMs are edge-driven at
-    // divider 1.0) and no MCK servo (MCK output is forced off in slave mode).
+    input_servo_apply(actual, fill_slot);
 }
 
 I2sSlaveState i2s_slave_get_state(void) {
@@ -1027,10 +1062,6 @@ I2sSlaveState i2s_slave_get_state(void) {
 
 uint32_t i2s_slave_get_detected_rate(void) {
     return i2s_slave_detected_rate;
-}
-
-uint32_t i2s_slave_current_tx_divider(void) {
-    return (i2s_slave_state == I2S_SLAVE_LOCKED) ? i2s_slave_last_div : 0;
 }
 
 void i2s_slave_get_status(I2sSlaveStatusPacket *out) {

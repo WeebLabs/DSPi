@@ -20,6 +20,7 @@
 #include "audio_input.h"
 #include "audio_pipeline.h"
 #include "spdif_input.h"
+#include "soft_vcxo.h"
 #include "i2s_input.h"
 #include "spdif_rx.h"
 #include "lg_sound_sync.h"
@@ -1514,6 +1515,10 @@ void core0_init() {
     pico_get_unique_board_id_string(usb_descriptor_str_serial, 17);
 
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
+
+    // Soft VCXO (system PLL trim): claims its explicit DMA channels, DMA
+    // timer 0 and PWM pacer slice before any dynamic DMA claims below.
+    soft_vcxo_init();
 
     // [CRITICAL FIX]
     // Initialize USB/SPDIF *BEFORE* PDM.

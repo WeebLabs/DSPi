@@ -1,9 +1,10 @@
 /*
- * input_servo.h; shared output-clock servo actuation for externally
- * clocked inputs (SPDIF input, ADAT input in slave clock mode).
+ * input_servo.h; shared clock servo for externally clocked inputs
+ * (SPDIF input, ADAT input in slave clock mode, I2S slave).
  *
  * Callers own lock gating, rate limiting, and the input rate measurement;
- * this module owns the divider math and PIO/MCK writes.
+ * this module owns the servo terms and actuates the soft VCXO (system PLL
+ * trim, soft_vcxo.c). Output PIO dividers stay at their nominal values.
  */
 
 #ifndef INPUT_SERVO_H
@@ -11,19 +12,15 @@
 
 #include <stdint.h>
 
-// Servo all output slots (SPDIF/I2S types), the ADAT output, and MCK to the
-// measured input rate: rate-based dividers plus a proportional trim from
-// slot 0's consumer fill. Returns the SPDIF-format divider written (16.8),
-// or 0 if actual_freq failed the sanity check. Skips PIO writes when the
-// dividers are unchanged.
-uint32_t input_servo_apply(float actual_freq);
+// Track the measured input rate: ppm feed-forward plus a fill trim from
+// the given output slot's consumer pool (fill_slot < 0 = rate term only).
+// Callers must not apply until the pipeline runs at the detected rate
+// (audio_state.freq matches), or the feed-forward is computed against the
+// wrong nominal divider.
+void input_servo_apply(float actual_freq, int fill_slot);
 
-// Clear the written-divider cache so the next apply performs a full rewrite.
-// Call when (re)acquiring lock or after outputs restart at nominal dividers.
+// Zero the integrator and park the VCXO at nominal. Call when tracking
+// starts or stops and when lock is (re)acquired.
 void input_servo_reset(void);
-
-// Last SPDIF-format divider written (0 if none since reset). Callers gate
-// this on their own lock state for *_current_tx_divider() semantics.
-uint32_t input_servo_current_divider(void);
 
 #endif // INPUT_SERVO_H

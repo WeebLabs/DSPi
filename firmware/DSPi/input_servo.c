@@ -1,159 +1,98 @@
 /*
- * input_servo.c; shared output-clock servo actuation
+ * input_servo.c; shared clock servo for externally clocked inputs
  *
- * Extracted from the SPDIF input servo so ADAT input (slave clock mode) can
- * reuse it unchanged. Two control terms, mirroring the USB feedback servo:
- *   Loop A: the measured input rate sets the ideal output dividers directly.
- *   Loop B: slot 0 consumer fill trims the dividers: a deadbanded
- *           proportional term (|error| > 2 buffers) for disturbances plus
- *           a slow clamped integrator (see SERVO_FILL_KI) that centres
- *           the fill on exactly 8 of 16 buffers by dithering the divider
- *           rounding across LSB boundaries for sub-LSB average rate.
- * The I2S divider is forced to exactly 2x the SPDIF divider so independent
- * rounding cannot make the two output types drift apart.
+ * Actuates the soft VCXO (system PLL trim, soft_vcxo.c) instead of output
+ * PIO dividers: every output clock (SPDIF/I2S/ADAT TX, MCK, PDM) derives
+ * from sys_clk, so one ppm command tracks them all and inter-slot
+ * alignment is preserved by construction. The old divider servo could not
+ * touch PDM at all and had a ~156 ppm control quantum (one 16.8 divider
+ * LSB at 48 kHz); the VCXO quantum is a single ~3.8 ns phase nudge.
  *
- * The I2S slave servo is NOT built on this: edge-locked I2S output slots
- * consume at exactly the external rate, so it must trim from the first
- * SPDIF-type slot only and never writes I2S/MCK dividers (see i2s_input.c).
+ * Two control terms, mirroring the USB feedback servo:
+ *   Loop A: ppm feed-forward from the measured input rate, computed
+ *           against the programmed nominal divider (ceil, identical to
+ *           the TX library) so divider rounding is cancelled here rather
+ *           than left to the integrator.
+ *   Loop B: consumer-fill trim; a deadbanded (|error| > 2 buffers)
+ *           proportional term for disturbances plus a slow clamped
+ *           integrator that centres the fill on exactly 8 of 16 buffers.
  *
- * FUTURE FIX (belt and braces, not yet implemented): slew-limit the applied
- * divider to +-1 LSB per call. With the long-window estimators upstream
- * (ADAT slave, SPDIF input) the rate term is already sub-LSB stable, so the
- * limit would rarely engage, but it would hard-bound output clock wander
- * (DAC PLL kindness) for every current and future caller regardless of
- * estimator quality. Needs care at (re)lock: the first apply after
- * input_servo_reset() must still jump straight to the target divider, not
- * slew from the nominal one. See "Clock Servo" in
- * Documentation/current_architecture.md.
+ * The I2S slave servo shares this module too (it passes the first
+ * SPDIF-type slot as fill reference): with no divider writes left, the
+ * old reason for its separate implementation is gone.
  */
 
 #include "input_servo.h"
+#include "soft_vcxo.h"
 #include "config.h"
 #include "audio_pipeline.h"
+#include "usb_audio.h"
 
 #include "hardware/clocks.h"
-#include "hardware/pio.h"
-#include "pico/audio_spdif.h"
-#include "pico/audio_i2s_multi.h"
-#include "adat_output.h"
 
 #define SERVO_FILL_KP  0.0005f   // Fill-level proportional gain
 
 // Slow fill-centering integrator. The proportional term is deadbanded
-// (|error| > 2) to avoid divider churn, so with an exact rate term the
-// fill parks wherever the enable transient or the divider rounding
-// residual (up to half an LSB, 78 ppm at 48 kHz) leaves it, e.g. the
-// ADAT slave 37% limit cycle. The integrator runs everywhere, including
-// inside the deadband, and accumulates until the trim crosses a divider
-// rounding boundary; at steady state it holds the average residual and
-// the divider dithers between adjacent LSBs with the duty needed to
-// centre the fill at 8 buffers.
+// (|error| > 2 buffers), so without an integral term the fill would park
+// wherever the enable transient leaves it inside the deadband. The
+// integrator accumulates the residual ppm (estimator bias, feed-forward
+// gain error) and pulls the fill onto exactly 8 buffers.
 //
-// Gain choice (per ~20 ms servo tick, per buffer of error): the trim to
-// fill loop is a single integrator (plant gain Fs/48 buffers per second
-// per unit trim), so pure integral action limit-cycles; KI is sized so
-// that cycle has ~1 buffer amplitude, the same magnitude as the existing
-// production/consumption wobble, with worst-case divider steps ~13 s
-// apart. Raising KI shrinks convergence time but steps the divider more
-// often; this value favours DAC kindness.
+// Gain: the trim-to-fill plant is a single integrator (Fs/48 buffers per
+// second per unit trim), so pure integral action limit-cycles; KI keeps
+// that cycle at ~1 buffer amplitude, the same magnitude as the normal
+// production/consumption wobble.
 //
-// The clamp bounds authority to ~2 LSB at 48 kHz: enough to cancel the
-// worst half-LSB rounding residual at every supported rate with margin,
-// small enough that windup from transient bogus fill reads (type
-// switches report 0) cannot push a persistent rate offset.
+// Clamp: +-50 ppm of authority. The feed-forward absorbs divider rounding
+// exactly, so the integrator only ever holds small residuals; the clamp
+// bounds windup from transient bogus fill reads (type switches report 0).
 #define SERVO_FILL_KI     2.0e-7f  // per tick per buffer of fill error
-#define SERVO_FILL_ICLAMP 3.2e-4f  // ~2 divider LSB at 48 kHz
+#define SERVO_FILL_ICLAMP 5.0e-5f  // +-50 ppm
 
-// Last written dividers; skip PIO writes when unchanged
-static uint32_t last_spdif_div = 0;
-static uint32_t last_i2s_div = 0;
-static uint32_t last_mck_div = 0;
-
-// Fill-centering integrator state (dimensionless rate trim)
+// Integrator state, as a dimensionless rate trim (1e-6 = 1 ppm).
 static float fill_trim_integral = 0.0f;
 
-// Apply a divider (16.8 fixed-point) to a PIO SM
-static inline void set_divider(PIO pio, uint sm, uint32_t div_16_8) {
-    pio_sm_set_clkdiv_int_frac(pio, sm, div_16_8 >> 8, div_16_8 & 0xFF);
-}
-
 DSP_TIME_CRITICAL
-uint32_t input_servo_apply(float actual_freq) {
-    if (actual_freq < 20000.0f || actual_freq > 200000.0f) return 0;
+void input_servo_apply(float actual_freq, int fill_slot) {
+    if (actual_freq < 20000.0f || actual_freq > 200000.0f) return;
 
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-    // No ceiling; precise float division lets the fill trim dither between
-    // adjacent integer divider values to achieve sub-LSB rate matching.
-    float spdif_div_f = (float)sys_clk / actual_freq;
+    uint32_t freq_nom = audio_state.freq;
+    if (freq_nom == 0) return;
+    uint32_t sys_clk = clock_get_hz(clk_sys);   // nominal by convention
 
-    uint8_t consumer_fill = get_slot_consumer_fill(0);  // Slot 0 as reference
-    int32_t fill_error = (int32_t)consumer_fill - 8;    // Target 50% of 16 buffers
+    // Programmed SPDIF-type divider: ceil(sys/freq), bit-identical to
+    // update_pio_frequency() in the TX library. Outputs actually run at
+    // sys/div, so referencing div (not freq_nom) folds the divider
+    // rounding residual into the feed-forward.
+    uint32_t div = sys_clk / freq_nom + (sys_clk % freq_nom != 0);
+    float ppm = ((actual_freq * (float)div) / (float)sys_clk - 1.0f) * 1e6f;
 
-    float fill_trim = 0.0f;
-    if (fill_error > 2 || fill_error < -2) {
-        // Positive error (overfull) → negative trim → reduce divider → speed up outputs
-        fill_trim = -(float)fill_error / 16.0f * SERVO_FILL_KP;
+    // Feed-forward far outside VCXO authority means the caller applied
+    // before the pipeline followed the detected rate; do not integrate on
+    // that transient.
+    if (ppm > 2000.0f || ppm < -2000.0f) return;
+
+    if (fill_slot >= 0) {
+        // Positive error (overfull) means consumers lag; speed sys_clk up.
+        int32_t fill_error = (int32_t)get_slot_consumer_fill((uint)fill_slot) - 8;
+
+        float fill_trim = 0.0f;
+        if (fill_error > 2 || fill_error < -2)
+            fill_trim = (float)fill_error / 16.0f * SERVO_FILL_KP;
+
+        // Centering integrator: always active so the fill converges on 8
+        // buffers instead of parking inside the deadband.
+        fill_trim_integral += (float)fill_error * SERVO_FILL_KI;
+        if (fill_trim_integral >  SERVO_FILL_ICLAMP) fill_trim_integral =  SERVO_FILL_ICLAMP;
+        if (fill_trim_integral < -SERVO_FILL_ICLAMP) fill_trim_integral = -SERVO_FILL_ICLAMP;
+
+        ppm += (fill_trim + fill_trim_integral) * 1e6f;
     }
 
-    // Centering integrator (see SERVO_FILL_KI): always active so the fill
-    // converges on 8 buffers instead of parking inside the deadband.
-    fill_trim_integral += -(float)fill_error * SERVO_FILL_KI;
-    if (fill_trim_integral >  SERVO_FILL_ICLAMP) fill_trim_integral =  SERVO_FILL_ICLAMP;
-    if (fill_trim_integral < -SERVO_FILL_ICLAMP) fill_trim_integral = -SERVO_FILL_ICLAMP;
-    fill_trim += fill_trim_integral;
-
-    uint32_t spdif_div = (uint32_t)(spdif_div_f * (1.0f + fill_trim) + 0.5f);
-    uint32_t i2s_div   = spdif_div * 2;
-
-    if (spdif_div == last_spdif_div && i2s_div == last_i2s_div)
-        return spdif_div;
-    last_spdif_div = spdif_div;
-    last_i2s_div = i2s_div;
-
-    extern struct audio_spdif_instance *spdif_instance_ptrs[];
-    extern struct audio_i2s_instance *i2s_instance_ptrs[];
-    extern uint8_t output_types[];
-
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
-            set_divider(spdif_instance_ptrs[i]->pio,
-                        spdif_instance_ptrs[i]->pio_sm, spdif_div);
-        } else if (output_types[i] == OUTPUT_TYPE_I2S && i2s_instance_ptrs[i]) {
-            set_divider(i2s_instance_ptrs[i]->pio,
-                        i2s_instance_ptrs[i]->pio_sm, i2s_div);
-        }
-    }
-
-#if PICO_RP2350
-    // ADAT bulk output runs the same 256*Fs PIO clock as the S/PDIF TX SMs;
-    // apply the identical divider so it stays rate-locked to the slots.
-    adat_output_servo_divider(spdif_div);
-#endif
-
-    // MCK servo: keep master clock frequency-locked to the servoed I2S data
-    // rate. MCK is driven by CLK_GPOUTn, so the divider is the direct 24.8
-    // form: div_24.8 = sys_clk * 256 / (actual_freq * multiplier).
-    extern bool i2s_mck_enabled;
-    extern uint16_t i2s_mck_multiplier;
-    if (i2s_mck_enabled && i2s_mck_multiplier > 0) {
-        float mck_div_f = (float)sys_clk * 256.0f / (actual_freq * (float)i2s_mck_multiplier);
-        uint32_t mck_div = (uint32_t)(mck_div_f * (1.0f + fill_trim) + 0.5f);
-        if (mck_div != last_mck_div) {
-            last_mck_div = mck_div;
-            audio_i2s_mck_set_divider(mck_div);
-        }
-    }
-
-    return spdif_div;
+    soft_vcxo_set_ppm(ppm);
 }
 
 void input_servo_reset(void) {
-    last_spdif_div = 0;
-    last_i2s_div = 0;
-    last_mck_div = 0;
     fill_trim_integral = 0.0f;
-}
-
-uint32_t input_servo_current_divider(void) {
-    return last_spdif_div;
+    soft_vcxo_set_ppm(0.0f);
 }

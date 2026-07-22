@@ -142,11 +142,6 @@ static void __not_in_flash_func(on_lost_stable_callback)(void) {
 // ============================================================================
 
 
-// Cached base dividers (16.8 fixed-point, same format as the SPDIF TX library).
-// Set once when lock is acquired; servo applies fractional adjustments to these.
-static uint32_t spdif_tx_base_divider = 0;  // sys_clk / sample_freq
-static uint32_t i2s_tx_base_divider = 0;    // sys_clk * 2 / sample_freq
-
 // Re-anchor the long-window rate measurement and clear the bridge estimate.
 // Call when lock is (re)acquired; the library republishes the {count, time}
 // pair every block IRQ, so the snapshot read here is at most one block old.
@@ -159,17 +154,6 @@ static void servo_meas_arm(void) {
     servo_long_valid = false;
     servo_hz_long = 0.0f;
     servo_hz_smooth = 0.0f;
-}
-
-// Compute and cache the base dividers for all output types at a given sample rate.
-static void servo_cache_base_dividers(uint32_t sample_freq) {
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-    // SPDIF TX: divider = sys_clk / sample_freq (16.8 fixed-point)
-    spdif_tx_base_divider = sys_clk / sample_freq +
-                            (sys_clk % sample_freq != 0);
-    // I2S TX: divider = sys_clk * 2 / sample_freq (ceiling division, matches I2S library)
-    uint64_t i2s_num = (uint64_t)sys_clk * 2;
-    i2s_tx_base_divider = (uint32_t)((i2s_num + sample_freq - 1) / sample_freq);
 }
 
 // ============================================================================
@@ -224,10 +208,8 @@ void spdif_input_start(void) {
     spdif_rx_lost_flag = false;
     spdif_rx_detected_rate = 0;
     servo_skip_counter = 0;
-    spdif_tx_base_divider = 0;
-    i2s_tx_base_divider = 0;
     servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
-    input_servo_reset();  // force a full divider rewrite after (re)lock
+    input_servo_reset();  // park the VCXO and zero the fill integrator
     lock_debounce_polls = 0;
 
     printf("SPDIF RX: started on GPIO %u\n", spdif_active_data_pin);
@@ -246,6 +228,7 @@ void spdif_input_stop(void) {
             gpio_set_dir(spdif_active_data_pin, GPIO_IN);
             spdif_active_data_pin = 0xFF;
         }
+        input_servo_reset();   // park the VCXO; no longer tracking
         spdif_state = SPDIF_INPUT_INACTIVE;
         spdif_rx_detected_rate = 0;
         printf("SPDIF RX: stopped\n");
@@ -309,7 +292,6 @@ uint32_t spdif_input_poll(void) {
         // Prepare for locked state
         spdif_state = SPDIF_INPUT_LOCKED;
         servo_skip_counter = 0;
-        servo_cache_base_dividers(rate);
         servo_meas_arm();
         lock_debounce_polls = 0;
 
@@ -412,7 +394,13 @@ uint32_t spdif_input_poll(void) {
 
 DSP_TIME_CRITICAL
 void spdif_input_update_clock_servo(void) {
-    if (spdif_state != SPDIF_INPUT_LOCKED || spdif_tx_base_divider == 0)
+    if (spdif_state != SPDIF_INPUT_LOCKED)
+        return;
+
+    // Hold off until the deferred rate change has landed: the servo's ppm
+    // feed-forward is computed against the nominal divider for the CURRENT
+    // pipeline rate, which is wrong until it matches the detected rate.
+    if (spdif_rx_detected_rate == 0 || spdif_rx_detected_rate != audio_state.freq)
         return;
 
     // Signal-loss pending but not yet processed by the poll (the flag is set
@@ -453,12 +441,8 @@ void spdif_input_update_clock_servo(void) {
         servo_long_valid = true;
     }
 
-    // Divider math and PIO/MCK writes are shared (input_servo.c).
-    input_servo_apply(servo_long_valid ? servo_hz_long : servo_hz_smooth);
-}
-
-uint32_t spdif_input_current_tx_divider(void) {
-    return (spdif_state == SPDIF_INPUT_LOCKED) ? input_servo_current_divider() : 0;
+    // Servo terms and VCXO actuation are shared (input_servo.c).
+    input_servo_apply(servo_long_valid ? servo_hz_long : servo_hz_smooth, 0);
 }
 
 // ============================================================================

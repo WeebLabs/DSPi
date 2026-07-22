@@ -22,7 +22,9 @@
  * No PIO resources are used; polling at 1 kHz comfortably tracks
  * hand-operated detented encoders (a fast spin is ~250 quarter-steps per
  * second, 4 samples per transition).  PWM LEDs use the otherwise-unused
- * hardware PWM slices.  The one interrupt user is the IR component:
+ * hardware PWM slices; the SOFT_VCXO_PWM_SLICE is reserved for the clock
+ * servo and is rejected at bind time.  The one interrupt user is the IR
+ * component:
  * control_surfaces_ir.c timestamps receiver edges from IO_IRQ_BANK0 into a
  * private ring, decoded here on the tick; remote buttons then act exactly
  * like physical buttons through the shared op helpers.
@@ -1020,6 +1022,11 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
     if (b->type == CS_TYPE_LED_PWM) {
         uint slice = pwm_gpio_to_slice_num(b->gpio[0]);
         uint chan  = pwm_gpio_to_channel(b->gpio[0]);
+        // Reject the slice the soft VCXO paces on; its wrap/clkdiv are the
+        // clock servo and an LED setup here would corrupt them.  On RP2350 no
+        // bondable GPIO maps to slice 8, so this is a no-op there; kept
+        // unconditional for uniformity.
+        if (slice == SOFT_VCXO_PWM_SLICE) return CS_STATUS_PWM_CONFLICT;
         for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
             if (s == slot || !s_rt[s].active) continue;
             const CsBinding *o = &s_cfg.bindings[s];

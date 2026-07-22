@@ -5,11 +5,9 @@
 //   [1][10x0][1][u3..u0]  then 8 x ( 6 x [1][nibble] ), nibbles MSB-first,
 // NRZI on the wire (1 = level transition).  NRZI is encoded on the CPU so
 // the PIO is a single out-pins instruction at 1 cycle/bit: PIO clock =
-// 256*Fs, making the ADAT clkdiv IDENTICAL to the S/PDIF TX divider.  The
-// SPDIF-input clock servo therefore rate-locks ADAT by writing it the same
-// divider it writes the slots (see spdif_input.c); in USB/I2S modes both run
-// the same nominal divider.  Either way ADAT can never drift against the
-// output slots.
+// 256*Fs.  ADAT runs the nominal 256*Fs divider at all times; the soft VCXO
+// (soft_vcxo.c) trims sys_clk itself to track the input, so ADAT can never
+// drift against the output slots.
 //
 // Encoding is LUT-driven: each PCM byte stuffs to a fixed 10-bit token
 // [1][hi nibble][1][lo nibble], and NRZI is linear (the entry-level-1 line
@@ -47,9 +45,6 @@
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "usb_audio.h"
-#include "spdif_input.h"
-#include "i2s_input.h"
-#include "adat_input.h"
 #include "notify.h"
 
 #define ADAT_PIO                pio1   // PDM owns SM 0 on this block
@@ -96,9 +91,6 @@ static bool     adat_need_local_resync;
 static volatile uint8_t adat_cfg_enabled;
 static volatile uint8_t adat_cfg_pin = PICO_ADAT_PIN;
 volatile bool adat_output_config_dirty;
-
-// Servo-supplied divider (0 = none); same 16.8 value the SPDIF TX SMs run.
-static volatile uint32_t adat_servo_div;
 
 static uint16_t adat_resync_count;
 static uint16_t adat_slip_count;
@@ -187,19 +179,14 @@ static void adat_write_silence(uint32_t frames) {
 
 // Nominal 16.8 clkdiv for PIO clock = 256*Fs: the SAME formula and value as
 // the S/PDIF TX library, so ADAT consumes at the identical rate in every
-// mode.  Computed at resync (adat_update_divider must stay flash-free for
-// the servo path).
+// mode.  Computed at resync; adat_update_divider must stay flash-free.
 static uint32_t adat_nom_div;
 
 DSP_TIME_CRITICAL
 static void adat_update_divider(void) {
-    // While the SPDIF-input clock servo is trimming the slot dividers it
-    // supplies the servoed value; sanity-bounded against nominal so a stale
-    // value from a previous rate can never be applied.
+    // Apply the nominal divider; pio_sm_init resets it, so this re-writes it
+    // at every resync.
     uint32_t div = adat_nom_div;
-    uint32_t servo = adat_servo_div;
-    if (servo && servo > div - div / 128 && servo < div + div / 128)
-        div = servo;
     pio_sm_set_clkdiv_int_frac(ADAT_PIO, ADAT_SM,
                                (uint16_t)(div >> 8), (uint8_t)(div & 0xFF));
 }
@@ -354,17 +341,9 @@ void adat_output_get_status(AdatStatus *out) {
 void adat_output_on_rate_change(uint32_t freq) {
     adat_cur_freq = freq;
     adat_rate_ok = (freq <= 48000);
-    adat_servo_div = 0;   // stale for the new rate; servo re-pushes if locked
     // Caller (perform_rate_change) holds the mute; the following
     // complete_pipeline_reset() restarts the stream via resync if valid.
     if (!adat_rate_ok && adat_running) adat_stop_hw();
-}
-
-// Called from the RAM-pinned SPDIF-input clock servo; keep it RAM-resident.
-DSP_TIME_CRITICAL
-void adat_output_servo_divider(uint32_t div_16_8) {
-    adat_servo_div = div_16_8;
-    if (adat_running && div_16_8) adat_update_divider();
 }
 
 void adat_output_stream_stop(void) {
@@ -394,16 +373,10 @@ void adat_output_resync(void) {
         pio_gpio_init(ADAT_PIO, adat_hw_pin);
         pio_sm_set_consecutive_pindirs(ADAT_PIO, ADAT_SM, adat_hw_pin, 1, true);
     }
-    // Pick up the active input servo's current divider (0 when no servo is
-    // locked; at most one of the two can be nonzero since input sources are
-    // exclusive); adat_update_divider() sanity-bounds it against nominal.
     {
         uint32_t sys = clock_get_hz(clk_sys);
         adat_nom_div = sys / adat_cur_freq + (sys % adat_cur_freq != 0);
     }
-    adat_servo_div = spdif_input_current_tx_divider();
-    if (adat_servo_div == 0) adat_servo_div = i2s_slave_current_tx_divider();
-    if (adat_servo_div == 0) adat_servo_div = adat_input_current_tx_divider();
     adat_sm_configure();
 
     // Line starts low: force the pin and seed the NRZI encoder to match.
