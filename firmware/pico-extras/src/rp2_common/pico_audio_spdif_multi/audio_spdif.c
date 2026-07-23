@@ -160,6 +160,12 @@ void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     // skewing this slot's accounting (and its re-arm offset) against the
     // others. DMA is stopped here per the contract, so the write is safe.
     dma_channel_set_read_addr(inst->dma_channel, inst->ring, false);
+    // Stamp the whole ring with valid CURRENT-format silence: the re-arm
+    // prefetches into the PIO FIFO straight from position 0, and after an
+    // output-type switch (shared store) or at boot (zeroed BSS) the raw
+    // contents are not valid for this format. Must follow the read-addr
+    // re-anchor above so the pump's consumed read is exactly zero.
+    audio_spdif_ring_silence_pump(inst, RING_FRAMES);
 }
 
 SPDIF_TIME_CRITICAL
