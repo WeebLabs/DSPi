@@ -126,21 +126,42 @@ uint32_t audio_i2s_ring_consumed_words(audio_i2s_instance_t *inst) {
     uint32_t addr = dma_channel_hw_addr(inst->dma_channel)->read_addr;
     uint32_t delta = (addr - inst->last_read_addr) & (I2S_RING_BYTES - 1u);
     inst->last_read_addr = addr;
-    inst->consumed_words += delta / 4u;
+    uint32_t words = delta / 4u;
+    inst->consumed_words += words;
+    // Frames-native counter: wraps at 2^32 FRAMES, coherent with wr_frames.
+    // consumed_words divided down would wrap at 2^31 frames and desync
+    // all fill math after hours of continuous playback; the remainder
+    // carries mid-frame DMA positions across calls.
+    uint32_t t = inst->consumed_word_rem + words;
+    inst->consumed_frames += t / 2u;
+    inst->consumed_word_rem = (uint8_t)(t % 2u);
     uint32_t out = inst->consumed_words;
+    restore_interrupts(save);
+    return out;
+}
+
+// Frames consumed since ring reset; the ONLY counter valid for fill and
+// deficit arithmetic (wrap-coherent with wr_frames).
+I2S_TIME_CRITICAL
+uint32_t audio_i2s_ring_consumed_frames(audio_i2s_instance_t *inst) {
+    (void)audio_i2s_ring_consumed_words(inst);
+    uint32_t save = save_and_disable_interrupts();
+    uint32_t out = inst->consumed_frames;
     restore_interrupts(save);
     return out;
 }
 
 I2S_TIME_CRITICAL
 uint32_t audio_i2s_ring_fill_frames(audio_i2s_instance_t *inst) {
-    return inst->wr_frames - audio_i2s_ring_consumed_words(inst) / 2u;
+    return inst->wr_frames - audio_i2s_ring_consumed_frames(inst);
 }
 
 void audio_i2s_ring_reset(audio_i2s_instance_t *inst) {
     inst->wr_frames = 0;
     inst->erased_frames = 0;
     inst->consumed_words = 0;
+    inst->consumed_frames = 0;
+    inst->consumed_word_rem = 0;
     inst->last_read_addr = (uint32_t)(uintptr_t)inst->ring;
     inst->snap_produced_frames = 0;
     inst->snap_consumed_frames = 0;
@@ -178,7 +199,7 @@ void audio_i2s_ring_skip(audio_i2s_instance_t *inst, uint32_t frames) {
 // Silence pump; see the S/PDIF twin for the contract.
 I2S_TIME_CRITICAL
 void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames) {
-    uint32_t consumed = audio_i2s_ring_consumed_words(inst) / 2u;
+    uint32_t consumed = audio_i2s_ring_consumed_frames(inst);
     uint32_t target = consumed + I2S_RING_FRAMES;
     uint32_t e = inst->erased_frames;
     if ((int32_t)(e - inst->wr_frames) < 0) e = inst->wr_frames;
@@ -197,7 +218,7 @@ void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames
 I2S_TIME_CRITICAL
 void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
                               const int32_t *lr, uint32_t frames) {
-    uint32_t consumed = audio_i2s_ring_consumed_words(inst) / 2u;
+    uint32_t consumed = audio_i2s_ring_consumed_frames(inst);
     uint32_t fill = inst->wr_frames - consumed;
 
     // Unsigned compare also covers reader-overtook-writer: writable = 0,
@@ -219,10 +240,11 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
     }
     inst->wr_frames = w;
 
+    // Signed ordering: raw compares break at the uint32 counter wrap.
     uint32_t e = inst->erased_frames;
-    if (e < w) e = w;
+    if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_I2S_ERASE_AHEAD;
-    while (e < target) {
+    while ((int32_t)(target - e) > 0) {
         int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
         dst[0] = (int32_t)I2S_PAD_PATTERN;
         dst[1] = (int32_t)I2S_PAD_PATTERN;

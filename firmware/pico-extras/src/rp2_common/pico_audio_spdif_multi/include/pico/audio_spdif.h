@@ -128,7 +128,9 @@ typedef struct audio_spdif_instance {
     // Consumed-side unwrap state; mutated only inside
     // audio_spdif_ring_consumed_words() under a brief IRQ-off section.
     uint32_t last_read_addr;
-    volatile uint32_t consumed_words;
+    volatile uint32_t consumed_words;   // words; USB feedback only
+    volatile uint32_t consumed_frames;  // frames; ALL fill/deficit math
+    uint8_t consumed_word_rem;          // mid-frame carry between reads
 
     // Cumulative-count snapshot latched at the end of each block write:
     // a coherent (constant-production-phase) observation pair for the
@@ -237,6 +239,11 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
  * period (~21 ms), which the main loop's fill checks guarantee.
  */
 uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst);
+
+// Frames consumed since ring reset. Wrap-coherent with wr_frames at 2^32;
+// the words counter is NOT (divided down it wraps early), so all fill and
+// deficit arithmetic must use this one.
+uint32_t audio_spdif_ring_consumed_frames(audio_spdif_instance_t *inst);
 
 /** \brief Frames of real audio written since the last ring reset. */
 static inline uint32_t audio_spdif_ring_produced_frames(audio_spdif_instance_t *inst) {

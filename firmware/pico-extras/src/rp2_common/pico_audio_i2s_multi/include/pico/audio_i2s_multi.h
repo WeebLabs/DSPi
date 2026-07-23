@@ -92,7 +92,9 @@ typedef struct audio_i2s_instance {
 
     // Consumed-side unwrap state (mutated only in the consumed getter).
     uint32_t last_read_addr;
-    volatile uint32_t consumed_words;
+    volatile uint32_t consumed_words;   // words; USB feedback only
+    volatile uint32_t consumed_frames;  // frames; ALL fill/deficit math
+    uint8_t consumed_word_rem;          // mid-frame carry between reads
 
     // Coherent produced/consumed pair latched after each block write.
     volatile uint32_t snap_produced_frames;
@@ -150,6 +152,11 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
 // Monotonic DMA words consumed since ring reset (unwraps the read pointer;
 // call at least once per ring period, guaranteed by main-loop fill checks).
 uint32_t audio_i2s_ring_consumed_words(audio_i2s_instance_t *inst);
+
+// Frames consumed since ring reset. Wrap-coherent with wr_frames at 2^32;
+// the words counter is NOT (divided down it wraps early), so all fill and
+// deficit arithmetic must use this one.
+uint32_t audio_i2s_ring_consumed_frames(audio_i2s_instance_t *inst);
 
 static inline uint32_t audio_i2s_ring_produced_frames(audio_i2s_instance_t *inst) {
     return inst->wr_frames;

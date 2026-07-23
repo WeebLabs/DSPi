@@ -135,15 +135,34 @@ uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
     uint32_t addr = dma_channel_hw_addr(inst->dma_channel)->read_addr;
     uint32_t delta = (addr - inst->last_read_addr) & (RING_BYTES - 1u);
     inst->last_read_addr = addr;
-    inst->consumed_words += delta / 4u;
+    uint32_t words = delta / 4u;
+    inst->consumed_words += words;
+    // Frames-native counter: wraps at 2^32 FRAMES, coherent with wr_frames.
+    // consumed_words divided down would wrap at 2^30 frames and desync
+    // all fill math after hours of continuous playback; the remainder
+    // carries mid-frame DMA positions across calls.
+    uint32_t t = inst->consumed_word_rem + words;
+    inst->consumed_frames += t / 4u;
+    inst->consumed_word_rem = (uint8_t)(t % 4u);
     uint32_t out = inst->consumed_words;
+    restore_interrupts(save);
+    return out;
+}
+
+// Frames consumed since ring reset; the ONLY counter valid for fill and
+// deficit arithmetic (wrap-coherent with wr_frames).
+SPDIF_TIME_CRITICAL
+uint32_t audio_spdif_ring_consumed_frames(audio_spdif_instance_t *inst) {
+    (void)audio_spdif_ring_consumed_words(inst);
+    uint32_t save = save_and_disable_interrupts();
+    uint32_t out = inst->consumed_frames;
     restore_interrupts(save);
     return out;
 }
 
 SPDIF_TIME_CRITICAL
 uint32_t audio_spdif_ring_fill_frames(audio_spdif_instance_t *inst) {
-    return inst->wr_frames - audio_spdif_ring_consumed_words(inst) / 4u;
+    return inst->wr_frames - audio_spdif_ring_consumed_frames(inst);
 }
 
 void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
@@ -151,6 +170,8 @@ void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     inst->wr_frames = 0;
     inst->erased_frames = 0;
     inst->consumed_words = 0;
+    inst->consumed_frames = 0;
+    inst->consumed_word_rem = 0;
     inst->last_read_addr = (uint32_t)(uintptr_t)inst->ring;
     inst->snap_produced_frames = 0;
     inst->snap_consumed_frames = 0;
@@ -191,7 +212,7 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames) {
 // audio (the stamped span is exactly the free region). Bounded per call.
 SPDIF_TIME_CRITICAL
 void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_frames) {
-    uint32_t consumed = audio_spdif_ring_consumed_words(inst) / 4u;
+    uint32_t consumed = audio_spdif_ring_consumed_frames(inst);
     uint32_t target = consumed + RING_FRAMES;
     uint32_t e = inst->erased_frames;
     if ((int32_t)(e - inst->wr_frames) < 0) e = inst->wr_frames;
@@ -213,7 +234,7 @@ void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_fr
 SPDIF_TIME_CRITICAL
 void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
                                 const int32_t *lr, uint32_t frames) {
-    uint32_t consumed = audio_spdif_ring_consumed_words(inst) / 4u;
+    uint32_t consumed = audio_spdif_ring_consumed_frames(inst);
     uint32_t fill = inst->wr_frames - consumed;
 
     // fill > RING_FRAMES (unsigned) also covers the underrun case where the
@@ -238,10 +259,11 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     inst->wr_frames = w;
 
     // Extend the erase-ahead silence margin.
+    // Signed ordering: raw compares break at the uint32 counter wrap.
     uint32_t e = inst->erased_frames;
-    if (e < w) e = w;
+    if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_SPDIF_ERASE_AHEAD;
-    while (e < target) {
+    while ((int32_t)(target - e) > 0) {
         stamp_frame(&ring[(e & RING_MASK) * 2u], e % 192u, 0, 0);
         e++;
     }

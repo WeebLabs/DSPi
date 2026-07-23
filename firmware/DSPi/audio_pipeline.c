@@ -1214,12 +1214,12 @@ static void output_rings_reanchor_if_needed(void) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
-            deficit = (int32_t)(audio_i2s_ring_consumed_words(inst) / 2u
+            deficit = (int32_t)(audio_i2s_ring_consumed_frames(inst)
                                 - inst->wr_frames);
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
-            deficit = (int32_t)(audio_spdif_ring_consumed_words(inst) / 4u
+            deficit = (int32_t)(audio_spdif_ring_consumed_frames(inst)
                                 - inst->wr_frames);
         }
         if (deficit > 0 && (uint32_t)deficit > max_deficit)
@@ -1261,12 +1261,12 @@ void output_rings_idle_pump(void) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (inst && inst->ring && inst->enabled &&
-                (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_words(inst) / 2u) < 240)
+                (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_frames(inst)) < 240)
                 audio_i2s_ring_silence_pump(inst, 192u);
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
             if (inst && inst->ring && inst->enabled &&
-                (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_words(inst) / 4u) < 240)
+                (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_frames(inst)) < 240)
                 audio_spdif_ring_silence_pump(inst, 192u);
         }
     }
