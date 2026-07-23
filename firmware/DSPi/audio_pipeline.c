@@ -1262,7 +1262,17 @@ static bool output_rings_pre_give(uint32_t frames) {
         if (!preset_loading) overruns++;
     }
 
-    // Group admission.
+    // Group admission. PDM first: when its consumer is live, its push
+    // queue must also fit the whole block, or pdm_push_sample would
+    // part-fill and offset PDM against the slots. The check is skipped
+    // when Core 1 is not draining (the queue would read permanently full
+    // and deadlock admission for every output).
+#if ENABLE_SUB
+    if (frames > 0 && pdm_enabled && core1_mode == CORE1_MODE_PDM &&
+        matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled &&
+        pdm_ring_free_slots() < frames)
+        return false;
+#endif
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         int32_t fill;
         if (output_types[i] == OUTPUT_TYPE_I2S) {

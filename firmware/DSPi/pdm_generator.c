@@ -184,6 +184,14 @@ void pdm_change_pin(uint8_t new_pin) {
     pdm_current_pin = new_pin;
 }
 
+// Free sample slots in the Core 0 to Core 1 message ring (SPSC, 256
+// entries, one kept open). Producer-side read; Core 1 only ADDS space,
+// so a caller-side admission check on this value stays valid until the
+// pushes that follow it.
+uint32_t __not_in_flash_func(pdm_ring_free_slots)(void) {
+    return 255u - (uint8_t)(pdm_head - pdm_tail);
+}
+
 void __not_in_flash_func(pdm_push_sample)(int32_t sample, bool reset) {
     uint8_t next_head = pdm_head + 1;
     if (next_head != pdm_tail) {
