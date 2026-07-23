@@ -35,6 +35,9 @@
 #include <math.h>
 #include <string.h>
 
+// Defined with the buffer statistics helpers below.
+static void output_rings_reanchor_if_needed(void);
+
 // spdif0_consumer_fill is defined in usb_audio.c and read by main.c
 extern volatile uint8_t spdif0_consumer_fill;
 
@@ -1148,6 +1151,13 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     }
 #endif
 
+    // Ring underrun recovery before the gives: if a stall let the
+    // free-running DMAs overtake the writers, re-anchor every ENABLED slot
+    // by the SAME frame count (identical skip preserves inter-slot
+    // alignment; disabled slots are re-anchored by the reset that precedes
+    // their next synchronized start).
+    output_rings_reanchor_if_needed();
+
     // Return all buffers
 #if PICO_RP2350
     for (int b = 0; b < 4; b++) {
@@ -1193,140 +1203,175 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 // BUFFER STATISTICS HELPERS
 // ----------------------------------------------------------------------------
 
-static uint count_pool_free(audio_buffer_pool_t *pool) {
-    uint32_t save = spin_lock_blocking(pool->free_list_spin_lock);
-    uint count = audio_buffer_list_count(pool->free_list);
-    spin_unlock(pool->free_list_spin_lock, save);
-    return count;
+// Ring underrun recovery (see the call site in process_audio_pipeline):
+// deficit measured against the worst enabled slot, skip rounded up to a
+// whole bucket plus one block of margin, applied identically everywhere.
+DSP_TIME_CRITICAL
+static void output_rings_reanchor_if_needed(void) {
+    uint32_t max_deficit = 0;
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        int32_t deficit = 0;
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (!inst || !inst->ring || !inst->enabled) continue;
+            deficit = (int32_t)(audio_i2s_ring_consumed_words(inst) / 2u
+                                - inst->wr_frames);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (!inst || !inst->ring || !inst->enabled) continue;
+            deficit = (int32_t)(audio_spdif_ring_consumed_words(inst) / 4u
+                                - inst->wr_frames);
+        }
+        if (deficit > 0 && (uint32_t)deficit > max_deficit)
+            max_deficit = (uint32_t)deficit;
+    }
+    if (max_deficit == 0) return;
+
+    uint32_t skip = ((max_deficit + 192u + 47u) / 48u) * 48u;
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled)
+                audio_i2s_ring_skip(inst, skip);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled)
+                audio_spdif_ring_skip(inst, skip);
+        }
+    }
+    extern volatile int overruns;
+    extern volatile bool preset_loading;
+    if (!preset_loading) overruns++;
 }
 
-static uint count_pool_prepared(audio_buffer_pool_t *pool) {
-    uint32_t save = spin_lock_blocking(pool->prepared_list_spin_lock);
-    uint count = audio_buffer_list_count(pool->prepared_list);
-    spin_unlock(pool->prepared_list_spin_lock, save);
-    return count;
+// Idle silence pump: with outputs enabled but no producer running (USB
+// pause, source gaps), keep the ring silent ahead of the reader so the
+// free-running DMA can never loop stale audio. The fill gate makes it a
+// no-op while streaming (fill holds near 8 buckets).
+DSP_TIME_CRITICAL
+void output_rings_idle_pump(void) {
+    if (output_type_switch_in_progress) return;
+    // Re-anchor here as well as in the give path: with no gives flowing
+    // (source switch, host stream stopped) the writer must still track the
+    // reader, or the deficit grows without bound. No-op when fill >= 0.
+    output_rings_reanchor_if_needed();
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        // Signed fill: a reader-ahead deficit must ENGAGE the pump, not
+        // read as a huge unsigned fill and disarm it.
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled &&
+                (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_words(inst) / 2u) < 240)
+                audio_i2s_ring_silence_pump(inst, 192u);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled &&
+                (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_words(inst) / 4u) < 240)
+                audio_spdif_ring_silence_pump(inst, 192u);
+        }
+    }
+}
+
+// Flash blackouts stall the main loop (and so the idle pump) for ~45 ms,
+// longer than the erase-ahead margin; pre-stamp a full ring of silence so
+// the wire stays clean throughout. Called from the flash-write bracket.
+void output_rings_prestamp_full_silence(void) {
+    if (output_type_switch_in_progress) return;
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled)
+                audio_i2s_ring_silence_pump(inst, PICO_AUDIO_I2S_RING_FRAMES);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled)
+                audio_spdif_ring_silence_pump(inst, PICO_AUDIO_SPDIF_RING_FRAMES);
+        }
+    }
+}
+
+// One "bucket" = 48 frames (the old consumer-buffer size); the vendor
+// stats wire format and every prefill threshold keep bucket units.
+#define SLOT_FILL_FRAMES_PER_BUCKET 48u
+#define SLOT_FILL_MAX_BUCKETS       SPDIF_CONSUMER_BUFFER_COUNT
+
+// Live ring fill in frames for a slot; returns false when no valid reading
+// exists (type switch in progress, slot not set up).
+static bool slot_ring_fill(uint slot, uint32_t *fill_frames) {
+    if (output_type_switch_in_progress) return false;
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (!inst || !inst->ring) return false;
+        *fill_frames = audio_i2s_ring_fill_frames(inst);
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+        if (!inst || !inst->ring) return false;
+        *fill_frames = audio_spdif_ring_fill_frames(inst);
+    }
+    // Reader ahead of writer (producer idle) is a deficit, not a huge fill.
+    if ((int32_t)*fill_frames < 0) *fill_frames = 0;
+    return true;
 }
 
 void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, uint *playing) {
-    // Output-type switches teardown/setup pools in main-loop context while USB
-    // control requests may still run in IRQ context. Avoid dereferencing pool
-    // pointers during that transition window.
-    if (output_type_switch_in_progress) {
-        *cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
+    // Bucket mapping keeps REQ_GET_BUFFER_STATS byte-compatible:
+    // prepared = fill buckets, free = capacity minus fill, playing = enabled.
+    uint32_t fill;
+    if (!slot_ring_fill(slot, &fill)) {
+        *cons_free = output_type_switch_in_progress ? SLOT_FILL_MAX_BUCKETS : 0;
         *cons_prepared = 0;
         *playing = 0;
         return;
     }
-
+    uint buckets = fill / SLOT_FILL_FRAMES_PER_BUCKET;
+    if (buckets > SLOT_FILL_MAX_BUCKETS) buckets = SLOT_FILL_MAX_BUCKETS;
+    *cons_prepared = buckets;
+    *cons_free = SLOT_FILL_MAX_BUCKETS - buckets;
     if (output_types[slot] == OUTPUT_TYPE_I2S) {
-        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
-        if (!inst || !inst->consumer_pool) {
-            *cons_free = 0;
-            *cons_prepared = 0;
-            *playing = 0;
-            return;
-        }
-        *cons_free = count_pool_free(inst->consumer_pool);
-        *cons_prepared = count_pool_prepared(inst->consumer_pool);
-        *playing = (inst->playing_buffer != NULL) ? 1 : 0;
+        *playing = (i2s_instance_ptrs[slot] && i2s_instance_ptrs[slot]->enabled) ? 1 : 0;
     } else {
-        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
-        if (!inst || !inst->consumer_pool) {
-            *cons_free = 0;
-            *cons_prepared = 0;
-            *playing = 0;
-            return;
-        }
-        *cons_free = count_pool_free(inst->consumer_pool);
-        *cons_prepared = count_pool_prepared(inst->consumer_pool);
-        *playing = (inst->playing_buffer != NULL) ? 1 : 0;
+        *playing = (spdif_instance_ptrs[slot] && spdif_instance_ptrs[slot]->enabled) ? 1 : 0;
     }
 }
 
 DSP_TIME_CRITICAL
 uint get_slot_consumer_fill(uint slot) {
-    // See get_slot_consumer_stats(): never touch per-slot pools while a type
-    // switch is mutating ownership/state.
-    if (output_type_switch_in_progress) {
-        return 0;
-    }
-
-    uint cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
-
-    if (output_types[slot] == OUTPUT_TYPE_I2S) {
-        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
-        if (inst && inst->consumer_pool) {
-            cons_free = count_pool_free(inst->consumer_pool);
-        }
-    } else {
-        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
-        if (inst && inst->consumer_pool) {
-            cons_free = count_pool_free(inst->consumer_pool);
-        }
-    }
-
-    if (cons_free > SPDIF_CONSUMER_BUFFER_COUNT) cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
-    return SPDIF_CONSUMER_BUFFER_COUNT - cons_free;
+    // Bucket units (0..16) so every prefill threshold keeps its meaning.
+    uint32_t fill;
+    if (!slot_ring_fill(slot, &fill)) return 0;
+    uint buckets = fill / SLOT_FILL_FRAMES_PER_BUCKET;
+    return (buckets > SLOT_FILL_MAX_BUCKETS) ? SLOT_FILL_MAX_BUCKETS : buckets;
 }
 
-// Fractional consumer fill for the clock servo, in buffer units (0..16),
-// or a negative value when no valid reading exists (type switch in
-// progress, slot not running). Refines the integer getter with the two
-// sub-buffer states it counts as whole buffers: the producer staging
-// buffer (only current_consumer_buffer_pos samples written) and the DMA
-// in-flight buffer (only the remaining transfer count still queued).
-// Reads are unsynchronized; momentary sub-buffer tearing is expected and
-// the servo's IIR absorbs it.
+// Live ring fill in frames for the vendor stats path (sample-granular).
+// Returns false when no valid reading exists.
+bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
+    return slot_ring_fill(slot, frames);
+}
+
+// Fractional fill for the clock servo, in bucket units, from the ring's
+// cumulative-count snapshot pair: produced and consumed frame totals are
+// latched together at the end of each block write, so the measurement is
+// taken at a constant production phase and the block-arrival sawtooth
+// never enters it. Negative = no valid reading this tick.
 DSP_TIME_CRITICAL
 float get_slot_consumer_fill_frac(uint slot) {
     if (output_type_switch_in_progress) return -1.0f;
 
-    const float inv_buf = 1.0f / (float)PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
-    uint cons_free;
-    uint held = 0;          // buffers counted whole but only partially real
-    float frac = 0.0f;      // their fractional replacements
-    uint dma_ch, wps;
-    audio_buffer_t *staging, *playing;
-    uint32_t staging_pos;
-
+    uint32_t produced, consumed;
     if (output_types[slot] == OUTPUT_TYPE_I2S) {
         audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
-        if (!inst || !inst->consumer_pool) return -1.0f;
-        cons_free    = count_pool_free(inst->consumer_pool);
-        staging      = inst->connection.current_consumer_buffer;
-        staging_pos  = inst->connection.current_consumer_buffer_pos;
-        playing      = inst->playing_buffer;
-        dma_ch       = inst->dma_channel;
-        wps          = 2;   // I2S: 2 DMA words per stereo sample
+        if (!inst || !inst->ring) return -1.0f;
+        produced = inst->snap_produced_frames;
+        consumed = inst->snap_consumed_frames;
     } else {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
-        if (!inst || !inst->consumer_pool) return -1.0f;
-        cons_free    = count_pool_free(inst->consumer_pool);
-        staging      = inst->connection.current_consumer_buffer;
-        staging_pos  = inst->connection.current_consumer_buffer_pos;
-        playing      = inst->playing_buffer;
-        dma_ch       = inst->dma_channel;
-        wps          = 4;   // S/PDIF: 4 DMA words per stereo sample
+        if (!inst || !inst->ring) return -1.0f;
+        produced = inst->snap_produced_frames;
+        consumed = inst->snap_consumed_frames;
     }
-
-    if (staging) {
-        held++;
-        frac += (float)staging_pos * inv_buf;
-    }
-    if (playing) {
-        held++;
-        frac += (float)(dma_channel_hw_addr(dma_ch)->transfer_count / wps) * inv_buf;
-    }
-
-    if (cons_free > SPDIF_CONSUMER_BUFFER_COUNT) cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
-    uint fill_whole = SPDIF_CONSUMER_BUFFER_COUNT - cons_free;
-    // Tearing guard: a buffer can move between categories mid-read.
-    if (fill_whole < held) fill_whole = held;
-
-    float fill = (float)(fill_whole - held) + frac;
-    if (fill < 0.0f) fill = 0.0f;
-    if (fill > (float)SPDIF_CONSUMER_BUFFER_COUNT) fill = (float)SPDIF_CONSUMER_BUFFER_COUNT;
-    return fill;
+    return (float)(int32_t)(produced - consumed) *
+           (1.0f / (float)SLOT_FILL_FRAMES_PER_BUCKET);
 }
 
 // Servo-critical: update slot-0 fill every packet with minimal work.

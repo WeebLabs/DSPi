@@ -25,11 +25,11 @@
 // 16 x 48 samples, which bounds the lead below the ring size; overwrite is
 // structurally impossible while the DMA runs.
 //
-// Underruns: silence frames are inserted slaved 1:1 to slot 0's DMA
-// starvation counter, so ADAT shifts by exactly the amount the slots shift
-// and the constant ADAT-to-slot offset survives host underruns.  While the
-// host stream is stopped (starvation counting disabled) the cushion is
-// simply kept topped up with silence.
+// Underruns: slot 0's starvation counter now reports frames of silence
+// exposed to the wire, so ADAT inserts that same frame delta 1:1 and shifts
+// by exactly the amount the slots shift; the constant ADAT-to-slot offset
+// survives host underruns.  While the host stream is stopped (no gives) the
+// cushion is simply kept topped up with silence.
 // ----------------------------------------------------------------------------
 
 #include "adat_output.h"
@@ -411,17 +411,20 @@ void adat_output_task(void) {
     if (!adat_running) return;
 
     if (adat_stream_active_mode) {
-        // Slaved insertion: mirror slot 0's silence fallbacks 1:1 so the
-        // ADAT-to-slot offset survives underruns exactly.
+        // Slaved insertion: the starvation counter is in frames, so mirror
+        // slot 0's underrun-frame delta 1:1 to keep the ADAT-to-slot offset
+        // exact across underruns.
         uint32_t starv = adat_slot0_starvations();
         uint32_t pending = starv - adat_slot0_starv_seen;
-        if (pending > 256) {
+        if (pending > 256 * PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT) {
             // Impossible as a real backlog: the counter was reset (stream
             // (re)start, stats reset).  Re-baseline without inserting.
             adat_slot0_starv_seen = starv;
         } else if (pending) {
-            if (pending > 8) pending = 8;   // bound per pass; catch up next call
-            adat_write_silence(pending * PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT);
+            // Bound the insert per pass in frames; carry the rest next call.
+            uint32_t cap = 8 * PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
+            if (pending > cap) pending = cap;
+            adat_write_silence(pending);
             adat_slot0_starv_seen += pending;
         }
     } else {

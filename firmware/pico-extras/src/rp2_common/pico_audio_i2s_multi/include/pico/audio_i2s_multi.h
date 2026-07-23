@@ -69,6 +69,7 @@ typedef struct audio_i2s_instance {
     PIO pio;
     uint8_t pio_sm;
     uint8_t dma_channel;
+    uint8_t dma_reload_channel; // RP2040 only: free-running reload pair partner
     uint8_t dma_irq;            // 0 or 1
     uint8_t data_pin;           // Serial audio data GPIO
     uint8_t clock_pin_base;     // BCK GPIO; LRCLK = clock_pin_base + 1
@@ -77,25 +78,39 @@ typedef struct audio_i2s_instance {
                                 // (clock_master must be false; divider fixed 1.0)
 
     // Runtime state
-    audio_buffer_t *playing_buffer;
     uint32_t freq;
     bool enabled;
+    uint8_t instance_index;     // Stable slot identity (== dma_channel)
 
-    // DMA word tracking for USB feedback endpoint
-    volatile uint32_t words_consumed;       // Total DMA words consumed (incremented in DMA IRQ)
-    uint32_t current_transfer_words;        // DMA word count of current transfer
+    // Ring state; same model as the S/PDIF library (see audio_spdif.c
+    // "Ring output model"). Frame counters are monotonic since ring reset.
+    int32_t *ring;                      // slot ring base (caller-owned)
+    volatile uint32_t wr_frames;        // frames of real audio written
+    uint32_t erased_frames;             // silence stamped through this total
+    volatile uint32_t underrun_frames;  // silence frames exposed to the wire
+    volatile uint32_t drop_frames;      // producer frames dropped on ring-full
 
-    // Per-instance audio pipeline
+    // Consumed-side unwrap state (mutated only in the consumed getter).
+    uint32_t last_read_addr;
+    volatile uint32_t consumed_words;
+
+    // Coherent produced/consumed pair latched after each block write.
+    volatile uint32_t snap_produced_frames;
+    volatile uint32_t snap_consumed_frames;
+
+    // Producer-side formats + embedded connection (until the direct
+    // ring-write migration removes the producer pools)
     audio_format_t consumer_format;
     audio_buffer_format_t consumer_buffer_format;
-    audio_buffer_t silence_buffer;
-    mem_buffer_t silence_mem;                   // static backing for silence_buffer (no heap)
-    uint8_t silence_data[PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES];
-    audio_buffer_pool_t *consumer_pool;         // shared per-slot static pool (assigned by caller)
-
-    // Embedded connection (uses container_of to recover instance pointer)
     struct producer_pool_blocking_give_connection connection;
 } audio_i2s_instance_t;
+
+// Ring geometry: shares the slot's 16 KB store with the S/PDIF instance
+// (frames are 8 bytes here vs 16, so I2S uses the first half). Identical
+// frame capacity keeps fill/latency semantics uniform across output types.
+#define PICO_AUDIO_I2S_RING_FRAMES  1024u
+#define PICO_AUDIO_I2S_RING_BYTES   (PICO_AUDIO_I2S_RING_FRAMES * 2u * 4u)
+#define PICO_AUDIO_I2S_ERASE_AHEAD  192u
 
 // ---------------------------------------------------------------------------
 // Configuration structure
@@ -115,7 +130,45 @@ typedef struct audio_i2s_config {
     bool    external_clock;     // true = slave to EXTERNAL BCK/LRCLK (pads are inputs;
                                 // clock_master ignored).  Wait-driven at divider 1.0;
                                 // rate changes do not touch these SMs' dividers.
+    uint8_t dma_reload_channel; // RP2040 only: reload partner (ignored on RP2350)
+    void   *ring_base;          // caller-owned per-slot ring storage (shared with
+                                // the slot's S/PDIF instance), aligned to the
+                                // S/PDIF ring size; I2S uses the first
+                                // PICO_AUDIO_I2S_RING_BYTES of it
 } audio_i2s_config_t;
+
+// ---------------------------------------------------------------------------
+// Ring output API (same model as pico_audio_spdif_multi)
+// ---------------------------------------------------------------------------
+
+// Encode a block of interleaved S32 L/R frames into the slot ring
+// (<<8 | pad pattern), extend the erase-ahead silence region, latch the
+// coherent produced/consumed snapshot pair.
+void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
+                              const int32_t *interleaved_lr, uint32_t frames);
+
+// Monotonic DMA words consumed since ring reset (unwraps the read pointer;
+// call at least once per ring period, guaranteed by main-loop fill checks).
+uint32_t audio_i2s_ring_consumed_words(audio_i2s_instance_t *inst);
+
+static inline uint32_t audio_i2s_ring_produced_frames(audio_i2s_instance_t *inst) {
+    return inst->wr_frames;
+}
+
+// Current fill in frames (produced minus consumed).
+uint32_t audio_i2s_ring_fill_frames(audio_i2s_instance_t *inst);
+
+// Reset ring pointers and accounting. DMA must be stopped.
+void audio_i2s_ring_reset(audio_i2s_instance_t *inst);
+
+// Group re-anchor primitive; the caller applies the SAME skip to every
+// enabled slot of both output types so inter-slot alignment holds.
+void audio_i2s_ring_skip(audio_i2s_instance_t *inst, uint32_t frames);
+
+// Extend the erased (silence) region toward one full ring ahead of the
+// reader, bounded by max_frames per call. Keeps a stalled producer from
+// ever looping stale ring content; cheap no-op while streaming.
+void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames);
 
 // ---------------------------------------------------------------------------
 // Public API — mirrors pico_audio_spdif_multi

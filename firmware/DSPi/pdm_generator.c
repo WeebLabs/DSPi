@@ -87,7 +87,7 @@ typedef struct {
     int32_t err_acc;   // Error accumulator for feedback
 } noise_shaper_t;
 
-static inline int32_t noise_shaped_dither(noise_shaper_t *ns, int32_t raw_dither, int32_t quant_error) {
+static inline int32_t pdm_noise_shaped_dither(noise_shaper_t *ns, int32_t raw_dither, int32_t quant_error) {
     // Accumulate quantization error with decay (LP filter on error)
     // Decay factor 0.97 in Q8 = 248
     ns->err_acc = ((ns->err_acc * 248) >> 8) + (quant_error >> 6);
@@ -367,7 +367,7 @@ static void __not_in_flash_func(pdm_processing_loop)() {
         // 256x Oversampling with 2nd-order sigma-delta modulator
         for (int chunk = 0; chunk < 8; chunk++) {
             int32_t raw_rand = (int32_t)(fast_rand() & PDM_DITHER_MASK) - (PDM_DITHER_MASK >> 1);
-            int32_t dither = noise_shaped_dither(&ns, raw_rand, local_pdm_err2 >> 8);
+            int32_t dither = pdm_noise_shaped_dither(&ns, raw_rand, local_pdm_err2 >> 8);
 
             uint32_t pdm_word = 0;
             for (int k = 0; k < 32; k++) {

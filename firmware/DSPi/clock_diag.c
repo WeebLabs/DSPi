@@ -59,7 +59,7 @@ static uint32_t fc_count = 0;
 static uint32_t loop_prev_us = 0;
 static uint32_t loop_gap_max_us = 0;
 
-// Per-slot min consumer fill and last-dump words_consumed.
+// Per-slot min consumer fill and last-dump ring consumed-words totals.
 static uint8_t  slot_min_fill[NUM_SPDIF_INSTANCES];
 static uint32_t slot_prev_words[NUM_SPDIF_INSTANCES];
 
@@ -311,16 +311,18 @@ void clock_diag_poll(void) {
             uint fill = output_type_switch_in_progress ? 0 : get_slot_consumer_fill((uint)i);
             uint32_t starv, words;
             const char *ty;
+            // Ring path: consumed words = unwrapped DMA read pointer; starv
+            // counts FRAMES of silence exposed (unit change from buffers).
             if (output_types[i] == OUTPUT_TYPE_I2S) {
                 ty = "i2s";
                 starv = audio_i2s_get_dma_starvations_instance((uint)i);
                 audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-                words = inst ? inst->words_consumed : 0;
+                words = (inst && inst->ring) ? audio_i2s_ring_consumed_words(inst) : 0;
             } else {
                 ty = "spd";
                 starv = audio_spdif_get_dma_starvations_instance((uint)i);
                 audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-                words = inst ? inst->words_consumed : 0;
+                words = (inst && inst->ring) ? audio_spdif_ring_consumed_words(inst) : 0;
             }
             uint32_t dwc = words - slot_prev_words[i];
             slot_prev_words[i] = words;

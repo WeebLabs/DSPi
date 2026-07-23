@@ -48,6 +48,12 @@ uint get_slot_consumer_fill(uint slot);
 // Sample-granular fill in buffer units (0..16) for the clock servo;
 // negative when no valid reading exists (type switch, slot not running).
 float get_slot_consumer_fill_frac(uint slot);
+// Ring stale-audio protection: main-loop idle pump and the pre-flash
+// full-silence stamp (see audio_pipeline.c).
+void output_rings_idle_pump(void);
+void output_rings_prestamp_full_silence(void);
+// Live sample-granular fill in frames; false = no valid reading.
+bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames);
 void get_slot_consumer_stats(uint slot, uint *cons_free,
                              uint *cons_prepared, uint *playing);
 void reset_buffer_watermarks(void);

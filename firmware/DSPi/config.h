@@ -655,6 +655,13 @@ typedef struct __attribute__((packed)) {
 #endif
 #define SOFT_VCXO_DMA_TIMER         0
 
+// Output slot rings: RP2040 lacks ENDLESS-mode DMA, so each slot's
+// free-running ring needs a reload partner channel (slot i uses
+// OUTPUT_SLOT_RELOAD_DMA_BASE + i). RP2350 uses ENDLESS mode, no partner.
+#if !PICO_RP2350
+#define OUTPUT_SLOT_RELOAD_DMA_BASE 6
+#endif
+
 // ---------------------------------------------------------------------------
 // Clock / audio-path diagnostics (bench instrumentation)
 // ---------------------------------------------------------------------------
@@ -1025,7 +1032,9 @@ typedef struct __attribute__((packed)) {
     uint8_t consumer_fill_pct;   // Consumer pipeline fill %
     uint8_t consumer_min_fill_pct; // Lowest consumer fill since last reset
     uint8_t consumer_max_fill_pct; // Highest consumer fill since last reset
-    uint8_t pad[2];
+    uint16_t fill_centi_pct;     // Sample-granular fill, 0.01% units on the
+                                 // same 16-bucket scale (5000 = 50.00%).
+                                 // Was pad[2]; zero on older firmware.
 } SpdifBufferStats;              // 8 bytes
 
 typedef struct __attribute__((packed)) {

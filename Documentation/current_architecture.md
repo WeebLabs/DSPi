@@ -241,9 +241,9 @@ The branch sits before both the IN-direction `vendor_handle_get` dispatcher and 
 **No MS OS 1.0 fallback:** Windows < 8.1 (EOL January 2023) sees DSPi as an unrecognised vendor function and still requires manual driver install. We're forward-only on Windows.
 
 ### Sample-rate & Bit-depth Switching
-*Last updated: 2026-07-11*
+*Last updated: 2026-07-23 (consumer pools replaced by per-slot rings)*
 
-Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switch) or SET_CUR on the endpoint sampling_freq control (rate switch) — must land on a muted, drained pipeline. Otherwise old-rate/old-bit-depth audio still queued in the consumer pools plays out against the new PIO divider or gets decoded under the wrong bytes-per-frame assumption, producing an audible pitch shift or byte-scramble burst.
+Any host-driven format change (SET_INTERFACE between AS alts for a bit-depth switch, or SET_CUR on the endpoint sampling_freq control for a rate switch) must land on a muted, drained pipeline. Otherwise old-rate/old-bit-depth audio still queued in the slot rings plays out against the new PIO divider or gets decoded under the wrong bytes-per-frame assumption, producing an audible pitch shift or byte-scramble burst.
 
 **`uac1_apply_alt()` (usb_audio.c):**
 - **Idempotent early-return.** `SET_INTERFACE(alt=current)` is common from host driver probes and used to tear down / re-open iso endpoints for no reason. Now skipped.
@@ -254,12 +254,12 @@ Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switc
 
 **USB rate ownership:** `usb_selected_rate` is the UAC1 playback endpoint's host-selected rate, while `audio_state.freq` is the rate actually applied to the live DSP pipeline. SET_CUR and the fixed-48-kHz multichannel alts always update the USB selection, but arm a live rate change only while USB is the active input; GET_CUR returns the retained USB selection. A later source switch into USB applies that selection, so decorative USB control traffic cannot interrupt S/PDIF or I2S playback and the host does not need to resend its rate when USB becomes active. Two races are closed inside the source-switch handler: `rate_change_pending` is cleared right after `active_input_source` flips (a SET_CUR armed for the old source in the same loop iteration would otherwise fire under the new source; mirrors the clock-mode flip handler's clear), and the switching-to-USB tail re-checks the retained selection against `audio_state.freq` and re-arms if a SET_CUR landed in USB IRQ context between the branch reading the selection and the source flip.
 
-**`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
+**`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket the new PIO divider would apply while old-rate audio still sits in each slot ring, playing out at the new bit-clock; audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, resets each slot ring, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
 
 **Nominal SPDIF divider restore (`restore_nominal_spdif_dividers()`, main.c):** since the soft-VCXO overhaul the input clock servos no longer trim any output divider; they pull `sys_clk` in ppm instead (see "Soft VCXO" and "Clock Servo"), so every SPDIF TX SM always runs its nominal `ceil(sys/f)` divider and the old trim-outlives-its-servo hazard (a servoed divider left displaced after the input stopped, dragging ADAT out of alignment with the slots it mirrors) is gone by construction. `restore_nominal_spdif_dividers()` is retained as one of the nominal-divider owner paths: `perform_rate_change()` still calls it (via `audio_spdif_apply_pio_frequency()`, a public wrapper in the SPDIF library) to reprogram every SPDIF-type slot to the new rate's nominal divider, and the two equal-rate paths that skip `perform_rate_change()` (the source-switch-away-from-I2S branch and the slave-to-master clock-mode flip) call it too; it is idempotent when the dividers already sit at nominal. All SPDIF slots receive the same divider, so inter-slot alignment is unaffected. *Last updated: 2026-07-22*
 
 ### Clock Diagnostics (bench instrument)
-*Last updated: 2026-07-22*
+*Last updated: 2026-07-23*
 
 `clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and a read-only `REQ_GET_CLOCK_DIAG` (0x82) vendor GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf output is otherwise discarded). Gated entirely by `DSPI_CLOCK_DIAG` (config.h, default 1 for bench; set 0 for release, which compiles everything to no-op inlines and makes `REQ_GET_CLOCK_DIAG` return a zero-length response). `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
 
@@ -271,12 +271,12 @@ The dump is six-to-eight lines, each prefixed `CLKDIAG ` for grepping:
 - `vcxo:` last commanded `ppm[min..max]`, `park` state, commanded `fbdiv0` (127/128/129), effective `pulseHz`, PWM `div`/`wrap`, cumulative `set`/`clamp`/`sflip` (sign-flip) counts, live `fbdivLive` (pll_sys `fbdiv_int`), PLL `cs` lock.
 - `vcxoloop:` PULSE and PACE DMA channel `busy`/`en`/`tcr` (transfer count remaining, from the debug registers)/PULSE `rd` addr/PACE `ctdreq` (DREQ counter), plus the PWM pacer `pwmctr` and its `moves` count since last dump (loop-alive evidence).
 - `servo:` measured input `in` Hz, `ff` feed-forward ppm, total `tot[min..max]` ppm, integrator `int` ppm, `ferr` fill error, `slot` used, `ticks`.
-- `slots:` per output slot: type (spd/i2s), current `fill`/`min` since dump, `starv` (per-instance consumer-empty DMA starts = silence-buffer substitutions, from the TX libraries' pre-existing starvation monitors, enabled here), `dwc` (delta words_consumed = TX DMA throughput; drops to 0 on a stalled channel).
+- `slots:` per output slot: type (spd/i2s), current `fill`/`min` since dump, `starv` (per-instance underrun count, now in **frames** of silence exposed to the wire, from the ring's always-on underrun accounting), `dwc` (delta words consumed = TX DMA throughput, derived from the unwrapped ring read pointer; drops to 0 on a stalled channel).
 - `pdm:` (when PDM enabled) ring/dma fill, `ringur` (ring-empty silence insertions) / `dmaur` (write-behind-read) underruns.
 - `input:` SPDIF RX `st` state, `rate`, `lk`/`ls` lock/loss counts, `par` parity errors, `fifo` fill %, estimator `hzL`/`hzS` (long-window count vs IIR bridge) and which is in `use`, long-window `span`.
 - `loop:` worst main-loop `gapmax` since last dump.
 
-Starvation counters are the authoritative instantaneous-empty signal (H3): the TX-library increment already existed in each DMA IRQ path (guarded by a runtime monitor bool that `clock_diag_init()` turns on); no new IRQ-path code was added. All `clock_diag.*`, plus the diagnostic getters in `soft_vcxo.c`/`input_servo.c`/`spdif_input.c`, live in flash and run only from the main loop.
+Starvation counters are the authoritative instantaneous-empty signal (H3). With the ring model they count **frames** of silence exposed to the wire (ring underrun accounting is always on, no monitor bool, no IRQ path). All `clock_diag.*`, plus the diagnostic getters in `soft_vcxo.c`/`input_servo.c`/`spdif_input.c`, live in flash and run only from the main loop.
 
 The `REQ_GET_CLOCK_DIAG` (0x82) snapshot is a packed little-endian `ClockDiagPacket` (`clock_diag.h`, version byte = 1) carrying every dump field: ppm values are centi-ppm (ppm times 100), frequencies flagged `_mhz` are milli-Hz, per-slot arrays are sized `NUM_SPDIF_INSTANCES` with a `num_slots` count. `clock_diag_poll()` latches it each second next to the printf; `clock_diag_get_snapshot()` copies it for the handler. Tearing is acceptable (both the poll and the control transfer run on the core 0 main loop). Host decoder: `tools`-adjacent `clkdiag_poll.py` polls it at 1 Hz. *Last updated: 2026-07-22.*
 
@@ -363,7 +363,7 @@ Note that `audio_state.volume` does NOT need a parallel field for the same reaso
 **Scope of click-free guarantee:** This ramp covers the output gain stage only. With loudness compensation enabled, `audio_set_volume()` swaps `current_loudness_coeffs` to a new table entry on every host volume step, and the SVF/biquad filter state continues from the previous coefficients — producing a small frequency-response transient at each step. With loudness disabled (or when the user does not change volume), the path is fully click-free; with loudness enabled, the broadband gain click is gone but a faint per-step zipper artifact can remain on signal-rich content.
 
 ### Asynchronous Feedback Endpoint
-*Last updated: 2026-04-18*
+*Last updated: 2026-07-23 (consumed words now from the unwrapped ring read pointer at SOF)*
 
 The device declares itself as a USB asynchronous sink, meaning it drives the audio clock from its own crystal oscillator rather than locking to the host's SOF timing. The feedback endpoint is re-armed from the `xfer_cb` completion in the custom UAC1 class driver (`uac1_driver_xfer_cb` on EP 0x82 in `usb_audio.c`) with the current `feedback_10_14` value, reporting the actual device sample rate to the host in 10.14 fixed-point format (samples per USB frame).
 
@@ -386,13 +386,9 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 | `nominal_feedback_10_14` | `volatile uint32_t` | `main.c` | Pre-computed nominal for current rate |
 | `slot0_produced_samples` | `volatile uint32_t` | `main.c` | Monotonic produced counter (incremented in `usb_audio.c`) |
 
-**S/PDIF/I2S library fields used by feedback:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `words_consumed` | `volatile uint32_t` | Total DMA words completed (incremented in DMA IRQ) |
-| `current_transfer_words` | `uint32_t` | Size of current in-flight DMA transfer |
+**Ring consumed-words used by feedback (2026-07-23):** with the free-running rings there is no `words_consumed` DMA-IRQ counter. At SOF the feedback loop reads `audio_spdif_ring_consumed_words()` (mirror `audio_i2s_*`), which unwraps the DMA read pointer to a monotonic total DMA words consumed since the last ring reset; this is sample-exact and needs no in-flight-transfer size term. The unwrap must be sampled at least once per ring period (~21 ms), which the main loop's fill checks and the per-SOF read both guarantee.
 
-**IRQ safety:** The SOF handler runs inside `isr_usbctrl`. DMA IRQ priorities are explicitly set to `PICO_HIGHEST_IRQ_PRIORITY` (`usb_audio.c:2755-2756`), matching the USB IRQ default. An init-time assertion (`NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ)`) verifies that DMA cannot preempt the SOF handler's non-atomic multi-field read of `words_consumed` + `transfer_count`.
+**IRQ safety:** The SOF handler runs inside `isr_usbctrl`. Output DMA raises no IRQ, so it cannot preempt the SOF read; the read-pointer unwrap is done under a brief IRQ-off section inside the getter. The DMA/USB IRQ priority pinning is retained for the S/PDIF RX path (the only remaining DMA IRQ user).
 
 ### USB Audio Decoupling (SPSC Ring Buffer)
 *Last updated: 2026-04-18*
@@ -420,7 +416,7 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 2. **Ring drain (main loop)** — Peek/process/consume loop, highest priority in main loop
 3. **USB decode (`process_audio_packet` in `usb_audio.c`)** — Gap detection, sync tracking, USB byte decode (16/24-bit) with per-channel preamp into `buf_l[]`/`buf_r[]`
 4. **DSP pipeline (`process_input_block` in `audio_pipeline.c`)**; input-agnostic: buffer acquisition, preset mute envelope, EQ, leveller, matrix mixer, per-output-pair crossfeed (PASS 4.5), per-output EQ/gain/loudness/delay, output encoding, buffer return, CPU metering
-5. **Buffer return** — Give completed buffers to consumer pools for DMA
+5. **Ring write**: the blocking give hands each finished producer block to the writer, which encodes it directly into the slot ring for the free-running DMA
 
 The `process_input_block()` function reads from `buf_l[]`/`buf_r[]` arrays (extern, defined in `audio_pipeline.c`, filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly. Buffer statistics helpers (`get_slot_consumer_fill()`, `get_slot_consumer_stats()`, `reset_buffer_watermarks()`) also live in `audio_pipeline.c`.
 
@@ -893,39 +889,42 @@ S/PDIF outputs share PIO0, each using one state machine. RP2350 has 4 instances;
 2-instruction NRZI encoder running on PIO0. Clock divider automatically adjusted for 44.1/48/96 kHz.
 
 ### Instance State
+*Last updated: 2026-07-23*
 
 ```c
 typedef struct audio_spdif_instance {
     PIO pio;
-    uint8_t pio_sm, dma_channel, dma_irq, pin;
+    uint8_t pio_sm, dma_channel, dma_reload_channel, dma_irq, pin, instance_index;
     bool enabled;
-    uint8_t subframe_position;  // 0-191: position in IEC 60958-1 192-frame audio block
-    audio_buffer_pool_t *consumer_pool;
-    audio_buffer_t silence_buffer;
-    // ... format, connection details
+    uint32_t *ring;                     // per-slot encoded ring (caller-owned)
+    volatile uint32_t wr_frames;        // frames of real audio written
+    uint32_t erased_frames;             // silence stamped through this total
+    volatile uint32_t underrun_frames;  // silence frames exposed to the wire
+    volatile uint32_t drop_frames;      // producer frames dropped on ring-full
+    uint32_t last_read_addr;            // consumed-side unwrap state
+    volatile uint32_t consumed_words;
+    volatile uint32_t snap_produced_frames, snap_consumed_frames;  // servo snapshot
+    // ... producer format + embedded connection (retained pending direct write)
 } audio_spdif_instance_t;
 ```
 
 ### Buffer Configuration
+*Last updated: 2026-07-23*
 
-- Producer pool: 8 buffers × 192 samples × 2ch × 4 bytes = 12,288 bytes per pool
-- Producer format: `AUDIO_BUFFER_FORMAT_PCM_S32` (24-bit audio in lower 24 bits of int32)
-- Consumer pool: 16 buffers × 48 samples (`SPDIF_CONSUMER_BUFFER_COUNT` × `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT`)
-- Consumer format: `AUDIO_BUFFER_FORMAT_PIO_SPDIF` (pre-encoded NRZI subframes)
-- DMA transfer granularity: 48 samples (1 ms at 48 kHz), down from 192 samples (4 ms)
-- Total consumer capacity: 16 × 48 = 768 samples (same as previous 4 × 192)
-- Fill target: 8 buffers (50%), latency jitter: ±1 buffer = ±1 ms (was ±4 ms with 192-sample buffers)
+The consumer buffer pool is gone. Each slot now drains a single **encoded ring** filled by the writer and read by a free-running DMA with **zero output IRQs**:
 
-### IEC 60958-1 Block Position Tracking
+- One static 16 KB ring per slot (`slot_ring_store[NUM_SPDIF_INSTANCES][PICO_AUDIO_SPDIF_RING_BYTES]` in usb_audio.c), caller-owned and passed via `config.ring_base`. The same store backs the slot's S/PDIF and I2S instances across output-type switches. `PICO_AUDIO_SPDIF_RING_FRAMES = 1024` frames (21.3 ms at 48 kHz), 2 channels × 8 bytes per frame; I2S uses the identical geometry (`_Static_assert`ed equal).
+- The writer encodes directly into the ring at give time (`audio_spdif_ring_write_s32`), stamping IEC preamble and channel-status per frame from the absolute frame index; the producer pools are retained for now (the blocking-give connection still drives the writer) pending a direct-write follow-up.
+- Erase-ahead silence margin: the writer keeps `PICO_AUDIO_SPDIF_ERASE_AHEAD` = 192 frames (one IEC block) of valid silence stamped ahead of real audio, so a stalled producer plays silence rather than a loop of stale ring content.
+- Free-running DMA: **ENDLESS** transfer count with hardware read-address wrap on RP2350 (power-of-two ring, no reload channel); on RP2040 a data + reload channel pair (`dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + slot`, base 6) rewrites the read address at the ring end. No DMA completes, so there is no output DMA IRQ on either platform.
+- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter now returns that snapshot difference (cumulative-count differencing). The USB feedback loop instead consumes the unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). Fill target and prefill thresholds are unchanged in semantics; `REQ_GET_BUFFER_STATS` and the prefill checks keep byte/semantics compatibility via a 48-frames-per-bucket mapping (a ring fill of N frames maps to N/48 legacy "buffers").
+- **Underrun recovery** is a group re-anchor: `output_rings_reanchor_if_needed()` (audio_pipeline.c) applies an identical `*_ring_skip()` to every enabled slot, so inter-slot sample alignment is preserved exactly across an underrun. The starvation counters (`audio_spdif_get_dma_starvations_instance()` / I2S mirror) now return frames of silence exposed to the wire, not silence-buffer DMA starts.
+Since 2026-07-23 each per-slot record also carries `fill_centi_pct` (uint16, formerly the two pad bytes): sample-granular fill in 0.01% units of the same 16-bucket scale (5000 = 50.00%; values above 10000 are legal, the ring holds more than the legacy capacity). Older firmware reports 0 in this field; the coarse bucket fields are unchanged, so existing Console builds keep working.
 
-Each 192-frame audio block carries channel status bits and a Z preamble at frame 0. With 48-sample DMA transfers, block boundaries no longer align to buffer boundaries. A per-instance `subframe_position` counter (0-191) tracks the current position within the 192-frame block across buffer boundaries:
+### IEC 60958-1 Block Phase
+*Last updated: 2026-07-23*
 
-*Last updated: 2026-03-23*
-
-- **Init:** Each consumer buffer is pre-initialized with preambles and channel status via `init_spdif_buffer(buffer, start_pos)`. These are treated as templates — runtime fixup corrects them before each DMA transfer.
-- **Runtime:** `subframe_position` advances by `PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT` (48) **unconditionally** after each DMA completion (including silence), maintaining correct 192-frame alignment across silence/audio transitions. Wraps at 192 using a branch (no modulo — avoids expensive division on M0+).
-- **Preamble + channel status stamping:** The consumer pool free list is LIFO, so buffers may return in a different order than initialized. `audio_start_dma_transfer()` stamps the correct Z/X preamble on the first L-channel subframe **and** corrects all channel status bits (IEC 60958-3 C bit at h[29]) to match the current `subframe_position`. When the C bit must flip, both C (bit 29) and parity P (bit 31) are XOR'd together, maintaining even subframe parity without recomputation. Applied to all buffers including the silence buffer.
-- **Static assert:** `PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0` enforced at compile time.
+Each 192-frame audio block carries channel status bits and a Z preamble at frame 0. With the ring, the block phase is simply the **absolute frame index mod 192**: `audio_spdif_ring_write_s32()` stamps the correct Z/X preamble and channel-status C bit (IEC 60958-3, h[29], with parity P at h[31] XOR'd alongside) per frame from the running write count, and the erase-ahead silence carries the same phase. No per-buffer template fixup or LIFO free-list correction is needed. `_Static_assert`: `PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_ERASE_AHEAD == 0` style invariants keep the block/margin aligned at compile time.
 
 ### 24-bit Output Encoding
 *Last updated: 2026-05-19*
@@ -959,8 +958,9 @@ Channel status is encoded as a 5-byte array (40 bits) per IEC 60958-3 consumer f
 Byte 3 is updated dynamically in `update_pio_frequency()` when sample rate changes.
 
 ### IRQ Handling
+*Last updated: 2026-07-23*
 
-All instances share DMA IRQ 1 via `irq_add_shared_handler()`. Reference-counted enable/disable. Handler iterates registered instances to find interrupt source.
+Output S/PDIF and I2S generate **no DMA IRQs** at all: the rings are drained by free-running DMA (ENDLESS on RP2350, data+reload pair on RP2040). The `dma_irq` field and the shared-refcount enable/disable API are retained solely for the S/PDIF RX hold on `DMA_IRQ_1`, which is unchanged and is now the only user of that refcount.
 
 ### Synchronized Start
 
@@ -1787,16 +1787,15 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Crossover-stage availability when PDM enabled | Single-core (Core 0 only) | Single-core (Core 0 only) |
 
 ### DMA
-*Last updated: 2026-07-22 (soft VCXO on CH10-11 / CH11-12; RP2350 I2S RX rings converted to single ENDLESS channels CH5-8)*
+*Last updated: 2026-07-23 (output rings free-running: zero output DMA IRQs; RP2040 adds reload channels 6-7)*
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
 | Priority | Global bus priority bits | Per-channel high-priority flag |
-| Output TX channels (SPDIF **or** I2S, per slot) | 0-1 | 0-3 |
-| SPDIF TX IRQ | DMA_IRQ_1 | DMA_IRQ_1 |
-| I2S TX IRQ | DMA_IRQ_0 | DMA_IRQ_0 |
+| Output TX channels (SPDIF **or** I2S, per slot) | 0-1 data + 6-7 reload (`OUTPUT_SLOT_RELOAD_DMA_BASE` 6 + slot) | 0-3 (ENDLESS, no reload) |
+| Output TX IRQ (SPDIF + I2S) | None (free-running ring) | None (free-running ring) |
 | SPDIF RX channels | CH4, CH5 | CH5, CH6 |
-| SPDIF RX IRQ | DMA_IRQ_1 (shared with SPDIF TX) | DMA_IRQ_1 (shared with SPDIF TX) |
+| SPDIF RX IRQ | DMA_IRQ_1 (refcount hold; now the only user) | DMA_IRQ_1 (refcount hold; now the only user) |
 | I2S RX channels | CH4, CH5 (1 pair, data+reload; shared with SPDIF RX) | CH5 + CH6 + CH7 + CH8 (up to 4 pairs; one ENDLESS-mode channel each, no reload; pair 0's CH5 shared with SPDIF RX) |
 | I2S RX IRQ | IRQ-less (chained ring) | IRQ-less (ENDLESS rings) |
 | PDM channel | Dynamic (`dma_claim_unused_channel`) | Dynamic (`dma_claim_unused_channel`) |
@@ -1813,10 +1812,13 @@ library to the other; the slot's PIO SM (index == slot index, both on
 `PICO_AUDIO_SPDIF_PIO`) is handed over the same way. Previously S/PDIF TX held
 channels 0-3 permanently (claimed at boot, never released) while I2S TX used a
 disjoint, hardcoded range (8-11); the I2S range is now gone, freeing the high
-DMA channels for input and clock use. Current RP2350 occupancy: outputs 0-3,
+DMA channels for input and clock use. On RP2040 each output slot also owns a
+free-running reload channel (`OUTPUT_SLOT_RELOAD_DMA_BASE` 6 + slot) that
+rewrites the ring read address at wrap; RP2350 uses ENDLESS mode and needs no
+reload channel. Current RP2350 occupancy: outputs 0-3,
 PDM 4, SPDIF RX 5-6 (or I2S RX 5-8 when the multichannel input runs), spare
-9-10, soft VCXO 11-12, ADAT out 13-14, ADAT in 15. RP2040: outputs 0-1, PDM 2,
-spare 3, RX 4-5, spare 6-9, soft VCXO 10-11. The RP2350 I2S RX rings were
+9-10, soft VCXO 11-12, ADAT out 13-14, ADAT in 15. RP2040: outputs 0-1 (+ reload
+pair 6-7), PDM 2, spare 3, RX 4-5, spare 8-9, soft VCXO 10-11. The RP2350 I2S RX rings were
 converted from data+reload channel pairs (which spanned 5-12) to a single
 ENDLESS-mode channel per pair (5-8, the same write-address-wrap pattern the ADAT
 RX ring uses) to free 9-12; RP2040 has no ENDLESS mode and keeps its data+reload
@@ -1846,7 +1848,7 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-07-22 (soft VCXO adds only ~24 B .data statics + ~0.3 KB RAM-pinned `soft_vcxo_set_ppm`; both platforms)*
+*Last updated: 2026-07-23 (output slot rings replace the static consumer pools; producer pools still heap-resident)*
 
 > **Soft VCXO (2026-07-22).** The clock-servo overhaul adds a negligible
 > footprint: ~24 bytes of `.data` statics (the `fbdivs[]` excursion/nominal pair
@@ -1915,20 +1917,19 @@ masked, and PDM claims its channel once at init.
 > RP2040 RAM-tightness noted under the old `copy_to_ram` image no longer applies.
 > See "USB Audio Loopback Capture (DSPI_LOOPBACK)".
 
-> **Static consumer pools (2026-05-31).** The per-output-slot consumer buffer pool
-> is now a single statically-allocated (BSS) pool per slot, **shared by the slot's
-> S/PDIF and I2S instances and reused across output-type switches** — sized for the
-> largest type (S/PDIF, stride `PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES` = 16; I2S
-> under-fills each 768-byte block). Previously each output-type instance malloc'd
-> (and the I2S side freed) its own pool, so a slot that had been both types held two
-> pools and a both-slots-I2S config on RP2040 overran the ~60 KB heap (`malloc`→NULL
-> crash). The shared static pool removes the second allocation, makes the footprint
-> deterministic and link-time-budgeted (a BSS overflow now fails the build, not the
-> field), and eliminates retype heap churn/fragmentation. Built via
-> `audio_consumer_pool_init_static()` at boot and re-pointed per connect via
-> `audio_consumer_pool_reformat()` (pico_audio); `*_connect_extra()` now take the pool
-> as a parameter. Producer pools remain heap (allocated once at boot, never churn).
-> Per-instance silence buffers are likewise static (embedded in the instance struct).
+> **Output slot rings (2026-07-23; supersedes the static consumer pools).** The
+> per-slot consumer buffer pool and its per-instance silence buffer are **deleted**.
+> Each slot now owns a single static 16 KB BSS ring, `slot_ring_store[NUM_SPDIF_INSTANCES]`
+> `[PICO_AUDIO_SPDIF_RING_BYTES]` in usb_audio.c (1024 frames × 2ch × 8 B), **shared
+> by the slot's S/PDIF and I2S instances and reused across output-type switches**
+> (`_Static_assert`ed to identical I2S geometry). The rings total 4 × 16 KB on
+> RP2350 / 2 × 16 KB on RP2040, plus up to 16 KB of alignment padding (the RP2350
+> ENDLESS read-address wrap requires the ring aligned to its own size). Drained by
+> free-running DMA (see "Buffer Configuration"), the footprint stays deterministic
+> and link-time-budgeted (a BSS overflow fails the build). The producer pools remain
+> heap-resident (allocated once at boot, never churn); they still drive the writer
+> via the blocking-give connection and are retained pending the direct-write
+> follow-up that will encode into the ring without an intermediate pool.
 
 > **XIP execution model (2026-07-05).** Both platforms build binary type
 > `default` (XIP): cold code executes from flash through the XIP cache and only
@@ -2030,13 +2031,13 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead (2 rings × 240 × 4) | ~1.9 KB |
 | Per-channel preamp + master volume | ~48 B |
-| Consumer pools + silence (static, 2 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~27 KB |
+| Output slot rings (static, 2 × 16 KB, shared SPDIF/I2S) + up to 16 KB align pad | ~32-48 KB |
 | I2S RX DMA ring (1024 × 4, 4 KB aligned) | 4 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~132 KB** (measured: 134,932 B; unchanged by the XIP migration) |
+| **Total BSS** | **~140 KB** (rings replaced the ~27 KB consumer pools) |
 | RAM code+rodata+data (.data section, hot set only) | 44,376 B (was 108,692 under copy_to_ram) |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | ~80,596 B (was ~10,476 under copy_to_ram) |
+| Free RAM | ~36 KB |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -2058,7 +2059,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Per-channel preamp (8 ch) + master volume | ~120 B |
 | Matrix mixer (8 × 9 crosspoints + outputs) | ~1.3 KB |
 | Loudness tables + per-output state (2 × 61 × 2 coeffs + 9 × 16 B) | ~3 KB |
-| Consumer pools + silence (static, 4 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~55 KB |
+| Output slot rings (static, 4 × 16 KB, shared SPDIF/I2S) + up to 16 KB align pad | ~64-80 KB |
 | I2S RX DMA ring (2048 × 4, 8 KB aligned) | 8 KB |
 | ADAT RX ring (`adat_rx_ring`, 2048 × 4, 8 KB aligned) | 8 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
@@ -2066,7 +2067,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | **Total BSS** | **~346 KB** (measured 353,884 B after the stereo upmixer, + ~12.3 KB over the prior build. RP2040 unchanged: the feature is compiled out and the matrix is untouched) |
 | RAM code+rodata+data (.data section, hot set only) | 70,520 B (was 147,332 under copy_to_ram) |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | ~99,460 B (per scripts/check_ram_placement.py, includes vector table + 2 KB heap reserve accounting) |
+| Free RAM | ~71 KB (rings replaced the ~55 KB consumer pools) |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -2089,9 +2090,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 |--------|------|
 | USB packet | 44-49 samples (~1 ms at 48 kHz) |
 | S/PDIF IEC block | 192 samples (IEC 60958-1 standard) |
-| S/PDIF DMA transfer | 48 samples (1 ms at 48 kHz) |
-| S/PDIF consumer pool | 16 buffers × 48 samples per output pair |
-| S/PDIF producer pool | 8 buffers × 192 samples per output pair |
+| S/PDIF DMA transfer | Free-running (whole ring; no fixed transfer quantum) |
+| S/PDIF slot ring | 1024 frames per slot (21.3 ms at 48 kHz); target fill ~50% |
+| S/PDIF producer pool | 8 buffers × 192 samples per output pair (retained, feeds the ring writer) |
 | PDM DMA ring | 2048 words |
 | PDM sample ring | 256 entries (Core 0 → Core 1) |
 
@@ -2745,9 +2746,11 @@ Transfers the complete DSP state in a single USB control transfer (3664 bytes at
 **Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.
 
 ### Buffer Statistics
-*Last updated: 2026-03-19*
+*Last updated: 2026-07-23 (consumer pool replaced by the slot ring; stats via a 48-frames-per-bucket mapping)*
 
-Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. Producer (USB-side) pool stats are not tracked because `producer_pool_blocking_give` returns buffers synchronously — the producer pool is always fully free between USB packets.
+Real-time buffer fill level monitoring for the SPDIF slot rings (DMA-side) and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. Producer (USB-side) pool stats are not tracked because `producer_pool_blocking_give` returns buffers synchronously; the producer pool is always fully free between USB packets.
+
+**Ring-to-bucket mapping (2026-07-23).** The wire format and thresholds are unchanged: each slot's ring fill is mapped to legacy "buffer" buckets of 48 frames (a ring fill of N frames reports N/48 buckets, capped at `SPDIF_CONSUMER_BUFFER_COUNT` = 16), so `REQ_GET_BUFFER_STATS`, the fill percentages, and every prefill threshold keep byte- and semantics-compatibility with the old consumer-pool counts.
 
 **Wire format:** `BufferStatsPacket` (44 bytes, fits in a single 64-byte USB control transfer). Contains per-instance SPDIF consumer stats (`SpdifBufferStats` x4, 8 bytes each), PDM stats (`PdmBufferStats`, 8 bytes), instance count, flags (PDM active, audio streaming), and a monotonic sequence counter.
 

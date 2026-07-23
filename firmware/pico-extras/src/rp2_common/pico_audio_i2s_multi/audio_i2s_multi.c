@@ -72,22 +72,30 @@ static struct pio_program i2s_extclk_prog = {
 // All other I2S SMs run the slave program (data-only, no clock output).
 static int8_t i2s_clock_master_index = -1;
 
-// Instance registry for DMA IRQ handler
+// Instance registry (starvation getters, group ops, master election)
 static audio_i2s_instance_t *i2s_instances[PICO_AUDIO_I2S_MAX_INSTANCES];
 static uint i2s_instance_count = 0;
 
-// DMA-starvation monitoring (mirrors pico_audio_spdif_multi): counts
-// consumer-empty DMA starts (silence fallback), per instance by slot index
-// (== dma_channel, same convention as the S/PDIF library).
-static volatile bool i2s_starvation_monitor_enabled = false;
-static volatile uint32_t i2s_dma_starvations = 0;
-static volatile uint32_t i2s_dma_starvations_by_inst[PICO_AUDIO_I2S_MAX_INSTANCES] = {0};
+// Ring geometry (see the S/PDIF library's "Ring output model" comment; the
+// I2S ring is the same design with 2 words/frame and pad-pattern silence).
+// Non-zero padding in the low 8 bits of every 32-bit wire word so a DAC's
+// zero-detect mute never latches (full rationale at the encode section).
+#define I2S_PAD_PATTERN   0x01
 
-// Track whether shared IRQ handler is installed per DMA IRQ line
-static bool i2s_irq_handler_installed[2] = {false, false};
+#define I2S_RING_FRAMES   PICO_AUDIO_I2S_RING_FRAMES
+#define I2S_RING_MASK     (I2S_RING_FRAMES - 1u)
+#define I2S_RING_WORDS    (I2S_RING_FRAMES * 2u)
+#define I2S_RING_BYTES    PICO_AUDIO_I2S_RING_BYTES
+#define I2S_WRITABLE_FRAMES (I2S_RING_FRAMES - PICO_AUDIO_I2S_ERASE_AHEAD)
+_Static_assert((I2S_RING_FRAMES & (I2S_RING_FRAMES - 1)) == 0,
+               "I2S ring frame count must be a power of two");
 
-// Reference count for DMA IRQ enable/disable
-static uint8_t i2s_irq_enable_count[2] = {0, 0};
+#if !PICO_RP2350
+// Reload source word for the RP2040 free-running pair. Deliberately
+// non-const: the DMA reads it from RAM during flash blackout windows
+// where an XIP fetch would stall the ring.
+static uint32_t i2s_ring_words_const = I2S_RING_WORDS;
+#endif
 
 // ---------------------------------------------------------------------------
 // MCK generator state
@@ -109,11 +117,178 @@ static uint32_t mck_div_24_8    = 0u;      // Last computed 24.8 fixed-point
                                            // enable in this state is refused.
 
 // ---------------------------------------------------------------------------
-// Forward declarations
+// Ring accounting (same model as the S/PDIF library)
 // ---------------------------------------------------------------------------
 
-static void __isr __time_critical_func(audio_i2s_dma_irq_handler)(void);
-static void __time_critical_func(i2s_audio_start_dma_transfer)(audio_i2s_instance_t *inst);
+I2S_TIME_CRITICAL
+uint32_t audio_i2s_ring_consumed_words(audio_i2s_instance_t *inst) {
+    uint32_t save = save_and_disable_interrupts();
+    uint32_t addr = dma_channel_hw_addr(inst->dma_channel)->read_addr;
+    uint32_t delta = (addr - inst->last_read_addr) & (I2S_RING_BYTES - 1u);
+    inst->last_read_addr = addr;
+    inst->consumed_words += delta / 4u;
+    uint32_t out = inst->consumed_words;
+    restore_interrupts(save);
+    return out;
+}
+
+I2S_TIME_CRITICAL
+uint32_t audio_i2s_ring_fill_frames(audio_i2s_instance_t *inst) {
+    return inst->wr_frames - audio_i2s_ring_consumed_words(inst) / 2u;
+}
+
+void audio_i2s_ring_reset(audio_i2s_instance_t *inst) {
+    inst->wr_frames = 0;
+    inst->erased_frames = 0;
+    inst->consumed_words = 0;
+    inst->last_read_addr = (uint32_t)(uintptr_t)inst->ring;
+    inst->snap_produced_frames = 0;
+    inst->snap_consumed_frames = 0;
+    // Re-anchor the HARDWARE read pointer too: the abort left it frozen
+    // mid-ring, and any consumed/fill read before the next arm would
+    // otherwise count a bogus base-to-stale delta into consumed_words,
+    // skewing this slot's accounting (and its re-arm offset) against the
+    // others. DMA is stopped here per the contract, so the write is safe.
+    dma_channel_set_read_addr(inst->dma_channel, inst->ring, false);
+}
+
+I2S_TIME_CRITICAL
+void audio_i2s_ring_skip(audio_i2s_instance_t *inst, uint32_t frames) {
+    inst->underrun_frames += frames;
+    inst->wr_frames += frames;
+    // Restamp silence through the new margin (see the S/PDIF twin).
+    uint32_t target = inst->wr_frames + PICO_AUDIO_I2S_ERASE_AHEAD;
+    uint32_t e = inst->erased_frames;
+    if ((int32_t)(target - e) > (int32_t)I2S_RING_FRAMES) e = target - I2S_RING_FRAMES;
+    while ((int32_t)(target - e) > 0) {
+        int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
+        dst[0] = (int32_t)I2S_PAD_PATTERN;
+        dst[1] = (int32_t)I2S_PAD_PATTERN;
+        e++;
+    }
+    inst->erased_frames = e;
+}
+
+// Silence pump; see the S/PDIF twin for the contract.
+I2S_TIME_CRITICAL
+void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames) {
+    uint32_t consumed = audio_i2s_ring_consumed_words(inst) / 2u;
+    uint32_t target = consumed + I2S_RING_FRAMES;
+    uint32_t e = inst->erased_frames;
+    if ((int32_t)(e - inst->wr_frames) < 0) e = inst->wr_frames;
+    int32_t need = (int32_t)(target - e);
+    if (need <= 0) return;
+    uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
+    while (n--) {
+        int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
+        dst[0] = (int32_t)I2S_PAD_PATTERN;
+        dst[1] = (int32_t)I2S_PAD_PATTERN;
+        e++;
+    }
+    inst->erased_frames = e;
+}
+
+I2S_TIME_CRITICAL
+void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
+                              const int32_t *lr, uint32_t frames) {
+    uint32_t consumed = audio_i2s_ring_consumed_words(inst) / 2u;
+    uint32_t fill = inst->wr_frames - consumed;
+
+    // Unsigned compare also covers reader-overtook-writer: writable = 0,
+    // block dropped and counted; the DSPi give path re-anchors via skip().
+    uint32_t writable = (fill < I2S_WRITABLE_FRAMES) ? (I2S_WRITABLE_FRAMES - fill) : 0;
+    if (frames > writable) {
+        inst->drop_frames += frames - writable;
+        frames = writable;
+    }
+
+    uint32_t w = inst->wr_frames;
+    for (uint32_t i = 0; i < frames; i++) {
+        int32_t *dst = &inst->ring[(w & I2S_RING_MASK) * 2u];
+        // 24-bit audio at MSB for I2S MSB-first output; pad pattern keeps
+        // 32-bit DAC zero-detect from latching on silence.
+        dst[0] = (lr[i * 2u]      << 8) | I2S_PAD_PATTERN;
+        dst[1] = (lr[i * 2u + 1u] << 8) | I2S_PAD_PATTERN;
+        w++;
+    }
+    inst->wr_frames = w;
+
+    uint32_t e = inst->erased_frames;
+    if (e < w) e = w;
+    uint32_t target = w + PICO_AUDIO_I2S_ERASE_AHEAD;
+    while (e < target) {
+        int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
+        dst[0] = (int32_t)I2S_PAD_PATTERN;
+        dst[1] = (int32_t)I2S_PAD_PATTERN;
+        e++;
+    }
+    inst->erased_frames = e;
+
+    inst->snap_produced_frames = w;
+    inst->snap_consumed_frames = consumed;
+}
+
+// ---------------------------------------------------------------------------
+// Free-running DMA arm/stop
+// ---------------------------------------------------------------------------
+
+static void i2s_ring_dma_arm(audio_i2s_instance_t *inst) {
+    pio_sm_clear_fifos(inst->pio, inst->pio_sm);
+
+    uint32_t offset = (inst->consumed_words * 4u) & (I2S_RING_BYTES - 1u);
+    uint8_t *start = (uint8_t *)inst->ring + offset;
+    // Keep the unwrap anchor exactly in step with the address programmed
+    // below so the first consumed read after (re)arm sees a zero delta.
+    inst->last_read_addr = (uint32_t)(uintptr_t)start;
+
+    dma_channel_config c = dma_channel_get_default_config(inst->dma_channel);
+    channel_config_set_transfer_data_size(&c, DMA_SIZE_32);
+    channel_config_set_read_increment(&c, true);
+    channel_config_set_write_increment(&c, false);
+    channel_config_set_ring(&c, false, __builtin_ctz(I2S_RING_BYTES));
+    channel_config_set_dreq(&c, pio_get_dreq(inst->pio, inst->pio_sm, true));
+    channel_config_set_high_priority(&c, true);
+
+#if PICO_RP2350
+    dma_channel_set_config(inst->dma_channel, &c, false);
+    dma_channel_set_write_addr(inst->dma_channel, &inst->pio->txf[inst->pio_sm], false);
+    dma_channel_set_read_addr(inst->dma_channel, start, false);
+    dma_channel_set_trans_count(inst->dma_channel,
+                                dma_encode_endless_transfer_count(), true);
+#else
+    dma_channel_config r = dma_channel_get_default_config(inst->dma_reload_channel);
+    channel_config_set_transfer_data_size(&r, DMA_SIZE_32);
+    channel_config_set_read_increment(&r, false);
+    channel_config_set_write_increment(&r, false);
+    dma_channel_configure(inst->dma_reload_channel, &r,
+                          &dma_hw->ch[inst->dma_channel].al1_transfer_count_trig,
+                          &i2s_ring_words_const, 1, false);
+
+    channel_config_set_chain_to(&c, inst->dma_reload_channel);
+    dma_channel_set_config(inst->dma_channel, &c, false);
+    dma_channel_set_write_addr(inst->dma_channel, &inst->pio->txf[inst->pio_sm], false);
+    dma_channel_set_read_addr(inst->dma_channel, start, false);
+    dma_channel_set_trans_count(inst->dma_channel, I2S_RING_WORDS, true);
+#endif
+}
+
+static void i2s_ring_dma_stop(audio_i2s_instance_t *inst) {
+#if !PICO_RP2350
+    // Break the chain loop before aborting so the reload cannot re-arm the
+    // data channel mid-abort.
+    hw_write_masked(&dma_hw->ch[inst->dma_channel].al1_ctrl,
+                    (uint32_t)inst->dma_channel << DMA_CH0_CTRL_TRIG_CHAIN_TO_LSB,
+                    DMA_CH0_CTRL_TRIG_CHAIN_TO_BITS);
+    dma_hw->abort = (1u << inst->dma_channel) | (1u << inst->dma_reload_channel);
+    while ((dma_hw->ch[inst->dma_channel].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) ||
+           (dma_hw->ch[inst->dma_reload_channel].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS))
+        tight_loop_contents();
+#else
+    dma_channel_abort(inst->dma_channel);
+    // Leave ENDLESS mode (mirrors adat_input_stop).
+    dma_channel_hw_addr(inst->dma_channel)->transfer_count = 0;
+#endif
+}
 
 // ---------------------------------------------------------------------------
 // PIO block index helper
@@ -267,19 +442,8 @@ static void i2s_update_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample
 // Connection callbacks
 // ---------------------------------------------------------------------------
 
-I2S_TIME_CRITICAL
-static audio_buffer_t *i2s_wrap_consumer_take(audio_connection_t *connection, bool block) {
-    // Recover the instance from the embedded connection
-    audio_i2s_instance_t *inst = container_of(
-        (struct producer_pool_blocking_give_connection *)connection,
-        audio_i2s_instance_t, connection);
-
-    // Support dynamic frequency shifting
-    if (connection->producer_pool->format->sample_freq != inst->freq) {
-        i2s_update_pio_frequency(inst, connection->producer_pool->format->sample_freq);
-    }
-    return consumer_pool_take_buffer_default(connection, block);
-}
+// (Consumer-take wrapper removed: the ring path has no consumer pool; the
+// lazy rate follow lives in the producer-give wrapper.)
 
 // ---------------------------------------------------------------------------
 // I2S sample encoding: left-justify 24-bit audio into 32-bit I2S frames
@@ -302,7 +466,7 @@ static audio_buffer_t *i2s_wrap_consumer_take(audio_connection_t *connection, bo
 // minimum possible disturbance — a single LSB at bit 0 of the 32-bit frame.
 // 24-bit-configured DACs are not helped by this trick (they can't see [7:0]);
 // for them the muted-output click problem must be addressed elsewhere.
-#define I2S_PAD_PATTERN  0x01
+// (I2S_PAD_PATTERN itself is defined with the ring geometry near the top.)
 
 // The shared per-slot consumer pool sizes its data blocks to the S/PDIF stride;
 // the I2S stride must fit within that. Pin it to the real frame size here.
@@ -320,50 +484,19 @@ _Static_assert(PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES == 2 * sizeof(int32_t),
 //
 I2S_TIME_CRITICAL
 static void i2s_wrap_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
-    // Mirrors producer_pool_blocking_give(): consume producer samples into
-    // free consumer buffers, then queue completed consumer buffers to prepared.
     struct producer_pool_blocking_give_connection *pbc =
         (struct producer_pool_blocking_give_connection *)connection;
-    uint32_t pos = 0;
+    audio_i2s_instance_t *inst =
+        container_of(pbc, audio_i2s_instance_t, connection);
 
-    while (pos < buffer->sample_count) {
-        if (!pbc->current_consumer_buffer) {
-            pbc->current_consumer_buffer = get_free_audio_buffer(connection->consumer_pool, true);
-            pbc->current_consumer_buffer_pos = 0;
-        }
-
-        uint32_t in_remaining = buffer->sample_count - pos;
-        uint32_t out_remaining = pbc->current_consumer_buffer->max_sample_count -
-                                 pbc->current_consumer_buffer_pos;
-        uint32_t sample_count = in_remaining < out_remaining ? in_remaining : out_remaining;
-
-        int32_t *src = ((int32_t *)buffer->buffer->bytes) + (pos * 2);
-        int32_t *dst = ((int32_t *)pbc->current_consumer_buffer->buffer->bytes) +
-                       (pbc->current_consumer_buffer_pos * 2);
-
-        // PIO enters at the left channel slot — DMA order matches producer order (L,R).
-        // Left-shift by 8 to place 24-bit audio at MSB for I2S MSB-first output;
-        // OR I2S_PAD_PATTERN into the unused bottom 8 padding bits so the DAC's
-        // zero-detect mute (32-bit-mode) never sees an all-zero frame.
-        for (uint32_t i = 0; i < sample_count; i++) {
-            dst[i * 2]     = (src[i * 2]     << 8) | I2S_PAD_PATTERN;
-            dst[i * 2 + 1] = (src[i * 2 + 1] << 8) | I2S_PAD_PATTERN;
-        }
-
-        pos += sample_count;
-        pbc->current_consumer_buffer_pos += sample_count;
-
-        if (pbc->current_consumer_buffer_pos ==
-            pbc->current_consumer_buffer->max_sample_count) {
-            pbc->current_consumer_buffer->sample_count =
-                pbc->current_consumer_buffer->max_sample_count;
-            queue_full_audio_buffer(connection->consumer_pool,
-                                    pbc->current_consumer_buffer);
-            pbc->current_consumer_buffer = NULL;
-        }
+    // Lazy rate follow (replaces the old consumer-take hook). External-clock
+    // SMs run at divider 1.0 and are skipped inside the update.
+    if (connection->producer_pool->format->sample_freq != inst->freq) {
+        i2s_update_pio_frequency(inst, connection->producer_pool->format->sample_freq);
     }
 
-    // Return producer buffer directly to free list (avoids recursive callback).
+    audio_i2s_ring_write_s32(inst, (const int32_t *)buffer->buffer->bytes,
+                             buffer->sample_count);
     queue_free_audio_buffer(connection->producer_pool, buffer);
 }
 
@@ -385,12 +518,17 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->clock_pin_base = config->clock_pin_base;
     inst->external_clock = config->external_clock;
     inst->clock_master = config->external_clock ? false : config->clock_master;
-    inst->playing_buffer = NULL;
+    inst->dma_reload_channel = config->dma_reload_channel;
     inst->freq = 0;
     inst->enabled = false;
-    inst->words_consumed = 0;
-    inst->current_transfer_words = 0;
-    inst->consumer_pool = NULL;
+    // Stable slot identity for stats and the shared slot ring.
+    inst->instance_index = config->dma_channel;
+    assert(config->ring_base != NULL);
+    assert(((uintptr_t)config->ring_base & (I2S_RING_BYTES - 1u)) == 0);
+    inst->ring = (int32_t *)config->ring_base;
+    inst->underrun_frames = 0;
+    inst->drop_frames = 0;
+    audio_i2s_ring_reset(inst);
 
     // This instance struct may be reused across output-type switches.
     // Clear carry-over connection state so a stale staging pointer from a
@@ -475,62 +613,21 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
                inst->pio_sm, inst->data_pin);
     }
 
-    // Initialize per-instance silence buffer (DMA-sized).  Filled with the
-    // I2S_PAD_PATTERN word (audio bits zero, padding bits non-zero) so the
-    // DAC sees non-zero frames during DMA underruns and doesn't engage
-    // zero-detect mute mid-stream.
     inst->consumer_buffer_format.format = &inst->consumer_format;
-    inst->silence_buffer.sample_count = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT;
-    inst->silence_buffer.max_sample_count = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT;
-    inst->silence_buffer.format = &inst->consumer_buffer_format;
-
-    // I2S silence: 48 samples × 2 channels × 4 bytes = 384 bytes, static backing (no heap)
-    const size_t silence_bytes = sizeof(inst->silence_data);
-    inst->silence_mem.bytes = inst->silence_data;
-    inst->silence_mem.size = silence_bytes;
-    inst->silence_mem.flags = 0;
-    inst->silence_buffer.buffer = &inst->silence_mem;
-    {
-        int32_t *p = (int32_t *)inst->silence_buffer.buffer->bytes;
-        const size_t word_count = silence_bytes / sizeof(int32_t);
-        for (size_t i = 0; i < word_count; i++) {
-            p[i] = (int32_t)I2S_PAD_PATTERN;
-        }
-    }
 
     __mem_fence_release();
 
-    // DMA setup
+    // Claim DMA; configuration happens at each arm. Ensure no stale
+    // completion latch or per-channel IRQ enable survives from a prior
+    // pool-mode user of this channel.
     dma_channel_claim(inst->dma_channel);
-
-    dma_channel_config dma_config = dma_channel_get_default_config(inst->dma_channel);
-    channel_config_set_dreq(&dma_config, pio_get_dreq(inst->pio, inst->pio_sm, true));
-
-#if PICO_RP2350
-    // RP2350 requires explicit high priority for DMA to prevent audio underruns
-    channel_config_set_high_priority(&dma_config, true);
+#if !PICO_RP2350
+    dma_channel_claim(inst->dma_reload_channel);
 #endif
-
-    dma_channel_configure(inst->dma_channel,
-                          &dma_config,
-                          &inst->pio->txf[inst->pio_sm],  // dest: PIO TX FIFO
-                          NULL,   // src: set per transfer
-                          0,      // count: set per transfer
-                          false   // don't trigger yet
-    );
-
-    // Install shared IRQ handler once per DMA IRQ line
-    if (!i2s_irq_handler_installed[inst->dma_irq]) {
-        irq_add_shared_handler(DMA_IRQ_0 + inst->dma_irq, audio_i2s_dma_irq_handler,
-                               PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
-        i2s_irq_handler_installed[inst->dma_irq] = true;
-    }
-
-    // Clear any stale completion flag from prior channel users before unmasking.
+    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
     dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, 1);
 
-    // Register instance atomically against DMA IRQ iteration.
+    // Register instance.
     uint32_t save = save_and_disable_interrupts();
     i2s_instances[i2s_instance_count++] = inst;
     restore_interrupts(save);
@@ -558,44 +655,26 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
     inst->consumer_buffer_format.format = &inst->consumer_format;
     inst->consumer_buffer_format.sample_stride = 2 * sizeof(int32_t);  // 8 bytes
 
-    // Reuse the caller's pool (one static pool per slot, shared with this slot's
-    // S/PDIF instance) — re-point its buffers at the I2S format and reclaim them
-    // all to the free list. No alloc/free across output-type switches.
-    assert(consumer_pool);
-    inst->consumer_pool = consumer_pool;
-    audio_consumer_pool_reformat(consumer_pool, &inst->consumer_buffer_format,
-                                 PICO_AUDIO_I2S_DMA_SAMPLE_COUNT);
-
-    // Pre-fill all consumer buffers with I2S_PAD_PATTERN words (audio bits
-    // zero, padding bits non-zero) so the very first DMA transfers — which
-    // can run before the producer pipeline has filled them — present
-    // non-zero frames to the DAC and don't latch zero-detect mute on
-    // startup.
-    {
-        const size_t buf_words = PICO_AUDIO_I2S_DMA_SAMPLE_COUNT * 2;
-        for (audio_buffer_t *buffer = consumer_pool->free_list; buffer; buffer = buffer->next) {
-            int32_t *p = (int32_t *)buffer->buffer->bytes;
-            for (size_t i = 0; i < buf_words; i++) {
-                p[i] = (int32_t)I2S_PAD_PATTERN;
-            }
-        }
-    }
+    (void)buffer_on_give;
+    (void)consumer_pool;   // ring path: the shared static pool is unused
 
     i2s_update_pio_frequency(inst, producer->format->sample_freq);
 
     __mem_fence_release();
 
     if (!connection) {
-        printf("I2S stereo 24-bit at %d Hz\n", (int)producer->format->sample_freq);
+        printf("I2S stereo 24-bit at %d Hz (ring)\n", (int)producer->format->sample_freq);
 
-        // Initialize the embedded connection callbacks
-        inst->connection.core.consumer_pool_take = i2s_wrap_consumer_take;
-        inst->connection.core.consumer_pool_give = consumer_pool_give_buffer_default;
+        inst->connection.core.consumer_pool_take = NULL;
+        inst->connection.core.consumer_pool_give = NULL;
         inst->connection.core.producer_pool_take = producer_pool_take_buffer_default;
         inst->connection.core.producer_pool_give = i2s_wrap_producer_give;
         connection = &inst->connection.core;
     }
-    audio_complete_connection(connection, producer, inst->consumer_pool);
+    // Manual link: there is no consumer pool to complete a connection with.
+    connection->producer_pool = producer;
+    connection->consumer_pool = NULL;
+    producer->connection = connection;
     return true;
 }
 
@@ -603,59 +682,8 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
 // DMA transfer
 // ---------------------------------------------------------------------------
 
-static void __time_critical_func(i2s_audio_start_dma_transfer)(audio_i2s_instance_t *inst) {
-    assert(!inst->playing_buffer);
-    audio_buffer_t *ab = take_audio_buffer(inst->consumer_pool, false);
-
-    inst->playing_buffer = ab;
-    if (!ab) {
-        // Play silence on underrun
-        ab = &inst->silence_buffer;
-
-        if (i2s_starvation_monitor_enabled) {
-            i2s_dma_starvations++;
-            if (inst->dma_channel < PICO_AUDIO_I2S_MAX_INSTANCES) {
-                i2s_dma_starvations_by_inst[inst->dma_channel]++;
-            }
-        }
-
-        extern int overruns;
-        extern volatile bool preset_loading;
-        if (!preset_loading)
-            overruns++;
-    }
-
-    // I2S: 2 DMA words per stereo sample (1 int32 L + 1 int32 R)
-    uint32_t transfer_words = ab->sample_count * 2;
-    inst->current_transfer_words = transfer_words;
-    dma_channel_transfer_from_buffer_now(inst->dma_channel, ab->buffer->bytes, transfer_words);
-}
-
-// ---------------------------------------------------------------------------
-// DMA IRQ handler — iterates all registered I2S instances
-// ---------------------------------------------------------------------------
-
-void __isr __time_critical_func(audio_i2s_dma_irq_handler)(void) {
-    for (uint i = 0; i < i2s_instance_count; i++) {
-        audio_i2s_instance_t *inst = i2s_instances[i];
-        if (dma_irqn_get_channel_status(inst->dma_irq, inst->dma_channel)) {
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-
-            // Track total DMA words consumed (for USB feedback endpoint)
-            inst->words_consumed += inst->current_transfer_words;
-
-            // Free the buffer we just finished playing
-            if (inst->playing_buffer) {
-                extern volatile uint32_t pio_samples_dma;
-                pio_samples_dma++;
-
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-            i2s_audio_start_dma_transfer(inst);
-        }
-    }
-}
+// (Pool-mode DMA transfer starter and DMA IRQ handler removed: the ring
+// path runs free-running DMA with zero IRQs; see i2s_ring_dma_arm/stop.)
 
 // ---------------------------------------------------------------------------
 // audio_i2s_set_enabled
@@ -663,21 +691,12 @@ void __isr __time_critical_func(audio_i2s_dma_irq_handler)(void) {
 
 void audio_i2s_set_enabled(audio_i2s_instance_t *inst, bool enabled) {
     if (enabled != inst->enabled) {
-#ifndef NDEBUG
         if (enabled) {
-            puts("Enabling PIO I2S audio\n");
-            printf("(on core %d)\n", get_core_num());
-        }
-#endif
-        if (enabled) {
-            if (i2s_irq_enable_count[inst->dma_irq]++ == 0)
-                irq_set_enabled(DMA_IRQ_0 + inst->dma_irq, true);
-            i2s_audio_start_dma_transfer(inst);
+            i2s_ring_dma_arm(inst);
             pio_sm_set_enabled(inst->pio, inst->pio_sm, true);
         } else {
             pio_sm_set_enabled(inst->pio, inst->pio_sm, false);
-            if (--i2s_irq_enable_count[inst->dma_irq] == 0)
-                irq_set_enabled(DMA_IRQ_0 + inst->dma_irq, false);
+            i2s_ring_dma_stop(inst);
         }
         inst->enabled = enabled;
     }
@@ -690,17 +709,7 @@ void audio_i2s_set_enabled(audio_i2s_instance_t *inst, bool enabled) {
 void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
     assert(!inst->enabled);
 
-    // Mask DMA IRQ for this channel during reinit
-    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-
-    // Abort any stale DMA transfer
-    dma_channel_abort(inst->dma_channel);
-
-    // Return in-flight buffer to consumer pool
-    if (inst->playing_buffer != NULL) {
-        give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-        inst->playing_buffer = NULL;
-    }
+    i2s_ring_dma_stop(inst);
 
     // Release old data pin from PIO mux -> high-Z
     gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);
@@ -745,10 +754,6 @@ void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
         if (sm_mask)
             pio_clkdiv_restart_sm_mask(inst->pio, sm_mask);
     }
-
-    // Clear any stale DMA completion flag, then unmask
-    dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
 
     inst->data_pin = new_pin;
 }
@@ -799,12 +804,10 @@ uint32_t audio_i2s_enable_sync_prepare(audio_i2s_instance_t *instances[], uint c
             pio_interrupt_clear(inst->pio, AUDIO_I2S_EXTCLK_SLIP_IRQ);
     }
 
-    // Enable DMA IRQ and prime DMA for all instances
+    // Arm free-running DMA for all instances (pre-fills each PIO FIFO,
+    // then stalls on DREQ until the synchronized SM start).
     for (uint i = 0; i < count; i++) {
-        audio_i2s_instance_t *inst = instances[i];
-        if (i2s_irq_enable_count[inst->dma_irq]++ == 0)
-            irq_set_enabled(DMA_IRQ_0 + inst->dma_irq, true);
-        i2s_audio_start_dma_transfer(inst);
+        i2s_ring_dma_arm(instances[i]);
     }
 
     // All instances share one PIO block (asserted); build its SM mask
@@ -829,24 +832,34 @@ void audio_i2s_enable_sync(audio_i2s_instance_t *instances[], uint count) {
     restore_interrupts(save);
 }
 
+// Starvation API, unit change: counts are FRAMES of silence exposed to the
+// wire (ring underrun accounting, always on).
 void audio_i2s_set_starvation_monitoring(bool enabled) {
-    i2s_starvation_monitor_enabled = enabled;
+    (void)enabled;
 }
 
 void audio_i2s_reset_dma_starvations(void) {
-    i2s_dma_starvations = 0;
-    for (uint i = 0; i < PICO_AUDIO_I2S_MAX_INSTANCES; i++) {
-        i2s_dma_starvations_by_inst[i] = 0;
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        i2s_instances[i]->underrun_frames = 0;
+        i2s_instances[i]->drop_frames = 0;
     }
 }
 
 uint32_t audio_i2s_get_dma_starvations(void) {
-    return i2s_dma_starvations;
+    uint32_t total = 0;
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        total += i2s_instances[i]->underrun_frames;
+    }
+    return total;
 }
 
 uint32_t audio_i2s_get_dma_starvations_instance(uint index) {
-    if (index >= PICO_AUDIO_I2S_MAX_INSTANCES) return 0;
-    return i2s_dma_starvations_by_inst[index];
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        if (i2s_instances[i]->instance_index == index) {
+            return i2s_instances[i]->underrun_frames;
+        }
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -857,39 +870,12 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     // Disable if still running
     if (inst->enabled) {
         audio_i2s_set_enabled(inst, false);
+    } else {
+        i2s_ring_dma_stop(inst);
     }
 
-    // Mask DMA IRQ and abort
-    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-    dma_channel_abort(inst->dma_channel);
-    dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-
-    // Return in-flight buffer owned by this instance.
-    if (inst->playing_buffer != NULL) {
-        if (inst->consumer_pool != NULL) {
-            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-        }
-        inst->playing_buffer = NULL;
-    }
-
-    // Return any partially filled producer->consumer staging buffer.
-    // This pointer lives in the embedded connection object, not the DMA path,
-    // so teardown must explicitly drain it before freeing the pool.
-    if (inst->connection.current_consumer_buffer != NULL) {
-        if (inst->consumer_pool != NULL) {
-            queue_free_audio_buffer(inst->consumer_pool,
-                                    inst->connection.current_consumer_buffer);
-        }
-        inst->connection.current_consumer_buffer = NULL;
-    }
-    inst->connection.current_consumer_buffer_pos = 0;
-
-    // Break bidirectional connection links before pool free so accidental
-    // post-teardown take/give paths fail fast instead of touching freed memory.
-    if (inst->consumer_pool &&
-        inst->consumer_pool->connection == &inst->connection.core) {
-        inst->consumer_pool->connection = NULL;
-    }
+    // Break the producer connection link so accidental post-teardown give
+    // paths fail fast.
     if (inst->connection.core.producer_pool &&
         inst->connection.core.producer_pool->connection == &inst->connection.core) {
         inst->connection.core.producer_pool->connection = NULL;
@@ -901,18 +887,15 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     inst->connection.core.producer_pool = NULL;
     inst->connection.core.consumer_pool = NULL;
 
-    // The consumer pool is a caller-owned static pool shared with this slot's
-    // S/PDIF instance — do NOT free it; just detach. It is re-formatted on the
-    // next connect (output-type switch). The silence buffer is backed by static
-    // instance storage (inst->silence_mem/silence_data) — also nothing to free.
-    inst->consumer_pool = NULL;
-
     // Release data pin
     gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);
     gpio_set_dir(inst->data_pin, GPIO_IN);
 
-    // Unclaim DMA channel and PIO SM
+    // Unclaim DMA channel(s) and PIO SM
     dma_channel_unclaim(inst->dma_channel);
+#if !PICO_RP2350
+    dma_channel_unclaim(inst->dma_reload_channel);
+#endif
     pio_sm_unclaim(inst->pio, inst->pio_sm);
 
     // Remove from instance registry atomically against DMA IRQ iteration.
@@ -969,20 +952,10 @@ void audio_i2s_update_all_frequencies(uint32_t sample_freq) {
     for (uint i = 0; i < i2s_instance_count; i++) {
         audio_i2s_instance_t *inst = i2s_instances[i];
 
-        // Quiesce currently enabled instances before sync re-enable.
-        // This keeps i2s_irq_enable_count balanced: audio_i2s_enable_sync()
-        // increments the refcount, so we must pair it with a decrement here.
-        // Also abort DMA to avoid overlapping old/new transfers across restart.
+        // Quiesce currently enabled instances before sync re-enable
+        // (set_enabled(false) stops the SM and the free-running DMA).
         if (inst->enabled) {
             audio_i2s_set_enabled(inst, false);
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
             active[active_count++] = inst;
         }
 

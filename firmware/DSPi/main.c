@@ -310,41 +310,15 @@ static void i2s_input_bringup_prefill(void) {
     i2s_input_start(master);
 }
 
-// Reset an SPDIF instance's software queue state so it can restart in phase with
-// other SPDIF instances after output-type switching.
+// Reset an SPDIF instance's ring state so it can restart in phase with the
+// other output slots after a drain (DMA must already be stopped). The ring
+// reset also restarts IEC 60958 block framing from frame 0.
 static void spdif_reset_consumer_pipeline(audio_spdif_instance_t *inst) {
-    // Return any partially filled producer->consumer staging buffer.
-    if (inst->connection.current_consumer_buffer) {
-        queue_free_audio_buffer(inst->consumer_pool, inst->connection.current_consumer_buffer);
-        inst->connection.current_consumer_buffer = NULL;
-    }
-    inst->connection.current_consumer_buffer_pos = 0;
-
-    // Drain prepared buffers back to free so we don't resume with stale backlog.
-    for (;;) {
-        audio_buffer_t *ab = get_full_audio_buffer(inst->consumer_pool, false);
-        if (!ab) break;
-        queue_free_audio_buffer(inst->consumer_pool, ab);
-    }
-
-    // Restart IEC60958 block framing from position 0 on next DMA prime.
-    inst->subframe_position = 0;
+    audio_spdif_ring_reset(inst);
 }
 
 static void i2s_reset_consumer_pipeline(audio_i2s_instance_t *inst) {
-    // Return any partially filled producer->consumer staging buffer.
-    if (inst->connection.current_consumer_buffer) {
-        queue_free_audio_buffer(inst->consumer_pool, inst->connection.current_consumer_buffer);
-        inst->connection.current_consumer_buffer = NULL;
-    }
-    inst->connection.current_consumer_buffer_pos = 0;
-
-    // Drain prepared buffers back to free so we don't resume with stale backlog.
-    for (;;) {
-        audio_buffer_t *ab = get_full_audio_buffer(inst->consumer_pool, false);
-        if (!ab) break;
-        queue_free_audio_buffer(inst->consumer_pool, ab);
-    }
+    audio_i2s_ring_reset(inst);
 }
 
 // Forward declarations (defined later in this file)
@@ -393,7 +367,6 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     extern audio_i2s_instance_t *i2s_instance_ptrs[];
     extern uint8_t output_pins[];
     extern struct audio_buffer_pool *producer_pools[];
-    extern struct audio_buffer_pool *slot_consumer_pools[];  // shared per-slot static pools
     extern bool i2s_mck_enabled;
     extern uint16_t i2s_mck_multiplier;
 
@@ -445,7 +418,7 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
             if (target_types[i] != OUTPUT_TYPE_I2S) continue;
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
+            if (!inst || !inst->ring) continue;
             if (inst->external_clock != want_extclk ||
                 inst->clock_master != (i == target_master_slot) ||
                 inst->clock_pin_base != i2s_effective_bck_pin()) {
@@ -508,33 +481,16 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     // Quiesce ALL currently active outputs before any teardown/setup work.
     // Type switching can repurpose SMs/channels and master-clock ownership;
     // doing that while other slots still run DMA/PIO is unsafe and can crash.
+    // (Ring path: set_enabled(false) stops the SM and its free-running DMA.)
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (current_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
-            if (inst->enabled) {
-                audio_i2s_set_enabled(inst, false);
-            }
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            if (!inst || !inst->ring) continue;
+            if (inst->enabled) audio_i2s_set_enabled(inst, false);
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (!inst || !inst->consumer_pool) continue;
-            if (inst->enabled) {
-                audio_spdif_set_enabled(inst, false);
-            }
-            dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-            dma_channel_abort(inst->dma_channel);
-            if (inst->playing_buffer) {
-                give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-                inst->playing_buffer = NULL;
-            }
-            dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
+            if (!inst || !inst->ring) continue;
+            if (inst->enabled) audio_spdif_set_enabled(inst, false);
         }
     }
 
@@ -567,7 +523,7 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 
             if (had_i2s) {
                 audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-                if (!inst->consumer_pool || inst->clock_master != want_master ||
+                if (!inst->ring || inst->clock_master != want_master ||
                     inst->external_clock != want_extclk ||
                     inst->clock_pin_base != i2s_effective_bck_pin()) {
                     if (inst->enabled) {
@@ -586,16 +542,19 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                     // per output slot (channel index == slot index).  The
                     // outgoing S/PDIF instance released channel i in Pass 1.
                     .dma_channel = i,
+#if !PICO_RP2350
+                    .dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + i,
+#endif
                     .pio_sm = i,
                     .pio = PICO_AUDIO_SPDIF_PIO,
                     .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
                     .clock_master = want_master,
                     .external_clock = want_extclk,
+                    .ring_base = slot_ring_store[i],
                 };
                 audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
-                // Re-formats the slot's shared static consumer pool for I2S (no alloc).
                 audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
-                                        false, slot_consumer_pools[i], NULL);
+                                        false, NULL, NULL);
                 if (had_i2s) {
                     printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
                 }
@@ -608,18 +567,17 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
             audio_spdif_config_t spdif_cfg = {
                 .pin = output_pins[i],
                 .dma_channel = i,
+#if !PICO_RP2350
+                .dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + i,
+#endif
                 .pio_sm = i,
                 .pio = PICO_AUDIO_SPDIF_PIO,
                 .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
+                .ring_base = slot_ring_store[i],
             };
             audio_spdif_setup(spdif_inst, &audio_format_48k, &spdif_cfg);
-            // Re-formats the slot's shared static consumer pool back to S/PDIF
-            // (re-points buffers + re-fills IEC-60958 framing), re-wires the
-            // connection, and re-applies the current sample-rate divider via
-            // update_pio_frequency — no alloc/free. The pool was last formatted
-            // for I2S.
             audio_spdif_connect_extra(spdif_inst, producer_pools[i], false,
-                                      slot_consumer_pools[i], NULL);
+                                      NULL, NULL);
             memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
         }
     }
@@ -761,11 +719,11 @@ static void process_pin_changes(uint8_t mask) {
         if (!(mask & (1u << i))) continue;
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (inst && inst->consumer_pool && inst->data_pin != output_pins[i])
+            if (inst && inst->ring && inst->data_pin != output_pins[i])
                 audio_i2s_change_data_pin(inst, output_pins[i]);
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (inst && inst->consumer_pool && inst->pin != output_pins[i])
+            if (inst && inst->ring && inst->pin != output_pins[i])
                 audio_spdif_change_pin(inst, output_pins[i]);
         }
     }
@@ -908,59 +866,14 @@ static bool pipeline_reset_ready(void) {
     return dac_hw_mute_hold_elapsed();
 }
 
-// Per-slot teardown: stop the output PIO SM, mask the channel's DMA IRQ,
-// abort the DMA, return the playing_buffer to the consumer pool, drain the
-// consumer pipeline, then re-arm the channel IRQ.  Safe to call with main
-// interrupts ENABLED, via a layered protection chain:
-//
-//   1. audio_*_set_enabled(inst, false) halts the PIO state machine,
-//      stopping DREQ-driven DMA progress.  This is NOT the IRQ-skip
-//      gate — the shared DMA IRQ handlers in audio_spdif.c:412-442 and
-//      audio_i2s_multi.c:504-524 do NOT read inst->enabled; they gate
-//      on dma_irqn_get_channel_status() (i.e. the post-mask `ints`
-//      register).  The `enabled` flag governs whether the audio path
-//      produces into the producer pool, not whether the IRQ handler
-//      services completions.
-//
-//   2. dma_irqn_set_channel_enabled(false) masks this channel's IRQ
-//      bit in irq_ctrl[irq_index].inte.  After this point the shared
-//      handler reads dma_irqn_get_channel_status as 0 for this channel
-//      and skips it — even if the underlying raw completion bit fires.
-//      THIS is the actual race protection.
-//
-//   3. dma_channel_abort() is a HW-level stop with a busy-wait for
-//      completion.  Critically: there is a brief window between step 1
-//      (SM stop) and step 2 (IRQ mask) where the IRQ handler CAN
-//      still fire if the last DMA word completed at exactly that
-//      instant.  In that window the racing handler may have called
-//      give_audio_buffer(playing_buffer) + audio_start_dma_transfer()
-//      — populating playing_buffer again and starting a fresh DMA.
-//      The abort here kills any such re-started DMA cleanly.
-//
-//   4. The `if (inst->playing_buffer) give_audio_buffer(...)` check
-//      AFTER the abort is NOT redundant — it handles the race in (3).
-//      Removing it would leak a buffer and (on re-enable) play stale
-//      audio.  Future maintainers: do not "simplify" this.
-//
-//   5. *_reset_consumer_pipeline() drains the prepared list back to
-//      the free list.  Safe because the channel IRQ is masked (the
-//      only writer to this consumer pool from IRQ context); the spin-
-//      lock inside the pool ops is the cross-with-main-thread guard.
-//
-//   6. dma_irqn_acknowledge_channel() clears any stale `ints` bit set
-//      during the (3) race window BEFORE re-arming the line, so no
-//      spurious post-reset interrupt fires.
-//
-// Concurrent producers that DON'T race here:
-//   - USB audio class ISR (usb_audio.c:1286 → usb_audio_ring_push) only
-//     pushes to the SPSC audio_ring.  Never touches consumer pools.
-//   - USB SOF ISR (usb_audio.c:1315-1363) reads inst->words_consumed +
-//     inst->current_transfer_words; these are written only from the
-//     DMA IRQ handler.  With the channel IRQ masked, they're stable.
-//   - Core 1 is idle: prepare_pipeline_reset() spin-waited for
-//     work_done, and preset_loading=true blocks new dispatch from
-//     process_audio_packet.  PDM mode (if active) operates on its own
-//     ring/DMA and never touches output pools.
+// Per-slot teardown: stop the output PIO SM and its free-running ring DMA,
+// then reset the slot's ring accounting so the next synchronized start
+// begins at frame 0.  The elaborate pool-era race chain (IRQ mask, abort,
+// playing-buffer recovery) is gone with the DMA IRQs themselves: the ring
+// path has no IRQ handler, no consumer pool, and no in-flight buffer.  The
+// USB SOF ISR reads the DMA read pointer, which is simply frozen once the
+// DMA is stopped.  Core 1 is idle here (prepare_pipeline_reset spin-waited
+// for work_done), so nothing races the ring reset.
 static void teardown_output_slot(int slot_idx) {
     extern uint8_t output_types[];
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
@@ -968,32 +881,18 @@ static void teardown_output_slot(int slot_idx) {
 
     if (output_types[slot_idx] == OUTPUT_TYPE_I2S) {
         audio_i2s_instance_t *inst = i2s_instance_ptrs[slot_idx];
-        if (!inst || !inst->consumer_pool) return;
+        if (!inst || !inst->ring) return;
 
+        // set_enabled(false) stops the SM and the free-running ring DMA;
+        // an already-disabled instance has no DMA running.
         if (inst->enabled) audio_i2s_set_enabled(inst, false);
-        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-        dma_channel_abort(inst->dma_channel);
-        if (inst->playing_buffer) {
-            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-            inst->playing_buffer = NULL;
-        }
         i2s_reset_consumer_pipeline(inst);
-        dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
     } else {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[slot_idx];
-        if (!inst || !inst->consumer_pool) return;
+        if (!inst || !inst->ring) return;
 
         if (inst->enabled) audio_spdif_set_enabled(inst, false);
-        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-        dma_channel_abort(inst->dma_channel);
-        if (inst->playing_buffer) {
-            give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
-            inst->playing_buffer = NULL;
-        }
         spdif_reset_consumer_pipeline(inst);
-        dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
-        dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, true);
     }
 }
 
@@ -1106,10 +1005,10 @@ static void complete_pipeline_reset(void) {
         teardown_output_slot(i);
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (inst && inst->consumer_pool) i2s_sync[i2s_count++] = inst;
+            if (inst && inst->ring) i2s_sync[i2s_count++] = inst;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (inst && inst->consumer_pool) spdif_sync[spdif_count++] = inst;
+            if (inst && inst->ring) spdif_sync[spdif_count++] = inst;
         }
     }
 
@@ -1201,10 +1100,10 @@ static void enable_outputs_in_sync(void) {
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (inst && inst->consumer_pool) i2s_sync[i2s_count++] = inst;
+            if (inst && inst->ring) i2s_sync[i2s_count++] = inst;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (inst && inst->consumer_pool) spdif_sync[spdif_count++] = inst;
+            if (inst && inst->ring) spdif_sync[spdif_count++] = inst;
         }
     }
 
@@ -1328,6 +1227,12 @@ static void prepare_flash_write_operation(void) {
     if (active_input_source == INPUT_SOURCE_USB) {
         usb_audio_drain_ring();
     }
+
+    // The blackout stalls the main loop far longer than the output rings'
+    // erase-ahead margin; stamp a full ring of silence on every enabled
+    // slot so the free-running DMAs play clean silence, never stale audio,
+    // for the entire flash window.
+    output_rings_prestamp_full_silence();
 
     // For SPDIF: fully tear down the RX pipeline before the flash blackout.
     // The alternative (keeping SPDIF RX running while IRQs are disabled for
@@ -1833,6 +1738,10 @@ int main(void) {
         // generator is idle.
         siggen_service();
         siggen_pump();
+
+        // Keep enabled output rings silent ahead of the reader when no
+        // producer is running (no-op while streaming).
+        output_rings_idle_pump();
 
         // Drain USB audio ring — highest priority (only when USB is active input).
         // USB ISR pushes raw packets into the ring; we run the full DSP

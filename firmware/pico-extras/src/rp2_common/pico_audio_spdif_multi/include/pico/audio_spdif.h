@@ -94,34 +94,52 @@ extern "C" {
 /** \brief Per-instance state for an S/PDIF output
  * \ingroup audio_spdif
  */
+// Ring geometry: one encoded ring per slot replaces the consumer pool.
+// Power of 2 (hardware read-address wrap on RP2350); 1024 frames = 21.3 ms
+// at 48 kHz. The writer keeps ERASE_AHEAD frames of valid silence stamped
+// ahead of real audio so a stalled producer plays silence, never a loop of
+// stale ring content.
+#define PICO_AUDIO_SPDIF_RING_FRAMES     1024u
+#define PICO_AUDIO_SPDIF_RING_BYTES      (PICO_AUDIO_SPDIF_RING_FRAMES * 2u * 8u)
+#define PICO_AUDIO_SPDIF_ERASE_AHEAD     192u   // one IEC block of silence margin
+
 typedef struct audio_spdif_instance {
     // Hardware config (set in setup, immutable after)
     PIO pio;
     uint8_t pio_sm;
     uint8_t dma_channel;
-    uint8_t dma_irq;            // 0 or 1
+    uint8_t dma_reload_channel; // RP2040 only: free-running reload pair partner
+    uint8_t dma_irq;            // 0 or 1; kept for the shared refcount API (RX hold)
     uint8_t pin;
+    uint8_t instance_index;     // Stable slot identity (== dma_channel)
 
     // Runtime state
-    audio_buffer_t *playing_buffer;
     uint32_t freq;
     bool enabled;
 
-    // DMA word tracking for USB feedback endpoint
-    volatile uint32_t words_consumed;       // Total DMA words consumed (incremented in DMA IRQ)
-    uint32_t current_transfer_words;        // DMA word count of current transfer
-    uint8_t subframe_position;              // 0-191: position in IEC 60958-1 192-frame audio block
-    uint8_t instance_index;                 // Stable registration index (0..PICO_AUDIO_SPDIF_MAX_INSTANCES-1)
+    // Ring state. Frame counters are monotonic since the last ring reset;
+    // uint32 wrap is harmless (all consumers use differences).
+    uint32_t *ring;                     // slot ring base (caller-owned words)
+    volatile uint32_t wr_frames;        // frames of real audio written
+    uint32_t erased_frames;             // silence stamped through this total
+    volatile uint32_t underrun_frames;  // silence frames exposed to the wire
+    volatile uint32_t drop_frames;      // producer frames dropped on ring-full
 
-    // Per-instance audio pipeline
+    // Consumed-side unwrap state; mutated only inside
+    // audio_spdif_ring_consumed_words() under a brief IRQ-off section.
+    uint32_t last_read_addr;
+    volatile uint32_t consumed_words;
+
+    // Cumulative-count snapshot latched at the end of each block write:
+    // a coherent (constant-production-phase) observation pair for the
+    // clock servo, free of the block-arrival sawtooth.
+    volatile uint32_t snap_produced_frames;
+    volatile uint32_t snap_consumed_frames;
+
+    // Producer-side formats + embedded connection (kept until the direct
+    // ring-write migration removes the producer pools)
     audio_format_t consumer_format;
     audio_buffer_format_t consumer_buffer_format;
-    audio_buffer_t silence_buffer;
-    mem_buffer_t silence_mem;                   // static backing for silence_buffer (no heap)
-    uint8_t silence_data[PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT * PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES];
-    audio_buffer_pool_t *consumer_pool;         // shared per-slot static pool (assigned by caller)
-
-    // Embedded connection
     struct producer_pool_blocking_give_connection connection;
 } audio_spdif_instance_t;
 
@@ -131,9 +149,13 @@ typedef struct audio_spdif_instance {
 typedef struct audio_spdif_config {
     uint8_t pin;
     uint8_t dma_channel;
+    uint8_t dma_reload_channel; // RP2040 only: reload partner (ignored on RP2350)
     uint8_t pio_sm;
     uint8_t pio;        // PIO block index (0, 1, or 2 on RP2350)
     uint8_t dma_irq;    // DMA IRQ index (0 or 1)
+    void   *ring_base;  // caller-owned per-slot ring storage,
+                        // PICO_AUDIO_SPDIF_RING_BYTES, aligned to its size;
+                        // shared with the slot's I2S instance across retypes
 } audio_spdif_config_t;
 
 /** \brief Set up an S/PDIF audio output instance
@@ -193,6 +215,51 @@ void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin);
  * \param inst The S/PDIF instance to tear down
  */
 void audio_spdif_teardown(audio_spdif_instance_t *inst);
+
+// ---------------------------------------------------------------------------
+// Ring output API
+// ---------------------------------------------------------------------------
+
+/** \brief Encode a block of interleaved S32 L/R frames into the slot ring.
+ *
+ * Stamps IEC preamble/channel-status per frame from the absolute frame
+ * index (phase = total frames mod 192), then extends the erase-ahead
+ * silence region. Frames beyond the writable window are dropped and
+ * counted in drop_frames. Latches the cumulative produced/consumed
+ * snapshot pair on return.
+ */
+void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
+                                const int32_t *interleaved_lr, uint32_t frames);
+
+/** \brief Monotonic DMA words consumed since the last ring reset.
+ *
+ * Unwraps the DMA read pointer; must be called at least once per ring
+ * period (~21 ms), which the main loop's fill checks guarantee.
+ */
+uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst);
+
+/** \brief Frames of real audio written since the last ring reset. */
+static inline uint32_t audio_spdif_ring_produced_frames(audio_spdif_instance_t *inst) {
+    return inst->wr_frames;
+}
+
+/** \brief Current fill in frames (produced minus consumed). */
+uint32_t audio_spdif_ring_fill_frames(audio_spdif_instance_t *inst);
+
+/** \brief Reset ring pointers and accounting. DMA must be stopped. */
+void audio_spdif_ring_reset(audio_spdif_instance_t *inst);
+
+/** \brief Group re-anchor primitive: advance the write position by
+ * `frames` without writing audio (the skipped region already carries
+ * erase-ahead silence). Counted in underrun_frames. The caller applies
+ * the SAME skip to every enabled slot so inter-slot alignment holds.
+ */
+void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames);
+
+// Extend the erased (silence) region toward one full ring ahead of the
+// reader, bounded by max_frames per call. Keeps a stalled producer from
+// ever looping stale ring content; cheap no-op while streaming.
+void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_frames);
 
 /** \brief Enable multiple S/PDIF instances with synchronized PIO start
  * \ingroup audio_spdif
