@@ -221,12 +221,18 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
     uint32_t consumed = audio_i2s_ring_consumed_frames(inst);
     uint32_t fill = inst->wr_frames - consumed;
 
-    // Unsigned compare also covers reader-overtook-writer: writable = 0,
-    // block dropped and counted; the DSPi give path re-anchors via skip().
+    // All-or-nothing: a partial write would advance this slot's wr by a
+    // different amount than its peers' (live DMA positions differ by FIFO
+    // prefetch and read timing), permanently skewing alignment. The DSPi
+    // give path admits a block only when EVERY enabled slot has space, so
+    // this fallback is unreachable in normal operation. Unsigned compare
+    // also covers reader-overtook-writer (re-anchored by the give path).
     uint32_t writable = (fill < I2S_WRITABLE_FRAMES) ? (I2S_WRITABLE_FRAMES - fill) : 0;
     if (frames > writable) {
-        inst->drop_frames += frames - writable;
-        frames = writable;
+        inst->drop_frames += frames;
+        inst->snap_produced_frames = inst->wr_frames;
+        inst->snap_consumed_frames = consumed;
+        return;
     }
 
     uint32_t w = inst->wr_frames;

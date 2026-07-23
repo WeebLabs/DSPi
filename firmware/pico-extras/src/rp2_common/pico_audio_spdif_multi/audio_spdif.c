@@ -237,13 +237,18 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     uint32_t consumed = audio_spdif_ring_consumed_frames(inst);
     uint32_t fill = inst->wr_frames - consumed;
 
-    // fill > RING_FRAMES (unsigned) also covers the underrun case where the
-    // reader has overtaken the writer: writable becomes 0, the block is
-    // dropped and counted, and the DSPi give path re-anchors via skip().
+    // All-or-nothing: a partial write would advance this slot's wr by a
+    // different amount than its peers' (live DMA positions differ by FIFO
+    // prefetch and read timing), permanently skewing alignment. The DSPi
+    // give path admits a block only when EVERY enabled slot has space, so
+    // this fallback is unreachable in normal operation. Unsigned compare
+    // also covers reader-overtook-writer (re-anchored by the give path).
     uint32_t writable = (fill < WRITABLE_FRAMES) ? (WRITABLE_FRAMES - fill) : 0;
     if (frames > writable) {
-        inst->drop_frames += frames - writable;
-        frames = writable;
+        inst->drop_frames += frames;
+        inst->snap_produced_frames = inst->wr_frames;
+        inst->snap_consumed_frames = consumed;
+        return;
     }
 
     // Phase = w mod 192. Known limit: at the uint32 wrap (~24.8 h of

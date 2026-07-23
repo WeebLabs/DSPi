@@ -36,7 +36,7 @@
 #include <string.h>
 
 // Defined with the buffer statistics helpers below.
-static void output_rings_reanchor_if_needed(void);
+static bool output_rings_pre_give(uint32_t frames);
 
 // spdif0_consumer_fill is defined in usb_audio.c and read by main.c
 extern volatile uint8_t spdif0_consumer_fill;
@@ -222,6 +222,14 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 #endif
 
     update_slot0_fill_fast();
+
+    // Pre-give gate, hoisted ABOVE every output side effect (PDM pushes
+    // mid-function, slot gives and the ADAT push at the end): a rejected
+    // block must vanish from EVERY output together, PDM included, or the
+    // outputs acquire a permanent content offset. Space only grows between
+    // here and the writes, so early admission stays valid.
+    bool rings_admit = output_rings_pre_give(sample_count);
+
     // Watermark tracking is diagnostic-only; run at lower cadence to keep
     // the packet callback lean under heavy DSP/output load.
     static uint8_t watermark_div = 0;
@@ -741,9 +749,11 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             }
             global_status.peaks[CH_OUT_SUB] = (uint16_t)(fminf(1.0f, peak_sub) * 32767.0f);
             if (peak_sub > CLIP_THRESH_F) global_status.clip_flags |= (1u << CH_OUT_SUB);
-            for (uint32_t i = 0; i < sample_count; i++) {
-                int32_t pdm_sample_q28 = (int32_t)(buf_out[NUM_OUTPUT_CHANNELS-1][i] * pdm_scale);
-                pdm_push_sample(pdm_sample_q28, false);
+            if (rings_admit) {
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    int32_t pdm_sample_q28 = (int32_t)(buf_out[NUM_OUTPUT_CHANNELS-1][i] * pdm_scale);
+                    pdm_push_sample(pdm_sample_q28, false);
+                }
             }
         } else {
             global_status.peaks[CH_OUT_SUB] = 0;
@@ -1128,8 +1138,10 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             }
             global_status.peaks[CH_OUT_SUB] = (uint16_t)(peak_sub >> 13);
             if (peak_sub > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << CH_OUT_SUB);
-            for (uint32_t i = 0; i < sample_count; i++) {
-                pdm_push_sample(buf_out[pdm_out][i], false);
+            if (rings_admit) {
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    pdm_push_sample(buf_out[pdm_out][i], false);
+                }
             }
         } else {
             global_status.peaks[CH_OUT_SUB] = 0;
@@ -1151,12 +1163,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     }
 #endif
 
-    // Ring underrun recovery before the gives: if a stall let the
-    // free-running DMAs overtake the writers, re-anchor every ENABLED slot
-    // by the SAME frame count (identical skip preserves inter-slot
-    // alignment; disabled slots are re-anchored by the reset that precedes
-    // their next synchronized start).
-    output_rings_reanchor_if_needed();
+    // rings_admit was decided at the top of this function, before the PDM
+    // pushes; monotone space keeps it valid here.
 
     // Return all buffers
 #if PICO_RP2350
@@ -1165,7 +1173,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             struct audio_buffer_pool *pool = (b == 0) ? producer_pool_1 :
                                               (b == 1) ? producer_pool_2 :
                                               (b == 2) ? producer_pool_3 : producer_pool_4;
-            give_audio_buffer(pool, audio_buf[b]);
+            if (rings_admit) give_audio_buffer(pool, audio_buf[b]);
+            else queue_free_audio_buffer(pool, audio_buf[b]);
         }
     }
 
@@ -1174,11 +1183,16 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // AFTER the (blocking) gives keeps the ADAT ring lead bounded by the
     // slot-0 consumer fill; see adat_output.c.  The snapshot gate keeps the
     // push and the conversion mode consistent within the packet.
-    if (finalize_s24)
+    if (finalize_s24 && rings_admit)
         adat_output_push_block((const out_s24_t (*)[192])buf_out, sample_count);
 #else
-    if (audio_buf[0]) give_audio_buffer(producer_pool_1, audio_buf[0]);
-    if (audio_buf[1]) give_audio_buffer(producer_pool_2, audio_buf[1]);
+    if (rings_admit) {
+        if (audio_buf[0]) give_audio_buffer(producer_pool_1, audio_buf[0]);
+        if (audio_buf[1]) give_audio_buffer(producer_pool_2, audio_buf[1]);
+    } else {
+        if (audio_buf[0]) queue_free_audio_buffer(producer_pool_1, audio_buf[0]);
+        if (audio_buf[1]) queue_free_audio_buffer(producer_pool_2, audio_buf[1]);
+    }
 #endif
 
     uint32_t packet_end = time_us_32();
@@ -1203,11 +1217,16 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 // BUFFER STATISTICS HELPERS
 // ----------------------------------------------------------------------------
 
-// Ring underrun recovery (see the call site in process_audio_pipeline):
-// deficit measured against the worst enabled slot, skip rounded up to a
-// whole bucket plus one block of margin, applied identically everywhere.
+// Pre-give gate, once per block: (1) underrun recovery, deficit measured
+// against the worst enabled slot, one identical skip everywhere; then
+// (2) group admission, true only when EVERY enabled slot can accept the
+// WHOLE block. Space only grows between this check and the writes, so an
+// admitted block can never be partially written; a rejected block is
+// dropped uniformly before any ring (or the ADAT mirror) sees it, which
+// is what keeps wr_frames, and therefore alignment, identical across
+// slots at the writable cap.
 DSP_TIME_CRITICAL
-static void output_rings_reanchor_if_needed(void) {
+static bool output_rings_pre_give(uint32_t frames) {
     uint32_t max_deficit = 0;
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         int32_t deficit = 0;
@@ -1225,23 +1244,46 @@ static void output_rings_reanchor_if_needed(void) {
         if (deficit > 0 && (uint32_t)deficit > max_deficit)
             max_deficit = (uint32_t)deficit;
     }
-    if (max_deficit == 0) return;
+    if (max_deficit != 0) {
+        uint32_t skip = ((max_deficit + 192u + 47u) / 48u) * 48u;
+        for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+            if (output_types[i] == OUTPUT_TYPE_I2S) {
+                audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+                if (inst && inst->ring && inst->enabled)
+                    audio_i2s_ring_skip(inst, skip);
+            } else {
+                audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+                if (inst && inst->ring && inst->enabled)
+                    audio_spdif_ring_skip(inst, skip);
+            }
+        }
+        extern volatile int overruns;
+        extern volatile bool preset_loading;
+        if (!preset_loading) overruns++;
+    }
 
-    uint32_t skip = ((max_deficit + 192u + 47u) / 48u) * 48u;
+    // Group admission.
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        int32_t fill;
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (inst && inst->ring && inst->enabled)
-                audio_i2s_ring_skip(inst, skip);
+            if (!inst || !inst->ring || !inst->enabled) continue;
+            fill = (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_frames(inst));
+            if (fill < 0) fill = 0;
+            if ((uint32_t)fill + frames >
+                PICO_AUDIO_I2S_RING_FRAMES - PICO_AUDIO_I2S_ERASE_AHEAD)
+                return false;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (inst && inst->ring && inst->enabled)
-                audio_spdif_ring_skip(inst, skip);
+            if (!inst || !inst->ring || !inst->enabled) continue;
+            fill = (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_frames(inst));
+            if (fill < 0) fill = 0;
+            if ((uint32_t)fill + frames >
+                PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD)
+                return false;
         }
     }
-    extern volatile int overruns;
-    extern volatile bool preset_loading;
-    if (!preset_loading) overruns++;
+    return true;
 }
 
 // Idle silence pump: with outputs enabled but no producer running (USB
@@ -1254,7 +1296,7 @@ void output_rings_idle_pump(void) {
     // Re-anchor here as well as in the give path: with no gives flowing
     // (source switch, host stream stopped) the writer must still track the
     // reader, or the deficit grows without bound. No-op when fill >= 0.
-    output_rings_reanchor_if_needed();
+    (void)output_rings_pre_give(0);
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         // Signed fill: a reader-ahead deficit must ENGAGE the pump, not
         // read as a huge unsigned fill and disarm it.
