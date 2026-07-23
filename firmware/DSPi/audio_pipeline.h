@@ -45,6 +45,9 @@ extern int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 
 // Buffer statistics helpers (used by vendor_commands.c and pipeline)
 uint get_slot_consumer_fill(uint slot);
+// Sample-granular fill in buffer units (0..16) for the clock servo;
+// negative when no valid reading exists (type switch, slot not running).
+float get_slot_consumer_fill_frac(uint slot);
 void get_slot_consumer_stats(uint slot, uint *cons_free,
                              uint *cons_prepared, uint *playing);
 void reset_buffer_watermarks(void);

@@ -146,26 +146,36 @@ which by convention keeps reporting 307.2 MHz; all nominal-divider math
 everywhere stays nominal, only the physical clock moves.
 
 Fill terms (only when `fill_slot >= 0`), in ppm convention (overfull
-consumer = outputs too slow = positive ppm = speed sys_clk up). Retuned
-2026-07-22 after the first hardware capture; the original divider-servo
-gains, expressed on a continuous actuator, limit-cycled the integrator
-between its clamp rails (-15..+50 ppm, ~100 s period, ~10 ppm/s slews)
-on zero true error, and the external DAC receiver PLL unlocked on the
-slews ("fill locked at 50-56% but the DAC cuts out"). Because fill
-responds to a rate trim through an integration and is quantized to
-whole buffers, a micro limit cycle is structural; the tuning makes it
-harmless instead of pretending to remove it:
+consumer = outputs too slow = positive ppm = speed sys_clk up).
 
-- P: continuous beyond a 2-buffer deadband, 1.5 ppm per buffer beyond
-  the edge (bounded ~+-9 ppm at the fill extremes).
-- Centering integrator: accumulates only on NONZERO fill error (a
-  centred fill cannot pump it), 0.005 ppm/tick per buffer, clamp
-  +-10 ppm (bounds the cycle amplitude; also covers a few percent of
-  tune-ratio gain error against a worst-case +-100 ppm source).
-- Global slew limiter: the total command moves at most 0.5 ppm per
-  ~20 ms tick (~25 ppm/s), so output carriers never step faster than
-  downstream receiver PLLs track. `input_servo_reset()` also zeroes the
-  limiter state.
+Tuning history: the original divider-servo gains, expressed on a
+continuous actuator, limit-cycled the integrator between its clamp rails
+(-15..+50 ppm, ~10 ppm/s slews) on zero true error because the fill was
+quantized to whole buffers; the external DAC receiver PLL unlocked on
+the slews ("fill locked at 50-56% but the DAC cuts out"). A first retune
+(2026-07-22) bounded the cycle with an error-gated integrator, a
++-10 ppm clamp, and a slew limiter; hardware confirmed carrier motion
+dropped to ~0.25 ppm/s and the DAC held lock, with the bounded +-10 ppm
+wander remaining as predicted.
+
+Current form (2026-07-23): the quantizer itself was removed. Loop B
+reads `get_slot_consumer_fill_frac()`, a sample-granular fill (queued
+whole buffers plus the producer staging position plus the DMA in-flight
+remainder, in buffer units), IIR-smoothed (alpha 0.125, ~160 ms). On a
+continuous error a plain PI converges to a fixed point, so the
+integrator gate is gone and the fill centres on 8.0 exactly:
+
+- P: 2 ppm per buffer of smoothed error (correction bandwidth ~0.002
+  rad/s against the ~0.001 buffer/s-per-ppm plant at 48 kHz), plus a
+  second 4 ppm/buffer slope beyond +-2 buffers for real displacements.
+- I: 5e-5 ppm/tick per buffer (zero below the P crossover for damping),
+  clamp +-3 ppm; it only holds the static residual (estimator bias,
+  tune-ratio gain error).
+- Global slew limiter: unchanged, 0.5 ppm per ~20 ms tick (~25 ppm/s).
+  `input_servo_reset()` zeroes the limiter and integrator and re-seeds
+  the fill IIR at target.
+- An invalid fill reading (negative: type switch in progress) holds the
+  previous command for that tick instead of actuating on garbage.
 
 A guard skips the tick when `|ppm_ff| > 2000`: that only happens if a
 caller applied against the wrong pipeline rate.

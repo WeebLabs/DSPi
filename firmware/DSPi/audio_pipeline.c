@@ -31,6 +31,7 @@
 #include "pico/audio_i2s_multi.h"
 #include "hardware/timer.h"
 #include "hardware/sync.h"
+#include "hardware/dma.h"
 #include <math.h>
 #include <string.h>
 
@@ -1266,6 +1267,66 @@ uint get_slot_consumer_fill(uint slot) {
 
     if (cons_free > SPDIF_CONSUMER_BUFFER_COUNT) cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
     return SPDIF_CONSUMER_BUFFER_COUNT - cons_free;
+}
+
+// Fractional consumer fill for the clock servo, in buffer units (0..16),
+// or a negative value when no valid reading exists (type switch in
+// progress, slot not running). Refines the integer getter with the two
+// sub-buffer states it counts as whole buffers: the producer staging
+// buffer (only current_consumer_buffer_pos samples written) and the DMA
+// in-flight buffer (only the remaining transfer count still queued).
+// Reads are unsynchronized; momentary sub-buffer tearing is expected and
+// the servo's IIR absorbs it.
+DSP_TIME_CRITICAL
+float get_slot_consumer_fill_frac(uint slot) {
+    if (output_type_switch_in_progress) return -1.0f;
+
+    const float inv_buf = 1.0f / (float)PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
+    uint cons_free;
+    uint held = 0;          // buffers counted whole but only partially real
+    float frac = 0.0f;      // their fractional replacements
+    uint dma_ch, wps;
+    audio_buffer_t *staging, *playing;
+    uint32_t staging_pos;
+
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (!inst || !inst->consumer_pool) return -1.0f;
+        cons_free    = count_pool_free(inst->consumer_pool);
+        staging      = inst->connection.current_consumer_buffer;
+        staging_pos  = inst->connection.current_consumer_buffer_pos;
+        playing      = inst->playing_buffer;
+        dma_ch       = inst->dma_channel;
+        wps          = 2;   // I2S: 2 DMA words per stereo sample
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+        if (!inst || !inst->consumer_pool) return -1.0f;
+        cons_free    = count_pool_free(inst->consumer_pool);
+        staging      = inst->connection.current_consumer_buffer;
+        staging_pos  = inst->connection.current_consumer_buffer_pos;
+        playing      = inst->playing_buffer;
+        dma_ch       = inst->dma_channel;
+        wps          = 4;   // S/PDIF: 4 DMA words per stereo sample
+    }
+
+    if (staging) {
+        held++;
+        frac += (float)staging_pos * inv_buf;
+    }
+    if (playing) {
+        held++;
+        frac += (float)(dma_channel_hw_addr(dma_ch)->transfer_count / wps) * inv_buf;
+    }
+
+    if (cons_free > SPDIF_CONSUMER_BUFFER_COUNT) cons_free = SPDIF_CONSUMER_BUFFER_COUNT;
+    uint fill_whole = SPDIF_CONSUMER_BUFFER_COUNT - cons_free;
+    // Tearing guard: a buffer can move between categories mid-read.
+    if (fill_whole < held) fill_whole = held;
+
+    float fill = (float)(fill_whole - held) + frac;
+    if (fill < 0.0f) fill = 0.0f;
+    if (fill > (float)SPDIF_CONSUMER_BUFFER_COUNT) fill = (float)SPDIF_CONSUMER_BUFFER_COUNT;
+    return fill;
 }
 
 // Servo-critical: update slot-0 fill every packet with minimal work.
