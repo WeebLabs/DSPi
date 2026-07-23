@@ -1540,7 +1540,26 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
         rate_shift = 12;
     }
 
-    fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift, spdif0_consumer_fill);
+    // Loop B input: slot 0 fill from the ring's coherent snapshot pair
+    // (constant production phase, no block-arrival sawtooth), converted to
+    // Q16.16 buckets. A rare torn read against the writer's two stores
+    // overstates fill by at most one block for a single 4 ms cycle; the
+    // controller's alpha 1/16 IIR reduces that to noise.
+    uint32_t fill_frames;
+    if (output_types[0] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[0];
+        fill_frames = (inst && inst->ring)
+            ? inst->snap_produced_frames - inst->snap_consumed_frames
+            : (uint32_t)spdif0_consumer_fill * 48u;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
+        fill_frames = (inst && inst->ring)
+            ? inst->snap_produced_frames - inst->snap_consumed_frames
+            : (uint32_t)spdif0_consumer_fill * 48u;
+    }
+    if ((int32_t)fill_frames < 0) fill_frames = 0;
+    fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift,
+                       (fill_frames << 16) / 48u);
 
     if (active_input_source != INPUT_SOURCE_USB) {
         // In non-USB modes the host's stream is decorative.  Output DMA can

@@ -87,11 +87,12 @@ void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl);
 // Called every SOF (1ms). Performs 4-SOF decimated measurement and update.
 // current_total_words: sub-buffer-precise DMA word count from slot 0.
 // rate_shift: 12 for SPDIF, 13 for I2S.
-// consumer_fill: current consumer buffer fill count for slot 0 (0-16).
+// consumer_fill_q16: slot 0 fill in Q16.16 buffer units (frames * 65536
+// / 48); sample-granular, from the ring's coherent snapshot pair.
 void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
                         uint32_t current_total_words,
                         uint32_t rate_shift,
-                        uint8_t consumer_fill);
+                        uint32_t consumer_fill_q16);
 
 // Get the current feedback value as 10.14 fixed-point for the USB endpoint.
 // Returns 0 if the controller has never been reset (caller should use nominal).

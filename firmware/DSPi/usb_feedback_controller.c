@@ -56,7 +56,7 @@ FB_TIME_CRITICAL
 void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
                         uint32_t current_total_words,
                         uint32_t rate_shift,
-                        uint8_t consumer_fill) {
+                        uint32_t consumer_fill_q16) {
     if (!ctrl->stream_active || !ctrl->rate_valid)
         return;
 
@@ -99,8 +99,9 @@ void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
         ctrl->holdoff_remaining--;
     } else {
         // Fill error in Q16.16 buffer-counts for smooth IIR filtering.
-        // Positive error = overfull, negative = underfull.
-        int32_t fill_error_q16 = ((int32_t)consumer_fill - FB_FILL_TARGET) << 16;
+        // Positive error = overfull, negative = underfull. The input is
+        // already Q16.16 (sample-granular); target/gains are unchanged.
+        int32_t fill_error_q16 = (int32_t)consumer_fill_q16 - (FB_FILL_TARGET << 16);
 
         // IIR filter: same α=1/16 as rate path
         int32_t fe_delta = fill_error_q16 - ctrl->fill_error_filtered;
