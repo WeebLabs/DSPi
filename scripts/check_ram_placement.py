@@ -30,7 +30,7 @@ RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
 # rp2350 raised 64K -> 72K for the ADAT input receiver (2026-07-13): the
 # RAM-pinned decode path (adat_input_poll + rate machine + shared servo)
 # adds ~3 KB of deliberately hot code.
-DATA_BUDGET = {"rp2040": 61440, "rp2350": 73728}
+DATA_BUDGET = {"rp2040": 61440, "rp2350": 75776}  # rp2350 raised 2026-07-23 (ring migration statics)
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {

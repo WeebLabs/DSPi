@@ -1228,24 +1228,43 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 DSP_TIME_CRITICAL
 static bool output_rings_pre_give(uint32_t frames) {
     uint32_t max_deficit = 0;
+    uint32_t ref_fill = UINT32_MAX;
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         int32_t deficit = 0;
+        uint32_t prewrite_fill = UINT32_MAX;
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
             deficit = (int32_t)(audio_i2s_ring_consumed_frames(inst)
                                 - inst->wr_frames);
+            prewrite_fill = inst->recovery_prewrite_fill_frames;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
             deficit = (int32_t)(audio_spdif_ring_consumed_frames(inst)
                                 - inst->wr_frames);
+            prewrite_fill = inst->recovery_prewrite_fill_frames;
         }
-        if (deficit > 0 && (uint32_t)deficit > max_deficit)
+        if (deficit > 0 && (uint32_t)deficit > max_deficit) {
             max_deficit = (uint32_t)deficit;
+            ref_fill = prewrite_fill;
+        }
     }
     if (max_deficit != 0) {
-        uint32_t skip = ((max_deficit + 192u + 47u) / 48u) * 48u;
+        // Sample-exact PDM/slot recovery. PDM plays the final successful
+        // block as real audio before it starts inserting zeros. Each ring
+        // writer therefore snapshots its fill BEFORE that block; deficit +
+        // pre-write fill is exactly the missing-source interval. Using the
+        // servo's post-write snapshot here would include the final real block
+        // and shift PDM against every slot by that block's frame count.
+        // No bucket rounding: recovery is exact for every input block size.
+        if (ref_fill == UINT32_MAX ||
+            ref_fill > PICO_AUDIO_SPDIF_RING_FRAMES) {
+            // No successful content since reset (or corrupt snapshot): there
+            // is no established PDM/content mapping to preserve.
+            ref_fill = 8u * 48u;
+        }
+        uint32_t skip = max_deficit + ref_fill;
         for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
             if (output_types[i] == OUTPUT_TYPE_I2S) {
                 audio_i2s_instance_t *inst = i2s_instance_ptrs[i];

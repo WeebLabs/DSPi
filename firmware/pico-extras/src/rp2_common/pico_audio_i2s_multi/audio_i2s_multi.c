@@ -39,6 +39,7 @@
 #include "hardware/irq.h"
 #include "hardware/clocks.h"   // CLK_GPOUTn config + clock_gpio_init_int_frac8()
 #include "hardware/sync.h"
+#include "pico/time.h"
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -123,10 +124,29 @@ static uint32_t mck_div_24_8    = 0u;      // Last computed 24.8 fixed-point
 I2S_TIME_CRITICAL
 uint32_t audio_i2s_ring_consumed_words(audio_i2s_instance_t *inst) {
     uint32_t save = save_and_disable_interrupts();
+    uint32_t now = time_us_32();
     uint32_t addr = dma_channel_hw_addr(inst->dma_channel)->read_addr;
     uint32_t delta = (addr - inst->last_read_addr) & (I2S_RING_BYTES - 1u);
     inst->last_read_addr = addr;
+    uint32_t elapsed_us = now - inst->last_read_time_us;
+    inst->last_read_time_us = now;
     uint32_t words = delta / 4u;
+    // The address supplies the exact in-ring remainder; elapsed time only
+    // selects complete laps missed during a long main-loop/flash blackout.
+    // SM bit too: between enable_sync_prepare and the gated mask start
+    // (external LRCLK gate in I2S clock-slave mode) enabled is true while
+    // nothing consumes; elapsed time must not inject phantom laps there.
+    if (inst->enabled && inst->freq != 0 &&
+        (inst->pio->ctrl & (1u << inst->pio_sm))) {
+        uint64_t expected_words =
+            ((uint64_t)elapsed_us * inst->freq * 2u + 500000u) / 1000000u;
+        if (expected_words > words) {
+            uint64_t missing = expected_words - words;
+            uint32_t laps = (uint32_t)((missing + I2S_RING_WORDS / 2u) /
+                                       I2S_RING_WORDS);
+            words += laps * I2S_RING_WORDS;
+        }
+    }
     inst->consumed_words += words;
     // Frames-native counter: wraps at 2^32 FRAMES, coherent with wr_frames.
     // consumed_words divided down would wrap at 2^31 frames and desync
@@ -163,8 +183,10 @@ void audio_i2s_ring_reset(audio_i2s_instance_t *inst) {
     inst->consumed_frames = 0;
     inst->consumed_word_rem = 0;
     inst->last_read_addr = (uint32_t)(uintptr_t)inst->ring;
+    inst->last_read_time_us = time_us_32();
     inst->snap_produced_frames = 0;
     inst->snap_consumed_frames = 0;
+    inst->recovery_prewrite_fill_frames = UINT32_MAX;
     // Re-anchor the HARDWARE read pointer too: the abort left it frozen
     // mid-ring, and any consumed/fill read before the next arm would
     // otherwise count a bogus base-to-stale delta into consumed_words,
@@ -258,6 +280,11 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
     }
     inst->erased_frames = e;
 
+    // Recovery needs the fill before THIS block, not the post-write servo
+    // snapshot below. The just-written frames remain real audio ahead of
+    // PDM's first inserted zero and must not be counted as recovery silence.
+    inst->recovery_prewrite_fill_frames = fill;
+
     inst->snap_produced_frames = w;
     inst->snap_consumed_frames = consumed;
 }
@@ -274,6 +301,7 @@ static void i2s_ring_dma_arm(audio_i2s_instance_t *inst) {
     // Keep the unwrap anchor exactly in step with the address programmed
     // below so the first consumed read after (re)arm sees a zero delta.
     inst->last_read_addr = (uint32_t)(uintptr_t)start;
+    inst->last_read_time_us = time_us_32();
 
     dma_channel_config c = dma_channel_get_default_config(inst->dma_channel);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32);

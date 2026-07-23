@@ -20,6 +20,7 @@
 #include "hardware/irq.h"
 #include "hardware/clocks.h"
 #include "hardware/sync.h"
+#include "pico/time.h"
 
 // ---------------------------------------------------------------------------
 // Ring output model
@@ -126,16 +127,32 @@ static inline void stamp_frame(spdif_subframe_t *p, uint phase,
 
 SPDIF_TIME_CRITICAL
 uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
-    // Forward-unwrap the DMA read pointer. Correct as long as calls are no
-    // further apart than one ring period (~21 ms); the main loop's fill
-    // checks guarantee that while producing. A longer gap under-counts by
-    // whole ring multiples, which is benign: playback position is masked,
-    // the re-anchor deficit errs small, and every reset re-zeroes it.
+    // Forward-unwrap the DMA read pointer. The address gives the exact
+    // remainder modulo one ring. Elapsed time is used only to select how many
+    // complete laps occurred, so a flash blackout can span multiple rings
+    // without losing whole laps from the PDM/slot recovery interval.
     uint32_t save = save_and_disable_interrupts();
+    uint32_t now = time_us_32();
     uint32_t addr = dma_channel_hw_addr(inst->dma_channel)->read_addr;
     uint32_t delta = (addr - inst->last_read_addr) & (RING_BYTES - 1u);
     inst->last_read_addr = addr;
+    uint32_t elapsed_us = now - inst->last_read_time_us;
+    inst->last_read_time_us = now;
     uint32_t words = delta / 4u;
+    // SM bit too: between enable_sync_prepare and the gated mask start
+    // (external LRCLK gate in I2S clock-slave mode) enabled is true while
+    // nothing consumes; elapsed time must not inject phantom laps there.
+    if (inst->enabled && inst->freq != 0 &&
+        (inst->pio->ctrl & (1u << inst->pio_sm))) {
+        uint64_t expected_words =
+            ((uint64_t)elapsed_us * inst->freq * 4u + 500000u) / 1000000u;
+        if (expected_words > words) {
+            uint64_t missing = expected_words - words;
+            uint32_t laps = (uint32_t)((missing + RING_WORDS / 2u) /
+                                       RING_WORDS);
+            words += laps * RING_WORDS;
+        }
+    }
     inst->consumed_words += words;
     // Frames-native counter: wraps at 2^32 FRAMES, coherent with wr_frames.
     // consumed_words divided down would wrap at 2^30 frames and desync
@@ -173,8 +190,10 @@ void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     inst->consumed_frames = 0;
     inst->consumed_word_rem = 0;
     inst->last_read_addr = (uint32_t)(uintptr_t)inst->ring;
+    inst->last_read_time_us = time_us_32();
     inst->snap_produced_frames = 0;
     inst->snap_consumed_frames = 0;
+    inst->recovery_prewrite_fill_frames = UINT32_MAX;
     // Re-anchor the HARDWARE read pointer too: the abort left it frozen
     // mid-ring, and any consumed/fill read before the next arm would
     // otherwise count a bogus base-to-stale delta into consumed_words,
@@ -274,6 +293,12 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     }
     inst->erased_frames = e;
 
+    // Recovery needs the fill before THIS block, not the post-write servo
+    // snapshot below. If the producer stalls, these `frames` remain real
+    // audio ahead of PDM's first inserted zero; counting them as silence
+    // would move the slot timeline by one block.
+    inst->recovery_prewrite_fill_frames = fill;
+
     // Latch the coherent produced/consumed pair (constant production phase;
     // the clock servo's cumulative-count observable).
     inst->snap_produced_frames = w;
@@ -294,6 +319,7 @@ static void ring_dma_arm(audio_spdif_instance_t *inst) {
     // Keep the unwrap anchor exactly in step with the address programmed
     // below so the first consumed read after (re)arm sees a zero delta.
     inst->last_read_addr = (uint32_t)(uintptr_t)start;
+    inst->last_read_time_us = time_us_32();
 
     dma_channel_config c = dma_channel_get_default_config(inst->dma_channel);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_32);

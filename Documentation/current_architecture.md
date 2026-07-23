@@ -889,7 +889,7 @@ S/PDIF outputs share PIO0, each using one state machine. RP2350 has 4 instances;
 2-instruction NRZI encoder running on PIO0. Clock divider automatically adjusted for 44.1/48/96 kHz.
 
 ### Instance State
-*Last updated: 2026-07-23*
+*Last updated: 2026-07-23 (pre-write recovery fill snapshot added)*
 
 ```c
 typedef struct audio_spdif_instance {
@@ -902,14 +902,16 @@ typedef struct audio_spdif_instance {
     volatile uint32_t underrun_frames;  // silence frames exposed to the wire
     volatile uint32_t drop_frames;      // producer frames dropped on ring-full
     uint32_t last_read_addr;            // consumed-side unwrap state
+    uint32_t last_read_time_us;          // whole-lap selector for long polls
     volatile uint32_t consumed_words;
     volatile uint32_t snap_produced_frames, snap_consumed_frames;  // servo snapshot
+    volatile uint32_t recovery_prewrite_fill_frames;  // UINT32_MAX until first write
     // ... producer format + embedded connection (retained pending direct write)
 } audio_spdif_instance_t;
 ```
 
 ### Buffer Configuration
-*Last updated: 2026-07-23*
+*Last updated: 2026-07-23 (PDM/slot recovery made block-size exact)*
 
 The consumer buffer pool is gone. Each slot now drains a single **encoded ring** filled by the writer and read by a free-running DMA with **zero output IRQs**:
 
@@ -917,8 +919,8 @@ The consumer buffer pool is gone. Each slot now drains a single **encoded ring**
 - The writer encodes directly into the ring at give time (`audio_spdif_ring_write_s32`), stamping IEC preamble and channel-status per frame from the absolute frame index; the producer pools are retained for now (the blocking-give connection still drives the writer) pending a direct-write follow-up.
 - Erase-ahead silence margin: the writer keeps `PICO_AUDIO_SPDIF_ERASE_AHEAD` = 192 frames (one IEC block) of valid silence stamped ahead of real audio, so a stalled producer plays silence rather than a loop of stale ring content.
 - Free-running DMA: **ENDLESS** transfer count with hardware read-address wrap on RP2350 (power-of-two ring, no reload channel); on RP2040 a data + reload channel pair (`dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + slot`, base 6) rewrites the read address at the ring end. No DMA completes, so there is no output DMA IRQ on either platform.
-- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter now returns that snapshot difference (cumulative-count differencing). The USB feedback loop instead consumes the unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). Fill target and prefill thresholds are unchanged in semantics; `REQ_GET_BUFFER_STATS` and the prefill checks keep byte/semantics compatibility via a 48-frames-per-bucket mapping (a ring fill of N frames maps to N/48 legacy "buffers").
-- **Underrun recovery** is a group re-anchor: `output_rings_reanchor_if_needed()` (audio_pipeline.c) applies an identical `*_ring_skip()` to every enabled slot, so inter-slot sample alignment is preserved exactly across an underrun. The starvation counters (`audio_spdif_get_dma_starvations_instance()` / I2S mirror) now return frames of silence exposed to the wire, not silence-buffer DMA starts.
+- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. The DMA address supplies the exact position modulo the 1,024-frame ring; for calls separated by more than one lap, elapsed microseconds and the configured sample rate select the nearest whole-lap count, so the ~45 ms flash blackout cannot disappear from recovery accounting. Time is only the lap selector; the hardware pointer remains the sample-granular remainder. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter returns that snapshot difference (cumulative-count differencing). A separate `recovery_prewrite_fill_frames` snapshot captures fill immediately **before** each successful write (`UINT32_MAX` until the first write after reset). The separation is load-bearing: the servo wants post-write fill, while underrun recovery must exclude the final real block that PDM consumes before inserting zeros. The USB feedback loop consumes the same unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). Fill target and prefill thresholds are unchanged in semantics; `REQ_GET_BUFFER_STATS` and the prefill checks keep byte/semantics compatibility via a 48-frames-per-bucket mapping (a ring fill of N frames maps to N/48 legacy "buffers").
+- **Underrun recovery** is a group re-anchor: `output_rings_pre_give()` (audio_pipeline.c) selects the worst enabled slot and applies one identical `*_ring_skip()` to every enabled slot, so inter-slot sample alignment is preserved exactly. Its skip is `deficit + recovery_prewrite_fill_frames`, with no bucket rounding. Algebraically this is the missing-source interval after the final successfully written block; it therefore equals the number of zeros PDM inserts after draining that same real block, preserving PDM-to-slot content alignment for arbitrary block sizes. A valid zero pre-write fill remains distinguishable from the reset sentinel. The starvation counters (`audio_spdif_get_dma_starvations_instance()` / I2S mirror) return frames of silence exposed to the wire, not silence-buffer DMA starts.
 Since 2026-07-23 each per-slot record also carries `fill_centi_pct` (uint16, formerly the two pad bytes): sample-granular fill in 0.01% units of the same 16-bucket scale (5000 = 50.00%; values above 10000 are legal, the ring holds more than the legacy capacity). Older firmware reports 0 in this field; the coarse bucket fields are unchanged, so existing Console builds keep working.
 
 ### IEC 60958-1 Block Phase
@@ -1848,7 +1850,7 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-07-23 (output slot rings replace the static consumer pools; producer pools still heap-resident)*
+*Last updated: 2026-07-23 (output-ring recovery snapshots added)*
 
 > **Soft VCXO (2026-07-22).** The clock-servo overhaul adds a negligible
 > footprint: ~24 bytes of `.data` statics (the `fbdivs[]` excursion/nominal pair
@@ -1929,7 +1931,11 @@ masked, and PDM claims its channel once at init.
 > and link-time-budgeted (a BSS overflow fails the build). The producer pools remain
 > heap-resident (allocated once at boot, never churn); they still drive the writer
 > via the blocking-give connection and are retained pending the direct-write
-> follow-up that will encode into the ring without an intermediate pool.
+> follow-up that will encode into the ring without an intermediate pool. Each
+> statically allocated S/PDIF and I2S instance now also carries a 4-byte
+> `recovery_prewrite_fill_frames` snapshot and a 4-byte `last_read_time_us`
+> whole-lap anchor: +32 B BSS on RP2040 (two instances of each type) and +64 B
+> on RP2350 (four instances of each type).
 
 > **XIP execution model (2026-07-05).** Both platforms build binary type
 > `default` (XIP): cold code executes from flash through the XIP cache and only

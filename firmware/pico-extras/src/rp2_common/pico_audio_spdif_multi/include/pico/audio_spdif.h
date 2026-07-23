@@ -128,6 +128,7 @@ typedef struct audio_spdif_instance {
     // Consumed-side unwrap state; mutated only inside
     // audio_spdif_ring_consumed_words() under a brief IRQ-off section.
     uint32_t last_read_addr;
+    uint32_t last_read_time_us;          // selects whole laps across long polls
     volatile uint32_t consumed_words;   // words; USB feedback only
     volatile uint32_t consumed_frames;  // frames; ALL fill/deficit math
     uint8_t consumed_word_rem;          // mid-frame carry between reads
@@ -137,6 +138,9 @@ typedef struct audio_spdif_instance {
     // clock servo, free of the block-arrival sawtooth.
     volatile uint32_t snap_produced_frames;
     volatile uint32_t snap_consumed_frames;
+    // Fill immediately before the most recent successful block write.
+    // UINT32_MAX means no successful write has occurred since ring reset.
+    volatile uint32_t recovery_prewrite_fill_frames;
 
     // Producer-side formats + embedded connection (kept until the direct
     // ring-write migration removes the producer pools)
@@ -235,8 +239,8 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
 
 /** \brief Monotonic DMA words consumed since the last ring reset.
  *
- * Unwraps the DMA read pointer; must be called at least once per ring
- * period (~21 ms), which the main loop's fill checks guarantee.
+ * Unwraps the DMA read pointer. Elapsed time selects any whole ring laps
+ * between calls; the hardware pointer supplies the exact in-ring remainder.
  */
 uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst);
 
