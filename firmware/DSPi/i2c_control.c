@@ -411,6 +411,14 @@ uint8_t i2c_ctrl_apply(const I2cCtrlConfig *cfg) {
 // Returns the validation status so boot code can record it for
 // REQ_GET_CTRL_IFACE_STATUS.  On failure the interface stays down but keeps
 // its stored config; the status command exposes live=false to the host.
+// Re-derive the I2C timing counts after a sys-clock switch: the IP counts
+// HCNT/LCNT/hold/filter in clk_sys cycles, so they go stale by up to 1.56x.
+// As a target we follow the controller's SCL, but the counts still gate
+// hold times and glitch filtering.
+void i2c_ctrl_reclock(void) {
+    if (live && inst) i2c_set_baudrate(inst, 400 * 1000);
+}
+
 uint8_t i2c_ctrl_init(const I2cCtrlConfig *cfg) {
     live = false;
     if (!cfg) return PIN_CONFIG_INVALID_PARAM;

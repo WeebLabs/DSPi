@@ -36,6 +36,7 @@
 #include "upmix.h"
 #include "adat_output.h"
 #include "adat_input.h"
+#include "sys_clock.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "usb_descriptors.h"
 #include "tusb.h"
@@ -1189,6 +1190,25 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
                 __dmb();
                 flash_set_master_volume_mode_pending = true;
             }
+            break;
+        }
+
+        case REQ_SET_SYS_CLOCK: {
+            // Payload: {mode, vreg_sel}.  Rejected outright (STALL) on a bad
+            // mode or a voltage outside the safe 0.85-1.30 V window; 0xFF asks
+            // for the mode's default.  Deferred to the main loop, which owns
+            // the audio teardown, the PLL switch, and the flash write.
+            if (buffer->data_len < 2) { handled = false; break; }
+            uint8_t m = vendor_rx_buf[0];
+            uint8_t v = vendor_rx_buf[1];
+            if (!sys_clock_mode_valid(m) || !sys_clock_vreg_valid(m, v)) {
+                handled = false;
+                break;
+            }
+            sys_clock_req_mode = m;
+            sys_clock_req_vreg = v;
+            __dmb();
+            sys_clock_set_pending = true;
             break;
         }
 
@@ -3481,6 +3501,23 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 static LgSoundSyncStatus status;
                 lg_sound_sync_get_status(&status);
                 vendor_send_response(&status, sizeof(status));
+                return true;
+            }
+
+            case REQ_GET_SYS_CLOCK: {
+                /* 8 bytes: active mode, stored mode, stored vreg_sel (raw,
+                 * 0xFF = "mode default"), the live vreg enum, and the
+                 * boot-fallback flag.  Active and stored differ exactly when a
+                 * fallback boot or an unconfirmed runtime switch is in force. */
+                uint8_t stored_mode = 0, stored_vreg = 0xFF;
+                preset_get_sys_clock(&stored_mode, &stored_vreg);
+                memset(resp_buf, 0, 8);
+                resp_buf[0] = (uint8_t)sys_clock_active_mode();
+                resp_buf[1] = stored_mode;
+                resp_buf[2] = stored_vreg;
+                resp_buf[3] = (uint8_t)vreg_get_voltage();
+                resp_buf[4] = sys_clock_fallback_active() ? 1 : 0;
+                vendor_send_response(resp_buf, 8);
                 return true;
             }
 

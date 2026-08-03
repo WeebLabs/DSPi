@@ -14,6 +14,7 @@
 #include "audio_input.h"
 #include "audio_pipeline.h"
 #include "config.h"
+#include "audio_clock_div.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
 #include "spdif_rx.h"
@@ -123,15 +124,11 @@ static void __not_in_flash_func(on_lost_stable_callback)(void) {
 static uint32_t spdif_tx_base_divider = 0;  // sys_clk / sample_freq
 static uint32_t i2s_tx_base_divider = 0;    // sys_clk * 2 / sample_freq
 
-// Compute and cache the base dividers for all output types at a given sample rate.
+// Compute and cache the base dividers for all output types at a given sample
+// rate; identical derivation to the TX libraries (audio_clock_div.h).
 static void servo_cache_base_dividers(uint32_t sample_freq) {
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-    // SPDIF TX: divider = sys_clk / sample_freq (16.8 fixed-point)
-    spdif_tx_base_divider = sys_clk / sample_freq +
-                            (sys_clk % sample_freq != 0);
-    // I2S TX: divider = sys_clk * 2 / sample_freq (ceiling division, matches I2S library)
-    uint64_t i2s_num = (uint64_t)sys_clk * 2;
-    i2s_tx_base_divider = (uint32_t)((i2s_num + sample_freq - 1) / sample_freq);
+    spdif_tx_base_divider = audio_base_divider_16_8(sample_freq);
+    i2s_tx_base_divider = spdif_tx_base_divider * 2u;
 }
 
 // ============================================================================

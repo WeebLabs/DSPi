@@ -9,7 +9,6 @@
 #include "pico/multicore.h"
 #include "pico/unique_id.h"
 #include "hardware/watchdog.h"
-#include "hardware/vreg.h"
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
@@ -28,6 +27,7 @@
 #include "crossover.h"
 #include "flash_clkdiv.h"
 #include "flash_storage.h"
+#include "sys_clock.h"
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "adat_input.h"
@@ -181,11 +181,10 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     // recompute handlers, REQ_GET_STATUS) reads audio_state.freq.
     audio_state.freq = new_freq;
 
-#if PICO_RP2350
-    // RP2350: 307.2MHz fixed (VCO 1536 / 5 / 1) — no clock switching
-#else
-    // RP2040: 307.2MHz fixed (VCO 1536 / 5 / 1) — no clock switching
-#endif
+    // sys_clk is not retuned per sample rate on either platform; every
+    // selectable mode yields exact 8.8 output dividers for the 48k family
+    // and a coherent shared-base divider otherwise (see audio_clock_div.h).
+
     // Reset sync
     extern volatile bool sync_started;
     extern volatile uint64_t total_samples_produced;
@@ -1660,25 +1659,12 @@ void core0_init() {
         fpscr |= (1 << 24) | (1 << 25);  // FZ + DN bits
         __asm__ volatile("vmsr fpscr, %0" : : "r"(fpscr));
     }
-
-    // RP2350: 307.2MHz (VCO 1536 / 5 / 1) — integer SPDIF/I2S dividers at 48kHz
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
-    busy_wait_ms(10);
-
-    if (!set_sys_clock_hz(307200000, false)) {
-        set_sys_clock_hz(150000000, false);
-    }
-
-    // Drop flash clock from ROM default (~102 MHz) to sys_clk/6 ≈ 51.2 MHz
-    // for parity with RP2040.  Subsequent flash ops go through the wrappers
-    // in flash_clkdiv.c which restore this after each erase/program.
-    dspi_flash_apply_clkdiv();
-#else
-    vreg_set_voltage(VREG_VOLTAGE_1_15);
-    busy_wait_ms(10);
-    // 307.2MHz -> VCO 1536 MHz / 5 / 1 — integer SPDIF/I2S dividers at 48kHz
-    set_sys_clock_pll(1536000000, 5, 1);
 #endif
+
+    // Selectable sys_clk (307.2 / 384 / 480 MHz), vreg sequencing, flash
+    // divider, and the crash-fallback breadcrumb.  Must precede every PIO/DMA
+    // divider claim below; sys_clock_boot_confirm() disarms it from the main loop.
+    sys_clock_boot_init();
 
     gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);
 
@@ -1936,18 +1922,21 @@ int main(void) {
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
     gpio_put(25, 1);
 
-#if !PICO_RP2350
-    set_sys_clock_pll(1536000000, 4, 2);
-#endif
+    // Watchdog BEFORE core0_init: the sys-clock crash-fallback breadcrumb only
+    // works if a hang anywhere in boot (XIP reads, USB init, preset load) still
+    // reboots.  8 s dwarfs the worst boot path incl. a directory migration.
+    watchdog_enable(8000, 1);
 
     core0_init();
-
-    // Enable watchdog
-    watchdog_enable(8000, 1);
 
     while (1) {
         // Update watchdog
         watchdog_update();
+
+        // Disarms the sys-clock fallback breadcrumb after several seconds of
+        // proven main-loop uptime (not on the first iteration; overclock
+        // failures surface under enumeration and DSP load, not at boot).
+        sys_clock_confirm_tick();
 
         // TinyUSB device task — processes enumeration, control transfers, and
         // deferred bus events.  Must be called at least once per main-loop
@@ -2467,6 +2456,75 @@ int main(void) {
                 dac_hw_mute_test_pending = false;
                 restore_interrupts(f);
                 (void)dac_hw_mute_test_start();
+            }
+
+            // Deferred sys clock / core voltage switch (REQ_SET_SYS_CLOCK).
+            if (sys_clock_set_pending) {
+                uint8_t sc_mode, sc_vreg;
+                uint32_t f = save_and_disable_interrupts();
+                sc_mode = sys_clock_req_mode;
+                sc_vreg = sys_clock_req_vreg;
+                sys_clock_set_pending = false;
+                restore_interrupts(f);
+
+                if ((SysClockMode)sc_mode == sys_clock_active_mode()) {
+                    // Voltage-only: the flash bracket frames just the
+                    // directory write; the vreg step itself is glitch-free
+                    // and applied with audio running.  The confirm tick
+                    // disarms the breadcrumb after the proving window.
+                    prepare_flash_write_operation();
+                    preset_set_sys_clock(sc_mode, sc_vreg);
+                    complete_flash_write_operation_full();
+                    sys_clock_apply_vreg_only(sc_vreg);
+                } else {
+                    // Full switch under one blackout: directory write, vreg/PLL
+                    // step, nominal divider rebuild for every output slot, then
+                    // the synchronized restart.  Persist BEFORE the PLL step: a
+                    // crash mid-switch reboots into the stored mode with the
+                    // breadcrumb armed, which is exactly the boot-fallback path.
+                    prepare_flash_write_operation();
+#if PICO_RP2350
+                    // ADAT RX decodes against a sys-derived divider and cell
+                    // count; stop it across the step so start() retunes both.
+                    bool adat_in_active = (active_input_source == INPUT_SOURCE_ADAT);
+                    if (adat_in_active) adat_input_stop();
+#endif
+                    preset_set_sys_clock(sc_mode, sc_vreg);
+                    sys_clock_apply((SysClockMode)sc_mode, sc_vreg);
+
+                    // Nominal dividers at the new sys clock; mirrors
+                    // perform_rate_change's divider block (rate unchanged).
+                    uint32_t sc_freq = audio_state.freq;
+                    audio_i2s_update_all_frequencies(sc_freq);
+                    restore_nominal_spdif_dividers(sc_freq);
+                    {
+                        extern bool i2s_mck_enabled;
+                        extern uint16_t i2s_mck_multiplier;
+                        if (i2s_mck_enabled) {
+                            audio_i2s_mck_update_frequency(sc_freq, i2s_mck_multiplier);
+                        }
+                    }
+                    pdm_update_clock(sc_freq);
+#if PICO_RP2350
+                    // Recomputes adat_nom_div and applies it live; the later
+                    // resync (complete_pipeline_reset or the prefill's
+                    // enable_outputs_in_sync) re-anchors alignment.
+                    adat_output_on_rate_change(sc_freq);
+                    if (adat_in_active) adat_input_start();
+#endif
+                    // The I2C target IP derives its timing counts from
+                    // clk_sys; UART runs from the 48 MHz USB PLL and is safe.
+                    i2c_ctrl_reclock();
+
+                    // Restarts SPDIF RX / I2S input (their dividers are set at
+                    // program init) and restores outputs in sync.  Under SPDIF
+                    // input this returns early with outputs muted; the lock
+                    // prefill's enable_outputs_in_sync() is what realigns all
+                    // slots at the new clock before any audio plays.  The
+                    // confirm tick disarms the breadcrumb after the proving
+                    // window.
+                    complete_flash_write_operation_full();
+                }
             }
         }
 

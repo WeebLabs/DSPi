@@ -19,6 +19,7 @@
 #include "hardware/irq.h"
 #include "hardware/clocks.h"
 #include "hardware/sync.h"
+#include "audio_clock_div.h"
 
 
 CU_REGISTER_DEBUG_PINS(audio_timing)
@@ -255,8 +256,10 @@ static void update_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_f
     uint32_t system_clock_frequency = clock_get_hz(clk_sys);
     assert(system_clock_frequency < 0x40000000);
 
-    // ceil the divider (gets us a closer hit to 44100 at 176.57142857142858 MHz)
-    uint32_t divider = system_clock_frequency / sample_freq + (system_clock_frequency % sample_freq != 0);
+    // Family base divider (PIO clock = 256*Fs); I2S/MCK/PDM/ADAT derive from
+    // the same value so every slot carries an identical ppm error at
+    // fractional sys clocks (see audio_clock_div.h).
+    uint32_t divider = audio_base_divider_16_8(sample_freq);
 
     printf("System clock at %u, S/PDIF clock divider 0x%x/256\n", (uint) system_clock_frequency, (uint)divider);
     assert(divider < 0x1000000);

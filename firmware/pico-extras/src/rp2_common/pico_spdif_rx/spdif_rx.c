@@ -12,6 +12,7 @@
 #include "hardware/dma.h"
 #include "hardware/irq.h"
 #include "hardware/sync.h"
+#include "hardware/clocks.h"
 #include "pico/stdlib.h"
 #include "spdif_rx_capture.pio.h"
 #include "spdif_rx_48000.pio.h"
@@ -186,9 +187,12 @@ static inline void _spdif_rx_program_init(PIO pio, uint sm, uint offset, uint en
     sm_config_set_in_pins(&sm_config, pin); // PINCTRL_IN_BASE for wait
     sm_config_set_in_shift(&sm_config, true, false, 32); // shift_right, no autopush, 32bit
     sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_RX);
-    const uint32_t div_int   = SPDIF_RX_SYS_CLK_FREQ / SPDIF_RX_PIO_CLK_FREQ;
-    const uint8_t  div_frac8 = (uint8_t) (((uint64_t) SPDIF_RX_SYS_CLK_FREQ * 256) / SPDIF_RX_PIO_CLK_FREQ - 256);
-    sm_config_set_clkdiv_int_frac8(&sm_config, div_int, div_frac8);
+    // Hold the RX PIO clock at exactly SPDIF_RX_PIO_CLK_FREQ at any sys
+    // clock; the per-rate programs and edge thresholds are calibrated to it.
+    // All selectable sys clocks (307.2/384/480 MHz) divide to it exactly.
+    const uint32_t div_256 = (uint32_t) (((uint64_t) clock_get_hz(clk_sys) * 256
+                                          + SPDIF_RX_PIO_CLK_FREQ / 2) / SPDIF_RX_PIO_CLK_FREQ);
+    sm_config_set_clkdiv_int_frac8(&sm_config, div_256 >> 8, (uint8_t) (div_256 & 0xFF));
     pio_sm_init(pio, sm, offset, &sm_config);
     pio_sm_set_pins(pio, sm, 0); // clear pins
     pio_sm_clear_fifos(pio, sm);

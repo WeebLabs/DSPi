@@ -144,6 +144,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_PSYBASS_MASK        0x3C
 #define REQ_GET_PSYBASS_MASK        0x3D
 
+// Selectable system clock (device-global; see sys_clock.h).  SET payload =
+// {mode, vreg_sel}, vreg_sel 0xFF = the mode's default voltage.
+#define REQ_SET_SYS_CLOCK   0x40
+#define REQ_GET_SYS_CLOCK   0x41
+
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
 #define REQ_GET_EQ_PARAM    0x43

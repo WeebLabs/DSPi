@@ -163,10 +163,13 @@ cmake --build build-rp2350 --clean-first   # RP2350 build
 Defined in `main.c`, function `core0_init()`:
 
 1. **GPIO setup** — LED (GPIO 25), status pin (GPIO 23)
-2. **Clock configuration** — PLL fixed at 307.2 MHz (VCO 1536 / 5 / 1), no runtime clock switching
-   - RP2350: `set_sys_clock_hz(307200000)`, VREG 1.15V
-   - RP2040: `set_sys_clock_pll(1536000000, 5, 1)`, VREG 1.15V
-   *Last updated: 2026-03-31*
+2. **Clock configuration**: `sys_clock_boot_init()` (sys_clock.c) reads the persisted
+   selectable mode (307.2 / 384 / 480 MHz) and voltage from the flash directory, checks
+   the crash-fallback breadcrumb, then sequences vreg + PLL on both platforms via
+   `set_sys_clock_pll()`. The watchdog is enabled in `main()` BEFORE `core0_init()` so a
+   boot hang under an overclock still reboots into the fallback. See the "Selectable
+   System Clock" section.
+   *Last updated: 2026-08-03*
 3. **Bus priority** — DMA gets highest system bus priority
 4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
 5. **Preset boot load** — `preset_boot_load()` always selects a preset. Reads preset directory, loads appropriate slot based on startup policy (specified default or last active). If the target slot is empty, applies factory defaults while keeping the slot selected. On first boot after upgrade, migrates legacy single-sector data into preset slot 0. A preset is always active — there is no "no preset" state.
@@ -1753,11 +1756,11 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
-| CPU | Dual Cortex-M0+ @ 133 MHz (OC to 307.2 MHz) | Dual Cortex-M33 @ 150 MHz (OC to 307.2 MHz) |
+| CPU | Dual Cortex-M0+ @ 133 MHz (OC to 307.2/384/480 MHz selectable) | Dual Cortex-M33 @ 150 MHz (OC to 307.2/384/480 MHz selectable) |
 | SRAM | 264 KB | 520 KB |
 | FPU | None (software float) | Single-precision VFP |
 | DCP | N/A | Double-precision coprocessor |
-| VREG | 1.20V (for OC) | 1.10V |
+| VREG | 1.15V default at 307.2 MHz; 1.20V at 384; 1.30V at 480 (identical both platforms, selectable at or above the mode default) | Same |
 | UART + I2C external control | Yes (identical) | Yes (identical) |
 | Control Surfaces nouns (caps v5) | 49 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 49, all usable |
 | Binary type | `default` (XIP) | `default` (XIP) |
@@ -1860,14 +1863,48 @@ unclaimed during a retype cannot race a `dma_claim_unused_channel` consumer
 masked, and PDM claims its channel once at init.
 
 ### Clock Configuration
+*Last updated: 2026-08-03 (selectable sys clock; the historical per-family clock switching is long gone)*
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
-| 48 kHz family | 307.2 MHz (VCO 1536 MHz / 5) | 307.2 MHz (VCO 1536 MHz / 5) |
-| 44.1 kHz family | 264.6 MHz (VCO 1058.4 MHz / 4) | 264.6 MHz (auto PLL) |
-| PLL config | Manual (`set_sys_clock_pll()`) | Automatic (`set_sys_clock_hz()`) |
+| Sys clock (all rates) | Selectable 307.2 / 384 / 480 MHz (VCO 1536/5, 1536/4, 1440/3) | Same |
+| PLL config | `set_sys_clock_pll()` via sys_clock.c mode table | Same |
 | I2S BCK/LRCLK default (master + unified pair) | GPIO 14/15 | GPIO 14/15 |
 | I2S slave-pair BCK/LRCLK default (SPLIT clock-pin mode; `PICO_I2S_BCK_PIN_SLAVE`) | GPIO 12/13 | GPIO 26/27 |
+
+---
+
+## Selectable System Clock
+*Last updated: 2026-08-03*
+
+Full spec: `Documentation/Features/selectable_sys_clock.md`. Summary:
+
+- **Three modes** (both platforms): 307.2 MHz (VCO 1536/5/1, default vreg 1.15 V),
+  384 MHz (VCO 1536/4/1, 1.20 V), 480 MHz (VCO 1440/3/1, 1.30 V). Module:
+  `sys_clock.c/h`. Vendor commands `REQ_SET_SYS_CLOCK` 0x40 / `REQ_GET_SYS_CLOCK`
+  0x41; persisted device-global in the flash directory (DIR V17, 2 bytes appended
+  to `FlashOutputConfig`), never carried by presets.
+- **Coherent divider derivation** (`audio_clock_div.h`): one base divider per rate
+  family (256×Fs, 16.8, round-to-nearest); SPDIF TX, ADAT out, I2S TX/RX-master
+  (2×), MCK (1×/2×), and PDM all derive by exact shifts, so every output slot
+  shares one ppm error and inter-slot alignment holds at fractional sys clocks.
+  48k family is exact in 8.8 at all three modes; 44.1k family carries a uniform
+  offset (-1.95 / +55.5 / +32.5 ppm at 307.2 / 384 / 480), absorbed by USB
+  feedback and the input clock servos.
+- **SPDIF RX** holds its PIO clock at exactly 122.88 MHz via a runtime divider;
+  **ADAT RX** runs at an exact-fraction divider pinning a 307.2 MHz effective
+  decode clock, so cells stay 27/25 in every mode.
+- **Runtime switch** (deferred main-loop apply): one flash-bracket blackout wraps
+  the directory write, vreg/PLL sequencing (voltage rises before the PLL, falls
+  after), nominal divider rebuild for every output, ADAT input stop/start, I2C
+  timing re-derivation, and the synchronized output restart. A voltage-only
+  change skips the audio teardown entirely.
+- **Crash fallback**: watchdog scratch[1] breadcrumb, armed for any non-default
+  mode or custom voltage, cleared only after ~5 s of proven main-loop uptime
+  (watchdog now enabled before `core0_init()`). A watchdog reboot with the
+  breadcrumb armed boots at 307.2 MHz/default vreg, latches that across warm
+  reboots, reports via GET byte 4, and never rewrites the stored setting; a
+  power cycle or new SET retries.
 
 ---
 
@@ -2576,7 +2613,7 @@ op state ~400 B).
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-07-18 (stereo upmixer commands 0x4A-0x4E added, RP2350 only)*
+*Last updated: 2026-08-03 (selectable sys clock commands 0x40/0x41 added)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -2606,6 +2643,8 @@ op state ~400 B).
 | REQ_GET_PSYBASS_ORIGINAL | 0x3B | IN | Get original low-band level (4-byte float) |
 | REQ_SET_PSYBASS_MASK | 0x3C | OUT | Set output mask (2-byte LE uint16; read live, no recompute) |
 | REQ_GET_PSYBASS_MASK | 0x3D | IN | Get output mask (2-byte LE uint16) |
+| REQ_SET_SYS_CLOCK | 0x40 | OUT | Set sys clock {mode, vreg_sel}: mode 0/1/2 = 307.2/384/480 MHz, vreg_sel = raw vreg enum >= the mode default (0xFF = default). Deferred main-loop apply; persisted device-global (DIR V17). Invalid mode or below-default voltage STALLs |
+| REQ_GET_SYS_CLOCK | 0x41 | IN | 8 bytes: active mode, stored mode, stored vreg_sel, live vreg enum, boot-fallback flag, 3 reserved |
 | REQ_SET_EQ_PARAM | 0x42 | OUT | Set EQ band parameters; optional 18-byte payload appends a `uint16` LE Linkwitz-Transform `qp` (`Q*512`) at offsets 16-17 (a 16-byte payload preserves the stored `qp`) |
 | REQ_GET_EQ_PARAM | 0x43 | IN | Get one EQ scalar; param codes 0-4 as before (type/freq/Q/gain_db/bypass), param code 5 returns `qp_x512` as a `u32` |
 | REQ_SET_PREAMP | 0x44 | OUT | Set preamp gain (legacy: sets all input channels) |
@@ -2850,6 +2889,7 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - **Migration:** Existing presets / bulk-params payloads with `mck_pin = 13` loaded on RP2040 fall back to `PICO_I2S_MCK_PIN` (GPIO 21) and force `i2s_mck_enabled = false` (see flash_storage.c apply path + bulk_params.c apply path). No `SLOT_DATA_VERSION` / `WIRE_FORMAT_VERSION` bump required; this is a value-only migration.
 
 ### Clock Math at 307.2 MHz
+*Last updated: 2026-08-03 (all dividers now derive from the shared family base; see Selectable System Clock)*
 
 | Signal | Fs    | Frequency  | Divider (24.8) | Jitter      |
 |--------|-------|------------|----------------|-------------|
@@ -2859,7 +2899,9 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 | MCK 128×        | 96 kHz | 12.288 MHz | 25.0  (GPOUTn) | Zero        |
 | MCK 256×        | 96 kHz | 24.576 MHz | 12.5  (GPOUTn) | Fractional  |
 
-MCK is driven directly by **CLK_GPOUTn** (hardware clock peripheral output) — `clock_gpio_init_int_frac8()` configures the 24.8 divider against `clk_sys` (AUXSRC_VALUE_CLK_SYS). The previous PIO-toggle implementation needed a `÷2` factor in the denominator (PIO clk = 2 × MCK), which halved divider precision and made every 256× combination fractional; with GPOUTn only 96 kHz × 256× remains fractional. The 96 kHz × 256× clamp that used to silently force 128× has been removed.
+MCK is driven directly by **CLK_GPOUTn** (hardware clock peripheral output); `clock_gpio_init_int_frac8()` configures the 24.8 divider against `clk_sys` (AUXSRC_VALUE_CLK_SYS). The previous PIO-toggle implementation needed a `÷2` factor in the denominator (PIO clk = 2 × MCK), which halved divider precision and made every 256× combination fractional; with GPOUTn only 96 kHz × 256× remains fractional at 307.2 MHz. The 96 kHz × 256× clamp that used to silently force 128× has been removed.
+
+Since the selectable-sys-clock work (2026-08-03) the MCK divider is no longer computed independently: it is the shared family base divider (256×) or exactly twice it (128×), from `audio_clock_div.h`. This also fixed a latent ~150 ppm MCK-vs-BCK ratio error at 44.1 kHz that the old truncating computation produced. At 384/480 MHz the 48k-family values above become exact fractional dividers (e.g. 62.5 / 78.125 for BCK at 48 kHz).
 
 ### Vendor Commands (0xC0–0xC9)
 
@@ -3165,13 +3207,13 @@ This matches the user's product-level decision; it differs from the industry-sta
 - **`bulk_params_apply` integration.** `WireInputConfig.spdif_rx_pin` is applied on bulk SET when `apply_pins == true`, mirroring how `output_pins[]` is applied. If the new pin differs from the current one and SPDIF input is active, the hot-swap fires.
 
 ### SPDIF RX Implementation
-*Last updated: 2026-05-19*
+*Last updated: 2026-08-03 (runtime SM divider replaces the compile-time sys clock constant)*
 
 **Library**: Forked from `elehobica/pico_spdif_rx` v0.9.3 at `firmware/pico-extras/src/rp2_common/pico_spdif_rx/`.
 
 **DSPi library patches:**
 - PIO2 support for RP2350
-- Clock constants: 307.2 MHz sys_clk, 122.88 MHz PIO clock (divider 2.5 exact)
+- Runtime SM divider: the PIO clock is held at exactly 122.88 MHz at any sys clock (`SPDIF_RX_PIO_CLK_FREQ`; divider computed from `clock_get_hz(clk_sys)` at program init: 2.5 / 3.125 / 3.90625 for the three selectable modes, all exact in 16.8)
 - Removed `pio_clear_instruction_memory()` (destroys shared PIO programs)
 - Removed `irq_set_enabled(DMA_IRQ_x, false)` (disables entire shared IRQ line)
 - Replaced `irq_has_shared_handler()` with private `irq_handler_registered` flag (prevents handler registration when other libraries share the IRQ line)
@@ -3182,7 +3224,7 @@ This matches the user's product-level decision; it differs from the industry-sta
 - RP2350: PIO2 SM0 (dedicated block, no conflicts)
 - RP2040: PIO1 SM2 (SM0=PDM occupies SM0 when active; SM1 was MCK pre-GPOUTn refactor and is now free — the patched `pio_clear_instruction_memory()` removal in the SPDIF RX library is still required because PDM and the I2S libraries share PIO program memory regardless of the MCK move)
 
-**Clock**: sys_clk 307.2 MHz → PIO clock 122.88 MHz (divider 2.5, exact). At 122.88 MHz: cy=20 (48kHz), cy=10 (96kHz), cy=5 (192kHz) — identical to original library values, zero error.
+**Clock**: PIO clock 122.88 MHz at every selectable sys clock (runtime divider, exact in all modes). At 122.88 MHz: cy=20 (48kHz), cy=10 (96kHz), cy=5 (192kHz); identical to original library values, zero error.
 
 **DMA**: Channels 5+6 (RP2350) or 4+5 (RP2040) on DMA_IRQ_0 (shared with I2S TX when active). DMA_IRQ_1 is dedicated to SPDIF TX only. This isolates SPDIF RX from SPDIF TX, avoiding shared handler conflicts.
 
@@ -3321,7 +3363,7 @@ The helper `i2s_effective_bck_pin()` resolves the pair the active clock mode act
 
 `INPUT_SOURCE_ADAT` (3) is an 8-channel, 24-bit ADAT lightpipe input from one TOSLINK receiver, 44.1/48 kHz only (no SMUX/96k). Disabled by default; selectable only when `adat_input_enabled != 0` AND `adat_input_pin != 0xFF`, and only on RP2350 (RP2040 keeps the config state for wire/preset round-trips but has no PIO/DMA budget for the receiver). Files: `adat_input.c/h`, `adat_input.pio`.
 
-**Receiver architecture.** PIO1 SM2 runs the `adat_rx` NRZI decoder (`adat_input.pio`, 15 instructions) at clock divider 1.0 (full sys_clk, zero divider jitter). Each wire bit cell is counted by a 2-cycle poll loop whose length is set per sample rate via the Y register (cell = 2Y+5 sys cycles: 27 at 44.1 kHz, 25 at 48 kHz at the 307.2 MHz sys clock); no transition within a cell decodes a 0, a transition decodes a 1 and re-anchors the cell grid within 2 sys cycles in both directions, so clock offset of either sign cannot accumulate (an earlier 8-PIO-cycles-per-cell fractional-divider design had a one-way ratchet that deleted bits at 44.1 kHz; see tools/adat_rx_test/adat_rx_bitdiff.c, which models both designs cycle-accurately and proves the current one bit-exact across at least +-1000 ppm source offsets at both rates). The SM emits the decoded bitstream MSB-first, autopushed every 32 bits. DMA channel 15 (the one permanently free channel) streams the words into an 8 KB / 2048-word ring in ENDLESS transfer-count mode with a hardware write-address wrap: a free-running ring with no IRQ and no reload channel. Frame handling is entirely CPU-side in the main-loop poll. ADAT input requires the 307.2 MHz sys clock; at the 150 MHz fallback clock the integer cell quantization is too coarse and the input does not lock.
+**Receiver architecture.** PIO1 SM2 runs the `adat_rx` NRZI decoder (`adat_input.pio`, 15 instructions) at an exact-fraction clock divider that pins its effective clock at 307.2 MHz in every selectable sys-clock mode (1.0 / 1.25 / 1.5625 at 307.2 / 384 / 480 MHz; `adat_rx_div_256()`), so cell counts and decode margins are mode-independent. Each wire bit cell is counted by a 2-cycle poll loop whose length is set per sample rate via the Y register (cell = 2Y+5 SM cycles: 27 at 44.1 kHz, 25 at 48 kHz at the 307.2 MHz effective clock); no transition within a cell decodes a 0, a transition decodes a 1 and re-anchors the cell grid within 2 sys cycles in both directions, so clock offset of either sign cannot accumulate (an earlier 8-PIO-cycles-per-cell fractional-divider design had a one-way ratchet that deleted bits at 44.1 kHz; see tools/adat_rx_test/adat_rx_bitdiff.c, which models both designs cycle-accurately and proves the current one bit-exact across at least +-1000 ppm source offsets at both rates). The SM emits the decoded bitstream MSB-first, autopushed every 32 bits. DMA channel 15 (the one permanently free channel) streams the words into an 8 KB / 2048-word ring in ENDLESS transfer-count mode with a hardware write-address wrap: a free-running ring with no IRQ and no reload channel. Frame handling is entirely CPU-side in the main-loop poll. ADAT input requires the 307.2 MHz effective decode clock, which the exact-fraction divider guarantees in every selectable mode; a hypothetical sub-307.2 sys clock would clamp the divider to 1.0 and may fail to lock on cell quantization.
 
 **Frame sync and loss detection.** The sync header's 10-zero run cannot occur in channel data (ADAT forces a 1 every 5th bit, bounding data runs to 4), so `adat_rx_scan()` searches fresh decoded bits for the 12-bit structural pattern `[1][10x0][1]` (`0x801`) to find the frame boundary. Once found, frames sit at a fixed bit offset (edge resync in the PIO absorbs clock offset, so exactly 256 bits arrive per frame) and `adat_rx_decode_frame()` unstuffs the 8 channel fields (exact inverse of `adat_encode_frame` in adat_output.c) into int32 full-scale. Each frame's header is verified before its samples are trusted; header verification doubles as the loss detector, since a dark or unplugged line decodes as zeros and never matches the header. An isolated bad frame is skipped while the lock holds; `ADAT_HDR_FAIL_LIMIT` (2) consecutive bad headers drop the lock (`slip_count`++).
 

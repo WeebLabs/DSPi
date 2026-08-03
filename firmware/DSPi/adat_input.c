@@ -2,9 +2,10 @@
  * adat_input.c; ADAT lightpipe 8-channel input (RP2350 only)
  *
  * Receiver architecture:
- *   PIO1 SM2 runs the adat_rx NRZI decoder (adat_input.pio) at clock
- *   divider 1.0, counting each wire bit cell with a 2-cycle poll loop
- *   whose length is set per sample rate (see adat_rx_set_cell). It emits
+ *   PIO1 SM2 runs the adat_rx NRZI decoder (adat_input.pio) at a 307.2 MHz
+ *   effective clock (exact-fraction divider, see adat_rx_div_256), counting
+ *   each wire bit cell with a 2-cycle poll loop whose length is set per
+ *   sample rate (see adat_rx_set_cell). It emits
  *   the DECODED bitstream (1 = line transition), MSB first, autopushed
  *   every 32 bits. DMA channel 15 streams the words into an 8 KB ring
  *   (ENDLESS transfer count + hardware write-address wrap: a free-running
@@ -158,15 +159,30 @@ static void adat_rx_set_state(AdatInputState st) {
                                  adat_clock_mode);
 }
 
-// Per-rate cell period. The SM runs at divider 1.0; the cell length is
-// 2*Y+5 sys cycles via the Y reload (adat_input.pio). Cells must be odd
-// (the poll loop counts in 2-cycle steps): at 307.2 MHz both rates are
-// (27 at 44.1 kHz, 25 at 48 kHz). The 150 MHz fallback sys clock yields
-// an even cell with degraded margins; ADAT input simply fails to lock
-// there, which is acceptable for a safety-net clock. Never servoed: the
-// per-edge re-anchoring absorbs percent-level offsets in both directions.
+// The RX SM runs at an exact fraction of sys_clk so its effective clock is
+// 307.2 MHz at every selectable sys clock (384 -> 1.25, 480 -> 1.5625; both
+// exact in 16.8): cell counts and decode margins are identical in all modes.
+// Below 307.2 MHz the divider clamps to 1.0 and the cell math follows sys.
+#define ADAT_RX_EFF_HZ 307200000u
+
+static uint32_t adat_rx_div_256(void) {
+    uint32_t div = (uint32_t)(((uint64_t)clock_get_hz(clk_sys) * 256u +
+                               ADAT_RX_EFF_HZ / 2u) / ADAT_RX_EFF_HZ);
+    return (div < 256u) ? 256u : div;
+}
+
+static uint32_t adat_rx_eff_hz(void) {
+    return (uint32_t)(((uint64_t)clock_get_hz(clk_sys) * 256u) / adat_rx_div_256());
+}
+
+// Per-rate cell period. The cell length is 2*Y+5 SM cycles via the Y reload
+// (adat_input.pio). Cells must be odd (the poll loop counts in 2-cycle
+// steps): at the 307.2 MHz effective clock both rates are (27 at 44.1 kHz,
+// 25 at 48 kHz) in every selectable mode. A future sub-307.2 clock may
+// round to an even cell with degraded margins and fail to lock. Never
+// servoed: per-edge re-anchoring absorbs percent-level offsets both ways.
 static void adat_rx_set_cell(uint32_t fs) {
-    uint32_t sys = clock_get_hz(clk_sys);
+    uint32_t sys = adat_rx_eff_hz();
     uint32_t denom = 256u * fs;
     uint32_t cell = (sys + denom / 2u) / denom;
     if ((cell & 1u) == 0) cell -= 1u;
@@ -466,7 +482,11 @@ void adat_input_start(void) {
     sm_config_set_jmp_pin(&c, pin);
     sm_config_set_in_shift(&c, false, true, 32);   // shift left (MSB first), autopush
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
-    sm_config_set_clkdiv_int_frac(&c, 1, 0);       // full sys_clk, no jitter
+    // Exact-fraction divider pins the effective decode clock at 307.2 MHz
+    // (see adat_rx_div_256); divider jitter is <=1 sys cycle, far inside the
+    // 2-cycle poll granularity.
+    uint32_t rx_div = adat_rx_div_256();
+    sm_config_set_clkdiv_int_frac(&c, (uint16_t)(rx_div >> 8), (uint8_t)(rx_div & 0xFFu));
     pio_sm_init(ADAT_RX_PIO, ADAT_RX_SM,
                 adat_rx_prog_offset + adat_rx_wrap_target, &c);
     // OSR = all-ones so `in osr, 1` emits a 1 (X and Y are both counters)

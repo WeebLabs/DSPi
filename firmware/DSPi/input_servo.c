@@ -83,14 +83,14 @@ uint32_t input_servo_apply(float actual_freq) {
     adat_output_servo_divider(spdif_div);
 #endif
 
-    // MCK servo: keep master clock frequency-locked to the servoed I2S data
-    // rate. MCK is driven by CLK_GPOUTn, so the divider is the direct 24.8
-    // form: div_24.8 = sys_clk * 256 / (actual_freq * multiplier).
+    // MCK servo: derive from the already-trimmed SPDIF divider (256x MCK
+    // shares its 24.8 value, 128x is exactly 2x) so MCK stays an exact
+    // multiple of BCK; rounding it independently could land 1 LSB off.
     extern bool i2s_mck_enabled;
     extern uint16_t i2s_mck_multiplier;
     if (i2s_mck_enabled && i2s_mck_multiplier > 0) {
-        float mck_div_f = (float)sys_clk * 256.0f / (actual_freq * (float)i2s_mck_multiplier);
-        uint32_t mck_div = (uint32_t)(mck_div_f * (1.0f + fill_trim) + 0.5f);
+        uint32_t mck_div = (i2s_mck_multiplier == 256u) ? spdif_div
+                                                        : spdif_div * 2u;
         if (mck_div != last_mck_div) {
             last_mck_div = mck_div;
             audio_i2s_mck_set_divider(mck_div);

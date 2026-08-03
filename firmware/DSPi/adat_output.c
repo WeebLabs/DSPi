@@ -40,6 +40,7 @@
 
 #include <string.h>
 #include "config.h"
+#include "audio_clock_div.h"
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -185,10 +186,10 @@ static void adat_write_silence(uint32_t frames) {
 // Hardware bring-up / teardown
 // ---------------------------------------------------------------------------
 
-// Nominal 16.8 clkdiv for PIO clock = 256*Fs: the SAME formula and value as
-// the S/PDIF TX library, so ADAT consumes at the identical rate in every
-// mode.  Computed at resync (adat_update_divider must stay flash-free for
-// the servo path).
+// Nominal 16.8 clkdiv for PIO clock = 256*Fs: the shared family base divider
+// (audio_clock_div.h), so ADAT consumes at the identical rate as the S/PDIF
+// slots in every mode.  Computed at resync (adat_update_divider must stay
+// flash-free for the servo path).
 static uint32_t adat_nom_div;
 
 DSP_TIME_CRITICAL
@@ -355,9 +356,14 @@ void adat_output_on_rate_change(uint32_t freq) {
     adat_cur_freq = freq;
     adat_rate_ok = (freq <= 48000);
     adat_servo_div = 0;   // stale for the new rate; servo re-pushes if locked
-    // Caller (perform_rate_change) holds the mute; the following
-    // complete_pipeline_reset() restarts the stream via resync if valid.
+    // Refresh the nominal divider immediately: after a sys-clock switch the
+    // eventual resync can be unboundedly late (SPDIF input waiting for lock)
+    // and the SM would free-run at the old clock's rate meanwhile.
+    adat_nom_div = audio_base_divider_16_8(freq);
+    // Caller holds the mute; the following complete_pipeline_reset() (or the
+    // prefill's enable_outputs_in_sync) restarts the stream via resync.
     if (!adat_rate_ok && adat_running) adat_stop_hw();
+    else if (adat_running) adat_update_divider();
 }
 
 // Called from the RAM-pinned SPDIF-input clock servo; keep it RAM-resident.
@@ -397,10 +403,7 @@ void adat_output_resync(void) {
     // Pick up the active input servo's current divider (0 when no servo is
     // locked; at most one of the two can be nonzero since input sources are
     // exclusive); adat_update_divider() sanity-bounds it against nominal.
-    {
-        uint32_t sys = clock_get_hz(clk_sys);
-        adat_nom_div = sys / adat_cur_freq + (sys % adat_cur_freq != 0);
-    }
+    adat_nom_div = audio_base_divider_16_8(adat_cur_freq);
     adat_servo_div = spdif_input_current_tx_divider();
     if (adat_servo_div == 0) adat_servo_div = i2s_slave_current_tx_divider();
     if (adat_servo_div == 0) adat_servo_div = adat_input_current_tx_divider();

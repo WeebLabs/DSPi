@@ -104,6 +104,13 @@ float preset_get_saved_master_volume(void);
 void preset_set_dac_hw_mute(const DacHwMuteConfig *cfg);
 void preset_get_dac_hw_mute(DacHwMuteConfig *out);
 
+// Selectable sys_clk (device-global, directory-stored; V17+).  vreg 0xFF means
+// "use the mode's default voltage".  The setter is synchronous and main-loop
+// only; the getter is safe to call before the clock is configured (XIP reads
+// plus, at most, a directory migration write).  Either getter pointer may be NULL.
+void preset_set_sys_clock(uint8_t mode, uint8_t vreg);
+void preset_get_sys_clock(uint8_t *mode, uint8_t *vreg);
+
 // External control-interface config (UART/I2C, board-level, directory-stored,
 // V6+).  Setter is synchronous and main-loop only; a NULL pointer leaves that
 // interface's stored config unchanged.  Getter copies out; either may be NULL.

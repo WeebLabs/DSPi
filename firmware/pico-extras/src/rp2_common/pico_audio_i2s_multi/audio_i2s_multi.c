@@ -39,6 +39,7 @@
 #include "hardware/irq.h"
 #include "hardware/clocks.h"   // CLK_GPOUTn config + clock_gpio_init_int_frac8()
 #include "hardware/sync.h"
+#include "audio_clock_div.h"
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -146,7 +147,9 @@ static PIO i2s_pio_block_from_index(uint8_t idx) {
 //                               = sys_clk × 2 / sample_freq
 //
 //   At 307.2 MHz / 48 kHz: divider = 12800 → integer 50, fractional 0
-//   (zero PIO clock jitter)
+//   (zero PIO clock jitter).  At the selectable 384/480 MHz sys clocks the
+//   48k family stays exact in 8.8; all rates derive from the shared base
+//   divider (audio_clock_div.h) so slots cannot drift apart.
 
 // Patch the 5-bit GPIO index field of a `wait gpio` instruction.
 static inline uint16_t i2s_patch_wait_gpio(uint16_t instr, uint8_t pin) {
@@ -218,12 +221,9 @@ static uint i2s_extclk_load_program(PIO pio, uint8_t bck_pin) {
 
 // Compute the I2S clock divider in 24.8 fixed-point for a given sample rate.
 static uint32_t i2s_compute_divider(uint32_t sample_freq) {
-    uint32_t system_clock_frequency = clock_get_hz(clk_sys);
-    assert(system_clock_frequency < 0x40000000);
-
-    // divider = sys_clk * 2 / sample_freq (ceiling division to match SPDIF rounding)
-    uint64_t num = (uint64_t)system_clock_frequency * 2;
-    uint32_t divider = (uint32_t)((num + sample_freq - 1) / sample_freq);
+    // Exactly 2x the family base divider (PIO clock = 128*Fs) so BCK stays
+    // ratio-locked to the SPDIF/ADAT/PDM slots at fractional sys clocks.
+    uint32_t divider = audio_base_divider_16_8(sample_freq) * 2u;
     assert(divider < 0x1000000);
     return divider;
 }
@@ -1063,7 +1063,8 @@ bool __time_critical_func(audio_i2s_extclk_framing_slipped)(void) {
 //   computation and writes a raw 24.8 divider — used by spdif_input.c to
 //   apply ppm-level corrections from the resampler / clock servo.
 //
-// Reference table at sys_clk = 307.2 MHz:
+// Reference table at sys_clk = 307.2 MHz (the default mode; at 384/480 MHz
+// the same derivation yields exact fractional dividers from the family base):
 //
 //   Fs      Mult    MCK target      Divider 24.8                  Type
 //   48k     128×    6.144  MHz      sys_clk × 256 / (48k × 128)   = 50.0    integer
@@ -1142,26 +1143,12 @@ void audio_i2s_mck_update_frequency(uint32_t sample_freq, uint32_t multiplier) {
         multiplier = 128;
     }
 
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-
-    // 24.8 fixed-point divider:
-    //   div         = sys_clk / MCK = sys_clk / (Fs × multiplier)
-    //   div_24.8    = div × 256
-    //               = sys_clk × 256 / (Fs × multiplier)
-    //
-    // NB: the previous PIO toggle program needed a ÷2 in the denominator
-    // (PIO clk = 2 × MCK because the program emits one transition per
-    // PIO cycle, so a full MCK period spans two PIO cycles).  With
-    // CLK_GPOUTn the divider applies one-to-one — net result: 2× more
-    // effective divider precision at the same Fs.  See the reference
-    // table at the top of this section for which Fs/mult combinations
-    // are now integer.
-    //
-    // 64-bit intermediate avoids overflow: sys_clk × 256 for sys_clk =
-    // 307.2 MHz already exceeds 2^32.
-    uint64_t num = (uint64_t)sys_clk * 256u;
-    uint64_t den = (uint64_t)sample_freq * multiplier;
-    uint32_t divider = (uint32_t)(num / den);
+    // Derived from the family base divider (256x MCK = the base itself, 128x
+    // MCK = exactly 2x) so MCK stays ratio-locked to BCK and the other slots
+    // at fractional sys clocks; the old independent truncation left MCK ~150
+    // ppm off BCK at 44.1 kHz.
+    uint32_t base = audio_base_divider_16_8(sample_freq);
+    uint32_t divider = (multiplier == 256u) ? base : base * 2u;
 
     printf("MCK divider 0x%x/256 (%u.%u) for %d Hz × %u = %u Hz (CLK_GPOUTn)\n",
            (uint)divider, (uint)(divider >> 8), (uint)(divider & 0xff),

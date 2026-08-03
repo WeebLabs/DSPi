@@ -48,12 +48,14 @@
 #include "i2c_control.h"     // i2c_ctrl_owns_pin (io_pin_valid guard)
 #include "bulk_params.h"     // WireBulkParams offsets for user_mute notify
 #include "dac_hw_mute.h"     // hold query for flash_mute_hold_samples floor
+#include "sys_clock.h"       // SysClockMode + sys_clock_mode_valid (V17 directory bytes)
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "hardware/irq.h"            // DMA_IRQ_0 (selective flash blackout keep mask)
 #include "hardware/structs/nvic.h"   // nvic_hw (selective flash blackout)
 #include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
+#include "hardware/vreg.h"    // VREG_VOLTAGE_MIN/MAX (sys_clk voltage sanitize)
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 
@@ -260,7 +262,12 @@ typedef struct __attribute__((packed)) {
     uint8_t spdif_rx_pin4;           // SPDIF RX 4 GPIO (DIR V16+; 0 = unset → default 22).
                                      // Grows the struct by 1 byte, so the V15→V16 directory
                                      // migration reads old configs via FlashOutputConfig_v15
-} FlashOutputConfig;                 // 35 bytes
+    uint8_t sys_clock_mode;          // Selectable sys_clk mode (DIR V17+; SysClockMode 0..2).
+                                     // Grows the struct by 2 bytes, so the V16→V17 directory
+                                     // migration reads old configs via FlashOutputConfig_v16.
+                                     // Device-global only: the preset paths must never write it
+    uint8_t sys_clock_vreg;          // Core voltage override (0xFF = the mode's default)
+} FlashOutputConfig;                 // 37 bytes
 
 // The SPDIF 2/3 pins live in spdif_rx_pin_ext[] (DIR V12) and SPDIF 4's in the
 // V16 tail byte; this indexes all three as one 0-based ext array so callers can
@@ -449,6 +456,35 @@ typedef struct __attribute__((packed)) {
     uint8_t adat_input_clock_mode;
 } FlashOutputConfig_v15;             // 34 bytes
 
+// Historical 35-byte device-global IO config (directory V16), before the
+// selectable sys_clk bytes were appended.  A strict prefix of the live
+// FlashOutputConfig; read only by the V16→V17 directory migration (prefix
+// memcpy widens it, then the migration seeds mode 0 / vreg 0xFF).
+typedef struct __attribute__((packed)) {
+    uint8_t output_pins[8];
+    uint8_t output_types[4];
+    uint8_t i2s_bck_pin;
+    uint8_t i2s_mck_pin;
+    uint8_t i2s_mck_enabled;
+    uint8_t i2s_mck_multiplier;
+    uint8_t spdif_rx_pin;
+    uint8_t i2s_rx_pin;
+    uint8_t i2s_input_rate_p1;
+    uint8_t i2s_input_channels;
+    uint8_t i2s_rx_pin_ext[3];
+    uint8_t adat_enabled;
+    uint8_t adat_pin;
+    uint8_t spdif_rx_enabled_ext;
+    uint8_t spdif_rx_pin_ext[2];
+    uint8_t i2s_clock_mode;
+    uint8_t i2s_clock_pin_mode;
+    uint8_t i2s_bck_pin_slave;
+    uint8_t adat_input_pin;
+    uint8_t adat_input_enabled;
+    uint8_t adat_input_clock_mode;
+    uint8_t spdif_rx_pin4;
+} FlashOutputConfig_v16;             // 35 bytes
+
 // --- Preset Directory v1 (legacy — kept only for upgrade migration) ---
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -566,6 +602,10 @@ typedef struct __attribute__((packed)) {
 // INDEPENDENT/WITH_PRESET model.  The V14→V15 migration reads the old layout
 // through FlashOutputConfig_v14 / PresetDirectory_v14 and seeds adat_input_pin
 // to 0xFF (the zero-fill 0 would misread as GPIO 0).
+//
+// V17 grows the device-global output_config by 2 bytes (selectable sys_clk:
+// sys_clock_mode + sys_clock_vreg).  Unlike every field above it is INDEPENDENT
+// only; preset load/save must leave the stored bytes alone.
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
     uint16_t version;                        // Directory format version (4)
@@ -598,7 +638,9 @@ typedef struct __attribute__((packed)) {
     // V15 grows it by 3 bytes (ADAT input: adat_input_pin + adat_input_enabled +
     // adat_input_clock_mode).
     // V16 grows it by 1 byte (SPDIF input 4 pin: spdif_rx_pin4).
-    FlashOutputConfig output_config;         // 35 bytes
+    // V17 grows it by 2 bytes (selectable sys_clk: sys_clock_mode +
+    // sys_clock_vreg).  Device-global only, never carried by a preset.
+    FlashOutputConfig output_config;         // 37 bytes
 
     // V6 addition: device-level external control-interface config (board-level).
     UartCtrlConfig uart_ctrl;                // 8 bytes; enabled=0 by default
@@ -921,7 +963,34 @@ typedef struct __attribute__((packed)) {
     CsIrConfig cs_ir;                        // 132 bytes
 } PresetDirectory_v15;
 
-#define DIR_VERSION_CURRENT  16
+// --- Preset Directory v16 (kept only for upgrade migration) ---
+// Identical to the live layout except output_config is the 35-byte
+// FlashOutputConfig_v16 (no selectable sys_clk bytes).
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;                        // == 16
+    uint16_t reserved;
+    uint32_t crc32;
+
+    uint8_t  startup_mode;
+    uint8_t  default_slot;
+    uint8_t  last_active_slot;
+    uint8_t  output_config_mode;
+    uint16_t slot_occupied;
+    uint8_t  master_volume_mode;
+    uint8_t  spdif_rx_pin;
+    float    master_volume_db;
+    char     slot_names[PRESET_SLOTS][PRESET_NAME_LEN];
+    DacHwMuteConfig dac_hw_mute;
+    FlashOutputConfig_v16 output_config;     // 35 bytes (frozen pre-sys-clock layout)
+    UartCtrlConfig uart_ctrl;
+    I2cCtrlConfig  i2c_ctrl;
+    CsFlashConfig cs_config;                 // 388 bytes (current format v2)
+    char cs_names[CS_MAX_BINDINGS][CS_NAME_LEN];  // 512 bytes
+    CsIrConfig cs_ir;                        // 132 bytes
+} PresetDirectory_v16;
+
+#define DIR_VERSION_CURRENT  17
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1214,6 +1283,7 @@ static void ctrl_iface_defaults(UartCtrlConfig *u, I2cCtrlConfig *i);  // define
 static void dir_sanitize_ctrl_iface(void);                            // defined below
 static void dir_sanitize_cs_config(void);                             // defined below
 static void dir_sanitize_cs_ir(void);                                 // defined below
+static void dir_sanitize_sys_clock(void);                             // defined below
 static void cs_config_from_v1(CsFlashConfig *dst, const CsFlashConfig_v1 *src);  // defined below
 // Forward declaration — defined alongside validate_slot() in the SLOT
 // VALIDATION section.  collect_live_state() and migrate_legacy() use it
@@ -1464,7 +1534,17 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
 // master_volume_mode).  The independent master_volume_db defaults to
 // MASTER_VOL_MAX_DB so boot-time audible behavior is unchanged post-upgrade.
 static int dir_flush(void);  // forward decl — migration calls it
+static bool dir_load_cache_raw(void);
+
+// Wrapper so EVERY load path (dir_ensure and preset_boot_load) gets the
+// sys-clock byte sanitize; the pre-V17 migration arms leave vreg 0 behind.
 static bool dir_load_cache(void) {
+    if (!dir_load_cache_raw()) return false;
+    dir_sanitize_sys_clock();
+    return true;
+}
+
+static bool dir_load_cache_raw(void) {
     const PresetDirectory *flash_dir = DIR_ADDR;
     if (flash_dir->magic != DIR_MAGIC) {
         dir_cache_valid = false;
@@ -1486,6 +1566,46 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_config();
         dir_sanitize_cs_ir();
         dir_cache_valid = true;
+        return true;
+    }
+
+    if (flash_dir->version == 16) {
+        // V16 -> V17 migration.  V17 grows the device-global output_config by
+        // 2 bytes (selectable sys_clk: sys_clock_mode + sys_clock_vreg).
+        // Validate the v16 CRC, copy every field forward, and widen the 35-byte
+        // output_config by prefix memcpy; the new bytes are then seeded to mode
+        // 0 / vreg 0xFF (the zero-fill 0 would misread as 0.55 V on RP2350).
+        const PresetDirectory_v16 *v16 = (const PresetDirectory_v16 *)flash_dir;
+        const uint8_t *v16_data_start = (const uint8_t *)&v16->startup_mode;
+        size_t v16_data_len = sizeof(PresetDirectory_v16) - offsetof(PresetDirectory_v16, startup_mode);
+        if (crc32(v16_data_start, v16_data_len) != v16->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        dir_cache.startup_mode       = v16->startup_mode;
+        dir_cache.default_slot       = v16->default_slot;
+        dir_cache.last_active_slot   = v16->last_active_slot;
+        dir_cache.output_config_mode = v16->output_config_mode;
+        dir_cache.slot_occupied      = v16->slot_occupied;
+        dir_cache.master_volume_mode = v16->master_volume_mode;
+        dir_cache.spdif_rx_pin       = v16->spdif_rx_pin;
+        dir_cache.master_volume_db   = v16->master_volume_db;
+        memcpy(dir_cache.slot_names, v16->slot_names, sizeof(dir_cache.slot_names));
+        dir_cache.dac_hw_mute        = v16->dac_hw_mute;
+        memcpy(&dir_cache.output_config, &v16->output_config, sizeof(v16->output_config));
+        dir_cache.output_config.sys_clock_mode = 0;
+        dir_cache.output_config.sys_clock_vreg = 0xFF;
+        dir_cache.uart_ctrl          = v16->uart_ctrl;
+        dir_cache.i2c_ctrl           = v16->i2c_ctrl;
+        dir_cache.cs_config          = v16->cs_config;
+        memcpy(dir_cache.cs_names, v16->cs_names, sizeof(dir_cache.cs_names));
+        dir_cache.cs_ir              = v16->cs_ir;
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
         return true;
     }
 
@@ -2190,6 +2310,17 @@ static void dir_sanitize_cs_ir(void) {
     c->version = CS_IR_CONFIG_VERSION;
 }
 
+// Normalize the selectable sys_clk bytes on every load path, migration arms
+// included: an out-of-range mode becomes 0 and any voltage outside the mode's
+// legal window (below its default, above 1.30 V, or the 0 a widening memset
+// leaves behind) becomes 0xFF = "use the mode's default".
+static void dir_sanitize_sys_clock(void) {
+    FlashOutputConfig *c = &dir_cache.output_config;
+    if (!sys_clock_mode_valid(c->sys_clock_mode)) c->sys_clock_mode = 0;
+    if (!sys_clock_vreg_valid(c->sys_clock_mode, c->sys_clock_vreg))
+        c->sys_clock_vreg = 0xFF;
+}
+
 // Write the RAM-cached directory back to flash.
 // Recomputes the CRC before writing.
 static int dir_flush(void) {
@@ -2304,10 +2435,17 @@ static void io_config_defaults(FlashOutputConfig *cfg) {
     cfg->adat_input_pin        = 0xFF;
     cfg->adat_input_enabled    = 0;
     cfg->adat_input_clock_mode = ADAT_CLOCK_MODE_MASTER;
+    // Selectable sys_clk: 307.2 MHz at the mode's default voltage.
+    cfg->sys_clock_mode = (uint8_t)SYS_CLOCK_MODE_307P2;
+    cfg->sys_clock_vreg = 0xFF;
 }
 
 // Snapshot the live IO globals into cfg (for REQ_SAVE_OUTPUT_CONFIG).
 static void io_config_from_live(FlashOutputConfig *cfg) {
+    // sys_clk has no live IO mirror and must survive this snapshot; grab the
+    // stored bytes first because cfg may alias dir_cache.output_config.
+    uint8_t sc_mode = dir_cache.output_config.sys_clock_mode;
+    uint8_t sc_vreg = dir_cache.output_config.sys_clock_vreg;
     memset(cfg, 0, sizeof(*cfg));
     for (int i = 0; i < NUM_PIN_OUTPUTS; i++)     cfg->output_pins[i]  = output_pins[i];
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) cfg->output_types[i] = output_types[i];
@@ -2341,6 +2479,8 @@ static void io_config_from_live(FlashOutputConfig *cfg) {
     cfg->adat_input_pin        = adat_input_pin;
     cfg->adat_input_enabled    = adat_input_enabled ? 1 : 0;
     cfg->adat_input_clock_mode = adat_clock_mode;
+    cfg->sys_clock_mode = sc_mode;
+    cfg->sys_clock_vreg = sc_vreg;
 }
 
 // Extract a slot's IO config into cfg, honoring the slot's data version
@@ -3700,6 +3840,24 @@ void preset_get_dac_hw_mute(DacHwMuteConfig *out) {
     if (!out) return;
     dir_ensure();
     memcpy(out, &dir_cache.dac_hw_mute, sizeof(*out));
+}
+
+// Selectable sys_clk persistence (device-global, never carried by a preset).
+// Same synchronous main-loop-only contract as preset_set_dac_hw_mute; the
+// stored bytes are re-sanitized on every load, so only gross validation here.
+void preset_set_sys_clock(uint8_t mode, uint8_t vreg) {
+    if (!sys_clock_mode_valid(mode)) return;
+    dir_ensure();
+    dir_cache.output_config.sys_clock_mode = mode;
+    dir_cache.output_config.sys_clock_vreg = vreg;
+    dir_sanitize_sys_clock();
+    dir_flush();
+}
+
+void preset_get_sys_clock(uint8_t *mode, uint8_t *vreg) {
+    dir_ensure();
+    if (mode) *mode = dir_cache.output_config.sys_clock_mode;
+    if (vreg) *vreg = dir_cache.output_config.sys_clock_vreg;
 }
 
 // Control-interface (UART/I2C) persistence.  Mirrors preset_set_dac_hw_mute:
