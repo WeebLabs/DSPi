@@ -8,25 +8,42 @@
 
 #include "hardware/structs/qmi.h"
 #include "hardware/regs/qmi.h"
+#include "hardware/clocks.h"
 
-#define DSPI_FLASH_SPI_CLKDIV   6
 #define FLASH_BLOCK_ERASE_CMD   0xd8
 
-// Force CLKDIV=6 into the two registers that matter:
+// Per-sys-clock QSPI divider: 6 keeps flash at 51.2/64 MHz for the 307.2/384
+// modes; 480 MHz uses 8 (60 MHz) because 80 MHz outruns the RXDELAY the ROM
+// calibrated at its boot clock.  RAM-cached: the flash-op wrappers run with
+// XIP down and must not call clock_get_hz (it lives in flash).
+static uint8_t dspi_flash_div = 6;
+
+static uint8_t clkdiv_for_hz(uint32_t sys_hz) {
+    return (sys_hz > 400000000u) ? 8 : 6;
+}
+
+// Force the cached CLKDIV into the two registers that matter:
 //   - DIRECT_CSR.CLKDIV: the ROM's direct-mode serial commands (erase/program)
 //   - M0_TIMING.CLKDIV:  XIP reads once we leave direct mode
 // Other fields (RXDELAY, COOLDOWN, RCMD/RFMT) are preserved via hw_write_masked.
 static void __no_inline_not_in_flash_func(dspi_set_clkdiv)(void) {
     hw_write_masked(&qmi_hw->direct_csr,
-                    DSPI_FLASH_SPI_CLKDIV << QMI_DIRECT_CSR_CLKDIV_LSB,
+                    (uint32_t)dspi_flash_div << QMI_DIRECT_CSR_CLKDIV_LSB,
                     QMI_DIRECT_CSR_CLKDIV_BITS);
     hw_write_masked(&qmi_hw->m[0].timing,
-                    DSPI_FLASH_SPI_CLKDIV << QMI_M0_TIMING_CLKDIV_LSB,
+                    (uint32_t)dspi_flash_div << QMI_M0_TIMING_CLKDIV_LSB,
                     QMI_M0_TIMING_CLKDIV_BITS);
     __compiler_memory_barrier();
 }
 
-void dspi_flash_apply_clkdiv(void) { dspi_set_clkdiv(); }
+void dspi_flash_apply_clkdiv_for_hz(uint32_t sys_hz) {
+    dspi_flash_div = clkdiv_for_hz(sys_hz);
+    dspi_set_clkdiv();
+}
+
+void dspi_flash_apply_clkdiv(void) {
+    dspi_flash_apply_clkdiv_for_hz(clock_get_hz(clk_sys));
+}
 
 // Re-implements SDK flash_range_erase/program but:
 //   1) snapshots QMI m[0] before the ROM calls (the ROM clobbers RCMD/RFMT/
@@ -65,7 +82,7 @@ void __no_inline_not_in_flash_func(dspi_flash_range_erase)(uint32_t flash_offs, 
     qmi_hw->m[0].rcmd   = saved_rcmd;
     qmi_hw->m[0].rfmt   = saved_rfmt;
     qmi_hw->m[0].timing = (saved_timing & ~QMI_M0_TIMING_CLKDIV_BITS)
-                        | (DSPI_FLASH_SPI_CLKDIV << QMI_M0_TIMING_CLKDIV_LSB);
+                        | ((uint32_t)dspi_flash_div << QMI_M0_TIMING_CLKDIV_LSB);
     __compiler_memory_barrier();
 }
 
@@ -89,7 +106,7 @@ void __no_inline_not_in_flash_func(dspi_flash_range_program)(uint32_t flash_offs
     qmi_hw->m[0].rcmd   = saved_rcmd;
     qmi_hw->m[0].rfmt   = saved_rfmt;
     qmi_hw->m[0].timing = (saved_timing & ~QMI_M0_TIMING_CLKDIV_BITS)
-                        | (DSPI_FLASH_SPI_CLKDIV << QMI_M0_TIMING_CLKDIV_LSB);
+                        | ((uint32_t)dspi_flash_div << QMI_M0_TIMING_CLKDIV_LSB);
     __compiler_memory_barrier();
 }
 
@@ -100,6 +117,7 @@ void __no_inline_not_in_flash_func(dspi_flash_range_program)(uint32_t flash_offs
 // trampolining through boot2 around each op).  Nothing extra to do.
 
 void dspi_flash_apply_clkdiv(void) {}
+void dspi_flash_apply_clkdiv_for_hz(uint32_t sys_hz) { (void)sys_hz; }
 
 // RAM-resident like the SDK implementations they wrap, so the flash-op entry
 // points are uniformly XIP-safe on both platforms.

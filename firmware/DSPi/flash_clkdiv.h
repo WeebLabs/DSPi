@@ -17,6 +17,11 @@ extern "C" {
 // directly: apply CLKDIV=6 once at startup for XIP reads, and save/restore
 // m[0] around each flash op (the ROM clobbers it) with CLKDIV=6 overlaid.
 void dspi_flash_apply_clkdiv(void);
+
+// Same, but for an explicit sys clock: the sys-clock switch calls this with
+// the faster of old/new BEFORE the PLL moves (so the QSPI link never
+// overshoots mid-switch) and with the new clock after.  RP2040 no-op.
+void dspi_flash_apply_clkdiv_for_hz(uint32_t sys_hz);
 void dspi_flash_range_erase(uint32_t flash_offs, size_t count);
 void dspi_flash_range_program(uint32_t flash_offs, const uint8_t *data, size_t count);
 

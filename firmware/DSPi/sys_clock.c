@@ -42,6 +42,15 @@ static const SysClockEntry sys_clock_table[SYS_CLOCK_MODE_COUNT] = {
     { 480000000u, 1440000000u, 3, 1, VREG_VOLTAGE_1_30 },
 };
 
+// Voltage ceiling: RP2350 permits a limited overvolt (up to 1.50 V, bench
+// use) after the POWMAN voltage-limit unlock; the RP2040 regulator field
+// ends at 1.30 V.
+#if PICO_RP2350
+#define SYS_CLOCK_VREG_CEIL ((uint8_t)VREG_VOLTAGE_1_50)
+#else
+#define SYS_CLOCK_VREG_CEIL ((uint8_t)VREG_VOLTAGE_1_30)
+#endif
+
 static SysClockMode sys_clock_mode_active = SYS_CLOCK_MODE_307P2;
 static bool sys_clock_fell_back = false;
 static bool sys_clock_confirmed = false;
@@ -62,7 +71,16 @@ bool sys_clock_vreg_valid(uint8_t mode, uint8_t vreg_sel) {
     // below the mode's default is a guaranteed-unstable (bricking) setting
     // and is rejected outright rather than clamped.
     return vreg_sel >= sys_clock_table[mode].default_vreg &&
-           vreg_sel <= (uint8_t)VREG_VOLTAGE_MAX;
+           vreg_sel <= SYS_CLOCK_VREG_CEIL;
+}
+
+// Above VREG_VOLTAGE_MAX (1.30 V) the SDK silently clamps unless the POWMAN
+// voltage limit is disabled first (RP2350 only; RP2040 cannot exceed it).
+static void sys_clock_set_vreg(uint8_t vreg) {
+#if PICO_RP2350
+    if (vreg > (uint8_t)VREG_VOLTAGE_MAX) vreg_disable_voltage_limit();
+#endif
+    vreg_set_voltage((enum vreg_voltage)vreg);
 }
 
 uint8_t sys_clock_resolve_vreg(SysClockMode m, uint8_t vreg_sel) {
@@ -86,14 +104,25 @@ static void sys_clock_switch(SysClockMode m, uint8_t vreg) {
     const SysClockEntry *e = &sys_clock_table[m];
     uint8_t cur = (uint8_t)vreg_get_voltage();
 
+#if PICO_RP2350
+    // QSPI divider for the FASTER of old/new before the PLL moves, so the
+    // flash link never overshoots mid-switch; trimmed to the new clock after.
+    uint32_t cur_hz = clock_get_hz(clk_sys);
+    dspi_flash_apply_clkdiv_for_hz(cur_hz > e->sys_hz ? cur_hz : e->sys_hz);
+#endif
+
     if (vreg > cur) {
-        vreg_set_voltage((enum vreg_voltage)vreg);
+        sys_clock_set_vreg(vreg);
         busy_wait_ms(10);
         set_sys_clock_pll(e->vco_hz, e->postdiv1, e->postdiv2);
     } else {
         set_sys_clock_pll(e->vco_hz, e->postdiv1, e->postdiv2);
-        if (vreg < cur) vreg_set_voltage((enum vreg_voltage)vreg);
+        if (vreg < cur) sys_clock_set_vreg(vreg);
     }
+
+#if PICO_RP2350
+    dspi_flash_apply_clkdiv_for_hz(e->sys_hz);
+#endif
     sys_clock_mode_active = m;
 }
 
@@ -166,6 +195,6 @@ void sys_clock_apply_vreg_only(uint8_t vreg_sel) {
     sys_clock_confirmed = false;
     sys_clock_fell_back = false;
     sys_clock_armed_at_us = time_us_64();
-    vreg_set_voltage((enum vreg_voltage)sys_clock_resolve_vreg(sys_clock_mode_active, vreg_sel));
+    sys_clock_set_vreg(sys_clock_resolve_vreg(sys_clock_mode_active, vreg_sel));
     busy_wait_ms(10);
 }

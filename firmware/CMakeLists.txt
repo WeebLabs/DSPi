@@ -13,7 +13,9 @@ set(PICO_EXTRAS_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-extras CACHE PATH "" FORCE)
 # div=2 would yield 153.6-240 MHz on the flash bus, far above the W25Q080's
 # 104-133 MHz rated max.  Reads survive (single-shot at boot) but erase/program
 # can't be clocked reliably there, and preset saves silently fail verification.
-# Divider 6 → 51.2 / 64 / 80 MHz, all within spec at every selectable clock.
+# Divider 6 → 51.2 / 64 / 80 MHz, all within the part's SCK spec.  On RP2350
+# the runtime override (flash_clkdiv.c) additionally uses div 8 (60 MHz) in
+# the 480 MHz mode: 80 MHz reads risk outrunning the un-retuned RXDELAY.
 # Must be set BEFORE pico_sdk_init() so it propagates to the boot2 build too.
 add_compile_definitions(PICO_FLASH_SPI_CLKDIV=6)
 # Note: PICO_FLASH_SPI_CLKDIV only reaches hardware on RP2040 (via boot2's SSI

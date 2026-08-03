@@ -138,10 +138,16 @@ the clock is configured (XIP reads plus at most one migration flush).
 
 **`REQ_SET_SYS_CLOCK` (0x40, OUT, 2 bytes)**: `{mode, vreg_sel}`.
 Validation before staging: `mode < 3`, and `vreg_sel` either 0xFF or a vreg
-enum **at or above the mode's default** and at most `VREG_VOLTAGE_1_30`;
-anything else STALLs. Undervolting is rejected by design: the voltage knob
-exists to trade voltage up for stability on marginal silicon, and a
-below-default value is a guaranteed-unstable persisted setting. Staged via
+enum **at or above the mode's default** and at most the platform ceiling:
+`VREG_VOLTAGE_1_50` on RP2350 (the firmware disables the POWMAN voltage limit
+automatically when a value above 1.30 V is applied), `VREG_VOLTAGE_1_30` on
+RP2040 (regulator hardware maximum). Anything else STALLs. Undervolting is
+rejected by design: the voltage knob exists to trade voltage up for stability
+on marginal silicon, and a below-default value is a guaranteed-unstable
+persisted setting. Note that 1.35 to 1.50 V sit above Raspberry Pi's
+sanctioned operating range: expect substantially more heat (the on-chip LDO
+dissipation grows with both voltage and clock), and treat them as bench tools
+rather than shipping configurations. Staged via
 `sys_clock_req_mode/vreg` + `sys_clock_set_pending` (declared in `sys_clock.h`)
 and applied from the main loop. Allowed on all transports.
 
@@ -219,15 +225,18 @@ mode. BOOTSEL remains the last-resort recovery.
 
 ## Hardware validation TODO (feature is HW-untested)
 
-- **Flash timing at 64/80 MHz.** `PICO_FLASH_SPI_CLKDIV=6` is a ratio, so the
-  QSPI clock scales with sys_clk (51.2 / 64 / 80 MHz). Those are within the
-  W25Q080's SCK rating, but the RX sample delay is not re-tuned: RP2040's
-  boot2 `RXDELAY` and RP2350's ROM-programmed `QMI M0_TIMING.RXDELAY` were
-  calibrated for slower flash clocks, and RP2350's MIN_DESELECT/MAX_SELECT
-  counts also shrink in real time. Failure mode is sporadic XIP corruption
-  (random hard faults, caught by the breadcrumb at boot but not gracefully).
-  Bench-verify XIP stability in all three modes; if marginal, bump RXDELAY per
-  mode (RP2350) or raise CLKDIV.
+- **Flash timing.** The QSPI divider is per-mode on RP2350
+  (`flash_clkdiv.c`): 6 at 307.2/384 MHz (51.2/64 MHz flash) and 8 at 480 MHz
+  (60 MHz flash). Bench status 2026-08-03: 384 MHz ran clean; 480 MHz with
+  div 6 (80 MHz flash) crashed immediately and the breadcrumb fallback
+  recovered the device as designed. The div-8 change is the discriminating
+  test between flash timing and core silicon limits; if 480 still crashes
+  with div 8 the chip itself cannot run 480 MHz at 1.30 V. The sys-clock
+  switch applies the divider for the faster of old/new clocks before the PLL
+  moves; the divider is RAM-cached because the flash-op wrappers run with XIP
+  down. RP2040 keeps boot2's fixed div 6 (80 MHz at 480). If div 8 proves to
+  be the fix, an RXDELAY bump is the alternative should the cold-path cost of
+  div 8 ever matter.
 - Overclock stability screening per platform (384 and especially 480 MHz on
   RP2040 will not run on all silicon even at 1.30 V).
 - SPDIF RX lock and ADAT RX lock at both rates in the overclocked modes
