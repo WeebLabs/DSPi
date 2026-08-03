@@ -54,8 +54,9 @@ bool sys_clock_fallback_active(void);
 bool sys_clock_mode_valid(uint8_t m);
 
 // A voltage selection is valid only at or above the mode's default (the knob
-// trades voltage up for stability, never down) and at most 1.30 V; 0xFF
-// always means "the mode's default".
+// trades voltage up for stability, never down) and at most the platform
+// ceiling: 1.50 V on RP2350 (POWMAN limit unlocked automatically), 1.30 V on
+// RP2040 (regulator hardware maximum).  0xFF always means "the mode default".
 bool sys_clock_vreg_valid(uint8_t mode, uint8_t vreg_sel);
 
 // 0xFF or any invalid selection resolves to the mode's default voltage.
