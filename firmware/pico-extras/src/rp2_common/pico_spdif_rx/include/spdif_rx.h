@@ -41,12 +41,11 @@ extern "C" {
   #endif
 #endif
 
-// DSPi: sys_clk 307.2 MHz, PIO clock 122.88 MHz (div = 2.5). Cycles per symbol
-// at that clock, one decoder program each: 44.1k 21.77 (cy 22), 48k 20 (cy 20),
-// 88.2k 10.88 (cy 11), 96k 10 (cy 10), 192k 5 (cy 5, also used for 176.4k).
-#ifndef SPDIF_RX_SYS_CLK_FREQ
-#define SPDIF_RX_SYS_CLK_FREQ (307200000)
-#endif
+// DSPi: the PIO clock is held at 122.88 MHz at every selectable sys clock; the
+// SM divider is computed at program init from the live sys clock (2.5 / 3.125 /
+// 3.90625, all exact in 16.8).  Cycles per symbol at that clock, one decoder
+// program each: 44.1k 21.77 (cy 22), 48k 20 (cy 20), 88.2k 10.88 (cy 11),
+// 96k 10 (cy 10), 192k 5 (cy 5, also used for 176.4k).
 #ifndef SPDIF_RX_PIO_CLK_FREQ
 #define SPDIF_RX_PIO_CLK_FREQ (122880000)
 #endif

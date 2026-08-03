@@ -241,6 +241,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 // wValue = (output << 8) | index; SET payload and GET reply are float32 LE,
 // except the read-only GET blocks LIMITER_GET_METER / LIMITER_GET_STATUS.
 #define REQ_LIMITER                 0x81
+// Selectable system clock (device-global; see sys_clock.h).  SET payload =
+// {mode, vreg_sel}, vreg_sel 0xFF = the mode's default voltage.
+#define REQ_SET_SYS_CLOCK   0x40
+#define REQ_GET_SYS_CLOCK   0x41
 
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42

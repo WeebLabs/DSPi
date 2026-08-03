@@ -61,6 +61,7 @@ static uint32_t fbdivs[2];
 static uint32_t fbdivs_addr = (uint32_t)(uintptr_t)fbdivs;
 
 static bool  vcxo_ready = false;
+static bool  vcxo_claimed = false;   // DMA/timer/PWM claims survive a stop
 static float vcxo_ppm = 0.0f;
 
 #if DSPI_CLOCK_DIAG
@@ -103,9 +104,12 @@ void soft_vcxo_init(void) {
     accessctrl_hw->pll_sys = 0xacce0000u | 0xffu;
 #endif
 
-    dma_channel_claim(SOFT_VCXO_DMA_PULSE);
-    dma_channel_claim(SOFT_VCXO_DMA_PACE);
-    dma_timer_claim(SOFT_VCXO_DMA_TIMER);
+    if (!vcxo_claimed) {
+        dma_channel_claim(SOFT_VCXO_DMA_PULSE);
+        dma_channel_claim(SOFT_VCXO_DMA_PACE);
+        dma_timer_claim(SOFT_VCXO_DMA_TIMER);
+        vcxo_claimed = true;
+    }
     dma_timer_set_fraction(SOFT_VCXO_DMA_TIMER, 1, SOFT_VCXO_PULSE_CYCLES);
 
     dma_channel_config c = dma_channel_get_default_config(SOFT_VCXO_DMA_PULSE);
@@ -137,6 +141,20 @@ void soft_vcxo_init(void) {
 
     dma_channel_start(SOFT_VCXO_DMA_PACE);
     vcxo_ready = true;
+}
+
+// Halt the pulse train before the PLL is reprogrammed: an aborted PULSE may
+// have left the excursion value in fbdiv_int, so nominal is written back by
+// hand.  soft_vcxo_init() re-reads the new plan and restarts.
+void soft_vcxo_stop(void) {
+    if (!vcxo_ready) return;
+    vcxo_ready = false;
+    pwm_set_enabled(SOFT_VCXO_PWM_SLICE, false);   // no further PACE DREQs
+    dma_channel_abort(SOFT_VCXO_DMA_PULSE);
+    dma_channel_abort(SOFT_VCXO_DMA_PACE);
+    dma_channel_abort(SOFT_VCXO_DMA_PULSE);        // in case PACE re-armed it
+    pll_sys_hw->fbdiv_int = vcxo_fbdiv_nom;
+    fbdivs[0] = fbdivs[1] = vcxo_fbdiv_nom;
 }
 
 DSP_TIME_CRITICAL

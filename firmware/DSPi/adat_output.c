@@ -32,6 +32,7 @@
 
 #include <string.h>
 #include "config.h"
+#include "audio_clock_div.h"
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -350,9 +351,14 @@ void adat_output_get_status(AdatStatus *out) {
 void adat_output_on_rate_change(uint32_t freq) {
     adat_cur_freq = freq;
     adat_rate_ok = (freq <= 48000);
+    // Refresh the nominal divider now rather than at the next resync: after a
+    // sys-clock switch that resync can be unboundedly late (SPDIF input
+    // waiting for lock) and the SM would free-run at the old clock's rate.
+    adat_nom_div = audio_base_divider_16_8(freq);
     // Caller (perform_rate_change) holds the mute; the following
     // complete_pipeline_reset() restarts the stream via resync if valid.
     if (!adat_rate_ok && adat_running) adat_stop_hw();
+    else if (adat_running) adat_update_divider();
 }
 
 void adat_output_stream_stop(void) {

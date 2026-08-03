@@ -3,7 +3,7 @@
 #
 # DSPi patches:
 #   - PIO2 support for RP2350
-#   - Clock constants for 307.2 MHz sys_clk / 122.88 MHz PIO clock
+#   - Runtime SM divider holds the PIO clock at 122.88 MHz at any sys_clk
 #   - Removed pio_clear_instruction_memory() (destroys shared PIO programs)
 #   - Pre-generated PIO files (no Python dependency)
 #   - Dedicated 44.1 kHz and 88.2 kHz decoder programs (cy 22 / 11)

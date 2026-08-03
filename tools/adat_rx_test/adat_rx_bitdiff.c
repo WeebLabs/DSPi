@@ -20,8 +20,10 @@
  * verifies the current exact-timing probe policy: the wrong family is dirty,
  * then the matching 48/44.1 kHz candidate decodes cleanly.
  *
- * cc -O2 -o adat_rx_bitdiff adat_rx_bitdiff.c && ./adat_rx_bitdiff
- * Single case: ./adat_rx_bitdiff <fs> <src_ppm> <div_or_y> <model>
+ * cc -O2 -o adat_rx_bitdiff adat_rx_bitdiff.c && ./adat_rx_bitdiff [sys_clk_hz]
+ * Single case: ./adat_rx_bitdiff <fs> <src_ppm> <div_or_y> <model> [sys_clk_hz]
+ * sys_clk_hz defaults to 307200000; the firmware also offers 384000000 and
+ * 480000000, whose decoder cell counts differ from the matrix defaults below.
  * (diff_streams() below is an unused-by-default manual diagnostic that
  * classifies raw bitstream divergences; wire it into main when needed.)
  */
@@ -32,7 +34,8 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define SYS_CLK_HZ 307200000ull
+// Selectable on the firmware (307.2 / 384 / 480 MHz); overridable per run.
+static uint64_t sys_clk_hz = 307200000ull;
 #define ADAT_SYNC_HEADER 0x8010u
 #define N_FRAMES 2000
 
@@ -410,7 +413,7 @@ static void diff_streams(void) {
 }
 
 static bool run_case(uint32_t fs, double ppm, uint32_t div) {
-    uint64_t tx_div = ((uint64_t)SYS_CLK_HZ + fs - 1) / fs;
+    uint64_t tx_div = (sys_clk_hz + fs - 1) / fs;
     double tx_bit_sys = ((double)tx_div / 256.0) / (1.0 + ppm * 1e-6);
     run_pio(tx_bit_sys, div);
     FrameVerdict v = frame_oracle();
@@ -428,7 +431,11 @@ static bool run_case(uint32_t fs, double ppm, uint32_t div) {
 int main(int argc, char **argv) {
     tx_init();
     gen_stream(12345);
-    if (argc == 5) {
+    // sys_clk is the optional trailing argument in both forms; alone it just
+    // re-runs the regression matrix at that clock.
+    if (argc == 6 || argc == 2)
+        sys_clk_hz = strtoull(argv[argc - 1], NULL, 0);
+    if (argc == 5 || argc == 6) {
         pio_model = atoi(argv[4]);
         run_case((uint32_t)atoi(argv[1]), atof(argv[2]), (uint32_t)atoi(argv[3]));
         return 0;

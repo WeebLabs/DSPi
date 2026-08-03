@@ -51,6 +51,7 @@
 #include "bulk_params.h"     // WireBulkParams offsets for user_mute notify
 #include "dac_hw_mute.h"     // hold query for flash_mute_hold_samples floor
 #include "audio_pipeline.h"  // output-ring stall bracket around the flash window
+#include "sys_clock.h"       // SysClockMode + the V23 sys clock block sanitize
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -626,6 +627,13 @@ typedef struct __attribute__((packed)) {
 // INDEPENDENT-mode store beside output_config.  V19/V21 migrate by a whole-block
 // prefix copy and V20 by its pre-cs_aux prefix; the zeroed block then reads as
 // "never saved" and dir_sanitize_limiter() seeds the defaults.
+//
+// V23 appends the device-global selectable sys clock block (FlashSysClockConfig)
+// after the limiter.  A trailing block rather than bytes grown into
+// output_config: that struct sits mid-directory, so growing it would move every
+// later field and force a frozen snapshot of each older layout.  V22 migrates
+// by a whole-block prefix copy; the zeroed block reads as "never saved" and
+// dir_sanitize_sys_clock() seeds mode 0 / default voltage.
 
 // Device-global output limiter settings, used when output_config_mode is
 // INDEPENDENT.  Fixed at the RP2350 output count so the layout is the same on
@@ -646,6 +654,16 @@ typedef struct __attribute__((packed)) {
 } FlashLimiterConfig;                        // 112 bytes
 #define FLASH_LIMITER_CONFIG_VERSION 1
 _Static_assert(NUM_OUTPUT_CHANNELS <= FLASH_LIMITER_OUTPUTS, "limiter directory records");
+
+// Selectable sys clock (sys_clock.h), device-global and never carried by a
+// preset.  vreg is the raw platform vreg enum; 0xFF = the mode's default.
+typedef struct __attribute__((packed)) {
+    uint8_t version;                         // 0 = never saved (defaults), 1 = current
+    uint8_t mode;                            // SysClockMode 0..2
+    uint8_t vreg;                            // 0xFF = mode default
+    uint8_t reserved;
+} FlashSysClockConfig;                       // 4 bytes
+#define FLASH_SYS_CLOCK_CONFIG_VERSION 1
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
@@ -712,6 +730,10 @@ typedef struct __attribute__((packed)) {
     // V22 addition: output limiter settings for INDEPENDENT mode (see
     // apply_output_config_from_mode()).  version 0 = never saved.
     FlashLimiterConfig limiter;              // 112 bytes
+
+    // V23 addition: selectable sys clock (device-global; see sys_clock.h).
+    // version 0 = never saved.
+    FlashSysClockConfig sys_clock;           // 4 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1206,6 +1228,14 @@ _Static_assert(sizeof(FlashLimiterConfig) == 112, "V22 limiter block geometry is
 _Static_assert(sizeof(PresetDirectory_v19) == 3035,
                "V19 directory geometry is frozen; snapshot any struct that grew");
 
+// V23 only appends, so a V22 directory migrates by copying its whole data
+// block; the sys clock block must directly follow the V22 layout, whose on-flash
+// geometry (V19 plus the 112-byte limiter block) is pinned here.
+#define PRESET_DIRECTORY_V22_SIZE (3035 + 112)
+_Static_assert(offsetof(PresetDirectory, sys_clock) == PRESET_DIRECTORY_V22_SIZE,
+               "V23 sys clock block must directly follow the V22 layout");
+_Static_assert(sizeof(FlashSysClockConfig) == 4, "V23 sys clock block geometry is frozen");
+
 // V20 only differs by the trailing aux table, so the V20->V21 migration is a
 // prefix copy that stops at cs_aux; everything ahead of it must match V21.
 _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirectory, cs_display),
@@ -1214,7 +1244,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  22
+#define DIR_VERSION_CURRENT  23
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1559,6 +1589,7 @@ static void dir_sanitize_cs_groups(void);                             // defined
 static void dir_sanitize_cs_macros(void);                             // defined below
 static void dir_sanitize_cs_display(void);                            // defined below
 static void dir_sanitize_limiter(void);                               // defined below
+static void dir_sanitize_sys_clock(void);                             // defined below
 static void cs_config_from_v1(CsFlashConfig *dst, const CsFlashConfig_v1 *src);  // defined below
 static void cs_ir_from_v1(CsIrConfig *dst, const CsIrConfig_v1 *src);            // defined below
 // Forward declaration — defined alongside validate_slot() in the SLOT
@@ -1828,12 +1859,40 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         return true;
     }
 
+    if (flash_dir->version == 22) {
+        // V22 -> V23 migration.  V23 only appends the sys clock block, so the
+        // whole V22 data block copies across; the zeroed block then reads as
+        // "never saved" and dir_sanitize_sys_clock() seeds the defaults.
+        const uint8_t *v22_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v22_data_len = PRESET_DIRECTORY_V22_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v22_data_start, v22_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        // Header excluded: dir_flush() restamps magic/version/crc, and copying
+        // the old one would leave the cache reading V22 until it does.
+        memcpy(&dir_cache.startup_mode, v22_data_start, v22_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
+        return true;
+    }
+
     if (flash_dir->version == 20) {
-        // V20 -> V22 migration.  V21 dropped the trailing aux output table, so
+        // V20 -> V23 migration.  V21 dropped the trailing aux output table, so
         // copy the V20 data block up to it and discard the rest; any aux output
         // configured on a V20 build is gone and must be rebuilt as a binding.
         const PresetDirectory_v20 *v20 = (const PresetDirectory_v20 *)flash_dir;
@@ -1855,14 +1914,15 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
     }
 
     if (flash_dir->version == 19 || flash_dir->version == 21) {
-        // V19 / V21 -> V22 migration.  V21 is byte-identical to V19 and V22
-        // only appends the limiter block, so the whole data block copies across.
+        // V19 / V21 -> V23 migration.  V21 is byte-identical to V19 and V22/V23
+        // only append (limiter, sys clock), so the whole data block copies across.
         const PresetDirectory_v19 *v19 = (const PresetDirectory_v19 *)flash_dir;
         const uint8_t *v19_data_start = (const uint8_t *)&v19->startup_mode;
         size_t v19_data_len = sizeof(PresetDirectory_v19) - offsetof(PresetDirectory_v19, startup_mode);
@@ -1881,6 +1941,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1908,6 +1969,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1936,6 +1998,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1967,6 +2030,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2009,6 +2073,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2053,6 +2118,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2096,6 +2162,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2140,6 +2207,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2183,6 +2251,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2226,6 +2295,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2267,6 +2337,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2303,6 +2374,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v8->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v8->cs_config);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2346,6 +2418,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v7->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v7->cs_config);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2380,6 +2453,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v6->i2c_ctrl;
         dir_cache.cs_config.version  = CS_CONFIG_VERSION;
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2412,6 +2486,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2446,6 +2521,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();   // persist as V5
         return true;
@@ -2483,6 +2559,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.spdif_rx_pin = v3->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2518,6 +2595,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.spdif_rx_pin = v2->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2551,6 +2629,7 @@ static bool dir_load_cache(void) {
         io_config_defaults(&dir_cache.output_config);      // V4 device-global IO (v1 has no RX pin)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_sys_clock();
         dir_cache_valid = true;
         (void)dir_flush();  // persist as V4; if the flush fails, cache stays valid in RAM
         return true;
@@ -2826,6 +2905,23 @@ static void dir_sanitize_limiter(void) {
     }
 }
 
+// Seed the sys clock block when it was never saved (fresh or migrated
+// directory) and clamp a stored one: an out-of-range mode becomes 0 and a
+// voltage outside the mode's legal window (sys_clock_vreg_valid: below the
+// mode default or above the platform ceiling) becomes 0xFF = mode default.
+static void dir_sanitize_sys_clock(void) {
+    FlashSysClockConfig *c = &dir_cache.sys_clock;
+    if (c->version != FLASH_SYS_CLOCK_CONFIG_VERSION) {
+        memset(c, 0, sizeof(*c));
+        c->version = FLASH_SYS_CLOCK_CONFIG_VERSION;
+        c->vreg = 0xFF;
+        return;
+    }
+    if (!sys_clock_mode_valid(c->mode)) c->mode = (uint8_t)SYS_CLOCK_MODE_307P2;
+    if (!sys_clock_vreg_valid(c->mode, c->vreg)) c->vreg = 0xFF;
+    c->reserved = 0;
+}
+
 // Write the RAM-cached directory back to flash.
 // Recomputes the CRC before writing.
 static int dir_flush(void) {
@@ -2868,6 +2964,7 @@ static void dir_ensure(void) {
     io_config_defaults(&dir_cache.output_config);  // V4 device-global IO defaults
     ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 control interfaces
     dir_sanitize_limiter();                        // V22 limiter defaults
+    dir_sanitize_sys_clock();
     dir_cache_valid = true;
     // Don't flush yet — will be flushed on first preset save
 }
@@ -4994,4 +5091,23 @@ void flash_factory_reset(void) {
     dir_ensure();
     apply_output_config_from_mode(NULL, false);
     notify_end_bulk();
+}
+
+// Selectable sys clock persistence (device-global, never carried by a preset).
+// Same synchronous main-loop-only contract as preset_set_dac_hw_mute; the
+// stored block is re-sanitized on every load, so only gross validation here.
+void preset_set_sys_clock(uint8_t mode, uint8_t vreg) {
+    if (!sys_clock_mode_valid(mode)) return;
+    dir_ensure();
+    dir_cache.sys_clock.version = FLASH_SYS_CLOCK_CONFIG_VERSION;
+    dir_cache.sys_clock.mode = mode;
+    dir_cache.sys_clock.vreg = vreg;
+    dir_sanitize_sys_clock();
+    (void)dir_flush();
+}
+
+void preset_get_sys_clock(uint8_t *mode, uint8_t *vreg) {
+    dir_ensure();
+    if (mode) *mode = dir_cache.sys_clock.mode;
+    if (vreg) *vreg = dir_cache.sys_clock.vreg;
 }

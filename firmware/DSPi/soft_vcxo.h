@@ -15,6 +15,10 @@
 // sys_clk change must stop the pulse train first: it rewrites fbdiv_int.
 void soft_vcxo_init(void);
 
+// Halt the pulse train and park the PLL at nominal.  Required before any
+// runtime sys_clk change (set_sys_clock_pll); call soft_vcxo_init() after.
+void soft_vcxo_stop(void);
+
 // Command a sys_clk offset in ppm (clamped to +-SOFT_VCXO_MAX_PPM);
 // 0 parks the PLL at exactly nominal. Cheap; callable at servo rate.
 void soft_vcxo_set_ppm(float ppm);

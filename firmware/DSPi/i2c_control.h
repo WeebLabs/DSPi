@@ -48,6 +48,10 @@
 // Returns the PIN_CONFIG_* validation status.
 uint8_t i2c_ctrl_init(const I2cCtrlConfig *cfg);
 
+// Re-derives the IP's clk_sys-based timing counts; call after a sys-clock
+// switch.  No-op when the interface is down.
+void i2c_ctrl_reclock(void);
+
 // Tear down, validate, reconfigure.  Returns PIN_CONFIG_* status; on
 // validation failure the previous config is restored best-effort.
 // Main-loop context only.
