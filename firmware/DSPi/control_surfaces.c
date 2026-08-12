@@ -35,10 +35,12 @@
 
 #include "control_surfaces.h"
 #include "control_surfaces_ir.h"
+#include "control_surfaces_display.h"
 #include "config.h"
 #include "vendor_commands.h"
 #include "flash_storage.h"
 #include "notify.h"
+#include "i2c_control.h"
 
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
@@ -108,6 +110,13 @@ IrCommand        cs_set_ir_cmd_val;
 volatile bool    cs_save_pending = false;
 volatile bool    cs_revert_pending = false;
 
+// Deferred display SET handoffs (caps v10)
+volatile bool    cs_set_disp_cfg_pending = false;
+CsDisplayCfg     cs_set_disp_cfg_val;
+volatile bool    cs_set_disp_page_pending = false;
+uint8_t          cs_set_disp_page_slot = 0;
+CsDisplayPage    cs_set_disp_page_val;
+
 // Deferred group / macro SET handoffs (caps v9)
 volatile bool    cs_set_group_pending = false;
 uint8_t          cs_set_group_slot = 0;
@@ -127,7 +136,7 @@ CsMacroStep      cs_set_macro_step_val;
 // ---------------------------------------------------------------------------
 
 static const CsCapsHeader s_caps = {
-    .caps_version = 9,
+    .caps_version = 10,
     .max_bindings = CS_MAX_BINDINGS,
     .type_count   = CS_TYPE_COUNT,
     .noun_count   = CS_NOUN_COUNT,
@@ -150,6 +159,8 @@ static const CsCapsHeader s_caps = {
                               CS_ACT_BIT(CS_ACT_TOGGLE) | CS_ACT_BIT(CS_ACT_SET) |
                               CS_ACT_BIT(CS_ACT_TRIGGER) | CS_ACT_BIT(CS_ACT_MOMENTARY),
                               1, CS_PINCLASS_ANY },
+        // Display container: gpio = SDA/SCL, content via commands 0x27-0x2B.
+        [CS_TYPE_DISPLAY] = { 0, 2, CS_PINCLASS_ANY },
     },
     .max_ir_commands = CS_MAX_IR_COMMANDS,
     .max_groups      = CS_MAX_GROUPS,
@@ -201,6 +212,7 @@ typedef struct {
     uint8_t  led_cond;      // delay-filtered condition the pin follows
     uint32_t led_edge_ms;   // wall-clock ms at the last raw-condition change
     uint16_t pwm_level;     // last written PWM compare level
+    uint32_t pv_key;        // PAGE_VALUE resolved-item key (session reset)
     CsOpState op;
 } CsRuntime;
 
@@ -240,6 +252,7 @@ static bool          s_dirty = false;            // live config != flash
 static CsIrConfig    s_ir;                       // live IR command table
 static CsOpState     s_ir_op[CS_MAX_IR_COMMANDS];
 static uint8_t       s_ir_cmd_status[CS_MAX_IR_COMMANDS];
+static uint32_t      s_ir_pv_key[CS_MAX_IR_COMMANDS];  // PAGE_VALUE session keys
 static uint8_t       s_ir_slot = 0xFF;           // slot of the live IR binding
 static bool          s_ir_hold = false;          // a remote button is down
 static uint16_t      s_ir_hold_ticks = 0;
@@ -282,6 +295,18 @@ static CsGroupOp     s_gop[CS_MAX_BINDINGS];
 
 // Macro sequencer: one macro at a time; a new fire cancels the old one at
 // its current step boundary.
+// Grouped IR ops share a 2-deep context pool: a receiver delivers one key
+// at a time, so per-command contexts would buy nothing; two covers a held
+// grouped momentary plus one interleaved grouped press.  Pool exhaustion
+// drops the new press.
+typedef struct {
+    bool      used;
+    uint8_t   sub;
+    CsGroupOp gop;
+} CsIrGop;
+#define CS_IR_GOP_POOL  2
+static CsIrGop s_ir_gop[CS_IR_GOP_POOL];
+
 static uint8_t   s_macro_run = 0xFF;             // running macro (0xFF idle)
 static uint8_t   s_macro_step = 0;
 static uint32_t  s_macro_delay = 0;              // ticks left before the step runs
@@ -381,6 +406,8 @@ static bool cs_shadow_confirmed(const CsNounDesc *nd, float live,
 
 static void cs_queue_op(const CsBinding *b, CsOpState *op, float value) {
     const CsNounDesc *nd = &cs_noun_table[b->noun];
+    // Overlay hook: a control adjusted this item (retries do not re-note).
+    cs_display_note_adjust(b->noun, b->target, b->index, false);
     if (nd->dflags & CS_NDF_DEFERRED) {
         op->shadow_active = true;
         op->shadow = value;
@@ -485,6 +512,7 @@ static void cs_gop_pump(const CsBinding *b, CsGroupOp *gop) {
 static void cs_group_abs(const CsBinding *b, CsGroupOp *gop, float value) {
     uint32_t members = cs_group_members(b);
     if (!members) return;
+    cs_display_note_adjust(b->noun, b->target, b->index, true);
     gop->mode = CS_GOP_ABS;
     gop->member_mask = members;
     gop->abs_value = value;
@@ -501,6 +529,7 @@ static void cs_group_step(const CsBinding *b, CsGroupOp *gop, int dir, int steps
     if (nd->kind == CS_KIND_CONTINUOUS) {
         uint32_t members = cs_group_members(b);
         if (!members) return;
+        cs_display_note_adjust(b->noun, b->target, b->index, true);
         if (gop->mode != CS_GOP_REL || gop->age >= CS_GROUP_SESSION_TICKS ||
             gop->member_mask != members) {
             gop->mode = CS_GOP_REL;
@@ -538,6 +567,7 @@ static void cs_group_step(const CsBinding *b, CsGroupOp *gop, int dir, int steps
 static void cs_group_momentary_engage(const CsBinding *b, CsGroupOp *gop) {
     uint32_t members = cs_group_members(b);
     if (!members) return;
+    cs_display_note_adjust(b->noun, b->target, b->index, true);
     cs_gop_capture(b, gop, members);
     gop->mode = CS_GOP_MOM_ENGAGE;
     gop->abs_value = (float)b->value;
@@ -611,6 +641,7 @@ static void cs_group_adjust(const CsBinding *b, CsGroupOp *gop, float value) {
     const CsNounDesc *nd = &cs_noun_table[b->noun];
     uint32_t members = cs_group_members(b);
     if (!members) return;
+    cs_display_note_adjust(b->noun, b->target, b->index, true);
     if (gop->mode != CS_GOP_ADJ || gop->age >= CS_GROUP_SESSION_TICKS ||
         gop->member_mask != members) {
         gop->mode = CS_GOP_ADJ;
@@ -644,6 +675,106 @@ static float cs_group_ind_level(const CsBinding *b) {
 }
 
 // ---------------------------------------------------------------------------
+// PAGE_VALUE: a control that edits whatever the display currently shows.
+// The target resolves at event time; op state carries over only while the
+// resolved item is unchanged (keyed reset, like the macro sequencer).
+// ---------------------------------------------------------------------------
+
+// Forward decls from the Actions and validation sections.
+static void cs_apply_step(const CsBinding *b, CsOpState *op, int dir, int steps);
+static void cs_button_press(const CsBinding *b, CsOpState *op);
+static uint8_t cs_validate_group_ref(const CsBinding *b);
+
+// Navigate to the next/previous active page (always wraps).  From the
+// "no page shown" state the first step lands on the edge page, not past it.
+static void cs_display_page_nav(int dir) {
+    uint16_t mask = cs_display_page_mask();
+    if (!mask) return;
+    uint8_t cur = cs_display_current_page();
+    uint8_t n = (cur != 0xFF) ? cur
+              : (dir > 0) ? (CS_MAX_DISPLAY_PAGES - 1) : 0;
+    for (uint8_t i = 0; i < CS_MAX_DISPLAY_PAGES; i++) {
+        n = (uint8_t)((n + CS_MAX_DISPLAY_PAGES + dir) % CS_MAX_DISPLAY_PAGES);
+        if (mask & (1u << n)) break;
+    }
+    cs_display_select_page(n);
+}
+
+// dir/steps for STEP/INC/DEC; action CS_ACT_TOGGLE for a toggle press.
+static void cs_pagevalue_apply(const CsBinding *pv, CsOpState *op, CsGroupOp *gop,
+                               uint32_t *key, int dir, int steps, uint8_t action) {
+    CsDisplayPage pg;
+    if (!cs_display_resolve_current(&pg)) return;
+    if ((control_surfaces_display_flash()->cfg.flags & CS_DCFG_EDIT_GATED) &&
+        !cs_display_edit_armed()) {
+        // Unarmed while gated: steps browse pages, toggles do nothing (the
+        // edit button owns arming).
+        if (action != CS_ACT_TOGGLE && dir != 0) cs_display_page_nav(dir);
+        return;
+    }
+    const CsNounDesc *nd = &cs_noun_table[pg.noun];
+    const uint16_t writers = CS_ACT_BIT(CS_ACT_STEP) | CS_ACT_BIT(CS_ACT_INC) |
+        CS_ACT_BIT(CS_ACT_DEC) | CS_ACT_BIT(CS_ACT_SET) | CS_ACT_BIT(CS_ACT_TOGGLE);
+    if ((nd->actions & writers) == 0) return;   // read-only page: no-op
+
+    CsBinding v;
+    memset(&v, 0, sizeof(v));
+    v.type   = CS_TYPE_ENCODER;   // ignored by the op helpers
+    v.noun   = pg.noun;
+    v.target = pg.target;
+    v.index  = pg.index;
+    v.flags  = (uint8_t)(((pg.flags & CS_DPAGE_GROUP) ? CS_FLAG_GROUP : 0) |
+                         (pv->flags & CS_FLAG_WRAP));
+
+    uint32_t k = ((uint32_t)pg.noun << 16) | ((uint32_t)pg.target << 8) |
+                 pg.index | ((pg.flags & CS_DPAGE_GROUP) ? 0x01000000u : 0);
+    if (*key != k) {
+        memset(op, 0, sizeof(*op));
+        memset(gop, 0, sizeof(*gop));
+        *key = k;
+    }
+    if (action == CS_ACT_TOGGLE) {
+        if (nd->kind != CS_KIND_BOOL) return;
+        v.action = CS_ACT_TOGGLE;
+        if (cs_binding_grouped(&v)) cs_group_press(&v, gop);
+        else                        cs_button_press(&v, op);
+        return;
+    }
+    if (nd->kind == CS_KIND_BOOL) {
+        // Detents on a bool page: up = on, down = off.
+        v.action = CS_ACT_SET;
+        v.value = (dir > 0) ? 1 : 0;
+        if (cs_binding_grouped(&v)) cs_group_press(&v, gop);
+        else                        cs_button_press(&v, op);
+        return;
+    }
+    if (cs_binding_grouped(&v)) cs_group_step(&v, gop, dir, steps);
+    else                        cs_apply_step(&v, op, dir, steps);
+}
+
+// Exported wrapper for the display module's page validation (the group
+// table and statuses are engine-owned statics).
+uint8_t cs_validate_grouped_target(const CsBinding *b) {
+    return cs_validate_group_ref(b);
+}
+
+// Retry/pump view for a PAGE_VALUE op: the parked work belongs to the
+// RESOLVED item (encoded in the session key), not the virtual noun, or a
+// BUSY dispatch would be retried through PAGE_VALUE and silently dropped.
+static CsBinding cs_pv_effective(const CsBinding *b, uint32_t key) {
+    if (b->noun != CS_NOUN_PAGE_VALUE) return *b;
+    CsBinding v;
+    memset(&v, 0, sizeof(v));
+    v.type   = CS_TYPE_ENCODER;
+    v.noun   = (uint8_t)(key >> 16);
+    v.target = (uint8_t)(key >> 8);
+    v.index  = (uint8_t)key;
+    v.flags  = (uint8_t)(((key & 0x01000000u) ? CS_FLAG_GROUP : 0) |
+                         (b->flags & CS_FLAG_WRAP));
+    return v;
+}
+
+// ---------------------------------------------------------------------------
 // Actions
 // ---------------------------------------------------------------------------
 
@@ -656,9 +787,18 @@ static int cs_enum_step(const CsBinding *b, const CsOpState *op, int dir) {
     int cur = (int)cs_base_value(b, op);
     bool wrap = (b->flags & CS_FLAG_WRAP) != 0;
 
-    if (b->noun == CS_NOUN_PRESET) {
-        uint16_t occ; uint8_t sm, ds, la, ocm, mvm;
-        preset_get_directory(&occ, &sm, &ds, &la, &ocm, &mvm);
+    if (b->noun == CS_NOUN_PRESET || b->noun == CS_NOUN_DISPLAY_PAGE) {
+        // Both step across OCCUPIED slots only (presets / active pages).
+        uint16_t occ;
+        if (b->noun == CS_NOUN_PRESET) {
+            uint8_t sm, ds, la, ocm, mvm;
+            preset_get_directory(&occ, &sm, &ds, &la, &ocm, &mvm);
+        } else {
+            occ = cs_display_page_mask();
+            // "No page shown" reads 255; re-enter the range from the edge
+            // so a non-WRAP control is not stuck outside it forever.
+            if (cur >= count) cur = (dir > 0) ? -1 : count;
+        }
         if (!occ) return -1;
         for (int i = 1; i <= count; i++) {
             int cand = cur + dir * i;
@@ -795,8 +935,17 @@ static void cs_group_fire(const CsBtnGroup *g, uint8_t event, bool is_repeat) {
         if (b->action == CS_ACT_MOMENTARY) continue;
         if (b->event != event) continue;
         if (is_repeat && !(b->flags & CS_FLAG_REPEAT)) continue;
-        if (cs_binding_grouped(b)) cs_group_press(b, &s_gop[s]);
-        else                       cs_button_press(b, &s_rt[s].op);
+        if (b->noun == CS_NOUN_PAGE_VALUE) {
+            int dir = (b->action == CS_ACT_DEC) ? -1
+                    : (b->action == CS_ACT_INC) ? +1 : 0;
+            cs_pagevalue_apply(b, &s_rt[s].op, &s_gop[s], &s_rt[s].pv_key,
+                               dir, 1, b->action == CS_ACT_TOGGLE
+                                       ? CS_ACT_TOGGLE : CS_ACT_STEP);
+        } else if (cs_binding_grouped(b)) {
+            cs_group_press(b, &s_gop[s]);
+        } else {
+            cs_button_press(b, &s_rt[s].op);
+        }
     }
 }
 
@@ -954,8 +1103,11 @@ static void cs_tick_encoder(uint8_t slot) {
         else if (gap < CS_ACCEL_GAP_X2) steps = 2;
     }
     rt->enc_gap = 0;
-    if (cs_binding_grouped(b)) cs_group_step(b, &s_gop[slot], dir, steps);
-    else                       cs_apply_step(b, &rt->op, dir, steps);
+    if (b->noun == CS_NOUN_PAGE_VALUE)
+        cs_pagevalue_apply(b, &rt->op, &s_gop[slot], &rt->pv_key,
+                           dir, steps, CS_ACT_STEP);
+    else if (cs_binding_grouped(b)) cs_group_step(b, &s_gop[slot], dir, steps);
+    else                            cs_apply_step(b, &rt->op, dir, steps);
 }
 
 // Map a filtered ADC reading onto the binding's span, quantized per unit.
@@ -1145,6 +1297,10 @@ static void cs_claim_pins(uint8_t slot) {
             pwm_set_enabled(slice, true);
             break;
         }
+        case CS_TYPE_DISPLAY:
+            // Pin mux, pulls and the I2C peripheral are the module's job.
+            cs_display_attach(b);
+            break;
         default:  // button / switch / encoder / IR inputs (idempotent re-claims OK)
             for (int i = 0; i < cs_pin_count(b->type); i++) {
                 gpio_init(b->gpio[i]);
@@ -1160,6 +1316,9 @@ static void cs_claim_pins(uint8_t slot) {
 // active binding still uses them; a PWM slice is stopped only when no other
 // CS PWM LED remains on it.  Caller has already marked the slot inactive.
 static void cs_release_pins(uint8_t slot, const CsBinding *b) {
+    if (b->type == CS_TYPE_DISPLAY) {
+        cs_display_detach();   // stops the I2C peripheral; pins deinit below
+    }
     if (b->type == CS_TYPE_IR) {
         cs_ir_detach();
         s_ir_slot = 0xFF;
@@ -1171,6 +1330,7 @@ static void cs_release_pins(uint8_t slot, const CsBinding *b) {
         for (uint8_t sub = 0; sub < CS_MAX_IR_COMMANDS; sub++)
             cs_ir_release_momentary(sub);
         memset(s_ir_op, 0, sizeof(s_ir_op));
+        memset(s_ir_gop, 0, sizeof(s_ir_gop));
         // Detach aborts a learn in progress; tell the waiting host now,
         // since the tick no longer runs IR work without a component.
         if (cs_ir_learn_take_change())
@@ -1226,6 +1386,7 @@ static void cs_seed_runtime(uint8_t slot) {
             s_ir_slot = slot;
             s_ir_hold = false;
             memset(s_ir_op, 0, sizeof(s_ir_op));
+            memset(s_ir_gop, 0, sizeof(s_ir_gop));
             break;
         default:   // buttons keep their state in the pin group
             break;
@@ -1339,6 +1500,32 @@ static uint8_t cs_validate_ir_container(const CsBinding *b, uint8_t slot) {
     return PIN_CONFIG_SUCCESS;
 }
 
+// The display binding is a container: SDA/SCL, model and address are the
+// only payload; content comes through the display commands.  SDA must be
+// an even GPIO and SCL the odd mux of the same I2C instance, and that
+// instance must not carry the I2C target control interface.
+static uint8_t cs_validate_display_container(const CsBinding *b, uint8_t slot) {
+    if (b->noun != 0 || b->action != 0 || b->event != 0 ||
+        b->target != 0 || b->step != 0 ||
+        b->range_min != 0 || b->range_max != 0 || b->flags != 0)
+        return CS_STATUS_INVALID_VALUE;
+    if (b->index == CS_DISP_MODEL_NONE || b->index >= CS_DISP_MODEL_COUNT)
+        return CS_STATUS_INVALID_VALUE;
+    if (b->value != 0 && (b->value < 0x08 || b->value > 0x77))
+        return CS_STATUS_INVALID_VALUE;
+    if ((b->gpio[0] & 1) != 0 || (b->gpio[1] & 1) != 1 ||
+        ((b->gpio[0] >> 1) & 1) != ((b->gpio[1] >> 1) & 1))
+        return CS_STATUS_PIN_NOT_I2C;
+    if (i2c_ctrl_live_instance() == (int)((b->gpio[0] >> 1) & 1))
+        return CS_STATUS_I2C_IN_USE;
+    for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+        if (s == slot || !s_rt[s].active) continue;
+        if (s_cfg.bindings[s].type == CS_TYPE_DISPLAY)
+            return CS_STATUS_DISPLAY_IN_USE;
+    }
+    return PIN_CONFIG_SUCCESS;
+}
+
 // Full validity check for a proposed binding.  Pin checks run against the
 // live device with this slot's own pins already released by the caller.
 static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
@@ -1367,6 +1554,9 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
         // Container slot: no noun/action/value semantics of its own; only
         // the shared pin checks below apply.
         uint8_t st = cs_validate_ir_container(b, slot);
+        if (st != PIN_CONFIG_SUCCESS) return st;
+    } else if (b->type == CS_TYPE_DISPLAY) {
+        uint8_t st = cs_validate_display_container(b, slot);
         if (st != PIN_CONFIG_SUCCESS) return st;
     } else {
         uint16_t bit = CS_ACT_BIT(b->action);
@@ -1397,6 +1587,13 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
 
         uint8_t vst = cs_validate_values(b, nd);
         if (vst != PIN_CONFIG_SUCCESS) return vst;
+
+        // PAGE_VALUE resolves its target at event time; nothing static to
+        // check the scalar fields against, so they must be zero.
+        if (b->noun == CS_NOUN_PAGE_VALUE &&
+            (b->value != 0 || b->step != 0 ||
+             b->range_min != 0 || b->range_max != 0))
+            return CS_STATUS_INVALID_VALUE;
     }
 
     // Pins: distinct, valid, unclaimed anywhere; the one sanctioned overlap
@@ -1468,10 +1665,14 @@ static uint8_t cs_validate_ir_cmd(const IrCommand *c) {
     if (c->protocol >= CS_IR_PROTO_COUNT) return CS_STATUS_INVALID_VALUE;
     if (c->code == 0) return CS_STATUS_INVALID_VALUE;   // 0 = never learned
     if (c->reserved[0] != 0 || c->reserved[1] != 0) return CS_STATUS_INVALID_VALUE;
-    if (c->flags & (uint8_t)~(CS_FLAG_WRAP | CS_FLAG_REPEAT))
+    // GROUP accepted since caps v10; a grouped remote key composes with
+    // hold-to-repeat exactly like a grouped button.
+    if (c->flags & (uint8_t)~(CS_FLAG_WRAP | CS_FLAG_REPEAT | CS_FLAG_GROUP))
         return CS_STATUS_INVALID_VALUE;
     if ((c->flags & CS_FLAG_REPEAT) &&
         c->action != CS_ACT_INC && c->action != CS_ACT_DEC)
+        return CS_STATUS_INVALID_VALUE;
+    if (c->noun == CS_NOUN_PAGE_VALUE && (c->value != 0 || c->step != 0))
         return CS_STATUS_INVALID_VALUE;
 
     const CsNounDesc *nd = &cs_noun_table[c->noun];
@@ -1480,18 +1681,43 @@ static uint8_t cs_validate_ir_cmd(const IrCommand *c) {
         return CS_STATUS_INVALID_ACTION;
 
     CsBinding v = cs_ir_view(c);
-    uint8_t tst = cs_noun_validate_target(&v);
+    uint8_t tst = (c->flags & CS_FLAG_GROUP) ? cs_validate_group_ref(&v)
+                                             : cs_noun_validate_target(&v);
     if (tst != PIN_CONFIG_SUCCESS) return tst;
     return cs_validate_values(&v, nd);
+}
+
+// Grouped IR context pool management.  Acquire finds the command's live
+// context or claims a free one; NULL when exhausted (the press is dropped).
+static CsGroupOp *cs_ir_gop_acquire(uint8_t sub) {
+    for (int i = 0; i < CS_IR_GOP_POOL; i++)
+        if (s_ir_gop[i].used && s_ir_gop[i].sub == sub) return &s_ir_gop[i].gop;
+    for (int i = 0; i < CS_IR_GOP_POOL; i++) {
+        if (!s_ir_gop[i].used) {
+            s_ir_gop[i].used = true;
+            s_ir_gop[i].sub = sub;
+            memset(&s_ir_gop[i].gop, 0, sizeof(s_ir_gop[i].gop));
+            return &s_ir_gop[i].gop;
+        }
+    }
+    return NULL;
+}
+
+static CsGroupOp *cs_ir_gop_find(uint8_t sub) {
+    for (int i = 0; i < CS_IR_GOP_POOL; i++)
+        if (s_ir_gop[i].used && s_ir_gop[i].sub == sub) return &s_ir_gop[i].gop;
+    return NULL;
 }
 
 // Best-effort momentary restore before a command's op state is discarded
 // (receiver teardown or command overwrite).  A BUSY dispatch is dropped
 // with the state; acceptable on a teardown path.
 static void cs_ir_release_momentary(uint8_t sub) {
+    CsBinding v = cs_ir_view(&s_ir.cmds[sub]);
+    CsGroupOp *gop = cs_ir_gop_find(sub);
+    if (gop) cs_group_momentary_release(&v, gop);
     CsOpState *op = &s_ir_op[sub];
     if (!op->mom_engaged) return;
-    CsBinding v = cs_ir_view(&s_ir.cmds[sub]);
     cs_momentary_release(&v, op);
 }
 
@@ -1508,6 +1734,14 @@ uint8_t control_surfaces_apply_ir_cmd(uint8_t sub, const IrCommand *c) {
         if (st != PIN_CONFIG_SUCCESS) return st;   // old command kept intact
     }
     cs_ir_release_momentary(sub);   // editing a held command restores first
+    // Drop the sub-slot's group context with its op state: a BUSY leftover
+    // would otherwise re-dispatch through the NEW command's noun.
+    for (int i = 0; i < CS_IR_GOP_POOL; i++) {
+        if (s_ir_gop[i].used && s_ir_gop[i].sub == sub) {
+            s_ir_gop[i].used = false;
+            memset(&s_ir_gop[i].gop, 0, sizeof(s_ir_gop[i].gop));
+        }
+    }
     s_ir.cmds[sub] = *c;
     memset(&s_ir_op[sub], 0, sizeof(s_ir_op[sub]));
     s_ir_cmd_status[sub] = PIN_CONFIG_SUCCESS;
@@ -1523,6 +1757,41 @@ static void cs_ir_fire(uint8_t protocol, uint32_t code, uint8_t evkind) {
             continue;
         CsBinding v = cs_ir_view(c);
         CsOpState *op = &s_ir_op[sub];
+        bool fire = (evkind == CS_IR_EVT_PRESS) ||
+                    (evkind == CS_IR_EVT_REPEAT && (c->flags & CS_FLAG_REPEAT));
+        if (c->noun == CS_NOUN_PAGE_VALUE) {
+            if (!fire) continue;
+            CsGroupOp *gop = cs_ir_gop_acquire(sub);
+            if (!gop) continue;
+            int dir = (c->action == CS_ACT_DEC) ? -1
+                    : (c->action == CS_ACT_INC) ? +1 : 0;
+            cs_pagevalue_apply(&v, op, gop, &s_ir_pv_key[sub], dir, 1,
+                               c->action == CS_ACT_TOGGLE ? CS_ACT_TOGGLE
+                                                          : CS_ACT_STEP);
+            continue;
+        }
+        if (c->flags & CS_FLAG_GROUP) {
+            CsGroupOp *gop = (evkind == CS_IR_EVT_RELEASE)
+                           ? cs_ir_gop_find(sub) : cs_ir_gop_acquire(sub);
+            if (!gop) continue;
+            switch (evkind) {
+                case CS_IR_EVT_PRESS:
+                    if (c->action == CS_ACT_MOMENTARY)
+                        cs_group_momentary_engage(&v, gop);
+                    else
+                        cs_group_press(&v, gop);
+                    break;
+                case CS_IR_EVT_REPEAT:
+                    if (c->flags & CS_FLAG_REPEAT) cs_group_press(&v, gop);
+                    break;
+                case CS_IR_EVT_RELEASE:
+                    if (c->action == CS_ACT_MOMENTARY)
+                        cs_group_momentary_release(&v, gop);
+                    break;
+                default: break;
+            }
+            continue;
+        }
         switch (evkind) {
             case CS_IR_EVT_PRESS:
                 if (c->action == CS_ACT_MOMENTARY) cs_momentary_engage(&v, op);
@@ -1616,8 +1885,11 @@ static bool cs_macro_step_empty(const CsMacroStep *s) {
 
 static uint8_t cs_validate_macro_step(const CsMacroStep *s) {
     if (cs_macro_step_empty(s)) return PIN_CONFIG_SUCCESS;
-    if (s->noun >= CS_NOUN_COUNT || s->noun == CS_NOUN_MACRO)
-        return CS_STATUS_INVALID_STEP;   // no nesting
+    // No nesting; PAGE_VALUE is excluded too (a stored sequence editing
+    // "whatever happens to be shown" is non-deterministic).
+    if (s->noun >= CS_NOUN_COUNT || s->noun == CS_NOUN_MACRO ||
+        s->noun == CS_NOUN_PAGE_VALUE)
+        return CS_STATUS_INVALID_STEP;
     if (s->action >= CS_ACT_COUNT ||
         !(CS_MACRO_STEP_ACTS & CS_ACT_BIT(s->action)))
         return CS_STATUS_INVALID_STEP;
@@ -1806,6 +2078,22 @@ uint8_t control_surfaces_apply_group(uint8_t idx, const CsGroup *g) {
         if (!cs_binding_grouped(b) || b->target != idx) continue;
         cs_revalidate_grouped_slot(s);
     }
+    // Grouped IR commands referencing this group revalidate too; a stale
+    // kind mismatch would otherwise keep dispatching to the wrong channels.
+    for (uint8_t sub = 0; sub < CS_MAX_IR_COMMANDS; sub++) {
+        const IrCommand *c = &s_ir.cmds[sub];
+        if (c->protocol == CS_IR_PROTO_NONE ||
+            !(c->flags & CS_FLAG_GROUP) || c->target != idx)
+            continue;
+        cs_ir_release_momentary(sub);
+        for (int i = 0; i < CS_IR_GOP_POOL; i++) {
+            if (s_ir_gop[i].used && s_ir_gop[i].sub == sub) {
+                s_ir_gop[i].used = false;
+                memset(&s_ir_gop[i].gop, 0, sizeof(s_ir_gop[i].gop));
+            }
+        }
+        s_ir_cmd_status[sub] = cs_validate_ir_cmd(c);
+    }
     cs_recount_active();
     cs_rebuild_groups();
     cs_macro_recount_status();
@@ -1961,14 +2249,17 @@ static void cs_load_stored_groups_macros(void) {
 
 static void cs_load_stored(void) {
     cs_load_stored_groups_macros();
+    // Display pages load before bindings so a stored display binding's
+    // attach sees its stored pages (seeding only fires on an empty table).
+    cs_display_load_stored();
     cs_load_stored_bindings();
     cs_load_stored_ir();
     for (uint8_t slot = 0; slot < CS_MAX_BINDINGS; slot++)
         preset_get_cs_name(slot, s_names[slot]);
 }
 
-// Shared group/macro state reset for init and revert: sequencer idle, group
-// contexts cleared, live tables zeroed for the reload.
+// Shared group/macro/display state reset for init and revert: sequencer
+// idle, group contexts cleared, live tables zeroed for the reload.
 static void cs_reset_groups_macros(void) {
     memset(&s_groups, 0, sizeof(s_groups));
     s_groups.version = CS_GROUP_CONFIG_VERSION;
@@ -1977,7 +2268,10 @@ static void cs_reset_groups_macros(void) {
     memset(s_group_status, 0, sizeof(s_group_status));
     memset(s_macro_status, 0, sizeof(s_macro_status));
     memset(s_gop, 0, sizeof(s_gop));
+    memset(s_ir_gop, 0, sizeof(s_ir_gop));
+    memset(s_ir_pv_key, 0, sizeof(s_ir_pv_key));
     control_surfaces_macro_cancel();
+    cs_display_reset();
 }
 
 void control_surfaces_init(void) {
@@ -2028,7 +2322,9 @@ void control_surfaces_tick(void) {
     for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
         CsRuntime *rt = &s_rt[s];
         if (!rt->active) continue;
-        const CsBinding *b = &s_cfg.bindings[s];
+        // PAGE_VALUE ops retry through their resolved item, not the noun.
+        CsBinding eb = cs_pv_effective(&s_cfg.bindings[s], rt->pv_key);
+        const CsBinding *b = &eb;
         CsOpState *op = &rt->op;
         if (op->pending &&
             cs_noun_dispatch(b->noun, b->target, b->index, op->value))
@@ -2052,7 +2348,8 @@ void control_surfaces_tick(void) {
     for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
         CsGroupOp *gop = &s_gop[s];
         if (!s_rt[s].active || gop->mode == CS_GOP_IDLE) continue;
-        const CsBinding *b = &s_cfg.bindings[s];
+        CsBinding eb = cs_pv_effective(&s_cfg.bindings[s], s_rt[s].pv_key);
+        const CsBinding *b = &eb;
         if (gop->pend_mask) cs_gop_pump(b, gop);
         if (gop->mode != CS_GOP_MOM_ENGAGE && gop->mode != CS_GOP_MOM_RESTORE &&
             gop->age < 0xFFFF && ++gop->age >= CS_GROUP_SESSION_TICKS &&
@@ -2080,12 +2377,36 @@ void control_surfaces_tick(void) {
         cs_tick_macro();
     }
 
+    // Grouped IR contexts: pump BUSY members, age sessions, free idle
+    // entries back to the pool (an engaged momentary pins its entry).
+    for (int i = 0; i < CS_IR_GOP_POOL; i++) {
+        CsIrGop *e = &s_ir_gop[i];
+        if (!e->used) continue;
+        if (!cs_ir_cmd_live(e->sub)) {
+            e->used = false;
+            memset(&e->gop, 0, sizeof(e->gop));
+            continue;
+        }
+        CsBinding iv = cs_ir_view(&s_ir.cmds[e->sub]);
+        CsBinding v = cs_pv_effective(&iv, s_ir_pv_key[e->sub]);
+        if (e->gop.pend_mask) cs_gop_pump(&v, &e->gop);
+        if (e->gop.mode != CS_GOP_MOM_ENGAGE && e->gop.mode != CS_GOP_MOM_RESTORE &&
+            e->gop.mode != CS_GOP_IDLE &&
+            e->gop.age < 0xFFFF && ++e->gop.age >= CS_GROUP_SESSION_TICKS &&
+            e->gop.pend_mask == 0)
+            e->gop.mode = CS_GOP_IDLE;
+        if (e->gop.mode == CS_GOP_IDLE && e->gop.pend_mask == 0)
+            e->used = false;
+    }
+
     // Same retry / shadow maintenance for the IR commands' op states.
     for (uint8_t sub = 0; sub < CS_MAX_IR_COMMANDS; sub++) {
         CsOpState *op = &s_ir_op[sub];
         if (!op->pending && !op->shadow_active) continue;
         if (!cs_ir_cmd_live(sub)) { op->pending = false; op->shadow_active = false; continue; }
-        const IrCommand *c = &s_ir.cmds[sub];
+        CsBinding iv = cs_ir_view(&s_ir.cmds[sub]);
+        CsBinding ev = cs_pv_effective(&iv, s_ir_pv_key[sub]);
+        const CsBinding *c = &ev;
         if (op->pending &&
             cs_noun_dispatch(c->noun, c->target, c->index, op->value))
             op->pending = false;
@@ -2102,6 +2423,8 @@ void control_surfaces_tick(void) {
 
     if (s_ir_slot != 0xFF)
         cs_tick_ir();
+
+    cs_display_tick();
 
     // Buttons decode once per pin group, not per binding.
     for (uint8_t i = 0; i < CS_MAX_BINDINGS; i++)

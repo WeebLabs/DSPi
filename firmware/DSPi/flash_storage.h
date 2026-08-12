@@ -117,9 +117,9 @@ void preset_get_cs_config(CsFlashConfig *out);
 
 // Control Surfaces IR command table (board-level, directory-stored, V11+).
 // Getter copies out of the RAM cache.  preset_set_cs_all persists bindings,
-// IR commands, slot names, groups and macros together in one directory-sector
-// write (the REQ_CS_SAVE path); synchronous and main-loop only, caller has
-// validated all five.  Returns PRESET_OK or PRESET_ERR_*.
+// IR commands, slot names, groups, macros and the display blob together in one
+// directory-sector write (the REQ_CS_SAVE path); synchronous and main-loop
+// only, caller has validated all six.  Returns PRESET_OK or PRESET_ERR_*.
 void preset_get_cs_ir_config(CsIrConfig *out);
 
 // Control Surfaces target groups and macros (board-level, directory-stored,
@@ -128,9 +128,15 @@ void preset_get_cs_ir_config(CsIrConfig *out);
 void preset_get_cs_groups(CsGroupConfig *out);
 void preset_get_cs_macros(CsMacroConfig *out);
 
+// Control Surfaces display config and page table (board-level, directory-
+// stored, V19+).  Getter copies out of the RAM cache; persists only through
+// preset_set_cs_all below.
+void preset_get_cs_display(CsDisplayFlash *out);
+
 uint8_t preset_set_cs_all(const CsFlashConfig *cfg, const CsIrConfig *ir,
                           const char (*names)[CS_NAME_LEN],
-                          const CsGroupConfig *groups, const CsMacroConfig *macros);
+                          const CsGroupConfig *groups, const CsMacroConfig *macros,
+                          const CsDisplayFlash *display);
 
 // Control Surfaces slot names (board-level, directory-stored, V10+).  User
 // labels for what each control slot is for; independent of the bindings

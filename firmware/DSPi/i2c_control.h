@@ -67,4 +67,8 @@ bool i2c_ctrl_owns_pin(uint8_t pin);
 // True when the peripheral is up and listening at the configured address.
 bool i2c_ctrl_is_live(void);
 
+// Hardware instance the live target interface occupies (0/1), or -1 when
+// down.  The CS display (I2C master) must claim the other instance.
+int i2c_ctrl_live_instance(void);
+
 #endif // I2C_CONTROL_H

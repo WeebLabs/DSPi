@@ -144,6 +144,17 @@ extern volatile uint32_t nominal_feedback_10_14;
                                           // running one; returns 1 status byte
 #define REQ_GET_CS_EXT_STATUS       0x26  // returns 24-byte CsExtStatusPacket
 
+// Control Surfaces I2C display (caps v10); see control_surfaces.h and
+// Documentation/Features/control_surfaces_display_spec.md section 2.4.
+#define REQ_SET_CS_DISPLAY_CFG      0x27  // payload = 12-byte CsDisplayCfg
+#define REQ_GET_CS_DISPLAY_CFG      0x28  // returns 16 bytes: {max_pages,
+                                          // model_count, reserved[2]} + CsDisplayCfg
+#define REQ_SET_CS_DISPLAY_PAGE     0x29  // wValue = page (0-15), payload = 4-byte
+                                          // CsDisplayPage; all-zero record clears it
+#define REQ_GET_CS_DISPLAY_PAGE     0x2A  // wValue = page (0-15); returns 4-byte
+                                          // CsDisplayPage
+#define REQ_GET_CS_DISPLAY_STATUS   0x2B  // returns 8-byte CsDisplayStatus
+
 // Psychoacoustic bass enhancement (missing-fundamental harmonics; psybass.h)
 #define REQ_SET_PSYBASS             0x30
 #define REQ_GET_PSYBASS             0x31

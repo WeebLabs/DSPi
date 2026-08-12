@@ -15,6 +15,7 @@
  */
 
 #include "control_surfaces.h"
+#include "control_surfaces_display.h"
 #include "config.h"
 #include "vendor_commands.h"
 #include "usb_audio.h"
@@ -239,6 +240,20 @@ const CsNounDesc cs_noun_table[CS_NOUN_COUNT] = {
     [CS_NOUN_MACRO]           = { CS_KIND_ENUM, CS_MAX_MACROS,
                                   CS_ACT_BIT(CS_ACT_SET) | CS_ACT_BIT(CS_ACT_IND_EQUALS),
                                   0, 0, CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_CPU_LOAD]        = { CS_KIND_CONTINUOUS, 0, CS_CONT_RO,
+                                  0, Q8(100), CS_UNIT_PERCENT,
+                                  CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_DISPLAY_PAGE]    = { CS_KIND_ENUM, CS_MAX_DISPLAY_PAGES,
+                                  CS_ENUM_RW, 0, 0, CS_UNIT_NONE,
+                                  CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_DISPLAY_EDIT]    = { CS_KIND_BOOL, 0, CS_BOOL_RW, 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    // Virtual: the engine resolves the shown page at event time; scalar
+    // fields must be zero (enforced in cs_validate / cs_validate_ir_cmd).
+    [CS_NOUN_PAGE_VALUE]      = { CS_KIND_ENUM, 1,
+                                  CS_ACT_BIT(CS_ACT_STEP) | CS_ACT_BIT(CS_ACT_INC) |
+                                  CS_ACT_BIT(CS_ACT_DEC) | CS_ACT_BIT(CS_ACT_TOGGLE),
+                                  0, 0, CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
 };
 
 // ---------------------------------------------------------------------------
@@ -406,6 +421,10 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
         case CS_NOUN_LOUDNESS_INTENSITY: return loudness_intensity_pct;
         // 255 while idle so an IND_EQUALS comparand never matches.
         case CS_NOUN_MACRO:              return (float)cs_macro_running_index();
+        case CS_NOUN_CPU_LOAD:           return (float)global_status.cpu0_load;
+        // 255 with no shown page, same never-matches convention.
+        case CS_NOUN_DISPLAY_PAGE:       return (float)cs_display_current_page();
+        case CS_NOUN_DISPLAY_EDIT:       return cs_display_edit_armed() ? 1.0f : 0.0f;
         default: return 0.0f;
     }
 }
@@ -523,6 +542,16 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             // Direct call, not a vendor command: the sequencer itself then
             // dispatches every step through the shared command surface.
             (void)control_surfaces_macro_fire((uint8_t)value);
+            return true;
+        case CS_NOUN_DISPLAY_PAGE:
+            cs_display_select_page((uint8_t)value);
+            return true;
+        case CS_NOUN_DISPLAY_EDIT:
+            cs_display_set_edit(value >= 0.5f);
+            return true;
+        case CS_NOUN_PAGE_VALUE:
+            // Never dispatched directly; the engine routes it at the event
+            // sources.  A stray dispatch is a safe no-op.
             return true;
         case CS_NOUN_DAC_MUTE_TEST:
             r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_TEST_DAC_HW_MUTE,

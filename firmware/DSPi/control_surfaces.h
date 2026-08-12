@@ -65,6 +65,14 @@
  * reserved bytes become max_groups/max_macros/max_macro_steps.
  * See Documentation/Features/control_surfaces_groups_macros_spec.md.
  *
+ * Caps v10 adds the I2C display component (CS_TYPE_DISPLAY container,
+ * commands 0x27-0x2B, directory V19), IR command group support
+ * (IrCommand.flags accepts CS_FLAG_GROUP), and nouns 53-56 (CPU_LOAD,
+ * DISPLAY_PAGE, DISPLAY_EDIT, PAGE_VALUE).  The caps type table grows by
+ * one row (the documented self-describing mechanism); every fixed-offset
+ * structure is unchanged.
+ * See Documentation/Features/control_surfaces_display_spec.md.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -87,6 +95,8 @@ typedef enum {
     CS_TYPE_LED_PWM = 6,   // PWM-dimmed LED (1 GPIO, hardware PWM slice)
     CS_TYPE_IR      = 7,   // IR remote receiver (1 GPIO); a container slot
                            // whose commands live in the IrCommand table
+    CS_TYPE_DISPLAY = 8,   // I2C character/OLED display (2 GPIOs: SDA, SCL);
+                           // a container slot, content configured via 0x27-0x2A
     CS_TYPE_COUNT
 } CsType;
 
@@ -157,6 +167,14 @@ typedef enum {
     CS_NOUN_MACRO          = 52, // enum 0..CS_MAX_MACROS-1; SET fires macro
                                  // `value`, IND_EQUALS lights while it runs;
                                  // live read = running index, 255 idle
+    // --- caps v10 additions ---
+    CS_NOUN_CPU_LOAD       = 53, // continuous percent 0..100, read-only (core 0)
+    CS_NOUN_DISPLAY_PAGE   = 54, // enum 0..15: shown display page; steps skip
+                                 // empty page slots (like PRESET skips empties)
+    CS_NOUN_DISPLAY_EDIT   = 55, // bool: edit mode armed (auto-clears after
+                                 // the configured edit_timeout)
+    CS_NOUN_PAGE_VALUE     = 56, // virtual: STEP/INC/DEC/TOGGLE the shown
+                                 // page's item, resolved at event time
     CS_NOUN_COUNT
 } CsNoun;
 
@@ -243,6 +261,37 @@ typedef enum {
 #define CS_MAX_GROUPS       8
 #define CS_MAX_MACROS       8
 #define CS_MAX_MACRO_STEPS  8
+
+// I2C display (caps v10); see control_surfaces_display_spec.md.
+#define CS_MAX_DISPLAY_PAGES  16
+
+// Display models (CsBinding.index on a CS_TYPE_DISPLAY slot).  Wire/flash
+// persistent; never renumber.  Bus speed and geometry are fixed per model.
+#define CS_DISP_MODEL_NONE           0
+#define CS_DISP_MODEL_LCD1602        1   // HD44780 16x2 via PCF8574, 100 kHz
+#define CS_DISP_MODEL_LCD2004        2   // HD44780 20x4 via PCF8574, 100 kHz
+#define CS_DISP_MODEL_CHAR_OLED_16X2 3   // US2066/RW1063, 400 kHz
+#define CS_DISP_MODEL_CHAR_OLED_20X2 4
+#define CS_DISP_MODEL_CHAR_OLED_20X4 5
+#define CS_DISP_MODEL_SSD1306_128X64 6   // graphic OLED, flash 5x8 font
+#define CS_DISP_MODEL_SSD1306_128X32 7
+#define CS_DISP_MODEL_SH1106_128X64  8
+#define CS_DISP_MODEL_COUNT          9
+
+// Display home-content modes (CsDisplayCfg.mode)
+#define CS_DMODE_FIXED          0   // show cfg.home_page
+#define CS_DMODE_CYCLE_SELECTED 1   // rotate the active pages at cfg.dwell
+#define CS_DMODE_CYCLE_ALL      2   // rotate every displayable noun at cfg.dwell
+
+// CsDisplayCfg.flags
+#define CS_DCFG_OVERLAY_ANY  0x01   // overlay also pops unconfigured dispatches
+#define CS_DCFG_EDIT_GATED   0x02   // PAGE_VALUE adjusts only while edit armed
+                                    // (steps navigate pages while unarmed)
+
+// CsDisplayPage.flags
+#define CS_DPAGE_ACTIVE  0x01       // slot in use (all-zero record = empty)
+#define CS_DPAGE_GROUP   0x02       // target is a group index
+#define CS_DPAGE_LARGE   0x04       // big font on graphic OLEDs (2x scaled)
 
 // IR remote control.  One CS_TYPE_IR binding (the receiver) may be live at a
 // time; its remote-button commands live in a separate table of sub-slots so
@@ -411,6 +460,48 @@ typedef struct __attribute__((packed)) {
     uint8_t  reserved[3];  // write 0
 } CsMacroHeaderWire;       // 36 bytes
 
+// Display configuration; 12 bytes, identical on the wire
+// (REQ_SET/GET_CS_DISPLAY_CFG payload) and inside CsDisplayFlash.
+typedef struct __attribute__((packed)) {
+    uint8_t  mode;          // CS_DMODE_*
+    uint8_t  home_page;     // page slot shown in FIXED mode
+    uint16_t dwell;         // cycle period, 0.1 s units (min 10 in cycle modes)
+    uint16_t overlay_hold;  // event pop-up hold, 0.1 s units; 0 = overlay off
+    uint8_t  brightness;    // 0-255; OLED contrast / backlight where supported
+    uint8_t  flags;         // CS_DCFG_*
+    uint16_t edit_timeout;  // edit-mode auto-disarm, 0.1 s units; 0 = manual only
+    uint8_t  reserved[2];   // write 0
+} CsDisplayCfg;             // 12 bytes
+
+// One display page; 4 bytes, wire (REQ_SET/GET_CS_DISPLAY_PAGE) and flash.
+// All-zero = empty slot.  Rendering is generic from the noun's kind/unit.
+typedef struct __attribute__((packed)) {
+    uint8_t noun;           // CsNoun to show
+    uint8_t target;         // channel, or group index with CS_DPAGE_GROUP
+    uint8_t index;          // filter band for CS_TARGET_DSP_BAND nouns (else 0)
+    uint8_t flags;          // CS_DPAGE_*
+} CsDisplayPage;            // 4 bytes
+
+// Display blob, directory-persisted (device-global, V19+).  All-zero =
+// feature idle; pages seed on first display apply, not at migration.
+#define CS_DISPLAY_CONFIG_VERSION  1
+typedef struct __attribute__((packed)) {
+    uint8_t       version;  // CS_DISPLAY_CONFIG_VERSION
+    uint8_t       reserved[3];
+    CsDisplayCfg  cfg;
+    CsDisplayPage pages[CS_MAX_DISPLAY_PAGES];
+} CsDisplayFlash;           // 80 bytes
+
+// REQ_GET_CS_DISPLAY_STATUS response.
+typedef struct __attribute__((packed)) {
+    uint8_t  init_state;    // 0 down, 1 initializing, 2 live, 3 error/backoff
+    uint8_t  current_page;  // shown page slot (0xFF = none/synthesized overlay)
+    uint8_t  flags;         // bit0 overlay showing, bit1 edit armed
+    uint8_t  model;         // live CS_DISP_MODEL_*
+    uint16_t nak_count;     // cumulative I2C aborts (saturating)
+    uint8_t  reserved[2];
+} CsDisplayStatus;          // 8 bytes
+
 // REQ_GET_CS_EXT_STATUS response.  Group/macro validity mirrors slot_status
 // semantics; macro_running is 0xFF when the sequencer is idle.
 typedef struct __attribute__((packed)) {
@@ -433,7 +524,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (9); see the file
+    uint8_t  caps_version; // capability format version (10); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)
@@ -447,7 +538,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  max_groups;       // CS_MAX_GROUPS
     uint8_t  max_macros;       // CS_MAX_MACROS
     uint8_t  max_macro_steps;  // CS_MAX_MACRO_STEPS
-} CsCapsHeader;            // 4 + 4*CS_TYPE_COUNT + 4 = 40 bytes
+} CsCapsHeader;            // 4 + 4*CS_TYPE_COUNT + 4 = 44 bytes at v10
 
 typedef struct __attribute__((packed)) {
     uint8_t  kind;         // CS_KIND_*
@@ -504,6 +595,11 @@ typedef struct __attribute__((packed)) {
                                         // or kind-incompatible with the noun
 #define CS_STATUS_INVALID_MACRO   0x20  // bad macro index or step_count
 #define CS_STATUS_INVALID_STEP    0x21  // macro step record invalid
+#define CS_STATUS_DISPLAY_IN_USE  0x22  // another slot already holds the display
+#define CS_STATUS_PIN_NOT_I2C     0x23  // SDA/SCL not a valid same-instance pair
+#define CS_STATUS_I2C_IN_USE      0x24  // instance occupied by the I2C control
+                                        // interface (target mode)
+#define CS_STATUS_INVALID_PAGE    0x25  // display cfg/page record invalid
 
 // ---------------------------------------------------------------------------
 // Public API (all main-loop context)
@@ -575,6 +671,17 @@ uint8_t control_surfaces_apply_macro_step(uint8_t idx, uint8_t step,
 uint8_t control_surfaces_macro_fire(uint8_t idx);
 void    control_surfaces_macro_cancel(void);
 
+// Validate and apply the display config / one page (all-zero page clears the
+// slot).  Live-only previews under the shared dirty flag; REQ_CS_SAVE
+// persists, REQ_CS_REVERT restores.  Returns PIN_CONFIG_* / CS_STATUS_*.
+uint8_t control_surfaces_apply_display_cfg(const CsDisplayCfg *c);
+uint8_t control_surfaces_apply_display_page(uint8_t idx, const CsDisplayPage *p);
+
+// Live display config (persistence source for REQ_CS_SAVE) and GET accessors.
+const CsDisplayFlash *control_surfaces_display_flash(void);
+const CsDisplayPage *control_surfaces_get_display_page(uint8_t idx);  // NULL if bad
+void control_surfaces_get_display_status(CsDisplayStatus *out);
+
 // Live tables (persistence sources for REQ_CS_SAVE) and read-only accessors
 // for the vendor GET handlers.
 const CsGroupConfig *control_surfaces_group_config(void);
@@ -635,10 +742,19 @@ extern uint8_t          cs_set_macro_step_slot;   // macro index
 extern uint8_t          cs_set_macro_step_idx;    // step index
 extern CsMacroStep      cs_set_macro_step_val;
 
+// Deferred display SETs (REQ_SET_CS_DISPLAY_CFG / _PAGE); same single-deep
+// handoff shape.  Results land in cs_last_status with cs_last_slot =
+// 0x50 | page (0x50 alone for the cfg).
+extern volatile bool    cs_set_disp_cfg_pending;
+extern CsDisplayCfg     cs_set_disp_cfg_val;
+extern volatile bool    cs_set_disp_page_pending;
+extern uint8_t          cs_set_disp_page_slot;
+extern CsDisplayPage    cs_set_disp_page_val;
+
 // Deferred save / revert (REQ_CS_SAVE / REQ_CS_REVERT).  Save persists the
 // whole live CS config (bindings + IR commands + slot names + groups +
-// macros) in one directory write; revert re-applies the stored config.
-// Results land in cs_last_status (cs_last_slot = 0xFF).
+// macros + display) in one directory write; revert re-applies the stored
+// config.  Results land in cs_last_status (cs_last_slot = 0xFF).
 extern volatile bool    cs_save_pending;
 extern volatile bool    cs_revert_pending;
 
@@ -672,6 +788,10 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value);
 // each resolved member through cs_noun_validate_target_ch.
 uint8_t cs_noun_validate_target(const CsBinding *b);
 uint8_t cs_noun_validate_target_ch(uint8_t noun, uint8_t ch, uint8_t index);
+
+// Grouped-reference check against the live group table (engine-owned);
+// exported for the display module's page validation.
+uint8_t cs_validate_grouped_target(const CsBinding *b);
 
 // Running macro index (255 = idle); the CS_NOUN_MACRO live read.
 uint8_t cs_macro_running_index(void);

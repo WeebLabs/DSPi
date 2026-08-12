@@ -11,7 +11,8 @@
 #include "vendor_commands.h"
 #include "usb_audio.h"
 #include "bulk_params.h"
-#include "control_surfaces.h"   // CsMacro sizes resp_small
+#include "control_surfaces.h"           // CsMacro sizes resp_small
+#include "control_surfaces_display.h"   // display instance exclusion
 
 #include <string.h>
 #include "pico/stdlib.h"
@@ -353,6 +354,11 @@ uint8_t i2c_ctrl_validate(const I2cCtrlConfig *cfg) {
         return PIN_CONFIG_INVALID_PIN;
     if (i2c_instance_index(cfg->sda_pin) != i2c_instance_index(cfg->scl_pin))
         return PIN_CONFIG_INVALID_PIN;
+    // The CS display holds the other hardware instance as I2C master; a
+    // target config on the same instance (even on different pins) would
+    // reset that block out from under it.
+    if (cs_display_live_instance() == (int)i2c_instance_index(cfg->sda_pin))
+        return PIN_CONFIG_PIN_IN_USE;
     uint8_t st = ctrl_iface_check_pin(cfg->sda_pin);
     if (st == PIN_CONFIG_SUCCESS) st = ctrl_iface_check_pin(cfg->scl_pin);
     return st;
@@ -428,3 +434,8 @@ bool i2c_ctrl_owns_pin(uint8_t pin) {
 }
 
 bool i2c_ctrl_is_live(void) { return live; }
+
+int i2c_ctrl_live_instance(void) {
+    if (!live) return -1;
+    return (inst == i2c1) ? 1 : 0;
+}

@@ -2487,10 +2487,45 @@ int main(void) {
                 }
             }
 
-            // Control Surfaces SAVE (deferred).  Persist the whole live
-            // config (bindings + IR commands + slot names + groups + macros)
-            // in one directory flash write, then clear the dirty preview flag
-            // on success.
+            // Control Surfaces display config SET (deferred).  The apply talks
+            // to the I2C display and repaints, so it must not run in the USB
+            // control path.  Device-global: reports as a bare 0x50.
+            if (cs_set_disp_cfg_pending) {
+                CsDisplayCfg c;
+                uint32_t f = save_and_disable_interrupts();
+                memcpy(&c, (const void *)&cs_set_disp_cfg_val, sizeof(c));
+                cs_set_disp_cfg_pending = false;
+                restore_interrupts(f);
+                uint8_t status = control_surfaces_apply_display_cfg(&c);
+                cs_last_status = status;
+                cs_last_slot = 0x50;
+                if (status == PIN_CONFIG_SUCCESS) {
+                    control_surfaces_set_dirty(true);
+                }
+            }
+
+            // Control Surfaces display page SET (deferred).  The page index was
+            // range-checked at the vendor handler.  Pages report as 0x50 | page.
+            if (cs_set_disp_page_pending) {
+                CsDisplayPage p;
+                uint8_t slot;
+                uint32_t f = save_and_disable_interrupts();
+                memcpy(&p, (const void *)&cs_set_disp_page_val, sizeof(p));
+                slot = cs_set_disp_page_slot;
+                cs_set_disp_page_pending = false;
+                restore_interrupts(f);
+                uint8_t status = control_surfaces_apply_display_page(slot, &p);
+                cs_last_status = status;
+                cs_last_slot = 0x50 | slot;
+                if (status == PIN_CONFIG_SUCCESS) {
+                    control_surfaces_set_dirty(true);
+                }
+            }
+
+            // Control Surfaces SAVE (deferred).  Persist the whole live config
+            // (bindings + IR commands + slot names + groups + macros + display
+            // config and pages) in one directory flash write, then clear the
+            // dirty preview flag on success.
             if (cs_save_pending) {
                 uint32_t f = save_and_disable_interrupts();
                 cs_save_pending = false;
@@ -2500,7 +2535,8 @@ int main(void) {
                                                control_surfaces_ir_config(),
                                                control_surfaces_names(),
                                                control_surfaces_group_config(),
-                                               control_surfaces_macro_config());
+                                               control_surfaces_macro_config(),
+                                               control_surfaces_display_flash());
                 complete_flash_write_operation_full();
                 cs_last_status = (rc == PRESET_OK) ? PIN_CONFIG_SUCCESS
                                                    : CS_STATUS_FLASH_ERROR;

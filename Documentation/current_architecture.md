@@ -1445,10 +1445,10 @@ Last 12 sectors (48 KB) of flash:
 | 1-10 | -44 KB to -8 KB | `0x44535033` ("DSP3") | Preset Slots 0-9 (full DSP state) |
 | 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
 
-### Preset Directory Fields (Version 18)
-*Last updated: 2026-08-09 (V18 appends the Control Surfaces target-group and macro tables)*
+### Preset Directory Fields (Version 19)
+*Last updated: 2026-08-12 (V19 appends the Control Surfaces display config and page table)*
 
-`DIR_VERSION_CURRENT` = 18. V4 renamed the former `include_pins` byte to
+`DIR_VERSION_CURRENT` = 19. V4 renamed the former `include_pins` byte to
 `output_config_mode` (same offset, 1:1 value mapping) and appended the
 device-global `FlashOutputConfig` block. V5 grew that block by 3 bytes for the
 I2S multichannel input pins (`i2s_rx_pin_ext[3]`). V6 appends the device-level
@@ -1514,10 +1514,23 @@ with the two new blobs zero-filled, which means "no groups, no macros";
 `dir_sanitize_cs_groups()` and `dir_sanitize_cs_macros()` bound-check the
 blob versions, `target_kind` and `step_count` on every load and zero
 implausible entries (`member_mask` range and step records are
-platform-dependent, so they validate at apply / fire time instead). See
+platform-dependent, so they validate at apply / fire time instead). V19
+appends the Control Surfaces display blob (80-byte `CsDisplayFlash`: version +
+12-byte `CsDisplayCfg` + 16x 4-byte `CsDisplayPage`) after `cs_macros`, taking
+`sizeof(PresetDirectory)` to 3035 bytes of the 4 KB sector. The V18 layout is
+byte-identical to the V19 prefix (frozen `PresetDirectory_v18` snapshot plus
+`_Static_assert`s pinning the 2955-byte geometry and the `cs_macros` offset),
+so the V18->V19 step is a prefix copy with the new blob zero-filled, which
+means "display idle, no pages"; page seeding happens only when a display
+binding is first applied, never at migration, so a migrated device shows
+nothing until configured. `dir_sanitize_cs_display()` resets the whole blob on
+an implausible version or dirty reserved bytes, clamps `mode` and `home_page`,
+and clears any page carrying unknown flag bits (page nouns are
+platform-dependent and validate at apply / render time). See
 `Documentation/Features/output_config_independent_load.md`,
-`Documentation/Features/control_interfaces_spec.md`, and
-`Documentation/Features/control_surfaces_spec.md`.
+`Documentation/Features/control_interfaces_spec.md`,
+`Documentation/Features/control_surfaces_spec.md`, and
+`Documentation/Features/control_surfaces_display_spec.md`.
 
 | Field | Description |
 |-------|-------------|
@@ -1539,6 +1552,7 @@ platform-dependent, so they validate at apply / fire time instead). See
 | cs_ir | Control Surfaces IR command table (V11 format v1 = 132 B / 8x 16-byte; V17 format v2 = 260-byte `CsIrConfig`: version + 16x 16-byte `IrCommand`; all-zero = every sub-slot empty = idle; board-level, survives factory reset) |
 | cs_groups | Control Surfaces target groups (V18+, 324-byte `CsGroupConfig`: version + 8x 40-byte `CsGroup`; all-zero = no groups; board-level, survives factory reset) |
 | cs_macros | Control Surfaces macros (V18+, 1060-byte `CsMacroConfig`: version + 8x 132-byte `CsMacro`, each 32-byte name + step count + 8x 12-byte `CsMacroStep`; all-zero = no macros; board-level, survives factory reset) |
+| cs_display | Control Surfaces display config and pages (V19+, 80-byte `CsDisplayFlash`: version + 12-byte `CsDisplayCfg` + 16x 4-byte `CsDisplayPage`; all-zero = display idle, no pages; board-level, survives factory reset) |
 
 ### Preset Slot Data (Version 12)
 *Last updated: 2026-07-19 (upmixer presence byte, slot V34; `SLOT_DATA_VERSION` now 34)*
@@ -1919,7 +1933,7 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-08-09 (Control Surfaces groups/macros: +~4.3 KB BSS RP2350, +~3.6 KB RP2040; preset directory now 2955 B at V18)*
+*Last updated: 2026-08-12 (Control Surfaces display: +~750 B BSS both platforms, ~12 KB flash; preset directory now 3035 B at V19)*
 
 > **Input capture arena (2026-08-06).** The `pico_spdif_rx` FIFO (12 KB), the I2S
 > RX rings (4 KB RP2040 / 32 KB RP2350) and the ADAT RX ring (8 KB, RP2350 only)
@@ -2095,6 +2109,17 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 > `base[NUM_CHANNELS]` capture array makes each ~92 B on RP2350 and ~52 B on
 > RP2040. The preset directory grows by the same 1,384 bytes to 2955 of its
 > 4 KB sector at V18, so the flash layout is again unchanged.
+>
+> **I2C display (2026-08-12, caps v10).** Roughly 750 B more BSS on both
+> platforms: ~410 B inside `control_surfaces_display.c` (the 80-byte live
+> `CsDisplayFlash`, the 128-byte TX word ring, four 22-byte text line buffers,
+> a 64-byte poll cache and driver state), the same 80 bytes again in the
+> `dir_cache` mirror, plus the engine-side `PAGE_VALUE` resolved-item keys (16
+> binding slots + 16 IR commands) and the two-entry grouped-IR `CsGroupOp`
+> pool. Flash grows about 12 KB for the per-model drivers and init scripts,
+> the ~480 B 5x8 font table and the per-noun label table; all of it is cold
+> and runs from XIP. The preset directory grows by the 80-byte blob to 3035 of
+> its 4 KB sector at V19, so the flash layout is again unchanged.
 
 ### RP2040 (264 KB SRAM)
 
@@ -2270,7 +2295,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## External Control Interfaces (UART / I2C Target)
-*Last updated: 2026-08-09 (`_ext_resp_copy` widened to 132 bytes for the Control Surfaces macro GET)*
+*Last updated: 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
 
 An external microcontroller can drive the entire vendor-command surface over a
 UART or the I2C target (slave) interface, at parity with USB. Full integrator
@@ -2352,6 +2377,15 @@ transport.
   `[status,lenL,lenH,payload]` read frames with `0xFF` padding, a `[0x01,0,0]`
   BUSY frame before the main loop dispatches, and resumable chunked reads. Up to
   400 kHz; weak internal pull-ups enabled but external pull-ups recommended.
+  The two hardware I2C instances are shared with the caps v10 Control Surfaces
+  display, which is an I2C **master**: a display binding must land on the
+  instance this target interface does not occupy, checked at apply time via
+  `i2c_ctrl_live_instance()` and rejected with `CS_STATUS_I2C_IN_USE` (0x24).
+  The reverse direction is only partly covered: a display's pins are reserved
+  against this interface through `control_surfaces_owns_pin()` inside
+  `pin_used_by_fixed_peripheral()`, but a *different* pin pair on the instance
+  a display already holds is not caught, so give the two functions separate
+  instances by design.
 
 ### Non-blocking design and IRQ priorities
 
@@ -2386,18 +2420,21 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-08-09 (caps v9: target groups and macros, commands 0x20-0x26, directory V18)*
+*Last updated: 2026-08-12 (caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
-encoders, plain indicator LEDs, PWM-dimmed LEDs, and an IR remote receiver on
+encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, and an
+I2C character/OLED display on
 spare GPIOs, configured over vendor commands `0x84`-`0x87`, `0x8B`/`0x8C`
 (per-slot names), `0x8D`-`0x8F` (IR commands and learn), `0x9D`/`0x9E`
-(save/revert), and `0x20`-`0x26` (target groups and macros). A binding attaches
+(save/revert), `0x20`-`0x26` (target groups and macros), and `0x27`-`0x2B`
+(display config, pages and status). A binding attaches
 one component (`CsType`)
 to one firmware parameter (`CsNoun`) through one operation (`CsAction`), on one
 or two GPIOs. The full integrator spec is
 `Documentation/Features/control_surfaces_spec.md`, with groups and macros
-specified in `Documentation/Features/control_surfaces_groups_macros_spec.md`.
+specified in `Documentation/Features/control_surfaces_groups_macros_spec.md`
+and the display in `Documentation/Features/control_surfaces_display_spec.md`.
 
 **Format v2** (`CS_CONFIG_VERSION` = 2, `caps_version` = 2) supersedes the
 original v1 model. Bindings grew from 16 to 24 bytes and gained explicit
@@ -2499,6 +2536,22 @@ exact-length readback are unaffected until they opt into the new commands;
 pre-v9 host read them as zeros). One noun is appended, `CS_NOUN_MACRO` (52),
 taking `noun_count` to 53.
 
+**Caps v10** (2026-08-12) adds the I2C display component (subsection below),
+commands `0x27`-`0x2B`, IR remote group support, four nouns (53-56), and
+directory V19. `CsBinding`, `IrCommand`, `CsStatusPacket`, `CsExtStatusPacket`
+and `CsNounDesc` are byte-identical to caps v9, but `REQ_GET_CS_CAPS` is the
+one pre-existing GET whose **length changes**: adding `CS_TYPE_DISPLAY` (8)
+grows the caps type table by one 4-byte `CsTypeDesc` row, so the header
+response goes from 40 to 44 bytes. That is the self-describing mechanism
+documented since caps v3 (hosts read `type_count` and locate
+`max_ir_commands` / `max_groups` / `max_macros` / `max_macro_steps` at offset
+`4 + 4 * type_count`), but external clients that do exact-length readback must
+be updated before this firmware ships to them. The appended nouns are
+`CS_NOUN_CPU_LOAD` (53, read-only percent from `global_status.cpu0_load`, the
+same source as `REQ_GET_STATUS` wValue 9, so an `IND_LEVEL` PWM LED becomes a
+CPU meter), `CS_NOUN_DISPLAY_PAGE` (54), `CS_NOUN_DISPLAY_EDIT` (55) and
+`CS_NOUN_PAGE_VALUE` (56), taking `noun_count` to 57.
+
 ### File layout
 
 - `control_surfaces.c` / `.h`: the engine and the wire/flash data model
@@ -2528,6 +2581,16 @@ taking `noun_count` to 53.
   tracking), and a stable FNV-1a timing-signature hash for everything else,
   surfacing press / repeat / release events plus the learn state machine
   (arm, 10 s window, capture-first-press).
+- `control_surfaces_display.c` / `.h` (engine-internal, caps v10): the
+  `CS_TYPE_DISPLAY` component. Owns the live `CsDisplayFlash` blob (config +
+  16 page slots), the content logic (home modes, event overlay, edit mode,
+  page resolution for `PAGE_VALUE`), the per-model I2C init scripts and the
+  byte-budget transmit state machine, plus the 5x8 flash font used by the
+  graphic OLEDs. Everything runs on the shared 1 kHz tick from core 0 and
+  never blocks. The host-facing apply/accessor entry points
+  (`control_surfaces_apply_display_cfg` / `_page`,
+  `control_surfaces_display_flash`, `control_surfaces_get_display_status`)
+  are declared in `control_surfaces.h`.
 - `vendor_commands.c`: the `0x84`-`0x87`, `0x8B`-`0x8F`, `0x9D`/`0x9E`
   handlers; `REQ_SET_CS_BINDING`, `REQ_SET_CS_NAME`, and `REQ_SET_CS_IR_CMD`
   latch deferred SETs, `REQ_CS_SAVE`/`REQ_CS_REVERT` latch deferred flags,
@@ -2778,6 +2841,105 @@ validity). New status codes are `CS_STATUS_INVALID_GROUP` (0x1F),
 groups and macros load before bindings, since bindings validate against
 groups.
 
+### I2C display component (caps v10, 0x27-0x2B)
+*Last updated: 2026-08-12*
+
+Wire detail (every struct, status code, model table and command payload) is in
+`Documentation/Features/control_surfaces_display_spec.md`; this subsection
+covers the firmware structure only.
+
+**The component.** `CS_TYPE_DISPLAY` (8) is a container binding like the IR
+receiver: one live display per device, `gpio[0]` = SDA, `gpio[1]` = SCL,
+`index` = model (1-8), `value` = 7-bit address or 0 for the model default,
+every other field 0. Eight models are supported: HD44780 16x2 / 20x4 behind a
+PCF8574 backpack (100 kHz), US2066/RW1063 character OLEDs in 16x2 / 20x2 /
+20x4 (400 kHz), and SSD1306 128x64 / 128x32 plus SH1106 128x64 graphic OLEDs
+(400 kHz, font-rendered). Validation requires SDA on an even GPIO and SCL on
+an odd one mapping to the same hardware I2C instance (GPIO bit 1 selects
+i2c0/i2c1, bit 0 selects SDA/SCL), that instance not being the one the I2C
+target control interface occupies (`i2c_ctrl_live_instance()`), and no second
+display slot; new status codes are `CS_STATUS_DISPLAY_IN_USE` (0x22),
+`CS_STATUS_PIN_NOT_I2C` (0x23), `CS_STATUS_I2C_IN_USE` (0x24) and
+`CS_STATUS_INVALID_PAGE` (0x25). `cs_claim_pins` calls `cs_display_attach()`
+(which does the pin mux, pull-ups and peripheral setup itself) and
+`cs_release_pins` calls `cs_display_detach()` before the ordinary GPIO
+release.
+
+**Driver.** The device is I2C master and everything runs on the existing
+1 kHz CS tick with no blocking. Bus traffic goes through a 64-entry uint16 TX
+ring whose words are the DW `data_cmd` encoding verbatim (low 8 bits data,
+bit 9 STOP) plus `0x8000 | ms` delay sentinels, which is how the HD44780 long
+commands are timed. Per tick a producer (the per-model init script first,
+then dirty text rows) fills the ring while space allows, and a pump drains it
+into the I2C TX FIFO while the FIFO has room, so the hardware transmits in
+the background and a dirty row lands in a few tens of ticks. A TX abort (NAK,
+arbitration loss) increments a saturating counter, flushes the ring, parks
+the component in an ERROR state and re-runs init after ~1 s, which makes
+hot-plug work. There is no framebuffer: content is two logical text lines
+(label and value) diffed against their last-transmitted copies into a
+per-physical-row dirty mask, and graphic models emit font columns on the fly
+from a single 5x8 flash table (~480 B); LARGE text is that same font
+pixel-doubled at render time into 10x16 glyphs (12 columns on 128 px, value
+spanning two page rows). Render runs on demand or every 32 ticks.
+
+**Content model.** A page is a 4-byte `{noun, target, index, flags}` record
+from the ordinary noun catalog (16 device-global slots), rendered generically
+by the noun's kind and unit, with flags for ACTIVE / GROUP / LARGE. Home
+content follows `CsDisplayCfg.mode`: fixed page, rotate the active pages at
+`dwell`, or rotate the untargeted platform-available nouns. Over the top of
+that, an **event overlay** pops whatever just changed for `overlay_hold`:
+every op initiator in the engine calls `cs_display_note_adjust()`, so a knob,
+remote key or macro step gives feedback even for an item with no configured
+page (`CS_DCFG_OVERLAY_ANY`), and a ~8 Hz compare poll over the active pages
+catches host-side changes that no control caused. The three display nouns and
+`CS_NOUN_MACRO` never pop as themselves. The first attach on an empty page
+table seeds volume / preset / input source / sample rate and the timing
+defaults, marking the config dirty like any other live edit.
+
+**Front-panel editing.** `CS_NOUN_DISPLAY_PAGE` (54) browses the active pages
+(steps skip empty slots through the same `cs_enum_step` occupancy path as
+`CS_NOUN_PRESET`), `CS_NOUN_DISPLAY_EDIT` (55) arms editing with an
+inactivity auto-disarm, and `CS_NOUN_PAGE_VALUE` (56) is virtual: it resolves
+the shown page's `{noun, target, index}` at event time and re-enters the
+normal op helpers with a synthesized binding, so grouped pages fan out
+through the group engine and deferred nouns keep their shadow/BUSY
+behaviour. With `CS_DCFG_EDIT_GATED` set, an unarmed `PAGE_VALUE` step
+navigates pages instead of adjusting, which turns one encoder plus one button
+into browse / arm / adjust. `PAGE_VALUE` accepts STEP/INC/DEC/TOGGLE only,
+must carry zeroed value/step/range fields (nothing static to validate against),
+and its op plus group-session state resets whenever the resolved item changes
+(a per-binding and per-IR-command resolved-item key). Buttons, encoders and
+IR commands may bind it; macro steps may **not**, rejected exactly like
+`CS_NOUN_MACRO` because a stored sequence editing whatever is on screen is
+non-deterministic.
+
+**IR group support.** `IrCommand.flags` now accepts `CS_FLAG_GROUP` (0x20),
+so a remote key reaches a target group directly instead of via a macro, with
+hold-to-repeat on grouped INC/DEC and grouped MOMENTARY engage/restore. A
+receiver delivers one key at a time, so grouped IR ops share a **pool of 2**
+`CsGroupOp` contexts rather than one per command slot; one may be pinned by a
+held grouped momentary while another key fires, and pool exhaustion drops the
+new op for that press. The CS tick pumps BUSY members, ages sessions and
+frees idle contexts back to the pool; receiver teardown restores any engaged
+grouped momentary first.
+
+**Control plumbing.** `REQ_SET_CS_DISPLAY_CFG` (0x27) and
+`REQ_SET_CS_DISPLAY_PAGE` (0x29) are single-deep deferred SETs in the
+established shape (`cs_set_disp_cfg_pending` / `cs_set_disp_page_pending`
+consumed by the main loop into `control_surfaces_apply_display_cfg` /
+`_apply_display_page`), reported through the shared `cs_last_status` /
+`cs_last_slot` channel with tag `0x50` bare for the config and `0x50 | page`
+for a page. They are apply-live-only previews: `REQ_CS_SAVE` persists the
+80-byte blob alongside bindings, names, IR commands, groups and macros in the
+one directory write, and `REQ_CS_REVERT` (or a reboot) restores the stored
+set. `REQ_GET_CS_DISPLAY_CFG` (0x28) prefixes the live config with
+`{max_pages, model_count, reserved[2]}` so a host learns the limits without a
+caps change, `REQ_GET_CS_DISPLAY_PAGE` (0x2A) returns one 4-byte record, and
+`REQ_GET_CS_DISPLAY_STATUS` (0x2B) returns the 8-byte `CsDisplayStatus`
+(init state, shown page, overlay/edit flags, live model, cumulative NAK
+count). At boot the display blob loads before the bindings, so a stored
+display binding's attach sees its stored pages and does not re-seed.
+
 ### Persistence and platform placement
 
 The binding table is device-global in the preset directory (388-byte
@@ -2786,8 +2948,9 @@ The binding table is device-global in the preset directory (388-byte
 factory reset and is not part of `WireBulkParams`. The per-slot names live
 next to it (V10, `cs_names[16][32]`) and the IR command table follows (V11,
 132-byte `CsIrConfig`: version + 8x 16-byte `IrCommand`), with the group table
-(V18, 324-byte `CsGroupConfig`) and macro table (V18, 1060-byte
-`CsMacroConfig`) appended last, all with the same lifetime. On RP2040
+(V18, 324-byte `CsGroupConfig`), macro table (V18, 1060-byte `CsMacroConfig`)
+and display blob (V19, 80-byte `CsDisplayFlash`) appended last, all with the
+same lifetime. On RP2040
 `control_surfaces.c.o`, `control_surfaces_nouns.c.o`, and the decode side of
 `control_surfaces_ir.c.o` execute from flash XIP
 (see Memory Layout); only the IR edge ISR is RAM-pinned
@@ -2802,11 +2965,15 @@ op state ~400 B). Groups and macros add roughly 4.3 KB on RP2350 and 3.6 KB on
 RP2040: the 1,384-byte live tables, the same again in the `dir_cache` mirror,
 and 17 `CsGroupOp` contexts (16 binding slots plus the macro sequencer) whose
 `base[NUM_CHANNELS]` array makes each ~92 B on RP2350 and ~52 B on RP2040.
+The caps v10 display adds roughly 750 B more BSS on both platforms and ~12 KB
+of flash (per-model drivers and init scripts, the 5x8 font, the noun label
+table); `control_surfaces_display.c.o` is cold and runs from flash XIP on
+RP2040 like the rest of the engine.
 
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-08-09 (Control Surfaces target-group and macro commands 0x20-0x26 added)*
+*Last updated: 2026-08-12 (Control Surfaces display commands 0x27-0x2B added)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -2829,6 +2996,11 @@ and 17 `CsGroupOp` contexts (16 binding slots plus the macro sequencer) whose
 | REQ_SET_CS_MACRO_STEP | 0x24 | OUT | Set one macro step (wValue=(step << 8)\|macro, payload=12-byte CsMacroStep; all-zero clears); apply-live-only, deferred, poll 0x87 |
 | REQ_CS_MACRO_FIRE | 0x25 | IN | Fire a macro (wValue=macro 0-7; 0xFFFF cancels the running one); returns 1 status byte |
 | REQ_GET_CS_EXT_STATUS | 0x26 | IN | Get the 24-byte CsExtStatusPacket (group/macro limits, running macro and step, per-group and per-macro validity) |
+| REQ_SET_CS_DISPLAY_CFG | 0x27 | OUT | Set the Control Surfaces display config (payload=12-byte CsDisplayCfg); apply-live-only preview, deferred, poll 0x87 (last_slot = 0x50) |
+| REQ_GET_CS_DISPLAY_CFG | 0x28 | IN | Get 16 bytes: `{max_pages, model_count, reserved[2]}` + the live 12-byte CsDisplayCfg |
+| REQ_SET_CS_DISPLAY_PAGE | 0x29 | OUT | Set one display page (wValue=page 0-15, payload=4-byte CsDisplayPage; all-zero clears); apply-live-only, deferred, poll 0x87 (last_slot = 0x50\|page) |
+| REQ_GET_CS_DISPLAY_PAGE | 0x2A | IN | Get the live 4-byte CsDisplayPage (wValue=page 0-15) |
+| REQ_GET_CS_DISPLAY_STATUS | 0x2B | IN | Get the 8-byte CsDisplayStatus (init state, shown page, overlay/edit flags, live model, cumulative I2C NAK count) |
 | REQ_SET_PSYBASS | 0x30 | OUT | Enable/disable psychoacoustic bass (1 byte, 0/1) |
 | REQ_GET_PSYBASS | 0x31 | IN | Get psybass enabled state (1 byte) |
 | REQ_SET_PSYBASS_CUTOFF | 0x32 | OUT | Set cutoff (4-byte LE IEEE754 float, 30-300 Hz, clamped) |

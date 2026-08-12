@@ -32,6 +32,8 @@ add_executable(DSPi
     config.h
     control_surfaces.c
     control_surfaces.h
+    control_surfaces_display.c
+    control_surfaces_display.h
     control_surfaces_ir.c
     control_surfaces_ir.h
     control_surfaces_nouns.c

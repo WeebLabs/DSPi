@@ -1414,6 +1414,52 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
         }
 
+        case REQ_SET_CS_DISPLAY_CFG: {
+            // Device-global, no slot index; the apply reconfigures the I2C
+            // instance and repaints, so it is deferred like the binding SET.
+            // Display SETs are tagged 0x50 in cs_last_slot (bare for the cfg).
+            if (cs_set_disp_cfg_pending) {
+                cs_last_status = CS_STATUS_BUSY;
+                cs_last_slot = 0x50;
+            } else if (buffer->data_len >= sizeof(CsDisplayCfg)) {
+                memcpy((void *)&cs_set_disp_cfg_val, vendor_rx_buf,
+                       sizeof(CsDisplayCfg));
+                cs_last_status = CS_STATUS_PENDING;
+                cs_last_slot = 0x50;
+                __dmb();
+                cs_set_disp_cfg_pending = true;
+            } else {
+                cs_last_status = CS_STATUS_INVALID_VALUE;
+                cs_last_slot = 0x50;
+            }
+            break;
+        }
+
+        case REQ_SET_CS_DISPLAY_PAGE: {
+            // wValue = page slot; an all-zero record clears it.  Pages report
+            // as 0x50 | page, sharing the cfg's tag space.
+            uint8_t slot = vendor_last_wValue & 0xFF;
+            if (slot >= CS_MAX_DISPLAY_PAGES) {
+                cs_last_status = CS_STATUS_INVALID_PAGE;
+                cs_last_slot = 0x50 | slot;
+            } else if (cs_set_disp_page_pending) {
+                cs_last_status = CS_STATUS_BUSY;
+                cs_last_slot = 0x50 | slot;
+            } else if (buffer->data_len >= sizeof(CsDisplayPage)) {
+                memcpy((void *)&cs_set_disp_page_val, vendor_rx_buf,
+                       sizeof(CsDisplayPage));
+                cs_set_disp_page_slot = slot;
+                cs_last_status = CS_STATUS_PENDING;
+                cs_last_slot = 0x50 | slot;
+                __dmb();
+                cs_set_disp_page_pending = true;
+            } else {
+                cs_last_status = CS_STATUS_INVALID_VALUE;
+                cs_last_slot = 0x50 | slot;
+            }
+            break;
+        }
+
         case REQ_SET_CHANNEL_NAME: {
             // wValue = channel index, payload = 1-32 bytes of name
             uint8_t ch = vendor_last_wValue & 0xFF;
@@ -2596,6 +2642,40 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 CsExtStatusPacket pkt;
                 control_surfaces_get_ext_status(&pkt);
                 vendor_send_response(&pkt, sizeof(pkt));
+                return true;
+            }
+
+            case REQ_GET_CS_DISPLAY_CFG: {
+                // Limits header then the live 12-byte config, so a host learns
+                // the page-table size and model enum span in one read.
+                uint8_t buf[4 + sizeof(CsDisplayCfg)];
+                buf[0] = CS_MAX_DISPLAY_PAGES;
+                buf[1] = CS_DISP_MODEL_COUNT;
+                buf[2] = 0;
+                buf[3] = 0;
+                memcpy(&buf[4], &control_surfaces_display_flash()->cfg,
+                       sizeof(CsDisplayCfg));
+                vendor_send_response(buf, sizeof(buf));
+                return true;
+            }
+
+            case REQ_GET_CS_DISPLAY_PAGE: {
+                // wValue = page slot; returns the live 4-byte record (all-zero
+                // when the slot is empty).
+                if (setup->wValue >= CS_MAX_DISPLAY_PAGES) return false;
+                const CsDisplayPage *p =
+                    control_surfaces_get_display_page((uint8_t)setup->wValue);
+                if (p == NULL) return false;
+                vendor_send_response(p, sizeof(CsDisplayPage));
+                return true;
+            }
+
+            case REQ_GET_CS_DISPLAY_STATUS: {
+                // 8-byte display companion to REQ_GET_CS_STATUS: link state,
+                // shown page, live model, and the cumulative I2C NAK count.
+                CsDisplayStatus st;
+                control_surfaces_get_display_status(&st);
+                vendor_send_response(&st, sizeof(st));
                 return true;
             }
 
