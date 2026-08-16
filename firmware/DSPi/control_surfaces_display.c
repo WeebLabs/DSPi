@@ -736,29 +736,60 @@ static bool disp_current_item(CsDisplayPage *out) {
     return false;
 }
 
+// Alignment field accessor; the reserved encoding reads as LEFT so a blob
+// from a future build can never index past the placement cases.
+static uint8_t disp_align(uint8_t mask, uint8_t shift) {
+    uint8_t a = (uint8_t)((s_disp.cfg.flags & mask) >> shift);
+    return (a > CS_DALIGN_RIGHT) ? CS_DALIGN_LEFT : a;
+}
+
+// Lay a formatted line out across its physical width, in place: edge
+// markers (armed value line only) then the text placed per `align`.  The
+// markers own columns 0 and w-1 whenever armed, so arming never shifts the
+// text; the text is truncated to the span between them instead.
+static void disp_lay_out(char *s, uint8_t w, uint8_t align, char marker) {
+    char out[DISP_MAX_COLS + 1];
+    if (w > DISP_MAX_COLS) w = DISP_MAX_COLS;
+    if (w < 4) marker = 0;
+    uint8_t iw  = marker ? (uint8_t)(w - 2) : w;
+    uint8_t len = (uint8_t)strlen(s);
+    if (len > iw) len = iw;
+    uint8_t pad = (uint8_t)(iw - len);
+    uint8_t off = (align == CS_DALIGN_CENTRE) ? (uint8_t)(pad / 2)
+                : (align == CS_DALIGN_RIGHT)  ? pad : 0;
+    if (marker) off++;
+    memset(out, ' ', w);
+    memcpy(out + off, s, len);
+    if (marker) {
+        out[0] = marker;
+        out[w - 1] = (marker == '>') ? '<' : marker;   // mirrored chevron
+    }
+    out[w] = '\0';
+    memcpy(s, out, (size_t)w + 1);
+}
+
 static void disp_render(void) {
+    const DispModelDesc *m = &s_models[s_model];
     CsDisplayPage it;
     char label[DISP_MAX_COLS + 1] = "DSPi";
     char value[DISP_MAX_COLS + 1] = "";
     bool large = false;
+    char marker = 0;         // edit marker glyph, 0 while unarmed
     if (disp_current_item(&it)) {
         large = (it.flags & CS_DPAGE_LARGE) || s_ov_active;
         disp_format_label(&it, label, sizeof(label));
         // Character modules ignore LARGE, so they keep the long names.
-        disp_format_value(&it, value, sizeof(value),
-                          large && s_models[s_model].graphic);
-        const CsNounDesc *nd = &cs_noun_table[it.noun];
-        if (s_edit) {
-            // Edit marker; a read-only item shows a lock instead.
-            char tmp[DISP_MAX_COLS + 1];
-            snprintf(tmp, sizeof(tmp), "%c%s",
-                     disp_item_readonly(nd) ? '!' : '>', value);
-            memcpy(value, tmp, sizeof(value));
-        }
+        disp_format_value(&it, value, sizeof(value), large && m->graphic);
+        // A read-only item shows a lock instead of the adjust chevron.
+        if (s_edit)
+            marker = disp_item_readonly(&cs_noun_table[it.noun]) ? '!' : '>';
     }
-    uint8_t cols = s_models[s_model].cols;
-    label[cols] = '\0';
-    value[cols] = '\0';
+    // The label is always small font; only a LARGE value narrows its width.
+    disp_lay_out(label, m->cols,
+                 disp_align(CS_DCFG_LABEL_ALIGN, CS_DCFG_LABEL_ALIGN_SHIFT), 0);
+    disp_lay_out(value, (large && m->graphic) ? DISP_LARGE_COLS : m->cols,
+                 disp_align(CS_DCFG_VALUE_ALIGN, CS_DCFG_VALUE_ALIGN_SHIFT),
+                 marker);
     if (large != s_view_large) {
         // Glyph pitch changed: the value area must repaint even when the
         // formatted string happens to be identical.
@@ -893,7 +924,13 @@ uint8_t control_surfaces_apply_display_cfg(const CsDisplayCfg *c) {
     if (!c) return CS_STATUS_INVALID_VALUE;
     if (c->mode > CS_DMODE_CYCLE_ALL) return CS_STATUS_INVALID_VALUE;
     if (c->home_page >= CS_MAX_DISPLAY_PAGES) return CS_STATUS_INVALID_PAGE;
-    if (c->flags & (uint8_t)~(CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED))
+    if (c->flags & (uint8_t)~(CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED |
+                              CS_DCFG_LABEL_ALIGN | CS_DCFG_VALUE_ALIGN))
+        return CS_STATUS_INVALID_VALUE;
+    if (((c->flags & CS_DCFG_LABEL_ALIGN) >> CS_DCFG_LABEL_ALIGN_SHIFT)
+            > CS_DALIGN_RIGHT ||
+        ((c->flags & CS_DCFG_VALUE_ALIGN) >> CS_DCFG_VALUE_ALIGN_SHIFT)
+            > CS_DALIGN_RIGHT)
         return CS_STATUS_INVALID_VALUE;
     if (c->reserved[0] || c->reserved[1]) return CS_STATUS_INVALID_VALUE;
     if (c->mode != CS_DMODE_FIXED && c->dwell < 10)
@@ -964,7 +1001,8 @@ void cs_display_load_stored(void) {
     s_disp.version = CS_DISPLAY_CONFIG_VERSION;
     if (s_disp.cfg.mode > CS_DMODE_CYCLE_ALL) s_disp.cfg.mode = CS_DMODE_FIXED;
     if (s_disp.cfg.home_page >= CS_MAX_DISPLAY_PAGES) s_disp.cfg.home_page = 0;
-    s_disp.cfg.flags &= (CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED);
+    s_disp.cfg.flags &= (CS_DCFG_OVERLAY_ANY | CS_DCFG_EDIT_GATED |
+                         CS_DCFG_LABEL_ALIGN | CS_DCFG_VALUE_ALIGN);
     if (s_disp.cfg.mode != CS_DMODE_FIXED && s_disp.cfg.dwell < 10)
         s_disp.cfg.dwell = 10;
     // Full noun/target validation happens HERE, not in the flash sanitizer

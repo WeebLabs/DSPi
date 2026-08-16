@@ -73,6 +73,11 @@
  * structure is unchanged.
  * See Documentation/Features/control_surfaces_display_spec.md.
  *
+ * Caps v11 adds per-line horizontal alignment for the display (two 2-bit
+ * fields in CsDisplayCfg.flags) and pins the edit markers to the outer
+ * columns of the value line.  No structure sizes change; the bump only
+ * tells hosts the flag bits are honoured rather than rejected.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -262,7 +267,8 @@ typedef enum {
 #define CS_MAX_MACROS       8
 #define CS_MAX_MACRO_STEPS  8
 
-// I2C display (caps v10); see control_surfaces_display_spec.md.
+// I2C display (caps v10, line alignment v11); see
+// control_surfaces_display_spec.md.
 #define CS_MAX_DISPLAY_PAGES  16
 
 // Display models (CsBinding.index on a CS_TYPE_DISPLAY slot).  Wire/flash
@@ -287,6 +293,16 @@ typedef enum {
 #define CS_DCFG_OVERLAY_ANY  0x01   // overlay also pops unconfigured dispatches
 #define CS_DCFG_EDIT_GATED   0x02   // PAGE_VALUE adjusts only while edit armed
                                     // (steps navigate pages while unarmed)
+#define CS_DCFG_LABEL_ALIGN  0x0C   // CS_DALIGN_* for the label line
+#define CS_DCFG_VALUE_ALIGN  0x30   // CS_DALIGN_* for the value line
+#define CS_DCFG_LABEL_ALIGN_SHIFT  2
+#define CS_DCFG_VALUE_ALIGN_SHIFT  4
+
+// Horizontal alignment, both CS_DCFG_*_ALIGN fields.  Encoding 3 is
+// reserved; the renderer treats it as LEFT.
+#define CS_DALIGN_LEFT    0
+#define CS_DALIGN_CENTRE  1
+#define CS_DALIGN_RIGHT   2
 
 // CsDisplayPage.flags
 #define CS_DPAGE_ACTIVE  0x01       // slot in use (all-zero record = empty)
@@ -524,7 +540,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (10); see the file
+    uint8_t  caps_version; // capability format version (11); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)

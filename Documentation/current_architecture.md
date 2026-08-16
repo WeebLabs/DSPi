@@ -2420,7 +2420,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-08-12 (caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
+*Last updated: 2026-08-16 (caps v11: display line alignment and bracketed edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, and an
@@ -2551,6 +2551,13 @@ be updated before this firmware ships to them. The appended nouns are
 same source as `REQ_GET_STATUS` wValue 9, so an `IND_LEVEL` PWM LED becomes a
 CPU meter), `CS_NOUN_DISPLAY_PAGE` (54), `CS_NOUN_DISPLAY_EDIT` (55) and
 `CS_NOUN_PAGE_VALUE` (56), taking `noun_count` to 57.
+
+**Caps v11** (2026-08-16) adds per-line horizontal alignment for the display
+and the bracketed edit markers (subsection below). Every structure, GET
+length and command payload is byte-identical to caps v10; the bump exists
+only so hosts know the new `CsDisplayCfg.flags` bits are honoured rather than
+rejected as unknown. Older stored blobs read back with the bits clear, which
+is left alignment, the pre-v11 behaviour.
 
 ### File layout
 
@@ -2841,8 +2848,8 @@ validity). New status codes are `CS_STATUS_INVALID_GROUP` (0x1F),
 groups and macros load before bindings, since bindings validate against
 groups.
 
-### I2C display component (caps v10, 0x27-0x2B)
-*Last updated: 2026-08-16*
+### I2C display component (caps v10-v11, 0x27-0x2B)
+*Last updated: 2026-08-16 (caps v11: per-line alignment, bracketed edit markers)*
 
 Wire detail (every struct, status code, model table and command payload) is in
 `Documentation/Features/control_surfaces_display_spec.md`; this subsection
@@ -2881,6 +2888,23 @@ per-physical-row dirty mask, and graphic models emit font columns on the fly
 from a single 5x8 flash table (~480 B); LARGE text is that same font
 pixel-doubled at render time into 10x16 glyphs (12 columns on 128 px, value
 spanning two page rows). Render runs on demand or every 32 ticks.
+
+**Line layout (caps v11).** Each line is laid out across its physical width
+by `disp_lay_out()` after formatting and before the change diff, so alignment
+is invisible to everything downstream and adds no I2C traffic (a dirty row
+rewrites every column regardless). Width is the model's column count, except
+a LARGE value on a graphic model, which is 12. Horizontal alignment is two
+2-bit fields in `CsDisplayCfg.flags` (bits 3:2 label, 5:4 value; 0 left,
+1 centre, 2 right), independent per line and applied to every view including
+the overlay and the idle line; the reserved encoding 3 is rejected by the
+apply path and read as left by the renderer. While edit is armed the value
+line reserves its outer two columns for `>` / `<` markers (`!` on both sides
+when the item is read-only) and lays the value out in the span between them,
+truncating to it. The columns are reserved unconditionally so arming never
+reflows the line: under centre alignment the value occupies identical columns
+armed and unarmed at any width. Vertical placement stays a per-model
+constant (`label_row` / `value_row`), which is what centres the pair on 4-row
+character modules.
 
 **Content model.** A page is a 4-byte `{noun, target, index, flags}` record
 from the ordinary noun catalog (16 device-global slots), rendered generically

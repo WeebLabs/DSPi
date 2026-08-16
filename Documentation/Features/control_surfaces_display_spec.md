@@ -1,10 +1,11 @@
 # Control Surfaces: I2C Character Displays (caps v10 bundle)
 
-*Spec version 1, implemented at caps v10 / directory V19. Companion to
+*Spec version 2, implemented at caps v10 / directory V19. Companion to
 `control_surfaces_spec.md` and `control_surfaces_groups_macros_spec.md`.
 Caps v10 bundles three additions: the display component, IR remote group
 support, and four new nouns (CPU_LOAD, DISPLAY_PAGE, DISPLAY_EDIT,
-PAGE_VALUE).*
+PAGE_VALUE). Caps v11 adds per-line horizontal alignment and the bracketed
+edit markers (s5.1); no structure size changes.*
 
 A display is a new Control Surfaces component: a small I2C character or
 OLED module wired to two spare GPIOs that shows what the device is doing.
@@ -123,8 +124,8 @@ Two further nouns make the display a front-panel editor. `DISPLAY_EDIT`
 (bool) arms editing of the shown page, from a button, remote key, or
 momentary hold, with an inactivity timeout (`edit_timeout`) so the panel
 never stays hot; an LED can indicate the armed state (`IND_EQUALS`) and the
-display prefixes the value with `>` while armed, or `!` when the shown item
-is read-only. `PAGE_VALUE` (virtual) resolves the currently shown page's
+display brackets the value line with `>` and `<` while armed, or `!` on both
+sides when the shown item is read-only (s5.1). `PAGE_VALUE` (virtual) resolves the currently shown page's
 `{noun, target, index}` at event time and applies STEP / INC / DEC / TOGGLE
 through the normal dispatch path using the resolved noun's unit, step law,
 and range: continuous items step, bools switch (a TOGGLE flips; an encoder
@@ -173,7 +174,7 @@ rejected with `CS_STATUS_DISPLAY_IN_USE`.
 | 2 | 2 | `dwell` | rotation period, 0.1 s units (min 10 in cycle modes) |
 | 4 | 2 | `overlay_hold` | pop-up hold, 0.1 s units (0 = overlay disabled) |
 | 6 | 1 | `brightness` | 0-255; OLED contrast, applied by the init script (0 = the driver default) |
-| 7 | 1 | `flags` | bit0 = overlay includes unconfigured dispatches; bit1 = PAGE_VALUE gated behind edit mode (steps navigate while unarmed) |
+| 7 | 1 | `flags` | bit0 = overlay includes unconfigured dispatches; bit1 = PAGE_VALUE gated behind edit mode (steps navigate while unarmed); bits 3:2 = label alignment, bits 5:4 = value alignment (0 left, 1 centre, 2 right; 3 reserved and rejected) |
 | 8 | 2 | `edit_timeout` | edit-mode inactivity auto-disarm, 0.1 s units (0 = manual only) |
 | 10 | 2 | `reserved` | write 0 |
 
@@ -269,6 +270,30 @@ Rendering is column-on-the-fly from the font into the transmit ring; there is
 no pixel framebuffer and no staging bitmap. Character modules ignore fonts
 entirely (glyphs in module ROM); no CGRAM glyphs are uploaded in this
 revision.
+
+### 5.1 Line layout and edit markers (caps v11)
+
+Each logical line is laid out across its physical width after formatting and
+before the change diff, so alignment costs one pass over a 21-byte buffer at
+the render decimation and never adds a byte of I2C traffic (a dirty row
+already rewrites every column). The label uses the model's column count; the
+value uses 12 when LARGE on a graphic panel and the model's count otherwise.
+Alignment comes from the two `CsDisplayCfg.flags` fields (s2.2) and applies
+to every view, including the overlay, CYCLE_ALL, and the idle "DSPi" line.
+
+While edit is armed the value line reserves its outer two columns for the
+markers, `>` and its mirror `<` (or `!` on both sides for a read-only item),
+and the value is centred, flushed or ranged within the span between them,
+truncated to that span if it is too long. Reserving the columns
+unconditionally is what keeps arming from moving the value: with centre
+alignment the value lands on exactly the same columns armed and unarmed, for
+any width and any string length. Left and right alignment necessarily shift
+the value one column inward when armed, since the marker takes the edge the
+value is anchored to.
+
+Character modules draw the markers from module ROM and graphic panels from
+the 5x8 table, so no CGRAM glyph upload is needed; a filled-triangle marker
+would require one and is deliberately out of scope.
 
 ## 6. Driver architecture
 
