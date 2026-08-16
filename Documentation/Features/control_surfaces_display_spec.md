@@ -63,12 +63,22 @@ flags}`. Flags: bit0 = ACTIVE (all-zero record = empty slot), bit1 = GROUP
 (`target` is a group index, same rules as bindings), bit2 = LARGE (render the
 value pixel-doubled on graphic OLEDs; ignored on character modules).
 Rendering is generic: the label line is the item's name, the value line its
-value formatted by unit (dB, Hz, percent, ms, on/off, enum index). Labels
+value formatted by unit (dB, Hz, percent, ms, on/off, enum name). Labels
 come from a flash string table per noun; targeted pages prefix the channel
-("Out3 Gain") or the group's user-assigned name ("Fronts Gain"). Special
-cases: a PRESET page shows the active preset's stored name, INPUT_SOURCE and
-SAMPLE_RATE render from small enum label tables, and a grouped page whose
-group is empty renders `--`.
+("Out3 Gain") or the group's user-assigned name ("Fronts Gain"). Enum nouns
+with fixed value sets render names from per-noun label tables: INPUT_SOURCE,
+SAMPLE_RATE, CROSSFEED_PRESET (Default/Chu Moy/Meier/Custom), LEVELLER_SPEED
+(Slow/Medium/Fast), FILTER_TYPE, and the upmix centre/surround modes
+(passive = "Sinner", adaptive = "Logician"). FILTER_TYPE covers all PEQ
+types 0-13 (including the host-only Linkwitz and first-order low/high pass)
+with slope-based names: PEQ low/high pass display as High Cut / Low Cut, and
+shelves and cuts carry their slope ("Low Shelf 12dB", "High Cut 6dB"). A
+value rendered in the LARGE font swaps to an abbreviated table sized for its
+12 columns ("LS 12dB/oct", "HC 6dB/oct"); character modules always use the
+long names. Special cases: a PRESET page
+shows the active preset's stored name, a MACRO page the macro's name, a
+grouped page whose group is empty renders `--`, and an enum value with no
+table entry (out-of-range or unrecognised values) falls back to `#N`.
 
 The first time a display component attaches with an all-empty page table, it
 seeds pages 0-3 as volume (LARGE), preset, input source and sample rate, and

@@ -20,6 +20,10 @@
 #include "config.h"
 #include "flash_storage.h"
 #include "usb_audio.h"
+#include "audio_input.h"
+#include "crossfeed.h"
+#include "leveller.h"
+#include "upmix.h"
 
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
@@ -513,8 +517,70 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
     [CS_NOUN_PAGE_VALUE] = "Value",
 };
 
-static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT"};
+static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",
+                                            "SPDIF 2", "SPDIF 3", "SPDIF 4"};
 static const char *const s_rate_label[]  = {"44.1 kHz", "48 kHz", "96 kHz"};
+static const char *const s_xf_preset_label[] = {"Default", "Chu Moy", "Meier", "Custom"};
+static const char *const s_lev_speed_label[] = {"Slow", "Medium", "Fast"};
+static const char *const s_center_mode_label[]   = {"Sinner", "Logician", "Off"};
+static const char *const s_surround_mode_label[] = {"Off", "Sinner", "Logician"};
+// Indexed by FilterType; includes the host-only types above the CS cycling
+// range (Linkwitz, first-order LP/HP) so a host-set band still reads by name.
+// PEQ low/high pass display as High Cut / Low Cut; two tables because the
+// 12-column LARGE font needs abbreviated names (edit marker + name <= 12).
+static const char *const s_filter_type_label[] = {
+    "Flat", "Peaking", "Low Shelf 12dB", "High Shelf 12dB", "High Cut 12dB",
+    "Low Cut 12dB", "Notch", "All Pass", "All Pass 1", "Low Shelf 6dB",
+    "High Shelf 6dB", "Linkwitz", "High Cut 6dB", "Low Cut 6dB",
+};
+static const char *const s_filter_type_large[] = {
+    "Flat", "Peaking", "LS 12dB/oct", "HS 12dB/oct", "HC 12dB/oct",
+    "LC 12dB/oct", "Notch", "All Pass", "All Pass 1", "LS 6dB/oct",
+    "HS 6dB/oct", "Linkwitz", "HC 6dB/oct", "LC 6dB/oct",
+};
+_Static_assert(sizeof(s_filter_type_label) == sizeof(s_filter_type_large),
+               "filter-type name tables must cover the same types");
+
+// Growing one of these enums must break the build here, not silently
+// reintroduce the numeric fallback on the front panel.
+#define DISP_N(t)  (sizeof(t) / sizeof((t)[0]))
+_Static_assert(DISP_N(s_input_label) == INPUT_SOURCE_MAX + 1,
+               "input-source names must cover the enum");
+_Static_assert(DISP_N(s_filter_type_label) == FILTER_HIGHPASS1 + 1,
+               "filter-type names must cover the PEQ types");
+_Static_assert(DISP_N(s_xf_preset_label) == CROSSFEED_PRESET_CUSTOM + 1,
+               "crossfeed preset names must cover the enum");
+_Static_assert(DISP_N(s_lev_speed_label) == LEVELLER_SPEED_COUNT,
+               "leveller speed names must cover the enum");
+#if PICO_RP2350
+_Static_assert(DISP_N(s_center_mode_label) == UPMIX_CENTER_OFF + 1,
+               "centre mode names must cover the enum");
+_Static_assert(DISP_N(s_surround_mode_label) == UPMIX_SURROUND_ADAPTIVE + 1,
+               "surround mode names must cover the enum");
+#endif
+
+#define DISP_TAB(t)  do { tab = (t); count = (int)(sizeof(t) / sizeof((t)[0])); } while (0)
+
+// Display name for an enum noun's value; NULL falls back to a number.
+// large selects the abbreviated names sized for the 12-column LARGE font.
+static const char *disp_enum_label(uint8_t noun, int v, bool large) {
+    const char *const *tab = NULL;
+    int count = 0;
+    switch (noun) {
+        case CS_NOUN_INPUT_SOURCE:        DISP_TAB(s_input_label); break;
+        case CS_NOUN_SAMPLE_RATE:         DISP_TAB(s_rate_label); break;
+        case CS_NOUN_CROSSFEED_PRESET:    DISP_TAB(s_xf_preset_label); break;
+        case CS_NOUN_LEVELLER_SPEED:      DISP_TAB(s_lev_speed_label); break;
+        case CS_NOUN_UPMIX_CENTER_MODE:   DISP_TAB(s_center_mode_label); break;
+        case CS_NOUN_UPMIX_SURROUND_MODE: DISP_TAB(s_surround_mode_label); break;
+        case CS_NOUN_FILTER_TYPE:
+            if (large) DISP_TAB(s_filter_type_large);
+            else       DISP_TAB(s_filter_type_label);
+            break;
+        default: break;
+    }
+    return (tab && v >= 0 && v < count) ? tab[v] : NULL;
+}
 
 // value with one decimal, no printf float support needed.
 static void fmt_fix1(char *out, size_t n, float v) {
@@ -554,7 +620,8 @@ static float disp_item_get(const CsDisplayPage *p, bool *ok) {
     return cs_noun_get(p->noun, target, p->index);
 }
 
-static void disp_format_value(const CsDisplayPage *p, char *out, size_t n) {
+static void disp_format_value(const CsDisplayPage *p, char *out, size_t n,
+                              bool large) {
     const CsNounDesc *nd = &cs_noun_table[p->noun];
     bool ok;
     float v = disp_item_get(p, &ok);
@@ -566,15 +633,6 @@ static void disp_format_value(const CsDisplayPage *p, char *out, size_t n) {
             snprintf(out, n, "%s", name);
         else
             snprintf(out, n, "Preset %d", (int)v + 1);
-        return;
-    }
-    if (p->noun == CS_NOUN_INPUT_SOURCE && v >= 0 &&
-        (int)v < (int)(sizeof(s_input_label) / sizeof(s_input_label[0]))) {
-        snprintf(out, n, "%s", s_input_label[(int)v]);
-        return;
-    }
-    if (p->noun == CS_NOUN_SAMPLE_RATE && v >= 0 && (int)v <= 2) {
-        snprintf(out, n, "%s", s_rate_label[(int)v]);
         return;
     }
     if (p->noun == CS_NOUN_MACRO) {
@@ -590,9 +648,12 @@ static void disp_format_value(const CsDisplayPage *p, char *out, size_t n) {
         case CS_KIND_BOOL:
             snprintf(out, n, "%s", (v >= 0.5f) ? "On" : "Off");
             return;
-        case CS_KIND_ENUM:
-            snprintf(out, n, "#%d", (int)v + 1);
+        case CS_KIND_ENUM: {
+            const char *name = disp_enum_label(p->noun, (int)v, large);
+            if (name) snprintf(out, n, "%s", name);
+            else snprintf(out, n, "#%d", (int)v + 1);
             return;
+        }
         default:
             break;
     }
@@ -681,10 +742,12 @@ static void disp_render(void) {
     char value[DISP_MAX_COLS + 1] = "";
     bool large = false;
     if (disp_current_item(&it)) {
-        disp_format_label(&it, label, sizeof(label));
-        disp_format_value(&it, value, sizeof(value));
-        const CsNounDesc *nd = &cs_noun_table[it.noun];
         large = (it.flags & CS_DPAGE_LARGE) || s_ov_active;
+        disp_format_label(&it, label, sizeof(label));
+        // Character modules ignore LARGE, so they keep the long names.
+        disp_format_value(&it, value, sizeof(value),
+                          large && s_models[s_model].graphic);
+        const CsNounDesc *nd = &cs_noun_table[it.noun];
         if (s_edit) {
             // Edit marker; a read-only item shows a lock instead.
             char tmp[DISP_MAX_COLS + 1];

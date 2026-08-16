@@ -2842,7 +2842,7 @@ groups and macros load before bindings, since bindings validate against
 groups.
 
 ### I2C display component (caps v10, 0x27-0x2B)
-*Last updated: 2026-08-12*
+*Last updated: 2026-08-16*
 
 Wire detail (every struct, status code, model table and command payload) is in
 `Documentation/Features/control_surfaces_display_spec.md`; this subsection
@@ -2884,7 +2884,17 @@ spanning two page rows). Render runs on demand or every 32 ticks.
 
 **Content model.** A page is a 4-byte `{noun, target, index, flags}` record
 from the ordinary noun catalog (16 device-global slots), rendered generically
-by the noun's kind and unit, with flags for ACTIVE / GROUP / LARGE. Home
+by the noun's kind and unit, with flags for ACTIVE / GROUP / LARGE. Enum
+nouns with fixed value sets render names from per-noun label tables
+(`disp_enum_label()`: input source, sample rate, crossfeed preset, leveller
+speed, PEQ filter type incl. the host-only types 11-13, upmix centre and
+surround modes; the upmixer's passive/adaptive engines are labelled
+"Sinner"/"Logician"); preset and macro show their stored names; only enums
+with no table entry (out-of-range or unrecognised values) fall back
+to `#N`. Filter types use slope-based names (PEQ low/high pass = "High
+Cut"/"Low Cut", e.g. "Low Shelf 12dB") from two tables: full words for the
+small font, abbreviations plus "dB/oct" ("LS 12dB/oct") when the value
+renders in the 12-column LARGE font on a graphic model. Home
 content follows `CsDisplayCfg.mode`: fixed page, rotate the active pages at
 `dwell`, or rotate the untargeted platform-available nouns. Over the top of
 that, an **event overlay** pops whatever just changed for `overlay_hold`:

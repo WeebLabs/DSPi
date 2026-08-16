@@ -683,8 +683,8 @@ Action-mask groups used below:
 | `LG_PRESENT` | 33 | BOOL | - | read-only | - | BOOL-RO |
 | `LG_MUTED` | 34 | BOOL | - | read-only | - | BOOL-RO |
 | `UPMIX` | 35 | BOOL | - | **RP2350 only** (mask 0 on RP2040) | - | BOOL-RW |
-| `UPMIX_CENTER_MODE` | 36 | ENUM | - | 2 (Passive/Logic); **RP2350 only** | - | ENUM-RW |
-| `UPMIX_SURROUND_MODE` | 37 | ENUM | - | 3 (Off/Passive/Logic); **RP2350 only** | - | ENUM-RW |
+| `UPMIX_CENTER_MODE` | 36 | ENUM | - | 3 (Sinner/Logician/Off); **RP2350 only** | - | ENUM-RW |
+| `UPMIX_SURROUND_MODE` | 37 | ENUM | - | 3 (Off/Sinner/Logician); **RP2350 only** | - | ENUM-RW |
 | `UPMIX_STRENGTH` | 38 | CONT | PERCENT | 0..100 %; **RP2350 only** | - | CONT-RW |
 | `UPMIX_WIDTH` | 39 | CONT | PERCENT | 0..100 %; **RP2350 only** | - | CONT-RW |
 | `UPMIX_PRESENCE` | 40 | CONT | DB | -12..+12 dB; **RP2350 only** | - | CONT-RW |
@@ -771,8 +771,8 @@ target and dispatches it.
 | `LG_PRESENT` | (read-only) | 1 while an LG Sound Sync source is detected. |
 | `LG_MUTED` | (read-only) | 1 while an LG source is present and reports muted. |
 | `UPMIX` | `REQ_UPMIX_SET_PARAM` (`0x4C`, wValue = 0, float) | Stereo upmixer enable (RP2350 only, mask 0 on RP2040; likewise the five nouns below). |
-| `UPMIX_CENTER_MODE` | `REQ_UPMIX_SET_PARAM` (wValue = 1) | Centre engine: 0 = Passive (fixed 0.7071 sum), 1 = Logic (adaptive correlation-steered extraction), 2 = Off (no centre output, L/R untouched; surrounds keep working). INC+WRAP cycles. |
-| `UPMIX_SURROUND_MODE` | `REQ_UPMIX_SET_PARAM` (wValue = 2) | Surround engine: 0 = Off, 1 = Passive (difference feed), 2 = Logic (Dolby low-complexity steering). INC+WRAP cycles. |
+| `UPMIX_CENTER_MODE` | `REQ_UPMIX_SET_PARAM` (wValue = 1) | Centre engine: 0 = Passive (fixed 0.7071 sum; displayed "Sinner"), 1 = Adaptive (correlation-steered extraction; displayed "Logician"), 2 = Off (no centre output, L/R untouched; surrounds keep working). INC+WRAP cycles. |
+| `UPMIX_SURROUND_MODE` | `REQ_UPMIX_SET_PARAM` (wValue = 2) | Surround engine: 0 = Off, 1 = Passive (difference feed; displayed "Sinner"), 2 = Adaptive (Dolby low-complexity steering; displayed "Logician"). INC+WRAP cycles. |
 | `UPMIX_STRENGTH` | `REQ_UPMIX_SET_PARAM` (wValue = 3) | Centre extraction strength 0..100 %. |
 | `UPMIX_WIDTH` | `REQ_UPMIX_SET_PARAM` (wValue = 4) | Centre width 0..100 % (0 = full removal from L/R, 100 = phantom kept). |
 | `UPMIX_PRESENCE` | `REQ_UPMIX_SET_PARAM` (wValue = 13) | Centre presence bell -12..+12 dB (both centre modes). |

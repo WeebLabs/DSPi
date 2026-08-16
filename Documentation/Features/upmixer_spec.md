@@ -149,8 +149,8 @@ On **RP2040** the feature does not exist: both SET commands STALL (error status 
 upmixer: `UPMIX` (35, enable), `UPMIX_CENTER_MODE` (36), `UPMIX_SURROUND_MODE`
 (37), `UPMIX_STRENGTH` (38), `UPMIX_WIDTH` (39), `UPMIX_PRESENCE` (40). All
 six are RP2350-only (empty action mask on RP2040). The front-panel mode
-labels call the ADAPTIVE engine modes "Logic"; the wire values are
-identical. See `control_surfaces_spec.md` sections 4.3 and 5.
+labels call the PASSIVE engine modes "Sinner" and the ADAPTIVE engine modes
+"Logician"; the wire values are identical. See `control_surfaces_spec.md` sections 4.3 and 5.
 
 ### 6.1 UpmixConfigPacket (44 bytes)
 
