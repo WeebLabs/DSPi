@@ -163,7 +163,7 @@ Beispiel: C_F = 10 nF → 100 mV/µC = 100 V/mC
 
 **I²C-Adresse:** ADDR-Pin an GND → **0x48**
 
-**Eingangsbereich (PGA-Einstellung):**
+**Eingangsbereich (PGA-Einstellung):** *(Hinweis: Die AIN-Pins müssen für Normalbetrieb innerhalb **GND..VDD** liegen; die PGA-FSR ist die interne ADC-Skalierung und erlaubt keine Messung außerhalb der Versorgungsschienen.)*
 
 | PGA | FSR | LSB-Größe |
 |-----|-----|-----------|
