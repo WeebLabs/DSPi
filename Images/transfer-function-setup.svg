@@ -1,0 +1,294 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820"
+     font-family="'Inter','Helvetica Neue',Arial,sans-serif">
+
+<rect width="1200" height="820" fill="#0f1117"/>
+<defs>
+  <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+    <path d="M40 0L0 0 0 40" fill="none" stroke="#1a1d27" stroke-width="0.8"/>
+  </pattern>
+  <marker id="a-grn" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0,0 L0,7 L7,3.5z" fill="#4ade80"/></marker>
+  <marker id="a-sky" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0,0 L0,7 L7,3.5z" fill="#38bdf8"/></marker>
+  <marker id="a-yel" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0,0 L0,7 L7,3.5z" fill="#facc15"/></marker>
+  <marker id="a-ora" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0,0 L0,7 L7,3.5z" fill="#fb923c"/></marker>
+  <marker id="a-red" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0,0 L0,7 L7,3.5z" fill="#f87171"/></marker>
+  <marker id="a-vio" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto"><path d="M0,0 L0,7 L7,3.5z" fill="#c084fc"/></marker>
+</defs>
+<rect width="1200" height="820" fill="url(#grid)"/>
+
+<!-- ── TITLE ─────────────────────────────────────────────── -->
+<text x="600" y="36" text-anchor="middle" font-size="18" font-weight="700" fill="#f4f4f5">Transfer Function Measurement System</text>
+<text x="600" y="54" text-anchor="middle" font-size="11" fill="#64748b">Pico 2 / DSPi · 1 ch stimulus out · 2 ch measurement in · 48 V phantom · ±9 V preamp rails</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     ROW 1:  PC  ──USB──  Pico 2  ──I2S──  PCM5102A  ──RCA──  Active Speaker
+     Y-centre = 220
+     ═══════════════════════════════════════════════════════════ -->
+
+<!-- PC -->
+<rect x="30" y="160" width="110" height="120" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="85" y="183" text-anchor="middle" font-size="12" font-weight="700" fill="#f4f4f5">PC</text>
+<text x="85" y="200" text-anchor="middle" font-size="9" fill="#94a3b8">REW / host</text>
+<text x="85" y="213" text-anchor="middle" font-size="9" fill="#94a3b8">measurement</text>
+<text x="85" y="226" text-anchor="middle" font-size="9" fill="#94a3b8">software</text>
+<rect x="62" y="237" width="46" height="16" rx="3" fill="#1e3a5f" stroke="#2563eb" stroke-width="1"/>
+<text x="85" y="249" text-anchor="middle" font-size="9" font-weight="600" fill="#38bdf8">USB</text>
+<text x="85" y="270" text-anchor="middle" font-size="8" fill="#64748b">1 out · 2 in</text>
+
+<!-- USB cable -->
+<line x1="140" y1="220" x2="175" y2="220" stroke="#38bdf8" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#a-sky)"/>
+<text x="157" y="213" text-anchor="middle" font-size="8" fill="#38bdf8">USB</text>
+
+<!-- Pico 2 -->
+<rect x="175" y="155" width="150" height="130" rx="10" fill="#161d30" stroke="#2d4a8a" stroke-width="2"/>
+<text x="250" y="177" text-anchor="middle" font-size="13" font-weight="700" fill="#93c5fd">Pico 2</text>
+<text x="250" y="192" text-anchor="middle" font-size="9" fill="#60a5fa">RP2350 · DSPi</text>
+<text x="183" y="210" font-size="8.5" fill="#94a3b8">GPIO 6  → I2S DATA out</text>
+<text x="183" y="223" font-size="8.5" fill="#94a3b8">GPIO 13 → MCK 256×Fs</text>
+<text x="183" y="236" font-size="8.5" fill="#94a3b8">GPIO 14 → BCK (shared)</text>
+<text x="183" y="249" font-size="8.5" fill="#94a3b8">GPIO 15 → LRCLK</text>
+<text x="183" y="262" font-size="8.5" fill="#94a3b8">GPIO 4  ← I2S DATA in</text>
+
+<!-- I2S out bus: Pico → PCM5102A  (green = audio data, yellow = clocks) -->
+<line x1="325" y1="210" x2="395" y2="210" stroke="#4ade80" stroke-width="2" marker-end="url(#a-grn)"/>
+<text x="360" y="204" text-anchor="middle" font-size="8" fill="#4ade80">DATA</text>
+<line x1="325" y1="228" x2="395" y2="228" stroke="#facc15" stroke-width="2" marker-end="url(#a-yel)"/>
+<text x="360" y="222" text-anchor="middle" font-size="8" fill="#facc15">CLK</text>
+
+<!-- PCM5102A DAC -->
+<rect x="395" y="170" width="130" height="100" rx="8" fill="#162215" stroke="#166534" stroke-width="1.5"/>
+<text x="460" y="192" text-anchor="middle" font-size="12" font-weight="700" fill="#4ade80">PCM5102A</text>
+<text x="460" y="207" text-anchor="middle" font-size="9" fill="#86efac">24-bit I²S DAC</text>
+<text x="460" y="220" text-anchor="middle" font-size="8" fill="#64748b">112 dB SNR</text>
+<text x="460" y="233" text-anchor="middle" font-size="8" fill="#86efac">VOUT1L → filter</text>
+<text x="460" y="248" text-anchor="middle" font-size="8" fill="#64748b">VOUT1R → 100Ω GND</text>
+
+<!-- Output filter block -->
+<rect x="550" y="185" width="80" height="70" rx="6" fill="#1a1f2e" stroke="#475569" stroke-width="1.2"/>
+<text x="590" y="204" text-anchor="middle" font-size="9" font-weight="600" fill="#f4f4f5">Output</text>
+<text x="590" y="216" text-anchor="middle" font-size="9" font-weight="600" fill="#f4f4f5">Filter</text>
+<text x="590" y="230" text-anchor="middle" font-size="8" fill="#94a3b8">47Ω + 10µF</text>
+<text x="590" y="242" text-anchor="middle" font-size="8" fill="#94a3b8">MKT film</text>
+<line x1="525" y1="220" x2="550" y2="220" stroke="#4ade80" stroke-width="2" marker-end="url(#a-grn)"/>
+
+<!-- RCA jack -->
+<circle cx="685" cy="220" r="25" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
+<circle cx="685" cy="220" r="11" fill="#334155" stroke="#64748b" stroke-width="1"/>
+<circle cx="685" cy="220" r="4.5" fill="#94a3b8"/>
+<text x="685" y="256" text-anchor="middle" font-size="9" font-weight="600" fill="#f4f4f5">RCA out</text>
+<line x1="630" y1="220" x2="660" y2="220" stroke="#4ade80" stroke-width="2" marker-end="url(#a-grn)"/>
+
+<!-- cable to speaker -->
+<line x1="710" y1="220" x2="740" y2="220" stroke="#4ade80" stroke-width="2" marker-end="url(#a-grn)"/>
+
+<!-- Active Speaker -->
+<rect x="740" y="162" width="130" height="116" rx="10" fill="#1c1a30" stroke="#4c1d95" stroke-width="1.5"/>
+<ellipse cx="800" cy="208" rx="32" ry="44" fill="#2d1f5e" stroke="#7c3aed" stroke-width="1.5"/>
+<ellipse cx="800" cy="208" rx="16" ry="24" fill="#1c1a30" stroke="#6d28d9" stroke-width="1"/>
+<ellipse cx="800" cy="208" rx="6" ry="8" fill="#4c1d95"/>
+<text x="850" y="192" font-size="9" font-weight="700" fill="#c4b5fd">Active</text>
+<text x="850" y="205" font-size="9" font-weight="700" fill="#c4b5fd">Speaker</text>
+<text x="850" y="220" font-size="8" fill="#8b5cf6">line input</text>
+<text x="850" y="233" font-size="8" fill="#64748b">2.1 Vrms max</text>
+<text x="850" y="246" font-size="8" fill="#64748b">(-10 dBV)</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     SHARED CLOCK BUS (vertical, x=370, y=228→490)
+     Feeds both PCM5102A and PCM1808
+     ═══════════════════════════════════════════════════════════ -->
+<line x1="370" y1="228" x2="370" y2="500" stroke="#facc15" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="345" y="370" text-anchor="middle" font-size="8" fill="#facc15" transform="rotate(-90,345,370)">BCK / LRCLK / MCK  (shared)</text>
+
+<!-- clock tap to PCM1808 -->
+<line x1="370" y1="500" x2="530" y2="500" stroke="#facc15" stroke-width="1.5" marker-end="url(#a-yel)"/>
+
+<!-- I2S RX back from ADC to Pico (GPIO 4) -->
+<line x1="530" y1="516" x2="370" y2="516" stroke="#38bdf8" stroke-width="2" marker-end="url(#a-sky)"/>
+<path d="M 370 516 L 250 516 L 250 285" stroke="#38bdf8" stroke-width="2" marker-end="url(#a-sky)"/>
+<text x="460" y="510" text-anchor="middle" font-size="8" fill="#38bdf8">I²S RX (GPIO 4)</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     ROW 2: PCM1808  ←  INA217×2  ←  XLR×2  ←  Mics
+     Y-centre ≈ 490 / 600 / 690
+     ═══════════════════════════════════════════════════════════ -->
+
+<!-- PCM1808 ADC -->
+<rect x="530" y="460" width="140" height="110" rx="8" fill="#161d30" stroke="#1e40af" stroke-width="1.5"/>
+<text x="600" y="482" text-anchor="middle" font-size="12" font-weight="700" fill="#93c5fd">PCM1808</text>
+<text x="600" y="497" text-anchor="middle" font-size="9" fill="#bfdbfe">24-bit I²S ADC</text>
+<text x="600" y="510" text-anchor="middle" font-size="8" fill="#64748b">slave mode, 256× MCK</text>
+<text x="600" y="523" text-anchor="middle" font-size="8" fill="#bfdbfe">VINL+ ← INA217 ch1</text>
+<text x="600" y="536" text-anchor="middle" font-size="8" fill="#bfdbfe">VINR+ ← INA217 ch2</text>
+<text x="600" y="549" text-anchor="middle" font-size="8" fill="#64748b">VCOM ref (1.65V) → IN−</text>
+
+<!-- INA217 ch1 output → ADC VINL+ -->
+<line x1="600" y1="620" x2="600" y2="570" stroke="#fb923c" stroke-width="2" marker-end="url(#a-ora)"/>
+
+<!-- INA217 ch2 output → ADC VINR+ -->
+<line x1="770" y1="620" x2="680" y2="570" stroke="#fb923c" stroke-width="2" marker-end="url(#a-ora)"/>
+
+<!-- INA217 ch1 -->
+<rect x="530" y="620" width="140" height="100" rx="8" fill="#271c15" stroke="#92400e" stroke-width="1.5"/>
+<text x="600" y="642" text-anchor="middle" font-size="12" font-weight="700" fill="#fb923c">INA217  ch1</text>
+<text x="600" y="657" text-anchor="middle" font-size="9" fill="#fdba74">instrumentation amp</text>
+<text x="600" y="671" text-anchor="middle" font-size="8" fill="#64748b">CMRR &gt; 80 dB · Vn 1.3 nV/√Hz</text>
+<text x="600" y="684" text-anchor="middle" font-size="8" fill="#fdba74">G = ×10 / ×31.6 / ×100</text>
+<text x="600" y="697" text-anchor="middle" font-size="8" fill="#64748b">+20 / +30 / +40 dB</text>
+<text x="600" y="710" text-anchor="middle" font-size="8" fill="#64748b">supply: ±9 V</text>
+
+<!-- INA217 ch2 -->
+<rect x="700" y="620" width="140" height="100" rx="8" fill="#271c15" stroke="#92400e" stroke-width="1.5"/>
+<text x="770" y="642" text-anchor="middle" font-size="12" font-weight="700" fill="#fb923c">INA217  ch2</text>
+<text x="770" y="657" text-anchor="middle" font-size="9" fill="#fdba74">instrumentation amp</text>
+<text x="770" y="671" text-anchor="middle" font-size="8" fill="#64748b">CMRR &gt; 80 dB · Vn 1.3 nV/√Hz</text>
+<text x="770" y="684" text-anchor="middle" font-size="8" fill="#fdba74">G = ×10 / ×31.6 / ×100</text>
+<text x="770" y="697" text-anchor="middle" font-size="8" fill="#64748b">+20 / +30 / +40 dB</text>
+<text x="770" y="710" text-anchor="middle" font-size="8" fill="#64748b">supply: ±9 V</text>
+
+<!-- Gain switch between ch1 and ch2 -->
+<rect x="618" y="737" width="104" height="38" rx="7" fill="#1a1510" stroke="#78350f" stroke-width="1.5"/>
+<text x="670" y="752" text-anchor="middle" font-size="10" font-weight="700" fill="#f59e0b">2P3T  GAIN  SW</text>
+<text x="670" y="766" text-anchor="middle" font-size="8.5" fill="#d97706">HI (×100) · MID (×31.6) · LO (×10)</text>
+<!-- switch legs -->
+<line x1="645" y1="737" x2="620" y2="720" stroke="#78350f" stroke-width="1.2" stroke-dasharray="3,2"/>
+<line x1="695" y1="737" x2="720" y2="720" stroke="#78350f" stroke-width="1.2" stroke-dasharray="3,2"/>
+<!-- R_G labels -->
+<text x="595" y="735" font-size="7.5" fill="#92400e">R_G: 62/196/665 Ω</text>
+<text x="765" y="735" font-size="7.5" fill="#92400e">R_G: 62/196/665 Ω</text>
+
+<!-- Phantom power + XLR ch1 -->
+<rect x="880" y="440" width="150" height="70" rx="7" fill="#1c1208" stroke="#78350f" stroke-width="1.2"/>
+<text x="955" y="460" text-anchor="middle" font-size="10" font-weight="700" fill="#fb923c">Phantom Power</text>
+<text x="955" y="474" text-anchor="middle" font-size="8.5" fill="#fdba74">+48 V  ·  IEC 61938</text>
+<text x="955" y="488" text-anchor="middle" font-size="8" fill="#94a3b8">6.81 kΩ × 4  ·  10µF/100V MKT</text>
+<text x="955" y="501" text-anchor="middle" font-size="8" fill="#64748b">block caps on XLR pin 2 &amp; 3</text>
+
+<!-- XLR 1 connector -->
+<rect x="880" y="550" width="120" height="65" rx="8" fill="#1a1f2e" stroke="#334155" stroke-width="1.5"/>
+<circle cx="910" cy="582" r="14" fill="#2d3748" stroke="#64748b" stroke-width="1"/>
+<circle cx="906" cy="576" r="4" fill="#94a3b8"/>
+<circle cx="906" cy="588" r="4" fill="#f87171"/>
+<circle cx="917" cy="582" r="4" fill="#4ade80"/>
+<text x="952" y="570" text-anchor="middle" font-size="10" font-weight="700" fill="#f4f4f5">XLR  1</text>
+<text x="952" y="583" text-anchor="middle" font-size="8" fill="#64748b">pin 1 = GND</text>
+<text x="952" y="595" text-anchor="middle" font-size="8" fill="#64748b">pin 2 = hot (+)</text>
+<text x="952" y="607" text-anchor="middle" font-size="8" fill="#64748b">pin 3 = cold (−)</text>
+
+<!-- XLR 2 connector -->
+<rect x="880" y="645" width="120" height="65" rx="8" fill="#1a1f2e" stroke="#334155" stroke-width="1.5"/>
+<circle cx="910" cy="677" r="14" fill="#2d3748" stroke="#64748b" stroke-width="1"/>
+<circle cx="906" cy="671" r="4" fill="#94a3b8"/>
+<circle cx="906" cy="683" r="4" fill="#f87171"/>
+<circle cx="917" cy="677" r="4" fill="#4ade80"/>
+<text x="952" y="665" text-anchor="middle" font-size="10" font-weight="700" fill="#f4f4f5">XLR  2</text>
+<text x="952" y="678" text-anchor="middle" font-size="8" fill="#64748b">pin 1 = GND</text>
+<text x="952" y="690" text-anchor="middle" font-size="8" fill="#64748b">pin 2 = hot (+)</text>
+<text x="952" y="702" text-anchor="middle" font-size="8" fill="#64748b">pin 3 = cold (−)</text>
+
+<!-- XLR1 → INA217 ch1 balanced line -->
+<line x1="880" y1="582" x2="670" y2="665" stroke="#f87171" stroke-width="2" marker-end="url(#a-red)"/>
+<text x="785" y="612" text-anchor="middle" font-size="8" fill="#f87171" transform="rotate(-25,785,612)">balanced  XLR</text>
+
+<!-- XLR2 → INA217 ch2 balanced line -->
+<line x1="880" y1="677" x2="840" y2="677" stroke="#f87171" stroke-width="2" marker-end="url(#a-red)"/>
+
+<!-- phantom → XLR1 -->
+<line x1="940" y1="510" x2="940" y2="550" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#a-ora)"/>
+<!-- phantom → XLR2 -->
+<line x1="960" y1="510" x2="960" y2="645" stroke="#fb923c" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#a-ora)"/>
+
+<!-- Microphone 1 -->
+<g transform="translate(1045,540)">
+  <ellipse cx="22" cy="20" rx="19" ry="17" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+  <ellipse cx="22" cy="20" rx="10" ry="9" fill="#0f172a" stroke="#475569" stroke-width="1"/>
+  <line x1="10" y1="18" x2="34" y2="18" stroke="#334155" stroke-width="1"/>
+  <line x1="8"  y1="23" x2="36" y2="23" stroke="#334155" stroke-width="1"/>
+  <rect x="16" y="37" width="12" height="22" rx="2" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="22" y1="59" x2="22" y2="70" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="13" y1="70" x2="31" y2="70" stroke="#64748b" stroke-width="2"/>
+  <text x="22" y="86" text-anchor="middle" font-size="9" font-weight="600" fill="#f4f4f5">Mic 1</text>
+  <text x="22" y="98" text-anchor="middle" font-size="7.5" fill="#64748b">reference</text>
+  <text x="22" y="109" text-anchor="middle" font-size="7.5" fill="#64748b">4–40 mV/Pa</text>
+</g>
+<line x1="1045" y1="582" x2="1000" y2="582" stroke="#64748b" stroke-width="1.5" marker-end="url(#a-vio)"/>
+
+<!-- Microphone 2 -->
+<g transform="translate(1045,645)">
+  <ellipse cx="22" cy="20" rx="19" ry="17" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+  <ellipse cx="22" cy="20" rx="10" ry="9" fill="#0f172a" stroke="#475569" stroke-width="1"/>
+  <line x1="10" y1="18" x2="34" y2="18" stroke="#334155" stroke-width="1"/>
+  <line x1="8"  y1="23" x2="36" y2="23" stroke="#334155" stroke-width="1"/>
+  <rect x="16" y="37" width="12" height="22" rx="2" fill="#1e293b" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="22" y1="59" x2="22" y2="70" stroke="#64748b" stroke-width="1.5"/>
+  <line x1="13" y1="70" x2="31" y2="70" stroke="#64748b" stroke-width="2"/>
+  <text x="22" y="86" text-anchor="middle" font-size="9" font-weight="600" fill="#f4f4f5">Mic 2</text>
+  <text x="22" y="98" text-anchor="middle" font-size="7.5" fill="#64748b">measurement</text>
+  <text x="22" y="109" text-anchor="middle" font-size="7.5" fill="#64748b">4–40 mV/Pa</text>
+</g>
+<line x1="1045" y1="677" x2="1000" y2="677" stroke="#64748b" stroke-width="1.5" marker-end="url(#a-vio)"/>
+
+<!-- ═══ ACOUSTIC PATH ══════════════════════════════════ -->
+<!-- curved arc: speaker (x=800,y=162 top) → mic1 (x=1067,y=540) -->
+<path d="M 850 162 Q 1000 80 1067 540" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="7,4" fill="none" marker-end="url(#a-vio)"/>
+<!-- speaker → mic2 -->
+<path d="M 870 162 Q 1020 90 1067 645" stroke="#7c3aed" stroke-width="1.2" stroke-dasharray="7,4" fill="none" marker-end="url(#a-vio)"/>
+<text x="1000" y="310" font-size="9" fill="#7c3aed">acoustic</text>
+<text x="1000" y="322" font-size="9" fill="#7c3aed">path</text>
+
+<!-- ═══ POWER SUPPLY ══════════════════════════════════ -->
+<rect x="30" y="355" width="160" height="165" rx="10" fill="#111521" stroke="#1e2540" stroke-width="1.5"/>
+<text x="110" y="376" text-anchor="middle" font-size="11" font-weight="700" fill="#f4f4f5">Power Supply</text>
+<text x="110" y="391" text-anchor="middle" font-size="8" fill="#64748b">all rails from USB VBUS (+5V)</text>
+<rect x="44" y="398" width="132" height="16" rx="3" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+<text x="110" y="410" text-anchor="middle" font-size="8.5" fill="#a78bfa">LP5907  → 3.3V_A (analog)</text>
+<rect x="44" y="418" width="132" height="16" rx="3" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+<text x="110" y="430" text-anchor="middle" font-size="8.5" fill="#f472b6">MT3608  → +9 V</text>
+<rect x="44" y="438" width="132" height="16" rx="3" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+<text x="110" y="450" text-anchor="middle" font-size="8.5" fill="#f472b6">TC962   → −9 V</text>
+<rect x="44" y="458" width="132" height="16" rx="3" fill="#2a1208" stroke="#7c2d12" stroke-width="1"/>
+<text x="110" y="470" text-anchor="middle" font-size="8.5" fill="#fb923c">MT3608  → +48 V phantom</text>
+<text x="110" y="492" text-anchor="middle" font-size="8" fill="#64748b">USB 3.0 / 5V adapter</text>
+<text x="110" y="505" text-anchor="middle" font-size="8" fill="#64748b">required (~800 mA total)</text>
+
+<!-- power rail dashed feeds -->
+<!-- 3.3V_A → DAC and ADC (subtle purple line along top) -->
+<path d="M 190 406 L 460 406 L 460 170" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" fill="none"/>
+<path d="M 460 406 L 600 406 L 600 460" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3" fill="none"/>
+<!-- ±9V → INA217s -->
+<path d="M 190 446 L 510 446 L 510 670" stroke="#f472b6" stroke-width="1" stroke-dasharray="3,3" fill="none"/>
+<path d="M 510 670 L 530 670" stroke="#f472b6" stroke-width="1" stroke-dasharray="3,3" fill="none"/>
+<path d="M 510 670 L 700 670" stroke="#f472b6" stroke-width="1" stroke-dasharray="3,3" fill="none"/>
+<!-- +48V → phantom -->
+<path d="M 190 466 L 855 466 L 855 475 L 880 475" stroke="#fb923c" stroke-width="1" stroke-dasharray="3,3" fill="none"/>
+
+<!-- ═══ LEGEND ═══════════════════════════════════════ -->
+<rect x="30" y="80" width="155" height="242" rx="8" fill="#0d1117" stroke="#1f2937" stroke-width="1"/>
+<text x="107" y="100" text-anchor="middle" font-size="10" font-weight="700" fill="#f4f4f5">Signal Legend</text>
+<line x1="42" y1="116" x2="76" y2="116" stroke="#4ade80" stroke-width="2"/>
+<text x="84" y="120" font-size="8.5" fill="#94a3b8">Audio output (I²S / analog)</text>
+<line x1="42" y1="134" x2="76" y2="134" stroke="#38bdf8" stroke-width="2"/>
+<text x="84" y="138" font-size="8.5" fill="#94a3b8">Audio input (I²S / analog)</text>
+<line x1="42" y1="152" x2="76" y2="152" stroke="#facc15" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="84" y="156" font-size="8.5" fill="#94a3b8">Shared I²S clock bus</text>
+<line x1="42" y1="170" x2="76" y2="170" stroke="#f87171" stroke-width="2"/>
+<text x="84" y="174" font-size="8.5" fill="#94a3b8">Balanced XLR audio</text>
+<line x1="42" y1="188" x2="76" y2="188" stroke="#fb923c" stroke-width="2"/>
+<text x="84" y="192" font-size="8.5" fill="#94a3b8">Preamp output</text>
+<line x1="42" y1="206" x2="76" y2="206" stroke="#c084fc" stroke-width="1.5"/>
+<text x="84" y="210" font-size="8.5" fill="#94a3b8">Mic cable / acoustic path</text>
+<line x1="42" y1="224" x2="76" y2="224" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="84" y="228" font-size="8.5" fill="#94a3b8">3.3V_A rail</text>
+<line x1="42" y1="242" x2="76" y2="242" stroke="#f472b6" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="84" y="246" font-size="8.5" fill="#94a3b8">±9 V preamp rails</text>
+<line x1="42" y1="260" x2="76" y2="260" stroke="#fb923c" stroke-width="1" stroke-dasharray="3,3"/>
+<text x="84" y="264" font-size="8.5" fill="#94a3b8">+48 V phantom</text>
+<line x1="42" y1="278" x2="76" y2="278" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="7,4"/>
+<text x="84" y="282" font-size="8.5" fill="#94a3b8">Acoustic path</text>
+<line x1="42" y1="296" x2="76" y2="296" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,3"/>
+<text x="84" y="300" font-size="8.5" fill="#94a3b8">USB (PC ↔ Pico 2)</text>
+
+<!-- ═══ FOOTER ═══════════════════════════════════════ -->
+<rect x="0" y="795" width="1200" height="25" fill="#0a0c10"/>
+<text x="20"  y="811" font-size="8" fill="#374151">H(f) = Ch2(f) / Ch1(f)  —  Mic 1 = reference near speaker  ·  Mic 2 = DUT measurement position  ·  Transfer function = mic2 / mic1</text>
+<text x="900" y="811" font-size="8" fill="#374151">sample rate: 48 / 96 kHz</text>
+
+</svg>
