@@ -169,7 +169,7 @@ Pico 2 GPIO 6
                     VOUT1R ──→ 100 Ω ──→ GND  (right channel terminated)
 ```
 
-Maximum output: **2.1 Vrms** (PCM5102A full scale at −10 dBV line level).
+Maximum output: **2.1 Vrms** (PCM5102A full scale, ≈ +6.4 dBV / +8.7 dBu).
 
 ### 5.3 Microphone Input Chain (2 channels)
 
