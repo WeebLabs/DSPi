@@ -78,6 +78,11 @@
  * columns of the value line.  No structure sizes change; the bump only
  * tells hosts the flag bits are honoured rather than rejected.
  *
+ * Caps v12 adds CsBinding.base_bright, a per-LED_PWM brightness ceiling
+ * carved from the spare reserved byte, so a level meter keeps its full
+ * sweep while its top end moves.  CsBinding stays 24 bytes and pre-v12
+ * configs carry 0 there, meaning full brightness.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -362,7 +367,10 @@ typedef struct __attribute__((packed)) {
     uint8_t event;         // CsEvent (buttons; 0 otherwise)
     uint8_t target;        // channel index for targeted nouns (else 0)
     uint8_t index;         // filter band for CS_TARGET_DSP_BAND nouns (else 0)
-    uint8_t reserved;      // write 0
+    // Per-LED brightness ceiling (caps v12): scales the final PWM duty, so a
+    // meter keeps its full sweep and only its top end moves.  Percent 1-100,
+    // 0 = unset = full; LED_PWM only, every other type writes 0.
+    uint8_t base_bright;
     int16_t value;         // SET/MOMENTARY target, IND_EQUALS/IND_ABOVE comparand
     int16_t step;          // STEP/INC/DEC size; 0 = per-unit default
     int16_t range_min;     // pot/IND_LEVEL span; both 0 = the noun's full range
@@ -372,7 +380,9 @@ typedef struct __attribute__((packed)) {
     // (PLC TON/TOF).  0.1 s units, 0 = immediate; LED types only.
     uint16_t on_delay;
     uint16_t off_delay;
-    uint8_t reserved2[2];  // write 0
+    uint8_t reserved2[2];  // write 0; earmarked for an LED-extras flags byte
+                           // (a future global Panel Brightness opt-in), since
+                           // CsBinding.flags has no free bit left
 } CsBinding;
 
 // One IR remote command; 16 bytes, identical on the wire (REQ_SET/GET_CS_IR_CMD
@@ -540,7 +550,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (11); see the file
+    uint8_t  caps_version; // capability format version (12); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)

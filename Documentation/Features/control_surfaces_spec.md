@@ -61,6 +61,14 @@ the caps header's three bytes after `max_ir_commands` become
 including every new struct and status code, is
 `control_surfaces_groups_macros_spec.md`.
 
+Caps v10 and v11 are the I2C display bundle and its line alignment; both are
+specified in `control_surfaces_display_spec.md`. Neither changes `CsBinding`.
+
+Caps v12 adds `CsBinding.base_bright`, a per-LED brightness ceiling for
+`CS_TYPE_LED_PWM` carved from the former `reserved` byte at offset 9 (struct
+still 24 bytes; sections 2.2 and 6.6). Pre-v12 configs carry 0 there, which
+means full brightness, so nothing migrates and no directory version changes.
+
 Writing style note: this doc avoids em-dashes per project convention.
 
 ---
@@ -222,14 +230,14 @@ giving smooth, jitter-free knob behavior without flooding the dispatcher.
 | 6 | 1 | `event` | `CsEvent` (buttons: 0 = press, 1 = long, 2 = double); MUST be 0 for other types |
 | 7 | 1 | `target` | channel address for targeted nouns (section 4.4); 0 otherwise |
 | 8 | 1 | `index` | filter band for `CS_TARGET_DSP_BAND` nouns; 0 otherwise |
-| 9 | 1 | `reserved` | write 0 (rejected non-zero) |
+| 9 | 1 | `base_bright` | caps v12: brightness ceiling, percent 1-100; `0` = unset = full. `CS_TYPE_LED_PWM` only, rejected non-zero elsewhere |
 | 10 | 2 | `value` (int16) | `SET`/`MOMENTARY` target, `IND_EQUALS`/`IND_ABOVE` comparand; unit-encoded (2.1) |
 | 12 | 2 | `step` (int16) | `STEP`/`INC`/`DEC` size; `0` = the unit default (2.1) |
 | 14 | 2 | `range_min` (int16) | pot / `IND_LEVEL` span low end; both range fields `0` = the noun's full range |
 | 16 | 2 | `range_max` (int16) | pot / `IND_LEVEL` span high end |
 | 18 | 2 | `on_delay` (uint16) | caps v8: raw condition must hold true this long before the LED turns on; 0.1 s units, 0 = immediate. LED types with `IND_EQUALS`/`IND_ABOVE` only; rejected non-zero elsewhere |
 | 20 | 2 | `off_delay` (uint16) | caps v8: raw condition must hold false this long before the LED turns off; same rules |
-| 22 | 2 | `reserved2[2]` | write 0 (rejected non-zero) |
+| 22 | 2 | `reserved2[2]` | write 0 (rejected non-zero); earmarked for an LED-extras flags byte, since `flags` has no free bit |
 
 #### 2.2.1 Flags
 
@@ -270,10 +278,10 @@ the firmware stores and what `REQ_GET_ALL_PARAMS` does **not** contain.
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
-| 0 | 1 | `caps_version` | capability format version (8) |
+| 0 | 1 | `caps_version` | capability format version (12) |
 | 1 | 1 | `max_bindings` | `CS_MAX_BINDINGS` (16) |
-| 2 | 1 | `type_count` | `CS_TYPE_COUNT` (8); the type table has this many entries, indexed by `CsType` |
-| 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (52) |
+| 2 | 1 | `type_count` | `CS_TYPE_COUNT` (9); the type table has this many entries, indexed by `CsType` |
+| 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (57) |
 | 4 | 32 | `types[8]` | eight `CsTypeDesc`, one per `CsType` including index 0 (`NONE`, all-zero) |
 | 36 | 1 | `max_ir_commands` | `CS_MAX_IR_COMMANDS` (16) |
 | 37 | 3 | `reserved[3]` | 0 |
@@ -939,6 +947,15 @@ so rapid detents on two different filter knobs cannot overwrite each other.
   range or the custom `[range_min, range_max]` span, with a squared
   perceptual curve; a per-channel VU-style meter LED is `LEVEL` +
   `IND_LEVEL`), plus `IND_EQUALS`/`IND_ABOVE` as full-on/off.
+- **Brightness ceiling (caps v12):** `base_bright` (percent 1-100, 0 = full)
+  scales the computed duty, so a meter keeps its whole sweep and only its top
+  end moves; it applies to the full-on/off actions too, which is how a panel
+  of indicators is dimmed as a set. The scale is **linear in duty** (the
+  perceptual curve belongs to the `IND_LEVEL` mapping, and squaring here
+  would round a 1% ceiling to fully off at wrap 4095). It is applied before
+  `CS_FLAG_INVERT`, so an active-low LED keeps a full-rail off state.
+  A future global Panel Brightness noun is intended to multiply into this
+  per-LED value for LEDs that opt in, via a flags byte from `reserved2`.
 - **`CS_FLAG_INVERT`** inverts the duty cycle for active-low wiring.
 - Refresh is decimated like plain LEDs (8 ms); brightness changes are applied
   only when the computed level changes.

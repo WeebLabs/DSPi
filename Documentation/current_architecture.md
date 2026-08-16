@@ -2420,7 +2420,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-08-16 (caps v11: display line alignment and bracketed edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
+*Last updated: 2026-08-16 (caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and bracketed edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, and an
@@ -2559,6 +2559,12 @@ only so hosts know the new `CsDisplayCfg.flags` bits are honoured rather than
 rejected as unknown. Older stored blobs read back with the bits clear, which
 is left alignment, the pre-v11 behaviour.
 
+**Caps v12** (2026-08-16) adds `CsBinding.base_bright`, the per-LED_PWM
+brightness ceiling described above. The byte comes from the struct's spare
+`reserved` field, so `CsBinding` stays 24 bytes, `CsFlashConfig` stays 388,
+every GET keeps its length, and no directory version moves. Pre-v12 configs
+carry 0, meaning full brightness.
+
 ### File layout
 
 - `control_surfaces.c` / `.h`: the engine and the wire/flash data model
@@ -2648,6 +2654,20 @@ the engine's only non-polled input (decode still runs on the tick).
 PWM LEDs use a hardware PWM slice (wrap 4095 at `sysclk`/16) with a squared
 perceptual-brightness curve; two PWM LEDs that would collide on the same slice +
 channel are rejected at apply time (`CS_STATUS_PWM_CONFLICT`).
+
+**Brightness ceiling (caps v12).** `CsBinding.base_bright` (percent 1-100,
+0 = full) scales the computed duty in `cs_tick_led_pwm`, so an `IND_LEVEL`
+meter keeps its whole sweep and only its top end moves; it covers the
+full-on/off indicator actions too, which is how a set of indicators is dimmed
+together. The scale is linear in duty, deliberately: the perceptual curve
+already lives in the `IND_LEVEL` mapping, and squaring the ceiling as well
+would round a 1% setting to fully off against wrap 4095. It is applied before
+`CS_FLAG_INVERT`, so active-low wiring keeps a full-rail off state. The field
+took the spare `reserved` byte at offset 9, leaving `CsBinding` byte-identical
+at 24 bytes, and pre-v12 configs read 0 there, meaning full brightness. A
+future global Panel Brightness noun is intended to multiply into this per-LED
+value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
+is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
 

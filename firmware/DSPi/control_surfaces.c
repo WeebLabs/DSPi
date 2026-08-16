@@ -136,7 +136,7 @@ CsMacroStep      cs_set_macro_step_val;
 // ---------------------------------------------------------------------------
 
 static const CsCapsHeader s_caps = {
-    .caps_version = 11,
+    .caps_version = 12,
     .max_bindings = CS_MAX_BINDINGS,
     .type_count   = CS_TYPE_COUNT,
     .noun_count   = CS_NOUN_COUNT,
@@ -1232,6 +1232,11 @@ static void cs_tick_led_pwm(uint8_t slot) {
         }
         level = cs_ind_delay(b, rt, raw) ? CS_PWM_WRAP : 0;
     }
+    // Brightness ceiling, linear in duty: the meter's perceptual curve is
+    // already baked into `level`, so this only lowers its top end.  Applied
+    // before INVERT so an active-low LED keeps a full-rail off state.
+    if (b->base_bright)
+        level = (uint16_t)(((uint32_t)level * b->base_bright) / 100u);
     if (b->flags & CS_FLAG_INVERT) level = CS_PWM_WRAP - level;
     if (level == rt->pwm_level) return;
     rt->pwm_level = level;
@@ -1536,9 +1541,14 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
     uint8_t gst = cs_validate_group_flags(b->flags, b->action,
                                           &cs_noun_table[b->noun]);
     if (gst != PIN_CONFIG_SUCCESS) return gst;
-    if (b->reserved != 0) return CS_STATUS_INVALID_VALUE;
     for (int i = 0; i < (int)sizeof(b->reserved2); i++)
         if (b->reserved2[i] != 0) return CS_STATUS_INVALID_VALUE;
+
+    // Brightness ceiling: PWM LEDs only, percent 1-100 with 0 = full.  Every
+    // other type must carry 0, so a pre-v12 config stays valid unchanged.
+    if (b->base_bright > 100) return CS_STATUS_INVALID_VALUE;
+    if (b->base_bright != 0 && b->type != CS_TYPE_LED_PWM)
+        return CS_STATUS_INVALID_VALUE;
 
     // Delays filter a boolean indicator condition; everything else (inputs,
     // IND_LEVEL, the IR container) must carry 0.
