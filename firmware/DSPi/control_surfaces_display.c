@@ -39,10 +39,18 @@
 #define DISP_MAX_COLS   21    // small-font columns on a 128 px OLED
 #define DISP_LARGE_COLS 12    // 2x-scaled font columns (10 px per glyph)
 
+// bar_row is where a CS_DPAGE_BAR page draws its level bar.  When it equals
+// value_row the panel has no spare line, so the value merges into the label
+// line and the bar takes the row (the 2-row layout); DISP_NO_BAR_ROW means
+// the model draws no bar line at all (graphic panels invert behind the text
+// instead).  See the feature spec, s5.2.
+#define DISP_NO_BAR_ROW 0xFF
+
 typedef struct {
     uint8_t cols, rows;       // text geometry (small font for graphic models)
     uint8_t label_row;        // text row of the label line
     uint8_t value_row;        // text row of the value line
+    uint8_t bar_row;          // text row of the level bar, or DISP_NO_BAR_ROW
     uint8_t graphic;          // 0 = character module, 1 = SSD1306, 2 = SH1106
     uint8_t pcf;              // HD44780 behind a PCF8574 backpack
     uint8_t def_addr;
@@ -51,14 +59,26 @@ typedef struct {
 
 static const DispModelDesc s_models[CS_DISP_MODEL_COUNT] = {
     [CS_DISP_MODEL_NONE]           = {0},
-    [CS_DISP_MODEL_LCD1602]        = {16, 2, 0, 1, 0, 1, 0x27, 100000},
-    [CS_DISP_MODEL_LCD2004]        = {20, 4, 1, 2, 0, 1, 0x27, 100000},
-    [CS_DISP_MODEL_CHAR_OLED_16X2] = {16, 2, 0, 1, 0, 0, 0x3C, 400000},
-    [CS_DISP_MODEL_CHAR_OLED_20X2] = {20, 2, 0, 1, 0, 0, 0x3C, 400000},
-    [CS_DISP_MODEL_CHAR_OLED_20X4] = {20, 4, 1, 2, 0, 0, 0x3C, 400000},
-    [CS_DISP_MODEL_SSD1306_128X64] = {21, 8, 0, 3, 1, 0, 0x3C, 400000},
-    [CS_DISP_MODEL_SSD1306_128X32] = {21, 4, 0, 2, 1, 0, 0x3C, 400000},
-    [CS_DISP_MODEL_SH1106_128X64]  = {21, 8, 0, 3, 2, 0, 0x3C, 400000},
+    [CS_DISP_MODEL_LCD1602]        = {16, 2, 0, 1, 1, 0, 1, 0x27, 100000},
+    [CS_DISP_MODEL_LCD2004]        = {20, 4, 1, 2, 3, 0, 1, 0x27, 100000},
+    [CS_DISP_MODEL_CHAR_OLED_16X2] = {16, 2, 0, 1, 1, 0, 0, 0x3C, 400000},
+    [CS_DISP_MODEL_CHAR_OLED_20X2] = {20, 2, 0, 1, 1, 0, 0, 0x3C, 400000},
+    [CS_DISP_MODEL_CHAR_OLED_20X4] = {20, 4, 1, 2, 3, 0, 0, 0x3C, 400000},
+    [CS_DISP_MODEL_SSD1306_128X64] = {21, 8, 0, 3, DISP_NO_BAR_ROW, 1, 0, 0x3C, 400000},
+    [CS_DISP_MODEL_SSD1306_128X32] = {21, 4, 0, 2, DISP_NO_BAR_ROW, 1, 0, 0x3C, 400000},
+    [CS_DISP_MODEL_SH1106_128X64]  = {21, 8, 0, 3, DISP_NO_BAR_ROW, 2, 0, 0x3C, 400000},
+};
+
+// CGRAM bar cells: codes 1-5 fill 1-5 of the 5 glyph columns (code 0 is
+// avoided so bar strings stay NUL-terminated C strings).  Building the
+// solid cell here too means no dependency on the module's ROM block glyph.
+#define DISP_BAR_SUBCOL 5
+static const uint8_t s_bar_cgram[DISP_BAR_SUBCOL][8] = {
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x10,0x00},
+    {0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00},
+    {0x1C,0x1C,0x1C,0x1C,0x1C,0x1C,0x1C,0x00},
+    {0x1E,0x1E,0x1E,0x1E,0x1E,0x1E,0x1E,0x00},
+    {0x1F,0x1F,0x1F,0x1F,0x1F,0x1F,0x1F,0x00},
 };
 
 // HD44780 DDRAM row origins.  US2066 uses 0x20 spacing in 3/4-line mode.
@@ -179,6 +199,10 @@ static uint8_t    s_dirty = 0;            // bit per physical text row (<= 8)
 // these; the working strings live on disp_render's stack).
 static char       s_label_out[DISP_MAX_COLS + 1];
 static char       s_value_out[DISP_MAX_COLS + 1];
+static char       s_bar_out[DISP_MAX_COLS + 1];   // character-cell level bar
+// Graphic panels carry the bar as an inverted run behind the value row
+// instead of a line of their own; 0 = no highlight.
+static uint8_t    s_bar_px = 0;
 
 // Content state
 static uint8_t    s_cur_page = 0xFF;      // home page currently shown
@@ -298,6 +322,18 @@ static bool disp_init_step(void) {
     const DispModelDesc *m = &s_models[s_model];
     uint16_t i = s_init_pos;
     if (m->pcf) {
+        // Tail of the script: the CGRAM bar cells, one glyph per step (a
+        // whole glyph is 9 bytes, so it needs far more ring than a command).
+        if (i >= 10) {
+            uint8_t g = (uint8_t)(i - 10);
+            if (g >= DISP_BAR_SUBCOL) { s_init_done = true; return true; }
+            if (txq_free() < 40) return false;
+            hd_emit((uint8_t)(0x40 | ((g + 1) * 8)), false, true);
+            for (uint8_t k = 0; k < 8; k++)
+                hd_emit(s_bar_cgram[g][k], true, k == 7);
+            s_init_pos++;
+            return true;
+        }
         // Classic 4-bit bring-up with the three 8-bit-mode knocks.
         if (txq_free() < 14) return false;
         switch (i) {
@@ -311,7 +347,7 @@ static bool disp_init_step(void) {
             case 7: hd_emit(0x01, false, true); txq_push(TXW_DELAY | 3); break;
             case 8: hd_emit(0x06, false, true); break;  // entry mode
             case 9: hd_emit(0x0C, false, true); break;  // display on
-            default: s_init_done = true; return true;
+            default: break;                             // unreachable, see above
         }
     } else if (!m->graphic) {
         // US2066 bring-up (Newhaven 3.3 V application sequence).
@@ -328,7 +364,17 @@ static bool disp_init_step(void) {
             0x01,                     // clear (needs settle)
             0x0C,
         };
-        if (i >= sizeof(seq)) { s_init_done = true; return true; }
+        if (i >= sizeof(seq)) {
+            // Same CGRAM bar cells as the HD44780 path; the sequence has
+            // already returned to the base instruction set by here.
+            uint8_t g = (uint8_t)(i - sizeof(seq));
+            if (g >= DISP_BAR_SUBCOL) { s_init_done = true; return true; }
+            if (txq_free() < 20) return false;
+            us_cmd((uint8_t)(0x40 | ((g + 1) * 8)));
+            for (uint8_t k = 0; k < 8; k++) us_dat(s_bar_cgram[g][k]);
+            s_init_pos++;
+            return true;
+        }
         if (seq[i] == 0xFF) { us_dat(seq[i + 1]); s_init_pos += 2; return true; }
         uint8_t c = seq[i];
         if (c == 0x09 && m->rows == 2) c = 0x08;   // 2-line variant
@@ -385,10 +431,15 @@ static bool disp_init_step(void) {
 // it; the value then occupies two page rows (value_row and value_row + 1).
 static bool disp_value_large(void);
 
+static bool disp_bar_line(void);
+
 static const char *disp_row_text(uint8_t r, bool *large, uint8_t *large_half) {
     const DispModelDesc *m = &s_models[s_model];
     *large = false;
     *large_half = 0;
+    // The bar owns its row outright; on 2-row panels that is the value row,
+    // and the value has already been folded into the label line.
+    if (disp_bar_line() && r == m->bar_row) return s_bar_out;
     if (r == m->label_row) return s_label_out;
     if (m->graphic && disp_value_large()) {
         if (r == m->value_row)     { *large = true; *large_half = 0; return s_value_out; }
@@ -444,6 +495,10 @@ static bool disp_row_step(void) {
     uint8_t glyph_w = large ? 10 : 6;
     uint8_t ncols = large ? DISP_LARGE_COLS : DISP_MAX_COLS;
     uint8_t tlen = text ? (uint8_t)strlen(text) : 0;   // once, not per column
+    // Graphic level bar: the value row's pixels are inverted up to s_bar_px,
+    // giving a lit block with the glyphs knocked out of it.
+    bool hl = s_bar_px && (s_row_cur == m->value_row ||
+                           (large && s_row_cur == m->value_row + 1));
     while (s_row_col < 128) {
         if (txq_free() < 2) return false;
         uint8_t ci = s_row_col / glyph_w;
@@ -462,6 +517,7 @@ static bool disp_row_step(void) {
                 px = g[cx];
             }
         }
+        if (hl && s_row_col < s_bar_px) px = (uint8_t)~px;
         bool last = (s_row_col == 127);
         txq_push((uint16_t)(px | (last ? TXW_STOP : 0)));
         s_row_col++;
@@ -470,11 +526,21 @@ static bool disp_row_step(void) {
 }
 
 // Mark the physical rows carrying a logical line dirty.
-static void disp_dirty_line(bool value_line) {
+#define DISP_LINE_LABEL 0
+#define DISP_LINE_VALUE 1
+#define DISP_LINE_BAR   2
+
+static void disp_dirty_line(uint8_t line) {
     const DispModelDesc *m = &s_models[s_model];
-    if (!value_line) {
+    if (line == DISP_LINE_LABEL) {
         s_dirty |= (uint8_t)(1u << m->label_row);
         return;
+    }
+    if (line == DISP_LINE_BAR) {
+        // Graphic panels carry the bar as inverted pixels on the value row,
+        // so a bar change dirties exactly what a value change would.
+        if (m->bar_row == DISP_NO_BAR_ROW) line = DISP_LINE_VALUE;
+        else { s_dirty |= (uint8_t)(1u << m->bar_row); return; }
     }
     s_dirty |= (uint8_t)(1u << m->value_row);
     if (m->graphic) s_dirty |= (uint8_t)(1u << (m->value_row + 1));
@@ -682,7 +748,10 @@ static void disp_format_value(const CsDisplayPage *p, char *out, size_t n,
     }
 }
 
-static void disp_format_label(const CsDisplayPage *p, char *out, size_t n) {
+// `tight` picks the one-letter channel prefixes (O1/I2/C3/C3B4) used when the
+// label shares its row with the value on a 2-row bar page.
+static void disp_format_label_ex(const CsDisplayPage *p, char *out, size_t n,
+                                 bool tight) {
     const CsNounDesc *nd = &cs_noun_table[p->noun];
     const char *base = s_noun_label[p->noun] ? s_noun_label[p->noun] : "?";
     if (p->flags & CS_DPAGE_GROUP) {
@@ -695,21 +764,35 @@ static void disp_format_label(const CsDisplayPage *p, char *out, size_t n) {
     }
     switch (nd->target_kind) {
         case CS_TARGET_INPUT_CH:
-            snprintf(out, n, "In%d %s", p->target + 1, base);
+            snprintf(out, n, tight ? "I%d %s" : "In%d %s", p->target + 1, base);
             break;
         case CS_TARGET_OUTPUT_CH:
-            snprintf(out, n, "Out%d %s", p->target + 1, base);
+            snprintf(out, n, tight ? "O%d %s" : "Out%d %s", p->target + 1, base);
             break;
         case CS_TARGET_DSP_CH:
-            snprintf(out, n, "Ch%d %s", p->target + 1, base);
+            snprintf(out, n, tight ? "C%d %s" : "Ch%d %s", p->target + 1, base);
             break;
         case CS_TARGET_DSP_BAND:
-            snprintf(out, n, "Ch%d B%d %s", p->target + 1, p->index + 1, base);
+            snprintf(out, n, tight ? "C%dB%d %s" : "Ch%d B%d %s",
+                     p->target + 1, p->index + 1, base);
             break;
         default:
             snprintf(out, n, "%s", base);
             break;
     }
+}
+
+static void disp_format_label(const CsDisplayPage *p, char *out, size_t n) {
+    disp_format_label_ex(p, out, n, false);
+}
+
+// Strip the space before a unit suffix ("-12.5 dB" -> "-12.5dB"); buys a
+// column on the combined line where every one counts.
+static void disp_tighten_value(char *s) {
+    char *sp = NULL;
+    for (char *c = s; *c; c++) if (*c == ' ') sp = c;
+    if (!sp || sp == s || !sp[1]) return;
+    memmove(sp, sp + 1, strlen(sp + 1) + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -768,43 +851,152 @@ static void disp_lay_out(char *s, uint8_t w, uint8_t align, char marker) {
     memcpy(s, out, (size_t)w + 1);
 }
 
+// Whether the shown item draws a level bar, and whether the panel spends a
+// text row on it.  Graphic panels invert behind the value instead.
+static bool s_view_bar = false;
+static bool disp_bar_line(void) {
+    return s_view_bar && s_models[s_model].bar_row != DISP_NO_BAR_ROW;
+}
+
+// Fraction of the item's full range the live value sits at, 0..1; log-unit
+// nouns map logarithmically, as the IND_LEVEL meter LEDs do.  False when the
+// noun has no usable span or the read failed.
+static bool disp_bar_norm(const CsDisplayPage *p, float *out) {
+    float lo, hi;
+    if (!cs_noun_span(p->noun, &lo, &hi)) return false;
+    bool ok;
+    float v = disp_item_get(p, &ok);
+    if (!ok) return false;
+    const CsNounDesc *nd = &cs_noun_table[p->noun];
+    float norm;
+    if (nd->unit == CS_UNIT_HZ || nd->unit == CS_UNIT_Q) {
+        if (!(lo > 0.0f) || !(v > 0.0f)) return false;
+        norm = log2f(v / lo) / log2f(hi / lo);
+    } else {
+        norm = (v - lo) / (hi - lo);
+    }
+    // NaN survives a min/max clamp, so gate on the positive test explicitly.
+    if (!(norm > 0.0f)) norm = 0.0f;
+    else if (norm > 1.0f) norm = 1.0f;
+    *out = norm;
+    return true;
+}
+
+// Fold the value into the label row, flush right, in place.  The value is
+// never truncated (it is the number being read); the label gives up columns
+// instead, keeping at least one space between them while it can.
+static void disp_merge_value(char *label, const char *value, uint8_t cols) {
+    uint8_t lw = (uint8_t)strlen(label), vw = (uint8_t)strlen(value);
+    if (vw > cols) vw = cols;
+    uint8_t room = (uint8_t)(vw < cols ? cols - vw - 1 : 0);   // label columns
+    if (lw > room) lw = room;
+    memset(label + lw, ' ', (size_t)(cols - vw - lw));
+    memcpy(label + cols - vw, value, vw);
+    label[cols] = '\0';
+}
+
+// Paint a character-cell bar: whole cells from the CGRAM solid glyph, one
+// partial cell for the remainder, blanks after.
+static void disp_bar_cells(char *out, uint8_t w, float norm) {
+    // Casting a negative or NaN float to unsigned is undefined, so gate here
+    // as well as at the caller; NaN survives a min/max clamp.
+    if (!(norm > 0.0f)) norm = 0.0f;
+    else if (norm > 1.0f) norm = 1.0f;
+    uint16_t sub = (uint16_t)(norm * (float)w * DISP_BAR_SUBCOL + 0.5f);
+    if (sub > (uint16_t)(w * DISP_BAR_SUBCOL)) sub = (uint16_t)(w * DISP_BAR_SUBCOL);
+    uint8_t full = (uint8_t)(sub / DISP_BAR_SUBCOL);
+    uint8_t rem  = (uint8_t)(sub % DISP_BAR_SUBCOL);
+    uint8_t i = 0;
+    for (; i < full; i++) out[i] = DISP_BAR_SUBCOL;   // CGRAM code 5 = solid
+    if (rem && i < w) out[i++] = (char)rem;
+    for (; i < w; i++) out[i] = ' ';
+    out[w] = '\0';
+}
+
 static void disp_render(void) {
     const DispModelDesc *m = &s_models[s_model];
     CsDisplayPage it;
     char label[DISP_MAX_COLS + 1] = "DSPi";
     char value[DISP_MAX_COLS + 1] = "";
-    bool large = false;
+    char bar[DISP_MAX_COLS + 1] = "";
+    bool large = false, bar_on = false;
+    float norm = 0.0f;
     char marker = 0;         // edit marker glyph, 0 while unarmed
     if (disp_current_item(&it)) {
         large = (it.flags & CS_DPAGE_LARGE) || s_ov_active;
-        disp_format_label(&it, label, sizeof(label));
+        bar_on = (it.flags & CS_DPAGE_BAR) && disp_bar_norm(&it, &norm);
         // Character modules ignore LARGE, so they keep the long names.
         disp_format_value(&it, value, sizeof(value), large && m->graphic);
         // A read-only item shows a lock instead of the adjust chevron.
         if (s_edit)
             marker = disp_item_readonly(&cs_noun_table[it.noun]) ? '!' : '>';
+        // A bar row on a 2-row panel costs the value its own line, so the
+        // two share the label row: compact prefixes, value flush right.
+        bool merged = bar_on && m->bar_row == m->value_row;
+        disp_format_label_ex(&it, label, sizeof(label), merged);
+        if (merged) {
+            disp_tighten_value(value);
+            uint8_t w = m->cols;
+            if (marker && w >= 4) {
+                // No room to bracket a line that already ends in the value,
+                // so an armed merged line takes the marker on the left only.
+                if (strlen(label) > (size_t)(w - 1)) label[w - 1] = '\0';
+                memmove(label + 1, label, strlen(label) + 1);
+                label[0] = marker;
+                disp_merge_value(label + 1, value, (uint8_t)(w - 1));
+            } else {
+                disp_merge_value(label, value, w);
+            }
+            value[0] = '\0';
+        }
     }
-    // The label is always small font; only a LARGE value narrows its width.
-    disp_lay_out(label, m->cols,
-                 disp_align(CS_DCFG_LABEL_ALIGN, CS_DCFG_LABEL_ALIGN_SHIFT), 0);
+    // Graphic panels have no bar string to diff, so the pixel extent is the
+    // change signal for the inverted run.
+    uint8_t bar_px = (bar_on && m->bar_row == DISP_NO_BAR_ROW)
+                   ? (uint8_t)(norm * 128.0f + 0.5f) : 0;
+    if (bar_px != s_bar_px) {
+        s_bar_px = bar_px;
+        disp_dirty_line(DISP_LINE_VALUE);
+    }
+    if (bar_on && m->bar_row != DISP_NO_BAR_ROW)
+        disp_bar_cells(bar, m->cols, norm);
+    // The merged line owns its own placement; the bar is inherently
+    // full-width, so neither takes the configured alignment.
+    bool merged = bar_on && m->bar_row == m->value_row;
+    if (!merged)
+        disp_lay_out(label, m->cols,
+                     disp_align(CS_DCFG_LABEL_ALIGN, CS_DCFG_LABEL_ALIGN_SHIFT),
+                     0);
     disp_lay_out(value, (large && m->graphic) ? DISP_LARGE_COLS : m->cols,
                  disp_align(CS_DCFG_VALUE_ALIGN, CS_DCFG_VALUE_ALIGN_SHIFT),
-                 marker);
+                 merged ? 0 : marker);
     if (large != s_view_large) {
         // Glyph pitch changed: the value area must repaint even when the
         // formatted string happens to be identical.
         s_view_large = large;
-        disp_dirty_line(true);
+        disp_dirty_line(DISP_LINE_VALUE);
+    }
+    if (bar_on != s_view_bar) {
+        // Row ownership changed; repaint every line the bar can touch.
+        s_view_bar = bar_on;
+        disp_dirty_line(DISP_LINE_LABEL);
+        disp_dirty_line(DISP_LINE_VALUE);
+        disp_dirty_line(DISP_LINE_BAR);
     }
     if (strncmp(label, s_label_out, sizeof(s_label_out)) != 0) {
         memset(s_label_out, 0, sizeof(s_label_out));
         strncpy(s_label_out, label, DISP_MAX_COLS);
-        disp_dirty_line(false);
+        disp_dirty_line(DISP_LINE_LABEL);
     }
     if (strncmp(value, s_value_out, sizeof(s_value_out)) != 0) {
         memset(s_value_out, 0, sizeof(s_value_out));
         strncpy(s_value_out, value, DISP_MAX_COLS);
-        disp_dirty_line(true);
+        disp_dirty_line(DISP_LINE_VALUE);
+    }
+    if (strncmp(bar, s_bar_out, sizeof(s_bar_out)) != 0) {
+        memset(s_bar_out, 0, sizeof(s_bar_out));
+        strncpy(s_bar_out, bar, DISP_MAX_COLS);
+        disp_dirty_line(DISP_LINE_BAR);
     }
 }
 
@@ -897,9 +1089,15 @@ static uint8_t disp_validate_page(const CsDisplayPage *p) {
             if (b[i] != 0) return CS_STATUS_INVALID_PAGE;
         return PIN_CONFIG_SUCCESS;
     }
-    if (p->flags & (uint8_t)~(CS_DPAGE_ACTIVE | CS_DPAGE_GROUP | CS_DPAGE_LARGE))
+    if (p->flags & (uint8_t)~(CS_DPAGE_ACTIVE | CS_DPAGE_GROUP |
+                              CS_DPAGE_LARGE | CS_DPAGE_BAR))
         return CS_STATUS_INVALID_PAGE;
     if (p->noun >= CS_NOUN_COUNT) return CS_STATUS_INVALID_NOUN;
+    // A bar plots a position within a range; bools and enums have none.
+    if (p->flags & CS_DPAGE_BAR) {
+        float lo, hi;
+        if (!cs_noun_span(p->noun, &lo, &hi)) return CS_STATUS_INVALID_PAGE;
+    }
     if (p->noun == CS_NOUN_DISPLAY_PAGE || p->noun == CS_NOUN_DISPLAY_EDIT ||
         p->noun == CS_NOUN_PAGE_VALUE)
         return CS_STATUS_INVALID_PAGE;
@@ -1054,6 +1252,9 @@ void cs_display_attach(const CsBinding *b) {
     s_nak = 0;
     memset(s_label_out, 0, sizeof(s_label_out));
     memset(s_value_out, 0, sizeof(s_value_out));
+    memset(s_bar_out, 0, sizeof(s_bar_out));
+    s_bar_px = 0;
+    s_view_bar = false;
     s_state = DSTATE_INIT;
     s_attached = true;
     disp_seed_pages();

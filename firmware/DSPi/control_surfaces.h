@@ -83,6 +83,12 @@
  * sweep while its top end moves.  CsBinding stays 24 bytes and pre-v12
  * configs carry 0 there, meaning full brightness.
  *
+ * Caps v13 adds display level bars: CsDisplayPage.flags gains CS_DPAGE_BAR
+ * for continuous nouns.  Character panels draw the bar in CGRAM cells (a
+ * 2-row panel folds the value into the label row to free one); graphic
+ * panels invert the pixels behind the value instead.  No structure sizes
+ * change.  See Documentation/Features/control_surfaces_display_spec.md.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -313,6 +319,9 @@ typedef enum {
 #define CS_DPAGE_ACTIVE  0x01       // slot in use (all-zero record = empty)
 #define CS_DPAGE_GROUP   0x02       // target is a group index
 #define CS_DPAGE_LARGE   0x04       // big font on graphic OLEDs (2x scaled)
+#define CS_DPAGE_BAR     0x08       // level bar for the value (continuous nouns
+                                    // only); character rows draw it in CGRAM
+                                    // cells, graphic panels invert behind text
 
 // IR remote control.  One CS_TYPE_IR binding (the receiver) may be live at a
 // time; its remote-button commands live in a separate table of sub-slots so
@@ -550,7 +559,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (12); see the file
+    uint8_t  caps_version; // capability format version (13); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)
@@ -818,6 +827,11 @@ uint8_t cs_noun_validate_target_ch(uint8_t noun, uint8_t ch, uint8_t index);
 // Grouped-reference check against the live group table (engine-owned);
 // exported for the display module's page validation.
 uint8_t cs_validate_grouped_target(const CsBinding *b);
+
+// A continuous noun's full range in natural units, decoded from min_q/max_q;
+// exported for the display module's level bars.  Returns false for nouns
+// with no usable span (non-continuous, or min >= max).
+bool cs_noun_span(uint8_t noun, float *lo, float *hi);
 
 // Running macro index (255 = idle); the CS_NOUN_MACRO live read.
 uint8_t cs_macro_running_index(void);

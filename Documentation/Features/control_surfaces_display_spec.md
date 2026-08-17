@@ -1,11 +1,12 @@
 # Control Surfaces: I2C Character Displays (caps v10 bundle)
 
-*Spec version 2, implemented at caps v10 / directory V19. Companion to
+*Spec version 3, implemented at caps v10 / directory V19. Companion to
 `control_surfaces_spec.md` and `control_surfaces_groups_macros_spec.md`.
 Caps v10 bundles three additions: the display component, IR remote group
 support, and four new nouns (CPU_LOAD, DISPLAY_PAGE, DISPLAY_EDIT,
 PAGE_VALUE). Caps v11 adds per-line horizontal alignment and the bracketed
-edit markers (s5.1); no structure size changes.*
+edit markers (s5.1), and caps v13 adds level bars (s5.2); no structure size
+changes.*
 
 A display is a new Control Surfaces component: a small I2C character or
 OLED module wired to two spare GPIOs that shows what the device is doing.
@@ -62,7 +63,9 @@ against the top edge.
 Up to 16 page slots, device-global, each 4 bytes: `{noun, target, index,
 flags}`. Flags: bit0 = ACTIVE (all-zero record = empty slot), bit1 = GROUP
 (`target` is a group index, same rules as bindings), bit2 = LARGE (render the
-value pixel-doubled on graphic OLEDs; ignored on character modules).
+value pixel-doubled on graphic OLEDs; ignored on character modules), bit3 =
+BAR (draw a level bar for the value; continuous nouns only, rejected with
+`CS_STATUS_INVALID_PAGE` on bools and enums, see s5.2).
 Rendering is generic: the label line is the item's name, the value line its
 value formatted by unit (dB, Hz, percent, ms, on/off, enum name). Labels
 come from a flash string table per noun; targeted pages prefix the channel
@@ -294,6 +297,44 @@ value is anchored to.
 Character modules draw the markers from module ROM and graphic panels from
 the 5x8 table, so no CGRAM glyph upload is needed; a filled-triangle marker
 would require one and is deliberately out of scope.
+
+### 5.2 Level bars (caps v13)
+
+`CS_DPAGE_BAR` plots the value's position within the noun's full range
+(`CsNounDesc.min_q`/`max_q`, so no page field is needed), mapped
+logarithmically for Hz and Q as the `IND_LEVEL` meter LEDs are, linearly
+otherwise. Validation rejects the flag on any noun with no usable span,
+which is every bool and enum.
+
+**Character panels** draw the bar from five CGRAM cells uploaded at the tail
+of the init script: codes 1-5 fill 1-5 of a glyph's 5 columns, giving
+`5 * cols` steps (80 on a 16-column panel). Code 0 is deliberately unused so
+bar strings stay ordinary NUL-terminated C strings, and building the solid
+cell in CGRAM rather than using the ROM block at 0xFF removes any dependency
+on what a given module has at that code point.
+
+Where the bar goes depends on how many rows the model has spare:
+
+| Model | Layout with BAR |
+|---|---|
+| 16x2, 20x2 | label and value share row 0, bar on row 1 |
+| 20x4 | row 0 blank, label row 1, value row 2, bar row 3 |
+| Graphic | no bar row; the value row's pixels invert instead |
+
+On a 2-row panel the value is folded into the label row: the label switches
+to compact channel prefixes (`O1`/`I2`/`C3`/`C3B4`), the value drops the
+space before its unit, and the value is placed flush right and never
+truncated, with the label giving up columns instead. `Volume   -12.5dB` and
+`C2B4 Freq 1200Hz` both land in exactly 16. Neither the merged line nor the
+bar takes the configured alignment: the merged line owns its own placement
+and a bar is inherently full-width.
+
+**Graphic panels** spend no row. The renderer already emits font columns one
+at a time, so the bar is an inverted run: pixel columns below the bar extent
+are XORed on the value row (both page rows when LARGE), giving a lit block
+with the glyphs knocked out of it at 128 steps. This is why the model table
+carries `DISP_NO_BAR_ROW` for them; a bar change dirties the value row, the
+same row a value change would.
 
 ## 6. Driver architecture
 

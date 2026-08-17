@@ -136,7 +136,7 @@ CsMacroStep      cs_set_macro_step_val;
 // ---------------------------------------------------------------------------
 
 static const CsCapsHeader s_caps = {
-    .caps_version = 12,
+    .caps_version = 13,
     .max_bindings = CS_MAX_BINDINGS,
     .type_count   = CS_TYPE_COUNT,
     .noun_count   = CS_NOUN_COUNT,
@@ -363,6 +363,18 @@ static void cs_span(const CsBinding *b, const CsNounDesc *nd, float *lo, float *
         *lo = cs_decode(nd->unit, nd->min_q);
         *hi = cs_decode(nd->unit, nd->max_q);
     }
+}
+
+bool cs_noun_span(uint8_t noun, float *lo, float *hi) {
+    if (noun >= CS_NOUN_COUNT) return false;
+    const CsNounDesc *nd = &cs_noun_table[noun];
+    if (nd->kind != CS_KIND_CONTINUOUS) return false;
+    float a = cs_decode(nd->unit, nd->min_q);
+    float b = cs_decode(nd->unit, nd->max_q);
+    if (!(b > a)) return false;
+    *lo = a;
+    *hi = b;
+    return true;
 }
 
 // Quantize a natural value: half-units for linear nouns, 1/24 octave above

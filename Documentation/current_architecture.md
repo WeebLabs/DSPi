@@ -2420,7 +2420,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-08-16 (caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and bracketed edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
+*Last updated: 2026-08-17 (caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and bracketed edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, and an
@@ -2564,6 +2564,10 @@ brightness ceiling described above. The byte comes from the struct's spare
 `reserved` field, so `CsBinding` stays 24 bytes, `CsFlashConfig` stays 388,
 every GET keeps its length, and no directory version moves. Pre-v12 configs
 carry 0, meaning full brightness.
+
+**Caps v13** (2026-08-17) adds display level bars: `CsDisplayPage.flags` gains
+`CS_DPAGE_BAR` (bit 3), rejected on nouns with no continuous span. The page
+record stays 4 bytes and `CsDisplayFlash` 80, so again nothing migrates.
 
 ### File layout
 
@@ -2868,8 +2872,8 @@ validity). New status codes are `CS_STATUS_INVALID_GROUP` (0x1F),
 groups and macros load before bindings, since bindings validate against
 groups.
 
-### I2C display component (caps v10-v11, 0x27-0x2B)
-*Last updated: 2026-08-16 (caps v11: per-line alignment, bracketed edit markers)*
+### I2C display component (caps v10-v13, 0x27-0x2B)
+*Last updated: 2026-08-17 (caps v13: level bars; caps v11: per-line alignment, bracketed edit markers)*
 
 Wire detail (every struct, status code, model table and command payload) is in
 `Documentation/Features/control_surfaces_display_spec.md`; this subsection
@@ -2949,6 +2953,21 @@ catches host-side changes that no control caused. The three display nouns and
 `CS_NOUN_MACRO` never pop as themselves. The first attach on an empty page
 table seeds volume / preset / input source / sample rate and the timing
 defaults, marking the config dirty like any other live edit.
+
+**Level bars (caps v13).** `CS_DPAGE_BAR` plots the value's position within
+the noun's own range (`cs_noun_span()` decodes `min_q`/`max_q`, so no page
+field grows), log-mapped for Hz and Q like the meter LEDs. Character panels
+draw it from five CGRAM cells appended to the init script (codes 1-5 fill 1-5
+glyph columns, giving `5 * cols` steps; code 0 stays unused so bar strings
+remain NUL-terminated, and the solid cell comes from CGRAM rather than the
+ROM block at 0xFF). `DispModelDesc.bar_row` says where it lands: a 4-row
+panel spends its spare bottom row, a 2-row panel has none to spare so the
+value folds into the label row (compact `O1`/`C3B4` prefixes, unit space
+dropped, value flush right and never truncated, label giving up columns).
+Graphic panels set `DISP_NO_BAR_ROW` and spend no row at all: since the
+renderer emits font columns on the fly, the bar is an inverted run XORed over
+the value row, 128 steps, glyphs knocked out of a lit block. Neither the
+merged line nor a bar row takes the configured alignment.
 
 **Front-panel editing.** `CS_NOUN_DISPLAY_PAGE` (54) browses the active pages
 (steps skip empty slots through the same `cs_enum_step` occupancy path as
