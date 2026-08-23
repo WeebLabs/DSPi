@@ -53,6 +53,9 @@
 #include "hardware/sync.h"
 #include "hardware/irq.h"            // DMA_IRQ_0 (selective flash blackout keep mask)
 #include "hardware/structs/nvic.h"   // nvic_hw (selective flash blackout)
+#if PICO_RP2350
+#include "hardware/structs/sysinfo.h"
+#endif
 #include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -2169,8 +2172,13 @@ static void ctrl_iface_defaults(UartCtrlConfig *u, I2cCtrlConfig *i) {
 // resets that interface to defaults (disabled).  Deeper checks (pin mux,
 // collisions) run elsewhere at apply time.
 static void dir_sanitize_ctrl_iface(void) {
+#if PICO_RP2350
+    uint8_t max_pin = (sysinfo_hw->package_sel == 0) ? 47 : 29;
+#else
+    uint8_t max_pin = 29;
+#endif
     UartCtrlConfig *u = &dir_cache.uart_ctrl;
-    if (u->enabled > 1 || u->tx_pin > 29 || u->rx_pin > 29 ||
+    if (u->enabled > 1 || u->tx_pin > max_pin || u->rx_pin > max_pin ||
         u->baud < UART_CTRL_BAUD_MIN || u->baud > UART_CTRL_BAUD_MAX) {
         ctrl_iface_defaults(u, NULL);
     }
@@ -2179,7 +2187,7 @@ static void dir_sanitize_ctrl_iface(void) {
     // whole stored config over a byte that used to be meaningless.
     if (u->notify_enable > 1) u->notify_enable = 0;
     I2cCtrlConfig *i = &dir_cache.i2c_ctrl;
-    if (i->enabled > 1 || i->sda_pin > 29 || i->scl_pin > 29 ||
+    if (i->enabled > 1 || i->sda_pin > max_pin || i->scl_pin > max_pin ||
         i->address < I2C_CTRL_ADDRESS_MIN || i->address > I2C_CTRL_ADDRESS_MAX) {
         ctrl_iface_defaults(NULL, i);
     }
@@ -2353,9 +2361,11 @@ static bool io_pin_valid(uint8_t pin) {
     // boot the interfaces are not yet up, so stored audio pins win and a
     // colliding control config stays down (visible via 0xF9).
     if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return false;
-    bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-    if (pin > 28) valid = false;
+#if PICO_RP2350
+    uint8_t max_pin = (sysinfo_hw->package_sel == 0) ? 47 : 29;
+    bool valid = (pin <= max_pin) && !(pin >= 23 && pin <= 25);
+#else
+    bool valid = (pin <= 28) && !(pin >= 23 && pin <= 25);
 #endif
     return valid;
 }

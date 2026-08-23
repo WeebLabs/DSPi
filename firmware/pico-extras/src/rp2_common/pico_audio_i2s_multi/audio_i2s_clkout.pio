@@ -87,8 +87,8 @@ static inline void audio_i2s_clkout_program_init(PIO pio, uint sm, uint offset,
     pio_sm_init(pio, sm, offset, &sm_config);
 
     // Configure pin directions: data pin + BCK + LRCLK as outputs
-    uint pin_mask = (1u << data_pin) | (3u << clock_pin_base);
-    pio_sm_set_pindirs_with_mask(pio, sm, pin_mask, pin_mask);
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_pin_base, 2, true);
 
     // Drive all pins low initially
     pio_sm_set_pins(pio, sm, 0);

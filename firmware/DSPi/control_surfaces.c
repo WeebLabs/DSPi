@@ -43,6 +43,9 @@
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
+#if PICO_RP2350
+#include "hardware/structs/sysinfo.h"
+#endif
 #include "pico/time.h"
 
 #include <math.h>
@@ -84,10 +87,26 @@
 #define CS_LOG_QUANT_STEPS    24.0f
 #define CS_LIN_QUANT          0.5f
 
-// ADC-capable pot pins: GPIO 26..28 = ADC channels 0..2 on both platforms.
+// ADC-capable pot pins:
+// GPIO 26..28 = ADC channels 0..2 on both platforms.
+// On RP2350B (QFN-80), GPIO 40..43 = ADC channels 4..7.
 // GPIO 29 is the board's VSYS/3 monitor on Pico and Pico 2, so it is excluded.
 #define CS_ADC_PIN_FIRST      26
 #define CS_ADC_PIN_LAST       28
+
+static inline int cs_pin_to_adc_channel(uint8_t pin) {
+    if (pin >= CS_ADC_PIN_FIRST && pin <= CS_ADC_PIN_LAST)
+        return pin - CS_ADC_PIN_FIRST;
+#if PICO_RP2350
+    if (sysinfo_hw->package_sel == 0 && pin >= 40 && pin <= 43)
+        return (int)(pin - 40 + 4);
+#endif
+    return -1;
+}
+
+static inline bool cs_is_adc_pin(uint8_t pin) {
+    return cs_pin_to_adc_channel(pin) >= 0;
+}
 
 // Deferred SET handoff (vendor_commands.c writes, main.c consumes)
 volatile bool    cs_set_binding_pending = false;
@@ -668,7 +687,7 @@ static void cs_tick_pot(uint8_t slot) {
     // The ADC input mux is unguarded; safe only because every ADC user (this
     // tick, the temperature read in vendor_commands.c) runs serialized in the
     // core0 main loop.  Do not move either to ISR/timer context.
-    adc_select_input(b->gpio[0] - CS_ADC_PIN_FIRST);
+    adc_select_input(cs_pin_to_adc_channel(b->gpio[0]));
     uint16_t raw = adc_read();
     // Truncate-toward-zero divide keeps the EMA directionally symmetric (an
     // arithmetic shift would creep on falling input but stall on rising).
@@ -867,7 +886,7 @@ static void cs_seed_runtime(uint8_t slot) {
             rt->enc_gap = 0xFFFF;
             break;
         case CS_TYPE_POT:
-            adc_select_input(b->gpio[0] - CS_ADC_PIN_FIRST);
+            adc_select_input(cs_pin_to_adc_channel(b->gpio[0]));
             rt->pot_filt = adc_read();
             rt->pot_settle = CS_POT_SEED_TICKS;
             break;
@@ -1002,8 +1021,7 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
     if (n == 2 && b->gpio[0] == b->gpio[1]) return PIN_CONFIG_INVALID_PIN;
     for (int i = 0; i < n; i++) {
         uint8_t pin = b->gpio[i];
-        if (td->pin_class == CS_PINCLASS_ADC &&
-            (pin < CS_ADC_PIN_FIRST || pin > CS_ADC_PIN_LAST))
+        if (td->pin_class == CS_PINCLASS_ADC && !cs_is_adc_pin(pin))
             return CS_STATUS_PIN_NOT_ADC;
         if (control_surfaces_owns_pin(pin)) {
             if (b->type != CS_TYPE_BUTTON) return PIN_CONFIG_PIN_IN_USE;
