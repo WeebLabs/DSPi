@@ -45,6 +45,9 @@
 #include "hardware/vreg.h"
 #include "hardware/clocks.h"
 #include "hardware/sync.h"
+#if PICO_RP2350
+#include "hardware/structs/sysinfo.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -277,9 +280,14 @@ int16_t read_temperature_cdeg(void) {
     const float conversion_factor = 3.3f / 4095.0f;
 
     // Temperature sensor channel: auto-detects based on chip variant
-    // RP2040, RP2350A (QFN-60): channel 4
-    // RP2350B (QFN-80): channel 8
-    adc_select_input(NUM_ADC_CHANNELS - 1);
+    // RP2040, RP2350A (QFN-60, package_sel==1): channel 4
+    // RP2350B/C (QFN-80/WLCSP-80, package_sel==0): channel 8
+#if PICO_RP2350
+    uint adc_chan = (sysinfo_hw->package_sel == 0) ? 8 : 4;
+    adc_select_input(adc_chan);
+#else
+    adc_select_input(4);
+#endif
     uint16_t adc_raw = adc_read();
     float voltage = adc_raw * conversion_factor;
     float temp_c = 27.0f - (voltage - 0.706f) / 0.001721f;
@@ -330,7 +338,7 @@ bool is_valid_gpio_pin(uint8_t pin) {
     // when the UART control interface claims them, is_pin_in_use() covers it.
     if (pin >= 23 && pin <= 25) return false;   // Power/LED
 #if PICO_RP2350
-    return pin <= 29;
+    return pin <= ((sysinfo_hw->package_sel == 0) ? 47 : 29);
 #else
     return pin <= 28;
 #endif

@@ -24,6 +24,10 @@ __pycache__/
 *.pyc
 *.pyo
 
+build-rp2040/
+build-rp2350/
+tools/dspi-web-console/
+
 # Ignore all markdown files except key docs
 *.md
 !README.md
@@ -31,5 +35,6 @@ __pycache__/
 !Documentation/Roadmap.md
 !Documentation/commands.md
 !Documentation/Features/*.md
+!tools/dspi_poke/README.md
 !tools/dspi_test/test_harness.md
 !tools/dspi_test/test_failures_diag.md

@@ -212,8 +212,8 @@ static inline void audio_i2s_rx_clkmaster_program_init(PIO pio, uint sm, uint of
     pio_sm_init(pio, sm, offset, &sm_config);
 
     // BCK + LRCLK out, data pin in
-    uint clock_mask = 3u << clock_pin_base;
-    pio_sm_set_pindirs_with_mask(pio, sm, clock_mask, clock_mask | (1u << data_pin));
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_pin_base, 2, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, false);
 
     // Drive clocks low initially
     pio_sm_set_pins(pio, sm, 0);
@@ -240,7 +240,7 @@ static inline void audio_i2s_rx_slave_program_init(PIO pio, uint sm, uint offset
 
     pio_sm_init(pio, sm, offset, &sm_config);
 
-    pio_sm_set_pindirs_with_mask(pio, sm, 0, 1u << data_pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, false);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +269,7 @@ static inline void audio_i2s_rx_slave_checked_program_init(PIO pio, uint sm, uin
 
     pio_sm_init(pio, sm, offset, &sm_config);
 
-    pio_sm_set_pindirs_with_mask(pio, sm, 0, 1u << data_pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, false);
 }
 
 %}

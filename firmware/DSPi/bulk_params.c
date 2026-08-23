@@ -24,6 +24,7 @@
 #include "notify.h"
 #include "uart_control.h"
 #include "i2c_control.h"
+#include "vendor_commands.h"
 
 #include <string.h>
 #include <stdio.h>   // printf() for rejected-config diagnostics
@@ -447,10 +448,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
 #endif
         for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
             uint8_t pin = in->pins.pins[i];
-            bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
+            bool valid = is_valid_gpio_pin(pin);
             // Never let a pushed config steal a live control interface's
             // GPIOs: over UART/I2C that would sever the link doing the push
             // (the self-lockout the USB-only config rule exists to prevent).
@@ -463,11 +461,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         // new GPIO without a vendor-command round trip.
         {
             uint8_t pin = in->input_config.spdif_rx_pin;
-            bool valid = (pin > 0) && (pin <= 29) &&
-                         !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
+            bool valid = (pin > 0) && is_valid_gpio_pin(pin);
             if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
             if (valid && pin != spdif_rx_pin) {
                 spdif_rx_pin = pin;
@@ -485,10 +479,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
             uint8_t pin = in->input_config.spdif_rx_pin_ext[i];
             if (pin == 0) continue;  // absent; keep live
-            bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
+            bool valid = is_valid_gpio_pin(pin);
             if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
             if (valid && pin != spdif_rx_pin_ext[i]) {
                 spdif_rx_pin_ext[i] = pin;

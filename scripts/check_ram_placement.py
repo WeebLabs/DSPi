@@ -27,10 +27,9 @@ FLASH_LO, FLASH_HI = 0x10000000, 0x20000000  # XIP flash window
 ROM_HI = 0x00008000                          # bootrom below here is always fine
 
 RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
-# rp2350 raised 64K -> 72K for the ADAT input receiver (2026-07-13): the
-# RAM-pinned decode path (adat_input_poll + rate machine + shared servo)
-# adds ~3 KB of deliberately hot code.
-DATA_BUDGET = {"rp2040": 61440, "rp2350": 73728}
+# rp2350 raised 64K -> 72K (ADAT input) -> 84K (silent flash writes): the
+# RAM-pinned decode path + flash-window execution adds hot code.
+DATA_BUDGET = {"rp2040": 61440, "rp2350": 86016}
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {
