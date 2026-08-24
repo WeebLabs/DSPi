@@ -39,6 +39,7 @@
 #include "config.h"
 #include "vendor_commands.h"
 #include "flash_storage.h"
+#include "audio_input.h"
 #include "notify.h"
 #include "i2c_control.h"
 
@@ -790,21 +791,29 @@ static CsBinding cs_pv_effective(const CsBinding *b, uint32_t key) {
 // Actions
 // ---------------------------------------------------------------------------
 
-// Step an enum noun by dir (+1/-1).  Presets step across OCCUPIED slots
-// only; an empty device is a no-op.  Returns the target index or -1 for
-// no movement.
+// Step an enum noun by dir (+1/-1).  Some enums are sparse at runtime and
+// step across the values actually on offer; landing on one of the others
+// would be silently refused by its setter and read as a dead control.
+// Returns the target index or -1 for no movement.
 static int cs_enum_step(const CsBinding *b, const CsOpState *op, int dir) {
     const CsNounDesc *nd = &cs_noun_table[b->noun];
     int count = nd->enum_count;
     int cur = (int)cs_base_value(b, op);
     bool wrap = (b->flags & CS_FLAG_WRAP) != 0;
 
-    if (b->noun == CS_NOUN_PRESET || b->noun == CS_NOUN_DISPLAY_PAGE) {
-        // Both step across OCCUPIED slots only (presets / active pages).
+    if (b->noun == CS_NOUN_PRESET || b->noun == CS_NOUN_DISPLAY_PAGE ||
+        b->noun == CS_NOUN_INPUT_SOURCE) {
+        // Occupied preset slots, active display pages, selectable input
+        // sources (disabled optional SPDIF and ADAT are not offered).
         uint16_t occ;
         if (b->noun == CS_NOUN_PRESET) {
             uint8_t sm, ds, la, ocm, mvm;
             preset_get_directory(&occ, &sm, &ds, &la, &ocm, &mvm);
+        } else if (b->noun == CS_NOUN_INPUT_SOURCE) {
+            occ = 0;
+            for (int i = 0; i < count; i++)
+                if (input_source_selectable((uint8_t)i))
+                    occ |= (uint16_t)(1u << i);
         } else {
             occ = cs_display_page_mask();
             // "No page shown" reads 255; re-enter the range from the edge

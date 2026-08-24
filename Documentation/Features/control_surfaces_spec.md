@@ -799,9 +799,15 @@ target and dispatches it.
 
 For `STEP`/`INC`/`DEC` on enum nouns, `CS_FLAG_WRAP` makes the ends wrap; without
 it the value clamps at 0 and `enum_count-1`. **`INC` + `WRAP` is the canonical
-"cycle" button** (cycle inputs, cycle crossfeed presets, cycle presets). For
-`PRESET`, stepping searches outward in the requested direction for the next
-occupied slot (honoring wrap), so a "next preset" button skips empty slots.
+"cycle" button** (cycle inputs, cycle crossfeed presets, cycle presets).
+
+Some enums are sparse at runtime, and stepping searches outward in the
+requested direction for the next value actually on offer (honoring wrap):
+`PRESET` skips empty slots, `DISPLAY_PAGE` skips inactive pages, and
+`INPUT_SOURCE` skips sources that are not selectable, meaning a disabled
+optional SPDIF input (2-4) and ADAT when disabled or unsupported. Without the
+skip, a step lands on one of those values, its setter silently refuses it,
+and the control reads as dead at the ends of the range.
 
 ### 5.2 Continuous stepping / adjust detail
 

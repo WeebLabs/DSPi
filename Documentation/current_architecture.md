@@ -2420,7 +2420,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-08-17 (caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and bracketed edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
+*Last updated: 2026-08-24 (input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, and an
@@ -2648,7 +2648,14 @@ acceleration (inter-detent gaps of 128/64/32 ms multiply the step x2/x4/x8),
 reads at most one pot ADC channel (round-robin, EMA + deadband + boot-sync
 immediate takeover), drives plain and PWM LEDs, and dispatches resulting changes.
 Stepping is unit-aware: dB and percent step linearly (default 1 dB / 1 %), Hz and
-Q step in octaves (default one-twelfth octave). Deferred nouns (`CS_NDF_DEFERRED`)
+Q step in octaves (default one-twelfth octave). Enums that are sparse at run
+time step across the values on offer rather than the raw index range
+(`cs_enum_step`): `PRESET` skips empty slots, `DISPLAY_PAGE` inactive pages,
+and `INPUT_SOURCE` sources that fail `input_source_selectable()`, meaning a
+disabled optional SPDIF (2-4) and ADAT when disabled or unsupported. The skip
+is what makes `CS_FLAG_WRAP` work at the ends: without it a step lands on a
+value whose setter silently refuses it, and the control reads as dead.
+Deferred nouns (`CS_NDF_DEFERRED`)
 are stepped from a per-op float target shadow rather than re-read each tick (the
 shadow/retry state was factored into a `CsOpState` shared by binding slots and IR
 commands). Read-only indicator nouns are evaluated only every 8 ticks, staggered
@@ -2976,7 +2983,8 @@ merged line nor a bar row takes the configured alignment.
 
 **Front-panel editing.** `CS_NOUN_DISPLAY_PAGE` (54) browses the active pages
 (steps skip empty slots through the same `cs_enum_step` occupancy path as
-`CS_NOUN_PRESET`), `CS_NOUN_DISPLAY_EDIT` (55) arms editing with an
+`CS_NOUN_PRESET` and `CS_NOUN_INPUT_SOURCE`), `CS_NOUN_DISPLAY_EDIT` (55)
+arms editing with an
 inactivity auto-disarm, and `CS_NOUN_PAGE_VALUE` (56) is virtual: it resolves
 the shown page's `{noun, target, index}` at event time and re-enters the
 normal op helpers with a synthesized binding, so grouped pages fan out
