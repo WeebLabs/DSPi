@@ -2989,9 +2989,10 @@ inactivity auto-disarm, and `CS_NOUN_PAGE_VALUE` (56) is virtual: it resolves
 the shown page's `{noun, target, index}` at event time and re-enters the
 normal op helpers with a synthesized binding, so grouped pages fan out
 through the group engine and deferred nouns keep their shadow/BUSY
-behaviour. With `CS_DCFG_EDIT_GATED` set, an unarmed `PAGE_VALUE` step
-navigates pages instead of adjusting, which turns one encoder plus one button
-into browse / arm / adjust. `PAGE_VALUE` accepts STEP/INC/DEC/TOGGLE only,
+behaviour. With `CS_DCFG_EDIT_GATED` set, which page seeding now does by
+default, an unarmed `PAGE_VALUE` step navigates pages instead of adjusting,
+which turns one encoder plus one button into browse / arm / adjust.
+`PAGE_VALUE` accepts STEP/INC/DEC/TOGGLE only,
 must carry zeroed value/step/range fields (nothing static to validate against),
 and its op plus group-session state resets whenever the resolved item changes
 (a per-binding and per-IR-command resolved-item key). Buttons, encoders and

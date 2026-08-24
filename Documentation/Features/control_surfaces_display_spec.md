@@ -85,11 +85,14 @@ grouped page whose group is empty renders `--`, and an enum value with no
 table entry (out-of-range or unrecognised values) falls back to `#N`.
 
 The first time a display component attaches with an all-empty page table, it
-seeds pages 0-3 as volume (LARGE), preset, input source and sample rate, and
+seeds pages 0-3 as volume (LARGE), preset, input source and sample rate,
 fills in any unset timing defaults (overlay hold 2 s, dwell 3 s, edit timeout
-10 s). Seeding marks the CS config dirty, so it is a live preview like any
-other edit until `REQ_CS_SAVE`; every seeded page is editable or clearable
-like any other page.
+10 s), and sets `CS_DCFG_EDIT_GATED`, so arm-before-edit is the out-of-box
+behaviour (s3.3). Seeding deliberately does *not* mark the CS config dirty:
+it is deterministic, so boot and revert reproduce the same live state instead
+of showing an unsaved preview forever. Every seeded page is editable or
+clearable like any other page, and a `REQ_CS_SAVE` after any host edit
+persists the seeded state with it.
 
 ### 1.4 Modes and the event overlay
 
@@ -136,9 +139,11 @@ detent sets on for up and off for down), grouped pages fan out through the
 group engine, read-only pages no-op.
 
 `CsDisplayCfg` flag bit1 (`CS_DCFG_EDIT_GATED`) gates `PAGE_VALUE` behind
-edit mode; while gated and edit is OFF, `PAGE_VALUE` steps navigate pages
-instead and a `PAGE_VALUE` toggle does nothing (the edit button owns
-arming). One encoder plus one button therefore forms the classic browse /
+edit mode, and page seeding sets it, so a fresh config is gated and a host
+that wants direct adjust clears the bit; a config saved before 2026-08-24
+keeps whatever it stored. While gated and edit is OFF, `PAGE_VALUE` steps
+navigate pages instead and a `PAGE_VALUE` toggle does nothing (the edit
+button owns arming). One encoder plus one button therefore forms the classic browse /
 arm / adjust front panel with no additional machinery. ADJUST (pots) is
 deliberately excluded: an absolute control against a changing target would
 slam values on every page change. A `PAGE_VALUE` binding must carry zeroed

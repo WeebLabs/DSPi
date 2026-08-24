@@ -1235,6 +1235,10 @@ static void disp_seed_pages(void) {
     if (s_disp.cfg.overlay_hold == 0) s_disp.cfg.overlay_hold = 20;  // 2 s
     if (s_disp.cfg.dwell < 10) s_disp.cfg.dwell = 30;                // 3 s
     if (s_disp.cfg.edit_timeout == 0) s_disp.cfg.edit_timeout = 100; // 10 s
+    // Arm-before-edit by default, so a knock on the value control browses
+    // rather than moving a parameter.  It needs a DISPLAY_EDIT control to
+    // arm with; a host wanting direct adjust clears the bit.
+    s_disp.cfg.flags |= CS_DCFG_EDIT_GATED;
     // No dirty mark: seeding is deterministic, so boot and revert reproduce
     // the same live state without flagging an unsaved preview forever.
 }
