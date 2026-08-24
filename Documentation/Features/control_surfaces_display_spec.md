@@ -4,9 +4,9 @@
 `control_surfaces_spec.md` and `control_surfaces_groups_macros_spec.md`.
 Caps v10 bundles three additions: the display component, IR remote group
 support, and four new nouns (CPU_LOAD, DISPLAY_PAGE, DISPLAY_EDIT,
-PAGE_VALUE). Caps v11 adds per-line horizontal alignment and the bracketed
-edit markers (s5.1), and caps v13 adds level bars (s5.2); no structure size
-changes.*
+PAGE_VALUE). Caps v11 adds per-line horizontal alignment and the
+edit markers (s5.1, marker placement revised 2026-08-24), and caps v13 adds
+level bars (s5.2); no structure size changes.*
 
 A display is a new Control Surfaces component: a small I2C character or
 OLED module wired to two spare GPIOs that shows what the device is doing.
@@ -284,15 +284,16 @@ value uses 12 when LARGE on a graphic panel and the model's count otherwise.
 Alignment comes from the two `CsDisplayCfg.flags` fields (s2.2) and applies
 to every view, including the overlay, CYCLE_ALL, and the idle "DSPi" line.
 
-While edit is armed the value line reserves its outer two columns for the
-markers, `>` and its mirror `<` (or `!` on both sides for a read-only item),
-and the value is centred, flushed or ranged within the span between them,
-truncated to that span if it is too long. Reserving the columns
-unconditionally is what keeps arming from moving the value: with centre
-alignment the value lands on exactly the same columns armed and unarmed, for
-any width and any string length. Left and right alignment necessarily shift
-the value one column inward when armed, since the marker takes the edge the
-value is anchored to.
+While edit is armed the value line carries the markers, `>` and its mirror
+`<` (or `!` for a read-only item), in the margin the alignment is not using,
+one blank column clear of the value: a left-flushed value takes the right
+marker only, a right-flushed value the left marker only, and a centred value
+both. The value's own placement is computed from the full line width whether
+armed or not, so arming never moves it under any alignment; a marker follows
+the value's length instead, stepping a column as `-9.5 dB` becomes
+`-12.5 dB`. Only a value long enough to reach a marker gives up columns: it
+is truncated to width minus 2 (minus 4 when centred), which is the one case
+where arming reflows the line.
 
 Character modules draw the markers from module ROM and graphic panels from
 the 5x8 table, so no CGRAM glyph upload is needed; a filled-triangle marker

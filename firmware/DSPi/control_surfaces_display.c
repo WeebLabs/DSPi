@@ -826,27 +826,32 @@ static uint8_t disp_align(uint8_t mask, uint8_t shift) {
     return (a > CS_DALIGN_RIGHT) ? CS_DALIGN_LEFT : a;
 }
 
-// Lay a formatted line out across its physical width, in place: edge
-// markers (armed value line only) then the text placed per `align`.  The
-// markers own columns 0 and w-1 whenever armed, so arming never shifts the
-// text; the text is truncated to the span between them instead.
+// Lay a formatted line out across its physical width, in place: the text
+// placed per `align`, then the armed marker(s) in the margin the alignment
+// leaves free (right of a left-flushed value, left of a right-flushed one,
+// both around a centred one), one blank clear of the text.  Position comes
+// from the full width either way, so arming never moves the value; only a
+// value long enough to reach a marker gives up columns.
 static void disp_lay_out(char *s, uint8_t w, uint8_t align, char marker) {
     char out[DISP_MAX_COLS + 1];
     if (w > DISP_MAX_COLS) w = DISP_MAX_COLS;
     if (w < 4) marker = 0;
-    uint8_t iw  = marker ? (uint8_t)(w - 2) : w;
+    uint8_t need = marker ? ((align == CS_DALIGN_CENTRE) ? 4 : 2) : 0;
     uint8_t len = (uint8_t)strlen(s);
-    if (len > iw) len = iw;
-    uint8_t pad = (uint8_t)(iw - len);
+    if (len > w - need) len = (uint8_t)(w - need);
+    if (len == 0) marker = 0;   // no lone marker on a blank line
+    uint8_t pad = (uint8_t)(w - len);
     uint8_t off = (align == CS_DALIGN_CENTRE) ? (uint8_t)(pad / 2)
                 : (align == CS_DALIGN_RIGHT)  ? pad : 0;
-    if (marker) off++;
     memset(out, ' ', w);
     memcpy(out + off, s, len);
-    if (marker) {
-        out[0] = marker;
-        out[w - 1] = (marker == '>') ? '<' : marker;   // mirrored chevron
+    if (marker && align != CS_DALIGN_RIGHT) {
+        uint8_t c = (uint8_t)(off + len + 1);
+        if (c > w - 1) c = (uint8_t)(w - 1);
+        out[c] = (marker == '>') ? '<' : marker;   // mirrored chevron
     }
+    if (marker && align != CS_DALIGN_LEFT)
+        out[(off >= 2) ? (uint8_t)(off - 2) : 0] = marker;
     out[w] = '\0';
     memcpy(s, out, (size_t)w + 1);
 }
@@ -937,13 +942,15 @@ static void disp_render(void) {
         if (merged) {
             disp_tighten_value(value);
             uint8_t w = m->cols;
-            if (marker && w >= 4) {
-                // No room to bracket a line that already ends in the value,
-                // so an armed merged line takes the marker on the left only.
-                if (strlen(label) > (size_t)(w - 1)) label[w - 1] = '\0';
-                memmove(label + 1, label, strlen(label) + 1);
-                label[0] = marker;
-                disp_merge_value(label + 1, value, (uint8_t)(w - 1));
+            uint8_t vw = (uint8_t)strlen(value);
+            if (vw > w) vw = w;
+            if (marker && w >= (uint8_t)(vw + 2)) {
+                // The value owns the right edge of a merged line, so the
+                // marker sits to its left and the label gives up columns.
+                uint8_t room = (uint8_t)(w - vw - 2);
+                if (strlen(label) > room) label[room] = '\0';
+                disp_merge_value(label, value, w);
+                label[room] = marker;
             } else {
                 disp_merge_value(label, value, w);
             }

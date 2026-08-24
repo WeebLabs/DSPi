@@ -2873,7 +2873,7 @@ groups and macros load before bindings, since bindings validate against
 groups.
 
 ### I2C display component (caps v10-v13, 0x27-0x2B)
-*Last updated: 2026-08-17 (caps v13: level bars; caps v11: per-line alignment, bracketed edit markers)*
+*Last updated: 2026-08-24 (alignment-aware edit marker placement; caps v13: level bars; caps v11: per-line alignment, edit markers)*
 
 Wire detail (every struct, status code, model table and command payload) is in
 `Documentation/Features/control_surfaces_display_spec.md`; this subsection
@@ -2922,11 +2922,16 @@ a LARGE value on a graphic model, which is 12. Horizontal alignment is two
 1 centre, 2 right), independent per line and applied to every view including
 the overlay and the idle line; the reserved encoding 3 is rejected by the
 apply path and read as left by the renderer. While edit is armed the value
-line reserves its outer two columns for `>` / `<` markers (`!` on both sides
-when the item is read-only) and lays the value out in the span between them,
-truncating to it. The columns are reserved unconditionally so arming never
-reflows the line: under centre alignment the value occupies identical columns
-armed and unarmed at any width. Vertical placement stays a per-model
+line takes the `>` / `<` markers (`!` when the item is read-only) in the
+margin the alignment leaves free, one blank column clear of the value: right
+marker only when left-flushed, left marker only when right-flushed, both when
+centred. The value is placed against the full width either way, so arming
+never moves it at any alignment; the marker tracks the value's length
+instead. A value long enough to reach a marker is truncated to width minus 2
+(minus 4 centred), the only case where arming reflows the line. On the merged
+label+value line of a 2-row bar page the value keeps the right edge, so the
+marker sits two columns left of it and the label gives up the room.
+Vertical placement stays a per-model
 constant (`label_row` / `value_row`), which is what centres the pair on 4-row
 character modules.
 
