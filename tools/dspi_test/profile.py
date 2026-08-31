@@ -91,11 +91,16 @@ def _probe_channel_ceiling(dev: DspiDevice, hi: int = 16) -> int:
 
 
 def build_profile(dev: DspiDevice) -> PlatformProfile:
-    plat = dev.get(OP.GET_PLATFORM, 4)
+    plat = dev.get(OP.GET_PLATFORM, 6)
     platform_id = plat[0]
     fw_major = plat[1]
-    fw_minor = (plat[2] >> 4) & 0x0F
-    fw_patch = plat[2] & 0x0F
+    if len(plat) >= 6:
+        fw_minor = plat[4]
+        fw_patch = plat[5]
+    else:
+        # Pre-widening firmware: nibble-packed byte 2, each field caps at 15.
+        fw_minor = (plat[2] >> 4) & 0x0F
+        fw_patch = plat[2] & 0x0F
     num_output_channels = plat[3]
 
     # Bulk header (first 16 bytes is the WireHeader).

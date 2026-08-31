@@ -3060,7 +3060,7 @@ RP2040 like the rest of the engine.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-08-12 (Control Surfaces display commands 0x27-0x2B added)*
+*Last updated: 2026-08-31 (REQ_GET_PLATFORM response widened to 6 bytes: full-width fw minor/patch appended)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -3161,7 +3161,7 @@ RP2040 like the rest of the engine.
 | REQ_SET_OUTPUT_PIN | 0x7C | OUT | Set output GPIO pin (pin byte 0xFF = reset that output to its platform default) |
 | REQ_GET_OUTPUT_PIN | 0x7D | IN | Get output GPIO pin |
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
-| REQ_GET_PLATFORM | 0x7F | IN | Get platform ID (0=RP2040, 1=RP2350) |
+| REQ_GET_PLATFORM | 0x7F | IN | Get platform ID, fw version (legacy nibbles + full-width minor/patch), output count; 6 bytes |
 | REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
 | REQ_SET_CS_BINDING | 0x84 | OUT | Set a Control Surfaces binding (wValue=slot 0-15, payload=24-byte CsBinding, required; short payload = INVALID_VALUE); apply-live-only preview, deferred, poll 0x87; persist via REQ_CS_SAVE (see Control Surfaces) |
 | REQ_GET_CS_BINDING | 0x85 | IN | Get the live 24-byte CsBinding for a slot (wValue=slot) |

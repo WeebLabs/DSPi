@@ -2301,10 +2301,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
 #if PICO_RP2350
                 resp_buf[0] = PLATFORM_RP2350;
 #endif
-                resp_buf[1] = (uint8_t)(FW_VERSION_BCD >> 8);    // major
-                resp_buf[2] = (uint8_t)(FW_VERSION_BCD & 0xFF);  // minor.patch BCD
+                resp_buf[1] = (uint8_t)(FW_VERSION_PACKED >> 8);    // major
+                resp_buf[2] = (uint8_t)(FW_VERSION_PACKED & 0xFF);  // legacy (minor << 4) | patch, each caps at 15
                 resp_buf[3] = NUM_OUTPUT_CHANNELS;
-                vendor_send_response(resp_buf, 4);
+                // Full-width minor/patch for hosts requesting >= 6 bytes; the
+                // transfer clamps to wLength, so 4-byte readers are unaffected.
+                resp_buf[4] = FW_VERSION_MINOR;
+                resp_buf[5] = FW_VERSION_PATCH;
+                vendor_send_response(resp_buf, 6);
                 return true;
             }
 

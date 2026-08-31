@@ -33,15 +33,17 @@ def serial_is_printable_hex(dev, profile, chk):
 
 @test("identity")
 def platform_packet(dev, profile, chk):
-    """0x7F returns [platform, fw_major, fw_minor.patch BCD, num_output_channels]."""
-    p = dev.get(OP.GET_PLATFORM, 4)
-    chk.eq(len(p), 4, "platform length")
+    """0x7F returns [platform, fw_major, legacy minor.patch nibbles,
+    num_output_channels, fw_minor, fw_patch]."""
+    p = dev.get(OP.GET_PLATFORM, 6)
+    chk.eq(len(p), 6, "platform length")
     chk.member(p[0], (0, 1), "platform id")
     chk.eq(p[3], profile.num_output_channels, "output-channel count byte")
-    # BCD nibbles must be valid decimal digits.
     chk.in_range(p[1], 0, 99, "fw major byte")
-    chk.in_range((p[2] >> 4) & 0xF, 0, 9, "fw minor nibble")
-    chk.in_range(p[2] & 0xF, 0, 9, "fw patch nibble")
+    # Legacy nibbles must mirror the full-width bytes while both fit in 4 bits.
+    if p[4] <= 15 and p[5] <= 15:
+        chk.eq((p[2] >> 4) & 0xF, p[4], "legacy minor nibble")
+        chk.eq(p[2] & 0xF, p[5], "legacy patch nibble")
 
 
 @test("identity")

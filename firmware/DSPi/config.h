@@ -586,11 +586,14 @@ typedef struct __attribute__((packed)) {
 #define PLATFORM_RP2040             0
 #define PLATFORM_RP2350             1
 
-// Firmware version (BCD encoded: major in high byte, minor.patch in low byte)
+// Firmware version.  The packed form squeezes minor and patch into one nibble
+// each (plain nibble packing, not BCD; no carry), so each caps at 15.  It only
+// feeds the legacy bytes of REQ_GET_PLATFORM; see
+// Documentation/Features/firmware_versioning_spec.md.
 #define FW_VERSION_MAJOR            1
 #define FW_VERSION_MINOR            1
 #define FW_VERSION_PATCH            6
-#define FW_VERSION_BCD              ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
+#define FW_VERSION_PACKED           ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
 
 // Universal "reset to default" escape hatch for every single-pin SET command
 // (REQ_SET_OUTPUT_PIN, REQ_SET_I2S_BCK_PIN, REQ_SET_MCK_PIN, REQ_SET_ADAT_PIN,

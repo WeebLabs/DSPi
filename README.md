@@ -513,7 +513,7 @@ Configuration is performed via **Interface 2** (Vendor Interface) using Control 
 | `0x7C` | `REQ_SET_OUTPUT_PIN` | IN | 1 byte | Change output GPIO pin (returns status) |
 | `0x7D` | `REQ_GET_OUTPUT_PIN` | IN | 1 byte | Get current GPIO pin for an output |
 | `0x7E` | `REQ_GET_SERIAL` | IN | variable | Get unique board serial number |
-| `0x7F` | `REQ_GET_PLATFORM` | IN | 1 byte | Get platform ID (0=RP2040, 1=RP2350) |
+| `0x7F` | `REQ_GET_PLATFORM` | IN | 6 bytes | Get platform ID, firmware version, output count |
 | `0x83` | `REQ_CLEAR_CLIPS` | OUT | — | Clear clip detection latches |
 | `0x90` | `REQ_PRESET_SAVE` | IN | 1 byte | Save live state to preset slot (wValue=slot) |
 | `0x91` | `REQ_PRESET_LOAD` | IN | 1 byte | Load preset slot to live state (wValue=slot) |
