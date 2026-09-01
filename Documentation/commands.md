@@ -189,6 +189,7 @@ the I2S RX pin, or a DAC hardware-mute pin.
 |----|------|-----|--------|--------------------|-------|
 | 0x7E | `GET_SERIAL` | R | 0 | resp **16 bytes** | Device serial string (raw bytes, NUL-padded) |
 | 0x7F | `GET_PLATFORM` | R | 0 | resp **6 bytes** | `[0]`=platform (0=RP2040, 1=RP2350), `[1]`=fw major, `[2]`=legacy (minor<<4)\|patch nibbles, `[3]`=`NUM_OUTPUT_CHANNELS`, `[4]`=fw minor, `[5]`=fw patch |
+| 0x80 | `GET_BUILD_INFO` | R | 0 | resp **64 bytes** | `[0..47]`=`git describe --always --dirty` string, `[48..59]`=build date `YYYY-MM-DD`, `[60..63]`=reserved 0. ASCII, NUL-padded. Provenance for humans only; no software may compare it |
 
 `GET_PLATFORM` is the canonical liveness/probe read; use it to detect the platform
 (and therefore channel/output counts) before issuing anything else.
@@ -1021,6 +1022,7 @@ with no OUT data, issued as an IN transfer (returns a status/echo byte).
 | 0x7D | GET_OUTPUT_PIN | R | returns `output_pins[idx]` |
 | 0x7E | GET_SERIAL | R | returns 16 bytes of the serial string |
 | 0x7F | GET_PLATFORM | R | returns {platform id, FW major, legacy minor.patch nibbles, NUM_OUTPUT_CHANNELS, FW minor, FW patch} |
+| 0x80 | GET_BUILD_INFO | R | returns 64-byte build stamp: git describe [0..47] + build date [48..59]; informational only |
 | 0x83 | CLEAR_CLIPS | W-as-R | read-and-clear: returns `global_status.clip_flags`, then zeroes it |
 | 0x90 | PRESET_SAVE | W-as-R | `pending_preset_save_slot` + `preset_save_pending` -> `preset_save(slot)` (flash; not gated) |
 | 0x91 | PRESET_LOAD | W-as-R | `pending_preset_load_slot` + `preset_load_pending` -> `preset_load(slot)` + pipeline reset / type switches (gated) |

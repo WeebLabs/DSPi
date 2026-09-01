@@ -259,6 +259,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Device Identification Commands
 #define REQ_GET_SERIAL              0x7E
 #define REQ_GET_PLATFORM            0x7F
+#define REQ_GET_BUILD_INFO          0x80  // 64-byte git-describe/date blob; provenance for
+                                          // humans only, no software may gate on it
 
 // Clip Detection Commands
 #define REQ_CLEAR_CLIPS             0x83

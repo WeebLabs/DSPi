@@ -31,6 +31,7 @@
 #include "uart_control.h"
 #include "i2c_control.h"
 #include "control_surfaces.h"
+#include "build_info.h"
 #include "pdm_generator.h"
 #include "siggen.h"
 #include "upmix.h"
@@ -2309,6 +2310,18 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 resp_buf[4] = FW_VERSION_MINOR;
                 resp_buf[5] = FW_VERSION_PATCH;
                 vendor_send_response(resp_buf, 6);
+                return true;
+            }
+
+            case REQ_GET_BUILD_INFO: {
+                // Provenance for humans and bench tools: [0..47] git describe
+                // --always --dirty, [48..59] build date YYYY-MM-DD, [60..63]
+                // reserved zero. ASCII, NUL padded. Nothing may gate on it
+                // (see Documentation/Features/firmware_versioning_spec.md).
+                memset(resp_buf, 0, 64);
+                strncpy((char *)resp_buf, BUILD_GIT_DESCRIBE, 47);
+                strncpy((char *)resp_buf + 48, BUILD_DATE, 11);
+                vendor_send_response(resp_buf, 64);
                 return true;
             }
 

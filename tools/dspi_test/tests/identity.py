@@ -1,11 +1,14 @@
 """
 Identity, platform, status, and clip-clear commands.
 
-Covers: 0x7E GET_SERIAL, 0x7F GET_PLATFORM, 0x50 GET_STATUS (+ sub-queries),
-0x83 CLEAR_CLIPS.  All read-only / non-mutating except clear-clips.
+Covers: 0x7E GET_SERIAL, 0x7F GET_PLATFORM, 0x80 GET_BUILD_INFO,
+0x50 GET_STATUS (+ sub-queries), 0x83 CLEAR_CLIPS.  All read-only /
+non-mutating except clear-clips.
 """
 
-from ..device import OP
+import re
+
+from ..device import OP, Stall
 from ..framework import test
 
 
@@ -44,6 +47,33 @@ def platform_packet(dev, profile, chk):
     if p[4] <= 15 and p[5] <= 15:
         chk.eq((p[2] >> 4) & 0xF, p[4], "legacy minor nibble")
         chk.eq(p[2] & 0xF, p[5], "legacy patch nibble")
+
+
+@test("identity")
+def build_info(dev, profile, chk):
+    """0x80 returns 64 bytes: [0..47] git describe string, [48..59] build date
+    YYYY-MM-DD, [60..63] reserved zero.  ASCII, NUL padded, informational only."""
+    try:
+        data = dev.get(OP.GET_BUILD_INFO, 64)
+    except Stall:
+        chk.note("GET_BUILD_INFO unsupported (pre-widening firmware); skipped")
+        return
+    chk.eq(len(data), 64, "build info length")
+    if len(data) != 64:
+        return
+    describe = data[:48].split(b"\0")[0]
+    date = data[48:60].split(b"\0")[0]
+    chk.ok(describe != b"", "describe string empty")
+    chk.ok(all(0x20 <= b < 0x7F for b in describe), f"describe not printable: {describe!r}")
+    chk.ok(re.fullmatch(rb"\d{4}-\d{2}-\d{2}", date) is not None,
+           f"build date not YYYY-MM-DD: {date!r}")
+    chk.eq(data[60:64], b"\0\0\0\0", "reserved tail zero")
+    # A published release must be built from a clean tagged checkout; flag a
+    # dirty stamp loudly but do not fail (bench builds are expected dirty).
+    if b"-dirty" in describe:
+        chk.note("DIRTY BUILD: binary was built from uncommitted changes")
+    chk.note(f"build {describe.decode('ascii', 'replace')} "
+             f"({date.decode('ascii', 'replace')})")
 
 
 @test("identity")

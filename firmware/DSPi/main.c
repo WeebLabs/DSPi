@@ -47,6 +47,12 @@
 #include "usb_feedback_controller.h"
 #include "usb_descriptors.h"
 #include "tusb.h"
+#include "pico/binary_info.h"
+#include "build_info.h"
+
+// Same stamp REQ_GET_BUILD_INFO reports, embedded in the UF2's binary info
+// so `picotool info` can identify a build file or a BOOTSEL-mode device.
+bi_decl(bi_program_version_string(BUILD_GIT_DESCRIBE));
 
 // ----------------------------------------------------------------------------
 // GLOBAL DEFINITIONS

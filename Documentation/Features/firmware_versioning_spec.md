@@ -8,6 +8,7 @@
 - The macOS Console app and the firmware ship as a matched pair with the same version. The app turns features on and off based on the version the device reports.
 - Legal ranges are major 0 to 255, minor 0 to 15, patch 0 to 255. The minor limit is a real trap and is explained under "Legal ranges" below.
 - Old hosts keep working without any change. They ask for 4 bytes and get exactly the same 4 bytes they always got.
+- Separately from the version, every binary carries an automatic git stamp readable via `REQ_GET_BUILD_INFO` (0x80) and `picotool info`. The version is the contract; the stamp is provenance. See "Build provenance" below.
 
 ## Why beta suffixes are gone
 
@@ -108,5 +109,21 @@ int major = info[1];
 int minor = (n >= 6) ? info[4] : (info[2] >> 4);
 int patch = (n >= 6) ? info[5] : (info[2] & 0x0F);
 ```
+
+## Build provenance: REQ_GET_BUILD_INFO (0x80)
+
+The version number answers "what does this build promise to hosts". It cannot answer "which exact source built this binary", because two bench builds and a release can all legally report the same three numbers. The build stamp answers that second question.
+
+Every build automatically embeds the output of `git describe --always --dirty` plus the build date. Nobody types it and nobody can forget it: `scripts/gen_build_info.cmake` runs on every build (build time, not configure time, so it never goes stale) and generates `build_info.h` in the build directory. A string like `v1.1.7-3-g1a2b3c4` means "3 commits past tag v1.1.7, exact commit 1a2b3c4". A `-dirty` suffix means the tree had uncommitted changes at build time, so the hash is approximate and the build should not be trusted as reproducible.
+
+The stamp is readable three ways.
+
+- `REQ_GET_BUILD_INFO` (0x80) returns a 64-byte blob from the running device. Bytes 0 to 47 are the describe string and bytes 48 to 59 are the build date `YYYY-MM-DD`, both ASCII and NUL-padded. Old firmware STALLs the request.
+- `picotool info <file>.uf2` reads the same string from the UF2's binary info, identifying a build file with no device attached.
+- `tools/dspi_test` prints it in the profile summary and checks it in the identity tests.
+
+Two rules keep it honest. First, the stamp is for humans only; no software may gate, compare, or parse it, exactly as with build labels. Second, a release build must be made from a clean checkout of the tagged commit, so a published binary reports the bare tag with no offset and no `-dirty`. A release stamp that says anything else means the binary was not built from the tag.
+
+Wire layout details live in `Documentation/Features/device_identification_spec.md`.
 
 See `Documentation/Features/device_identification_spec.md` for the full `REQ_GET_PLATFORM` and `REQ_GET_SERIAL` reference.

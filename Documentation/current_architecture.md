@@ -116,7 +116,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 ---
 
 ## Build System
-*Last updated: 2026-07-05*
+*Last updated: 2026-09-01 (git build stamp added)*
 
 ### CMake Configuration
 
@@ -155,6 +155,13 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 cmake --build build-rp2040 --clean-first   # RP2040 build
 cmake --build build-rp2350 --clean-first   # RP2350 build
 ```
+
+### Git Build Stamp
+*Last updated: 2026-09-01*
+
+Every build regenerates `<build dir>/DSPi/generated/build_info.h` via the `dspi_build_info` custom target, which runs `scripts/gen_build_info.cmake` at build time (never at configure time, which would go stale). The header defines `BUILD_GIT_DESCRIBE` (`git describe --always --dirty`, clamped from the front to 47 chars so the hash and dirty flag survive) and `BUILD_DATE`. The script writes the header only when the content changes, so dependents recompile only when the hash, dirty state, or date actually moved.
+
+Consumers: `vendor_commands.c` serves the stamp over `REQ_GET_BUILD_INFO` (0x80), and `main.c` embeds it in the UF2's binary info (`bi_program_version_string`) so `picotool info` identifies a build file or a BOOTSEL-mode device. The stamp is provenance for humans; the version reported by `REQ_GET_PLATFORM` remains the only compatibility contract (see `Documentation/Features/firmware_versioning_spec.md`).
 
 ---
 
@@ -3060,7 +3067,7 @@ RP2040 like the rest of the engine.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-08-31 (REQ_GET_PLATFORM response widened to 6 bytes: full-width fw minor/patch appended)*
+*Last updated: 2026-09-01 (REQ_GET_BUILD_INFO 0x80 added: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -3162,6 +3169,7 @@ RP2040 like the rest of the engine.
 | REQ_GET_OUTPUT_PIN | 0x7D | IN | Get output GPIO pin |
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID, fw version (legacy nibbles + full-width minor/patch), output count; 6 bytes |
+| REQ_GET_BUILD_INFO | 0x80 | IN | Get 64-byte build stamp: git describe [0..47] + build date [48..59]; provenance only, never gated on |
 | REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
 | REQ_SET_CS_BINDING | 0x84 | OUT | Set a Control Surfaces binding (wValue=slot 0-15, payload=24-byte CsBinding, required; short payload = INVALID_VALUE); apply-live-only preview, deferred, poll 0x87; persist via REQ_CS_SAVE (see Control Surfaces) |
 | REQ_GET_CS_BINDING | 0x85 | IN | Get the live 24-byte CsBinding for a slot (wValue=slot) |

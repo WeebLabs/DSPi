@@ -138,7 +138,22 @@ pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/adat_input.pio)
 
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
+
+# Git build stamp, regenerated on EVERY build so the header tracks the
+# checkout rather than the last configure. The script writes only on change,
+# so dependents recompile only when the hash, dirty state, or date moved.
+set(BUILD_INFO_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/build_info.h)
+add_custom_target(dspi_build_info
+    COMMAND ${CMAKE_COMMAND}
+        -DREPO_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DOUT_FILE=${BUILD_INFO_HEADER}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/gen_build_info.cmake
+    BYPRODUCTS ${BUILD_INFO_HEADER}
+    COMMENT "Stamping git build info"
+    VERBATIM)
+add_dependencies(DSPi dspi_build_info)
 
 target_compile_definitions(DSPi PRIVATE
     AUDIO_FREQ_MAX=48000

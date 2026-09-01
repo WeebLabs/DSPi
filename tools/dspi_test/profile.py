@@ -52,13 +52,15 @@ class PlatformProfile:
     wire_format_version: int
     bulk_payload_len: int
     default_output_pins: list = field(default_factory=list)
+    build_info: str = ""    # git describe stamp from 0x80; "" on old firmware
 
     @property
     def fw_str(self) -> str:
         return f"v{self.fw_major}.{self.fw_minor}.{self.fw_patch}"
 
     def summary(self) -> str:
-        return (f"{self.platform_name} {self.fw_str} | out={self.num_output_channels} "
+        build = f" build={self.build_info}" if self.build_info else ""
+        return (f"{self.platform_name} {self.fw_str}{build} | out={self.num_output_channels} "
                 f"total={self.num_channels} in={self.num_input_channels} "
                 f"spdif={self.num_spdif} pins={self.num_pin_outputs} "
                 f"bands≤{self.band_ceiling}/{self.max_bands} wire=v{self.wire_format_version} "
@@ -103,6 +105,13 @@ def build_profile(dev: DspiDevice) -> PlatformProfile:
         fw_patch = plat[2] & 0x0F
     num_output_channels = plat[3]
 
+    # Build provenance stamp (0x80); optional, old firmware STALLs.
+    try:
+        bi = dev.get(OP.GET_BUILD_INFO, 64)
+        build_info = bi[:48].split(b"\0")[0].decode("ascii", "replace")
+    except Stall:
+        build_info = ""
+
     # Bulk header (first 16 bytes is the WireHeader).
     hdr = dev.get(OP.GET_ALL_PARAMS, 16)
     (fmt_ver, hdr_plat, num_channels, num_out_hdr, num_input_channels,
@@ -135,4 +144,5 @@ def build_profile(dev: DspiDevice) -> PlatformProfile:
         wire_format_version=fmt_ver,
         bulk_payload_len=payload_len,
         default_output_pins=DEFAULT_OUTPUT_PINS.get(platform_id, []),
+        build_info=build_info,
     )

@@ -2,10 +2,11 @@
 
 ## Overview
 
-DSPi exposes two vendor USB control transfer commands for device identification:
+DSPi exposes three vendor USB control transfer commands for device identification:
 
 - **`REQ_GET_SERIAL` (0x7E)** — Returns the board's unique flash ID as a 16-byte ASCII hex string
 - **`REQ_GET_PLATFORM` (0x7F)** — Returns platform type, firmware version, and output count
+- **`REQ_GET_BUILD_INFO` (0x80)**: Returns the git describe stamp and build date of the running firmware (provenance for humans; never compared by software)
 
 These complement the standard USB `iSerialNumber` string descriptor (already populated from the same flash unique ID at boot) by making identification data available over the vendor control interface to already-connected software.
 
@@ -88,6 +89,27 @@ Request:  bmRequestType=0xC1, bRequest=0x7F, wValue=0, wIndex=2, wLength=6
 Response: 01 01 16 09 01 06
           platform=RP2350, fw=v1.1.6, outputs=9
 ```
+
+---
+
+## REQ_GET_BUILD_INFO (0x80)
+
+**Direction:** Device to Host (GET)
+**wValue:** 0 (unused)
+**wIndex:** Vendor interface number
+**wLength:** 64
+
+### Response (64 bytes)
+
+| Offset | Size | Field | Content |
+|--------|------|-------|---------|
+| 0 | 48 | `git_describe` | Output of `git describe --always --dirty` at build time, e.g. `v1.1.7-3-g1a2b3c4-dirty`. ASCII, NUL-padded. Clamped from the front if longer than 47 chars (the hash and dirty flag at the end always survive) |
+| 48 | 12 | `build_date` | `YYYY-MM-DD`, ASCII, NUL-padded |
+| 60 | 4 | reserved | Zero |
+
+The stamp is regenerated on every build by `scripts/gen_build_info.cmake`, so it always reflects the checkout the binary was actually compiled from. A `-dirty` suffix means the working tree had uncommitted changes; treat the hash as approximate in that case. Firmware without this command STALLs the request, which hosts must treat as "provenance unavailable".
+
+The version from 0x7F is the compatibility contract; this string is provenance only. **No software may gate, compare, or parse it.** See `firmware_versioning_spec.md`, "Build provenance".
 
 ---
 
@@ -186,3 +208,4 @@ printf("Platform: %s, FW: v%d.%d.%d, Outputs: %d\n",
 | 0x7D | `REQ_GET_OUTPUT_PIN` |
 | 0x7E | `REQ_GET_SERIAL` |
 | 0x7F | `REQ_GET_PLATFORM` |
+| 0x80 | `REQ_GET_BUILD_INFO` |
