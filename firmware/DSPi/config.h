@@ -129,8 +129,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MS_VENDOR_CODE      0x01
 
 // Control Surfaces target groups and macros (caps v9); see control_surfaces.h
-// and Documentation/Features/control_surfaces_groups_macros_spec.md.  The rest
-// of 0x00-0x1F stays unallocated; 0x01 is MS_VENDOR_CODE above, intercepted in
+// and Documentation/Features/control_surfaces_groups_macros_spec.md.  0x10-0x1A
+// hold the subharmonic synthesizer (above); the rest of 0x00-0x1F stays
+// unallocated.  0x01 is MS_VENDOR_CODE above, intercepted in
 // tud_vendor_control_xfer_cb before the application dispatcher sees it.
 #define REQ_SET_CS_GROUP            0x20  // wValue = group (0-7), payload = 40-byte CsGroup;
                                           // all-zero record clears the slot
@@ -154,6 +155,20 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_CS_DISPLAY_PAGE     0x2A  // wValue = page (0-15); returns 4-byte
                                           // CsDisplayPage
 #define REQ_GET_CS_DISPLAY_STATUS   0x2B  // returns 8-byte CsDisplayStatus
+
+// Subharmonic synthesizer (dbx-style octave divider; subharm.h).  First
+// application block allocated inside 0x00-0x1F.
+#define REQ_SET_SUBHARM             0x10  // 1 byte 0/1
+#define REQ_GET_SUBHARM             0x11
+#define REQ_SET_SUBHARM_LOW         0x12  // float dB, 24-36 Hz band level
+#define REQ_GET_SUBHARM_LOW         0x13
+#define REQ_SET_SUBHARM_HIGH        0x14  // float dB, 36-56 Hz band level
+#define REQ_GET_SUBHARM_HIGH        0x15
+#define REQ_SET_SUBHARM_BOOST       0x16  // float dB, LF boost bell
+#define REQ_GET_SUBHARM_BOOST       0x17
+#define REQ_SET_SUBHARM_MASK        0x18  // uint16 LE output mask
+#define REQ_GET_SUBHARM_MASK        0x19
+#define REQ_GET_SUBHARM_HEADROOM    0x1A  // float dB: preamp headroom to free
 
 // Psychoacoustic bass enhancement (missing-fundamental harmonics; psybass.h)
 #define REQ_SET_PSYBASS             0x30
@@ -814,6 +829,9 @@ typedef struct {
     // Psychoacoustic bass snapshot for THIS packet; same single-view rationale.
     const void       *psybass_coeffs;  // PsybassCoeffs or NULL = off
     uint16_t          psybass_mask;    // Bit k = process output k
+    // Subharmonic synthesizer snapshot for THIS packet; same single-view rationale.
+    const void       *subharm_coeffs;  // SubharmCoeffs or NULL = off
+    uint16_t          subharm_mask;    // Bit k = process output k
 } Core1EqWork;
 
 // ----------------------------------------------------------------------------

@@ -4,6 +4,7 @@ Loudness / crossfeed / matrix-mixer group.
 Loudness   0x58-0x5D
 Crossfeed  0x5E-0x67
 Matrix     0x70/0x71
+Subharm    0x10-0x1A
 """
 
 import struct
@@ -148,3 +149,54 @@ def matrix_full_sweep(dev, profile, chk):
                 if fails <= 4:
                     chk.ok(False, f"crosspoint [{inp}][{out}] mismatch: en={ge} gain={gg:.3f} (want en={en} gain={gain:.3f})")
     chk.eq(fails, 0, f"all {ni*no} crosspoints round-trip")
+
+
+# --- Subharmonic synthesizer ------------------------------------------------
+
+@test("dynamics", mutating=True)
+def subharm_enable_bool(dev, profile, chk):
+    """0x10/0x11 subharm enable != 0 coercion."""
+    bool_roundtrip(dev, chk, OP.SET_SUBHARM, OP.GET_SUBHARM, label="subharm enable")
+
+
+@test("dynamics", mutating=True)
+def subharm_level_clamps(dev, profile, chk):
+    """0x12-0x17 band levels clamp to [-30,+6], boost to [0,+6]."""
+    for name, s, g in (("low", OP.SET_SUBHARM_LOW, OP.GET_SUBHARM_LOW),
+                       ("high", OP.SET_SUBHARM_HIGH, OP.GET_SUBHARM_HIGH)):
+        float_roundtrip(dev, chk, s, g, -6.0, label=f"{name} -6")
+        float_clamp(dev, chk, s, g, -99.0, -30.0, label=f"{name} low clamp")
+        float_clamp(dev, chk, s, g, 40.0, 6.0, label=f"{name} high clamp")
+    float_roundtrip(dev, chk, OP.SET_SUBHARM_BOOST, OP.GET_SUBHARM_BOOST, 3.0, label="boost 3")
+    float_clamp(dev, chk, OP.SET_SUBHARM_BOOST, OP.GET_SUBHARM_BOOST, -5.0, 0.0, label="boost low clamp")
+    float_clamp(dev, chk, OP.SET_SUBHARM_BOOST, OP.GET_SUBHARM_BOOST, 20.0, 6.0, label="boost high clamp")
+
+
+@test("dynamics", mutating=True)
+def subharm_mask_roundtrip(dev, profile, chk):
+    """0x18/0x19 output mask round-trips as raw uint16."""
+    for m in (0x0001, 0x0005, 0xFFFF):
+        dev.set(OP.SET_SUBHARM_MASK, struct.pack("<H", m))
+        chk.eq(dev.get_u16(OP.GET_SUBHARM_MASK), m, f"mask 0x{m:04X}")
+
+
+@test("dynamics", mutating=True)
+def subharm_headroom(dev, profile, chk):
+    """0x1A headroom is 0 dB while disabled and grows with band level and boost."""
+    dev.set_u8(OP.SET_SUBHARM, 0)
+    chk.eq(dev.get_f32(OP.GET_SUBHARM_HEADROOM), 0.0, "disabled reads 0 dB")
+    dev.set_f32(OP.SET_SUBHARM_LOW, 0.0)
+    dev.set_f32(OP.SET_SUBHARM_HIGH, -30.0)
+    dev.set_f32(OP.SET_SUBHARM_BOOST, 0.0)
+    dev.set_u8(OP.SET_SUBHARM, 1)
+    one_band = dev.get_f32(OP.GET_SUBHARM_HEADROOM)
+    # One band at 0 dB: the divided sub is ~0.85 of the band on top of the
+    # direct tone, so the bound sits between 5 and 7 dB.
+    chk.ok(5.0 < one_band < 7.0, f"one band at 0 dB needs {one_band:.2f} dB")
+    dev.set_f32(OP.SET_SUBHARM_HIGH, 0.0)
+    two_band = dev.get_f32(OP.GET_SUBHARM_HEADROOM)
+    chk.ok(two_band > one_band, f"second band raises it ({one_band:.2f} -> {two_band:.2f} dB)")
+    dev.set_f32(OP.SET_SUBHARM_BOOST, 6.0)
+    boosted = dev.get_f32(OP.GET_SUBHARM_HEADROOM)
+    chk.ok(boosted >= two_band + 3.0, f"+6 dB boost raises it ({two_band:.2f} -> {boosted:.2f} dB)")
+    dev.set_u8(OP.SET_SUBHARM, 0)

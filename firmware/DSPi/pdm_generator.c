@@ -487,6 +487,9 @@ static void __not_in_flash_func(eq_worker_loop)() {
         const PsybassCoeffs *pb_coeffs =
             (const PsybassCoeffs *)core1_eq_work.psybass_coeffs;
         uint16_t pb_mask = core1_eq_work.psybass_mask;
+        const SubharmCoeffs *sh_coeffs =
+            (const SubharmCoeffs *)core1_eq_work.subharm_coeffs;
+        uint16_t sh_mask = core1_eq_work.subharm_mask;
 
         // Crossfeed for Core 1's pairs, pre-EQ (Core 0 owns pair 0; snapshot
         // comes from core1_eq_work so both cores apply the same view).
@@ -501,7 +504,20 @@ static void __not_in_flash_func(eq_worker_loop)() {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                subharm_reset_output_state(&subharm_output_state[out]);
                 continue;
+            }
+
+            // Subharmonic synthesizer, pre-crossover and ahead of psybass (same
+            // predicate as Core 0 in audio_pipeline.c; snapshot comes from
+            // core1_eq_work so both cores share one view per packet).
+            if (sh_coeffs && ((sh_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                subharm_process_output_block(sh_coeffs, &subharm_output_state[out],
+                                             buf_out[out], sample_count);
+            } else {
+                subharm_reset_output_state(&subharm_output_state[out]);
             }
 
             // Psychoacoustic bass on masked outputs, pre-crossover (same
@@ -673,6 +689,9 @@ static void __not_in_flash_func(eq_worker_loop)() {
         const PsybassCoeffs *pb_coeffs =
             (const PsybassCoeffs *)core1_eq_work.psybass_coeffs;
         uint16_t pb_mask = core1_eq_work.psybass_mask;
+        const SubharmCoeffs *sh_coeffs =
+            (const SubharmCoeffs *)core1_eq_work.subharm_coeffs;
+        uint16_t sh_mask = core1_eq_work.subharm_mask;
 
         // Crossfeed for Core 1's pair, pre-EQ (Core 0 owns pair 0; snapshot
         // comes from core1_eq_work so both cores apply the same view).
@@ -687,7 +706,20 @@ static void __not_in_flash_func(eq_worker_loop)() {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                subharm_reset_output_state(&subharm_output_state[out]);
                 continue;
+            }
+
+            // Subharmonic synthesizer, pre-crossover and ahead of psybass (same
+            // predicate as Core 0 in audio_pipeline.c; snapshot comes from
+            // core1_eq_work so both cores share one view per packet).
+            if (sh_coeffs && ((sh_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                subharm_process_output_block(sh_coeffs, &subharm_output_state[out],
+                                             buf_out[out], sample_count);
+            } else {
+                subharm_reset_output_state(&subharm_output_state[out]);
             }
 
             // Psychoacoustic bass on masked outputs, pre-crossover (same

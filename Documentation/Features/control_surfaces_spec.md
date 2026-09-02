@@ -1,6 +1,6 @@
 # Control Surfaces (User-Wired Physical Controls and Indicators)
 
-*Firmware capability format version: 9*
+*Firmware capability format version: 14*
 *Config (flash) version: 2; IR config version: 2*
 *Directory version: 18*
 
@@ -68,6 +68,11 @@ Caps v12 adds `CsBinding.base_bright`, a per-LED brightness ceiling for
 `CS_TYPE_LED_PWM` carved from the former `reserved` byte at offset 9 (struct
 still 24 bytes; sections 2.2 and 6.6). Pre-v12 configs carry 0 there, which
 means full brightness, so nothing migrates and no directory version changes.
+
+Caps v14 appends nouns 57-60 for the subharmonic synthesizer (`SUBHARM`,
+`SUBHARM_LOW`, `SUBHARM_HIGH`, `SUBHARM_BOOST`; sections 4.3 and 5) with no
+structure or stored-config change; `noun_count` reads 61. The authority for the
+effect itself is `subharmonic_synth_spec.md`.
 
 Writing style note: this doc avoids em-dashes per project convention.
 
@@ -278,10 +283,10 @@ the firmware stores and what `REQ_GET_ALL_PARAMS` does **not** contain.
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
-| 0 | 1 | `caps_version` | capability format version (12) |
+| 0 | 1 | `caps_version` | capability format version (14) |
 | 1 | 1 | `max_bindings` | `CS_MAX_BINDINGS` (16) |
 | 2 | 1 | `type_count` | `CS_TYPE_COUNT` (9); the type table has this many entries, indexed by `CsType` |
-| 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (57) |
+| 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (61) |
 | 4 | 32 | `types[8]` | eight `CsTypeDesc`, one per `CsType` including index 0 (`NONE`, all-zero) |
 | 36 | 1 | `max_ir_commands` | `CS_MAX_IR_COMMANDS` (16) |
 | 37 | 3 | `reserved[3]` | 0 |
@@ -707,6 +712,10 @@ Action-mask groups used below:
 | `LOUDNESS_SPL` | 49 | CONT | DB | 40..100 dB SPL | - | CONT-RW |
 | `LOUDNESS_INTENSITY` | 50 | CONT | PERCENT | 0..127 % | - | CONT-RW |
 | `INPUT_LEVEL_MAX` | 51 | CONT | DB | -60..0 dB | - | CONT-RO |
+| `SUBHARM` | 57 | BOOL | - | - | - | BOOL-RW |
+| `SUBHARM_LOW` | 58 | CONT | DB | -30..+6 dB (-30 = band off) | - | CONT-RW |
+| `SUBHARM_HIGH` | 59 | CONT | DB | -30..+6 dB (-30 = band off) | - | CONT-RW |
+| `SUBHARM_BOOST` | 60 | CONT | DB | 0..+6 dB | - | CONT-RW |
 
 The *effective* legal action set for a (type, noun) pair is the bitwise AND of
 its two masks. Example: an encoder (`STEP` only) on `USER_MUTE` (bool, no
@@ -790,6 +799,10 @@ target and dispatches it.
 | `PSYBASS_DRIVE` | `REQ_SET_PSYBASS_DRIVE` (`0x36`, float dB) | Odd-path clipper drive 0..18 dB. |
 | `PSYBASS_CHARACTER` | `REQ_SET_PSYBASS_CHARACTER` (`0x38`, float %) | Even<->odd harmonic blend 0..100 % (warm to aggressive). |
 | `PSYBASS_ORIGINAL` | `REQ_SET_PSYBASS_ORIGINAL` (`0x3A`, float dB) | Original low-band level -60..0 dB. |
+| `SUBHARM` | `REQ_SET_SUBHARM` (`0x10`, uint8 0/1) | Subharmonic synthesizer enable. |
+| `SUBHARM_LOW` | `REQ_SET_SUBHARM_LOW` (`0x12`, float dB) | 24-36 Hz sub level -30..+6 dB; the floor turns the band off. |
+| `SUBHARM_HIGH` | `REQ_SET_SUBHARM_HIGH` (`0x14`, float dB) | 36-56 Hz sub level -30..+6 dB; the floor turns the band off. |
+| `SUBHARM_BOOST` | `REQ_SET_SUBHARM_BOOST` (`0x16`, float dB) | LF boost bell 0..+6 dB, applied after the subs are summed. |
 | `OUTPUT_DELAY` | `REQ_SET_OUTPUT_DELAY` (`0x78`, wValue = `target`, float ms) | Per-output delay; bindable span is the full delay ring at 48 kHz (21 ms RP2040 / 42 ms RP2350). At 96 kHz the pipeline clamps in samples, exactly as for a host-set delay; the ms value round-trips unclamped. |
 | `PRESET_RELOAD` | `REQ_PRESET_LOAD` (`0x91`, GET, wValue = active slot) | `TRIGGER` reloads the currently active preset from flash via the deferred pipeline-safe path, discarding unsaved live edits. Device-global state (master volume in independent mode, output config, CS bindings) is untouched. |
 | `LOUDNESS_SPL` | `REQ_SET_LOUDNESS_REF` (`0x5A`, float dB SPL) | Reference listening level 40..100 dB SPL: the level at which the ISO 226 compensation reads flat. Lower it and the curve engages sooner as volume drops. |

@@ -28,6 +28,7 @@
 #include "audio_pipeline.h"
 #include "dsp_pipeline.h"
 #include "psybass.h"
+#include "subharm.h"
 #include "upmix.h"
 #include "loudness.h"
 #if PICO_RP2350
@@ -221,6 +222,17 @@ const CsNounDesc cs_noun_table[CS_NOUN_COUNT] = {
     [CS_NOUN_PSYBASS_ORIGINAL] = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
                                   Q8(PSYBASS_ORIGINAL_MIN), Q8(PSYBASS_ORIGINAL_MAX),
                                   CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_SUBHARM]         = { CS_KIND_BOOL, 0, CS_BOOL_RW, 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_SUBHARM_LOW]     = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  Q8(SUBHARM_LEVEL_MIN), Q8(SUBHARM_LEVEL_MAX),
+                                  CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_SUBHARM_HIGH]    = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  Q8(SUBHARM_LEVEL_MIN), Q8(SUBHARM_LEVEL_MAX),
+                                  CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_SUBHARM_BOOST]   = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  Q8(SUBHARM_BOOST_MIN), Q8(SUBHARM_BOOST_MAX),
+                                  CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
     [CS_NOUN_OUTPUT_DELAY]    = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
                                   0, CS_DELAY_MAX_MS_Q8, CS_UNIT_MS,
                                   CS_TARGET_OUTPUT_CH, NUM_OUTPUT_CHANNELS, 0 },
@@ -413,6 +425,10 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
         case CS_NOUN_PSYBASS_DRIVE:     return psybass_config.drive_db;
         case CS_NOUN_PSYBASS_CHARACTER: return psybass_config.character_pct;
         case CS_NOUN_PSYBASS_ORIGINAL:  return psybass_config.original_db;
+        case CS_NOUN_SUBHARM:           return subharm_config.enabled ? 1.0f : 0.0f;
+        case CS_NOUN_SUBHARM_LOW:       return subharm_config.low_db;
+        case CS_NOUN_SUBHARM_HIGH:      return subharm_config.high_db;
+        case CS_NOUN_SUBHARM_BOOST:     return subharm_config.boost_db;
         case CS_NOUN_OUTPUT_DELAY:      return matrix_mixer.outputs[target].delay_ms;
         case CS_NOUN_PRESET_RELOAD:     return 0.0f;
         // Both read live: the SET handler stores the value immediately and
@@ -477,6 +493,19 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             float f = value;
             r = vendor_dispatch_set(CTRL_SOURCE_GPIO,
                                     psybass_req[noun - CS_NOUN_PSYBASS_CUTOFF],
+                                    0, 0, (const uint8_t *)&f, sizeof(f));
+            break;
+        }
+        case CS_NOUN_SUBHARM_LOW:
+        case CS_NOUN_SUBHARM_HIGH:
+        case CS_NOUN_SUBHARM_BOOST: {
+            // Per-parameter float SETs; nouns are contiguous from LOW.
+            static const uint8_t subharm_req[] = {
+                REQ_SET_SUBHARM_LOW, REQ_SET_SUBHARM_HIGH, REQ_SET_SUBHARM_BOOST,
+            };
+            float f = value;
+            r = vendor_dispatch_set(CTRL_SOURCE_GPIO,
+                                    subharm_req[noun - CS_NOUN_SUBHARM_LOW],
                                     0, 0, (const uint8_t *)&f, sizeof(f));
             break;
         }
@@ -582,6 +611,7 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
                 case CS_NOUN_LEVELLER_SPEED:   req = REQ_SET_LEVELLER_SPEED;     break;
                 case CS_NOUN_LEVELLER_LOOKAHEAD: req = REQ_SET_LEVELLER_LOOKAHEAD; break;
                 case CS_NOUN_PSYBASS:          req = REQ_SET_PSYBASS;            break;
+                case CS_NOUN_SUBHARM:          req = REQ_SET_SUBHARM;            break;
                 default:                       return true;   // read-only noun
             }
             r = vendor_dispatch_set(CTRL_SOURCE_GPIO, req, 0, 0, &v, 1);

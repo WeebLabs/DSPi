@@ -208,6 +208,7 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     crossfeed_update_pending = true;  // Recalculate crossfeed coefficients for new sample rate
     leveller_update_pending = true;   // Recalculate leveller coefficients for new sample rate
     psybass_update_pending = true;    // Recalculate psybass coefficients for new sample rate
+    subharm_update_pending = true;    // Recalculate subharm coefficients for new sample rate
 #if PICO_RP2350
     upmix_update_pending = true;      // Recalculate upmixer coefficients for new sample rate
 #endif
@@ -1832,6 +1833,9 @@ void core0_init() {
     // Initial psychoacoustic bass setup (uses loaded or default params)
     psybass_apply_config((const PsybassConfig *)&psybass_config, 48000.0f);
 
+    // Initial subharmonic synthesizer setup (uses loaded or default params)
+    subharm_apply_config((const SubharmConfig *)&subharm_config, 48000.0f);
+
 #if PICO_RP2350
     // Initial upmixer setup (uses loaded or default params)
     upmix_apply_config((const UpmixConfig *)&upmix_config, 48000.0f);
@@ -2740,6 +2744,14 @@ int main(void) {
         if (psybass_update_pending) {
             psybass_update_pending = false;
             psybass_apply_config((const PsybassConfig *)&psybass_config, (float)audio_state.freq);
+        }
+
+        // Handle subharmonic synthesizer coefficient updates: same publish
+        // model as psybass (NULL = disabled; per-output states reset by the
+        // pipeline whenever an output is skipped).
+        if (subharm_update_pending) {
+            subharm_update_pending = false;
+            subharm_apply_config((const SubharmConfig *)&subharm_config, (float)audio_state.freq);
         }
 
 #if PICO_RP2350

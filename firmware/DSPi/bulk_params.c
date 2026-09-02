@@ -52,8 +52,11 @@ _Static_assert(sizeof(WireUpmixParams) == 44, "V25 upmixer section must be 44 by
 // mid-struct edit that shifts them must bump WIRE_FORMAT_VERSION instead.
 _Static_assert(offsetof(WireBulkParams, upmix) == 5900,
                "V25 upmixer section must sit at wire offset 5900");
-_Static_assert(sizeof(WireBulkParams) == 5944,
-               "V25 wire total must be 5944 bytes");
+_Static_assert(sizeof(WireSubharmParams) == 16, "V29 subharm section must be 16 bytes");
+_Static_assert(offsetof(WireBulkParams, subharm) == 5944,
+               "V29 subharm section must sit at wire offset 5944");
+_Static_assert(sizeof(WireBulkParams) == 5960,
+               "V29 wire total must be 5960 bytes");
 #if PICO_RP2350
 _Static_assert(sizeof(WireUpmixParams) == sizeof(UpmixConfigPacket),
                "WireUpmixParams and UpmixConfigPacket must have identical layout");
@@ -319,6 +322,14 @@ void bulk_params_collect(WireBulkParams *out) {
     out->psybass.drive_db      = psybass_config.drive_db;
     out->psybass.character_pct = psybass_config.character_pct;
     out->psybass.original_db   = psybass_config.original_db;
+
+    // Subharmonic synthesizer (V29+).  One global config copied straight in.
+    out->subharm.enabled     = subharm_config.enabled ? 1 : 0;
+    out->subharm.reserved0   = 0;
+    out->subharm.output_mask = subharm_config.output_mask;
+    out->subharm.low_db      = subharm_config.low_db;
+    out->subharm.high_db     = subharm_config.high_db;
+    out->subharm.boost_db    = subharm_config.boost_db;
 
     // Stereo upmixer (V25+).  RP2350 only; the whole section (including reserved)
     // stays zeroed on RP2040 from the memset above.
@@ -908,6 +919,15 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     psybass_config.character_pct = in->psybass.character_pct;
     psybass_config.original_db   = in->psybass.original_db;
     psybass_update_pending = true;
+
+    // Subharmonic synthesizer (V29+).  Same raw-copy-then-recompute model as
+    // psybass; floats are clamped downstream in subharm_compute_coefficients.
+    subharm_config.enabled     = (in->subharm.enabled != 0);
+    subharm_config.output_mask = in->subharm.output_mask;
+    subharm_config.low_db      = in->subharm.low_db;
+    subharm_config.high_db     = in->subharm.high_db;
+    subharm_config.boost_db    = in->subharm.boost_db;
+    subharm_update_pending = true;
 
     // Stereo upmixer (V25+).  RP2350 only; RP2040 ignores the section.  Config
     // copied straight in (mode fields clamped; floats are clamped downstream in

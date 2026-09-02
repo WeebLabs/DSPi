@@ -923,6 +923,55 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             }
             break;
 
+        // Subharmonic Synthesizer Commands (same apply model as psybass)
+        case REQ_SET_SUBHARM:
+            if (buffer->data_len >= 1) {
+                subharm_config.enabled = (vendor_rx_buf[0] != 0);
+                subharm_update_pending = true;
+                uint8_t v = subharm_config.enabled ? 1 : 0;
+                notify_param_write(offsetof(WireBulkParams, subharm.enabled), 1, &v);
+            }
+            break;
+
+        case REQ_SET_SUBHARM_LOW:
+        case REQ_SET_SUBHARM_HIGH:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < SUBHARM_LEVEL_MIN) val = SUBHARM_LEVEL_MIN;
+                if (val > SUBHARM_LEVEL_MAX) val = SUBHARM_LEVEL_MAX;
+                bool low = (vendor_last_request == REQ_SET_SUBHARM_LOW);
+                if (low) subharm_config.low_db = val; else subharm_config.high_db = val;
+                subharm_update_pending = true;
+                notify_param_write(low ? offsetof(WireBulkParams, subharm.low_db)
+                                       : offsetof(WireBulkParams, subharm.high_db),
+                                   sizeof(float), &val);
+            }
+            break;
+
+        case REQ_SET_SUBHARM_BOOST:
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                if (val < SUBHARM_BOOST_MIN) val = SUBHARM_BOOST_MIN;
+                if (val > SUBHARM_BOOST_MAX) val = SUBHARM_BOOST_MAX;
+                subharm_config.boost_db = val;
+                subharm_update_pending = true;
+                notify_param_write(offsetof(WireBulkParams, subharm.boost_db),
+                                   sizeof(float), &val);
+            }
+            break;
+
+        case REQ_SET_SUBHARM_MASK:
+            if (buffer->data_len >= 2) {
+                subharm_config.output_mask = (uint16_t)(vendor_rx_buf[0] | (vendor_rx_buf[1] << 8));
+                // Read live each packet like the psybass mask; no recompute.
+                uint16_t m = subharm_config.output_mask;
+                notify_param_write(offsetof(WireBulkParams, subharm.output_mask),
+                                   2, (const uint8_t *)&m);
+            }
+            break;
+
         // Volume Leveller Commands
         case REQ_SET_LEVELLER_ENABLE:
             if (buffer->data_len >= 1) {
@@ -1912,6 +1961,42 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 resp_buf[0] = (uint8_t)(m & 0xFF);
                 resp_buf[1] = (uint8_t)((m >> 8) & 0xFF);
                 vendor_send_response(resp_buf, 2);
+                return true;
+            }
+
+            // Subharmonic Synthesizer GET commands
+            case REQ_GET_SUBHARM: {
+                resp_buf[0] = subharm_config.enabled ? 1 : 0;
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_SUBHARM_LOW:
+            case REQ_GET_SUBHARM_HIGH:
+            case REQ_GET_SUBHARM_BOOST: {
+                float val = (setup->bRequest == REQ_GET_SUBHARM_LOW)  ? subharm_config.low_db
+                          : (setup->bRequest == REQ_GET_SUBHARM_HIGH) ? subharm_config.high_db
+                                                                      : subharm_config.boost_db;
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
+            case REQ_GET_SUBHARM_MASK: {
+                uint16_t m = subharm_config.output_mask;
+                resp_buf[0] = (uint8_t)(m & 0xFF);
+                resp_buf[1] = (uint8_t)((m >> 8) & 0xFF);
+                vendor_send_response(resp_buf, 2);
+                return true;
+            }
+
+            case REQ_GET_SUBHARM_HEADROOM: {
+                // Computed from the live config on request (no cached value to
+                // race the main-loop recompute after a SET).
+                SubharmConfig cfg = subharm_config;
+                float val = subharm_headroom_db(&cfg);
+                memcpy(resp_buf, &val, 4);
+                vendor_send_response(resp_buf, 4);
                 return true;
             }
 

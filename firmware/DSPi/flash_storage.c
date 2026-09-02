@@ -178,7 +178,12 @@
 //        load via slot_data_size_for_version and keep the device-level pin.
 //        Input 4's enable bit is bit 2 of the existing V24 spdif_rx_enabled_ext
 //        byte, which pre-V35 firmware masked to 0, so no gate is needed there.
-#define SLOT_DATA_VERSION       35
+//   V36: Subharmonic synthesizer appended (subharm_enabled + reserved + output
+//        mask + three floats; struct grows by 16 bytes).  Backward-compatible
+//        tail-append like V22..V35: V21..V35 slots still load via
+//        slot_data_size_for_version; older slots have no subharm data and load
+//        the disabled/all-outputs defaults (apply is gated on version >= 36).
+#define SLOT_DATA_VERSION       36
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1300,6 +1305,15 @@ typedef struct __attribute__((packed)) {
     // The matching enable bit is bit 2 of spdif_rx_enabled_ext above, which
     // pre-V35 firmware always wrote as 0.
     uint8_t spdif_rx_pin4;
+
+    // V36: subharmonic synthesizer (one global config + output mask; see
+    // subharm.h).  Gated on version >= 36 in apply_slot_to_live().
+    uint8_t  subharm_enabled;
+    uint8_t  subharm_reserved;
+    uint16_t subharm_output_mask;
+    float    subharm_low_db;
+    float    subharm_high_db;
+    float    subharm_boost_db;
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -3228,6 +3242,14 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->psybass_character_pct = psybass_config.character_pct;
     slot->psybass_original_db   = psybass_config.original_db;
 
+    // Subharmonic synthesizer (V36): one global config, enabled + mask + 3 floats.
+    slot->subharm_enabled     = subharm_config.enabled ? 1 : 0;
+    slot->subharm_reserved    = 0;
+    slot->subharm_output_mask = subharm_config.output_mask;
+    slot->subharm_low_db      = subharm_config.low_db;
+    slot->subharm_high_db     = subharm_config.high_db;
+    slot->subharm_boost_db    = subharm_config.boost_db;
+
     // ADAT input (V32): raw pin (0xFF unset) + enable + clock mode (both
     // platforms; RP2040 stores its default state for round-trips).
     slot->adat_input_pin        = adat_input_pin;
@@ -3493,6 +3515,24 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     }
     psybass_update_pending = true;
 
+    // Subharmonic synthesizer (V36): older slots have no subharm data, so
+    // restore the disabled/all-outputs defaults for them.  Pending is raised in
+    // both branches so a load that turns it off unpublishes its coefficients.
+    if (slot->version >= 36) {
+        subharm_config.enabled     = (slot->subharm_enabled != 0);
+        subharm_config.output_mask = slot->subharm_output_mask;
+        subharm_config.low_db      = slot->subharm_low_db;
+        subharm_config.high_db     = slot->subharm_high_db;
+        subharm_config.boost_db    = slot->subharm_boost_db;
+    } else {
+        subharm_config.enabled     = false;
+        subharm_config.output_mask = SUBHARM_DEFAULT_OUTPUT_MASK;
+        subharm_config.low_db      = SUBHARM_DEFAULT_LOW;
+        subharm_config.high_db     = SUBHARM_DEFAULT_HIGH;
+        subharm_config.boost_db    = SUBHARM_DEFAULT_BOOST;
+    }
+    subharm_update_pending = true;
+
     // Stereo upmixer (V33): RP2350-only.  V33+ slots restore the stored config
     // (modes clamped; enabled = nonzero); older slots load the disabled
     // defaults.  Range clamping of the floats happens downstream in
@@ -3700,7 +3740,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // appended i2s_clock_mode; V29 appended i2s_clock_pin_mode + i2s_bck_pin_slave;
 // V30 appended peq_qp_x512; V31 appended psybass; V32 appended the ADAT input
 // fields; V33 appended the stereo upmixer config; V35 appended the SPDIF input
-// 4 pin, so each version's range stops where the next version's fields begin
+// 4 pin; V36 appended the subharmonic synthesizer config, so each version's
+// range stops where the next version's fields begin
 // (a stored slot's CRC was computed without the fields its version predates).
 #define SLOT_DATA_SIZE_V21 \
     (offsetof(PresetSlot, i2s_input_channels) - offsetof(PresetSlot, filter_recipes))
@@ -3731,6 +3772,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // V34 claims the upmix reserved byte (presence); no size change.
 #define SLOT_DATA_SIZE_V34 SLOT_DATA_SIZE_V33
 #define SLOT_DATA_SIZE_V35 \
+    (offsetof(PresetSlot, subharm_enabled) - offsetof(PresetSlot, filter_recipes))
+#define SLOT_DATA_SIZE_V36 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
@@ -3745,7 +3788,9 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 35
+        case SLOT_DATA_VERSION:   // 36
+            return SLOT_DATA_SIZE_V36;
+        case 35:
             return SLOT_DATA_SIZE_V35;
         case 34:
             return SLOT_DATA_SIZE_V34;
@@ -4364,6 +4409,14 @@ static void apply_factory_defaults(void) {
     psybass_config.character_pct = PSYBASS_DEFAULT_CHARACTER;
     psybass_config.original_db   = PSYBASS_DEFAULT_ORIGINAL;
     psybass_update_pending = true;
+
+    // Subharmonic synthesizer
+    subharm_config.enabled     = false;
+    subharm_config.output_mask = SUBHARM_DEFAULT_OUTPUT_MASK;
+    subharm_config.low_db      = SUBHARM_DEFAULT_LOW;
+    subharm_config.high_db     = SUBHARM_DEFAULT_HIGH;
+    subharm_config.boost_db    = SUBHARM_DEFAULT_BOOST;
+    subharm_update_pending = true;
 
     // Stereo upmixer (RP2350-only): disabled, default engine params.
 #if PICO_RP2350

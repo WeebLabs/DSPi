@@ -92,6 +92,9 @@ extern volatile bool crossfeed_update_pending;
 // Psychoacoustic bass (config/state/coeffs live in psybass.c)
 #include "psybass.h"
 
+// Subharmonic synthesizer (config/state/coeffs live in subharm.c)
+#include "subharm.h"
+
 // Volume Leveller
 extern volatile LevellerConfig leveller_config;
 extern volatile bool leveller_update_pending;

@@ -191,6 +191,11 @@ typedef enum {
                                  // the configured edit_timeout)
     CS_NOUN_PAGE_VALUE     = 56, // virtual: STEP/INC/DEC/TOGGLE the shown
                                  // page's item, resolved at event time
+    // --- caps v14 additions ---
+    CS_NOUN_SUBHARM        = 57, // bool (subharmonic synthesizer enable)
+    CS_NOUN_SUBHARM_LOW    = 58, // continuous dB -30..+6 (24-36 Hz band level)
+    CS_NOUN_SUBHARM_HIGH   = 59, // continuous dB -30..+6 (36-56 Hz band level)
+    CS_NOUN_SUBHARM_BOOST  = 60, // continuous dB 0..+6 (LF boost bell)
     CS_NOUN_COUNT
 } CsNoun;
 
@@ -559,7 +564,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (13); see the file
+    uint8_t  caps_version; // capability format version (14); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)

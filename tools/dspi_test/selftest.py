@@ -451,7 +451,8 @@ for fs in (48000.0, 44100.0):
 print("27. Phase 5 tests registered, and the replay block still comes last")
 audio_names = [tc.name for tc in REGISTRY if tc.group == "audio"]
 for n in ("peq_linkwitz_transform", "xo_all_band_slots", "xo_two_band_cascade",
-          "loudness_output_mask", "upmix_centre_off_passthrough", "psybass_harmonics"):
+          "loudness_output_mask", "upmix_centre_off_passthrough", "psybass_harmonics",
+          "subharm_octave"):
     check(n in audio_names, f"{n} registered")
 check(audio_names[-1] == "rate_switch_round_trip",
       f"round trip still last (got {audio_names[-1]!r})")

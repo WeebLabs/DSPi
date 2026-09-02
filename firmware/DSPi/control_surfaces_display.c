@@ -580,7 +580,9 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
     [CS_NOUN_LOUDNESS_INTENSITY] = "Loud Amt", [CS_NOUN_INPUT_LEVEL_MAX] = "In Level",
     [CS_NOUN_MACRO] = "Macro",             [CS_NOUN_CPU_LOAD] = "CPU",
     [CS_NOUN_DISPLAY_PAGE] = "Page",       [CS_NOUN_DISPLAY_EDIT] = "Edit",
-    [CS_NOUN_PAGE_VALUE] = "Value",
+    [CS_NOUN_PAGE_VALUE] = "Value",       [CS_NOUN_SUBHARM] = "Subharm",
+    [CS_NOUN_SUBHARM_LOW] = "Sub 24-36",  [CS_NOUN_SUBHARM_HIGH] = "Sub 36-56",
+    [CS_NOUN_SUBHARM_BOOST] = "LF Boost",
 };
 
 static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",

@@ -280,7 +280,7 @@ closed:
    consumer lead. `usb_silent_fill_recovery()` now extends the mute floor and
    primes zero-input blocks through the complete shared pipeline.
 3. Whole-preset coefficient replacement preserved PEQ/crossover recursive
-   state and published loudness/crossfeed/psybass/upmix/leveller coefficients
+   state and published loudness/crossfeed/psybass/subharm/upmix/leveller coefficients
    on the next main-loop pass. Old recursive energy was therefore interpreted
    by new coefficients, while one post-apply block could see a mixed DSP
    context. Whole-context recalculation now clears PEQ/crossover state, and

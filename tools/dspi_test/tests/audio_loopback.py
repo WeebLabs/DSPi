@@ -1405,6 +1405,8 @@ UPMIX_CENTER_OFF = 2
 UPMIX_SURROUND_PASSIVE = 1
 UPMIX_ROW_LS = 3
 PSYBASS_CUTOFF, PSYBASS_HARMONICS, PSYBASS_DRIVE = 120.0, 12.0, 18.0
+SUBHARM_TONE = 60.0           # inside the 48-72 Hz band: sub lands at 30 Hz
+SUBHARM_MIN_RISE_DB = 20.0    # sub bin must rise at least this much when enabled
 
 
 def _set_lt_band(dev, ch, band, f0, q0, fp, qp):
@@ -1596,6 +1598,39 @@ def psybass_harmonics(dev, profile, chk):
                  f"(cutoff {PSYBASS_CUTOFF:g}Hz)")
     finally:
         dev.set_u8(OP.SET_PSYBASS, 0); dev.wait_ready()
+
+
+@test("audio", mutating=True)
+def subharm_octave(dev, profile, chk):
+    """Subharmonic synthesizer adds a tone one octave below a band-1 input."""
+    rig = _get_rig(dev, profile)
+    out_l = _slot_indices(profile, rig["slot"])[0]
+    sub = SUBHARM_TONE / 2.0
+    probes = (sub, SUBHARM_TONE)
+    try:
+        _flatten_chain(dev, rig["ch_l"])
+        dev.set_u8(OP.SET_SUBHARM, 0); dev.wait_ready()
+        off = _capture(dev, lambda: audio.measure_tone_bins(rig["out"], rig["in"], rig["chan"],
+                                            rig["fs"], SUBHARM_TONE, probes))
+        dev.set_f32(OP.SET_SUBHARM_LOW, 0.0)
+        dev.set_f32(OP.SET_SUBHARM_HIGH, -30.0)     # floor = band off
+        dev.set_f32(OP.SET_SUBHARM_BOOST, 0.0)
+        dev.set(OP.SET_SUBHARM_MASK, struct.pack("<H", 1 << out_l))
+        dev.set_u8(OP.SET_SUBHARM, 1); dev.wait_ready()
+        on = _capture(dev, lambda: audio.measure_tone_bins(rig["out"], rig["in"], rig["chan"],
+                                           rig["fs"], SUBHARM_TONE, probes))
+        rise = on[sub] - off[sub]
+        chk.ok(rise > SUBHARM_MIN_RISE_DB,
+               f"sub-octave generated ({sub:g}Hz {off[sub]:.1f} -> {on[sub]:.1f} dBFS)")
+        # The divider preserves the band amplitude and the 40 Hz post-lowpass
+        # passes 30 Hz nearly flat, so the sub sits within a few dB of the tone.
+        chk.ok(abs(on[sub] - on[SUBHARM_TONE]) < 6.0,
+               f"sub level tracks the input band ({on[sub]:.1f} vs {on[SUBHARM_TONE]:.1f} dBFS)")
+        chk.ok(abs(on[SUBHARM_TONE] - off[SUBHARM_TONE]) < 1.0,
+               f"fundamental untouched ({off[SUBHARM_TONE]:.1f} -> {on[SUBHARM_TONE]:.1f} dBFS)")
+        chk.note(f"subharm: {SUBHARM_TONE:g}Hz in, {sub:g}Hz sub rose {rise:.1f} dB")
+    finally:
+        dev.set_u8(OP.SET_SUBHARM, 0); dev.wait_ready()
 
 
 # --- Per-rate replay --------------------------------------------------------

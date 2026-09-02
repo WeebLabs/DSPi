@@ -593,6 +593,33 @@ def measure_tone_2ch(out_dev, in_dev, fs, freq=1000.0, dur_s=0.8, amp=0.4, left_
     return dbfs(s0), dbfs(s1), _thd_pct(s0, fs, freq)
 
 
+def measure_tone_bins(out_dev, in_dev, in_channel, fs, freq, probes, dur_s=0.8, amp=0.4):
+    """Play a sine at `freq`, capture it, and return {probe_hz: level_dbfs} for
+    each probe frequency, read from a Hann-windowed FFT of the steady tail (so
+    a divider or envelope-driven stage is measured after it has locked).  The
+    scale is calibrated so a full-scale sine reads 0 dBFS at its own bin."""
+    _require()
+    tone = make_tone(fs, freq, dur_s, amp)
+    pad = np.zeros(int(PAD_S * fs), np.float32)
+    cap = play_record(np.concatenate([pad, tone, pad]), fs, out_dev, in_dev)
+    if cap.shape[0] == 0:
+        return {p: -200.0 for p in probes}
+    y = cap[:, in_channel] if cap.ndim > 1 else cap
+    seg, _strength = align(y, tone)
+    lo, hi = int(0.30 * len(seg)), int(0.95 * len(seg))
+    core = seg[lo:hi]
+    win = np.hanning(len(core))
+    X = np.abs(np.fft.rfft(core * win)) * (2.0 / np.sum(win))
+    df = fs / len(core)
+    out = {}
+    for p in probes:
+        k = int(round(p / df))
+        a, b = max(k - 2, 0), min(k + 3, len(X))
+        peak = float(np.max(X[a:b])) if b > a else 0.0
+        out[p] = 20.0 * np.log10(max(peak, 1e-12))
+    return out
+
+
 def _thd_pct(x, fs, f0, n_harm=6):
     win = np.hanning(len(x))
     X = np.abs(np.fft.rfft(x * win))

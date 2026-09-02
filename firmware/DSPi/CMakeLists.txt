@@ -5,7 +5,7 @@ add_compile_options(-O2)
 
 # Use -O3 for DSP-critical files
 set_source_files_properties(
-    usb_audio.c vendor_commands.c audio_pipeline.c crossfeed.c loudness.c psybass.c leveller.c crossover.c spdif_input.c i2s_input.c input_servo.c lg_sound_sync.c dac_hw_mute.c siggen.c upmix.c adat_output.c adat_input.c
+    usb_audio.c vendor_commands.c audio_pipeline.c crossfeed.c loudness.c psybass.c subharm.c leveller.c crossover.c spdif_input.c i2s_input.c input_servo.c lg_sound_sync.c dac_hw_mute.c siggen.c upmix.c adat_output.c adat_input.c
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
@@ -71,6 +71,8 @@ add_executable(DSPi
     pdm_generator.h
     psybass.c
     psybass.h
+    subharm.c
+    subharm.h
     siggen.c
     siggen.h
     spdif_input.c
