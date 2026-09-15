@@ -1052,37 +1052,33 @@ static bool uac1_open_stream_eps(uint8_t rhport, uint8_t alt) {
     return true;
 }
 
-// Drain/arm the interrupt IN endpoint.  Always keeps EP 0x83 armed: if a
-// Drain the notification queue to the bulk IN endpoint.  Follows TinyUSB's
-// recommended pattern (same as HID's tud_hid_n_report):
-//   1. Bail early if no event is pending — bulk IN doesn't need keep-alives.
-//   2. Atomic claim of the EP via usbd_edpt_claim (checks busy && !claimed).
-//   3. Fill the stable TX buffer while holding the claim.
-//   4. usbd_edpt_xfer kicks off the transfer; claim is released on completion.
+// Keep-alive pacing for EP 0x83.  An idle packet goes out only after this long
+// without any packet; see usb_notify_drain.
+#define NOTIFY_IDLE_KEEPALIVE_US 100000u
+
+// When the last packet (event or idle) was armed.  Written from both the main
+// loop and USB IRQ context; a stale read only shifts one keep-alive.
+static uint32_t notify_last_arm_us;
+
+// Drain the notification queue to the bulk IN endpoint with TinyUSB's claim,
+// fill, xfer pattern (as tud_hid_n_report does).  If the EP is busy or claimed
+// elsewhere, the next tick or xfer_cb re-arm tries again.
 //
-// The claim-based pattern eliminates the race window between checking busy
-// and calling usbd_edpt_xfer that our previous code had.  If the EP is
-// currently busy (xfer in flight) or already claimed by another path, claim
-// returns false and we defer to the next tick / xfer_cb re-arm.
+// Events are armed at once.  With nothing queued, a 1-byte idle packet is armed
+// only after NOTIFY_IDLE_KEEPALIVE_US of quiet, and the EP otherwise stays
+// unarmed while the host's read waits.  Re-arming idle packets back to back
+// made the host spin on this bulk endpoint.  This deliberately relaxes the old
+// never-NAK rule; see notification_protocol_v2_spec.md section 3.1.
 static void __not_in_flash_func(usb_notify_drain)(uint8_t rhport) {
     if (!uac1.notify_ep_open) return;
 
-    // Always-armed pattern: keep a transfer in flight on EP 0x83 at all
-    // times.  When the event ring is empty, we arm a 1-byte idle packet
-    // (0x00) instead of bailing.  Reasons:
-    //
-    // 1. macOS IOKit has been observed to drop the first bulk packet
-    //    after a long idle period — the pipe state gets "cold" and the
-    //    first packet after the gap is lost, while subsequent packets
-    //    arrive normally.  Keeping the pipe hot with idle keep-alives
-    //    eliminates this.
-    //
-    // 2. The original firmware descriptor comment documented this intent
-    //    ("device always keeps EP 0x83 armed") but the actual drain bailed
-    //    on empty ring; this change aligns the behavior with the comment.
-    //
-    // The Swift monitor discards 1-byte idle packets (byte 0 == 0x00),
-    // so the user-visible event stream is unaffected.
+    // Nothing to send and a packet went out recently: stay unarmed.  Checked
+    // before the claim so a quiet main-loop pass touches no EP state.
+    if (!notify_has_pending_for(NOTIFY_CONSUMER_USB) &&
+        (uint32_t)(time_us_32() - notify_last_arm_us) < NOTIFY_IDLE_KEEPALIVE_US) {
+        return;
+    }
+
     if (!usbd_edpt_claim(rhport, NOTIFY_IN_ENDPOINT)) {
         // EP already busy/claimed — xfer_cb will re-arm when it completes.
         return;
@@ -1102,7 +1098,8 @@ static void __not_in_flash_func(usb_notify_drain)(uint8_t rhport) {
     }
 
     if (len == 0) {
-        // Ring empty (or unknown event_id).  Arm an idle keep-alive.
+        // Ring empty (or unknown event_id) and the keep-alive interval has
+        // passed.  Arm an idle keep-alive.
         notify_buf[0] = 0x00;
         len = 1;
         consumed_ring_entry = false;
@@ -1115,6 +1112,9 @@ static void __not_in_flash_func(usb_notify_drain)(uint8_t rhport) {
         usbd_edpt_release(rhport, NOTIFY_IN_ENDPOINT);
         return;
     }
+
+    // Any packet, event or idle, restarts the keep-alive interval.
+    notify_last_arm_us = time_us_32();
 
     // Xfer accepted.  Advance the ring tail only if this packet represented
     // a real event; idle keep-alives don't consume ring entries.

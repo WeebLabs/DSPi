@@ -1,7 +1,7 @@
 # Notification Protocol v2 Specification
 
 *Status: implemented*
-*Last updated: 2026-07-05*
+*Last updated: 2026-09-15*
 
 ## 1. Motivation
 
@@ -33,7 +33,8 @@ The current EP 0x83 descriptor uses `NOTIFY_EP_MAX_PKT = 8`. That is too small f
 
 Constraints we preserve:
 - **Keep the EP as BULK IN**, not interrupt — the existing comment in `usb_descriptors.h` documents a real RP2xxx DCD crash when an interrupt IN endpoint polls continuously alongside rapid EP0 SETUPs. Do not switch back to interrupt.
-- **Keep the "always-armed" invariant.** The endpoint must never NAK (the same DCD bug is the reason). When the ring is empty, arm with a 1-byte `NOTIFY_EVT_IDLE` packet, same as today. The host sees short packets when idle, full packets when events arrive.
+- **Pace the idle keep-alive.** A queued event is armed immediately. When the ring is empty, the device arms a 1-byte `NOTIFY_EVT_IDLE` packet only after 100 ms without any packet (`NOTIFY_IDLE_KEEPALIVE_US`), and otherwise leaves the endpoint unarmed, so the host's read waits (NAK) until there is something to send. The keep-alive exists because macOS has been seen to drop the first bulk packet after a long idle gap; 100 ms keeps the pipe active and sits well inside the host's 500 ms read timeout. The host sees short packets at most every 100 ms when idle, full packets when events arrive.
+  - *Superseded rule:* the endpoint was previously kept armed at all times (never NAK), re-arming an idle packet the moment the last one completed. Because bulk IN is serviced as fast as the host asks, that made the Console re-read the pipe thousands of times a second at 10-20% of a core. The DCD crash cited for never-NAK was recorded with an interrupt endpoint's fixed-interval polling, which the bulk endpoint already avoids; the relaxed rule should be stress-tested under heavy EP0 traffic before release.
 
 This is a descriptor change. Implications:
 - Bump `bcdDevice` so Windows re-reads the descriptor instead of using its cached version.
@@ -60,7 +61,7 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 
 | ID   | Name                          | Class        | Description |
 |------|-------------------------------|--------------|-------------|
-| 0x00 | `NOTIFY_EVT_IDLE`             | Idle         | Keep-alive. Host discards. Exists only to keep EP armed. |
+| 0x00 | `NOTIFY_EVT_IDLE`             | Idle         | Keep-alive. Host discards. Sent after 100 ms without a packet, only to keep the pipe active. |
 | 0x01 | `NOTIFY_EVT_MASTER_VOLUME`    | v1 legacy    | Payload: `float db` (4 bytes). Emitted **in addition to** v2 for hosts that only speak v1. |
 | 0x02 | `NOTIFY_EVT_PARAM_CHANGED`    | Coalesceable | See §3.4. The primary v2 event. |
 | 0x03 | `NOTIFY_EVT_BULK_INVALIDATED` | Discrete     | See §3.5. Host should `REQ_GET_ALL_PARAMS`. |
@@ -272,7 +273,7 @@ static volatile uint32_t notify_overflow_count;
 3. Otherwise, append at `head`. The push **never fails**: if advancing `head` would collide with an active consumer's tail, that consumer's oldest entry is force-dropped first (its tail is force-advanced, counted in `notify_consumer_drops[c]`) and the push proceeds. Each pushed v2 entry is stamped `seq = ++notify_seq` here; the v1 legacy master-volume entry carries no seq and does not consume one (§4.7). The old "ring full -> drop, except BULK_INVALIDATED displaces the oldest" path is gone; force-advance guarantees delivery for every event type.
 
 **Drain rule (per consumer; USB runs from `usb_notify_tick` / `xfer_cb`, UART from `uart_ctrl_poll`):**
-1. If the consumer has no entry pending, arm with the 1-byte `NOTIFY_EVT_IDLE` packet (USB, to preserve the always-armed invariant, §3.1) or send nothing (UART).
+1. If the consumer has no entry pending, send nothing, except that USB arms the 1-byte `NOTIFY_EVT_IDLE` packet once 100 ms have passed without a packet (the paced keep-alive, §3.1).
 2. `notify_peek_next_for(consumer, ...)` formats the consumer's next entry into a buffer using the entry's stored `seq`; it does **not** allocate a seq and does **not** advance the tail. It skips entries not meant for this consumer (the v1 master-volume entry is USB-only).
 3. Hand the packet to the transport (USB: claim EP then `usbd_edpt_xfer`; UART: frame it as a `0x40` frame). On successful hand-off, `notify_commit_pop_for(consumer)` advances that consumer's tail.
 4. USB re-arms on `xfer_cb` (idle or next entry).
