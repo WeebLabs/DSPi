@@ -1,0 +1,495 @@
+/*
+ * Tube Preamp Emulation
+ *
+ * Biased asymmetric polynomial waveshaper with supply sag, a DC blocker and
+ * an optional transformer stage (low-band soft saturation + HF one-pole),
+ * run per output channel.  Tube types are rows of the four character
+ * parameters, applied at SET time only, so every type costs the same.
+ * Signal flow, parameter ranges and Q28 ceilings:
+ * Documentation/Features/tube_preamp_spec.md.
+ */
+
+#include <math.h>
+#include <string.h>
+#include "tube.h"
+#include "bulk_params.h"   // WireBulkParams offsets for change notifications
+#include "notify.h"
+
+// Live configuration; defaults are the 12AX7 row (spec section 2).
+volatile TubeConfig tube_config = {
+    .enabled      = false,
+    .tube_type    = TUBE_DEFAULT_TUBE_TYPE,
+    .rectifier    = TUBE_DEFAULT_RECTIFIER,
+    .xfmr_enabled = false,
+    .output_mask  = TUBE_DEFAULT_OUTPUT_MASK,
+    .drive_db     = TUBE_DEFAULT_DRIVE,
+    .bias_pct     = TUBE_DEFAULT_BIAS,
+    .asym_db      = TUBE_DEFAULT_ASYM,
+    .hardness_pct = TUBE_DEFAULT_HARDNESS,
+    .sag_pct      = TUBE_DEFAULT_SAG,
+    .xfmr_lf_hz   = TUBE_DEFAULT_XFMR_LF,
+    .xfmr_sat_pct = TUBE_DEFAULT_XFMR_SAT,
+    .xfmr_hf_hz   = TUBE_DEFAULT_XFMR_HF,
+    .mix_pct      = TUBE_DEFAULT_MIX,
+    .trim_db      = TUBE_DEFAULT_TRIM,
+};
+volatile bool tube_update_pending = false;
+
+TubeOutputState tube_output_state[NUM_OUTPUT_CHANNELS];
+
+volatile const TubeCoeffs *current_tube_coeffs = NULL;
+
+// Double buffer so tube_apply_config() never writes through the published
+// pointer while a packet is using it.
+static TubeCoeffs tb_coeff_bufs[2];
+static uint8_t tb_coeff_idx = 0;
+
+// Tube style rows: bias_pct, asym_db, hardness_pct, sag_pct (spec 2.3).
+// Index = tube_type - 1.  Values are wire-visible defaults, never renumber.
+typedef struct { float bias, asym, hardness, sag; } TubeRow;
+static const TubeRow tube_rows[TUBE_TYPE_MAX] = {
+    { 30.0f, 3.0f, 40.0f, 30.0f },   //  1 12AX7 / ECC83
+    { 25.0f, 3.0f, 35.0f, 25.0f },   //  2 5751
+    { 15.0f, 2.0f, 55.0f, 20.0f },   //  3 12AT7 / ECC81
+    { 20.0f, 4.0f, 25.0f, 30.0f },   //  4 12AY7
+    { 15.0f, 5.0f, 20.0f, 15.0f },   //  5 12AU7 / ECC82
+    { 20.0f, 6.0f, 15.0f, 20.0f },   //  6 6SN7
+    { 30.0f, 3.0f, 30.0f, 30.0f },   //  7 6SL7
+    { 10.0f, 2.0f, 60.0f, 10.0f },   //  8 6DJ8 / ECC88 / 6922
+    {  5.0f, 0.0f, 75.0f, 25.0f },   //  9 EF86 / 6267
+    {  8.0f, 1.0f, 65.0f, 30.0f },   // 10 6SJ7
+    {  0.0f, 0.0f, 50.0f, 45.0f },   // 11 EL84 / 6BQ5
+    {  0.0f, 0.0f, 60.0f, 55.0f },   // 12 EL34
+    {  0.0f, 0.0f, 55.0f, 35.0f },   // 13 6L6 / 5881
+    {  0.0f, 0.0f, 35.0f, 60.0f },   // 14 6V6
+    {  0.0f, 0.0f, 45.0f, 20.0f },   // 15 KT88 / 6550
+    { 35.0f, 6.0f, 10.0f, 25.0f },   // 16 300B / 2A3
+};
+
+// Rectifier rows: sag depth scale, attack ms, release ms (spec 2.9).
+typedef struct { float scale, att_ms, rel_ms; } RectRow;
+static const RectRow rect_rows[TUBE_RECT_MAX + 1] = {
+    { 0.0f,  0.0f,   0.0f },   // solid state: sag off
+    { 0.6f,  5.0f, 120.0f },   // GZ34 / 5AR4
+    { 1.0f,  8.0f, 200.0f },   // 5U4
+    { 1.3f, 10.0f, 300.0f },   // 5Y3
+};
+
+static inline float clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// ---------------------------------------------------------------------------
+// Indexed parameter access
+// ---------------------------------------------------------------------------
+
+// Write a clamped float field and notify at its wire offset.  Returns true
+// when the stored value changed (drives the tube-type custom reset).
+static bool set_float_field(volatile float *field, float v, float lo, float hi,
+                            uint16_t wire_off) {
+    v = clampf(v, lo, hi);
+    bool changed = (*field != v);
+    *field = v;
+    notify_param_write(wire_off, sizeof(float), &v);
+    return changed;
+}
+
+static void set_u8_field(volatile uint8_t *field, uint8_t v, uint16_t wire_off) {
+    *field = v;
+    notify_param_write(wire_off, 1, &v);
+}
+
+static void set_bool_field(volatile bool *field, bool v, uint16_t wire_off) {
+    *field = v;
+    uint8_t b = v ? 1 : 0;
+    notify_param_write(wire_off, 1, &b);
+}
+
+// Integer-valued parameters arrive as floats: round after clamping.
+static uint32_t round_clamp_u(float v, float hi) {
+    v = clampf(v, 0.0f, hi);
+    return (uint32_t)(v + 0.5f);
+}
+
+// Character knobs drop the tube type back to custom when they actually
+// change; a SET landing on the stored value leaves the type alone.
+static void custom_reset_if(bool changed) {
+    if (changed && tube_config.tube_type != TUBE_TYPE_CUSTOM) {
+        set_u8_field(&tube_config.tube_type, TUBE_TYPE_CUSTOM,
+                     offsetof(WireBulkParams, tube.tube_type));
+    }
+}
+
+bool tube_set_param(uint8_t index, float value) {
+    if (index >= TUBE_NUM_PARAMS) return false;
+    if (value != value) return true;   // NaN: ignore, never store
+
+    #define TUBE_OFF(f) ((uint16_t)offsetof(WireBulkParams, tube.f))
+    bool recompute = true;
+    switch (index) {
+    case TUBE_PARAM_ENABLED:
+        set_bool_field(&tube_config.enabled, value != 0.0f, TUBE_OFF(enabled));
+        break;
+    case TUBE_PARAM_OUTPUT_MASK: {
+        // Read live by the pipeline each packet; no recompute needed.
+        uint16_t m = (uint16_t)round_clamp_u(value, 65535.0f);
+        tube_config.output_mask = m;
+        notify_param_write(TUBE_OFF(output_mask), 2, &m);
+        recompute = false;
+        break;
+    }
+    case TUBE_PARAM_TUBE_TYPE: {
+        uint8_t t = (uint8_t)round_clamp_u(value, (float)TUBE_TYPE_MAX);
+        if (t != TUBE_TYPE_CUSTOM) {
+            const TubeRow *r = &tube_rows[t - 1];
+            set_float_field(&tube_config.bias_pct, r->bias, TUBE_BIAS_MIN, TUBE_BIAS_MAX, TUBE_OFF(bias_pct));
+            set_float_field(&tube_config.asym_db, r->asym, TUBE_ASYM_MIN, TUBE_ASYM_MAX, TUBE_OFF(asym_db));
+            set_float_field(&tube_config.hardness_pct, r->hardness, TUBE_HARDNESS_MIN, TUBE_HARDNESS_MAX, TUBE_OFF(hardness_pct));
+            set_float_field(&tube_config.sag_pct, r->sag, TUBE_SAG_MIN, TUBE_SAG_MAX, TUBE_OFF(sag_pct));
+        }
+        set_u8_field(&tube_config.tube_type, t, TUBE_OFF(tube_type));
+        break;
+    }
+    case TUBE_PARAM_DRIVE_DB:
+        set_float_field(&tube_config.drive_db, value, TUBE_DRIVE_MIN, TUBE_DRIVE_MAX, TUBE_OFF(drive_db));
+        break;
+    case TUBE_PARAM_BIAS_PCT:
+        custom_reset_if(set_float_field(&tube_config.bias_pct, value, TUBE_BIAS_MIN, TUBE_BIAS_MAX, TUBE_OFF(bias_pct)));
+        break;
+    case TUBE_PARAM_ASYM_DB:
+        custom_reset_if(set_float_field(&tube_config.asym_db, value, TUBE_ASYM_MIN, TUBE_ASYM_MAX, TUBE_OFF(asym_db)));
+        break;
+    case TUBE_PARAM_HARDNESS_PCT:
+        custom_reset_if(set_float_field(&tube_config.hardness_pct, value, TUBE_HARDNESS_MIN, TUBE_HARDNESS_MAX, TUBE_OFF(hardness_pct)));
+        break;
+    case TUBE_PARAM_SAG_PCT:
+        custom_reset_if(set_float_field(&tube_config.sag_pct, value, TUBE_SAG_MIN, TUBE_SAG_MAX, TUBE_OFF(sag_pct)));
+        break;
+    case TUBE_PARAM_RECTIFIER:
+        set_u8_field(&tube_config.rectifier, (uint8_t)round_clamp_u(value, (float)TUBE_RECT_MAX), TUBE_OFF(rectifier));
+        break;
+    case TUBE_PARAM_XFMR_ENABLED:
+        set_bool_field(&tube_config.xfmr_enabled, value != 0.0f, TUBE_OFF(xfmr_enabled));
+        break;
+    case TUBE_PARAM_XFMR_LF_HZ:
+        set_float_field(&tube_config.xfmr_lf_hz, value, TUBE_XFMR_LF_MIN, TUBE_XFMR_LF_MAX, TUBE_OFF(xfmr_lf_hz));
+        break;
+    case TUBE_PARAM_XFMR_SAT_PCT:
+        set_float_field(&tube_config.xfmr_sat_pct, value, TUBE_XFMR_SAT_MIN, TUBE_XFMR_SAT_MAX, TUBE_OFF(xfmr_sat_pct));
+        break;
+    case TUBE_PARAM_XFMR_HF_HZ:
+        set_float_field(&tube_config.xfmr_hf_hz, value, TUBE_XFMR_HF_MIN, TUBE_XFMR_HF_MAX, TUBE_OFF(xfmr_hf_hz));
+        break;
+    case TUBE_PARAM_MIX_PCT:
+        set_float_field(&tube_config.mix_pct, value, TUBE_MIX_MIN, TUBE_MIX_MAX, TUBE_OFF(mix_pct));
+        break;
+    case TUBE_PARAM_TRIM_DB:
+        set_float_field(&tube_config.trim_db, value, TUBE_TRIM_MIN, TUBE_TRIM_MAX, TUBE_OFF(trim_db));
+        break;
+    default:
+        return false;
+    }
+    #undef TUBE_OFF
+    if (recompute) tube_update_pending = true;
+    return true;
+}
+
+bool tube_get_param(uint8_t index, float *value) {
+    switch (index) {
+    case TUBE_PARAM_ENABLED:      *value = tube_config.enabled ? 1.0f : 0.0f; break;
+    case TUBE_PARAM_OUTPUT_MASK:  *value = (float)tube_config.output_mask; break;
+    case TUBE_PARAM_TUBE_TYPE:    *value = (float)tube_config.tube_type; break;
+    case TUBE_PARAM_DRIVE_DB:     *value = tube_config.drive_db; break;
+    case TUBE_PARAM_BIAS_PCT:     *value = tube_config.bias_pct; break;
+    case TUBE_PARAM_ASYM_DB:      *value = tube_config.asym_db; break;
+    case TUBE_PARAM_HARDNESS_PCT: *value = tube_config.hardness_pct; break;
+    case TUBE_PARAM_SAG_PCT:      *value = tube_config.sag_pct; break;
+    case TUBE_PARAM_RECTIFIER:    *value = (float)tube_config.rectifier; break;
+    case TUBE_PARAM_XFMR_ENABLED: *value = tube_config.xfmr_enabled ? 1.0f : 0.0f; break;
+    case TUBE_PARAM_XFMR_LF_HZ:   *value = tube_config.xfmr_lf_hz; break;
+    case TUBE_PARAM_XFMR_SAT_PCT: *value = tube_config.xfmr_sat_pct; break;
+    case TUBE_PARAM_XFMR_HF_HZ:   *value = tube_config.xfmr_hf_hz; break;
+    case TUBE_PARAM_MIX_PCT:      *value = tube_config.mix_pct; break;
+    case TUBE_PARAM_TRIM_DB:      *value = tube_config.trim_db; break;
+    default: return false;
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Coefficients
+// ---------------------------------------------------------------------------
+
+// One-pole coefficient a for y += a (x - y) at corner f (Hz), or time
+// constant tau (s) via f = 1 / (2 pi tau).
+static float onepole_a(float f_hz, float fs) {
+    return 1.0f - expf(-2.0f * 3.1415926535f * f_hz / fs);
+}
+static float onepole_a_tau(float tau_s, float fs) {
+    return 1.0f - expf(-1.0f / (tau_s * fs));
+}
+
+// Float shaper, used only to find the at-rest output v0 at recompute time.
+static float shaper_f(float t, float ratio_n, float c1, float c3, float c5,
+                      float s_p, float s_n) {
+    if (t < 0.0f) t *= ratio_n;
+    t = clampf(t, -1.0f, 1.0f);
+    float t2 = t * t;
+    float p = t * (c1 + t2 * (c3 + t2 * c5));
+    return p * (t >= 0.0f ? s_p : s_n);
+}
+
+void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, float sample_rate) {
+    if (!config->enabled || sample_rate < 1.0f) {
+        memset(coeffs, 0, sizeof(TubeCoeffs));
+        return;
+    }
+
+    float drive_db = clampf(config->drive_db, TUBE_DRIVE_MIN, TUBE_DRIVE_MAX);
+    float bias_pct = clampf(config->bias_pct, TUBE_BIAS_MIN, TUBE_BIAS_MAX);
+    float asym_db  = clampf(config->asym_db, TUBE_ASYM_MIN, TUBE_ASYM_MAX);
+    float hard_pct = clampf(config->hardness_pct, TUBE_HARDNESS_MIN, TUBE_HARDNESS_MAX);
+    float sag_pct  = clampf(config->sag_pct, TUBE_SAG_MIN, TUBE_SAG_MAX);
+    float xf_lf    = clampf(config->xfmr_lf_hz, TUBE_XFMR_LF_MIN, TUBE_XFMR_LF_MAX);
+    float xf_sat   = clampf(config->xfmr_sat_pct, TUBE_XFMR_SAT_MIN, TUBE_XFMR_SAT_MAX);
+    float xf_hf    = clampf(config->xfmr_hf_hz, TUBE_XFMR_HF_MIN, TUBE_XFMR_HF_MAX);
+    float mix_pct  = clampf(config->mix_pct, TUBE_MIX_MIN, TUBE_MIX_MAX);
+    float trim_db  = clampf(config->trim_db, TUBE_TRIM_MIN, TUBE_TRIM_MAX);
+    uint8_t rect   = config->rectifier > TUBE_RECT_MAX ? TUBE_RECT_MAX : config->rectifier;
+
+    // Shaper: knee fixed at t = 1, small-signal gain normalised to unity
+    float m = powf(10.0f, drive_db / 20.0f);              // 1.0 .. 15.85
+    float h = hard_pct * 0.01f;
+    float c1 = 1.5f + 0.375f * h;
+    float c3 = -0.5f - 0.75f * h;
+    float c5 = 0.375f * h;
+    float kn = powf(10.0f, asym_db / 20.0f);              // 0.25 .. 3.98
+    float ratio_n = 1.0f / kn;
+    float s_p = 1.0f / c1;
+    float s_n = kn / c1;                                  // <= 2.65
+    float b = bias_pct * 0.005f;                          // -0.5 .. 0.5
+    float v0 = shaper_f(b, ratio_n, c1, c3, c5, s_p, s_n);
+
+    // Supply sag
+    const RectRow *rr = &rect_rows[rect];
+    float depth = clampf(sag_pct * 0.01f * rr->scale, 0.0f, TUBE_SAG_DEPTH_MAX);
+    bool sag_on = (rect != TUBE_RECT_SOLID_STATE) && depth > 0.0f;
+    float sagk = m * depth;
+    float sag_att = sag_on ? onepole_a_tau(rr->att_ms * 1e-3f, sample_rate) : 0.0f;
+    float sag_rel = sag_on ? onepole_a_tau(rr->rel_ms * 1e-3f, sample_rate) : 0.0f;
+
+    float dc_r = expf(-2.0f * 3.1415926535f * TUBE_DC_BLOCK_HZ / sample_rate);
+    float meter_decay = expf(-1.0f / (TUBE_METER_TAU_MS * 1e-3f * sample_rate));
+
+    // Transformer: 6 dB/oct split, low-band knee 0 .. -18 dBFS, HF one-pole
+    float xf_a_lf = onepole_a(xf_lf, sample_rate);
+    float ks = powf(10.0f, -0.18f * xf_sat / 20.0f);      // 1.0 .. 0.126
+    float xf_inv_ks = 1.0f / ks;                          // <= 7.94
+    float xf_s = ks / 1.5f;
+    float xf_a_hf = (xf_hf >= TUBE_XFMR_HF_MAX) ? 1.0f : onepole_a(xf_hf, sample_rate);
+
+    float mix = mix_pct * 0.01f;
+    float dry_w = 1.0f - mix;
+    float wet_w = mix * powf(10.0f, trim_db / 20.0f);     // <= 3.98
+    // RP2040 mix budget: dry term <= 4 dry_w, wet term <= wet_w wet_lim, sum
+    // held at 7.5 of the 8.0 Q28 ceiling.  Bites only far above full scale.
+    float wet_lim = (wet_w > 1e-6f) ? clampf((7.5f - 4.0f * dry_w) / wet_w, 0.0f, TUBE_Q28_Y2_LIM)
+                                    : TUBE_Q28_Y2_LIM;
+
+    coeffs->xfmr_on = config->xfmr_enabled ? 1 : 0;
+    coeffs->sag_on = sag_on ? 1 : 0;
+
+#if PICO_RP2350
+    coeffs->m = m;           coeffs->sagk = sagk;       coeffs->bias = b;
+    coeffs->ratio_n = ratio_n;
+    coeffs->c1 = c1;         coeffs->c3 = c3;           coeffs->c5 = c5;
+    coeffs->s_p = s_p;       coeffs->s_n = s_n;         coeffs->v0 = v0;
+    coeffs->sag_att = sag_att; coeffs->sag_rel = sag_rel;
+    coeffs->dc_r = dc_r;     coeffs->meter_decay = meter_decay;
+    coeffs->xf_a_lf = xf_a_lf; coeffs->xf_inv_ks = xf_inv_ks;
+    coeffs->xf_s = xf_s;     coeffs->xf_a_hf = xf_a_hf;
+    coeffs->dry_w = dry_w;   coeffs->wet_w = wet_w;     coeffs->wet_lim = wet_lim;
+#else
+    // m, sagk and bias live in Q24 so the kernel's drive product lands in a
+    // "/16" domain that cannot wrap; everything else is Q28 (all < 8.0).
+    const float q28 = (float)(1LL << FILTER_SHIFT);
+    const float q24 = (float)(1LL << (FILTER_SHIFT - 4));
+    coeffs->m = (int32_t)(m * q24);
+    coeffs->sagk = (int32_t)(sagk * q24);
+    coeffs->bias = (int32_t)(b * q24);
+    coeffs->ratio_n = (int32_t)(ratio_n * q28);
+    coeffs->c1 = (int32_t)(c1 * q28);
+    coeffs->c3 = (int32_t)(c3 * q28);
+    coeffs->c5 = (int32_t)(c5 * q28);
+    coeffs->s_p = (int32_t)(s_p * q28);
+    coeffs->s_n = (int32_t)(s_n * q28);
+    coeffs->v0 = (int32_t)(v0 * q28);
+    coeffs->sag_att = (int32_t)(sag_att * q28);
+    coeffs->sag_rel = (int32_t)(sag_rel * q28);
+    coeffs->dc_r = (int32_t)(dc_r * q28);
+    coeffs->meter_decay = (int32_t)(meter_decay * q28);
+    coeffs->xf_a_lf = (int32_t)(xf_a_lf * q28);
+    // Q26: fast_mul_q28 needs |a| + |b| < 8, and 7.94 + 1.0 does not fit
+    coeffs->xf_inv_ks = (int32_t)(xf_inv_ks * q28 * 0.25f);
+    coeffs->xf_s = (int32_t)(xf_s * q28);
+    coeffs->xf_a_hf = (int32_t)(xf_a_hf * q28);
+    coeffs->dry_w = (int32_t)(dry_w * q28);
+    coeffs->wet_w = (int32_t)(wet_w * q28);
+    coeffs->wet_lim = (int32_t)(wet_lim * q28);
+#endif
+}
+
+void tube_apply_config(const TubeConfig *config, float sample_rate) {
+    // Compute into the inactive buffer, then publish the pointer.  The
+    // pipeline snapshots current_tube_coeffs once per packet.
+    TubeCoeffs *next = &tb_coeff_bufs[tb_coeff_idx ^ 1];
+    tube_compute_coefficients(next, config, sample_rate);
+    if (config->enabled) {
+        tb_coeff_idx ^= 1;
+        current_tube_coeffs = next;
+    } else {
+        current_tube_coeffs = NULL;
+    }
+}
+
+uint16_t tube_meter_u16(uint8_t out) {
+    if (out >= NUM_OUTPUT_CHANNELS) return 0;
+    tb_num_t m = tube_output_state[out].meter;
+#if PICO_RP2350
+    if (m < 0.0f) m = 0.0f;
+    return (uint16_t)(fminf(1.0f, m) * 32767.0f);
+#else
+    if (m < 0) m = 0;
+    if (m >= (1 << FILTER_SHIFT)) return 32767;
+    return (uint16_t)(m >> (FILTER_SHIFT - 15));
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Kernel
+// ---------------------------------------------------------------------------
+
+#if PICO_RP2350
+
+DSP_TIME_CRITICAL
+void tube_process_output_block(const TubeCoeffs * __restrict c,
+                               TubeOutputState * __restrict st,
+                               float * __restrict buf, uint32_t n) {
+    float env = st->env, dc_x1 = st->dc_x1, dc_y1 = st->dc_y1;
+    float xf_lp = st->xf_lp, xf_hf = st->xf_hf, meter = st->meter;
+    const bool sag_on = c->sag_on, xfmr_on = c->xfmr_on;
+
+    for (uint32_t i = 0; i < n; i++) {
+        float x = buf[i];
+
+        // Sag pulls the drive down with the previous sample's knee drive
+        float m_eff = sag_on ? c->m - c->sagk * env : c->m;
+        float t = m_eff * x + c->bias;
+        if (t < 0.0f) t *= c->ratio_n;
+        if (t > 1.0f) t = 1.0f; else if (t < -1.0f) t = -1.0f;
+
+        float t2 = t * t;
+        float p = t * (c->c1 + t2 * (c->c3 + t2 * c->c5));
+        float v = p * (t >= 0.0f ? c->s_p : c->s_n) - c->v0;
+
+        // DC blocker: asymmetric clipping leaves a level-dependent offset
+        float y = v - dc_x1 + c->dc_r * dc_y1;
+        dc_x1 = v; dc_y1 = y;
+
+        float a = fabsf(t);
+        env += (a - env) * (a > env ? c->sag_att : c->sag_rel);
+        float mt = meter * c->meter_decay;
+        meter = a > mt ? a : mt;
+
+        if (xfmr_on) {
+            xf_lp += c->xf_a_lf * (y - xf_lp);
+            float high = y - xf_lp;
+            float u = xf_lp * c->xf_inv_ks;
+            if (u > 1.0f) u = 1.0f; else if (u < -1.0f) u = -1.0f;
+            float ls = (1.5f * u - 0.5f * u * u * u) * c->xf_s;
+            y = high + ls;
+            xf_hf += c->xf_a_hf * (y - xf_hf);
+            y = xf_hf;
+        }
+
+        buf[i] = c->dry_w * x + c->wet_w * y;
+    }
+
+    st->env = env; st->dc_x1 = dc_x1; st->dc_y1 = dc_y1;
+    st->xf_lp = xf_lp; st->xf_hf = xf_hf; st->meter = meter;
+}
+
+#else
+
+static inline int32_t clamp_one(int32_t v) {
+    const int32_t one = 1 << FILTER_SHIFT;
+    return v > one ? one : (v < -one ? -one : v);
+}
+static inline int32_t clamp_lim(int32_t v, int32_t lim) {
+    return v > lim ? lim : (v < -lim ? -lim : v);
+}
+
+DSP_TIME_CRITICAL
+void tube_process_output_block(const TubeCoeffs * __restrict c,
+                               TubeOutputState * __restrict st,
+                               int32_t * __restrict buf, uint32_t n) {
+    int32_t env = st->env, dc_x1 = st->dc_x1, dc_y1 = st->dc_y1;
+    int32_t xf_lp = st->xf_lp, xf_hf = st->xf_hf, meter = st->meter;
+    const bool sag_on = c->sag_on, xfmr_on = c->xfmr_on;
+    const int32_t one16 = 1 << (FILTER_SHIFT - 4);
+    const int32_t four = 4 << FILTER_SHIFT;
+    const int32_t y_lim = (int32_t)(TUBE_Q28_Y_LIM * (1 << FILTER_SHIFT));
+    const int32_t y2_lim = (int32_t)(TUBE_Q28_Y2_LIM * (1 << FILTER_SHIFT));
+    const int32_t wet_lim = c->wet_lim;
+
+    for (uint32_t i = 0; i < n; i++) {
+        int32_t x = buf[i];
+        int32_t x4 = clamp_lim(x, four);
+
+        // Drive product in a /16 domain: m (Q24) x input clamped to +/-4.0
+        // stays under 4.0.  Pre-clamping t to +/-4 before the negative knee
+        // ratio keeps that product in range; see spec 2.4 for the one lossy
+        // corner (past +12 dBFS at 0 dB drive with extreme bias and asymmetry).
+        int32_t m_eff = sag_on ? c->m - fast_mul_q28(c->sagk, env) : c->m;
+        int32_t t16 = fast_mul_q28(m_eff, x4) + c->bias;
+        if (t16 < 0) t16 = fast_mul_q28(clamp_lim(t16, 4 * one16), c->ratio_n);
+        if (t16 > one16) t16 = one16; else if (t16 < -one16) t16 = -one16;
+        int32_t t = t16 << 4;
+
+        int32_t t2 = fast_mul_q28(t, t);
+        int32_t p = fast_mul_q28(t, c->c1 + fast_mul_q28(t2, c->c3 + fast_mul_q28(t2, c->c5)));
+        int32_t v = fast_mul_q28(p, t >= 0 ? c->s_p : c->s_n) - c->v0;
+
+        // DC blocker output is bounded by 2 max|v| = 5.3; the state keeps the
+        // true value, the clamped copy bounds every later operand.
+        int32_t y = v - dc_x1 + fast_mul_q28(c->dc_r, dc_y1);
+        dc_x1 = v; dc_y1 = y;
+        y = clamp_lim(y, y_lim);
+
+        int32_t a = t < 0 ? -t : t;
+        env += fast_mul_q28(a - env, a > env ? c->sag_att : c->sag_rel);
+        int32_t mt = fast_mul_q28(meter, c->meter_decay);
+        meter = a > mt ? a : mt;
+
+        if (xfmr_on) {
+            xf_lp += fast_mul_q28(c->xf_a_lf, y - xf_lp);
+            int32_t high = y - xf_lp;
+            // xf_inv_ks is Q26 (see tube_compute_coefficients); shift back
+            int32_t u = clamp_one(fast_mul_q28(clamp_one(xf_lp), c->xf_inv_ks) << 2);
+            int32_t u3 = fast_mul_q28(fast_mul_q28(u, u), u);
+            int32_t ls = fast_mul_q28(u + (u >> 1) - (u3 >> 1), c->xf_s);
+            y = clamp_lim(high + ls, y2_lim);
+            xf_hf += fast_mul_q28(c->xf_a_hf, y - xf_hf);
+            y = xf_hf;
+        }
+
+        // Mix budget: 4 dry_w + wet_w wet_lim <= 7.5 (see wet_lim)
+        y = clamp_lim(y, wet_lim);
+        buf[i] = fast_mul_q28(c->dry_w, x4) + fast_mul_q28(c->wet_w, y);
+    }
+
+    st->env = env; st->dc_x1 = dc_x1; st->dc_y1 = dc_y1;
+    st->xf_lp = xf_lp; st->xf_hf = xf_hf; st->meter = meter;
+}
+
+#endif

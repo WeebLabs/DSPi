@@ -5,6 +5,7 @@ Loudness   0x58-0x5D
 Crossfeed  0x5E-0x67
 Matrix     0x70/0x71
 Subharm    0x10-0x1F, 0x2C-0x2F, 0xA9-0xAE
+Tube       0x3E-0x3F, 0x81
 """
 
 import struct
@@ -311,3 +312,174 @@ def subharm_bulk_roundtrip(dev, profile, chk):
         chk.approx(dev.get_f32(op), val, 1e-3, f"pre-test 0x{op:02X} value restored")
     chk.eq(dev.get_u8(OP.GET_SUBHARM_SELECT), saved_mode, "pre-test select mode restored")
     chk.eq(dev.get_u8(OP.GET_SUBHARM_LINK), saved_link, "pre-test link restored")
+
+
+# --- Tube preamp ------------------------------------------------------------
+
+# Parameter indices travel in wValue on both 0x3E and 0x3F; they mirror
+# TUBE_PARAM_* in firmware/DSPi/tube.h and are the wire/flash field order.
+T_ENABLED, T_MASK, T_TYPE, T_DRIVE = 0, 1, 2, 3
+T_BIAS, T_ASYM, T_HARDNESS, T_SAG = 4, 5, 6, 7
+T_RECTIFIER, T_XFMR_EN, T_XFMR_LF, T_XFMR_SAT = 8, 9, 10, 11
+T_XFMR_HF, T_MIX, T_TRIM = 12, 13, 14
+T_NUM_PARAMS = 15
+
+
+def _tube_set(dev, index, value):
+    return dev.set_f32(OP.SET_TUBE_PARAM, value, wvalue=index)
+
+
+def _tube_get(dev, index):
+    return dev.get_f32(OP.GET_TUBE_PARAM, wvalue=index)
+
+
+@test("dynamics", mutating=True)
+def tube_param_roundtrip(dev, profile, chk):
+    """0x3E/0x3F carry the parameter index in wValue: drive round-trips."""
+    prev = _tube_get(dev, T_DRIVE)
+    float_roundtrip(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 12.0,
+                    wvalue=T_DRIVE, label="drive 12 dB")
+    _tube_set(dev, T_DRIVE, prev)
+
+
+@test("dynamics", mutating=True)
+def tube_param_clamps(dev, profile, chk):
+    """0x3E clamps every parameter: drive to [0,24] dB, mix to [0,100] %."""
+    prev_drive = _tube_get(dev, T_DRIVE)
+    prev_mix = _tube_get(dev, T_MIX)
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 99.0, 24.0,
+                wvalue=T_DRIVE, label="drive high clamp")
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, -5.0, 0.0,
+                wvalue=T_DRIVE, label="drive low clamp")
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 150.0, 100.0,
+                wvalue=T_MIX, label="mix high clamp")
+    _tube_set(dev, T_DRIVE, prev_drive)
+    _tube_set(dev, T_MIX, prev_mix)
+
+
+# Character fields must go back before the type: restoring a non-custom type
+# last re-runs its row lookup, so the two can never be left disagreeing.
+_T_CHARACTER = (T_BIAS, T_ASYM, T_HARDNESS, T_SAG)
+
+
+def _tube_save_voicing(dev):
+    return [(idx, _tube_get(dev, idx)) for idx in _T_CHARACTER + (T_TYPE,)]
+
+
+def _tube_restore_voicing(dev, saved):
+    for idx, val in saved:
+        _tube_set(dev, idx, val)
+
+
+@test("dynamics", mutating=True)
+def tube_enable_bool(dev, profile, chk):
+    """Index 0 is a bool on a float wire: it reads back as exactly 1.0 / 0.0."""
+    prev = _tube_get(dev, T_ENABLED)
+    _tube_set(dev, T_ENABLED, 1.0)
+    chk.approx(_tube_get(dev, T_ENABLED), 1.0, 1e-6, "enabled set 1")
+    _tube_set(dev, T_ENABLED, 0.0)
+    chk.approx(_tube_get(dev, T_ENABLED), 0.0, 1e-6, "enabled set 0")
+    _tube_set(dev, T_ENABLED, prev)
+
+
+@test("dynamics", mutating=True)
+def tube_mask_roundtrip(dev, profile, chk):
+    """Index 1 is a uint16 mask carried as a float and read back unrounded."""
+    prev = _tube_get(dev, T_MASK)
+    _tube_set(dev, T_MASK, 3.0)
+    chk.approx(_tube_get(dev, T_MASK), 3.0, 1e-6, "mask 0x0003")
+    _tube_set(dev, T_MASK, 65535.0)
+    chk.approx(_tube_get(dev, T_MASK), 65535.0, 1e-6, "mask 0xFFFF")
+    _tube_set(dev, T_MASK, prev)
+
+
+@test("dynamics", mutating=True)
+def tube_type_loads_row(dev, profile, chk):
+    """Index 2 copies a character row in; editing a row field flips it to Custom."""
+    saved = _tube_save_voicing(dev)
+    _tube_set(dev, T_TYPE, 16.0)   # 300B / 2A3
+    chk.approx(_tube_get(dev, T_BIAS), 35.0, 1e-3, "300B bias")
+    chk.approx(_tube_get(dev, T_ASYM), 6.0, 1e-3, "300B asymmetry")
+    chk.approx(_tube_get(dev, T_HARDNESS), 10.0, 1e-3, "300B hardness")
+    chk.approx(_tube_get(dev, T_SAG), 25.0, 1e-3, "300B sag")
+    # A character edit that lands on a different value must reset the picker.
+    _tube_set(dev, T_BIAS, 12.5)
+    chk.approx(_tube_get(dev, T_TYPE), 0.0, 1e-6, "bias edit flips type to Custom")
+    _tube_restore_voicing(dev, saved)
+
+
+@test("dynamics", mutating=True)
+def tube_same_value_edit_keeps_type(dev, profile, chk):
+    """A character SET landing on the stored value must leave the type picker alone."""
+    saved = _tube_save_voicing(dev)
+    _tube_set(dev, T_TYPE, 16.0)   # 300B / 2A3: bias 35, asym 6, hardness 10, sag 25
+    _tube_set(dev, T_BIAS, 35.0)   # identical to what the row just stored
+    chk.approx(_tube_get(dev, T_TYPE), 16.0, 1e-6, "same-value bias SET keeps type 16")
+    _tube_set(dev, T_BIAS, 36.0)
+    chk.approx(_tube_get(dev, T_TYPE), 0.0, 1e-6, "changed bias SET flips type to Custom")
+    _tube_restore_voicing(dev, saved)
+
+
+@test("dynamics")
+def tube_bad_index_stalls(dev, profile, chk):
+    """A GET past the last parameter index STALLs (never returns stale bytes)."""
+    chk.stalls(lambda: dev.get(OP.GET_TUBE_PARAM, 4, wvalue=T_NUM_PARAMS),
+               f"index {T_NUM_PARAMS} STALL")
+
+
+@test("dynamics", mutating=True)
+def tube_bad_set_is_silent_noop(dev, profile, chk):
+    """SET at an index past the last one, or with a short payload, ACKs and changes nothing."""
+    prev = _tube_get(dev, T_DRIVE)
+    _tube_set(dev, T_DRIVE, 9.0)
+    chk.no_stall(lambda: _tube_set(dev, T_NUM_PARAMS, 21.0), "bad SET index no STALL")
+    chk.approx(_tube_get(dev, T_DRIVE), 9.0, 1e-3, "drive unchanged by bad-index SET")
+    # Under four bytes the dispatcher never reaches tube_set_param at all.
+    chk.no_stall(lambda: dev.set(OP.SET_TUBE_PARAM, b"\x00\x00", wvalue=T_DRIVE),
+                 "short tube payload no STALL")
+    chk.approx(_tube_get(dev, T_DRIVE), 9.0, 1e-3, "drive unchanged by short SET")
+    _tube_set(dev, T_DRIVE, prev)
+
+
+@test("dynamics")
+def tube_meter_length(dev, profile, chk):
+    """0x81 returns one uint16 saturation peak per output channel."""
+    n = profile.num_output_channels
+    data = dev.get(OP.GET_TUBE_METER, 2 * n)
+    chk.eq(len(data), 2 * n, f"{n} outputs -> {2 * n} bytes")
+    peaks = struct.unpack(f"<{n}H", data)
+    chk.ok(all(p <= 32767 for p in peaks), "every peak inside the 0..32767 status scale")
+
+
+@test("dynamics", mutating=True)
+def tube_bulk_roundtrip(dev, profile, chk):
+    """The V31 tube wire section carries the module through GET/SET_ALL_PARAMS."""
+    before = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+    probes = ((T_DRIVE, 15.0, 0.0), (T_MIX, 40.0, 100.0), (T_TRIM, -6.0, 0.0),
+              (T_XFMR_LF, 120.0, 20.0))
+    saved = {idx: _tube_get(dev, idx) for idx, _, _ in probes}
+    voicing = _tube_save_voicing(dev)
+    for idx, want, _ in probes:
+        _tube_set(dev, idx, want)
+    # Park on a Custom voicing no row can produce (EL34 leaves bias at 0), so an
+    # apply that re-derived the character fields from tube_type would lose it.
+    _tube_set(dev, T_TYPE, 12.0)   # EL34
+    _tube_set(dev, T_BIAS, 40.0)   # drops the picker to 0 Custom
+    chk.approx(_tube_get(dev, T_TYPE), 0.0, 1e-6, "bias edit armed Custom before the GET")
+    blob = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+    # Clear the live values, then prove the blob restores every one of them.
+    for idx, _, clear in probes:
+        _tube_set(dev, idx, clear)
+    _tube_set(dev, T_TYPE, 16.0)   # 300B row overwrites bias with 35
+    dev.set(OP.SET_ALL_PARAMS, blob)
+    dev.wait_ready()
+    for idx, want, _ in probes:
+        chk.approx(_tube_get(dev, idx), want, 1e-3, f"index {idx} restored")
+    chk.approx(_tube_get(dev, T_BIAS), 40.0, 1e-3, "custom bias survives the apply")
+    chk.approx(_tube_get(dev, T_TYPE), 0.0, 1e-6, "type 0 Custom survives the apply")
+    dev.set(OP.SET_ALL_PARAMS, before)
+    dev.wait_ready()
+    for idx, val in saved.items():
+        chk.approx(_tube_get(dev, idx), val, 1e-3, f"pre-test index {idx} restored")
+    for idx, val in voicing:
+        chk.approx(_tube_get(dev, idx), val, 1e-3, f"pre-test voicing index {idx} restored")

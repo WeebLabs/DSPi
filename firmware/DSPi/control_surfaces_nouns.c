@@ -29,6 +29,7 @@
 #include "dsp_pipeline.h"
 #include "psybass.h"
 #include "subharm.h"
+#include "tube.h"
 #include "upmix.h"
 #include "loudness.h"
 #if PICO_RP2350
@@ -296,6 +297,19 @@ const CsNounDesc cs_noun_table[CS_NOUN_COUNT] = {
     [CS_NOUN_AUX_LEVEL]       = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
                                   0, Q8(100), CS_UNIT_PERCENT,
                                   CS_TARGET_AUX, CS_MAX_BINDINGS, 0 },
+    // Tube preamp (caps v19).  Untargeted: one global config with its own
+    // output mask, as for psybass and subharm.
+    [CS_NOUN_TUBE]            = { CS_KIND_BOOL, 0, CS_BOOL_RW, 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_TUBE_DRIVE]      = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  Q8(TUBE_DRIVE_MIN), Q8(TUBE_DRIVE_MAX),
+                                  CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_TUBE_TYPE]       = { CS_KIND_ENUM, TUBE_TYPE_MAX + 1,
+                                  CS_ENUM_RW, 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_TUBE_MIX]        = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  Q8(TUBE_MIX_MIN), Q8(TUBE_MIX_MAX),
+                                  CS_UNIT_PERCENT, CS_TARGET_NONE, 0, 0 },
 };
 
 // ---------------------------------------------------------------------------
@@ -480,6 +494,10 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
         case CS_NOUN_DISPLAY_EDIT:       return cs_display_edit_armed() ? 1.0f : 0.0f;
         case CS_NOUN_AUX:                return control_surfaces_aux_state(target) ? 1.0f : 0.0f;
         case CS_NOUN_AUX_LEVEL:          return (float)control_surfaces_aux_level(target) / 256.0f;
+        case CS_NOUN_TUBE:               return tube_config.enabled ? 1.0f : 0.0f;
+        case CS_NOUN_TUBE_DRIVE:         return tube_config.drive_db;
+        case CS_NOUN_TUBE_TYPE:          return (float)tube_config.tube_type;
+        case CS_NOUN_TUBE_MIX:           return tube_config.mix_pct;
         default: return 0.0f;
     }
 }
@@ -553,6 +571,25 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             r = vendor_dispatch_set(CTRL_SOURCE_GPIO,
                                     subharm_req[noun - CS_NOUN_SUBHARM_LOW],
                                     0, 0, (const uint8_t *)&f, sizeof(f));
+            break;
+        }
+        case CS_NOUN_TUBE:
+        case CS_NOUN_TUBE_DRIVE:
+        case CS_NOUN_TUBE_TYPE:
+        case CS_NOUN_TUBE_MIX: {
+            // One indexed command, index in wValue.  The payload is a float32
+            // for every parameter, so the enable and the type must NOT fall
+            // through to the one-byte default arm below.
+            static const uint8_t tube_param[] = {
+                TUBE_PARAM_ENABLED, TUBE_PARAM_DRIVE_DB,
+                TUBE_PARAM_TUBE_TYPE, TUBE_PARAM_MIX_PCT,
+            };
+            float f = (noun == CS_NOUN_TUBE) ? ((value != 0.0f) ? 1.0f : 0.0f)
+                    : (noun == CS_NOUN_TUBE_TYPE) ? (float)(uint8_t)value
+                                                  : value;
+            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_TUBE_PARAM,
+                                    tube_param[noun - CS_NOUN_TUBE], 0,
+                                    (const uint8_t *)&f, sizeof(f));
             break;
         }
 #if PICO_RP2350

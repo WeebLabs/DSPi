@@ -225,6 +225,12 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_PSYBASS_MASK        0x3C
 #define REQ_GET_PSYBASS_MASK        0x3D
 
+// Tube preamp emulation (indexed parameter access; tube.h).  One SET/GET pair
+// covers every parameter, so adding one must not add an opcode here.
+#define REQ_SET_TUBE_PARAM          0x3E  // wValue low byte = index (tube.h TUBE_PARAM_*), 4-byte float32 LE
+#define REQ_GET_TUBE_PARAM          0x3F  // wValue low byte = index, returns 4-byte float32 LE
+#define REQ_GET_TUBE_METER          0x81  // NUM_OUTPUT_CHANNELS x uint16 LE saturation peaks
+
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
 #define REQ_GET_EQ_PARAM    0x43
@@ -878,6 +884,9 @@ typedef struct {
     uint16_t          subharm_mask;    // Bit k = process output k
     uint8_t           subharm_flags;   // SUBHARM_FLAG_* (link pairs, solo)
     uint8_t           subharm_phase;   // decimation phase at packet start
+    // Tube preamp snapshot for THIS packet; same single-view rationale.
+    const void       *tube_coeffs;     // TubeCoeffs or NULL = off
+    uint16_t          tube_mask;       // Bit k = process output k
 } Core1EqWork;
 
 // ----------------------------------------------------------------------------

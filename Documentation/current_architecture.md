@@ -57,7 +57,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-07-05*
+*Last updated: 2026-09-18 (tube preamp module added)*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -82,6 +82,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `loudness.h` | Loudness API, coefficient structs |
 | `leveller.c` | Volume leveller (feedforward RMS compressor) |
 | `leveller.h` | Volume leveller API, state/config structs |
+| `tube.c` | Tube preamp emulation: biased asymmetric waveshaper, supply sag, optional transformer stage, tube and rectifier tables, shared per-output kernel |
+| `tube.h` | Tube preamp API, `TubeConfig`/`TubeCoeffs`/`TubeOutputState` structs, parameter index enum, ranges and defaults |
 | `lg_sound_sync.c` | LG Sound Sync detection state machine + apply path (drives host volume from LG-decoded TV remote) |
 | `lg_sound_sync.h` | LG Sound Sync API, status struct, default constant |
 | `i2s_input.c` | I2S RX integration: master/slave PIO lifecycle, IRQ-less DMA ring, poll into pipeline |
@@ -707,9 +709,9 @@ RP2040 is unaffected: its band-major assembly kernels (`dsp_process_rp2040.S`) a
 
 **FPU configuration (RP2350):** Both cores set FPSCR flush-to-zero (FZ) and default-NaN (DN) bits at startup. This prevents denormalized floats from causing performance penalties as SVF integrator and biquad states decay toward zero after silence.
 
-**FP contraction (added 2026-08-05, RP2350 only):** `dsp_pipeline.c` is compiled with `-ffp-contract=off`, so the EQ kernels use separate VMUL/VADD instead of fused VFMA. Hardware measurement on the CPU meter established that the M33 FMA pipeline is throughput-bound with an effective VFMA occupancy of roughly 2 to 2.5 cycles versus 1 for VMUL/VADD: de-contraction emits ~58 % more FP instructions (and eliminates the VMOV accumulator copies VFMA's destructive form forces) yet measures 14 to 24 % less EQ cost on every kernel path, SVF and biquad alike, with no register spills. Loads/stores already overlap FPU issue, so FP-op *occupancy* is the only currency that matters in these loops. That is why the fused kernel only became worthwhile once its arms were specialized to match the single kernels' op counts (above): while it used the generic 9-op form it was giving back most of what the saved memory traffic won. Precision cost of double rounding is negligible and was verified on hardware: loopback THD, noise floor, and flat-path residual byte-identical to the contracted build, filter responses within 0.01 dB, and host analysis puts the noise penalty at ~1.5 dB on a −137 dB re-signal error floor. The flag is per-file: other DSP translation units (loudness, psybass, leveller, crossfeed, upmix) still contract and are candidates for the same measure-then-decide treatment. `subharm.c` (added 2026-09-02) also compiles with `-ffp-contract=off`: a static count of its kernel loop shows FMAs 70 to 0, VMOV accumulator copies 25 to 4, FP instructions 109 to 175, and an occupancy-weighted estimate about 9 % fewer cycles per sample; the hardware CPU-meter confirmation is still pending. `rta_bass.c` (added 2026-09-12) compiles with `-O3 -ffp-contract=off` on RP2350 only. Its float bass kernel goes from 8 fused multiply-adds to none, at a cost of 256 B of RAM code, and the speed gain is unmeasured (`RtaStatus.bass_busy_us_per_s`). RP2040 keeps `-O2`: its fixed-point kernel has no FP ops, and `-O3` only unrolled the loops for 1.6 KB more RAM code.
+**FP contraction (added 2026-08-05, RP2350 only):** `dsp_pipeline.c` is compiled with `-ffp-contract=off`, so the EQ kernels use separate VMUL/VADD instead of fused VFMA. Hardware measurement on the CPU meter established that the M33 FMA pipeline is throughput-bound with an effective VFMA occupancy of roughly 2 to 2.5 cycles versus 1 for VMUL/VADD: de-contraction emits ~58 % more FP instructions (and eliminates the VMOV accumulator copies VFMA's destructive form forces) yet measures 14 to 24 % less EQ cost on every kernel path, SVF and biquad alike, with no register spills. Loads/stores already overlap FPU issue, so FP-op *occupancy* is the only currency that matters in these loops. That is why the fused kernel only became worthwhile once its arms were specialized to match the single kernels' op counts (above): while it used the generic 9-op form it was giving back most of what the saved memory traffic won. Precision cost of double rounding is negligible and was verified on hardware: loopback THD, noise floor, and flat-path residual byte-identical to the contracted build, filter responses within 0.01 dB, and host analysis puts the noise penalty at ~1.5 dB on a −137 dB re-signal error floor. The flag is per-file: other DSP translation units (loudness, psybass, leveller, crossfeed, upmix) still contract and are candidates for the same measure-then-decide treatment. `subharm.c` (added 2026-09-02) also compiles with `-ffp-contract=off`: a static count of its kernel loop shows FMAs 70 to 0, VMOV accumulator copies 25 to 4, FP instructions 109 to 175, and an occupancy-weighted estimate about 9 % fewer cycles per sample; the hardware CPU-meter confirmation is still pending. `tube.c` (added 2026-09-18) compiles with `-O3 -ffp-contract=off` on the same static-estimate basis as `subharm.c`, and is likewise unmeasured on the CPU meter. `rta_bass.c` (added 2026-09-12) compiles with `-O3 -ffp-contract=off` on RP2350 only. Its float bass kernel goes from 8 fused multiply-adds to none, at a cost of 256 B of RAM code, and the speed gain is unmeasured (`RtaStatus.bass_busy_us_per_s`). RP2040 keeps `-O2`: its fixed-point kernel has no FP ops, and `-O3` only unrolled the loops for 1.6 KB more RAM code.
 
-*Last updated: 2026-09-12 (rta_bass.c FP contraction, RP2350 only; previously 2026-08-06)*
+*Last updated: 2026-09-18 (tube.c FP contraction, static estimate only; 2026-09-12: rta_bass.c FP contraction, RP2350 only; previously 2026-08-06)*
 
 **Memory impact:** Biquad struct grows from ~48 to ~68 bytes on RP2350. With 110 EQ biquads at the larger size: ~3 KB additional BSS. (Loudness no longer uses the full `Biquad` struct; since 2026-07-09 its per-output shelf state is a separate minimal array, `loudness_output_state`, 144 B on RP2350 / 80 B on RP2040.)
 
@@ -1280,6 +1282,123 @@ Follows the psybass module pattern:
 
 ---
 
+## Tube Preamp Emulation
+*Last updated: 2026-09-18 (RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
+
+### Purpose
+
+Valve-style harmonic colour, compression and optional output-transformer character, applied per output channel. The module sits in the same family as Psychoacoustic Bass and the Subharmonic Synthesizer. One global configuration, a 16-bit output mask, shared double-buffered coefficients, per-output state, zero added latency.
+
+It is a characterful approximation, not a circuit simulation. A single static waveshaper with an adjustable operating point (bias), separate positive and negative knees (asymmetry), a knee-hardness blend and a slow supply-sag envelope covers the audible differences between the popular preamp and power tubes. A tube-type selector loads a row of those four character values at SET time, so the kernel costs the same for every type. Both platforms. Module: `firmware/DSPi/tube.c` / `tube.h`. Full spec: `Documentation/Features/tube_preamp_spec.md`. Status: **HW-untested** (verified against an offline model of the kernel).
+
+### Signal Flow (per output channel, in place)
+
+```
+m_eff = m - m * depth * env                 // supply sag; env follows |t|
+t     = m_eff * x + b                       // b = operating point in knee units
+t     = (t < 0) ? t * ratio_n : t           // negative knee offset
+t     = clamp(t, -1, +1)                    // the positive knee is fixed at t = 1
+v     = t (c1 + t^2 (c3 + t^2 c5)) * (t >= 0 ? s_p : s_n) - v0
+y     = DC_block(v)                         // one-pole high pass at 5 Hz
+if transformer:
+    low = LP1(y, xfmr_lf_hz), high = y - low
+    y   = LP1(high + sat(low), xfmr_hf_hz)  // sat = cubic soft clip, low band only
+out   = (1 - mix) * x + mix * trim * y
+env  += (|t| - env) * (|t| > env ? a_att : a_rel)
+meter = max(|t|, meter * decay)             // 300 ms decay
+```
+
+- **The shaper.** `p(t) = t (c1 + t^2 (c3 + t^2 c5))` blends a cubic soft knee at hardness 0 into a quintic hard knee at hardness 100. Both reach exactly 1 at t = 1 with zero slope, so the clamp is continuous in value and in slope at every hardness. `s_p` and `s_n` normalise the small-signal gain to unity, so hardness never changes the level of clean material.
+- **Even harmonics from the bias.** `b` shifts the operating point along the curve, so second-harmonic content rises with signal level the way it does in a real single-ended stage. `v0` is the shaper's output at rest and is subtracted, so enabling the effect produces no step. The DC blocker then removes the level-dependent offset that asymmetric clipping creates.
+- **Supply sag.** A one-pole follower of how hard the stage is being driven into the knee pulls the drive down slowly. The rectifier selector presets the depth scale and the attack and release times. Effective depth is capped at 0.9 so the gain never reaches zero, and a solid-state rectifier disables the stage outright.
+- **Transformer.** A one-pole split at `xfmr_lf_hz` feeds a cubic soft clipper on the low band only, then a one-pole rolls the sum off at `xfmr_hf_hz`. Core saturation scales with voltage over frequency, so a 6 dB per octave split is the physically correct slope. With the stage off its state is zero and the kernel skips it on a flag hoisted out of the sample loop, rather than running pass-through coefficients.
+- **Zero added latency.** Every stage is memoryless or a one-pole IIR and the dry path is never delayed, so inter-output-slot sample alignment is untouched by construction (the CLAUDE.md inviolable guarantee).
+
+### Tube Types and Rectifiers
+
+`tube_type` 1..16 names a row of `bias_pct`, `asym_db`, `hardness_pct` and `sag_pct`, running from the 12AX7 to the 300B. Setting the type copies its row into those four parameters, stores the type and notifies every field it changed. Setting any of those four to a value different from the one stored resets the type to 0 (Custom) and notifies that byte, while a SET that lands on the value already there leaves the type alone. Bulk apply and preset load restore the stored fields verbatim and never run the row lookup, so a preset saved as a 12AX7 reloads with the voicing it was saved with even if the row table changes in a later firmware. Push-pull power rows carry zero bias and zero asymmetry, because a push-pull stage cancels even harmonics by construction; their character comes from hardness, sag and the transformer stage.
+
+`rectifier` 0..3 selects solid state (sag off), GZ34, 5U4 or 5Y3. Each is a row of sag depth scale, attack time and release time.
+
+### Platform Implementation
+
+The kernel exists once, in `tube.c`, written against a number-type abstraction in `tube.h` (`tb_num_t`, with `TB_ZERO` and `TB_ONE`). `tube_process_output_block()` is an out-of-line `DSP_TIME_CRITICAL` function shared by all six call sites, so its RAM text is paid once. It measures 858 B on RP2350 and 1,220 B on RP2040.
+
+- **RP2350:** `tb_num_t` is float and the kernel is plain single-precision arithmetic.
+- **RP2040:** `tb_num_t` is Q28 `int32_t` and every multiply is `fast_mul_q28`. `m`, `sagk` and `bias` are carried in **Q24** rather than Q28 so that drive up to 15.85 linear (24 dB) fits, which puts the drive product in a domain sixteen times smaller that cannot wrap. Every other coefficient is Q28 and is verified against the +/-8.0 representable range. The negative-knee ratio is at most 3.98, the transformer reciprocal knee at most 7.94 (the -18 dBFS floor on `xfmr_sat_pct` is what bounds it) and the wet weight at most 3.98.
+
+  The constraint that shapes the whole kernel is `fast_mul_q28`'s own. It splits each operand into 16-bit halves and sums the cross products in an `int32`, so it needs the **sum of the two operand magnitudes** to stay below 8.0. A small product is not enough. Every operand is therefore bounded at the point of use.
+
+  | Clamp | Limit | Where |
+  |-------|-------|-------|
+  | Shaper input | +/-4.0 | before the drive multiply |
+  | Driven value | +/-4 knee units | before the negative-knee ratio multiply |
+  | DC-blocker output copy | +/-3.4 (`TUBE_Q28_Y_LIM`) | state keeps the true value |
+  | Transformer output | +/-3.4 (`TUBE_Q28_Y2_LIM`) | before the HF one-pole |
+  | Transformer low band | +/-1.0 | before the knee multiply; the reciprocal knee is carried in **Q26** and shifted back |
+  | Wet signal | `wet_lim` = clamp((7.5 - 4 `dry_w`) / `wet_w`, 0, 3.4) | before the output mix |
+
+  The dry term in `wet_lim` uses the +/-4.0-clamped input, so the final sum can never exceed 7.5. The one lossy corner is an input beyond +12 dBFS at 0 dB drive with maximum bias and asymmetry, where the negative half saturates slightly early. Everywhere else the clamps land on material the +/-1 knee clamp would flatten anyway.
+
+A host model that emulates `fast_mul_q28` exactly (16-bit halves, `int32` partial sums, wrap detection) reports **zero integer overflows** over 404 parameter combinations times two transformer states, with hot (+6 dBFS) and realistic stimuli. Its worst in-range difference from the float kernel is about **-73 dBFS**, which is the helper's truncation floor rather than a kernel error. Small-signal gain is unity at every hardness, and silence in gives exactly zero out for all 16 tube rows.
+
+### Parameters
+
+One global config (`TubeConfig`) applied to the output channels selected by `output_mask`. Every parameter is addressed by a small integer index through one SET/GET pair, and on the wire every value is a little-endian IEEE 754 float32, the booleans and enums included. All SETs clamp, so a GET after a SET returns the clamped value.
+
+| Index | Parameter | Type | Range | Default | Description |
+|-------|-----------|------|-------|---------|-------------|
+| 0 | enabled | bool | 0/1 | false | Enable/disable the effect |
+| 1 | output_mask | uint16 | 0x0000-0xFFFF | 0xFFFF | Bit k: process output channel k; read live, no recompute |
+| 2 | tube_type | enum | 0..16 | 1 (12AX7) | 0 = Custom; 1..16 each load a character row |
+| 3 | drive_db | float | 0..24 dB | 6 | Gain ahead of the shaper; at 0 dB a full-scale input just reaches the knee |
+| 4 | bias_pct | float | -100..+100 % | 30 | Operating point, `b = bias_pct / 200` |
+| 5 | asym_db | float | -12..+12 dB | 3 | How much later the negative half reaches its knee |
+| 6 | hardness_pct | float | 0..100 | 40 | Cubic (0) to quintic (100) knee blend |
+| 7 | sag_pct | float | 0..100 % | 30 | Supply sag depth before the rectifier scale |
+| 8 | rectifier | enum | 0..3 | 1 (GZ34) | 0 = solid state, which turns sag off |
+| 9 | xfmr_enabled | bool | 0/1 | false | Transformer stage |
+| 10 | xfmr_lf_hz | float | 20..300 Hz | 80 | Corner of the low-band split |
+| 11 | xfmr_sat_pct | float | 0..100 % | 30 | Low-band knee, 0 dBFS at 0 % to -18 dBFS at 100 % |
+| 12 | xfmr_hf_hz | float | 2000..20000 Hz | 20000 | HF rolloff; 20000 is bypass (coefficient exactly 1.0) |
+| 13 | mix_pct | float | 0..100 % | 100 | Dry/wet blend; the dry path is the untouched input |
+| 14 | trim_db | float | -12..+12 dB | 0 | Level applied to the wet path only |
+
+Defaults for indices 4 to 7 are the 12AX7 row.
+
+### Saturation Meter
+
+`tube_meter_u16()` returns a per-output decaying peak of `|t|` taken after the knee clamp, on the same 0..32767 scale as `SystemStatusPacket.peaks`, where 32767 means the stage was fully clipped. The decay is 300 ms, so a host can poll a meter widget at 10 to 20 Hz. It is runtime only and appears in no wire section, preset slot or notification.
+
+### Coefficient Publish & Per-Output State
+
+Follows the psybass module pattern:
+
+- **Double-buffered publish.** `tube.c` computes one shared `TubeCoeffs` (about 22 values) into the inactive buffer and atomically publishes the pointer via `volatile const TubeCoeffs *current_tube_coeffs` (**NULL = disabled**). Vendor SET handlers go through `tube_set_param()`, which clamps, writes `tube_config` and raises `tube_update_pending`; the main loop consumes the flag and calls `tube_apply_config()`. Coefficients are also recomputed on rate change (`perform_rate_change()` raises the flag). Initial setup runs once in `core0_init()`.
+- **Per-output state ownership.** `TubeOutputState tube_output_state[NUM_OUTPUT_CHANNELS]` lives in `tube.c` and is 24 bytes per output, holding the sag envelope, the DC-blocker input and output, the transformer low-band and HF one-pole states and the meter. Each output is only ever touched by the core that owns it in the current pipeline mode.
+- **Skip-and-reset predicate.** An output runs tube when coeffs are published AND its mask bit is set AND it is matrix-enabled AND not muted AND not carrying a siggen RAW test signal. Otherwise its state is reset each packet (`tube_reset_output_state()`) so re-entry starts clean. The predicate is wired at all six pipeline call sites, the single-core and dual-core output loops on both platform branches of `audio_pipeline.c` and the two Core 1 EQ-worker output loops in `pdm_generator.c`, and the disabled PDM output's state is kept cleared in EQ_WORKER mode.
+- **Two-core coherence.** Core 0 snapshots the coefficient pointer and `output_mask` once per packet and hands them to Core 1 through the `Core1EqWork` fields `tube_coeffs` and `tube_mask`, so both cores apply one consistent view for the whole packet (the same single-view rationale as the psybass and subharm fields).
+- **Chain position.** Tube runs per output, post-matrix, after crossfeed, after the subharmonic synthesizer and after psybass, and before the crossover, per-output PEQ, gain, loudness and delay. Running after the two bass modules is deliberate, so the stage saturates the enhanced bass rather than the other way round. Pre-crossover placement puts the saturator where a real preamp sits ahead of an active crossover, so a subwoofer output saturates the full-band program and then low-passes the result while a tweeter output keeps the harmonics the bass generated. Because tube runs pre-gain, its character does not change with volume.
+- **RAM cost.** 552 B of `.bss` on RP2350 (216 B of per-output state, two `TubeCoeffs` buffers and the config) and 452 B on RP2040 (120 B of state), plus the shared kernel's 858 B and 1,220 B of RAM text. See "Memory Layout".
+- **CPU cost.** Estimated at about 45 FP ops per sample per processed output on RP2350. RP2040 costs **11 `fast_mul_q28` per sample** in the base path, plus 1 with sag on, plus 1 on the negative half of the waveform, plus 6 with the transformer on, so 13 to 19 is the typical range. Both figures are **static estimates and have not been measured on the CPU meter**. With the effect disabled the published pointer is NULL and a processed output costs one pointer test.
+
+### Persistence & Control
+
+- **Wire format V31:** `WireTubeParams` (48 bytes) is tail-appended to `WireBulkParams` at offset 5980, taking the packet total to **6028 bytes**. Bulk collect copies `tube_config` straight out. Bulk apply copies the fields verbatim, clamps `tube_type` and `rectifier` because the coefficient tables index on them, leaves the floats to be clamped downstream and raises the pending flag. It never runs the tube-type row lookup, which would overwrite a saved Custom voicing.
+- **Preset slot V38:** the same fifteen values are tail-appended to `PresetSlot` (struct grows 48 bytes; `SLOT_DATA_SIZE_V38`), gated on `slot->version >= 38` in `apply_slot_to_live()`. V21..V37 slots still validate via `slot_data_size_for_version()` and load the `TUBE_DEFAULT_*` values with the effect off. Factory reset applies the same defaults. The pending flag is raised on both branches, so a load that turns the effect off also unpublishes its coefficients.
+- **Vendor commands:** `0x3E` and `0x3F` are one indexed SET/GET pair covering every parameter, with the index in the low byte of wValue and a 4-byte float32 LE payload. Adding a parameter later therefore costs no opcode. An out-of-range index makes the SET a no-op and the GET STALL, so a host can feature-detect the module from index 0 alone; a SET shorter than four bytes is a no-op, and a NaN is ignored while the SET still reports success. Coercion differs by type. The booleans (indices 0 and 9) are **non-zero-is-true**, not rounded, so 0.4 enables. The enums and `output_mask` are **rounded to nearest and then clamped**. `tube_set_param()` owns the clamping and the pending flag, and it calls `notify_param_write` on every SET whether or not the stored value changed (deduplicating a no-change write is the notify layer's job, not the module's), so a tube-type SET that names a row always issues five notifications (four knobs plus the type byte) and a knob SET that drops the type to Custom emits two. Only `output_mask` skips the recompute flag, because the pipeline reads it live each packet. See the Vendor Command Reference table.
+- **Saturation meter:** `REQ_GET_TUBE_METER` (0x81) returns `NUM_OUTPUT_CHANNELS` uint16 LE values from `tube_meter_u16()`. 18 bytes on RP2350, 10 on RP2040.
+- **Control Surfaces:** caps v19 nouns 70-73 (`TUBE`, `TUBE_DRIVE`, `TUBE_TYPE`, `TUBE_MIX`). All four dispatch through `REQ_SET_TUBE_PARAM` with the parameter index in wValue, so all four carry a float32 payload, the bool and the enum included. Display labels are "Tube", "Tube Drive", "Tube Type" and "Tube Mix", and the type noun has its own 17-entry short-form label table.
+
+### Interactions and Edge Cases
+
+- **Headroom.** The shaper output is bounded by `max(s_p, s_n)`, at most 2.65 with the negative knee 12 dB later, and the transformer saturator is bounded by its own knee. The wet path can therefore exceed 0 dBFS only through `trim_db`.
+- **Aliasing.** The shaper runs at the native rate with no oversampling. Harmonic content is bounded to fifth order below the clamp, so aliasing is audible only on bright material at heavy drive at 44.1 and 48 kHz, and is negligible at 96 kHz.
+- **RAW signal generator outputs** bypass the effect and reset its state, as for psybass.
+- **Masking and alignment.** Masking the effect per output changes that output's phase response only through one-pole IIR stages, the same category as a PEQ band, and never its sample alignment.
+
+---
+
 ## Stereo Upmixer
 *Last updated: 2026-08-01 (centre engine OFF mode)*
 
@@ -1696,7 +1815,7 @@ through `cs_names` like any other slot. (Historical: V20 alone carried a
 292-byte `cs_aux` table here, dropped at V21.)
 
 ### Preset Slot Data (Version 12)
-*Last updated: 2026-09-04 (subharm third band / selectivity / ceiling / link, slot V37; `SLOT_DATA_VERSION` now 37)*
+*Last updated: 2026-09-18 (tube preamp, slot V38; `SLOT_DATA_VERSION` now 38; 2026-09-04: subharm third band / selectivity / ceiling / link, slot V37)*
 
 | Field | Description |
 |-------|-------------|
@@ -1714,6 +1833,7 @@ through `cs_names` like any other slot. (Historical: V20 alone carried a
 | Crossfeed | enabled, preset, ITD, custom fc/feed, output_pair_mask (V27+, tail-appended; older slots default 0x01) |
 | Psychoacoustic bass | enabled, output_mask, cutoff, harmonics, drive, character, original (V31+, tail-appended 24 bytes, `SLOT_DATA_VERSION` 31; older slots load disabled/all-outputs defaults) |
 | Subharmonic synthesizer | enabled, output_mask, low_db, high_db, boost_db (V36+, tail-appended 16 bytes); top_db, select_depth, select_hold_ms, ceiling_db, select_mode, link_pairs (V37+, tail-appended 20 more bytes, `SLOT_DATA_VERSION` 37). Pre-V36 slots load disabled/all-outputs defaults; V36 slots load the `SUBHARM_DEFAULT_*` values for the V37 fields. `solo` is runtime-only and never stored |
+| Tube preamp | enabled, tube_type, rectifier, xfmr_enabled, output_mask and ten floats (V38+, tail-appended 48 bytes, `SLOT_DATA_VERSION` 38). Pre-V38 slots load the `TUBE_DEFAULT_*` values with the effect off. The stored character fields are restored verbatim, never re-derived from the tube_type row, so a preset keeps its voicing across firmware |
 | Stereo upmixer | enabled, centre/surround modes, presence_q1 (V34+, int8 dB * 2, was reserved), ten floats (V33+, tail-appended 44 bytes; `SLOT_DATA_VERSION` now 34, size unchanged from V33; RP2350 only, gated on version >= 33; older slots load disabled defaults; RP2040 stores zeros and never applies them) |
 | Matrix mixer | crosspoints + output channels |
 | Pin config | NUM_PIN_OUTPUTS pin assignments (always stored, conditionally loaded) |
@@ -1947,7 +2067,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-09-12 (6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-09-18 (tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; current .data and free-RAM figures; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -1963,8 +2083,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
-| RAM code+rodata+data (.data) | 44,376 B (was 108,692 under copy_to_ram) | 48,688 B (was 147,332 under copy_to_ram) |
-| Free RAM | ~80,596 B (was ~10,476) | ~182,228 B (was ~75,540) |
+| RAM code+rodata+data (.data) | 64,464 B of the 65,536 B budget | 91,496 B of the 92,160 B budget |
+| Free RAM | 46,748 B | 77,320 B |
 | Custom XIP linker script | `memmap_dspi_rp2040_xip.ld` (+divider/int64/bit-ops IN_RAM defines) | `memmap_dspi_rp2350_xip.ld` |
 
 ### DSP Processing
@@ -1993,7 +2113,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Input capture arena (shared SPDIF FIFO / I2S rings / ADAT ring) | 12,288 B, 4096-aligned (SPDIF FIFO is the largest member) | 32,768 B, 8192-aligned (the four I2S rings are the largest member) |
 | USB input bit depth | 16-bit or 24-bit (alt) | 16/24-bit (stereo) or 16-bit (multichannel) |
 | AS alt settings | 0, 1 (16-bit), 2 (24-bit) | 0, 1, 2, 3 (4ch), 4 (6ch), 5 (8ch) |
-| Wire / slot version | V30 / V37 | V30 / V37 |
+| Wire / slot version | V31 / V38 | V31 / V38 |
 | S/PDIF bit depth | 24-bit | 24-bit |
 | S/PDIF input conversion | 24-bit sign-extended full-scale → Q28 via `>> 2` (equivalent to `sample << 6`) | 24-bit sign-extended full-scale → float via `÷ 2147483648.0f` |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
@@ -2002,6 +2122,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Crossfeed | Per output pair, post-matrix (PASS 4.5); 2 pairs; `output_pair_mask` (default pair 1) | Per output pair, post-matrix (PASS 4.5); 4 pairs; `output_pair_mask` (default pair 1). Both platforms: shared coeffs, per-pair state, works in every input mode |
 | Psychoacoustic bass | Per output, pre-crossover; RBJ Q28 biquads (with pre-drive low-band clamp) | Per output, pre-crossover; TPT SVF float. Both platforms: missing-fundamental NLD, `output_mask`, zero added latency |
 | Subharmonic synthesizer | Per output, pre-crossover, ahead of psybass; same kernel in Q28 through `fast_mul_q28` (band clamp before the divider); 10-byte sub meter (5 outputs) | Per output, pre-crossover, ahead of psybass; same kernel in float; 18-byte sub meter (9 outputs). Both platforms: TPT SVF band split, hysteresis octave dividers, phase-aligned sum, LF bell, `output_mask`, selectivity, sub ceiling, pair link, runtime solo, headroom reading, zero added latency |
+| Tube preamp | Per output, pre-crossover, after psybass; same kernel in Q28 through `fast_mul_q28`, whose operand magnitudes must sum below 8.0 (drive in Q24, Q26 transformer knee, clamps on the shaper input, driven value, DC-blocker output, transformer output and low band, and the wet signal); 11 multiplies per sample base, 13 to 19 typical; 1,220 B of shared RAM text; 10-byte saturation meter (5 outputs) | Per output, pre-crossover, after psybass; same kernel in float; 18-byte saturation meter (9 outputs). Both platforms: biased asymmetric waveshaper with a blended knee hardness, supply sag, DC blocker, optional transformer stage, 16 tube-type rows, `output_mask`, zero added latency |
 | Spectrum analyser (RTA) | Q15 `int16_t` kernel; default order 9 (512 points), max 10 (1024); measured per-bin dynamic range 78 dB (`RtaCaps.dynamic_range_db` = 78); 5 tracked channels; Q27 continuous 10–200 Hz bass bank (6th-order bands) with 64-bit power; ~6.9 KB analyser BSS | Float kernel; default order 10 (1024 points), max 10 (1024); dynamic range 120 dB, limited by the wire level byte rather than arithmetic; 9 tracked channels; float continuous 10–200 Hz bass bank (6th-order bands); ~11.2 KB analyser BSS |
 | Stereo upmixer | Not available (compiled out; matrix untouched) | Stereo input only: derives C/Ls/Rs into matrix rows 2..4 (passive/adaptive/off centre; off/passive/adaptive surround). Zero-latency steering; deliberate per-row surround Haas delay |
 | EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |
@@ -2077,7 +2198,19 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-09-12 (shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-09-18 (tube preamp: BSS +452 B RP2040 / +552 B RP2350, shared kernel 1,220 B RP2040 / 858 B RP2350 of RAM text; current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+
+> **Tube preamp (2026-09-18).** The module adds **452 B of BSS on RP2040**
+> (120 B of `tube_output_state` for 5 outputs, two `TubeCoeffs` buffers and the
+> 48-byte config) and **552 B on RP2350** (216 B of state for 9 outputs, the same
+> two buffers and the config). Its one shared `DSP_TIME_CRITICAL` kernel,
+> `tube_process_output_block`, is **1,220 B of RAM text on RP2040** and **858 B on
+> RP2350**, paid once for all six per-output call sites. Measured after the change,
+> `.data` is 64,464 B of the 65,536 B budget on RP2040 (was 62,816 B) and 91,496 B
+> of 92,160 B on RP2350 (was 90,176 B), BSS is 150,932 B (was 150,480 B) and
+> 355,472 B (was 354,920 B), and free RAM is 46,748 B (was 48,848 B) and 77,320 B
+> (was 79,192 B). Both platforms stay inside the `check_ram_placement.py` `.data`
+> budget. No audio buffers or delay lines change. See "Tube Preamp Emulation".
 
 > **Spectrum analyser (2026-09-12).** Capture remains **2,048 B RP2040 /
 > 4,096 B RP2350**, with a 529 B raw-bin frame. The continuous 10–200 Hz bank
@@ -2310,10 +2443,10 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Consumer pools + silence (static, 2 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~27 KB |
 | I2S RX DMA ring (1024 × 4, 4 KB aligned) | 4 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~132 KB** (measured: 134,932 B; unchanged by the XIP migration) |
-| RAM code+rodata+data (.data section, hot set only) | 44,376 B (was 108,692 under copy_to_ram) |
+| **Total BSS** | **~147 KB** (measured 150,932 B after the tube preamp) |
+| RAM code+rodata+data (.data section, hot set only) | 64,464 B after the tube preamp (was 62,816 B), within the 65,536 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | ~80,596 B (was ~10,476 under copy_to_ram) |
+| Free RAM | 46,748 B (per scripts/check_ram_placement.py, after the tube preamp; was 48,848 B) |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -2340,10 +2473,10 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | ADAT RX ring (`adat_rx_ring`, 2048 × 4, 8 KB aligned) | 8 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
-| **Total BSS** | **~346 KB** (measured 353,884 B after the stereo upmixer, + ~12.3 KB over the prior build. RP2040 unchanged: the feature is compiled out and the matrix is untouched) |
-| RAM code+rodata+data (.data section, hot set only) | 84,360 B (was 147,332 under copy_to_ram; +5,256 B for the fused SVF pair arms, 2026-08-06). Over the 73,728 B `check_ram_placement.py` budget, which now fails by 10,632 B; the budget has not been re-cut since the ADAT input receiver raised it to 72 KB |
+| **Total BSS** | **~347 KB** (measured 355,472 B after the tube preamp; was 354,920 B) |
+| RAM code+rodata+data (.data section, hot set only) | 91,496 B after the tube preamp (was 90,176 B), within the 92,160 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 103,964 B (per scripts/check_ram_placement.py, includes vector table + 2 KB heap reserve accounting) |
+| Free RAM | 77,320 B (per scripts/check_ram_placement.py, after the tube preamp; was 79,192 B; includes vector table + 2 KB heap reserve accounting) |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -2589,7 +2722,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-09-07 (caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
+*Last updated: 2026-09-18 (caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, an
@@ -2785,6 +2918,15 @@ addresses the binding slot holding the output), status code
 0 on every non-aux type, so pre-v18 bindings remain valid unchanged; no
 structure changes size and no other GET changes length, so external clients
 doing exact-length readback are unaffected until they opt in.
+
+**Caps v19** (2026-09-18) appends four nouns (70-73) for the tube preamp, with no
+structure or stored-config changes. `TUBE` (enable), `TUBE_DRIVE` (0..24 dB),
+`TUBE_TYPE` (enum, 17 values, 0 = Custom) and `TUBE_MIX` (0..100 % dry/wet) all
+dispatch through the one indexed command `REQ_SET_TUBE_PARAM` (`0x3E`) with the
+parameter index in wValue, so all four carry a float32 payload, the bool and the
+enum included. `noun_count` goes to 74. Display labels are "Tube", "Tube Drive",
+"Tube Type" and "Tube Mix", and the type noun has its own 17-entry short-form
+label table. The authority for the effect is `tube_preamp_spec.md`.
 
 ### File layout
 
@@ -3394,7 +3536,7 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-09-12 (RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+*Last updated: 2026-09-18 (tube preamp: indexed 0x3E/0x3F and the 0x81 saturation meter; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -3474,6 +3616,8 @@ lands on a hot path and the audio path is untouched.
 | REQ_GET_PSYBASS_ORIGINAL | 0x3B | IN | Get original low-band level (4-byte float) |
 | REQ_SET_PSYBASS_MASK | 0x3C | OUT | Set output mask (2-byte LE uint16; read live, no recompute) |
 | REQ_GET_PSYBASS_MASK | 0x3D | IN | Get output mask (2-byte LE uint16) |
+| REQ_SET_TUBE_PARAM | 0x3E | OUT | Set one tube preamp parameter (wValue low byte = index 0-14, payload = 4-byte LE IEEE754 float for every parameter, the bool and enum ones included). Clamped; an out-of-range index, a payload shorter than 4 bytes and a NaN are all no-ops. Every index except 1 (`output_mask`) raises the coefficient recompute |
+| REQ_GET_TUBE_PARAM | 0x3F | IN | Get one tube preamp parameter (wValue low byte = index; 4-byte float). An unknown index STALLs, so index 0 doubles as the feature probe |
 | REQ_SET_EQ_PARAM | 0x42 | OUT | Set EQ band parameters; optional 18-byte payload appends a `uint16` LE Linkwitz-Transform `qp` (`Q*512`) at offsets 16-17 (a 16-byte payload preserves the stored `qp`) |
 | REQ_GET_EQ_PARAM | 0x43 | IN | Get one EQ scalar; param codes 0-4 as before (type/freq/Q/gain_db/bypass), param code 5 returns `qp_x512` as a `u32` |
 | REQ_SET_PREAMP | 0x44 | OUT | Set preamp gain (legacy: sets all input channels) |
@@ -3535,6 +3679,7 @@ lands on a hot path and the audio path is untouched.
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID, fw version (legacy nibbles + full-width minor/patch + beta ordinal), output count; 7 bytes |
 | REQ_GET_BUILD_INFO | 0x80 | IN | Get 64-byte build stamp: git describe [0..47] + build date [48..59]; provenance only, never gated on |
+| REQ_GET_TUBE_METER | 0x81 | IN | Get the per-output tube saturation peak (NUM_OUTPUT_CHANNELS x uint16 LE, 0..32767 each; 18 B RP2350 / 10 B RP2040) |
 | REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
 | REQ_SET_CS_BINDING | 0x84 | OUT | Set a Control Surfaces binding (wValue=slot 0-15, payload=24-byte CsBinding, required; short payload = INVALID_VALUE); apply-live-only preview, deferred, poll 0x87; persist via REQ_CS_SAVE (see Control Surfaces) |
 | REQ_GET_CS_BINDING | 0x85 | IN | Get the live 24-byte CsBinding for a slot (wValue=slot) |
@@ -3643,11 +3788,11 @@ lands on a hot path and the audio path is untouched.
 | REQ_GET_I2S_CLOCK_PIN_MODE | 0xFF | IN | Get live I2S clock-pin mode (returns uint8_t: 0 = unified, 1 = split) |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-09-04 (wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
+*Last updated: 2026-09-18 (wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
 
 Transfers the complete DSP state in a single USB control transfer (3664 bytes at V11/V12), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 30, total 5980 bytes); packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), user volume/mute (`WireUserVolume`, 16 bytes), DAC hardware mute (`WireDacHwMute`, 16 bytes, V10+), and **crossover bands** (`WireCrossoverConfig`, 704 bytes = 11 × 4 × `WireBandParams`, V11+). V12 claims two reserved bytes inside `WireInputConfig` for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000); V12 payloads are byte-identical in size to V11. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 PEQ bands, 4 crossover bands per channel). Unused entries zero-padded; for crossover, master rows (channel < `CH_OUT_1`) are zeroed on collect and skipped on apply. **V20** repurposes the `WireCrossfeedParams` reserved byte (offset 3) as `output_pair_mask` (bit p = crossfeed on output pair p); struct sizes are unchanged. **V22** carries the Linkwitz-Transform target `Q` in the EQ `WireBandParams.reserved[2]` bytes (`uint16` LE, `Q*512`; zero for non-LT types), so struct sizes stay unchanged. (V21 claimed one `WireInputConfig` reserved byte for the I2S clock master/slave mode, also size-neutral.) **V23** tail-appends the 24-byte `WirePsybassParams` (psychoacoustic bass: `enabled` + `output_mask` + five floats), bringing the total to 5900 bytes. **V24** claims three `WireInputConfig` reserved bytes for the ADAT input (`adat_input_pin`, `adat_input_enabled_p1`, `adat_clock_mode_p1`, each 0 = absent/keep-live); struct sizes and the 5900-byte total are unchanged. **V25** tail-appends the 44-byte `WireUpmixParams` (RP2350 stereo upmixer: enabled + centre/surround modes + reserved + ten floats; layout-identical to `UpmixConfigPacket`), bringing the total to 5944 bytes; the section is zeroed on collect and ignored on apply on RP2040. **V28** widens `WireInputConfig.spdif_rx_pin_ext` from 2 to 3 entries (SPDIF input 4), consuming that section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and the 5944-byte total and every later section offset are unchanged. The input-config section now has no reserved bytes left. **V29** tail-appends the 16-byte `WireSubharmParams` (subharmonic synthesizer: `enabled` + `reserved0` + `output_mask` + `low_db`/`high_db`/`boost_db`) at offset 5944, bringing the total to 5960 bytes. **V30** grows that section to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, bringing the total to 5980 bytes; the section offset stays 5944 and `solo` is deliberately absent (runtime-only).
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 31, total 6028 bytes); packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), user volume/mute (`WireUserVolume`, 16 bytes), DAC hardware mute (`WireDacHwMute`, 16 bytes, V10+), and **crossover bands** (`WireCrossoverConfig`, 704 bytes = 11 × 4 × `WireBandParams`, V11+). V12 claims two reserved bytes inside `WireInputConfig` for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000); V12 payloads are byte-identical in size to V11. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 PEQ bands, 4 crossover bands per channel). Unused entries zero-padded; for crossover, master rows (channel < `CH_OUT_1`) are zeroed on collect and skipped on apply. **V20** repurposes the `WireCrossfeedParams` reserved byte (offset 3) as `output_pair_mask` (bit p = crossfeed on output pair p); struct sizes are unchanged. **V22** carries the Linkwitz-Transform target `Q` in the EQ `WireBandParams.reserved[2]` bytes (`uint16` LE, `Q*512`; zero for non-LT types), so struct sizes stay unchanged. (V21 claimed one `WireInputConfig` reserved byte for the I2S clock master/slave mode, also size-neutral.) **V23** tail-appends the 24-byte `WirePsybassParams` (psychoacoustic bass: `enabled` + `output_mask` + five floats), bringing the total to 5900 bytes. **V24** claims three `WireInputConfig` reserved bytes for the ADAT input (`adat_input_pin`, `adat_input_enabled_p1`, `adat_clock_mode_p1`, each 0 = absent/keep-live); struct sizes and the 5900-byte total are unchanged. **V25** tail-appends the 44-byte `WireUpmixParams` (RP2350 stereo upmixer: enabled + centre/surround modes + reserved + ten floats; layout-identical to `UpmixConfigPacket`), bringing the total to 5944 bytes; the section is zeroed on collect and ignored on apply on RP2040. **V28** widens `WireInputConfig.spdif_rx_pin_ext` from 2 to 3 entries (SPDIF input 4), consuming that section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and the 5944-byte total and every later section offset are unchanged. The input-config section now has no reserved bytes left. **V29** tail-appends the 16-byte `WireSubharmParams` (subharmonic synthesizer: `enabled` + `reserved0` + `output_mask` + `low_db`/`high_db`/`boost_db`) at offset 5944, bringing the total to 5960 bytes. **V30** grows that section to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, bringing the total to 5980 bytes; the section offset stays 5944 and `solo` is deliberately absent (runtime-only). **V31** tail-appends the 48-byte `WireTubeParams` (tube preamp: `enabled` + `tube_type` + `rectifier` + `xfmr_enabled` + `output_mask` + two reserved bytes + ten floats) at offset 5980, bringing the total to 6028 bytes. Apply clamps `tube_type` and `rectifier` and copies the character fields verbatim, never running the tube-type row lookup, which would overwrite a saved Custom voicing.
 
 **Per-version size anchors** live in `bulk_params.h` (`WIRE_BULK_PARAMS_V{N}_SIZE`, N=2..12). Each legacy-section apply gate inside `bulk_params_apply()` compares `payload_length` against its own version's anchor, NOT against `sizeof(WireBulkParams)`. Without this discipline, growing the struct would silently lock older payloads out of the very tail sections they own (e.g. a V10 payload would stop applying its DAC-mute section the moment V11 was added). V<11 payloads leave crossover state untouched on apply; V<12 payloads leave the I2S input pin/rate untouched.
 

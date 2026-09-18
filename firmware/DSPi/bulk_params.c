@@ -21,6 +21,7 @@
 #include "dac_hw_mute.h"
 #include "adat_output.h"
 #include "upmix.h"     // upmix_config / upmix_update_pending (RP2350; header body #if-guarded)
+#include "tube.h"      // tube_config / tube_update_pending
 #include "notify.h"
 #include "uart_control.h"
 #include "i2c_control.h"
@@ -55,8 +56,11 @@ _Static_assert(offsetof(WireBulkParams, upmix) == 5900,
 _Static_assert(sizeof(WireSubharmParams) == 36, "V30 subharm section must be 36 bytes");
 _Static_assert(offsetof(WireBulkParams, subharm) == 5944,
                "V29 subharm section must sit at wire offset 5944");
-_Static_assert(sizeof(WireBulkParams) == 5980,
-               "V30 wire total must be 5980 bytes");
+_Static_assert(sizeof(WireTubeParams) == 48, "V31 tube section must be 48 bytes");
+_Static_assert(offsetof(WireBulkParams, tube) == 5980,
+               "V31 tube section must sit at wire offset 5980");
+_Static_assert(sizeof(WireBulkParams) == 6028,
+               "V31 wire total must be 6028 bytes");
 #if PICO_RP2350
 _Static_assert(sizeof(WireUpmixParams) == sizeof(UpmixConfigPacket),
                "WireUpmixParams and UpmixConfigPacket must have identical layout");
@@ -338,6 +342,25 @@ void bulk_params_collect(WireBulkParams *out) {
     out->subharm.link_pairs     = subharm_config.link_pairs ? 1 : 0;
     out->subharm.reserved1[0]   = 0;
     out->subharm.reserved1[1]   = 0;
+
+    // Tube preamp (V31+).  One global config copied straight from live state.
+    out->tube.enabled      = tube_config.enabled ? 1 : 0;
+    out->tube.tube_type    = tube_config.tube_type;
+    out->tube.rectifier    = tube_config.rectifier;
+    out->tube.xfmr_enabled = tube_config.xfmr_enabled ? 1 : 0;
+    out->tube.output_mask  = tube_config.output_mask;
+    out->tube.reserved[0]  = 0;
+    out->tube.reserved[1]  = 0;
+    out->tube.drive_db     = tube_config.drive_db;
+    out->tube.bias_pct     = tube_config.bias_pct;
+    out->tube.asym_db      = tube_config.asym_db;
+    out->tube.hardness_pct = tube_config.hardness_pct;
+    out->tube.sag_pct      = tube_config.sag_pct;
+    out->tube.xfmr_lf_hz   = tube_config.xfmr_lf_hz;
+    out->tube.xfmr_sat_pct = tube_config.xfmr_sat_pct;
+    out->tube.xfmr_hf_hz   = tube_config.xfmr_hf_hz;
+    out->tube.mix_pct      = tube_config.mix_pct;
+    out->tube.trim_db      = tube_config.trim_db;
 
     // Stereo upmixer (V25+).  RP2350 only; the whole section (including reserved)
     // stays zeroed on RP2040 from the memset above.
@@ -945,6 +968,29 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
                                     ? SUBHARM_SELECT_MODE_MAX : in->subharm.select_mode;
     subharm_config.link_pairs     = (in->subharm.link_pairs != 0);
     subharm_update_pending = true;
+
+    // Tube preamp (V31+).  Fields are copied verbatim with no tube_type row
+    // lookup: applying the row would overwrite a saved Custom voicing.  Enums
+    // are clamped here because the coefficient tables index on them; floats
+    // are clamped downstream in tube_compute_coefficients.
+    tube_config.enabled      = (in->tube.enabled != 0);
+    tube_config.tube_type    = (in->tube.tube_type > TUBE_TYPE_MAX)
+                               ? TUBE_TYPE_MAX : in->tube.tube_type;
+    tube_config.rectifier    = (in->tube.rectifier > TUBE_RECT_MAX)
+                               ? TUBE_RECT_MAX : in->tube.rectifier;
+    tube_config.xfmr_enabled = (in->tube.xfmr_enabled != 0);
+    tube_config.output_mask  = in->tube.output_mask;
+    tube_config.drive_db     = in->tube.drive_db;
+    tube_config.bias_pct     = in->tube.bias_pct;
+    tube_config.asym_db      = in->tube.asym_db;
+    tube_config.hardness_pct = in->tube.hardness_pct;
+    tube_config.sag_pct      = in->tube.sag_pct;
+    tube_config.xfmr_lf_hz   = in->tube.xfmr_lf_hz;
+    tube_config.xfmr_sat_pct = in->tube.xfmr_sat_pct;
+    tube_config.xfmr_hf_hz   = in->tube.xfmr_hf_hz;
+    tube_config.mix_pct      = in->tube.mix_pct;
+    tube_config.trim_db      = in->tube.trim_db;
+    tube_update_pending = true;
 
     // Stereo upmixer (V25+).  RP2350 only; RP2040 ignores the section.  Config
     // copied straight in (mode fields clamped; floats are clamped downstream in

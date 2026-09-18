@@ -7,6 +7,7 @@
 #include "crossover.h"
 #include "usb_audio.h"
 #include "siggen.h"     // siggen_raw_mask: per-output EQ bypass in RAW mode
+#include "tube.h"
 #include "output_s24.h" // RP2350 EQ worker: in-place S24 finalization
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
@@ -488,6 +489,9 @@ static void __not_in_flash_func(eq_worker_loop)() {
         const PsybassCoeffs *pb_coeffs =
             (const PsybassCoeffs *)core1_eq_work.psybass_coeffs;
         uint16_t pb_mask = core1_eq_work.psybass_mask;
+        const TubeCoeffs *tb_coeffs =
+            (const TubeCoeffs *)core1_eq_work.tube_coeffs;
+        uint16_t tb_mask = core1_eq_work.tube_mask;
         const SubharmCoeffs *sh_coeffs =
             (const SubharmCoeffs *)core1_eq_work.subharm_coeffs;
         uint16_t sh_mask = core1_eq_work.subharm_mask;
@@ -512,6 +516,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                tube_reset_output_state(&tube_output_state[out]);
                 continue;
             }
 
@@ -525,6 +530,15 @@ static void __not_in_flash_func(eq_worker_loop)() {
                                              buf_out[out], sample_count);
             } else {
                 psybass_reset_output_state(&psybass_output_state[out]);
+            }
+            // Tube preamp after psybass, pre-crossover; same predicate and snapshot.
+            if (tb_coeffs && ((tb_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                tube_process_output_block(tb_coeffs, &tube_output_state[out],
+                                          buf_out[out], sample_count);
+            } else {
+                tube_reset_output_state(&tube_output_state[out]);
             }
 
             // Output crossover + EQ
@@ -685,6 +699,9 @@ static void __not_in_flash_func(eq_worker_loop)() {
         const PsybassCoeffs *pb_coeffs =
             (const PsybassCoeffs *)core1_eq_work.psybass_coeffs;
         uint16_t pb_mask = core1_eq_work.psybass_mask;
+        const TubeCoeffs *tb_coeffs =
+            (const TubeCoeffs *)core1_eq_work.tube_coeffs;
+        uint16_t tb_mask = core1_eq_work.tube_mask;
         const SubharmCoeffs *sh_coeffs =
             (const SubharmCoeffs *)core1_eq_work.subharm_coeffs;
         uint16_t sh_mask = core1_eq_work.subharm_mask;
@@ -709,6 +726,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                tube_reset_output_state(&tube_output_state[out]);
                 continue;
             }
 
@@ -722,6 +740,15 @@ static void __not_in_flash_func(eq_worker_loop)() {
                                              buf_out[out], sample_count);
             } else {
                 psybass_reset_output_state(&psybass_output_state[out]);
+            }
+            // Tube preamp after psybass, pre-crossover; same predicate and snapshot.
+            if (tb_coeffs && ((tb_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                tube_process_output_block(tb_coeffs, &tube_output_state[out],
+                                          buf_out[out], sample_count);
+            } else {
+                tube_reset_output_state(&tube_output_state[out]);
             }
 
             // Output crossover + EQ (block-based)

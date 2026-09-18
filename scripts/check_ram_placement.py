@@ -110,6 +110,7 @@ COMMON = [
     ("xover_process_channel_block", False),
     ("crossfeed_process_pair_block", False),
     ("crossfeed_process_pairs", False),
+    ("tube_process_output_block", False),
     ("leveller_process_block", False),
     ("update_buffer_watermarks", True),
     ("get_slot_consumer_fill", False),

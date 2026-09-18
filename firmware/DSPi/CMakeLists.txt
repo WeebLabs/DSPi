@@ -13,9 +13,11 @@ set_source_files_properties(
 # dsp_cascade_block). -ffp-contract=off is a measured 14-24% win there; M33
 # VFMA occupies the FPU ~2-2.5 cycles vs 1 for VMUL/VADD. subharm.c gets the
 # same flag on a static estimate (~9% fewer cycles, 25 -> 4 VMOVs); confirm on
-# the CPU meter. See "FP contraction" in Documentation/current_architecture.md.
+# the CPU meter. tube.c gets it on the same static-estimate basis (its shaper
+# is the same shape of short multiply-add chain); confirm on the CPU meter.
+# See "FP contraction" in Documentation/current_architecture.md.
 set_source_files_properties(
-    dsp_pipeline.c subharm.c
+    dsp_pipeline.c subharm.c tube.c
     PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off"
 )
 
@@ -74,6 +76,8 @@ add_executable(DSPi
     psybass.h
     subharm.c
     subharm.h
+    tube.c
+    tube.h
     siggen.c
     siggen.h
     rta_bass.c

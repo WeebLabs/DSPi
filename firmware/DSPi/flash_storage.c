@@ -43,6 +43,7 @@
 #include "lg_sound_sync.h"
 #include "adat_output.h"     // adat_output_config_enabled/_pin/_set_config (RP2350)
 #include "upmix.h"           // upmix_config + UPMIX_DEFAULT_* (RP2350 only)
+#include "tube.h"            // tube_config + TUBE_DEFAULT_*
 #include "notify.h"
 #include "uart_control.h"    // uart_ctrl_owns_pin (io_pin_valid guard)
 #include "i2c_control.h"     // i2c_ctrl_owns_pin (io_pin_valid guard)
@@ -188,7 +189,11 @@
 //        bytes).  Backward-compatible tail-append like V22..V36: V21..V36 slots
 //        still load via slot_data_size_for_version and take the SUBHARM_DEFAULT_*
 //        values for the new fields (apply is gated on version >= 37).
-#define SLOT_DATA_VERSION       37
+//   V38: Tube preamp appended (four bytes + output mask + two reserved + ten
+//        floats; struct grows by 48 bytes).  Tail-append like V22..V37: older
+//        slots load via slot_data_size_for_version and take the TUBE_DEFAULT_*
+//        values with the effect off (apply is gated on version >= 38).
+#define SLOT_DATA_VERSION       38
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1414,6 +1419,27 @@ typedef struct __attribute__((packed)) {
     uint8_t  subharm_select_mode;
     uint8_t  subharm_link_pairs;
     uint8_t  subharm_reserved2[2];
+
+    // V38: tube preamp (one global config + output mask; see tube.h).  Layout
+    // mirrors WireTubeParams.  Gated on version >= 38 in apply_slot_to_live();
+    // the stored character fields are restored verbatim, never re-derived from
+    // the tube_type row, so a preset keeps its voicing across firmware.
+    uint8_t  tube_enabled;
+    uint8_t  tube_type;
+    uint8_t  tube_rectifier;
+    uint8_t  tube_xfmr_enabled;
+    uint16_t tube_output_mask;
+    uint8_t  tube_reserved[2];
+    float    tube_drive_db;
+    float    tube_bias_pct;
+    float    tube_asym_db;
+    float    tube_hardness_pct;
+    float    tube_sag_pct;
+    float    tube_xfmr_lf_hz;
+    float    tube_xfmr_sat_pct;
+    float    tube_xfmr_hf_hz;
+    float    tube_mix_pct;
+    float    tube_trim_db;
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -3411,6 +3437,25 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->subharm_reserved2[0]   = 0;
     slot->subharm_reserved2[1]   = 0;
 
+    // Tube preamp (V38): one global config, four bytes + mask + 10 floats.
+    slot->tube_enabled      = tube_config.enabled ? 1 : 0;
+    slot->tube_type         = tube_config.tube_type;
+    slot->tube_rectifier    = tube_config.rectifier;
+    slot->tube_xfmr_enabled = tube_config.xfmr_enabled ? 1 : 0;
+    slot->tube_output_mask  = tube_config.output_mask;
+    slot->tube_reserved[0]  = 0;
+    slot->tube_reserved[1]  = 0;
+    slot->tube_drive_db     = tube_config.drive_db;
+    slot->tube_bias_pct     = tube_config.bias_pct;
+    slot->tube_asym_db      = tube_config.asym_db;
+    slot->tube_hardness_pct = tube_config.hardness_pct;
+    slot->tube_sag_pct      = tube_config.sag_pct;
+    slot->tube_xfmr_lf_hz   = tube_config.xfmr_lf_hz;
+    slot->tube_xfmr_sat_pct = tube_config.xfmr_sat_pct;
+    slot->tube_xfmr_hf_hz   = tube_config.xfmr_hf_hz;
+    slot->tube_mix_pct      = tube_config.mix_pct;
+    slot->tube_trim_db      = tube_config.trim_db;
+
     // ADAT input (V32): raw pin (0xFF unset) + enable + clock mode (both
     // platforms; RP2040 stores its default state for round-trips).
     slot->adat_input_pin        = adat_input_pin;
@@ -3712,6 +3757,46 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     }
     subharm_update_pending = true;
 
+    // Tube preamp (V38): older slots have no tube data, so restore the
+    // disabled/all-outputs defaults for them.  Pending is raised in both
+    // branches so a load that turns it off unpublishes its coefficients.
+    if (slot->version >= 38) {
+        tube_config.enabled      = (slot->tube_enabled != 0);
+        tube_config.tube_type    = (slot->tube_type > TUBE_TYPE_MAX)
+                                   ? TUBE_TYPE_MAX : slot->tube_type;
+        tube_config.rectifier    = (slot->tube_rectifier > TUBE_RECT_MAX)
+                                   ? TUBE_RECT_MAX : slot->tube_rectifier;
+        tube_config.xfmr_enabled = (slot->tube_xfmr_enabled != 0);
+        tube_config.output_mask  = slot->tube_output_mask;
+        tube_config.drive_db     = slot->tube_drive_db;
+        tube_config.bias_pct     = slot->tube_bias_pct;
+        tube_config.asym_db      = slot->tube_asym_db;
+        tube_config.hardness_pct = slot->tube_hardness_pct;
+        tube_config.sag_pct      = slot->tube_sag_pct;
+        tube_config.xfmr_lf_hz   = slot->tube_xfmr_lf_hz;
+        tube_config.xfmr_sat_pct = slot->tube_xfmr_sat_pct;
+        tube_config.xfmr_hf_hz   = slot->tube_xfmr_hf_hz;
+        tube_config.mix_pct      = slot->tube_mix_pct;
+        tube_config.trim_db      = slot->tube_trim_db;
+    } else {
+        tube_config.enabled      = false;
+        tube_config.tube_type    = TUBE_DEFAULT_TUBE_TYPE;
+        tube_config.rectifier    = TUBE_DEFAULT_RECTIFIER;
+        tube_config.xfmr_enabled = false;
+        tube_config.output_mask  = TUBE_DEFAULT_OUTPUT_MASK;
+        tube_config.drive_db     = TUBE_DEFAULT_DRIVE;
+        tube_config.bias_pct     = TUBE_DEFAULT_BIAS;
+        tube_config.asym_db      = TUBE_DEFAULT_ASYM;
+        tube_config.hardness_pct = TUBE_DEFAULT_HARDNESS;
+        tube_config.sag_pct      = TUBE_DEFAULT_SAG;
+        tube_config.xfmr_lf_hz   = TUBE_DEFAULT_XFMR_LF;
+        tube_config.xfmr_sat_pct = TUBE_DEFAULT_XFMR_SAT;
+        tube_config.xfmr_hf_hz   = TUBE_DEFAULT_XFMR_HF;
+        tube_config.mix_pct      = TUBE_DEFAULT_MIX;
+        tube_config.trim_db      = TUBE_DEFAULT_TRIM;
+    }
+    tube_update_pending = true;
+
     // Stereo upmixer (V33): RP2350-only.  V33+ slots restore the stored config
     // (modes clamped; enabled = nonzero); older slots load the disabled
     // defaults.  Range clamping of the floats happens downstream in
@@ -3920,8 +4005,9 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // V30 appended peq_qp_x512; V31 appended psybass; V32 appended the ADAT input
 // fields; V33 appended the stereo upmixer config; V35 appended the SPDIF input
 // 4 pin; V36 appended the subharmonic synthesizer config; V37 appended the
-// subharm third band / selectivity / ceiling / link, so each version's
-// range stops where the next version's fields begin
+// subharm third band / selectivity / ceiling / link; V38 appended the tube
+// preamp config, so each version's range stops where the next version's
+// fields begin
 // (a stored slot's CRC was computed without the fields its version predates).
 #define SLOT_DATA_SIZE_V21 \
     (offsetof(PresetSlot, i2s_input_channels) - offsetof(PresetSlot, filter_recipes))
@@ -3956,6 +4042,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V36 \
     (offsetof(PresetSlot, subharm_top_db) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V37 \
+    (offsetof(PresetSlot, tube_enabled) - offsetof(PresetSlot, filter_recipes))
+#define SLOT_DATA_SIZE_V38 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
@@ -3964,14 +4052,16 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // (I2S clock master/slave mode), V29 (I2S clock-pin mode), V30 (Linkwitz
 // Transform per-band target Q), V31 (psychoacoustic bass), V32 (ADAT input) and
 // V33 (stereo upmixer), V35 (SPDIF input 4 pin), V36 (subharmonic synthesizer)
-// and V37 (subharm third band / selectivity / ceiling / link) are
-// backward-compatible tail-appends; V34 (upmix presence) claims a reserved byte
-// with no size change.  V21..V36 slots are all accepted (an older slot loads
+// V37 (subharm third band / selectivity / ceiling / link) and V38 (tube preamp)
+// are backward-compatible tail-appends; V34 (upmix presence) claims a reserved
+// byte with no size change.  V21..V37 slots are all accepted (an older slot loads
 // with the newer fields defaulted to unset) while older/unknown versions are
 // invalidated and the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 37
+        case SLOT_DATA_VERSION:   // 38
+            return SLOT_DATA_SIZE_V38;
+        case 37:
             return SLOT_DATA_SIZE_V37;
         case 36:
             return SLOT_DATA_SIZE_V36;
@@ -4611,6 +4701,24 @@ static void apply_factory_defaults(void) {
     // must not leave the device monitoring the sub only.
     subharm_config.solo           = false;
     subharm_update_pending = true;
+
+    // Tube preamp
+    tube_config.enabled      = false;
+    tube_config.tube_type    = TUBE_DEFAULT_TUBE_TYPE;
+    tube_config.rectifier    = TUBE_DEFAULT_RECTIFIER;
+    tube_config.xfmr_enabled = false;
+    tube_config.output_mask  = TUBE_DEFAULT_OUTPUT_MASK;
+    tube_config.drive_db     = TUBE_DEFAULT_DRIVE;
+    tube_config.bias_pct     = TUBE_DEFAULT_BIAS;
+    tube_config.asym_db      = TUBE_DEFAULT_ASYM;
+    tube_config.hardness_pct = TUBE_DEFAULT_HARDNESS;
+    tube_config.sag_pct      = TUBE_DEFAULT_SAG;
+    tube_config.xfmr_lf_hz   = TUBE_DEFAULT_XFMR_LF;
+    tube_config.xfmr_sat_pct = TUBE_DEFAULT_XFMR_SAT;
+    tube_config.xfmr_hf_hz   = TUBE_DEFAULT_XFMR_HF;
+    tube_config.mix_pct      = TUBE_DEFAULT_MIX;
+    tube_config.trim_db      = TUBE_DEFAULT_TRIM;
+    tube_update_pending = true;
 
     // Stereo upmixer (RP2350-only): disabled, default engine params.
 #if PICO_RP2350

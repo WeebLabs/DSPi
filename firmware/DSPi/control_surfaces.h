@@ -103,6 +103,12 @@
  * grows to 9 bytes.  Directory V21 drops the V20 table.
  * See Documentation/Features/control_surfaces_aux_spec.md.
  *
+ * Caps v19 appends the tube preamp nouns (70-73: TUBE, TUBE_DRIVE,
+ * TUBE_TYPE, TUBE_MIX).  All four dispatch through the indexed
+ * REQ_SET_TUBE_PARAM, whose payload is a float32 for every parameter kind,
+ * the bool and the enum included.  No structure sizes change.
+ * See Documentation/Features/tube_preamp_spec.md.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -226,6 +232,11 @@ typedef enum {
     CS_NOUN_AUX            = 68, // bool; target = binding slot holding an aux output
     CS_NOUN_AUX_LEVEL      = 69, // continuous percent 0..100; target = slot holding
                                  // a CS_TYPE_AUX_PWM output
+    // --- caps v19 additions ---
+    CS_NOUN_TUBE           = 70, // bool (tube preamp enable)
+    CS_NOUN_TUBE_DRIVE     = 71, // continuous dB 0..24
+    CS_NOUN_TUBE_TYPE      = 72, // enum 0..TUBE_TYPE_MAX (0 = Custom)
+    CS_NOUN_TUBE_MIX       = 73, // continuous percent 0..100 (dry/wet)
     CS_NOUN_COUNT
 } CsNoun;
 
@@ -611,7 +622,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (18); see the file
+    uint8_t  caps_version; // capability format version (19); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)

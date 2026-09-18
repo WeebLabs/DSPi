@@ -24,6 +24,7 @@
 #include "siggen.h"
 #include "rta.h"
 #include "upmix.h"
+#include "tube.h"
 #include "adat_output.h"
 #include "output_s24.h"
 #include "loopback.h"   // DSPI_LOOPBACK slot-0 capture tap (self-guarded; empty otherwise)
@@ -382,6 +383,9 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // the low band before any high-pass crossover removes it).
     const PsybassCoeffs *pb_coeffs = (const PsybassCoeffs *)current_psybass_coeffs;
     uint16_t pb_mask = psybass_config.output_mask;
+    // Tube preamp snapshot: same model, runs after psybass, pre-crossover.
+    const TubeCoeffs *tb_coeffs = (const TubeCoeffs *)current_tube_coeffs;
+    uint16_t tb_mask = tube_config.output_mask;
 
     // Subharmonic synthesizer snapshot for this packet: same model as psybass
     // (pointer NULL = disabled, output mask, shared with Core 1 via
@@ -545,6 +549,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.xfeed_mask = xf_mask;
         core1_eq_work.psybass_coeffs = pb_coeffs;
         core1_eq_work.psybass_mask = pb_mask;
+        core1_eq_work.tube_coeffs = tb_coeffs;
+        core1_eq_work.tube_mask = tb_mask;
         core1_eq_work.subharm_coeffs = sh_coeffs;
         core1_eq_work.subharm_mask = sh_mask;
         core1_eq_work.subharm_flags = sh_flags;
@@ -574,6 +580,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                tube_reset_output_state(&tube_output_state[out]);
                 continue;
             }
             // Psychoacoustic bass on masked outputs, pre-crossover (must see
@@ -586,6 +593,15 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                                              buf_out[out], sample_count);
             } else {
                 psybass_reset_output_state(&psybass_output_state[out]);
+            }
+            // Tube preamp after psybass, pre-crossover; same skip-and-reset predicate.
+            if (tb_coeffs && ((tb_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                tube_process_output_block(tb_coeffs, &tube_output_state[out],
+                                          buf_out[out], sample_count);
+            } else {
+                tube_reset_output_state(&tube_output_state[out]);
             }
             if (!matrix_mixer.outputs[out].mute && !(siggen_raw_mask & (1u << out))) {
                 uint8_t eq_ch = CH_OUT_1 + out;
@@ -641,6 +657,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // first packet after a switch back to single-core starts clean.
         loudness_reset_output_state(&loudness_output_state[NUM_OUTPUT_CHANNELS - 1]);
         psybass_reset_output_state(&psybass_output_state[NUM_OUTPUT_CHANNELS - 1]);
+        tube_reset_output_state(&tube_output_state[NUM_OUTPUT_CHANNELS - 1]);
         subharm_reset_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
 
         // Core 0: Delay for outputs 0-1
@@ -721,6 +738,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                tube_reset_output_state(&tube_output_state[out]);
                 continue;
             }
             // Psychoacoustic bass, pre-crossover (see dual-core branch above).
@@ -731,6 +749,15 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                                              buf_out[out], sample_count);
             } else {
                 psybass_reset_output_state(&psybass_output_state[out]);
+            }
+            // Tube preamp after psybass, pre-crossover; same skip-and-reset predicate.
+            if (tb_coeffs && ((tb_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                tube_process_output_block(tb_coeffs, &tube_output_state[out],
+                                          buf_out[out], sample_count);
+            } else {
+                tube_reset_output_state(&tube_output_state[out]);
             }
             if (!matrix_mixer.outputs[out].mute && !(siggen_raw_mask & (1u << out))) {
                 uint8_t eq_ch = CH_OUT_1 + out;
@@ -898,6 +925,9 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // runs per output pre-crossover, shared with Core 1 via core1_eq_work.
     const PsybassCoeffs *pb_coeffs = (const PsybassCoeffs *)current_psybass_coeffs;
     uint16_t pb_mask = psybass_config.output_mask;
+    // Tube preamp snapshot: same model, runs after psybass, pre-crossover.
+    const TubeCoeffs *tb_coeffs = (const TubeCoeffs *)current_tube_coeffs;
+    uint16_t tb_mask = tube_config.output_mask;
 
     // Subharmonic synthesizer snapshot for this packet (see RP2350 branch
     // above): per output pre-crossover, ahead of psybass, shared with Core 1.
@@ -983,6 +1013,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.xfeed_mask = xf_mask;
         core1_eq_work.psybass_coeffs = pb_coeffs;
         core1_eq_work.psybass_mask = pb_mask;
+        core1_eq_work.tube_coeffs = tb_coeffs;
+        core1_eq_work.tube_mask = tb_mask;
         core1_eq_work.subharm_coeffs = sh_coeffs;
         core1_eq_work.subharm_mask = sh_mask;
         core1_eq_work.subharm_flags = sh_flags;
@@ -1007,6 +1039,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                tube_reset_output_state(&tube_output_state[out]);
                 continue;
             }
             // Psychoacoustic bass on masked outputs, pre-crossover (must see
@@ -1019,6 +1052,15 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                                              buf_out[out], sample_count);
             } else {
                 psybass_reset_output_state(&psybass_output_state[out]);
+            }
+            // Tube preamp after psybass, pre-crossover; same skip-and-reset predicate.
+            if (tb_coeffs && ((tb_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                tube_process_output_block(tb_coeffs, &tube_output_state[out],
+                                          buf_out[out], sample_count);
+            } else {
+                tube_reset_output_state(&tube_output_state[out]);
             }
             if (!matrix_mixer.outputs[out].mute && !(siggen_raw_mask & (1u << out))) {
                 uint8_t eq_ch = CH_OUT_1 + out;
@@ -1070,6 +1112,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // first packet after a switch back to single-core starts clean.
         loudness_reset_output_state(&loudness_output_state[NUM_OUTPUT_CHANNELS - 1]);
         psybass_reset_output_state(&psybass_output_state[NUM_OUTPUT_CHANNELS - 1]);
+        tube_reset_output_state(&tube_output_state[NUM_OUTPUT_CHANNELS - 1]);
         subharm_reset_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
 
         // Core 0: Delay for outputs 0-1
@@ -1143,6 +1186,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             if (!matrix_mixer.outputs[out].enabled) {
                 loudness_reset_output_state(&loudness_output_state[out]);
                 psybass_reset_output_state(&psybass_output_state[out]);
+                tube_reset_output_state(&tube_output_state[out]);
                 continue;
             }
             // Psychoacoustic bass, pre-crossover (see dual-core branch above).
@@ -1153,6 +1197,15 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
                                              buf_out[out], sample_count);
             } else {
                 psybass_reset_output_state(&psybass_output_state[out]);
+            }
+            // Tube preamp after psybass, pre-crossover; same skip-and-reset predicate.
+            if (tb_coeffs && ((tb_mask >> out) & 1u)
+                && !matrix_mixer.outputs[out].mute
+                && !(siggen_raw_mask & (1u << out))) {
+                tube_process_output_block(tb_coeffs, &tube_output_state[out],
+                                          buf_out[out], sample_count);
+            } else {
+                tube_reset_output_state(&tube_output_state[out]);
             }
             if (!matrix_mixer.outputs[out].mute && !(siggen_raw_mask & (1u << out))) {
                 uint8_t eq_ch = CH_OUT_1 + out;

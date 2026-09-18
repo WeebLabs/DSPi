@@ -25,6 +25,7 @@
 #include "leveller.h"
 #include "upmix.h"
 #include "subharm.h"
+#include "tube.h"
 
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
@@ -588,6 +589,8 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
     [CS_NOUN_SUBHARM_HOLD] = "Sub Hold",   [CS_NOUN_SUBHARM_CEILING] = "Sub Ceil",
     [CS_NOUN_SUBHARM_LINK] = "Sub Link",   [CS_NOUN_SUBHARM_SOLO] = "Sub Solo",
     [CS_NOUN_AUX] = "Aux",                 [CS_NOUN_AUX_LEVEL] = "Aux",
+    [CS_NOUN_TUBE] = "Tube",               [CS_NOUN_TUBE_DRIVE] = "Tube Drive",
+    [CS_NOUN_TUBE_TYPE] = "Tube Type",     [CS_NOUN_TUBE_MIX] = "Tube Mix",
 };
 
 static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",
@@ -596,6 +599,12 @@ static const char *const s_rate_label[]  = {"44.1 kHz", "48 kHz", "96 kHz"};
 static const char *const s_xf_preset_label[] = {"Default", "Chu Moy", "Meier", "Custom"};
 static const char *const s_lev_speed_label[] = {"Slow", "Medium", "Fast"};
 static const char *const s_subharm_select_label[] = {"All", "Percussive", "Sustained"};
+// Indexed by tube_type; row 0 is the no-row Custom entry.  Short forms only,
+// the panel has ~10 columns for a value.
+static const char *const s_tube_type_label[] = {
+    "Custom", "12AX7", "5751", "12AT7", "12AY7", "12AU7", "6SN7", "6SL7",
+    "6DJ8", "EF86", "6SJ7", "EL84", "EL34", "6L6", "6V6", "KT88", "300B",
+};
 static const char *const s_center_mode_label[]   = {"Sinner", "Logician", "Off"};
 static const char *const s_surround_mode_label[] = {"Off", "Sinner", "Logician"};
 // Indexed by FilterType; includes the host-only types above the CS cycling
@@ -628,6 +637,8 @@ _Static_assert(DISP_N(s_lev_speed_label) == LEVELLER_SPEED_COUNT,
                "leveller speed names must cover the enum");
 _Static_assert(DISP_N(s_subharm_select_label) == SUBHARM_SELECT_MODE_MAX + 1,
                "subharm selectivity names must cover the enum");
+_Static_assert(DISP_N(s_tube_type_label) == TUBE_TYPE_MAX + 1,
+               "tube type names must cover the enum");
 #if PICO_RP2350
 _Static_assert(DISP_N(s_center_mode_label) == UPMIX_CENTER_OFF + 1,
                "centre mode names must cover the enum");
@@ -648,6 +659,7 @@ static const char *disp_enum_label(uint8_t noun, int v, bool large) {
         case CS_NOUN_CROSSFEED_PRESET:    DISP_TAB(s_xf_preset_label); break;
         case CS_NOUN_LEVELLER_SPEED:      DISP_TAB(s_lev_speed_label); break;
         case CS_NOUN_SUBHARM_SELECT:      DISP_TAB(s_subharm_select_label); break;
+        case CS_NOUN_TUBE_TYPE:           DISP_TAB(s_tube_type_label); break;
         case CS_NOUN_UPMIX_CENTER_MODE:   DISP_TAB(s_center_mode_label); break;
         case CS_NOUN_UPMIX_SURROUND_MODE: DISP_TAB(s_surround_mode_label); break;
         case CS_NOUN_FILTER_TYPE:

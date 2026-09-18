@@ -74,6 +74,13 @@ Caps v14 appends nouns 57-60 for the subharmonic synthesizer (`SUBHARM`,
 structure or stored-config change; `noun_count` reads 61. The authority for the
 effect itself is `subharmonic_synth_spec.md`.
 
+Caps v19 appends nouns 70-73 for the tube preamp (`TUBE`, `TUBE_DRIVE`,
+`TUBE_TYPE`, `TUBE_MIX`; sections 4.3 and 5) with no structure or
+stored-config change; `noun_count` reads 74. All four dispatch through the one
+indexed command `REQ_SET_TUBE_PARAM`, whose payload is a float32 for every
+parameter kind, the bool and the enum included. The authority for the effect
+itself is `tube_preamp_spec.md`.
+
 Writing style note: this doc avoids em-dashes per project convention.
 
 ---
@@ -227,7 +234,7 @@ giving smooth, jitter-free knob behavior without flooding the dispatcher.
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
 | 0 | 1 | `type` | `CsType` (0-10); `0` = slot cleared |
-| 1 | 1 | `noun` | `CsNoun` (0-69 at caps v18; read `noun_count`) |
+| 1 | 1 | `noun` | `CsNoun` (0-69 at caps v18, 0-73 at caps v19; read `noun_count`) |
 | 2 | 1 | `action` | `CsAction` (0-11) |
 | 3 | 1 | `flags` | `CS_FLAG_*` bitfield (see 2.2.1); unknown bits are rejected with `CS_STATUS_INVALID_VALUE` |
 | 4 | 1 | `gpio[0]` | primary GPIO |
@@ -284,10 +291,10 @@ the firmware stores and what `REQ_GET_ALL_PARAMS` does **not** contain.
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
-| 0 | 1 | `caps_version` | capability format version (18) |
+| 0 | 1 | `caps_version` | capability format version (19) |
 | 1 | 1 | `max_bindings` | `CS_MAX_BINDINGS` (16) |
 | 2 | 1 | `type_count` | `CS_TYPE_COUNT` (11); the type table has this many entries, indexed by `CsType` |
-| 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (70) |
+| 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (74) |
 | 4 | 44 | `types[11]` | eleven `CsTypeDesc`, one per `CsType` including index 0 (`NONE`, all-zero) |
 | 48 | 1 | `max_ir_commands` | `CS_MAX_IR_COMMANDS` (16) |
 | 49 | 1 | `max_groups` | `CS_MAX_GROUPS` (8) |
@@ -311,7 +318,7 @@ reads `max_bindings`. See `control_surfaces_aux_spec.md`.
 
 ### 2.5 `CsNounDesc` (12 bytes)
 
-Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18).
+Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18 and 0-73 at caps v19).
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -742,6 +749,10 @@ Action-mask groups used below:
 | `SUBHARM_BOOST` | 60 | CONT | DB | 0..+6 dB | - | CONT-RW |
 | `AUX` | 68 | BOOL | - | auxiliary output on/off, no audio meaning | AUX | BOOL-RW |
 | `AUX_LEVEL` | 69 | CONT | PERCENT | 0..100 % (`CS_TYPE_AUX_PWM` slots only) | AUX | CONT-RW |
+| `TUBE` | 70 | BOOL | - | - | - | BOOL-RW |
+| `TUBE_DRIVE` | 71 | CONT | DB | 0..+24 dB | - | CONT-RW |
+| `TUBE_TYPE` | 72 | ENUM | - | 17 (0 = Custom, 1..16 = tube styles) | - | ENUM-RW |
+| `TUBE_MIX` | 73 | CONT | PERCENT | 0..100 % (dry/wet) | - | CONT-RW |
 
 The *effective* legal action set for a (type, noun) pair is the bitwise AND of
 its two masks. Example: an encoder (`STEP` only) on `USER_MUTE` (bool, no
@@ -836,6 +847,10 @@ target and dispatches it.
 | `LOUDNESS_INTENSITY` | `REQ_SET_LOUDNESS_INTENSITY` (`0x5C`, float %) | Compensation depth, 100 % = the full ISO 226 contour difference. The vendor command accepts 0..200 %, but 8.8 percent caps the bindable span at 0..127 %. |
 | `AUX` | `REQ_SET_CS_AUX_STATE` (`0x04`, wValue = `target` = the aux slot, uint8 0/1) | Auxiliary output on/off; a pin with no audio meaning. See `control_surfaces_aux_spec.md`. |
 | `AUX_LEVEL` | `REQ_SET_CS_AUX_LEVEL` (`0x06`, wValue = `target` = the aux slot, uint16 LE 8.8 percent) | Auxiliary PWM output level, clamped at 100 % (25600). No rounding to whole percent, so any `step` is valid. |
+| `TUBE` | `REQ_SET_TUBE_PARAM` (`0x3E`, wValue = 0, float32 LE) | Tube preamp enable. The payload is a float32, not a byte, like every other index of this command. |
+| `TUBE_DRIVE` | `REQ_SET_TUBE_PARAM` (wValue = 3, float32 LE) | Gain ahead of the shaper, 0..24 dB. |
+| `TUBE_TYPE` | `REQ_SET_TUBE_PARAM` (wValue = 2, float32 LE) | Tube style 0..16; 0 is Custom, 1..16 each load a bias / asymmetry / hardness / sag row. INC+WRAP cycles. Sent as an integer-valued float, which the handler rounds and clamps. |
+| `TUBE_MIX` | `REQ_SET_TUBE_PARAM` (wValue = 13, float32 LE) | Dry/wet blend 0..100 %. |
 
 ### 5.1 Enum stepping detail
 
@@ -1451,7 +1466,9 @@ Groups and macros (caps v9, directory V18) are in
 v10-v13, directory V19) in `control_surfaces_display_spec.md`, and auxiliary
 outputs (caps v18, directory V21) in `control_surfaces_aux_spec.md`. Caps
 v14-v16 appended subharmonic synthesizer nouns and widened three of their
-ranges, with no structure or stored-config change.
+ranges, with no structure or stored-config change. Caps v19 appends the four
+tube preamp nouns (70-73), again with no structure or stored-config change;
+the effect itself is specified in `tube_preamp_spec.md`.
 
 **Caps v17 never shipped.** It modelled auxiliary outputs as a separate table
 of eight pinless on/off + level values (`CsAuxCfg` / `CsAuxConfig`, commands
