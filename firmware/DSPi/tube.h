@@ -40,7 +40,7 @@ enum {
 #define TUBE_RECT_MAX            3
 
 // Parameter limits and defaults
-#define TUBE_DRIVE_MIN            0.0f
+#define TUBE_DRIVE_MIN           -6.0f   // knee 6 dB above full scale; floor keeps s_n = kn/(c1 m) <= 5.3 in Q28
 #define TUBE_DRIVE_MAX           24.0f   // 10^(24/20) = 15.85: carried in Q24 on RP2040
 #define TUBE_BIAS_MIN          -100.0f
 #define TUBE_BIAS_MAX           100.0f
@@ -62,11 +62,11 @@ enum {
 #define TUBE_TRIM_MAX            12.0f
 
 #define TUBE_DEFAULT_TUBE_TYPE      1     // 12AX7
-#define TUBE_DEFAULT_DRIVE          6.0f
-#define TUBE_DEFAULT_BIAS          30.0f  // 12AX7 row
+#define TUBE_DEFAULT_DRIVE         -6.0f  // clean: 0.5 % THD at -12 dBFS, level-neutral
+#define TUBE_DEFAULT_BIAS          10.0f  // 12AX7 row
 #define TUBE_DEFAULT_ASYM           3.0f
 #define TUBE_DEFAULT_HARDNESS      40.0f
-#define TUBE_DEFAULT_SAG           30.0f
+#define TUBE_DEFAULT_SAG           15.0f
 #define TUBE_DEFAULT_RECTIFIER      1     // GZ34
 #define TUBE_DEFAULT_XFMR_LF       80.0f
 #define TUBE_DEFAULT_XFMR_SAT      30.0f
@@ -126,7 +126,7 @@ typedef struct {
     tb_num_t bias;         // operating point b in knee units
     tb_num_t ratio_n;      // positive knee / negative knee
     tb_num_t c1, c3, c5;   // blended polynomial p(t) = t (c1 + t^2 (c3 + t^2 c5))
-    tb_num_t s_p, s_n;     // output scale per half (unity small-signal gain)
+    tb_num_t s_p, s_n;     // output scale per half, includes 1/m makeup (unity small-signal gain)
     tb_num_t v0;           // shaper output at rest, subtracted
     tb_num_t sag_att;      // envelope coefficients
     tb_num_t sag_rel;

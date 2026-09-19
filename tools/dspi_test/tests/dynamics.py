@@ -349,7 +349,7 @@ def tube_param_clamps(dev, profile, chk):
     prev_mix = _tube_get(dev, T_MIX)
     float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 99.0, 24.0,
                 wvalue=T_DRIVE, label="drive high clamp")
-    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, -5.0, 0.0,
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, -20.0, -6.0,
                 wvalue=T_DRIVE, label="drive low clamp")
     float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 150.0, 100.0,
                 wvalue=T_MIX, label="mix high clamp")
@@ -398,10 +398,10 @@ def tube_type_loads_row(dev, profile, chk):
     """Index 2 copies a character row in; editing a row field flips it to Custom."""
     saved = _tube_save_voicing(dev)
     _tube_set(dev, T_TYPE, 16.0)   # 300B / 2A3
-    chk.approx(_tube_get(dev, T_BIAS), 35.0, 1e-3, "300B bias")
+    chk.approx(_tube_get(dev, T_BIAS), 12.0, 1e-3, "300B bias")
     chk.approx(_tube_get(dev, T_ASYM), 6.0, 1e-3, "300B asymmetry")
     chk.approx(_tube_get(dev, T_HARDNESS), 10.0, 1e-3, "300B hardness")
-    chk.approx(_tube_get(dev, T_SAG), 25.0, 1e-3, "300B sag")
+    chk.approx(_tube_get(dev, T_SAG), 12.0, 1e-3, "300B sag")
     # A character edit that lands on a different value must reset the picker.
     _tube_set(dev, T_BIAS, 12.5)
     chk.approx(_tube_get(dev, T_TYPE), 0.0, 1e-6, "bias edit flips type to Custom")
@@ -412,10 +412,10 @@ def tube_type_loads_row(dev, profile, chk):
 def tube_same_value_edit_keeps_type(dev, profile, chk):
     """A character SET landing on the stored value must leave the type picker alone."""
     saved = _tube_save_voicing(dev)
-    _tube_set(dev, T_TYPE, 16.0)   # 300B / 2A3: bias 35, asym 6, hardness 10, sag 25
-    _tube_set(dev, T_BIAS, 35.0)   # identical to what the row just stored
+    _tube_set(dev, T_TYPE, 16.0)   # 300B / 2A3: bias 12, asym 6, hardness 10, sag 12
+    _tube_set(dev, T_BIAS, 12.0)   # identical to what the row just stored
     chk.approx(_tube_get(dev, T_TYPE), 16.0, 1e-6, "same-value bias SET keeps type 16")
-    _tube_set(dev, T_BIAS, 36.0)
+    _tube_set(dev, T_BIAS, 13.0)
     chk.approx(_tube_get(dev, T_TYPE), 0.0, 1e-6, "changed bias SET flips type to Custom")
     _tube_restore_voicing(dev, saved)
 
@@ -470,7 +470,7 @@ def tube_bulk_roundtrip(dev, profile, chk):
     # Clear the live values, then prove the blob restores every one of them.
     for idx, _, clear in probes:
         _tube_set(dev, idx, clear)
-    _tube_set(dev, T_TYPE, 16.0)   # 300B row overwrites bias with 35
+    _tube_set(dev, T_TYPE, 16.0)   # 300B row overwrites bias with 12
     dev.set(OP.SET_ALL_PARAMS, blob)
     dev.wait_ready()
     for idx, want, _ in probes:

@@ -11,6 +11,7 @@ Both platforms are supported. RP2350 runs the kernel in float; RP2040 runs the s
 ### Key characteristics
 
 - **Per-output processing with one global parameter set.** Every output selected by `output_mask` runs the same configuration. Different settings per speaker are handled by masking and presets, as for loudness and psybass.
+- **Clean by default, level-neutral.** The shaper carries `1 / drive` makeup gain so small-signal level never changes, and the default knee sits 6 dB above full scale. Enabling the module at default adds about 0.5 % second-harmonic-led distortion at -12 dBFS and no gain change.
 - **Single shaper shape, sixteen tube styles.** Triodes, pentodes, push-pull and single-ended power stages differ in this model only by bias, knee asymmetry, knee hardness and sag depth. Selecting a tube type copies its row into those four parameters and the user's drive, mix and transformer settings are left alone.
 - **Level-dependent even harmonics.** The bias term shifts the operating point on the curve, so second-harmonic content rises with signal level exactly as it does in a real single-ended stage. Knee asymmetry adds further even-order content at heavy drive.
 - **Supply sag.** A one-pole envelope of how far into the knee the stage is being driven pulls the drive down slowly. A rectifier selector presets the sag depth scale and attack and release times.
@@ -42,11 +43,11 @@ Both platforms are supported. RP2350 runs the kernel in float; RP2040 runs the s
    meter = max(|t|, meter * decay)      300 ms decay
 ```
 
-- `m = 10^(drive_db/20)`. The positive knee is fixed at t = 1, so drive alone sets how hard the stage is driven and full-scale input at 0 dB drive just reaches the knee.
+- `m = 10^(drive_db/20)`. The positive knee is fixed at t = 1, so drive alone sets how hard the stage is driven: a full-scale input reaches the knee at 0 dB drive, and at the -6 dB default the knee sits 6 dB above full scale.
 - `b = bias_pct / 200` (range -0.5 .. +0.5 in knee units).
 - `ratio_n = 10^(-asym_db/20)`: a positive `asym_db` makes the negative half clip later (softer cut-off side, harder grid-conduction side).
 - `p(t) = t * (c1 + t^2 * (c3 + t^2 * c5))` with `h = hardness_pct / 100`, `c1 = 1.5 + 0.375 h`, `c3 = -0.5 - 0.75 h`, `c5 = 0.375 h`. At h = 0 this is the cubic `1.5 t - 0.5 t^3`; at h = 1 it is the quintic `(15 t - 10 t^3 + 3 t^5) / 8`. Both reach exactly 1 at t = 1 with zero slope, so the clamp is continuous in value and slope for every hardness.
-- `s_p = 1 / c1` and `s_n = 10^(asym_db/20) / c1` normalise the small-signal gain to unity so hardness does not change the level of clean material.
+- `s_p = 1 / (c1 m)` and `s_n = 10^(asym_db/20) / (c1 m)` normalise the small-signal gain to unity, so neither hardness nor drive changes the level of clean material. Drive moves the knee, not the loudness; `trim_db` is the only level control.
 - `v0 = p(b) * s` is the shaper's output for silence, subtracted so enabling the effect produces no step. The DC blocker removes the level-dependent offset asymmetric clipping creates.
 - Sag: `depth = clamp(sag_pct / 100 * rect_scale, 0, 0.9)`; `env += (|t| - env) * (|t| > env ? a_att : a_rel)`. Solid-state rectifier disables sag entirely.
 - Transformer saturator: `sat(low) = 1.5 u - 0.5 u^3` with `u = clamp(low / ks, -1, 1)`, scaled by `ks / 1.5`; `ks = 10^(-0.18 * xfmr_sat_pct / 20)` so 100 % puts the low-band knee at -18 dBFS.
@@ -82,11 +83,11 @@ Every parameter is addressed by a small integer index through one indexed SET/GE
 | 0 | `enabled` | bool | 0 / 1 | 0 | yes |
 | 1 | `output_mask` | uint16 | 0x0000 .. 0xFFFF | 0xFFFF | no (read live) |
 | 2 | `tube_type` | enum | 0 .. 16 | 1 (12AX7) | yes (loads a row) |
-| 3 | `drive_db` | float | 0 .. 24 dB | 6 | yes |
-| 4 | `bias_pct` | float | -100 .. +100 % | 30 | yes |
+| 3 | `drive_db` | float | -6 .. 24 dB | -6 | yes |
+| 4 | `bias_pct` | float | -100 .. +100 % | 10 | yes |
 | 5 | `asym_db` | float | -12 .. +12 dB | 3 | yes |
 | 6 | `hardness_pct` | float | 0 .. 100 % | 40 | yes |
-| 7 | `sag_pct` | float | 0 .. 100 % | 30 | yes |
+| 7 | `sag_pct` | float | 0 .. 100 % | 15 | yes |
 | 8 | `rectifier` | enum | 0 .. 3 | 1 (GZ34) | yes |
 | 9 | `xfmr_enabled` | bool | 0 / 1 | 0 | yes |
 | 10 | `xfmr_lf_hz` | float | 20 .. 300 Hz | 80 | yes |
@@ -95,7 +96,16 @@ Every parameter is addressed by a small integer index through one indexed SET/GE
 | 13 | `mix_pct` | float | 0 .. 100 % | 100 | yes |
 | 14 | `trim_db` | float | -12 .. +12 dB | 0 | yes |
 
-Defaults for indices 4 to 7 are the 12AX7 row.
+Defaults for indices 4 to 7 are the 12AX7 row. The defaults are chosen to be clean rather than an obvious effect: with the knee 6 dB above full scale and a 10 % bias, enabling the module at default is level-neutral and adds a small, second-harmonic-led colour that grows with level. Host-model figures for a 100 Hz sine on the default settings:
+
+| Input level | H2 | H3 | THD |
+|---|---|---|---|
+| -20 dBFS | -55 dBc | -71 dBc | 0.18 % |
+| -12 dBFS | -47 dBc | -55 dBc | 0.50 % |
+| -6 dBFS | -39 dBc | -44 dBc | 1.25 % |
+| 0 dBFS | -31 dBc | -33 dBc | 3.6 % |
+
+Below the knee the second harmonic scales as about `0.5 x bias x drive x level` and the third as `(drive x level)^2 / 12`, both relative to the fundamental, so drive raises both, bias raises only the even-order part, and hardness and asymmetry do nothing until the signal reaches the knee.
 
 ### 2.1 enabled
 
@@ -110,22 +120,24 @@ Bit k selects output channel k (RP2350: 0..7 S/PDIF, 8 PDM; RP2040: 0..3 S/PDIF,
 | Value | Tube | Style | bias_pct | asym_db | hardness_pct | sag_pct |
 |---|---|---|---|---|---|---|
 | 0 | Custom | Knobs as set, no row applied | | | | |
-| 1 | 12AX7 / ECC83 | High-gain preamp triode; the default | 30 | 3 | 40 | 30 |
-| 2 | 5751 | Cooler 12AX7 | 25 | 3 | 35 | 25 |
-| 3 | 12AT7 / ECC81 | Medium-gain driver, more odd-order | 15 | 2 | 55 | 20 |
-| 4 | 12AY7 | Tweed front end, gentle | 20 | 4 | 25 | 30 |
-| 5 | 12AU7 / ECC82 | Clean line stage | 15 | 5 | 20 | 15 |
-| 6 | 6SN7 | Octal hi-fi line stage, sweet | 20 | 6 | 15 | 20 |
-| 7 | 6SL7 | Octal high-mu, rounder knee | 30 | 3 | 30 | 30 |
-| 8 | 6DJ8 / ECC88 / 6922 | Clean, hard when pushed | 10 | 2 | 60 | 10 |
-| 9 | EF86 / 6267 | Pentode preamp, symmetric bite | 5 | 0 | 75 | 25 |
-| 10 | 6SJ7 | Octal pentode, softer than EF86 | 8 | 1 | 65 | 30 |
-| 11 | EL84 / 6BQ5 | Push-pull power, chimey | 0 | 0 | 50 | 45 |
-| 12 | EL34 | Push-pull power, mid crunch, deep sag | 0 | 0 | 60 | 55 |
-| 13 | 6L6 / 5881 | Push-pull power, tight | 0 | 0 | 55 | 35 |
-| 14 | 6V6 | Push-pull power, early breakup, heavy sag | 0 | 0 | 35 | 60 |
-| 15 | KT88 / 6550 | Push-pull hi-fi power, near linear | 0 | 0 | 45 | 20 |
-| 16 | 300B / 2A3 | Single-ended DHT, pure even harmonics | 35 | 6 | 10 | 25 |
+
+Rows are scaled for a clean default. Asymmetry and hardness carry each tube's identity and only act at the knee, so turning drive up brings the character out; bias and sag are kept low so the default is transparent.
+| 1 | 12AX7 / ECC83 | High-gain preamp triode; the default | 10 | 3 | 40 | 15 |
+| 2 | 5751 | Cooler 12AX7 | 8 | 3 | 35 | 12 |
+| 3 | 12AT7 / ECC81 | Medium-gain driver, more odd-order | 5 | 2 | 55 | 10 |
+| 4 | 12AY7 | Tweed front end, gentle | 7 | 4 | 25 | 15 |
+| 5 | 12AU7 / ECC82 | Clean line stage | 5 | 5 | 20 | 8 |
+| 6 | 6SN7 | Octal hi-fi line stage, sweet | 7 | 6 | 15 | 10 |
+| 7 | 6SL7 | Octal high-mu, rounder knee | 10 | 3 | 30 | 15 |
+| 8 | 6DJ8 / ECC88 / 6922 | Clean, hard when pushed | 3 | 2 | 60 | 5 |
+| 9 | EF86 / 6267 | Pentode preamp, symmetric bite | 2 | 0 | 75 | 12 |
+| 10 | 6SJ7 | Octal pentode, softer than EF86 | 3 | 1 | 65 | 15 |
+| 11 | EL84 / 6BQ5 | Push-pull power, chimey | 0 | 0 | 50 | 25 |
+| 12 | EL34 | Push-pull power, mid crunch, deep sag | 0 | 0 | 60 | 30 |
+| 13 | 6L6 / 5881 | Push-pull power, tight | 0 | 0 | 55 | 18 |
+| 14 | 6V6 | Push-pull power, early breakup, heavy sag | 0 | 0 | 35 | 30 |
+| 15 | KT88 / 6550 | Push-pull hi-fi power, near linear | 0 | 0 | 45 | 10 |
+| 16 | 300B / 2A3 | Single-ended DHT, pure even harmonics | 12 | 6 | 10 | 12 |
 
 **Apply semantics.** Setting `tube_type` to 1..16 copies that row into `bias_pct`, `asym_db`, `hardness_pct` and `sag_pct`, stores the type, and raises the recompute flag. Each changed field emits its own change notification. Setting it to 0 stores 0, leaves the four knobs untouched, and still raises the recompute flag (a harmless no-op recompute). Setting any of indices 4..7 to a value different from the current one resets `tube_type` to 0 (Custom) and notifies that byte; a SET that lands on the value already stored leaves the type alone. Bulk apply and preset load restore the stored fields verbatim with no row lookup, so a preset saved as "12AX7" reloads as 12AX7 even if the row table changes in a later firmware.
 
@@ -133,7 +145,7 @@ Push-pull power-tube styles have zero bias and asymmetry because a push-pull sta
 
 ### 2.4 drive_db
 
-Linear gain ahead of the shaper. At 0 dB a full-scale input just reaches the knee. On RP2040 the drive coefficient is stored in Q24 rather than Q28 so the full 24 dB range fits the fixed-point ceiling. The kernel clamps the shaper input to +/-4.0 (+12 dBFS) first so the drive product cannot wrap; the dry path is never clamped. The clamp is lossless except for inputs beyond +12 dBFS at 0 dB drive with maximum bias and asymmetry, where the negative half saturates slightly early.
+Sets how far into the knee the signal is driven. Small-signal gain is unity at every drive because the shaper output is scaled by `1 / m`, so drive changes distortion, not loudness, and the clip ceiling of the wet path falls as drive rises (`1 / (c1 m)` on the positive half). At 0 dB a full-scale input just reaches the knee; at the -6 dB default the knee is 6 dB above full scale; at +24 dB a -24 dBFS input reaches it. The -6 dB floor is a fixed-point constraint: the negative-half scale `kn / (c1 m)` reaches 5.3 there with +12 dB asymmetry and must stay inside the Q28 budget. On RP2040 the drive coefficient is stored in Q24 rather than Q28 so the full range fits. The kernel clamps the shaper input to +/-4.0 (+12 dBFS) first so the drive product cannot wrap; the dry path is never clamped. The clamp is lossless except for inputs beyond +12 dBFS at low drive with maximum bias and asymmetry, where the negative half saturates slightly early.
 
 ### 2.5 bias_pct
 
@@ -270,8 +282,9 @@ Send `REQ_SET_TUBE_PARAM` per knob change. The firmware clamps and notifies, so 
 
 ### Suggested starting points
 
-- Warm hi-fi: 12AU7 or 6SN7, drive 3 to 6 dB, mix 100, transformer off.
-- Single-ended sweetness: 300B, drive 6 dB, transformer on at 80 Hz, 30 %.
+- Clean default: 12AX7, drive -6 dB, mix 100, transformer off. Level-neutral, 0.5 % THD at -12 dBFS.
+- Warm hi-fi: 12AU7 or 6SN7, drive -3 to 0 dB, mix 100, transformer off.
+- Single-ended sweetness: 300B, drive 0 to 3 dB, transformer on at 80 Hz, 30 %.
 - Guitar-amp style: 12AX7, drive 12 to 18 dB, rectifier 5U4, transformer on with `xfmr_hf_hz` around 6 kHz.
 - Push-pull power styles (EL84, EL34, 6L6, 6V6, KT88) are meant to be used with the transformer on.
 
@@ -288,8 +301,8 @@ Caps version 19 adds four nouns so panels and IR remotes can drive the effect: `
 ## 7. Interactions and Edge Cases
 
 - **Slot alignment.** Nothing in the module delays a sample. Masking the effect per output changes the phase response of that output only through one-pole IIR stages, the same category as a PEQ band, and never its sample alignment.
-- **Headroom.** The shaper output is bounded by `max(s_p, s_n)`, at most 2.65 (+8.5 dBFS) with the negative knee 12 dB later, and the DC blocker can double that on a transient. So a heavily driven, strongly asymmetric setting can push the wet path above 0 dBFS even at 0 dB trim; the host should watch the output clip flags and use `trim_db` to bring it back. Symmetric settings stay under +1 dBFS. The transformer saturator is bounded by its knee. Small-signal gain is unity at every hardness.
-- **Q28 ceilings (RP2040).** `fast_mul_q28` splits each operand into 16-bit halves and sums the two cross products in a 32-bit integer, so its real constraint is that the two operand magnitudes sum to below 8.0, not that their product does. The kernel is budgeted on that rule. Drive up to 15.85 is carried in Q24 along with the bias and sag terms so the drive product lands in a "/16" domain; the shaper input is clamped to +/-4.0 and the driven value to +/-4 knee units before the negative-knee ratio multiply (see 2.4 for the one lossy corner). The DC-blocker output is bounded by twice the shaper peak (5.3), so a copy of it is clamped to +/-3.4 (`TUBE_Q28_Y_LIM`) while the filter state keeps the true value; the transformer output is clamped to +/-3.4 (`TUBE_Q28_Y2_LIM`) ahead of its HF one-pole so each one-pole difference stays under 6.8. The transformer low band is clamped to +/-1.0 before its knee multiply, with the reciprocal knee (up to 7.94) carried in Q26 and shifted back. The wet signal is clamped to `wet_lim = clamp((7.5 - 4 dry_w) / wet_w, 0, 3.4)` and the dry term uses the +/-4.0-clamped input, so the final sum never exceeds 7.5. None of these clamps can bite while the wet signal is within +10 dBFS pre-trim. A host model that emulates the multiply helper exactly reports zero integer overflows over 404 parameter combinations, both transformer states, with +6 dBFS and realistic stimuli, and a worst in-range difference from the float kernel of about -73 dBFS, which is the helper's own truncation floor.
+- **Headroom.** With makeup gain the positive-half ceiling is `1 / (c1 m)`: 1.33 (+2.5 dBFS) at -6 dB drive, 0.67 at 0 dB, and falling 1 dB per dB of drive above that. The negative half's ceiling is `kn` times higher, up to 5.3 (+14.5 dBFS) at -6 dB drive with +12 dB asymmetry, and the DC blocker can double a transient. A strongly asymmetric setting driven hard can therefore push the wet path above 0 dBFS at 0 dB trim; the host should watch the output clip flags and use `trim_db`. Symmetric settings never exceed +2.5 dBFS. The transformer saturator is bounded by its knee. Small-signal gain is unity at every hardness and drive.
+- **Q28 ceilings (RP2040).** `fast_mul_q28` splits each operand into 16-bit halves and sums the two cross products in a 32-bit integer, so its real constraint is that the two operand magnitudes sum to below 8.0, not that their product does. The kernel is budgeted on that rule. Drive up to 15.85 is carried in Q24 along with the bias and sag terms so the drive product lands in a "/16" domain; the shaper input is clamped to +/-4.0 and the driven value to +/-4 knee units before the negative-knee ratio multiply (see 2.4 for the one lossy corner). The shaper output `v` is clamped to +/-3.4 (`TUBE_Q28_Y_LIM`) before the DC blocker because `s_n` reaches 5.3 at -6 dB drive and the blocker's output is bounded by twice its input, which must stay under 8.0; a copy of the blocker output is clamped to the same limit while the filter state keeps the true value; the transformer output is clamped to +/-3.4 (`TUBE_Q28_Y2_LIM`) ahead of its HF one-pole so each one-pole difference stays under 6.8. The transformer low band is clamped to +/-1.0 before its knee multiply, with the reciprocal knee (up to 7.94) carried in Q26 and shifted back. The wet signal is clamped to `wet_lim = clamp((7.5 - 4 dry_w) / wet_w, 0, 3.4)` and the dry term uses the +/-4.0-clamped input, so the final sum never exceeds 7.5. None of these clamps can bite while the wet signal is within +10 dBFS pre-trim. A host model that emulates the multiply helper exactly reports zero integer overflows over 406 parameter combinations, both transformer states, with +6 dBFS and realistic stimuli, and a worst in-range difference from the float kernel of about -76 dBFS, which is the helper's own truncation floor.
 - **Bypass cost.** With `enabled = 0` the published pointer is NULL and the per-output loop skips the call. With the transformer off the transformer stages are skipped inside the kernel by a hoisted flag, not evaluated with pass-through coefficients.
 - **Psybass and subharm ordering.** Both run before tube so the stage saturates the enhanced bass rather than the other way round.
 - **RAW signal generator outputs** bypass the effect and reset its state, as for psybass.
@@ -300,11 +313,12 @@ Caps version 19 adds four nouns so panels and IR remotes can drive the effect: `
 ## 8. Implementation Summary (firmware reference)
 
 - **Files:** `tube.h`, `tube.c` (config, coefficient computation, tube and rectifier tables, per-output kernel, meter accessor).
-- **Kernel:** one `DSP_TIME_CRITICAL` non-inline function `tube_process_output_block()` called from the six per-output loops (four in `audio_pipeline.c`, two in `pdm_generator.c`), so its RAM text is paid once. `tube.c` compiles with `-O3 -ffp-contract=off` like `subharm.c`.
+- **Kernel:** one `DSP_TIME_CRITICAL` non-inline function `tube_process_output_block()` called from the six per-output loops (four in `audio_pipeline.c`, two in `pdm_generator.c`), so its RAM text is paid once. `tube.c` compiles with `-O3 -ffp-contract=off` like `subharm.c`; a hardware A/B on 2026-09-19 found no measurable difference either way for this file.
+- **Branch-free float body (RP2350).** The first build wrote every clamp and sign-dependent select as `if` or `?:`. On the M33 each float comparison is a VCMP followed by a VMRS that moves FPU flags into the core and stalls the pipeline, and every taken branch flushes because the core has no branch predictor. That build had 16 compare pairs and 26 branches per loop and metered about 2 % CPU per output at 48 kHz, roughly four times the arithmetic-only estimate. The kernel now writes each select as an `fmaxf`/`fminf` split (`t = fmaxf(t,0) + fminf(t,0) * ratio_n`, and likewise for the half scale, the sag attack/release and the meter), which compiles to VMAXNM/VMINNM with no flag transfer and is bit-exact with the branchy form. The transformer arm is a literal parameter to an always-inline body so the compiler emits two loops. Result: zero compares, 5 branches, 660 B of RAM text.
 - **Snapshot:** `Core1EqWork` gains `tube_coeffs` and `tube_mask` so both cores apply one view per packet.
 - **State:** `TubeOutputState` per output: sag envelope, DC-blocker input and output, transformer low-band and high-frequency one-pole states, meter. 24 bytes per output (216 B RP2350, 120 B RP2040).
 - **Coefficients:** 23 values including the RP2040-only `wet_lim`, double-buffered.
-- **Measured footprint (2026-09-18 clean builds):** RP2350 kernel 858 B of RAM text, `.data` 91,496 of the 92,160 B budget, BSS +552 B, free RAM 77,320 B. RP2040 kernel 1,220 B of RAM text, `.data` 64,464 of 65,536, BSS +452 B, free RAM 46,748 B. Neither placement budget needed raising.
-- **Cost estimate:** about 45 FP ops per sample per output on RP2350 (0.45 % CPU per output at 48 kHz, 307.2 MHz). On RP2040, 11 `fast_mul_q28` per sample base, plus one with sag on, one on the negative half, and six with the transformer on (13 to 19 typical). Both to be confirmed on the CPU meter; hardware-untested as of this writing.
+- **Measured footprint (2026-09-19 builds):** RP2350 kernel 660 B of RAM text, `.data` 91,296 of the 92,160 B budget, BSS +552 B, free RAM 77,520 B. RP2040 kernel 1,280 B of RAM text, `.data` 64,528 of 65,536, BSS +452 B, free RAM 46,684 B. Neither placement budget needed raising.
+- **Cost:** the branchy first build metered about 2 % CPU per output at 48 kHz on RP2350 (307.2 MHz); the branch-free build meters just over 1 % per output under the same conditions (2026-09-19). Arithmetic alone is about 45 FP ops per sample per output. On RP2040, 11 `fast_mul_q28` per sample base, plus one with sag on, one on the negative half, and six with the transformer on (13 to 19 typical), unmeasured.
 - **Versions:** wire V31, slot V38, Control Surfaces caps v19.
 - **Vendor commands:** 0x3E, 0x3F, 0x81.

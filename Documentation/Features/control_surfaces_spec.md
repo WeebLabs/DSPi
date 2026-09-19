@@ -750,7 +750,7 @@ Action-mask groups used below:
 | `AUX` | 68 | BOOL | - | auxiliary output on/off, no audio meaning | AUX | BOOL-RW |
 | `AUX_LEVEL` | 69 | CONT | PERCENT | 0..100 % (`CS_TYPE_AUX_PWM` slots only) | AUX | CONT-RW |
 | `TUBE` | 70 | BOOL | - | - | - | BOOL-RW |
-| `TUBE_DRIVE` | 71 | CONT | DB | 0..+24 dB | - | CONT-RW |
+| `TUBE_DRIVE` | 71 | CONT | DB | -6..+24 dB | - | CONT-RW |
 | `TUBE_TYPE` | 72 | ENUM | - | 17 (0 = Custom, 1..16 = tube styles) | - | ENUM-RW |
 | `TUBE_MIX` | 73 | CONT | PERCENT | 0..100 % (dry/wet) | - | CONT-RW |
 
@@ -848,7 +848,7 @@ target and dispatches it.
 | `AUX` | `REQ_SET_CS_AUX_STATE` (`0x04`, wValue = `target` = the aux slot, uint8 0/1) | Auxiliary output on/off; a pin with no audio meaning. See `control_surfaces_aux_spec.md`. |
 | `AUX_LEVEL` | `REQ_SET_CS_AUX_LEVEL` (`0x06`, wValue = `target` = the aux slot, uint16 LE 8.8 percent) | Auxiliary PWM output level, clamped at 100 % (25600). No rounding to whole percent, so any `step` is valid. |
 | `TUBE` | `REQ_SET_TUBE_PARAM` (`0x3E`, wValue = 0, float32 LE) | Tube preamp enable. The payload is a float32, not a byte, like every other index of this command. |
-| `TUBE_DRIVE` | `REQ_SET_TUBE_PARAM` (wValue = 3, float32 LE) | Gain ahead of the shaper, 0..24 dB. |
+| `TUBE_DRIVE` | `REQ_SET_TUBE_PARAM` (wValue = 3, float32 LE) | Knee position with automatic makeup gain, -6..24 dB. Small-signal level does not change with the setting. |
 | `TUBE_TYPE` | `REQ_SET_TUBE_PARAM` (wValue = 2, float32 LE) | Tube style 0..16; 0 is Custom, 1..16 each load a bias / asymmetry / hardness / sag row. INC+WRAP cycles. Sent as an integer-valued float, which the handler rounds and clamps. |
 | `TUBE_MIX` | `REQ_SET_TUBE_PARAM` (wValue = 13, float32 LE) | Dry/wet blend 0..100 %. |
 

@@ -44,26 +44,26 @@ volatile const TubeCoeffs *current_tube_coeffs = NULL;
 static TubeCoeffs tb_coeff_bufs[2];
 static uint8_t tb_coeff_idx = 0;
 
-// Tube style rows: bias_pct, asym_db, hardness_pct, sag_pct (spec 2.3).
-// Index = tube_type - 1.  Values are wire-visible defaults, never renumber.
+// Tube style rows: bias_pct, asym_db, hardness_pct, sag_pct (spec 2.3), scaled
+// for a clean default; drive brings the character up.  Never renumber.
 typedef struct { float bias, asym, hardness, sag; } TubeRow;
 static const TubeRow tube_rows[TUBE_TYPE_MAX] = {
-    { 30.0f, 3.0f, 40.0f, 30.0f },   //  1 12AX7 / ECC83
-    { 25.0f, 3.0f, 35.0f, 25.0f },   //  2 5751
-    { 15.0f, 2.0f, 55.0f, 20.0f },   //  3 12AT7 / ECC81
-    { 20.0f, 4.0f, 25.0f, 30.0f },   //  4 12AY7
-    { 15.0f, 5.0f, 20.0f, 15.0f },   //  5 12AU7 / ECC82
-    { 20.0f, 6.0f, 15.0f, 20.0f },   //  6 6SN7
-    { 30.0f, 3.0f, 30.0f, 30.0f },   //  7 6SL7
-    { 10.0f, 2.0f, 60.0f, 10.0f },   //  8 6DJ8 / ECC88 / 6922
-    {  5.0f, 0.0f, 75.0f, 25.0f },   //  9 EF86 / 6267
-    {  8.0f, 1.0f, 65.0f, 30.0f },   // 10 6SJ7
-    {  0.0f, 0.0f, 50.0f, 45.0f },   // 11 EL84 / 6BQ5
-    {  0.0f, 0.0f, 60.0f, 55.0f },   // 12 EL34
-    {  0.0f, 0.0f, 55.0f, 35.0f },   // 13 6L6 / 5881
-    {  0.0f, 0.0f, 35.0f, 60.0f },   // 14 6V6
-    {  0.0f, 0.0f, 45.0f, 20.0f },   // 15 KT88 / 6550
-    { 35.0f, 6.0f, 10.0f, 25.0f },   // 16 300B / 2A3
+    { 10.0f, 3.0f, 40.0f, 15.0f },   //  1 12AX7 / ECC83
+    {  8.0f, 3.0f, 35.0f, 12.0f },   //  2 5751
+    {  5.0f, 2.0f, 55.0f, 10.0f },   //  3 12AT7 / ECC81
+    {  7.0f, 4.0f, 25.0f, 15.0f },   //  4 12AY7
+    {  5.0f, 5.0f, 20.0f,  8.0f },   //  5 12AU7 / ECC82
+    {  7.0f, 6.0f, 15.0f, 10.0f },   //  6 6SN7
+    { 10.0f, 3.0f, 30.0f, 15.0f },   //  7 6SL7
+    {  3.0f, 2.0f, 60.0f,  5.0f },   //  8 6DJ8 / ECC88 / 6922
+    {  2.0f, 0.0f, 75.0f, 12.0f },   //  9 EF86 / 6267
+    {  3.0f, 1.0f, 65.0f, 15.0f },   // 10 6SJ7
+    {  0.0f, 0.0f, 50.0f, 25.0f },   // 11 EL84 / 6BQ5
+    {  0.0f, 0.0f, 60.0f, 30.0f },   // 12 EL34
+    {  0.0f, 0.0f, 55.0f, 18.0f },   // 13 6L6 / 5881
+    {  0.0f, 0.0f, 35.0f, 30.0f },   // 14 6V6
+    {  0.0f, 0.0f, 45.0f, 10.0f },   // 15 KT88 / 6550
+    { 12.0f, 6.0f, 10.0f, 12.0f },   // 16 300B / 2A3
 };
 
 // Rectifier rows: sag depth scale, attack ms, release ms (spec 2.9).
@@ -257,16 +257,17 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     float trim_db  = clampf(config->trim_db, TUBE_TRIM_MIN, TUBE_TRIM_MAX);
     uint8_t rect   = config->rectifier > TUBE_RECT_MAX ? TUBE_RECT_MAX : config->rectifier;
 
-    // Shaper: knee fixed at t = 1, small-signal gain normalised to unity
-    float m = powf(10.0f, drive_db / 20.0f);              // 1.0 .. 15.85
+    // Shaper: knee fixed at t = 1; the 1/m makeup keeps small-signal gain at
+    // unity so drive moves the knee, not the level (s_n <= 5.3 at -6 dB)
+    float m = powf(10.0f, drive_db / 20.0f);              // 0.5 .. 15.85
     float h = hard_pct * 0.01f;
     float c1 = 1.5f + 0.375f * h;
     float c3 = -0.5f - 0.75f * h;
     float c5 = 0.375f * h;
     float kn = powf(10.0f, asym_db / 20.0f);              // 0.25 .. 3.98
     float ratio_n = 1.0f / kn;
-    float s_p = 1.0f / c1;
-    float s_n = kn / c1;                                  // <= 2.65
+    float s_p = 1.0f / (c1 * m);
+    float s_n = kn / (c1 * m);
     float b = bias_pct * 0.005f;                          // -0.5 .. 0.5
     float v0 = shaper_f(b, ratio_n, c1, c3, c5, s_p, s_n);
 
@@ -371,52 +372,68 @@ uint16_t tube_meter_u16(uint8_t out) {
 
 #if PICO_RP2350
 
-DSP_TIME_CRITICAL
-void tube_process_output_block(const TubeCoeffs * __restrict c,
-                               TubeOutputState * __restrict st,
-                               float * __restrict buf, uint32_t n) {
+// Branch-free float body.  Every sign-dependent select is written as a
+// fmaxf/fminf split (VMAXNM/VMINNM, no flag transfer), which is bit-exact
+// with the branchy form; a VCMP+VMRS pair or a taken branch costs more
+// on the M33 than the arithmetic it would skip.  `xfmr` is a literal at
+// each call so the compiler drops the unused arm.
+static inline __attribute__((always_inline))
+void tube_block_f(const TubeCoeffs * __restrict c, TubeOutputState * __restrict st,
+                  float * __restrict buf, uint32_t n, const bool xfmr) {
     float env = st->env, dc_x1 = st->dc_x1, dc_y1 = st->dc_y1;
     float xf_lp = st->xf_lp, xf_hf = st->xf_hf, meter = st->meter;
-    const bool sag_on = c->sag_on, xfmr_on = c->xfmr_on;
+    const float m = c->m, sagk = c->sagk, bias = c->bias, ratio_n = c->ratio_n;
+    const float c1 = c->c1, c3 = c->c3, c5 = c->c5, s_p = c->s_p, s_n = c->s_n, v0 = c->v0;
+    const float sag_att = c->sag_att, sag_rel = c->sag_rel, dc_r = c->dc_r, decay = c->meter_decay;
+    const float a_lf = c->xf_a_lf, inv_ks = c->xf_inv_ks, xf_s = c->xf_s, a_hf = c->xf_a_hf;
+    const float dry_w = c->dry_w, wet_w = c->wet_w;
 
     for (uint32_t i = 0; i < n; i++) {
         float x = buf[i];
 
         // Sag pulls the drive down with the previous sample's knee drive
-        float m_eff = sag_on ? c->m - c->sagk * env : c->m;
-        float t = m_eff * x + c->bias;
-        if (t < 0.0f) t *= c->ratio_n;
-        if (t > 1.0f) t = 1.0f; else if (t < -1.0f) t = -1.0f;
+        // (sagk is zero when sag is off, so no branch is needed)
+        float t = (m - sagk * env) * x + bias;
+        t = fmaxf(t, 0.0f) + fminf(t, 0.0f) * ratio_n;
+        t = fminf(fmaxf(t, -1.0f), 1.0f);
 
         float t2 = t * t;
-        float p = t * (c->c1 + t2 * (c->c3 + t2 * c->c5));
-        float v = p * (t >= 0.0f ? c->s_p : c->s_n) - c->v0;
+        float p = t * (c1 + t2 * (c3 + t2 * c5));
+        // p carries the sign of t, so the half select splits on p
+        float v = fmaxf(p, 0.0f) * s_p + fminf(p, 0.0f) * s_n - v0;
 
         // DC blocker: asymmetric clipping leaves a level-dependent offset
-        float y = v - dc_x1 + c->dc_r * dc_y1;
+        float y = v - dc_x1 + dc_r * dc_y1;
         dc_x1 = v; dc_y1 = y;
 
         float a = fabsf(t);
-        env += (a - env) * (a > env ? c->sag_att : c->sag_rel);
-        float mt = meter * c->meter_decay;
-        meter = a > mt ? a : mt;
+        float d = a - env;
+        env += fmaxf(d, 0.0f) * sag_att + fminf(d, 0.0f) * sag_rel;
+        meter = fmaxf(a, meter * decay);
 
-        if (xfmr_on) {
-            xf_lp += c->xf_a_lf * (y - xf_lp);
+        if (xfmr) {
+            xf_lp += a_lf * (y - xf_lp);
             float high = y - xf_lp;
-            float u = xf_lp * c->xf_inv_ks;
-            if (u > 1.0f) u = 1.0f; else if (u < -1.0f) u = -1.0f;
-            float ls = (1.5f * u - 0.5f * u * u * u) * c->xf_s;
+            float u = fminf(fmaxf(xf_lp * inv_ks, -1.0f), 1.0f);
+            float ls = (1.5f * u - 0.5f * u * u * u) * xf_s;
             y = high + ls;
-            xf_hf += c->xf_a_hf * (y - xf_hf);
+            xf_hf += a_hf * (y - xf_hf);
             y = xf_hf;
         }
 
-        buf[i] = c->dry_w * x + c->wet_w * y;
+        buf[i] = dry_w * x + wet_w * y;
     }
 
     st->env = env; st->dc_x1 = dc_x1; st->dc_y1 = dc_y1;
     st->xf_lp = xf_lp; st->xf_hf = xf_hf; st->meter = meter;
+}
+
+DSP_TIME_CRITICAL
+void tube_process_output_block(const TubeCoeffs * __restrict c,
+                               TubeOutputState * __restrict st,
+                               float * __restrict buf, uint32_t n) {
+    if (c->xfmr_on) tube_block_f(c, st, buf, n, true);
+    else            tube_block_f(c, st, buf, n, false);
 }
 
 #else
@@ -458,10 +475,12 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
 
         int32_t t2 = fast_mul_q28(t, t);
         int32_t p = fast_mul_q28(t, c->c1 + fast_mul_q28(t2, c->c3 + fast_mul_q28(t2, c->c5)));
-        int32_t v = fast_mul_q28(p, t >= 0 ? c->s_p : c->s_n) - c->v0;
+        // v clamp: s_n reaches 5.3 at -6 dB drive, and the DC blocker output
+        // is bounded by 2 max|v|, which must stay under the 8.0 Q28 ceiling.
+        int32_t v = clamp_lim(fast_mul_q28(p, t >= 0 ? c->s_p : c->s_n) - c->v0, y_lim);
 
-        // DC blocker output is bounded by 2 max|v| = 5.3; the state keeps the
-        // true value, the clamped copy bounds every later operand.
+        // DC blocker output <= 6.8; the state keeps the true value, the
+        // clamped copy bounds every later operand.
         int32_t y = v - dc_x1 + fast_mul_q28(c->dc_r, dc_y1);
         dc_x1 = v; dc_y1 = y;
         y = clamp_lim(y, y_lim);

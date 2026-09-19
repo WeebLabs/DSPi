@@ -1283,7 +1283,7 @@ Follows the psybass module pattern:
 ---
 
 ## Tube Preamp Emulation
-*Last updated: 2026-09-18 (RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
+*Last updated: 2026-09-19 (drive range -6..24 dB with automatic makeup gain, level-neutral defaults, rescaled tube rows, RP2040 shaper-output clamp; RP2350 kernel rewritten branch-free, 660 B; 2026-09-18: RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
 
 ### Purpose
 
@@ -1308,7 +1308,8 @@ env  += (|t| - env) * (|t| > env ? a_att : a_rel)
 meter = max(|t|, meter * decay)             // 300 ms decay
 ```
 
-- **The shaper.** `p(t) = t (c1 + t^2 (c3 + t^2 c5))` blends a cubic soft knee at hardness 0 into a quintic hard knee at hardness 100. Both reach exactly 1 at t = 1 with zero slope, so the clamp is continuous in value and in slope at every hardness. `s_p` and `s_n` normalise the small-signal gain to unity, so hardness never changes the level of clean material.
+- **The shaper.** `p(t) = t (c1 + t^2 (c3 + t^2 c5))` blends a cubic soft knee at hardness 0 into a quintic hard knee at hardness 100. Both reach exactly 1 at t = 1 with zero slope, so the clamp is continuous in value and in slope at every hardness. `s_p` and `s_n` normalise the small-signal gain to unity, so neither hardness nor drive changes the level of clean material.
+- **Drive and automatic makeup gain.** The output scales carry the makeup factor themselves. `s_p = 1 / (c1 m)` and `s_n = kn / (c1 m)`, where `m` is the linear drive. Small-signal gain is therefore unity at every drive setting, and the drive knob moves the knee relative to the signal rather than moving the level. Turning drive up adds harmonics without getting louder, which is what makes A/B comparison honest. Drive runs from **-6 to +24 dB**, and at -6 dB the knee sits 6 dB above full scale, so a full-scale input never reaches it. The -6 dB floor is a Q28 constraint rather than a musical one. `s_n` reaches 5.3 there, and it has to stay representable and inside the `fast_mul_q28` operand-sum rule.
 - **Even harmonics from the bias.** `b` shifts the operating point along the curve, so second-harmonic content rises with signal level the way it does in a real single-ended stage. `v0` is the shaper's output at rest and is subtracted, so enabling the effect produces no step. The DC blocker then removes the level-dependent offset that asymmetric clipping creates.
 - **Supply sag.** A one-pole follower of how hard the stage is being driven into the knee pulls the drive down slowly. The rectifier selector presets the depth scale and the attack and release times. Effective depth is capped at 0.9 so the gain never reaches zero, and a solid-state rectifier disables the stage outright.
 - **Transformer.** A one-pole split at `xfmr_lf_hz` feeds a cubic soft clipper on the low band only, then a one-pole rolls the sum off at `xfmr_hf_hz`. Core saturation scales with voltage over frequency, so a 6 dB per octave split is the physically correct slope. With the stage off its state is zero and the kernel skips it on a flag hoisted out of the sample loop, rather than running pass-through coefficients.
@@ -1318,14 +1319,35 @@ meter = max(|t|, meter * decay)             // 300 ms decay
 
 `tube_type` 1..16 names a row of `bias_pct`, `asym_db`, `hardness_pct` and `sag_pct`, running from the 12AX7 to the 300B. Setting the type copies its row into those four parameters, stores the type and notifies every field it changed. Setting any of those four to a value different from the one stored resets the type to 0 (Custom) and notifies that byte, while a SET that lands on the value already there leaves the type alone. Bulk apply and preset load restore the stored fields verbatim and never run the row lookup, so a preset saved as a 12AX7 reloads with the voicing it was saved with even if the row table changes in a later firmware. Push-pull power rows carry zero bias and zero asymmetry, because a push-pull stage cancels even harmonics by construction; their character comes from hardness, sag and the transformer stage.
 
+The rows are scaled for a clean default rather than for maximum character, so drive is what brings the voicing up. Relative to the first implementation, bias is roughly a third of what it was and sag roughly half, while asymmetry and hardness are unchanged.
+
+| Type | Name | bias_pct | asym_db | hardness_pct | sag_pct |
+|------|------|----------|---------|--------------|---------|
+| 1 | 12AX7 / ECC83 | 10 | 3 | 40 | 15 |
+| 2 | 5751 | 8 | 3 | 35 | 12 |
+| 3 | 12AT7 / ECC81 | 5 | 2 | 55 | 10 |
+| 4 | 12AY7 | 7 | 4 | 25 | 15 |
+| 5 | 12AU7 / ECC82 | 5 | 5 | 20 | 8 |
+| 6 | 6SN7 | 7 | 6 | 15 | 10 |
+| 7 | 6SL7 | 10 | 3 | 30 | 15 |
+| 8 | 6DJ8 / ECC88 / 6922 | 3 | 2 | 60 | 5 |
+| 9 | EF86 / 6267 | 2 | 0 | 75 | 12 |
+| 10 | 6SJ7 | 3 | 1 | 65 | 15 |
+| 11 | EL84 / 6BQ5 | 0 | 0 | 50 | 25 |
+| 12 | EL34 | 0 | 0 | 60 | 30 |
+| 13 | 6L6 / 5881 | 0 | 0 | 55 | 18 |
+| 14 | 6V6 | 0 | 0 | 35 | 30 |
+| 15 | KT88 / 6550 | 0 | 0 | 45 | 10 |
+| 16 | 300B / 2A3 | 12 | 6 | 10 | 12 |
+
 `rectifier` 0..3 selects solid state (sag off), GZ34, 5U4 or 5Y3. Each is a row of sag depth scale, attack time and release time.
 
 ### Platform Implementation
 
-The kernel exists once, in `tube.c`, written against a number-type abstraction in `tube.h` (`tb_num_t`, with `TB_ZERO` and `TB_ONE`). `tube_process_output_block()` is an out-of-line `DSP_TIME_CRITICAL` function shared by all six call sites, so its RAM text is paid once. It measures 858 B on RP2350 and 1,220 B on RP2040.
+The kernel exists once, in `tube.c`, written against a number-type abstraction in `tube.h` (`tb_num_t`, with `TB_ZERO` and `TB_ONE`). `tube_process_output_block()` is an out-of-line `DSP_TIME_CRITICAL` function shared by all six call sites, so its RAM text is paid once. It measures 660 B on RP2350 and 1,280 B on RP2040. The RP2350 body is branch-free: every sign-dependent select is an fmaxf/fminf split (VMAXNM/VMINNM, bit-exact with the branchy form) because a VCMP+VMRS pair or a taken branch costs the M33 more than the arithmetic it skips; the first build with `if` selects had 16 compare pairs and 26 branches per loop and metered about 2 % CPU per output at 48 kHz; the rewrite has none and 5 and meters just over 1 % per output (2026-09-19), close to the arithmetic floor. The transformer arm is unswitched into two loop bodies.
 
 - **RP2350:** `tb_num_t` is float and the kernel is plain single-precision arithmetic.
-- **RP2040:** `tb_num_t` is Q28 `int32_t` and every multiply is `fast_mul_q28`. `m`, `sagk` and `bias` are carried in **Q24** rather than Q28 so that drive up to 15.85 linear (24 dB) fits, which puts the drive product in a domain sixteen times smaller that cannot wrap. Every other coefficient is Q28 and is verified against the +/-8.0 representable range. The negative-knee ratio is at most 3.98, the transformer reciprocal knee at most 7.94 (the -18 dBFS floor on `xfmr_sat_pct` is what bounds it) and the wet weight at most 3.98.
+- **RP2040:** `tb_num_t` is Q28 `int32_t` and every multiply is `fast_mul_q28`. `m`, `sagk` and `bias` are carried in **Q24** rather than Q28 so that drive up to 15.85 linear (24 dB) fits, which puts the drive product in a domain sixteen times smaller that cannot wrap. Every other coefficient is Q28 and is verified against the +/-8.0 representable range. The negative-knee ratio is at most 3.98, the transformer reciprocal knee at most 7.94 (the -18 dBFS floor on `xfmr_sat_pct` is what bounds it) and the wet weight at most 3.98. The makeup gain puts `s_n` at up to **5.3**, at the -6 dB drive floor with the negative knee 12 dB later, and that is precisely what sets the floor. A lower minimum drive would push `s_n` past the representable range.
 
   The constraint that shapes the whole kernel is `fast_mul_q28`'s own. It splits each operand into 16-bit halves and sums the cross products in an `int32`, so it needs the **sum of the two operand magnitudes** to stay below 8.0. A small product is not enough. Every operand is therefore bounded at the point of use.
 
@@ -1333,14 +1355,17 @@ The kernel exists once, in `tube.c`, written against a number-type abstraction i
   |-------|-------|-------|
   | Shaper input | +/-4.0 | before the drive multiply |
   | Driven value | +/-4 knee units | before the negative-knee ratio multiply |
+  | Shaper output `v` | +/-3.4 (`TUBE_Q28_Y_LIM`) | after the `v0` subtraction, before the DC blocker. `s_n` reaches 5.3 at -6 dB drive, so the raw value can overshoot |
   | DC-blocker output copy | +/-3.4 (`TUBE_Q28_Y_LIM`) | state keeps the true value |
   | Transformer output | +/-3.4 (`TUBE_Q28_Y2_LIM`) | before the HF one-pole |
   | Transformer low band | +/-1.0 | before the knee multiply; the reciprocal knee is carried in **Q26** and shifted back |
   | Wet signal | `wet_lim` = clamp((7.5 - 4 `dry_w`) / `wet_w`, 0, 3.4) | before the output mix |
 
+  The shaper-output clamp is what keeps the DC blocker in range. Its output is bounded by twice the largest `v` it can be fed, so clamping `v` to 3.4 holds that at 6.8 instead of the 10.6 an unclamped 5.3 would produce, and 10.6 does not fit. This clamp is RP2040 only. The RP2350 float kernel has no equivalent, because nothing there needs bounding.
+
   The dry term in `wet_lim` uses the +/-4.0-clamped input, so the final sum can never exceed 7.5. The one lossy corner is an input beyond +12 dBFS at 0 dB drive with maximum bias and asymmetry, where the negative half saturates slightly early. Everywhere else the clamps land on material the +/-1 knee clamp would flatten anyway.
 
-A host model that emulates `fast_mul_q28` exactly (16-bit halves, `int32` partial sums, wrap detection) reports **zero integer overflows** over 404 parameter combinations times two transformer states, with hot (+6 dBFS) and realistic stimuli. Its worst in-range difference from the float kernel is about **-73 dBFS**, which is the helper's truncation floor rather than a kernel error. Small-signal gain is unity at every hardness, and silence in gives exactly zero out for all 16 tube rows.
+A host model that emulates `fast_mul_q28` exactly (16-bit halves, `int32` partial sums, wrap detection) reports **zero integer overflows** over 406 parameter combinations times two transformer states, with hot (+6 dBFS) and realistic stimuli. Its worst in-range difference from the float kernel is about **-76 dBFS**, which is the helper's truncation floor rather than a kernel error. Small-signal gain is unity at every hardness, and silence in gives exactly zero out for all 16 tube rows.
 
 ### Parameters
 
@@ -1351,11 +1376,11 @@ One global config (`TubeConfig`) applied to the output channels selected by `out
 | 0 | enabled | bool | 0/1 | false | Enable/disable the effect |
 | 1 | output_mask | uint16 | 0x0000-0xFFFF | 0xFFFF | Bit k: process output channel k; read live, no recompute |
 | 2 | tube_type | enum | 0..16 | 1 (12AX7) | 0 = Custom; 1..16 each load a character row |
-| 3 | drive_db | float | 0..24 dB | 6 | Gain ahead of the shaper; at 0 dB a full-scale input just reaches the knee |
-| 4 | bias_pct | float | -100..+100 % | 30 | Operating point, `b = bias_pct / 200` |
+| 3 | drive_db | float | -6..24 dB | -6 | Knee position, with automatic makeup gain; at 0 dB a full-scale input just reaches the knee, at -6 dB the knee sits 6 dB above full scale |
+| 4 | bias_pct | float | -100..+100 % | 10 | Operating point, `b = bias_pct / 200` |
 | 5 | asym_db | float | -12..+12 dB | 3 | How much later the negative half reaches its knee |
 | 6 | hardness_pct | float | 0..100 | 40 | Cubic (0) to quintic (100) knee blend |
-| 7 | sag_pct | float | 0..100 % | 30 | Supply sag depth before the rectifier scale |
+| 7 | sag_pct | float | 0..100 % | 15 | Supply sag depth before the rectifier scale |
 | 8 | rectifier | enum | 0..3 | 1 (GZ34) | 0 = solid state, which turns sag off |
 | 9 | xfmr_enabled | bool | 0/1 | false | Transformer stage |
 | 10 | xfmr_lf_hz | float | 20..300 Hz | 80 | Corner of the low-band split |
@@ -1365,6 +1390,8 @@ One global config (`TubeConfig`) applied to the output channels selected by `out
 | 14 | trim_db | float | -12..+12 dB | 0 | Level applied to the wet path only |
 
 Defaults for indices 4 to 7 are the 12AX7 row.
+
+**Why the defaults changed (2026-09-19).** The first set added +6 dB of gain and about 6 % THD at -12 dBFS, so switching the module on was a loudness change as much as a tonal one. The new default is level-neutral and measures 0.18 % THD at -20 dBFS, 0.50 % at -12 dBFS and 3.6 % at 0 dBFS on a 100 Hz sine in the host model, second-harmonic led.
 
 ### Saturation Meter
 
@@ -1379,7 +1406,7 @@ Follows the psybass module pattern:
 - **Skip-and-reset predicate.** An output runs tube when coeffs are published AND its mask bit is set AND it is matrix-enabled AND not muted AND not carrying a siggen RAW test signal. Otherwise its state is reset each packet (`tube_reset_output_state()`) so re-entry starts clean. The predicate is wired at all six pipeline call sites, the single-core and dual-core output loops on both platform branches of `audio_pipeline.c` and the two Core 1 EQ-worker output loops in `pdm_generator.c`, and the disabled PDM output's state is kept cleared in EQ_WORKER mode.
 - **Two-core coherence.** Core 0 snapshots the coefficient pointer and `output_mask` once per packet and hands them to Core 1 through the `Core1EqWork` fields `tube_coeffs` and `tube_mask`, so both cores apply one consistent view for the whole packet (the same single-view rationale as the psybass and subharm fields).
 - **Chain position.** Tube runs per output, post-matrix, after crossfeed, after the subharmonic synthesizer and after psybass, and before the crossover, per-output PEQ, gain, loudness and delay. Running after the two bass modules is deliberate, so the stage saturates the enhanced bass rather than the other way round. Pre-crossover placement puts the saturator where a real preamp sits ahead of an active crossover, so a subwoofer output saturates the full-band program and then low-passes the result while a tweeter output keeps the harmonics the bass generated. Because tube runs pre-gain, its character does not change with volume.
-- **RAM cost.** 552 B of `.bss` on RP2350 (216 B of per-output state, two `TubeCoeffs` buffers and the config) and 452 B on RP2040 (120 B of state), plus the shared kernel's 858 B and 1,220 B of RAM text. See "Memory Layout".
+- **RAM cost.** 552 B of `.bss` on RP2350 (216 B of per-output state, two `TubeCoeffs` buffers and the config) and 452 B on RP2040 (120 B of state), plus the shared kernel's 660 B and 1,280 B of RAM text. See "Memory Layout".
 - **CPU cost.** Estimated at about 45 FP ops per sample per processed output on RP2350. RP2040 costs **11 `fast_mul_q28` per sample** in the base path, plus 1 with sag on, plus 1 on the negative half of the waveform, plus 6 with the transformer on, so 13 to 19 is the typical range. Both figures are **static estimates and have not been measured on the CPU meter**. With the effect disabled the published pointer is NULL and a processed output costs one pointer test.
 
 ### Persistence & Control
@@ -1392,7 +1419,7 @@ Follows the psybass module pattern:
 
 ### Interactions and Edge Cases
 
-- **Headroom.** The shaper output is bounded by `max(s_p, s_n)`, at most 2.65 with the negative knee 12 dB later, and the transformer saturator is bounded by its own knee. The wet path can therefore exceed 0 dBFS only through `trim_db`.
+- **Headroom.** The shaper output is bounded by `max(s_p, s_n)`, at most 5.3 at the -6 dB drive floor with the negative knee 12 dB later, and the transformer saturator is bounded by its own knee. Small-signal gain is unity at every drive, so the wet path can exceed 0 dBFS only through `trim_db` or through material already near the knee. On RP2040 that bound is clamped to 3.4 before the DC blocker; RP2350 carries it in float.
 - **Aliasing.** The shaper runs at the native rate with no oversampling. Harmonic content is bounded to fifth order below the clamp, so aliasing is audible only on bright material at heavy drive at 44.1 and 48 kHz, and is negligible at 96 kHz.
 - **RAW signal generator outputs** bypass the effect and reset its state, as for psybass.
 - **Masking and alignment.** Masking the effect per output changes that output's phase response only through one-pole IIR stages, the same category as a PEQ band, and never its sample alignment.
@@ -2067,7 +2094,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-09-18 (tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; current .data and free-RAM figures; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-09-19 (tube preamp row: RP2040 shaper-output clamp and kernel size 1,280 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2083,8 +2110,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
-| RAM code+rodata+data (.data) | 64,464 B of the 65,536 B budget | 91,496 B of the 92,160 B budget |
-| Free RAM | 46,748 B | 77,320 B |
+| RAM code+rodata+data (.data) | 64,528 B of the 65,536 B budget | 91,296 B of the 92,160 B budget |
+| Free RAM | 46,684 B | 77,520 B |
 | Custom XIP linker script | `memmap_dspi_rp2040_xip.ld` (+divider/int64/bit-ops IN_RAM defines) | `memmap_dspi_rp2350_xip.ld` |
 
 ### DSP Processing
@@ -2122,7 +2149,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Crossfeed | Per output pair, post-matrix (PASS 4.5); 2 pairs; `output_pair_mask` (default pair 1) | Per output pair, post-matrix (PASS 4.5); 4 pairs; `output_pair_mask` (default pair 1). Both platforms: shared coeffs, per-pair state, works in every input mode |
 | Psychoacoustic bass | Per output, pre-crossover; RBJ Q28 biquads (with pre-drive low-band clamp) | Per output, pre-crossover; TPT SVF float. Both platforms: missing-fundamental NLD, `output_mask`, zero added latency |
 | Subharmonic synthesizer | Per output, pre-crossover, ahead of psybass; same kernel in Q28 through `fast_mul_q28` (band clamp before the divider); 10-byte sub meter (5 outputs) | Per output, pre-crossover, ahead of psybass; same kernel in float; 18-byte sub meter (9 outputs). Both platforms: TPT SVF band split, hysteresis octave dividers, phase-aligned sum, LF bell, `output_mask`, selectivity, sub ceiling, pair link, runtime solo, headroom reading, zero added latency |
-| Tube preamp | Per output, pre-crossover, after psybass; same kernel in Q28 through `fast_mul_q28`, whose operand magnitudes must sum below 8.0 (drive in Q24, Q26 transformer knee, clamps on the shaper input, driven value, DC-blocker output, transformer output and low band, and the wet signal); 11 multiplies per sample base, 13 to 19 typical; 1,220 B of shared RAM text; 10-byte saturation meter (5 outputs) | Per output, pre-crossover, after psybass; same kernel in float; 18-byte saturation meter (9 outputs). Both platforms: biased asymmetric waveshaper with a blended knee hardness, supply sag, DC blocker, optional transformer stage, 16 tube-type rows, `output_mask`, zero added latency |
+| Tube preamp | Per output, pre-crossover, after psybass; same kernel in Q28 through `fast_mul_q28`, whose operand magnitudes must sum below 8.0 (drive in Q24, Q26 transformer knee, clamps on the shaper input, driven value, shaper output, DC-blocker output, transformer output and low band, and the wet signal); 11 multiplies per sample base, 13 to 19 typical; 1,280 B of shared RAM text; 10-byte saturation meter (5 outputs) | Per output, pre-crossover, after psybass; same kernel in float, with no headroom clamps at all; 660 B of shared RAM text; 18-byte saturation meter (9 outputs). Both platforms: biased asymmetric waveshaper with a blended knee hardness, supply sag, DC blocker, optional transformer stage, 16 tube-type rows, drive -6..+24 dB with automatic makeup gain, `output_mask`, zero added latency |
 | Spectrum analyser (RTA) | Q15 `int16_t` kernel; default order 9 (512 points), max 10 (1024); measured per-bin dynamic range 78 dB (`RtaCaps.dynamic_range_db` = 78); 5 tracked channels; Q27 continuous 10–200 Hz bass bank (6th-order bands) with 64-bit power; ~6.9 KB analyser BSS | Float kernel; default order 10 (1024 points), max 10 (1024); dynamic range 120 dB, limited by the wire level byte rather than arithmetic; 9 tracked channels; float continuous 10–200 Hz bass bank (6th-order bands); ~11.2 KB analyser BSS |
 | Stereo upmixer | Not available (compiled out; matrix untouched) | Stereo input only: derives C/Ls/Rs into matrix rows 2..4 (passive/adaptive/off centre; off/passive/adaptive surround). Zero-latency steering; deliberate per-row surround Haas delay |
 | EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |
@@ -2198,17 +2225,18 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-09-18 (tube preamp: BSS +452 B RP2040 / +552 B RP2350, shared kernel 1,220 B RP2040 / 858 B RP2350 of RAM text; current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-09-19 (RP2040 tube kernel 1,280 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +452 B RP2040 / +552 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Tube preamp (2026-09-18).** The module adds **452 B of BSS on RP2040**
 > (120 B of `tube_output_state` for 5 outputs, two `TubeCoeffs` buffers and the
 > 48-byte config) and **552 B on RP2350** (216 B of state for 9 outputs, the same
 > two buffers and the config). Its one shared `DSP_TIME_CRITICAL` kernel,
-> `tube_process_output_block`, is **1,220 B of RAM text on RP2040** and **858 B on
+> `tube_process_output_block`, is **1,280 B of RAM text on RP2040** (1,220 B before
+> the 2026-09-19 shaper-output clamp) and **660 B on
 > RP2350**, paid once for all six per-output call sites. Measured after the change,
-> `.data` is 64,464 B of the 65,536 B budget on RP2040 (was 62,816 B) and 91,496 B
+> `.data` is 64,528 B of the 65,536 B budget on RP2040 (was 62,816 B) and 91,296 B
 > of 92,160 B on RP2350 (was 90,176 B), BSS is 150,932 B (was 150,480 B) and
-> 355,472 B (was 354,920 B), and free RAM is 46,748 B (was 48,848 B) and 77,320 B
+> 355,472 B (was 354,920 B), and free RAM is 46,684 B (was 48,848 B) and 77,520 B
 > (was 79,192 B). Both platforms stay inside the `check_ram_placement.py` `.data`
 > budget. No audio buffers or delay lines change. See "Tube Preamp Emulation".
 
@@ -2444,9 +2472,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | I2S RX DMA ring (1024 × 4, 4 KB aligned) | 4 KB |
 | Other BSS | ~20 KB |
 | **Total BSS** | **~147 KB** (measured 150,932 B after the tube preamp) |
-| RAM code+rodata+data (.data section, hot set only) | 64,464 B after the tube preamp (was 62,816 B), within the 65,536 B `check_ram_placement.py` budget |
+| RAM code+rodata+data (.data section, hot set only) | 64,528 B after the tube preamp (was 62,816 B), within the 65,536 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 46,748 B (per scripts/check_ram_placement.py, after the tube preamp; was 48,848 B) |
+| Free RAM | 46,684 B (per scripts/check_ram_placement.py, after the tube preamp; was 48,848 B) |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -2474,9 +2502,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
 | **Total BSS** | **~347 KB** (measured 355,472 B after the tube preamp; was 354,920 B) |
-| RAM code+rodata+data (.data section, hot set only) | 91,496 B after the tube preamp (was 90,176 B), within the 92,160 B `check_ram_placement.py` budget |
+| RAM code+rodata+data (.data section, hot set only) | 91,296 B after the tube preamp (was 90,176 B), within the 92,160 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 77,320 B (per scripts/check_ram_placement.py, after the tube preamp; was 79,192 B; includes vector table + 2 KB heap reserve accounting) |
+| Free RAM | 77,520 B (per scripts/check_ram_placement.py, after the tube preamp; was 79,192 B; includes vector table + 2 KB heap reserve accounting) |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
