@@ -2,8 +2,8 @@
  * Tube Preamp Emulation
  *
  * Biased asymmetric polynomial waveshaper with supply sag, a DC blocker and
- * an optional transformer stage (low-band soft saturation + HF one-pole),
- * run per output channel.  Tube types are rows of the four character
+ * an optional output-stage model (damping-factor bell at the speaker
+ * resonance plus a top shelf), run per output channel.  Tube types are rows of the four character
  * parameters, applied at SET time only, so every type costs the same.
  * Signal flow, parameter ranges and Q28 ceilings:
  * Documentation/Features/tube_preamp_spec.md.
@@ -27,9 +27,8 @@ volatile TubeConfig tube_config = {
     .asym_db      = TUBE_DEFAULT_ASYM,
     .hardness_pct = TUBE_DEFAULT_HARDNESS,
     .sag_pct      = TUBE_DEFAULT_SAG,
-    .xfmr_lf_hz   = TUBE_DEFAULT_XFMR_LF,
-    .xfmr_sat_pct = TUBE_DEFAULT_XFMR_SAT,
-    .xfmr_hf_hz   = TUBE_DEFAULT_XFMR_HF,
+    .xfmr_damping = TUBE_DEFAULT_XFMR_DAMPING,
+    .xfmr_res_hz  = TUBE_DEFAULT_XFMR_RES,
     .mix_pct      = TUBE_DEFAULT_MIX,
     .trim_db      = TUBE_DEFAULT_TRIM,
 };
@@ -171,14 +170,11 @@ bool tube_set_param(uint8_t index, float value) {
     case TUBE_PARAM_XFMR_ENABLED:
         set_bool_field(&tube_config.xfmr_enabled, value != 0.0f, TUBE_OFF(xfmr_enabled));
         break;
-    case TUBE_PARAM_XFMR_LF_HZ:
-        set_float_field(&tube_config.xfmr_lf_hz, value, TUBE_XFMR_LF_MIN, TUBE_XFMR_LF_MAX, TUBE_OFF(xfmr_lf_hz));
+    case TUBE_PARAM_XFMR_DAMPING:
+        set_float_field(&tube_config.xfmr_damping, value, TUBE_XFMR_DAMPING_MIN, TUBE_XFMR_DAMPING_MAX, TUBE_OFF(xfmr_damping));
         break;
-    case TUBE_PARAM_XFMR_SAT_PCT:
-        set_float_field(&tube_config.xfmr_sat_pct, value, TUBE_XFMR_SAT_MIN, TUBE_XFMR_SAT_MAX, TUBE_OFF(xfmr_sat_pct));
-        break;
-    case TUBE_PARAM_XFMR_HF_HZ:
-        set_float_field(&tube_config.xfmr_hf_hz, value, TUBE_XFMR_HF_MIN, TUBE_XFMR_HF_MAX, TUBE_OFF(xfmr_hf_hz));
+    case TUBE_PARAM_XFMR_RES_HZ:
+        set_float_field(&tube_config.xfmr_res_hz, value, TUBE_XFMR_RES_MIN, TUBE_XFMR_RES_MAX, TUBE_OFF(xfmr_res_hz));
         break;
     case TUBE_PARAM_MIX_PCT:
         set_float_field(&tube_config.mix_pct, value, TUBE_MIX_MIN, TUBE_MIX_MAX, TUBE_OFF(mix_pct));
@@ -206,9 +202,8 @@ bool tube_get_param(uint8_t index, float *value) {
     case TUBE_PARAM_SAG_PCT:      *value = tube_config.sag_pct; break;
     case TUBE_PARAM_RECTIFIER:    *value = (float)tube_config.rectifier; break;
     case TUBE_PARAM_XFMR_ENABLED: *value = tube_config.xfmr_enabled ? 1.0f : 0.0f; break;
-    case TUBE_PARAM_XFMR_LF_HZ:   *value = tube_config.xfmr_lf_hz; break;
-    case TUBE_PARAM_XFMR_SAT_PCT: *value = tube_config.xfmr_sat_pct; break;
-    case TUBE_PARAM_XFMR_HF_HZ:   *value = tube_config.xfmr_hf_hz; break;
+    case TUBE_PARAM_XFMR_DAMPING: *value = tube_config.xfmr_damping; break;
+    case TUBE_PARAM_XFMR_RES_HZ:  *value = tube_config.xfmr_res_hz; break;
     case TUBE_PARAM_MIX_PCT:      *value = tube_config.mix_pct; break;
     case TUBE_PARAM_TRIM_DB:      *value = tube_config.trim_db; break;
     default: return false;
@@ -250,9 +245,8 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     float asym_db  = clampf(config->asym_db, TUBE_ASYM_MIN, TUBE_ASYM_MAX);
     float hard_pct = clampf(config->hardness_pct, TUBE_HARDNESS_MIN, TUBE_HARDNESS_MAX);
     float sag_pct  = clampf(config->sag_pct, TUBE_SAG_MIN, TUBE_SAG_MAX);
-    float xf_lf    = clampf(config->xfmr_lf_hz, TUBE_XFMR_LF_MIN, TUBE_XFMR_LF_MAX);
-    float xf_sat   = clampf(config->xfmr_sat_pct, TUBE_XFMR_SAT_MIN, TUBE_XFMR_SAT_MAX);
-    float xf_hf    = clampf(config->xfmr_hf_hz, TUBE_XFMR_HF_MIN, TUBE_XFMR_HF_MAX);
+    float df       = clampf(config->xfmr_damping, TUBE_XFMR_DAMPING_MIN, TUBE_XFMR_DAMPING_MAX);
+    float res_hz   = clampf(config->xfmr_res_hz, TUBE_XFMR_RES_MIN, TUBE_XFMR_RES_MAX);
     float mix_pct  = clampf(config->mix_pct, TUBE_MIX_MIN, TUBE_MIX_MAX);
     float trim_db  = clampf(config->trim_db, TUBE_TRIM_MIN, TUBE_TRIM_MAX);
     uint8_t rect   = config->rectifier > TUBE_RECT_MAX ? TUBE_RECT_MAX : config->rectifier;
@@ -280,14 +274,23 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     float sag_rel = sag_on ? onepole_a_tau(rr->rel_ms * 1e-3f, sample_rate) : 0.0f;
 
     float dc_r = expf(-2.0f * 3.1415926535f * TUBE_DC_BLOCK_HZ / sample_rate);
-    float meter_decay = expf(-1.0f / (TUBE_METER_TAU_MS * 1e-3f * sample_rate));
 
-    // Transformer: 6 dB/oct split, low-band knee 0 .. -18 dBFS, HF one-pole
-    float xf_a_lf = onepole_a(xf_lf, sample_rate);
-    float ks = powf(10.0f, -0.18f * xf_sat / 20.0f);      // 1.0 .. 0.126
-    float xf_inv_ks = 1.0f / ks;                          // <= 7.94
-    float xf_s = ks / 1.5f;
-    float xf_a_hf = (xf_hf >= TUBE_XFMR_HF_MAX) ? 1.0f : onepole_a(xf_hf, sample_rate);
+    // Output stage: source impedance Zn/df against a speaker whose impedance
+    // rises to ZP x nominal at resonance and ZH x nominal at the top, so the
+    // terminal voltage lifts by ZP (df+1)/(ZP df+1) at the bell and
+    // ZH (df+1)/(ZH df+1) on the shelf.  Bell is a Cytomic TPT SVF peaking
+    // section, Q fixed, A = sqrt(gain), k = 1/(Q A), mix k (A^2 - 1).
+    float g_bump = TUBE_XFMR_Z_PEAK_RATIO * (df + 1.0f) / (TUBE_XFMR_Z_PEAK_RATIO * df + 1.0f);
+    float g_top  = TUBE_XFMR_Z_HF_RATIO * (df + 1.0f) / (TUBE_XFMR_Z_HF_RATIO * df + 1.0f);
+    float bA = sqrtf(g_bump);
+    float bg = tanf(3.1415926535f * res_hz / sample_rate);
+    float bk = 1.0f / (TUBE_XFMR_BELL_Q * bA);
+    float bl_a1 = 1.0f / (1.0f + bg * (bg + bk));
+    float bl_a2 = bg * bl_a1;
+    float bl_a3 = bg * bl_a2;
+    float bl_m1 = bk * (bA * bA - 1.0f);                  // <= 0.67
+    float sh_a = onepole_a(TUBE_XFMR_SHELF_HZ, sample_rate);
+    float sh_g = g_top - 1.0f;                            // <= 0.33
 
     float mix = mix_pct * 0.01f;
     float dry_w = 1.0f - mix;
@@ -306,9 +309,9 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     coeffs->c1 = c1;         coeffs->c3 = c3;           coeffs->c5 = c5;
     coeffs->s_p = s_p;       coeffs->s_n = s_n;         coeffs->v0 = v0;
     coeffs->sag_att = sag_att; coeffs->sag_rel = sag_rel;
-    coeffs->dc_r = dc_r;     coeffs->meter_decay = meter_decay;
-    coeffs->xf_a_lf = xf_a_lf; coeffs->xf_inv_ks = xf_inv_ks;
-    coeffs->xf_s = xf_s;     coeffs->xf_a_hf = xf_a_hf;
+    coeffs->dc_r = dc_r;
+    coeffs->bl_a1 = bl_a1;   coeffs->bl_a2 = bl_a2;     coeffs->bl_a3 = bl_a3;
+    coeffs->bl_m1 = bl_m1;   coeffs->sh_a = sh_a;       coeffs->sh_g = sh_g;
     coeffs->dry_w = dry_w;   coeffs->wet_w = wet_w;     coeffs->wet_lim = wet_lim;
 #else
     // m, sagk and bias live in Q24 so the kernel's drive product lands in a
@@ -328,12 +331,12 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     coeffs->sag_att = (int32_t)(sag_att * q28);
     coeffs->sag_rel = (int32_t)(sag_rel * q28);
     coeffs->dc_r = (int32_t)(dc_r * q28);
-    coeffs->meter_decay = (int32_t)(meter_decay * q28);
-    coeffs->xf_a_lf = (int32_t)(xf_a_lf * q28);
-    // Q26: fast_mul_q28 needs |a| + |b| < 8, and 7.94 + 1.0 does not fit
-    coeffs->xf_inv_ks = (int32_t)(xf_inv_ks * q28 * 0.25f);
-    coeffs->xf_s = (int32_t)(xf_s * q28);
-    coeffs->xf_a_hf = (int32_t)(xf_a_hf * q28);
+    coeffs->bl_a1 = (int32_t)(bl_a1 * q28);
+    coeffs->bl_a2 = (int32_t)(bl_a2 * q28);
+    coeffs->bl_a3 = (int32_t)(bl_a3 * q28);
+    coeffs->bl_m1 = (int32_t)(bl_m1 * q28);
+    coeffs->sh_a = (int32_t)(sh_a * q28);
+    coeffs->sh_g = (int32_t)(sh_g * q28);
     coeffs->dry_w = (int32_t)(dry_w * q28);
     coeffs->wet_w = (int32_t)(wet_w * q28);
     coeffs->wet_lim = (int32_t)(wet_lim * q28);
@@ -353,19 +356,6 @@ void tube_apply_config(const TubeConfig *config, float sample_rate) {
     }
 }
 
-uint16_t tube_meter_u16(uint8_t out) {
-    if (out >= NUM_OUTPUT_CHANNELS) return 0;
-    tb_num_t m = tube_output_state[out].meter;
-#if PICO_RP2350
-    if (m < 0.0f) m = 0.0f;
-    return (uint16_t)(fminf(1.0f, m) * 32767.0f);
-#else
-    if (m < 0) m = 0;
-    if (m >= (1 << FILTER_SHIFT)) return 32767;
-    return (uint16_t)(m >> (FILTER_SHIFT - 15));
-#endif
-}
-
 // ---------------------------------------------------------------------------
 // Kernel
 // ---------------------------------------------------------------------------
@@ -381,11 +371,12 @@ static inline __attribute__((always_inline))
 void tube_block_f(const TubeCoeffs * __restrict c, TubeOutputState * __restrict st,
                   float * __restrict buf, uint32_t n, const bool xfmr) {
     float env = st->env, dc_x1 = st->dc_x1, dc_y1 = st->dc_y1;
-    float xf_lp = st->xf_lp, xf_hf = st->xf_hf, meter = st->meter;
+    float bl_ic1 = st->bl_ic1, bl_ic2 = st->bl_ic2, sh_lp = st->sh_lp;
     const float m = c->m, sagk = c->sagk, bias = c->bias, ratio_n = c->ratio_n;
     const float c1 = c->c1, c3 = c->c3, c5 = c->c5, s_p = c->s_p, s_n = c->s_n, v0 = c->v0;
-    const float sag_att = c->sag_att, sag_rel = c->sag_rel, dc_r = c->dc_r, decay = c->meter_decay;
-    const float a_lf = c->xf_a_lf, inv_ks = c->xf_inv_ks, xf_s = c->xf_s, a_hf = c->xf_a_hf;
+    const float sag_att = c->sag_att, sag_rel = c->sag_rel, dc_r = c->dc_r;
+    const float bl_a1 = c->bl_a1, bl_a2 = c->bl_a2, bl_a3 = c->bl_a3, bl_m1 = c->bl_m1;
+    const float sh_a = c->sh_a, sh_g = c->sh_g;
     const float dry_w = c->dry_w, wet_w = c->wet_w;
 
     for (uint32_t i = 0; i < n; i++) {
@@ -409,23 +400,24 @@ void tube_block_f(const TubeCoeffs * __restrict c, TubeOutputState * __restrict 
         float a = fabsf(t);
         float d = a - env;
         env += fmaxf(d, 0.0f) * sag_att + fminf(d, 0.0f) * sag_rel;
-        meter = fmaxf(a, meter * decay);
 
         if (xfmr) {
-            xf_lp += a_lf * (y - xf_lp);
-            float high = y - xf_lp;
-            float u = fminf(fmaxf(xf_lp * inv_ks, -1.0f), 1.0f);
-            float ls = (1.5f * u - 0.5f * u * u * u) * xf_s;
-            y = high + ls;
-            xf_hf += a_hf * (y - xf_hf);
-            y = xf_hf;
+            // Output stage: bell at the speaker resonance, then the top shelf
+            float v3 = y - bl_ic2;
+            float bv1 = bl_a1 * bl_ic1 + bl_a2 * v3;
+            float bv2 = bl_ic2 + bl_a2 * bl_ic1 + bl_a3 * v3;
+            bl_ic1 = 2.0f * bv1 - bl_ic1;
+            bl_ic2 = 2.0f * bv2 - bl_ic2;
+            y += bl_m1 * bv1;
+            sh_lp += sh_a * (y - sh_lp);
+            y += sh_g * (y - sh_lp);
         }
 
         buf[i] = dry_w * x + wet_w * y;
     }
 
     st->env = env; st->dc_x1 = dc_x1; st->dc_y1 = dc_y1;
-    st->xf_lp = xf_lp; st->xf_hf = xf_hf; st->meter = meter;
+    st->bl_ic1 = bl_ic1; st->bl_ic2 = bl_ic2; st->sh_lp = sh_lp;
 }
 
 DSP_TIME_CRITICAL
@@ -438,10 +430,6 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
 
 #else
 
-static inline int32_t clamp_one(int32_t v) {
-    const int32_t one = 1 << FILTER_SHIFT;
-    return v > one ? one : (v < -one ? -one : v);
-}
 static inline int32_t clamp_lim(int32_t v, int32_t lim) {
     return v > lim ? lim : (v < -lim ? -lim : v);
 }
@@ -451,12 +439,13 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
                                TubeOutputState * __restrict st,
                                int32_t * __restrict buf, uint32_t n) {
     int32_t env = st->env, dc_x1 = st->dc_x1, dc_y1 = st->dc_y1;
-    int32_t xf_lp = st->xf_lp, xf_hf = st->xf_hf, meter = st->meter;
+    int32_t bl_ic1 = st->bl_ic1, bl_ic2 = st->bl_ic2, sh_lp = st->sh_lp;
     const bool sag_on = c->sag_on, xfmr_on = c->xfmr_on;
     const int32_t one16 = 1 << (FILTER_SHIFT - 4);
     const int32_t four = 4 << FILTER_SHIFT;
     const int32_t y_lim = (int32_t)(TUBE_Q28_Y_LIM * (1 << FILTER_SHIFT));
     const int32_t y2_lim = (int32_t)(TUBE_Q28_Y2_LIM * (1 << FILTER_SHIFT));
+    const int32_t bell_in = (int32_t)(TUBE_Q28_BELL_IN * (1 << FILTER_SHIFT));
     const int32_t wet_lim = c->wet_lim;
 
     for (uint32_t i = 0; i < n; i++) {
@@ -487,19 +476,19 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
 
         int32_t a = t < 0 ? -t : t;
         env += fast_mul_q28(a - env, a > env ? c->sag_att : c->sag_rel);
-        int32_t mt = fast_mul_q28(meter, c->meter_decay);
-        meter = a > mt ? a : mt;
 
         if (xfmr_on) {
-            xf_lp += fast_mul_q28(c->xf_a_lf, y - xf_lp);
-            int32_t high = y - xf_lp;
-            // xf_inv_ks is Q26 (see tube_compute_coefficients); shift back
-            int32_t u = clamp_one(fast_mul_q28(clamp_one(xf_lp), c->xf_inv_ks) << 2);
-            int32_t u3 = fast_mul_q28(fast_mul_q28(u, u), u);
-            int32_t ls = fast_mul_q28(u + (u >> 1) - (u3 >> 1), c->xf_s);
-            y = clamp_lim(high + ls, y2_lim);
-            xf_hf += fast_mul_q28(c->xf_a_hf, y - xf_hf);
-            y = xf_hf;
+            // Bell input clamp bounds the SVF difference term; bell output is
+            // clamped again so the shelf difference stays under 6.8.
+            y = clamp_lim(y, bell_in);
+            int32_t v3 = y - bl_ic2;
+            int32_t bv1 = fast_mul_q28(c->bl_a1, bl_ic1) + fast_mul_q28(c->bl_a2, v3);
+            int32_t bv2 = bl_ic2 + fast_mul_q28(c->bl_a2, bl_ic1) + fast_mul_q28(c->bl_a3, v3);
+            bl_ic1 = 2 * bv1 - bl_ic1;
+            bl_ic2 = 2 * bv2 - bl_ic2;
+            y = clamp_lim(y + fast_mul_q28(c->bl_m1, bv1), y2_lim);
+            sh_lp += fast_mul_q28(c->sh_a, y - sh_lp);
+            y += fast_mul_q28(c->sh_g, y - sh_lp);
         }
 
         // Mix budget: 4 dry_w + wet_w wet_lim <= 7.5 (see wet_lim)
@@ -508,7 +497,7 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
     }
 
     st->env = env; st->dc_x1 = dc_x1; st->dc_y1 = dc_y1;
-    st->xf_lp = xf_lp; st->xf_hf = xf_hf; st->meter = meter;
+    st->bl_ic1 = bl_ic1; st->bl_ic2 = bl_ic2; st->sh_lp = sh_lp;
 }
 
 #endif

@@ -189,10 +189,12 @@
 //        bytes).  Backward-compatible tail-append like V22..V36: V21..V36 slots
 //        still load via slot_data_size_for_version and take the SUBHARM_DEFAULT_*
 //        values for the new fields (apply is gated on version >= 37).
-//   V38: Tube preamp appended (four bytes + output mask + two reserved + ten
-//        floats; struct grows by 48 bytes).  Tail-append like V22..V37: older
-//        slots load via slot_data_size_for_version and take the TUBE_DEFAULT_*
-//        values with the effect off (apply is gated on version >= 38).
+//   V38: Tube preamp appended (four bytes + output mask + two reserved + nine
+//        floats + one reserved float; struct grows by 48 bytes).  The output
+//        stage carries a damping factor and a speaker resonance.  Tail-append
+//        like V22..V37: older slots load via slot_data_size_for_version and
+//        take the TUBE_DEFAULT_* values with the effect off (apply is gated on
+//        version >= 38).
 #define SLOT_DATA_VERSION       38
 
 // ============================================================================
@@ -1435,11 +1437,11 @@ typedef struct __attribute__((packed)) {
     float    tube_asym_db;
     float    tube_hardness_pct;
     float    tube_sag_pct;
-    float    tube_xfmr_lf_hz;
-    float    tube_xfmr_sat_pct;
-    float    tube_xfmr_hf_hz;
+    float    tube_xfmr_damping;
+    float    tube_xfmr_res_hz;
     float    tube_mix_pct;
     float    tube_trim_db;
+    float    tube_reserved_f;
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -3450,11 +3452,11 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->tube_asym_db      = tube_config.asym_db;
     slot->tube_hardness_pct = tube_config.hardness_pct;
     slot->tube_sag_pct      = tube_config.sag_pct;
-    slot->tube_xfmr_lf_hz   = tube_config.xfmr_lf_hz;
-    slot->tube_xfmr_sat_pct = tube_config.xfmr_sat_pct;
-    slot->tube_xfmr_hf_hz   = tube_config.xfmr_hf_hz;
+    slot->tube_xfmr_damping = tube_config.xfmr_damping;
+    slot->tube_xfmr_res_hz  = tube_config.xfmr_res_hz;
     slot->tube_mix_pct      = tube_config.mix_pct;
     slot->tube_trim_db      = tube_config.trim_db;
+    slot->tube_reserved_f   = 0.0f;
 
     // ADAT input (V32): raw pin (0xFF unset) + enable + clock mode (both
     // platforms; RP2040 stores its default state for round-trips).
@@ -3773,9 +3775,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
         tube_config.asym_db      = slot->tube_asym_db;
         tube_config.hardness_pct = slot->tube_hardness_pct;
         tube_config.sag_pct      = slot->tube_sag_pct;
-        tube_config.xfmr_lf_hz   = slot->tube_xfmr_lf_hz;
-        tube_config.xfmr_sat_pct = slot->tube_xfmr_sat_pct;
-        tube_config.xfmr_hf_hz   = slot->tube_xfmr_hf_hz;
+        tube_config.xfmr_damping = slot->tube_xfmr_damping;
+        tube_config.xfmr_res_hz  = slot->tube_xfmr_res_hz;
         tube_config.mix_pct      = slot->tube_mix_pct;
         tube_config.trim_db      = slot->tube_trim_db;
     } else {
@@ -3789,9 +3790,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
         tube_config.asym_db      = TUBE_DEFAULT_ASYM;
         tube_config.hardness_pct = TUBE_DEFAULT_HARDNESS;
         tube_config.sag_pct      = TUBE_DEFAULT_SAG;
-        tube_config.xfmr_lf_hz   = TUBE_DEFAULT_XFMR_LF;
-        tube_config.xfmr_sat_pct = TUBE_DEFAULT_XFMR_SAT;
-        tube_config.xfmr_hf_hz   = TUBE_DEFAULT_XFMR_HF;
+        tube_config.xfmr_damping = TUBE_DEFAULT_XFMR_DAMPING;
+        tube_config.xfmr_res_hz  = TUBE_DEFAULT_XFMR_RES;
         tube_config.mix_pct      = TUBE_DEFAULT_MIX;
         tube_config.trim_db      = TUBE_DEFAULT_TRIM;
     }
@@ -4713,9 +4713,8 @@ static void apply_factory_defaults(void) {
     tube_config.asym_db      = TUBE_DEFAULT_ASYM;
     tube_config.hardness_pct = TUBE_DEFAULT_HARDNESS;
     tube_config.sag_pct      = TUBE_DEFAULT_SAG;
-    tube_config.xfmr_lf_hz   = TUBE_DEFAULT_XFMR_LF;
-    tube_config.xfmr_sat_pct = TUBE_DEFAULT_XFMR_SAT;
-    tube_config.xfmr_hf_hz   = TUBE_DEFAULT_XFMR_HF;
+    tube_config.xfmr_damping = TUBE_DEFAULT_XFMR_DAMPING;
+    tube_config.xfmr_res_hz  = TUBE_DEFAULT_XFMR_RES;
     tube_config.mix_pct      = TUBE_DEFAULT_MIX;
     tube_config.trim_db      = TUBE_DEFAULT_TRIM;
     tube_update_pending = true;

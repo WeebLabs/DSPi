@@ -2213,18 +2213,6 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 return true;
             }
 
-            case REQ_GET_TUBE_METER: {
-                // Same 0..32767 scale as SystemStatusPacket.peaks, so a host
-                // can drive one meter widget from either source.
-                for (uint8_t k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
-                    uint16_t m = tube_meter_u16(k);
-                    resp_buf[2 * k]     = (uint8_t)(m & 0xFF);
-                    resp_buf[2 * k + 1] = (uint8_t)((m >> 8) & 0xFF);
-                }
-                vendor_send_response(resp_buf, 2 * NUM_OUTPUT_CHANNELS);
-                return true;
-            }
-
             // Volume Leveller GET commands
             case REQ_GET_LEVELLER_ENABLE: {
                 resp_buf[0] = leveller_config.enabled ? 1 : 0;

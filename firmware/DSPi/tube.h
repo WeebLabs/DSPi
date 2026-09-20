@@ -24,9 +24,8 @@ enum {
     TUBE_PARAM_SAG_PCT,
     TUBE_PARAM_RECTIFIER,
     TUBE_PARAM_XFMR_ENABLED,
-    TUBE_PARAM_XFMR_LF_HZ,
-    TUBE_PARAM_XFMR_SAT_PCT,
-    TUBE_PARAM_XFMR_HF_HZ,
+    TUBE_PARAM_XFMR_DAMPING,
+    TUBE_PARAM_XFMR_RES_HZ,
     TUBE_PARAM_MIX_PCT,
     TUBE_PARAM_TRIM_DB,
     TUBE_NUM_PARAMS
@@ -50,12 +49,10 @@ enum {
 #define TUBE_HARDNESS_MAX       100.0f
 #define TUBE_SAG_MIN              0.0f
 #define TUBE_SAG_MAX            100.0f
-#define TUBE_XFMR_LF_MIN         20.0f
-#define TUBE_XFMR_LF_MAX        300.0f
-#define TUBE_XFMR_SAT_MIN         0.0f
-#define TUBE_XFMR_SAT_MAX       100.0f   // knee -18 dBFS: 1/ks = 7.94 < 8.0 Q28
-#define TUBE_XFMR_HF_MIN       2000.0f
-#define TUBE_XFMR_HF_MAX      20000.0f   // treated as bypass
+#define TUBE_XFMR_DAMPING_MIN     1.0f   // damping factor: +4.1 dB bump, +2.5 dB top
+#define TUBE_XFMR_DAMPING_MAX    20.0f   // +0.3 dB bump, near flat
+#define TUBE_XFMR_RES_MIN        30.0f   // speaker resonance (bell centre)
+#define TUBE_XFMR_RES_MAX       150.0f
 #define TUBE_MIX_MIN              0.0f
 #define TUBE_MIX_MAX            100.0f
 #define TUBE_TRIM_MIN           -12.0f
@@ -68,22 +65,28 @@ enum {
 #define TUBE_DEFAULT_HARDNESS      40.0f
 #define TUBE_DEFAULT_SAG           15.0f
 #define TUBE_DEFAULT_RECTIFIER      1     // GZ34
-#define TUBE_DEFAULT_XFMR_LF       80.0f
-#define TUBE_DEFAULT_XFMR_SAT      30.0f
-#define TUBE_DEFAULT_XFMR_HF    20000.0f
+#define TUBE_DEFAULT_XFMR_DAMPING   2.0f  // audible bump once the stage is enabled
+#define TUBE_DEFAULT_XFMR_RES      85.0f
 #define TUBE_DEFAULT_MIX          100.0f
 #define TUBE_DEFAULT_TRIM           0.0f
 #define TUBE_DEFAULT_OUTPUT_MASK 0xFFFFu
 
-#define TUBE_DC_BLOCK_HZ          5.0f
-#define TUBE_METER_TAU_MS       300.0f
+#define TUBE_DC_BLOCK_HZ          2.5f   // -0.07 dB at 20 Hz; 5 Hz cost 0.26 dB
 #define TUBE_SAG_DEPTH_MAX        0.9f   // gain never falls to zero
 
 // RP2040 Q28 headroom clamps (spec section 7): fast_mul_q28 needs the two
-// operand magnitudes to sum below 8.0, so the wet signal is bounded after
-// the DC blocker and again ahead of the transformer HF one-pole.
-#define TUBE_Q28_Y_LIM            3.4f   // 2 * 3.4 + a_lf < 8 for the one-pole difference
+// operand magnitudes to sum below 8.0, so the wet signal is bounded before
+// the DC blocker, before the output-stage bell, and between bell and shelf.
+#define TUBE_Q28_Y_LIM            3.4f
 #define TUBE_Q28_Y2_LIM           3.4f
+#define TUBE_Q28_BELL_IN          2.5f   // bell input: keeps the SVF difference term under 6.5
+
+// Output-stage model: speaker impedance peak and HF rise relative to nominal,
+// and the fixed corner of the voice-coil-inductance shelf.
+#define TUBE_XFMR_Z_PEAK_RATIO    4.0f
+#define TUBE_XFMR_Z_HF_RATIO      2.0f
+#define TUBE_XFMR_SHELF_HZ     2500.0f
+#define TUBE_XFMR_BELL_Q          0.707f
 
 // Configuration (persisted to flash / wire).  Field order matches the wire
 // section and the parameter index table.
@@ -98,9 +101,8 @@ typedef struct {
     float    asym_db;
     float    hardness_pct;
     float    sag_pct;
-    float    xfmr_lf_hz;
-    float    xfmr_sat_pct;
-    float    xfmr_hf_hz;
+    float    xfmr_damping;   // damping factor 1..20
+    float    xfmr_res_hz;    // speaker resonance, bell centre
     float    mix_pct;
     float    trim_db;
 } TubeConfig;
@@ -131,11 +133,10 @@ typedef struct {
     tb_num_t sag_att;      // envelope coefficients
     tb_num_t sag_rel;
     tb_num_t dc_r;         // DC blocker pole
-    tb_num_t meter_decay;
-    tb_num_t xf_a_lf;      // transformer split one-pole
-    tb_num_t xf_inv_ks;    // 1 / low-band knee (RP2040: Q26, shifted back in the kernel)
-    tb_num_t xf_s;         // low-band knee / 1.5
-    tb_num_t xf_a_hf;      // transformer HF one-pole (1.0 = bypass)
+    tb_num_t bl_a1, bl_a2, bl_a3;  // output-stage bell, TPT SVF at the resonance
+    tb_num_t bl_m1;                // bell mix: k (A^2 - 1)
+    tb_num_t sh_a;                 // top shelf one-pole coefficient
+    tb_num_t sh_g;                 // top shelf lift minus 1
     tb_num_t dry_w;        // 1 - mix
     tb_num_t wet_w;        // mix * trim
     tb_num_t wet_lim;      // RP2040 wet clamp: (7.5 - 4 dry_w) / wet_w capped at Y2_LIM; unused on RP2350
@@ -146,9 +147,8 @@ typedef struct {
 typedef struct {
     tb_num_t env;          // sag envelope of |t|
     tb_num_t dc_x1, dc_y1; // DC blocker
-    tb_num_t xf_lp;        // transformer split state
-    tb_num_t xf_hf;        // transformer HF one-pole state
-    tb_num_t meter;        // decaying peak of |t| (0..1)
+    tb_num_t bl_ic1, bl_ic2; // bell SVF integrators
+    tb_num_t sh_lp;          // top shelf one-pole state
 } TubeOutputState;
 
 // Live configuration + main-loop recompute flag (defined in tube.c).
@@ -181,9 +181,6 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
 // Recompute shared coefficients from config and publish current_tube_coeffs.
 // Called from the main loop while audio runs; never touches per-output state.
 void tube_apply_config(const TubeConfig *config, float sample_rate);
-
-// Per-output saturation meter on the status-packet scale (0..32767).
-uint16_t tube_meter_u16(uint8_t out);
 
 // Run one output's block in place.  Non-inline RAM-resident kernel shared by
 // every call site so its text is paid once.

@@ -356,11 +356,11 @@ void bulk_params_collect(WireBulkParams *out) {
     out->tube.asym_db      = tube_config.asym_db;
     out->tube.hardness_pct = tube_config.hardness_pct;
     out->tube.sag_pct      = tube_config.sag_pct;
-    out->tube.xfmr_lf_hz   = tube_config.xfmr_lf_hz;
-    out->tube.xfmr_sat_pct = tube_config.xfmr_sat_pct;
-    out->tube.xfmr_hf_hz   = tube_config.xfmr_hf_hz;
+    out->tube.xfmr_damping = tube_config.xfmr_damping;
+    out->tube.xfmr_res_hz  = tube_config.xfmr_res_hz;
     out->tube.mix_pct      = tube_config.mix_pct;
     out->tube.trim_db      = tube_config.trim_db;
+    out->tube.reserved_f   = 0.0f;
 
     // Stereo upmixer (V25+).  RP2350 only; the whole section (including reserved)
     // stays zeroed on RP2040 from the memset above.
@@ -985,9 +985,8 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     tube_config.asym_db      = in->tube.asym_db;
     tube_config.hardness_pct = in->tube.hardness_pct;
     tube_config.sag_pct      = in->tube.sag_pct;
-    tube_config.xfmr_lf_hz   = in->tube.xfmr_lf_hz;
-    tube_config.xfmr_sat_pct = in->tube.xfmr_sat_pct;
-    tube_config.xfmr_hf_hz   = in->tube.xfmr_hf_hz;
+    tube_config.xfmr_damping = in->tube.xfmr_damping;
+    tube_config.xfmr_res_hz  = in->tube.xfmr_res_hz;
     tube_config.mix_pct      = in->tube.mix_pct;
     tube_config.trim_db      = in->tube.trim_db;
     tube_update_pending = true;

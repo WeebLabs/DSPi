@@ -31,7 +31,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION      31   // V31: append tube preamp section (48 bytes; biased asymmetric waveshaper with sag and transformer stage, both platforms). V30: subharmonic synthesizer section grows 16 to 36 bytes (third band top_db, selectivity mode/depth/hold, sub ceiling, pair link); solo is runtime-only and stays off the wire. V29: append subharmonic synthesizer section (16 bytes; dbx-style octave divider, both platforms). V28: fourth selectable SPDIF input; input-config spdif_rx_pin_ext grows 2 to 3 entries, shifting the fields below it down one byte and consuming that section's last reserved byte (section size unchanged). V27: upmixer centre mode gains OFF (2), a surrounds-only setting that leaves L/R bit-exact; enum widening only, no struct or offset changes. V26: upmixer presence bell claims the upmix section reserved byte (int8, dB*2; struct sizes unchanged). V25: append upmixer section (44 bytes; RP2350 stereo upmixer, zeroed/ignored on RP2040). V24: ADAT input config (pin/enable/clock mode) claimed from the input-config reserved bytes (struct size unchanged). V23: append psybass section (24 bytes; psychoacoustic bass enhancement). V22: Linkwitz Transform target Q carried in the EQ WireBandParams reserved[2] bytes (uint16 LE, Q*512; zero for non-LT types; struct size unchanged). V21: I2S clock master/slave mode in the input-config section (claims one reserved byte; size unchanged). V20: crossfeed output_pair_mask replaces WireCrossfeedParams reserved byte; struct sizes unchanged. V19: loudness_output_mask replaces global reserved[2]; struct sizes unchanged. V18: leveller detector/apply channel masks (WireLevellerConfig grows 16 to 20 bytes). V17: append ADAT output config section (RP2350; zeroed/ignored on RP2040). V16: unified channel model (inputs are first-class channels with PEQ + metering; no "master"); matrix/preamp direct (8 inputs); compat-breaking, no migration.
+#define WIRE_FORMAT_VERSION      31   // V31: append tube preamp section (48 bytes; biased asymmetric waveshaper with sag and a damping-factor output stage, both platforms). V30: subharmonic synthesizer section grows 16 to 36 bytes (third band top_db, selectivity mode/depth/hold, sub ceiling, pair link); solo is runtime-only and stays off the wire. V29: append subharmonic synthesizer section (16 bytes; dbx-style octave divider, both platforms). V28: fourth selectable SPDIF input; input-config spdif_rx_pin_ext grows 2 to 3 entries, shifting the fields below it down one byte and consuming that section's last reserved byte (section size unchanged). V27: upmixer centre mode gains OFF (2), a surrounds-only setting that leaves L/R bit-exact; enum widening only, no struct or offset changes. V26: upmixer presence bell claims the upmix section reserved byte (int8, dB*2; struct sizes unchanged). V25: append upmixer section (44 bytes; RP2350 stereo upmixer, zeroed/ignored on RP2040). V24: ADAT input config (pin/enable/clock mode) claimed from the input-config reserved bytes (struct size unchanged). V23: append psybass section (24 bytes; psychoacoustic bass enhancement). V22: Linkwitz Transform target Q carried in the EQ WireBandParams reserved[2] bytes (uint16 LE, Q*512; zero for non-LT types; struct size unchanged). V21: I2S clock master/slave mode in the input-config section (claims one reserved byte; size unchanged). V20: crossfeed output_pair_mask replaces WireCrossfeedParams reserved byte; struct sizes unchanged. V19: loudness_output_mask replaces global reserved[2]; struct sizes unchanged. V18: leveller detector/apply channel masks (WireLevellerConfig grows 16 to 20 bytes). V17: append ADAT output config section (RP2350; zeroed/ignored on RP2040). V16: unified channel model (inputs are first-class channels with PEQ + metering; no "master"); matrix/preamp direct (8 inputs); compat-breaking, no migration.
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -411,19 +411,19 @@ typedef struct __attribute__((packed)) {
     uint8_t  enabled;                // 0/1
     uint8_t  tube_type;              // 0 = custom, 1..TUBE_TYPE_MAX
     uint8_t  rectifier;              // 0..TUBE_RECT_MAX
-    uint8_t  xfmr_enabled;           // 0/1: transformer stage
+    uint8_t  xfmr_enabled;           // 0/1: output stage
     uint16_t output_mask;            // Bit k: tube processes output channel k
     uint8_t  reserved[2];            // Zero
-    float    drive_db;               // Gain into the shaper, 0..24 dB
+    float    drive_db;               // Gain into the shaper, -6..24 dB
     float    bias_pct;               // Operating point, -100..+100 %
     float    asym_db;                // Negative-knee offset, -12..+12 dB
     float    hardness_pct;           // Cubic to quintic knee blend, 0..100
     float    sag_pct;                // Supply sag depth, 0..100 %
-    float    xfmr_lf_hz;             // Transformer low-band split, 20..300 Hz
-    float    xfmr_sat_pct;           // Low-band saturation, 0..100 %
-    float    xfmr_hf_hz;             // HF rolloff, 2000..20000 Hz (20000 = bypass)
+    float    xfmr_damping;           // Output-stage damping factor, 1..20
+    float    xfmr_res_hz;            // Speaker resonance (bell centre), 30..150 Hz
     float    mix_pct;                // Dry/wet blend, 0..100 %
     float    trim_db;                // Wet-path level, -12..+12 dB
+    float    reserved_f;             // Zero; holds the section at 48 bytes
 } WireTubeParams;                    // 48 bytes
 
 // ============================================================================

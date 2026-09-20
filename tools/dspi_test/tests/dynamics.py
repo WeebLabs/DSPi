@@ -5,7 +5,7 @@ Loudness   0x58-0x5D
 Crossfeed  0x5E-0x67
 Matrix     0x70/0x71
 Subharm    0x10-0x1F, 0x2C-0x2F, 0xA9-0xAE
-Tube       0x3E-0x3F, 0x81
+Tube       0x3E-0x3F
 """
 
 import struct
@@ -320,9 +320,9 @@ def subharm_bulk_roundtrip(dev, profile, chk):
 # TUBE_PARAM_* in firmware/DSPi/tube.h and are the wire/flash field order.
 T_ENABLED, T_MASK, T_TYPE, T_DRIVE = 0, 1, 2, 3
 T_BIAS, T_ASYM, T_HARDNESS, T_SAG = 4, 5, 6, 7
-T_RECTIFIER, T_XFMR_EN, T_XFMR_LF, T_XFMR_SAT = 8, 9, 10, 11
-T_XFMR_HF, T_MIX, T_TRIM = 12, 13, 14
-T_NUM_PARAMS = 15
+T_RECTIFIER, T_XFMR_EN, T_XDAMP, T_XRES = 8, 9, 10, 11
+T_MIX, T_TRIM = 12, 13
+T_NUM_PARAMS = 14
 
 
 def _tube_set(dev, index, value):
@@ -344,17 +344,29 @@ def tube_param_roundtrip(dev, profile, chk):
 
 @test("dynamics", mutating=True)
 def tube_param_clamps(dev, profile, chk):
-    """0x3E clamps every parameter: drive to [0,24] dB, mix to [0,100] %."""
+    """0x3E clamps every parameter: drive, mix, damping factor and resonance."""
     prev_drive = _tube_get(dev, T_DRIVE)
     prev_mix = _tube_get(dev, T_MIX)
+    prev_damp = _tube_get(dev, T_XDAMP)
+    prev_res = _tube_get(dev, T_XRES)
     float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 99.0, 24.0,
                 wvalue=T_DRIVE, label="drive high clamp")
     float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, -20.0, -6.0,
                 wvalue=T_DRIVE, label="drive low clamp")
     float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 150.0, 100.0,
                 wvalue=T_MIX, label="mix high clamp")
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 0.5, 1.0,
+                wvalue=T_XDAMP, label="damping low clamp")
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 99.0, 20.0,
+                wvalue=T_XDAMP, label="damping high clamp")
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 10.0, 30.0,
+                wvalue=T_XRES, label="resonance low clamp")
+    float_clamp(dev, chk, OP.SET_TUBE_PARAM, OP.GET_TUBE_PARAM, 999.0, 150.0,
+                wvalue=T_XRES, label="resonance high clamp")
     _tube_set(dev, T_DRIVE, prev_drive)
     _tube_set(dev, T_MIX, prev_mix)
+    _tube_set(dev, T_XDAMP, prev_damp)
+    _tube_set(dev, T_XRES, prev_res)
 
 
 # Character fields must go back before the type: restoring a non-custom type
@@ -441,22 +453,12 @@ def tube_bad_set_is_silent_noop(dev, profile, chk):
     _tube_set(dev, T_DRIVE, prev)
 
 
-@test("dynamics")
-def tube_meter_length(dev, profile, chk):
-    """0x81 returns one uint16 saturation peak per output channel."""
-    n = profile.num_output_channels
-    data = dev.get(OP.GET_TUBE_METER, 2 * n)
-    chk.eq(len(data), 2 * n, f"{n} outputs -> {2 * n} bytes")
-    peaks = struct.unpack(f"<{n}H", data)
-    chk.ok(all(p <= 32767 for p in peaks), "every peak inside the 0..32767 status scale")
-
-
 @test("dynamics", mutating=True)
 def tube_bulk_roundtrip(dev, profile, chk):
     """The V31 tube wire section carries the module through GET/SET_ALL_PARAMS."""
     before = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
     probes = ((T_DRIVE, 15.0, 0.0), (T_MIX, 40.0, 100.0), (T_TRIM, -6.0, 0.0),
-              (T_XFMR_LF, 120.0, 20.0))
+              (T_XRES, 120.0, 30.0))
     saved = {idx: _tube_get(dev, idx) for idx, _, _ in probes}
     voicing = _tube_save_voicing(dev)
     for idx, want, _ in probes:

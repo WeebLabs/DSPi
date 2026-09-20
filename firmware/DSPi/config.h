@@ -229,7 +229,6 @@ extern volatile uint32_t nominal_feedback_10_14;
 // covers every parameter, so adding one must not add an opcode here.
 #define REQ_SET_TUBE_PARAM          0x3E  // wValue low byte = index (tube.h TUBE_PARAM_*), 4-byte float32 LE
 #define REQ_GET_TUBE_PARAM          0x3F  // wValue low byte = index, returns 4-byte float32 LE
-#define REQ_GET_TUBE_METER          0x81  // NUM_OUTPUT_CHANNELS x uint16 LE saturation peaks
 
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
