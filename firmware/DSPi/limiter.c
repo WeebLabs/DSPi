@@ -10,7 +10,6 @@
 #include "limiter.h"
 #include "bulk_params.h"   // WireBulkParams offsets for change notifications
 #include "notify.h"
-#include "siggen.h"        // siggen_raw_mask: RAW outputs are delayed, never limited
 #include "usb_audio.h"     // matrix_mixer
 #include "hardware/sync.h"
 
@@ -332,7 +331,9 @@ void limiter_packet_begin(uint32_t n, bool silent, bool dual_core) {
         for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++)
             if (matrix_mixer.outputs[k].enabled) ring |= (uint16_t)(1u << k);
         ring &= processed;
-        if (c) part = ring & c->enabled_mask & (uint16_t)~siggen_raw_mask;
+        // RAW test signals are limited too: RAW skips the crossover, which is
+        // exactly when a driver most needs the protection.
+        if (c) part = ring & c->enabled_mask;
     }
 
     // Core 1 is idle here, so touching its outputs' state is safe.  An
