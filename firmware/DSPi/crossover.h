@@ -17,9 +17,9 @@
  *     bands 20..23  crossover (xover_recipes[][band - XOVER_BAND_BASE])
  *     bands 24+     rejected
  *
- * Storage is uniform across NUM_CHANNELS for indexing symmetry with PEQ;
- * crossover bands on master channels (channel < CH_OUT_1) are rejected at
- * the vendor handler boundary, never reach storage or pipeline.
+ * Recipes span NUM_CHANNELS to match the flash slot and wire layouts; the
+ * designed cascades and bypass flags are output-indexed (ch - CH_OUT_1).
+ * Crossover bands on input channels are rejected at the handler boundary.
  *
  * See Documentation/Features/crossover_filters_spec.md.
  */
@@ -72,17 +72,15 @@ typedef struct {
     bool     bypass;         // True ⇒ skip entire band (whole-cascade bypass)
 } XoverFilter;
 
-// Per-channel × per-band storage. xover_recipes mirrors filter_recipes for
-// PEQ — same `EqParamPacket` shape (Q and gain_db are ignored for crossover
-// types). xover_filters holds the design output (cascade) consumed by the
-// processing kernel.
-extern XoverFilter   xover_filters[NUM_CHANNELS][MAX_XOVER_BANDS];
+// xover_recipes mirrors filter_recipes (EqParamPacket, channel-indexed; Q and
+// gain_db ignored for crossover types). xover_filters holds the designed
+// cascades and is indexed by OUTPUT (0..NUM_OUTPUT_CHANNELS-1), not channel.
+extern XoverFilter   xover_filters[NUM_OUTPUT_CHANNELS][MAX_XOVER_BANDS];
 extern EqParamPacket xover_recipes[NUM_CHANNELS][MAX_XOVER_BANDS];
 
-// Fast-path "no work" flag. true when every band on the channel is bypassed
-// or designed-to-flat; checked once per output per packet to short-circuit
-// the whole crossover stage for that channel.
-extern bool channel_xover_bypassed[NUM_CHANNELS];
+// Fast-path "no work" flag per OUTPUT: true when every band is bypassed or
+// designed-to-flat, so the whole crossover stage is skipped for that output.
+extern bool output_xover_bypassed[NUM_OUTPUT_CHANNELS];
 
 // ---------------------------------------------------------------------------
 // Init / design / recompute
@@ -108,9 +106,9 @@ void xover_design_filter(const EqParamPacket *recipe,
 // dsp_recalculate_all_filters().
 void xover_recalculate_all(float sample_rate);
 
-// Recompute channel_xover_bypassed[ch] after writing one band. Safe to call
-// after any number of band updates; cheap O(MAX_XOVER_BANDS).
-void xover_update_channel_bypass(uint8_t ch);
+// Recompute output_xover_bypassed[out] after writing one band. Takes an
+// OUTPUT index, not a channel. Cheap O(MAX_XOVER_BANDS).
+void xover_update_output_bypass(uint8_t out);
 
 // ---------------------------------------------------------------------------
 // Processing kernel

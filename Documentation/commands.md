@@ -1122,7 +1122,7 @@ hardware-mute settle hold has elapsed); "not gated" runs as soon as the loop rea
 
 | Pending flag | main.c operation | Gated |
 |---|---|---|
-| `eq_update_pending` | write `filter_recipes`/`xover_recipes` from `pending_packet` (Core 1 fence if EQ-worker output), then `dsp_compute_coefficients()` + `channel_bypassed` recompute (PEQ) or `xover_design_filter()` + `xover_update_channel_bypass()` (crossover) | no |
+| `eq_update_pending` | write `filter_recipes`/`xover_recipes` from `pending_packet` (Core 1 fence if EQ-worker output), then `dsp_compute_coefficients()` + `channel_bypassed` recompute (PEQ) or `xover_design_filter()` + `xover_update_output_bypass()` on the output index (crossover) | no |
 | `loudness_recompute_pending` | `loudness_recompute_table()` then re-key `current_loudness_coeffs` (also raised by rate change / factory reset) | no |
 | `crossfeed_update_pending` | `crossfeed_apply_config()` (recompute into the inactive coeff buffer, publish `current_crossfeed_coeffs`; NULL = disabled) | no |
 | `leveller_update_pending` (+ `leveller_reset_pending`) | `leveller_compute_coefficients()` (+ `leveller_reset_state()`); set `leveller_bypassed` | no |

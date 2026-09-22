@@ -768,7 +768,7 @@ PDM sub gets automatic alignment compensation: +SUB_ALIGN_SAMPLES (128 samples =
 ---
 
 ## Crossover Filters
-*Last updated: 2026-08-05*
+*Last updated: 2026-09-22*
 
 ### Purpose
 
@@ -811,9 +811,11 @@ Kernel reuses the existing per-section TDF2 (RP2040) and SVF/TDF2 (RP2350) inner
 
 ### State
 
-- `xover_filters[NUM_CHANNELS][MAX_XOVER_BANDS]` — designed biquad cascades
-- `xover_recipes[NUM_CHANNELS][MAX_XOVER_BANDS]` — user-supplied recipe (EqParamPacket)
-- `channel_xover_bypassed[NUM_CHANNELS]` — fast-path flag; the stage is skipped entirely for a channel when all 4 bands are bypassed (the default)
+- `xover_filters[NUM_OUTPUT_CHANNELS][MAX_XOVER_BANDS]`: designed biquad cascades, indexed by **output** (`ch - CH_OUT_1`)
+- `xover_recipes[NUM_CHANNELS][MAX_XOVER_BANDS]`: user-supplied recipe (EqParamPacket), indexed by **channel**
+- `output_xover_bypassed[NUM_OUTPUT_CHANNELS]`: fast-path flag per output; the stage is skipped entirely for an output when all 4 bands are bypassed (the default)
+
+*Last updated: 2026-09-22.* The cascades and bypass flags carry no input rows because input channels can never run a crossover. The recipes keep the full `NUM_CHANNELS` width because they are copied verbatim into the preset slot and the bulk wire struct, both of which are laid out at that width; their input rows are inert. `xover_update_output_bypass()` takes an output index. The `eq_update_pending` handler in `main.c` converts `p.channel` to an output index and drops a crossover packet aimed at an input channel, since the upstream handlers should never let one through. Shrinking the cascades saved 9,352 B of BSS on RP2350 and 1,058 B on RP2040.
 
 ### State preservation across redesigns (2026-06-11)
 
@@ -835,7 +837,7 @@ Previously the RP2040 path also folded `is_bypassed` into its per-output PEQ gat
 
 ### Defaults
 
-Every default band: `type=FILTER_FLAT, freq=1000.0, Q=0.707, gain_db=0, bypass=0, band=XOVER_BAND_BASE+i`. Because FLAT is not a crossover type, the design routine produces a bypassed cascade and `channel_xover_bypassed[*] = true`. Zero per-sample cost until the user picks a real crossover type.
+Every default band: `type=FILTER_FLAT, freq=1000.0, Q=0.707, gain_db=0, bypass=0, band=XOVER_BAND_BASE+i`. Because FLAT is not a crossover type, the design routine produces a bypassed cascade and `output_xover_bypassed[*] = true`. Zero per-sample cost until the user picks a real crossover type.
 
 ### Files
 
@@ -2282,7 +2284,13 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-09-22 (output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-09-22 (crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+
+> **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
+> crossover bypass flags dropped their input-channel rows, which no path could
+> use. BSS falls by **1,058 B on RP2040** (`xover_filters` 3,696 B to 2,640 B) and
+> **9,352 B on RP2350** (19,856 B to 10,512 B). Measured after the change, BSS is
+> 151,412 B on RP2040 and 348,584 B on RP2350; free RAM is 43,660 B and 82,096 B.
 
 > **Output limiter (2026-09-22).** The module adds **1,238 B of BSS on RP2040**
 > (820 B of per-output state including five 128-byte lookahead rings, a 240 B
@@ -2527,7 +2535,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Delay lines (5 × 2048 × 4) | 40 KB |
 | Output buffers (5 × 192 × 4 + 2 × 192 × 4) | ~5.25 KB |
 | Filters + recipes (7 channels) | ~8 KB |
-| Crossover filters + recipes (7 × 4 × Biquad + recipes) | ~4.1 KB |
+| Crossover filters + recipes (5 outputs × 4 bands cascades + 7 × 4 recipes) | ~3.1 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Loudness per-output state (5 × 16 B) | 80 B |
 | Preset system (dir_cache + slot_buf + write_buf) | ~6 KB |
@@ -2553,7 +2561,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 |---------|---------------|
 | Delay lines (9 × 2048 × 4) | 72 KB |
 | Filters + recipes | ~18 KB |
-| Crossover filters + recipes (11 × 4 × Biquad + recipes) | ~15 KB |
+| Crossover filters + recipes (9 outputs × 4 bands cascades + 17 × 4 recipes) | ~11.6 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Input buffers (buf_l + buf_r + buf_in_ext[6][192], 8-channel USB) | ~6 KB |
 | Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |

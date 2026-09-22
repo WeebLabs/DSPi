@@ -2721,9 +2721,14 @@ int main(void) {
 
             uint32_t flags = save_and_disable_interrupts();
             if (is_xover) {
-                xover_design_filter(&p, &xover_filters[p.channel][local],
-                                    (float)audio_state.freq);
-                xover_update_channel_bypass(p.channel);
+                // Input channels have no cascade storage; upstream handlers
+                // reject them, and this guard keeps a stray one in bounds.
+                if (p.channel >= CH_OUT_1) {
+                    uint8_t out = (uint8_t)(p.channel - CH_OUT_1);
+                    xover_design_filter(&p, &xover_filters[out][local],
+                                        (float)audio_state.freq);
+                    xover_update_output_bypass(out);
+                }
             } else {
                 dsp_compute_coefficients(&p, &filters[p.channel][p.band],
                                         (float)audio_state.freq);

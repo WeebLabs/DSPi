@@ -545,8 +545,8 @@ static void __not_in_flash_func(eq_worker_loop)() {
             // Output crossover + EQ
             if (!matrix_mixer.outputs[out].mute && !(siggen_raw_mask & (1u << out))) {
                 uint8_t eq_ch = CH_OUT_1 + out;
-                if (!channel_xover_bypassed[eq_ch])
-                    xover_process_channel_block(xover_filters[eq_ch], buf_out[out], sample_count);
+                if (!output_xover_bypassed[out])
+                    xover_process_channel_block(xover_filters[out], buf_out[out], sample_count);
                 if (!channel_bypassed[eq_ch]) {
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
                 }
@@ -760,8 +760,8 @@ static void __not_in_flash_func(eq_worker_loop)() {
             // Output crossover + EQ (block-based)
             if (!matrix_mixer.outputs[out].mute && !(siggen_raw_mask & (1u << out))) {
                 uint8_t eq_ch = CH_OUT_1 + out;
-                if (!channel_xover_bypassed[eq_ch])
-                    xover_process_channel_block(xover_filters[eq_ch], buf_out[out], sample_count);
+                if (!output_xover_bypassed[out])
+                    xover_process_channel_block(xover_filters[out], buf_out[out], sample_count);
                 if (!channel_bypassed[eq_ch]) {
                     dsp_process_channel_block(filters[eq_ch], buf_out[out], sample_count, eq_ch);
                 }

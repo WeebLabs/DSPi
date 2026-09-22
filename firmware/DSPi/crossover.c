@@ -42,9 +42,9 @@
 // Storage
 // =============================================================================
 
-XoverFilter   xover_filters[NUM_CHANNELS][MAX_XOVER_BANDS];
+XoverFilter   xover_filters[NUM_OUTPUT_CHANNELS][MAX_XOVER_BANDS];
 EqParamPacket xover_recipes[NUM_CHANNELS][MAX_XOVER_BANDS];
-bool          channel_xover_bypassed[NUM_CHANNELS];
+bool          output_xover_bypassed[NUM_OUTPUT_CHANNELS];
 
 // =============================================================================
 // Filter-type → metadata
@@ -680,13 +680,13 @@ void xover_design_filter(const EqParamPacket *recipe,
 // Init / recompute / bypass helpers
 // =============================================================================
 
-void xover_update_channel_bypass(uint8_t ch) {
-    if (ch >= NUM_CHANNELS) return;
+void xover_update_output_bypass(uint8_t out) {
+    if (out >= NUM_OUTPUT_CHANNELS) return;
     bool all = true;
     for (uint8_t b = 0; b < MAX_XOVER_BANDS; b++) {
-        if (!xover_filters[ch][b].bypass) { all = false; break; }
+        if (!xover_filters[out][b].bypass) { all = false; break; }
     }
-    channel_xover_bypassed[ch] = all;
+    output_xover_bypassed[out] = all;
 }
 
 void xover_init_default_filters(void) {
@@ -708,23 +708,27 @@ void xover_init_default_filters(void) {
             r->freq     = 1000.0f;
             r->Q        = 0.707f;
             r->gain_db  = 0.0f;
-
-            // Design with FILTER_FLAT yields a bypassed band.
-            xover_design_filter(r, &xover_filters[ch][i], 0.0f);
-            xover_filters[ch][i].bypass = true;
         }
-        channel_xover_bypassed[ch] = true;
+    }
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
+        for (int i = 0; i < MAX_XOVER_BANDS; i++) {
+            // Design with FILTER_FLAT yields a bypassed band.
+            xover_design_filter(&xover_recipes[CH_OUT_1 + out][i],
+                                &xover_filters[out][i], 0.0f);
+            xover_filters[out][i].bypass = true;
+        }
+        output_xover_bypassed[out] = true;
     }
 }
 
 void xover_recalculate_all(float sample_rate) {
-    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
         for (int i = 0; i < MAX_XOVER_BANDS; i++) {
-            xover_design_filter(&xover_recipes[ch][i],
-                                &xover_filters[ch][i],
+            xover_design_filter(&xover_recipes[CH_OUT_1 + out][i],
+                                &xover_filters[out][i],
                                 sample_rate);
         }
-        xover_update_channel_bypass((uint8_t)ch);
+        xover_update_output_bypass((uint8_t)out);
     }
 }
 
