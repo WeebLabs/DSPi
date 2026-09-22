@@ -36,6 +36,7 @@
 #include "siggen.h"
 #include "rta.h"
 #include "tube.h"
+#include "limiter.h"
 #include "upmix.h"
 #include "adat_output.h"
 #include "adat_input.h"
@@ -1062,6 +1063,18 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
 
         // Tube Preamp Command (one indexed setter for every parameter)
+        // Output Limiter (IN direction of the same opcode is in the GET switch)
+        case REQ_LIMITER:
+            // limiter_set_param() owns clamping, the pending flag and the
+            // per-output notifications.  Bad output or index is a no-op.
+            if (buffer->data_len >= 4) {
+                float val;
+                memcpy(&val, vendor_rx_buf, 4);
+                (void)limiter_set_param((uint8_t)(vendor_last_wValue >> 8),
+                                        (uint8_t)(vendor_last_wValue & 0xFF), val);
+            }
+            break;
+
         case REQ_SET_TUBE_PARAM:
             // tube_set_param() owns the clamping, the pending flag and every
             // notify_param_write (a type row change emits several), so adding
@@ -2203,6 +2216,33 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             }
 
             // Tube Preamp GET commands
+            case REQ_LIMITER: {
+                uint8_t index = (uint8_t)(setup->wValue & 0xFF);
+                if (index == LIMITER_GET_METER) {
+                    for (uint8_t k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+                        uint16_t m = limiter_meter_centidb(k);
+                        resp_buf[2 * k]     = (uint8_t)(m & 0xFF);
+                        resp_buf[2 * k + 1] = (uint8_t)(m >> 8);
+                    }
+                    vendor_send_response(resp_buf, 2 * NUM_OUTPUT_CHANNELS);
+                    return true;
+                }
+                if (index == LIMITER_GET_STATUS) {
+                    resp_buf[0] = limiter_is_engaged() ? 1 : 0;
+                    resp_buf[1] = LIMITER_DELAY;
+                    resp_buf[2] = LIMITER_BLOCK;
+                    resp_buf[3] = NUM_OUTPUT_CHANNELS;
+                    vendor_send_response(resp_buf, 4);
+                    return true;
+                }
+                // Unknown output or index STALLs, so index 0x81 feature-detects.
+                float v;
+                if (!limiter_get_param((uint8_t)(setup->wValue >> 8), index, &v)) return false;
+                memcpy(resp_buf, &v, 4);
+                vendor_send_response(resp_buf, 4);
+                return true;
+            }
+
             case REQ_GET_TUBE_PARAM: {
                 // wValue low byte = index; an unknown one STALLs so a host can
                 // feature-detect the module from index 0 alone.

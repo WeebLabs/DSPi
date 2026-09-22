@@ -22,6 +22,7 @@
 #include "adat_output.h"
 #include "upmix.h"     // upmix_config / upmix_update_pending (RP2350; header body #if-guarded)
 #include "tube.h"      // tube_config / tube_update_pending
+#include "limiter.h"   // limiter_config / limiter_update_pending
 #include "notify.h"
 #include "uart_control.h"
 #include "i2c_control.h"
@@ -59,8 +60,12 @@ _Static_assert(offsetof(WireBulkParams, subharm) == 5944,
 _Static_assert(sizeof(WireTubeParams) == 48, "V31 tube section must be 48 bytes");
 _Static_assert(offsetof(WireBulkParams, tube) == 5980,
                "V31 tube section must sit at wire offset 5980");
-_Static_assert(sizeof(WireBulkParams) == 6028,
-               "V31 wire total must be 6028 bytes");
+_Static_assert(sizeof(WireLimiterParams) == 108, "V32 limiter section must be 108 bytes");
+_Static_assert(offsetof(WireBulkParams, limiter) == 6028,
+               "V32 limiter section must sit at wire offset 6028");
+_Static_assert(sizeof(WireBulkParams) == 6136,
+               "V32 wire total must be 6136 bytes");
+_Static_assert(NUM_OUTPUT_CHANNELS <= WIRE_MAX_OUTPUT_CHANNELS, "limiter wire records");
 #if PICO_RP2350
 _Static_assert(sizeof(WireUpmixParams) == sizeof(UpmixConfigPacket),
                "WireUpmixParams and UpmixConfigPacket must have identical layout");
@@ -361,6 +366,14 @@ void bulk_params_collect(WireBulkParams *out) {
     out->tube.mix_pct      = tube_config.mix_pct;
     out->tube.trim_db      = tube_config.trim_db;
     out->tube.reserved_f   = 0.0f;
+
+    // Output limiter (V32+).  One record per output; the rest stay zeroed.
+    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        out->limiter.outputs[k].enabled      = limiter_config[k].enabled ? 1 : 0;
+        out->limiter.outputs[k].link_group   = limiter_config[k].link_group;
+        out->limiter.outputs[k].threshold_db = limiter_config[k].threshold_db;
+        out->limiter.outputs[k].release_ms   = limiter_config[k].release_ms;
+    }
 
     // Stereo upmixer (V25+).  RP2350 only; the whole section (including reserved)
     // stays zeroed on RP2040 from the memset above.
@@ -990,6 +1003,16 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     tube_config.mix_pct      = in->tube.mix_pct;
     tube_config.trim_db      = in->tube.trim_db;
     tube_update_pending = true;
+
+    // Output limiter (V32+).  Values are sanitized in limiter_apply_config.
+    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        const WireLimiterOutput *w = &in->limiter.outputs[k];
+        limiter_config[k].enabled      = (w->enabled != 0);
+        limiter_config[k].link_group   = w->link_group;
+        limiter_config[k].threshold_db = w->threshold_db;
+        limiter_config[k].release_ms   = w->release_ms;
+    }
+    limiter_update_pending = true;
 
     // Stereo upmixer (V25+).  RP2350 only; RP2040 ignores the section.  Config
     // copied straight in (mode fields clamped; floats are clamped downstream in

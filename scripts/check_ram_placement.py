@@ -32,7 +32,9 @@ RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
 # adds ~3 KB of deliberately hot code.
 # Raised 2026-09-07 with the spectrum analyser: RP2040 sat 368 B under the
 # old 60K and the RP2350 image had already outgrown 72K before this change.
-DATA_BUDGET = {"rp2040": 65536, "rp2350": 92160}
+# Raised 2 KB each 2026-09-22 for the output limiter's RAM hooks (2.2 KB
+# RP2350, 2.4 KB RP2040); both images sat under 1 KB from the old budgets.
+DATA_BUDGET = {"rp2040": 67584, "rp2350": 94208}
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {
@@ -111,6 +113,10 @@ COMMON = [
     ("crossfeed_process_pair_block", False),
     ("crossfeed_process_pairs", False),
     ("tube_process_output_block", False),
+    ("limiter_packet_begin", False),
+    ("limiter_process_outputs", False),
+    ("limiter_packet_end", False),
+    ("limiter_reset_all", False),
     ("leveller_process_block", False),
     ("update_buffer_watermarks", True),
     ("get_slot_consumer_fill", False),

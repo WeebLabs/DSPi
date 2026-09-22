@@ -78,6 +78,8 @@ add_executable(DSPi
     subharm.h
     tube.c
     tube.h
+    limiter.c
+    limiter.h
     siggen.c
     siggen.h
     rta_bass.c

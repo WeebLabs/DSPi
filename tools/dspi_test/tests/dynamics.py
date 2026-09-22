@@ -6,6 +6,7 @@ Crossfeed  0x5E-0x67
 Matrix     0x70/0x71
 Subharm    0x10-0x1F, 0x2C-0x2F, 0xA9-0xAE
 Tube       0x3E-0x3F
+Limiter    0x81 (OUT sets, IN gets)
 """
 
 import struct
@@ -485,3 +486,170 @@ def tube_bulk_roundtrip(dev, profile, chk):
         chk.approx(_tube_get(dev, idx), val, 1e-3, f"pre-test index {idx} restored")
     for idx, val in voicing:
         chk.approx(_tube_get(dev, idx), val, 1e-3, f"pre-test voicing index {idx} restored")
+
+
+# --- Output limiter ----------------------------------------------------------
+
+# One opcode for both directions: wValue = (output << 8) | index.  Indices
+# mirror LIMITER_PARAM_* / LIMITER_GET_* in firmware/DSPi/limiter.h.
+L_ENABLED, L_THRESH, L_RELEASE, L_GROUP = 0, 1, 2, 3
+L_NUM_PARAMS = 4
+L_METER, L_STATUS = 0x80, 0x81
+L_ALL = 0xFF
+
+
+def _lim_set(dev, out, index, value):
+    return dev.set_f32(OP.LIMITER, value, wvalue=(out << 8) | index)
+
+
+def _lim_get(dev, out, index):
+    return dev.get_f32(OP.LIMITER, wvalue=(out << 8) | index)
+
+
+def _lim_status(dev):
+    engaged, lookahead, block, n_out = dev.get(OP.LIMITER, 4, wvalue=L_STATUS)
+    return engaged, lookahead, block, n_out
+
+
+def _lim_save(dev, profile):
+    return [[_lim_get(dev, k, i) for i in range(L_NUM_PARAMS)]
+            for k in range(profile.num_output_channels)]
+
+
+def _lim_restore(dev, saved):
+    for k, vals in enumerate(saved):
+        for i, v in enumerate(vals):
+            _lim_set(dev, k, i, v)
+
+
+@test("dynamics")
+def limiter_status_block(dev, profile, chk):
+    """GET index 0x81 reports the fixed 32-sample lookahead, 16-sample block and output count."""
+    _, lookahead, block, n_out = _lim_status(dev)
+    chk.eq(lookahead, 32, "lookahead samples")
+    chk.eq(block, 16, "block samples")
+    chk.eq(n_out, profile.num_output_channels, "num_outputs")
+
+
+@test("dynamics", mutating=True)
+def limiter_param_roundtrip(dev, profile, chk):
+    """Each parameter round-trips per output, independently of its neighbours."""
+    saved = _lim_save(dev, profile)
+    _lim_set(dev, 1, L_THRESH, -7.5)
+    _lim_set(dev, 1, L_RELEASE, 250.0)
+    _lim_set(dev, 1, L_GROUP, 2.0)
+    _lim_set(dev, 0, L_THRESH, -3.0)
+    chk.approx(_lim_get(dev, 1, L_THRESH), -7.5, 1e-4, "out 1 threshold")
+    chk.approx(_lim_get(dev, 1, L_RELEASE), 250.0, 1e-3, "out 1 release")
+    chk.approx(_lim_get(dev, 1, L_GROUP), 2.0, 1e-6, "out 1 link group")
+    chk.approx(_lim_get(dev, 0, L_THRESH), -3.0, 1e-4, "out 0 threshold untouched by out 1")
+    _lim_restore(dev, saved)
+
+
+@test("dynamics", mutating=True)
+def limiter_param_clamps(dev, profile, chk):
+    """Threshold -30..0 dB, release 10..1000 ms, link group 0..4 (rounded)."""
+    saved = _lim_save(dev, profile)
+    for val, want, what in ((5.0, 0.0, "threshold hi"), (-99.0, -30.0, "threshold lo")):
+        _lim_set(dev, 0, L_THRESH, val)
+        chk.approx(_lim_get(dev, 0, L_THRESH), want, 1e-4, what)
+    for val, want, what in ((1.0, 10.0, "release lo"), (5000.0, 1000.0, "release hi")):
+        _lim_set(dev, 0, L_RELEASE, val)
+        chk.approx(_lim_get(dev, 0, L_RELEASE), want, 1e-3, what)
+    for val, want, what in ((9.0, 4.0, "group hi"), (2.4, 2.0, "group rounds"), (-3.0, 0.0, "group lo")):
+        _lim_set(dev, 0, L_GROUP, val)
+        chk.approx(_lim_get(dev, 0, L_GROUP), want, 1e-6, what)
+    _lim_restore(dev, saved)
+
+
+@test("dynamics", mutating=True)
+def limiter_all_outputs_set(dev, profile, chk):
+    """Output byte 0xFF on a SET writes that parameter on every output."""
+    saved = _lim_save(dev, profile)
+    _lim_set(dev, L_ALL, L_THRESH, -4.0)
+    for k in range(profile.num_output_channels):
+        chk.approx(_lim_get(dev, k, L_THRESH), -4.0, 1e-4, f"out {k} threshold")
+    _lim_restore(dev, saved)
+
+
+@test("dynamics")
+def limiter_bad_get_stalls(dev, profile, chk):
+    """A GET for a missing output, a missing index or output 0xFF STALLs."""
+    n = profile.num_output_channels
+    chk.stalls(lambda: dev.get(OP.LIMITER, 4, wvalue=(n << 8) | L_THRESH), "output past the end")
+    chk.stalls(lambda: dev.get(OP.LIMITER, 4, wvalue=L_NUM_PARAMS), "index past the end")
+    chk.stalls(lambda: dev.get(OP.LIMITER, 4, wvalue=(L_ALL << 8) | L_THRESH), "all-outputs GET")
+
+
+@test("dynamics", mutating=True)
+def limiter_bad_set_is_silent_noop(dev, profile, chk):
+    """SET with a bad output, a bad index or a short payload ACKs and changes nothing."""
+    saved = _lim_save(dev, profile)
+    _lim_set(dev, 0, L_THRESH, -9.0)
+    n = profile.num_output_channels
+    chk.no_stall(lambda: _lim_set(dev, n, L_THRESH, -2.0), "bad output no STALL")
+    chk.no_stall(lambda: _lim_set(dev, 0, L_NUM_PARAMS, -2.0), "bad index no STALL")
+    chk.no_stall(lambda: dev.set(OP.LIMITER, b"\x00\x00", wvalue=L_THRESH), "short payload no STALL")
+    chk.approx(_lim_get(dev, 0, L_THRESH), -9.0, 1e-4, "threshold unchanged")
+    _lim_restore(dev, saved)
+
+
+@test("dynamics")
+def limiter_meter_shape(dev, profile, chk):
+    """GET index 0x80 returns one uint16 per output."""
+    n = profile.num_output_channels
+    raw = dev.get(OP.LIMITER, 2 * n, wvalue=L_METER)
+    chk.eq(len(raw), 2 * n, "meter length")
+
+
+@test("dynamics", mutating=True)
+def limiter_engage_follows_enable(dev, profile, chk):
+    """Enabling any output engages the lookahead delay; disabling the last releases it."""
+    import time
+    saved = _lim_save(dev, profile)
+    _lim_set(dev, L_ALL, L_ENABLED, 0.0)
+
+    def wait_engaged(want):
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if _lim_status(dev)[0] == want:
+                return True
+            time.sleep(0.02)
+        return False
+
+    chk.ok(wait_engaged(0), "released with every output off")
+    _lim_set(dev, 0, L_ENABLED, 1.0)
+    chk.ok(wait_engaged(1), "engaged after enabling output 0")
+    _lim_set(dev, 0, L_ENABLED, 0.0)
+    chk.ok(wait_engaged(0), "released after disabling output 0")
+    _lim_restore(dev, saved)
+    if any(vals[L_ENABLED] for vals in saved):
+        chk.ok(wait_engaged(1), "pre-test engaged state restored")
+
+
+@test("dynamics", mutating=True)
+def limiter_bulk_roundtrip(dev, profile, chk):
+    """The V32 limiter wire section carries every output through GET/SET_ALL_PARAMS."""
+    before = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+    saved = _lim_save(dev, profile)
+    last = profile.num_output_channels - 1
+    _lim_set(dev, last, L_THRESH, -12.5)
+    _lim_set(dev, last, L_RELEASE, 333.0)
+    _lim_set(dev, last, L_GROUP, 3.0)
+    _lim_set(dev, last, L_ENABLED, 1.0)
+    blob = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+    _lim_set(dev, last, L_THRESH, -1.0)
+    _lim_set(dev, last, L_RELEASE, 100.0)
+    _lim_set(dev, last, L_GROUP, 0.0)
+    _lim_set(dev, last, L_ENABLED, 0.0)
+    dev.set(OP.SET_ALL_PARAMS, blob)
+    dev.wait_ready()
+    chk.approx(_lim_get(dev, last, L_THRESH), -12.5, 1e-4, "threshold restored")
+    chk.approx(_lim_get(dev, last, L_RELEASE), 333.0, 1e-3, "release restored")
+    chk.approx(_lim_get(dev, last, L_GROUP), 3.0, 1e-6, "group restored")
+    chk.approx(_lim_get(dev, last, L_ENABLED), 1.0, 1e-6, "enable restored")
+    dev.set(OP.SET_ALL_PARAMS, before)
+    dev.wait_ready()
+    for k, vals in enumerate(saved):
+        for i, v in enumerate(vals):
+            chk.approx(_lim_get(dev, k, i), v, 1e-3, f"pre-test out {k} index {i} restored")

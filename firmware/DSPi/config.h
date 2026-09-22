@@ -230,6 +230,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_TUBE_PARAM          0x3E  // wValue low byte = index (tube.h TUBE_PARAM_*), 4-byte float32 LE
 #define REQ_GET_TUBE_PARAM          0x3F  // wValue low byte = index, returns 4-byte float32 LE
 
+// Output limiter (limiter.h).  One opcode for everything: OUT sets, IN gets.
+// wValue = (output << 8) | index; SET payload and GET reply are float32 LE,
+// except the read-only GET blocks LIMITER_GET_METER / LIMITER_GET_STATUS.
+#define REQ_LIMITER                 0x81
+
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
 #define REQ_GET_EQ_PARAM    0x43

@@ -35,6 +35,7 @@
 #include "siggen.h"
 #include "rta.h"
 #include "tube.h"
+#include "limiter.h"
 #include "upmix.h"
 #include "usb_audio.h"
 #include "notify.h"
@@ -213,6 +214,7 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     psybass_update_pending = true;    // Recalculate psybass coefficients for new sample rate
     subharm_update_pending = true;    // Recalculate subharm coefficients for new sample rate
     tube_update_pending = true;       // Recalculate tube coefficients for new sample rate
+    limiter_update_pending = true;    // Release coefficients depend on the rate
 #if PICO_RP2350
     upmix_update_pending = true;      // Recalculate upmixer coefficients for new sample rate
 #endif
@@ -943,6 +945,33 @@ bool pipeline_producer_is_streaming(void) {
         !output_type_switch_in_progress &&
         !(preset_loading && active_input_source != INPUT_SOURCE_USB)) return true;
     return false;
+}
+
+// The limiter's delay can only appear or vanish in silence.  With packets
+// flowing, hold the fade and let the pipeline switch once the rings are zero.
+// With none (no producer, or USB flagged live but idle) switch directly.
+#define LIMITER_ENGAGE_IDLE_US 50000u
+static void limiter_engage_service(void) {
+    static uint32_t last_count;
+    static uint64_t last_packet_us, last_call_us;
+    bool want = limiter_wants_engaged();
+    uint64_t now = time_us_64();
+    uint32_t count = limiter_packet_count();
+    // A gap between calls is a blocked main loop, not an idle producer.
+    bool stalled_here = (now - last_call_us) > 10000u;
+    last_call_us = now;
+    if (count != last_count || want == limiter_is_engaged() || stalled_here) {
+        last_count = count;
+        last_packet_us = now;
+    }
+    if (want == limiter_is_engaged()) return;
+    if (!pipeline_producer_is_streaming() || (now - last_packet_us) > LIMITER_ENGAGE_IDLE_US) {
+        limiter_force_engage(want);
+        return;
+    }
+    if (limiter_switch_ready()) return;   // already silent: switches next packet
+    uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
+    pipeline_hold_soft_mute(samples_for_duration_ms(fs, PIPELINE_FADE_REQUEST_MS));
 }
 
 // One service pass over whatever is producing blocks.  Used by the blocking
@@ -1842,6 +1871,9 @@ void core0_init() {
 
     // Initial tube preamp setup (uses loaded or default params)
     tube_apply_config((const TubeConfig *)&tube_config, 48000.0f);
+
+    // Initial output limiter setup; the delay engages via the main loop.
+    limiter_apply_config(48000.0f);
 
 #if PICO_RP2350
     // Initial upmixer setup (uses loaded or default params)
@@ -2777,6 +2809,14 @@ int main(void) {
             tube_apply_config((const TubeConfig *)&tube_config, (float)audio_state.freq);
         }
 
+        // Output limiter: publish coefficients, then bring the lookahead delay
+        // into line with them (switched only in silence, spec 2.3).
+        if (limiter_update_pending) {
+            limiter_update_pending = false;
+            limiter_apply_config((float)audio_state.freq);
+        }
+        limiter_engage_service();
+
 #if PICO_RP2350
         // Handle upmixer coefficient updates: same double-buffer publish
         // model (NULL = disabled); processing state resets via upmix_park()
@@ -3144,6 +3184,7 @@ int main(void) {
                 int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #endif
                 memset(delay_lines, 0, sizeof(delay_lines));
+                limiter_reset_all();
 
                 // Transition Core 1 mode to match new output enable state
                 Core1Mode new_mode = derive_core1_mode();

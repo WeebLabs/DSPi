@@ -31,7 +31,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION      31   // V31: append tube preamp section (48 bytes; biased asymmetric waveshaper with sag and a damping-factor output stage, both platforms). V30: subharmonic synthesizer section grows 16 to 36 bytes (third band top_db, selectivity mode/depth/hold, sub ceiling, pair link); solo is runtime-only and stays off the wire. V29: append subharmonic synthesizer section (16 bytes; dbx-style octave divider, both platforms). V28: fourth selectable SPDIF input; input-config spdif_rx_pin_ext grows 2 to 3 entries, shifting the fields below it down one byte and consuming that section's last reserved byte (section size unchanged). V27: upmixer centre mode gains OFF (2), a surrounds-only setting that leaves L/R bit-exact; enum widening only, no struct or offset changes. V26: upmixer presence bell claims the upmix section reserved byte (int8, dB*2; struct sizes unchanged). V25: append upmixer section (44 bytes; RP2350 stereo upmixer, zeroed/ignored on RP2040). V24: ADAT input config (pin/enable/clock mode) claimed from the input-config reserved bytes (struct size unchanged). V23: append psybass section (24 bytes; psychoacoustic bass enhancement). V22: Linkwitz Transform target Q carried in the EQ WireBandParams reserved[2] bytes (uint16 LE, Q*512; zero for non-LT types; struct size unchanged). V21: I2S clock master/slave mode in the input-config section (claims one reserved byte; size unchanged). V20: crossfeed output_pair_mask replaces WireCrossfeedParams reserved byte; struct sizes unchanged. V19: loudness_output_mask replaces global reserved[2]; struct sizes unchanged. V18: leveller detector/apply channel masks (WireLevellerConfig grows 16 to 20 bytes). V17: append ADAT output config section (RP2350; zeroed/ignored on RP2040). V16: unified channel model (inputs are first-class channels with PEQ + metering; no "master"); matrix/preamp direct (8 inputs); compat-breaking, no migration.
+#define WIRE_FORMAT_VERSION      32   // V32: append output limiter section (108 bytes; per-output enable, link group, threshold, release; both platforms). V31: append tube preamp section (48 bytes; biased asymmetric waveshaper with sag and a damping-factor output stage, both platforms). V30: subharmonic synthesizer section grows 16 to 36 bytes (third band top_db, selectivity mode/depth/hold, sub ceiling, pair link); solo is runtime-only and stays off the wire. V29: append subharmonic synthesizer section (16 bytes; dbx-style octave divider, both platforms). V28: fourth selectable SPDIF input; input-config spdif_rx_pin_ext grows 2 to 3 entries, shifting the fields below it down one byte and consuming that section's last reserved byte (section size unchanged). V27: upmixer centre mode gains OFF (2), a surrounds-only setting that leaves L/R bit-exact; enum widening only, no struct or offset changes. V26: upmixer presence bell claims the upmix section reserved byte (int8, dB*2; struct sizes unchanged). V25: append upmixer section (44 bytes; RP2350 stereo upmixer, zeroed/ignored on RP2040). V24: ADAT input config (pin/enable/clock mode) claimed from the input-config reserved bytes (struct size unchanged). V23: append psybass section (24 bytes; psychoacoustic bass enhancement). V22: Linkwitz Transform target Q carried in the EQ WireBandParams reserved[2] bytes (uint16 LE, Q*512; zero for non-LT types; struct size unchanged). V21: I2S clock master/slave mode in the input-config section (claims one reserved byte; size unchanged). V20: crossfeed output_pair_mask replaces WireCrossfeedParams reserved byte; struct sizes unchanged. V19: loudness_output_mask replaces global reserved[2]; struct sizes unchanged. V18: leveller detector/apply channel masks (WireLevellerConfig grows 16 to 20 bytes). V17: append ADAT output config section (RP2350; zeroed/ignored on RP2040). V16: unified channel model (inputs are first-class channels with PEQ + metering; no "master"); matrix/preamp direct (8 inputs); compat-breaking, no migration.
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -427,6 +427,25 @@ typedef struct __attribute__((packed)) {
 } WireTubeParams;                    // 48 bytes
 
 // ============================================================================
+// Section 25: Output Limiter (108 bytes); V32+
+// ============================================================================
+//
+// One record per output (see limiter.h and
+// Documentation/Features/output_limiter_spec.md).  Entries past
+// num_output_channels are zero on GET and ignored on SET.
+typedef struct __attribute__((packed)) {
+    uint8_t  enabled;                // 0/1
+    uint8_t  link_group;             // 0 = unlinked, 1..4
+    uint8_t  reserved[2];            // Zero
+    float    threshold_db;           // Ceiling, -30..0 dBFS
+    float    release_ms;             // 10..1000 ms
+} WireLimiterOutput;                 // 12 bytes
+
+typedef struct __attribute__((packed)) {
+    WireLimiterOutput outputs[WIRE_MAX_OUTPUT_CHANNELS];
+} WireLimiterParams;                 // 108 bytes
+
+// ============================================================================
 // Complete Packet
 // ============================================================================
 typedef struct __attribute__((packed)) {
@@ -454,7 +473,8 @@ typedef struct __attribute__((packed)) {
     WireUpmixParams     upmix;           //   44  (V25+)
     WireSubharmParams   subharm;         //   36  (V29+; 36 bytes at V30)
     WireTubeParams      tube;            //   48  (V31+)
-} WireBulkParams;                        // Total: 6028 bytes (V31 appends the 48-byte tube section)
+    WireLimiterParams   limiter;         //  108  (V32+)
+} WireBulkParams;                        // Total: 6136 bytes (V32 appends the 108-byte limiter section)
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 
@@ -466,7 +486,7 @@ typedef struct __attribute__((packed)) {
 #define WIRE_BULK_PARAMS_MIN_SIZE   WIRE_BULK_PARAMS_SIZE
 
 // Buffer size for USB stream transfer (must be power of 2, >= WIRE_BULK_PARAMS_SIZE).
-// V31 is 6028 bytes (17-channel EQ/names/crossover + ADAT + leveller masks + psybass + upmixer + subharm + tube); 8192 is the next power of 2.
+// V32 is 6136 bytes (17-channel EQ/names/crossover + ADAT + leveller masks + psybass + upmixer + subharm + tube + limiter); 8192 is the next power of 2.
 // Shared by both platforms (the wire format is platform-independent).
 #define WIRE_BULK_BUF_SIZE     8192
 

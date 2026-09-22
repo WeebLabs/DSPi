@@ -8,6 +8,7 @@
 #include "usb_audio.h"
 #include "siggen.h"     // siggen_raw_mask: per-output EQ bypass in RAW mode
 #include "tube.h"
+#include "limiter.h"
 #include "output_s24.h" // RP2350 EQ worker: in-place S24 finalization
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
@@ -589,6 +590,11 @@ static void __not_in_flash_func(eq_worker_loop)() {
             }
         }
 
+        // Output limiter for Core 1's outputs, ahead of the delay lines.  It
+        // meets Core 0 inside when a link group spans both cores (limiter.h).
+        limiter_process_outputs(CORE1_EQ_FIRST_OUTPUT, CORE1_EQ_LAST_OUTPUT,
+                                buf_out, sample_count, 1);
+
         // Delay for Core 1 outputs
         if (any_delay_active) {
             for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
@@ -798,6 +804,11 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 loudness_reset_output_state(&loudness_output_state[out]);
             }
         }
+
+        // Output limiter for Core 1's outputs, ahead of the delay lines.  It
+        // meets Core 0 inside when a link group spans both cores (limiter.h).
+        limiter_process_outputs(CORE1_EQ_FIRST_OUTPUT, CORE1_EQ_LAST_OUTPUT,
+                                buf_out, sample_count, 1);
 
         // Delay for Core 1 outputs
         if (any_delay_active) {

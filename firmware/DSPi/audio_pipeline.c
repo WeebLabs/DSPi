@@ -25,6 +25,7 @@
 #include "rta.h"
 #include "upmix.h"
 #include "tube.h"
+#include "limiter.h"
 #include "adat_output.h"
 #include "output_s24.h"
 #include "loopback.h"   // DSPI_LOOPBACK slot-0 capture tap (self-guarded; empty otherwise)
@@ -161,6 +162,11 @@ void pipeline_request_soft_mute(uint32_t samples) {
     __dmb();
 }
 
+void pipeline_hold_soft_mute(uint32_t samples) {
+    if (preset_mute_request_counter < samples) preset_mute_request_counter = samples;
+    __dmb();
+}
+
 void pipeline_clear_soft_mute_request(void) {
     preset_mute_request_counter = 0;
     __dmb();
@@ -189,7 +195,8 @@ uint32_t pipeline_max_active_delay_samples(void) {
     for (int i = 0; i < NUM_DELAY_CHANNELS; i++) {
         if (channel_delay_samples[i] > max_delay) max_delay = channel_delay_samples[i];
     }
-    return (uint32_t)max_delay;
+    // The limiter's lookahead ring sits after the mute gain as well.
+    return (uint32_t)max_delay + limiter_latency_samples();
 }
 
 static inline float update_preset_mute_envelope(uint32_t sample_count, uint32_t sample_rate_hz) {
@@ -533,7 +540,15 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // (resync runs on this same thread, so the value cannot change mid-call).
     bool finalize_s24 = adat_output_is_active();
 
-    if (core1_mode == CORE1_MODE_EQ_WORKER) {
+    // One mode snapshot for the limiter and the branch below, so both agree.
+    bool dual_core = (core1_mode == CORE1_MODE_EQ_WORKER);
+    // Output limiter packet setup: must precede the Core 1 dispatch.  An
+    // all-zero composite gain is what lets it switch its delay silently.
+    limiter_packet_begin(sample_count,
+                         vol_mul_master_start == 0.0f && vol_mul_master_target == 0.0f,
+                         dual_core);
+
+    if (dual_core) {
         // --- Dual-core path: Core 1 handles EQ+delay+SPDIF for outputs 2-7 ---
 
         // Dispatch to Core 1 — both cores share the same vol ramp params so
@@ -659,6 +674,10 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         psybass_reset_output_state(&psybass_output_state[NUM_OUTPUT_CHANNELS - 1]);
         tube_reset_output_state(&tube_output_state[NUM_OUTPUT_CHANNELS - 1]);
         subharm_reset_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
+
+        // Output limiter for Core 0's outputs; meets Core 1 inside when a
+        // link group spans both cores (limiter.h).
+        limiter_process_outputs(0, CORE1_EQ_FIRST_OUTPUT - 1, buf_out, sample_count, 0);
 
         // Core 0: Delay for outputs 0-1
         if (any_delay_active) {
@@ -802,6 +821,9 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             }
         }
 
+        // Output limiter, post-gain and ahead of the delay lines (limiter.h).
+        limiter_process_outputs(0, NUM_OUTPUT_CHANNELS - 1, buf_out, sample_count, 0);
+
         // Delay
         if (any_delay_active) {
             for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
@@ -873,6 +895,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         }
 #endif
     }
+    limiter_packet_end(sample_count);
 
     // (Per-input peaks/clip are written in PASS 2, above.)
 
@@ -998,7 +1021,15 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // PDM output index
     int pdm_out = NUM_OUTPUT_CHANNELS - 1;
 
-    if (core1_mode == CORE1_MODE_EQ_WORKER) {
+    // One mode snapshot for the limiter and the branch below, so both agree.
+    bool dual_core = (core1_mode == CORE1_MODE_EQ_WORKER);
+    // Output limiter packet setup: must precede the Core 1 dispatch.  An
+    // all-zero composite gain is what lets it switch its delay silently.
+    limiter_packet_begin(sample_count,
+                         vol_mul_master_start_q15 == 0 && vol_mul_master_target == 0,
+                         dual_core);
+
+    if (dual_core) {
         // --- Dual-core path: Core 0 handles pair 1, Core 1 handles pair 2 ---
 
         // Dispatch to Core 1 — both cores share the same vol ramp params so
@@ -1114,6 +1145,10 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         psybass_reset_output_state(&psybass_output_state[NUM_OUTPUT_CHANNELS - 1]);
         tube_reset_output_state(&tube_output_state[NUM_OUTPUT_CHANNELS - 1]);
         subharm_reset_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
+
+        // Output limiter for Core 0's outputs; meets Core 1 inside when a
+        // link group spans both cores (limiter.h).
+        limiter_process_outputs(0, CORE1_EQ_FIRST_OUTPUT - 1, buf_out, sample_count, 0);
 
         // Core 0: Delay for outputs 0-1
         if (any_delay_active) {
@@ -1249,6 +1284,9 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
             }
         }
 
+        // Output limiter, post-gain and ahead of the delay lines (limiter.h).
+        limiter_process_outputs(0, NUM_OUTPUT_CHANNELS - 1, buf_out, sample_count, 0);
+
         // Delay (all outputs use same base write index)
         if (any_delay_active) {
             for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
@@ -1313,6 +1351,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         }
 #endif
     }
+    limiter_packet_end(sample_count);
 
     // (Per-input peaks/clip are written in PASS 2, above.)
 #endif

@@ -45,6 +45,10 @@ void pipeline_reset_cpu_metering(void);
 // and audio fades back up.
 void pipeline_request_soft_mute(uint32_t samples);
 
+// Like pipeline_request_soft_mute() but never shortens a longer outstanding
+// request, so a second requester cannot cut another's dwell short.
+void pipeline_hold_soft_mute(uint32_t samples);
+
 // Drop the request from pipeline_request_soft_mute() immediately.  Used once
 // `preset_loading` has taken ownership of the mute.
 void pipeline_clear_soft_mute_request(void);

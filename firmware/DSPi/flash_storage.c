@@ -44,6 +44,7 @@
 #include "adat_output.h"     // adat_output_config_enabled/_pin/_set_config (RP2350)
 #include "upmix.h"           // upmix_config + UPMIX_DEFAULT_* (RP2350 only)
 #include "tube.h"            // tube_config + TUBE_DEFAULT_*
+#include "limiter.h"         // limiter_config + limiter_config_defaults
 #include "notify.h"
 #include "uart_control.h"    // uart_ctrl_owns_pin (io_pin_valid guard)
 #include "i2c_control.h"     // i2c_ctrl_owns_pin (io_pin_valid guard)
@@ -195,7 +196,11 @@
 //        like V22..V37: older slots load via slot_data_size_for_version and
 //        take the TUBE_DEFAULT_* values with the effect off (apply is gated on
 //        version >= 38).
-#define SLOT_DATA_VERSION       38
+//   V39: Output limiter appended (per output: enabled, link group, threshold,
+//        release; 10 bytes x NUM_OUTPUT_CHANNELS).  Tail-append like V22..V38:
+//        older slots load with every limiter off at the defaults (apply is
+//        gated on version >= 39).
+#define SLOT_DATA_VERSION       39
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1442,6 +1447,13 @@ typedef struct __attribute__((packed)) {
     float    tube_mix_pct;
     float    tube_trim_db;
     float    tube_reserved_f;
+
+    // V39: output limiter, one entry per output (see limiter.h).  Gated on
+    // version >= 39 in apply_slot_to_live(); values are sanitized on apply.
+    uint8_t  limiter_enabled[NUM_OUTPUT_CHANNELS];
+    uint8_t  limiter_link_group[NUM_OUTPUT_CHANNELS];
+    float    limiter_threshold_db[NUM_OUTPUT_CHANNELS];
+    float    limiter_release_ms[NUM_OUTPUT_CHANNELS];
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -3458,6 +3470,14 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->tube_trim_db      = tube_config.trim_db;
     slot->tube_reserved_f   = 0.0f;
 
+    // Output limiter (V39): one entry per output.
+    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        slot->limiter_enabled[k]      = limiter_config[k].enabled ? 1 : 0;
+        slot->limiter_link_group[k]   = limiter_config[k].link_group;
+        slot->limiter_threshold_db[k] = limiter_config[k].threshold_db;
+        slot->limiter_release_ms[k]   = limiter_config[k].release_ms;
+    }
+
     // ADAT input (V32): raw pin (0xFF unset) + enable + clock mode (both
     // platforms; RP2040 stores its default state for round-trips).
     slot->adat_input_pin        = adat_input_pin;
@@ -3797,6 +3817,21 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     }
     tube_update_pending = true;
 
+    // Output limiter (V39): older slots have none, so every output loads off
+    // at the defaults.  A change in whether any limiter is on is switched
+    // under a fade by the main loop (spec 2.3), never here.
+    if (slot->version >= 39) {
+        for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+            limiter_config[k].enabled      = (slot->limiter_enabled[k] != 0);
+            limiter_config[k].link_group   = slot->limiter_link_group[k];
+            limiter_config[k].threshold_db = slot->limiter_threshold_db[k];
+            limiter_config[k].release_ms   = slot->limiter_release_ms[k];
+        }
+    } else {
+        limiter_config_defaults();
+    }
+    limiter_update_pending = true;
+
     // Stereo upmixer (V33): RP2350-only.  V33+ slots restore the stored config
     // (modes clamped; enabled = nonzero); older slots load the disabled
     // defaults.  Range clamping of the floats happens downstream in
@@ -4044,6 +4079,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V37 \
     (offsetof(PresetSlot, tube_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V38 \
+    (offsetof(PresetSlot, limiter_enabled) - offsetof(PresetSlot, filter_recipes))
+#define SLOT_DATA_SIZE_V39 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
@@ -4052,14 +4089,16 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // (I2S clock master/slave mode), V29 (I2S clock-pin mode), V30 (Linkwitz
 // Transform per-band target Q), V31 (psychoacoustic bass), V32 (ADAT input) and
 // V33 (stereo upmixer), V35 (SPDIF input 4 pin), V36 (subharmonic synthesizer)
-// V37 (subharm third band / selectivity / ceiling / link) and V38 (tube preamp)
-// are backward-compatible tail-appends; V34 (upmix presence) claims a reserved
-// byte with no size change.  V21..V37 slots are all accepted (an older slot loads
-// with the newer fields defaulted to unset) while older/unknown versions are
-// invalidated and the slot loads factory defaults.
+// V37 (subharm third band / selectivity / ceiling / link), V38 (tube preamp)
+// and V39 (output limiter) are backward-compatible tail-appends; V34 (upmix
+// presence) claims a reserved byte with no size change.  V21..V38 slots are all
+// accepted (an older slot loads with the newer fields defaulted to unset) while
+// older/unknown versions are invalidated and the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 38
+        case SLOT_DATA_VERSION:   // 39
+            return SLOT_DATA_SIZE_V39;
+        case 38:
             return SLOT_DATA_SIZE_V38;
         case 37:
             return SLOT_DATA_SIZE_V37;
@@ -4202,6 +4241,7 @@ uint8_t preset_load(uint8_t slot) {
     int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 #endif
     memset(delay_lines, 0, sizeof(delay_lines));
+    limiter_reset_all();   // its lookahead rings are delay lines too
 
     // Transition Core 1 mode to match the new output enable state
     Core1Mode new_mode = derive_core1_mode();
@@ -4718,6 +4758,10 @@ static void apply_factory_defaults(void) {
     tube_config.mix_pct      = TUBE_DEFAULT_MIX;
     tube_config.trim_db      = TUBE_DEFAULT_TRIM;
     tube_update_pending = true;
+
+    // Output limiter: every output off at the defaults.
+    limiter_config_defaults();
+    limiter_update_pending = true;
 
     // Stereo upmixer (RP2350-only): disabled, default engine params.
 #if PICO_RP2350
