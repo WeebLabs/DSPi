@@ -71,7 +71,7 @@ typedef struct {
 
 // Shadow mirror of live state in wire format.  param_write compares new
 // writes against this to decide whether a notification is needed.
-// 2912 B on RP2350 / RP2040 alike.  Placed in RAM so reads don't stall on XIP.
+// Same size on both platforms (the wire format is platform-independent).
 static __attribute__((aligned(4))) WireBulkParams param_shadow;
 
 // Event ring.  head = next-free slot; each consumer owns a tail
@@ -214,21 +214,9 @@ void notify_consumer_set_active(NotifyConsumer c, bool active) {
 }
 
 void notify_rebaseline(void) {
-    // Collect into a scratch buffer first so we don't clobber shadow state
-    // if collect() reads from any volatile globals racily.  Our collect is
-    // synchronous with live state, so this is defensive rather than strictly
-    // necessary.
-    //
-    // Scratch is `static` (BSS), NOT a stack local: sizeof(WireBulkParams)
-    // is ~3.6 KB after the V11 crossover section, well above what's safe to
-    // park on Core 0's stack.  All callers of notify_rebaseline() run on the
-    // Core 0 main loop (preset load/delete/save + bulk apply); no ISR path
-    // re-enters the function, so a function-static is race-free.
-    static __attribute__((aligned(4))) WireBulkParams tmp;
-    bulk_params_collect(&tmp);
-    uint32_t flags = save_and_disable_interrupts();
-    memcpy(&param_shadow, &tmp, sizeof(param_shadow));
-    restore_interrupts(flags);
+    // Collects in place with no scratch copy or IRQ lock.  Safe only while
+    // every param_write runs on the Core 0 main loop (see header comment).
+    bulk_params_collect(&param_shadow);
 }
 
 void notify_set_source(ParamSource src) {

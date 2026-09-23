@@ -47,8 +47,6 @@ _Static_assert(sizeof(WireInputConfig) == 16,
                "reserved bytes; growing it shifts every later wire offset");
 _Static_assert(sizeof(WireLgSoundSync) == sizeof(LgSoundSyncStatus),
                "WireLgSoundSync and LgSoundSyncStatus must have identical layout");
-_Static_assert(sizeof(WireBulkParams) <= WIRE_BULK_BUF_SIZE,
-               "WireBulkParams must fit in the bulk transfer buffer");
 _Static_assert(sizeof(WireUpmixParams) == 44, "V25 upmixer section must be 44 bytes");
 // Wire ABI pins: hosts hard-code these numbers (see upmixer_spec.md).  A
 // mid-struct edit that shifts them must bump WIRE_FORMAT_VERSION instead.

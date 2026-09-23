@@ -1690,40 +1690,28 @@ static float db_to_linear(float db) {
 // LOW-LEVEL FLASH HELPERS
 // ============================================================================
 
-// Erase the sector(s) covering a record and write data into them.
-// `offset` is the byte offset from the start of flash (not XIP address).
-// `data`/`len` specify the payload; it is zero-padded up to page alignment.
-// Records up to SLOT_BYTES (a 2-sector preset slot) are supported; the erase
-// rounds up to a full sector boundary so a >4 KB slot erases both its sectors.
-static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
+// Page-aligned staging buffer for every flash record, sized for the largest
+// (a preset slot).  preset_save() builds its slot here in place.
+static union {
+    PresetSlot slot;
+    uint8_t    bytes[SLOT_BYTES];
+} __attribute__((aligned(256))) flash_stage;
+
+// Erase the sector(s) covering the first `len` bytes of flash_stage and
+// program them.  `offset` is the byte offset from the start of flash (not
+// XIP address).  The caller must have 0xFF-filled flash_stage past `len`.
+static int flash_program_staged(uint32_t offset, size_t len) {
     // Program size rounds to a page; erase size rounds to a sector.
     size_t write_size = (len + FLASH_PAGE_SIZE - 1)   & ~(FLASH_PAGE_SIZE - 1);
     size_t erase_size = (len + FLASH_SECTOR_SIZE - 1) & ~(FLASH_SECTOR_SIZE - 1);
+    if (len > sizeof(flash_stage.bytes)) return -1;
 
-    // Page-aligned scratch buffer sized for the largest record (a 2-sector slot).
-    static uint8_t __attribute__((aligned(256))) write_buf[SLOT_BYTES];
-    if (len > sizeof(write_buf)) return -1;   // defensive: record too large
-    memset(write_buf, 0xFF, sizeof(write_buf));
-    memcpy(write_buf, data, len);
-
-    // NOTE: earlier versions drained the SPDIF RX FIFO here via a
-    // `while (spdif_input_poll() > 0)` loop.  That triggered full DSP
-    // pipeline processing (including a Core 1 work dispatch + wait) inside
-    // flash_write_sector, which introduced a crash path on preset_save
-    // with SPDIF as the active input source.  The pre-blackout drain now
-    // lives only in prepare_flash_write_operation()'s settle loop, which
-    // runs once per top-level flash operation; multi-write operations
-    // (preset_save = slot + dir) rely on the SPDIF RX library's own
-    // overflow handling during the brief inter-write window.
+    // Never poll audio input in here: a Core 1 dispatch inside flash prep
+    // crashes.  The SPDIF RX pre-drain lives in prepare_flash_write_operation().
     //
-    // Park Core 1 in RAM before quiescing XIP for flash erase/program.
-    // Guarded: (a) victim_is_initialized handles first-boot (Core 1 not
-    // launched yet) and launch-to-init race; (b) __get_current_exception
-    // skips lockout in IRQ context (USB vendor handler) where SDK lock
-    // internals are unsafe. IRQ-context saves are safe because Core 1's
-    // entire execution set is RAM-resident (enforced by
-    // scripts/check_ram_placement.py); core-1 lockout is still used when
-    // not in IRQ context.
+    // Park Core 1 in RAM before quiescing XIP.  Lockout is skipped before
+    // Core 1 launches and, as a fallback, in IRQ context where SDK lock
+    // internals are unsafe.  No flash write runs from an IRQ today.
     bool do_lockout = multicore_lockout_victim_is_initialized(1)
                       && (__get_current_exception() == 0);
     if (do_lockout) multicore_lockout_start_blocking();
@@ -1741,7 +1729,7 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     // keeps clocking framed silence for the whole erase/program window.
     flash_irq_blackout_begin();
     dspi_flash_range_erase(offset, erase_size);
-    dspi_flash_range_program(offset, write_buf, write_size);
+    dspi_flash_range_program(offset, flash_stage.bytes, write_size);
     flash_irq_blackout_end();
 
     if (do_lockout) multicore_lockout_end_blocking();
@@ -1757,11 +1745,19 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
 
     // Verify magic survived the write
     const uint32_t *verify = (const uint32_t *)(XIP_BASE + offset);
-    const uint32_t *expected = (const uint32_t *)data;
+    const uint32_t *expected = (const uint32_t *)flash_stage.bytes;
     if (*verify != *expected) {
         return -1;  // Write verification failed
     }
     return 0;
+}
+
+// Stage `len` bytes of `data` (0xFF-padded) and write them to `offset`.
+static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
+    if (len > sizeof(flash_stage.bytes)) return -1;
+    memset(flash_stage.bytes, 0xFF, sizeof(flash_stage.bytes));
+    memcpy(flash_stage.bytes, data, len);
+    return flash_program_staged(offset, len);
 }
 
 // ============================================================================
@@ -4163,9 +4159,10 @@ uint8_t preset_save(uint8_t slot) {
 
     dir_ensure();
 
-    // Build the slot data from current live state
-    static PresetSlot slot_buf;
-    collect_live_state(&slot_buf, slot);
+    // Build the slot in place in the flash staging buffer.  Nothing else may
+    // touch flash_stage until the slot write below has finished.
+    memset(flash_stage.bytes, 0xFF, sizeof(flash_stage.bytes));
+    collect_live_state(&flash_stage.slot, slot);
 
     // Engage mute before flash writes to prevent audio glitches
     preset_mute_counter = flash_mute_hold_samples();
@@ -4173,7 +4170,7 @@ uint8_t preset_save(uint8_t slot) {
     __dmb();
 
     // Write slot to flash
-    if (flash_write_sector(SLOT_SECTOR_OFFSET(slot), &slot_buf, sizeof(slot_buf)) != 0) {
+    if (flash_program_staged(SLOT_SECTOR_OFFSET(slot), sizeof(PresetSlot)) != 0) {
         return PRESET_ERR_FLASH_WRITE;
     }
 
@@ -4269,19 +4266,19 @@ uint8_t preset_delete(uint8_t slot) {
 
     // NOTE: muting is now handled by prepare_pipeline_reset() in the main
     // loop caller.  The mute counter and preset_loading flag are set there.
-    // See flash_write_sector() for why we no longer drain SPDIF RX FIFO
+    // See flash_program_staged() for why we no longer drain SPDIF RX FIFO
     // here (was causing preset_save/delete crashes via Core 1 dispatch
     // inside the flash blackout prep).
     __dmb();
 
     // Erase the slot's full flash allocation (SLOT_BYTES = all SLOT_SECTORS,
     // 2 sectors on RP2350) so no stale data lingers in the second sector.
-    // Same lockout guard as flash_write_sector.
+    // Same lockout guard as flash_program_staged().
     bool do_lockout = multicore_lockout_victim_is_initialized(1)
                       && (__get_current_exception() == 0);
     if (do_lockout) multicore_lockout_start_blocking();
 
-    // Same treatment as flash_write_sector(): PDM ring to true silence (only
+    // Same treatment as flash_program_staged(): PDM ring to true silence (only
     // when Core 1 is parked), then a blackout that leaves the output DMA IRQ
     // lines alive so the slots keep clocking through the erase.
     if (do_lockout) pdm_flash_silence();

@@ -1092,9 +1092,8 @@ for (int ch = 0; ch < num_ch; ch++) {
 | Component | Size | Notes |
 |-----------|------|-------|
 | `dir_cache` (PresetDirectory) | ~340 bytes | Cached in BSS, loaded once at boot |
-| `slot_buf` (PresetSlot, static) | ~1.8 KB (RP2040) / ~2.8 KB (RP2350) | Reused for each save operation |
-| `write_buf` (sector scratch) | 4 KB | Page-aligned, used for flash writes |
+| `flash_stage` (flash staging buffer) | 4 KB (RP2040) / 8 KB (RP2350) | Page-aligned; `preset_save()` builds its slot here in place (separate `slot_buf` removed 2026-09-22) |
 | `channel_names` | 224 B (RP2040) / 352 B (RP2350) | Live channel name array |
-| `bulk_param_buf` | 4 KB | Shared GET/SET buffer (includes channel names section) |
+| `bulk_param_buf` | `sizeof(WireBulkParams)` (6,136 B at V32) | Shared GET/SET buffer (includes channel names section) |
 | `preset_loading` + `preset_mute_counter` | 5 bytes | Mute-on-load control |
 | **Total BSS increase** | **~6 KB (RP2040) / ~7 KB (RP2350)** | |

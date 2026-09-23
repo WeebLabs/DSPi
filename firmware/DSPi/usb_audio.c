@@ -184,7 +184,7 @@ volatile uint8_t ctrl_i2c_last_status = PIN_CONFIG_SUCCESS;
 // context where some of those updates originate.
 volatile bool spdif_rx_pin_change_pending = false;
 
-// 4 KB aligned buffer shared between GET and SET bulk param transfers.
+// Buffer shared by bulk GET/SET param transfers on every control transport.
 uint8_t __attribute__((aligned(4))) bulk_param_buf[WIRE_BULK_BUF_SIZE];
 
 // Per-input-channel preamp gain.  Indexed by input channel (0=USB L, 1=USB R).

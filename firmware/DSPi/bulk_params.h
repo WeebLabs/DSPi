@@ -485,10 +485,9 @@ typedef struct __attribute__((packed)) {
 // whose length != sizeof(WireBulkParams).
 #define WIRE_BULK_PARAMS_MIN_SIZE   WIRE_BULK_PARAMS_SIZE
 
-// Buffer size for USB stream transfer (must be power of 2, >= WIRE_BULK_PARAMS_SIZE).
-// V32 is 6136 bytes (17-channel EQ/names/crossover + ADAT + leveller masks + psybass + upmixer + subharm + tube + limiter); 8192 is the next power of 2.
-// Shared by both platforms (the wire format is platform-independent).
-#define WIRE_BULK_BUF_SIZE     8192
+// Shared bulk transfer buffer size.  Every writer bounds itself by
+// sizeof(WireBulkParams); the RTA bands-all response is asserted to fit.
+#define WIRE_BULK_BUF_SIZE     WIRE_BULK_PARAMS_SIZE
 
 // Collect current live DSP state into wire format
 void bulk_params_collect(WireBulkParams *out);

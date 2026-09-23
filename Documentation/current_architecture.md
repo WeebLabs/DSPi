@@ -289,7 +289,7 @@ Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switc
 **Persistence (compat-breaking).** Wire `WIRE_FORMAT_VERSION=16` (direct 8-input matrix/preamp + 17-channel EQ; no tail-append/version gates; 5864 B). Flash `SLOT_DATA_VERSION=21` (direct layout; the slot spans **2 flash sectors** on RP2350; 1 on RP2040). No migration — pre-version data loads factory defaults.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-09-07 (NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
+*Last updated: 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
@@ -300,7 +300,7 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 **v2 core design (`notify.c/notify.h`):** every parameter is identified by its `offsetof` into `WireBulkParams`. A single event ID (`NOTIFY_EVT_PARAM_CHANGED = 0x02`) carries `(wire_offset, wire_size, source, value)`. Host dispatch is a flat lookup on offset, not a hand-written switch — adding a parameter requires zero wire-format changes.
 
 **Subsystem state:**
-- `param_shadow`: mirror of `WireBulkParams` (3664 B BSS at V11). `notify_param_write` compares writes against it; notifications only fire on real byte-level changes.
+- `param_shadow`: mirror of `WireBulkParams` (6,136 B BSS at V32). `notify_param_write` compares writes against it; notifications only fire on real byte-level changes. `notify_rebaseline()` collects straight into it with no scratch copy, which is safe only because every param write runs on the Core 0 main loop *(2026-09-22)*.
 - `notify_ring[32]`: single-producer, **multi-consumer** ring of pending events (1920 B BSS). Coalesces PARAM_CHANGED entries on `(event_id, offset, size)`; a swept knob generates one queued entry, not hundreds. Coalescing only mutates entries no active consumer has consumed yet (window starts at the fastest consumer's tail). See "Multi-consumer ring" below.
 - `notify_bulk_depth`: nesting counter. While `> 0`, per-field `param_write` calls are suppressed (shadow still updates) and the outermost `notify_end_bulk()` emits a single `BULK_INVALIDATED` event.
 - `notify_current_source`: global source tag set by scoped brackets (see below).
@@ -369,7 +369,7 @@ The device declares itself as a USB asynchronous sink, meaning it drives the aud
 - **Backlog servo (Loop B):** Proportional correction based on epoch-relative produced/consumed sample balance, replacing the former integer buffer-count fill servo. `slot0_produced_samples` is incremented in `usb_audio.c` when a slot-0 producer buffer is committed. Consumption is derived from DMA word progress: SPDIF `current_total_words << 14`, I2S `<< 15`. Backlog is computed in unsigned Q16.16 with modular arithmetic (wrap-safe as long as actual backlog remains far below 32768 stereo samples; steady-state ≈384, giving 85× margin). Servo gain Kp_q16=85 (equivalent to old 1024 per 48-sample buffer), clamped to ±0.25 sample/frame. No integrator.
 - **Startup/reset gating:** After any reset, resync, stream activation, or slot-0 output-type switch, the servo is held at zero for 2 controller updates (~8ms). During holdoff, nominal feedback is emitted. On stream deactivation (alt 0), the controller is invalidated and all filter state cleared.
 - **Rate change:** `perform_rate_change()` pre-computes `nominal_feedback_10_14 = (freq << 14) / 1000` and calls `reset_usb_feedback_loop()` → `fb_ctrl_reset()`, reseeding the rate estimator at nominal and establishing a new backlog epoch.
-- **Flash blackout recovery:** `flash_write_sector()` and `preset_delete()` call `fb_ctrl_reset()` after the ~45ms interrupt blackout, reseeding the controller at nominal.
+- **Flash blackout recovery:** `flash_program_staged()` and `preset_delete()` call `fb_ctrl_reset()` after the ~45ms interrupt blackout, reseeding the controller at nominal.
 - **Endpoint serialization:** `fb_ctrl_get_10_14()` converts Q16.16 to 10.14 via rounded shift: `(q16 + 2) >> 2`. Fallback to `nominal_feedback_10_14` if the controller has never been reset.
 - **Total clamp:** nominal ±1.0 sample/frame (65536 in Q16.16).
 
@@ -1715,13 +1715,14 @@ The wire format and persisted preset data are unchanged (only `intensity_pct` an
 ---
 
 ## Flash Storage
-*Last updated: 2026-07-25 (selective NVIC blackout: the output DMA IRQ lines stay live through erase/program, so every slot keeps clocking framed silence instead of freezing mid-frame; PDM ring silenced and re-anchored). Previously, 2026-07-23 (every runtime flash write now completes via complete_flash_write_operation_full; light completion path removed)*
+*Last updated: 2026-09-22 (single staging buffer: `flash_write_sector()` is now a thin copy-in wrapper over `flash_program_staged()`, and `preset_save()` builds its slot in place in `flash_stage`; the IRQ-context lockout skip is documented as a fallback, since no flash write runs from an IRQ). Previously, 2026-07-25 (selective NVIC blackout: the output DMA IRQ lines stay live through erase/program, so every slot keeps clocking framed silence instead of freezing mid-frame; PDM ring silenced and re-anchored). Previously, 2026-07-23 (every runtime flash write now completes via complete_flash_write_operation_full; light completion path removed)*
 
 ### Flash Operation Safety
 
-Flash erase/program requires quiescing XIP (execute-in-place): only the erase/program windows forbid flash fetches; ordinary XIP execution is legal even with IRQs disabled. `flash_write_sector()` and `preset_delete()` run under a selective interrupt blackout (below) and park Core 1 via a guarded `multicore_lockout` when Core 1 is a registered victim:
+Flash erase/program requires quiescing XIP (execute-in-place): only the erase/program windows forbid flash fetches; ordinary XIP execution is legal even with IRQs disabled. `flash_program_staged()` (which every record write goes through) and `preset_delete()` run under a selective interrupt blackout (below) and park Core 1 via a guarded `multicore_lockout` when Core 1 is a registered victim:
 
-- **Guard condition:** `multicore_lockout_victim_is_initialized(1) && (__get_current_exception() == 0)`. The SDK function handles first-boot (Core 1 not launched) and launch-to-init race windows. The exception check skips lockout from IRQ context (USB vendor handler), where SDK lock internals are unsafe. IRQ-context saves that skip the lockout are safe because everything Core 1 can execute is RAM-resident (enforced by `scripts/check_ram_placement.py` Check B / B2), so a parked-or-not Core 1 never fetches from flash during the erase/program window. The audio consequence of a flash write is unchanged (muted window, feedback re-seed).
+- **Guard condition:** `multicore_lockout_victim_is_initialized(1) && (__get_current_exception() == 0)`. The SDK function handles first-boot (Core 1 not launched) and launch-to-init race windows. The exception check skips lockout from IRQ context, where SDK lock internals are unsafe. This is a fallback only. No flash write runs from an IRQ today: vendor requests on every transport dispatch from the Core 0 main loop (USB callbacks run in `tud_task()`, and `pico_stdio_usb`, which would call `tud_task()` from an IRQ, is not linked). An IRQ-context save that skipped the lockout would still be safe because everything Core 1 can execute is RAM-resident (enforced by `scripts/check_ram_placement.py` Check B / B2), so a parked-or-not Core 1 never fetches from flash during the erase/program window. The audio consequence of a flash write is unchanged (muted window, feedback re-seed).
+- **Staging buffer:** every record is written from one static, 256-byte-aligned `flash_stage` union (`PresetSlot` or `SLOT_BYTES` raw bytes), 0xFF-padded past the record. `flash_write_sector()` copies a caller's record in. `preset_save()` instead 0xFF-fills the buffer and calls `collect_live_state()` straight into `flash_stage.slot`, so nothing may use `flash_stage` between that collect and the slot write. The directory write that follows reuses the buffer only after the slot write has finished.
 - **Core 1 victim init:** `multicore_lockout_victim_init()` called at the start of `pdm_core1_entry()`.
 - **Interrupt blackout:** ~45 ms for sector erase + program. Since 2026-07-25 this is a *selective* blackout, not PRIMASK (see below). The existing mute strategy (`preset_loading` + `preset_mute_counter`) and feedback reseed still cover the audio gap.
 
@@ -1969,7 +1970,7 @@ The main loop handler for each operation follows the pattern:
 
 **Delay line zeroing:** `preset_load()` clears all delay line buffers (`memset(delay_lines, 0, ...)`) after `dsp_update_delay_samples()` to prevent stale audio from the previous preset's delay configuration bleeding through.
 
-**Feedback recovery:** `flash_write_sector()` (called during save/delete) reseeds the feedback controller at nominal after the ~45ms interrupt blackout. `complete_pipeline_reset()` (called after load/delete) also resets feedback state.
+**Feedback recovery:** `flash_program_staged()` (called during save/delete) reseeds the feedback controller at nominal after the ~45ms interrupt blackout. `complete_pipeline_reset()` (called after load/delete) also resets feedback state.
 
 **Underrun suppression:** All underrun/overrun counters are suppressed while `preset_loading` is true, preventing erroneous counts during intentional pipeline disruption.
 
@@ -2284,7 +2285,7 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-09-22 (crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-09-22 (buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -2528,6 +2529,14 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 > layout is again unchanged. Current sizes after the change are 263,356 text
 > and 150,016 bss on RP2040, 310,572 text and 355,188 bss on RP2350.
 
+> **Buffer cleanup (2026-09-22).** Three duplicate buffers are gone. The
+> notification refresh collects straight into `param_shadow` (its 6,136 B
+> scratch copy is removed). `preset_save()` builds its slot in place in the
+> flash staging buffer instead of in a separate `PresetSlot` (2,685 B RP2040,
+> 6,453 B RP2350). `bulk_param_buf` is sized to `WireBulkParams` instead of
+> 8 KB, because every writer is bounded by that size. BSS falls by 10,880 B on
+> RP2040 and 14,648 B on RP2350. Flash layout and wire format are unchanged.
+
 ### RP2040 (264 KB SRAM)
 
 | Section | Size (approx) |
@@ -2538,9 +2547,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Crossover filters + recipes (5 outputs × 4 bands cascades + 7 × 4 recipes) | ~3.1 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Loudness per-output state (5 × 16 B) | 80 B |
-| Preset system (dir_cache + slot_buf + write_buf) | ~6 KB |
-| Bulk param buffer (8 KB aligned, holds V15 = 4128 B) | ~8 KB |
-| `notify_rebaseline` static scratch (V15 WireBulkParams) | ~4.1 KB |
+| Preset system (dir_cache 3,035 B + `flash_stage` 4 KB, 256-B aligned) | ~7 KB |
+| Bulk param buffer (`sizeof(WireBulkParams)`, 6,136 B at V32) | ~6 KB |
+| Notification shadow (`param_shadow`, one `WireBulkParams`) | ~6 KB |
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead (2 rings × 240 × 4) | ~1.9 KB |
@@ -2548,10 +2557,10 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Consumer pools + silence (static, 2 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~27 KB |
 | I2S RX DMA ring (1024 × 4, 4 KB aligned) | 4 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~147 KB** (measured 150,940 B after the tube preamp) |
-| RAM code+rodata+data (.data section, hot set only) | 64,448 B after the tube preamp (was 62,816 B), within the 65,536 B `check_ram_placement.py` budget |
+| **Total BSS** | **~137 KB** (measured 140,532 B after the 2026-09-22 buffer cleanup; was 151,412 B) |
+| RAM code+rodata+data (.data section, hot set only) | 67,040 B as of 2026-09-22, within the 67,584 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 46,756 B (per scripts/check_ram_placement.py, after the tube preamp; was 48,848 B) |
+| Free RAM | 54,572 B (per scripts/check_ram_placement.py, after the 2026-09-22 buffer cleanup) |
 | SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -2564,9 +2573,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Crossover filters + recipes (9 outputs × 4 bands cascades + 17 × 4 recipes) | ~11.6 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Input buffers (buf_l + buf_r + buf_in_ext[6][192], 8-channel USB) | ~6 KB |
-| Preset system (dir_cache + slot_buf + write_buf) | ~7 KB |
-| Bulk param buffer (8 KB aligned, holds V15 = 4128 B) | ~8 KB |
-| `notify_rebaseline` static scratch (V15 WireBulkParams) | ~4.1 KB |
+| Preset system (dir_cache 3,035 B + `flash_stage` 8 KB, 256-B aligned) | ~11 KB |
+| Bulk param buffer (`sizeof(WireBulkParams)`, 6,136 B at V32) | ~6 KB |
+| Notification shadow (`param_shadow`, one `WireBulkParams`) | ~6 KB |
 | USB audio ring buffer (4 × 794, 8-channel packets) | ~3.2 KB |
 | Channel names (11 × 32) | ~352 B |
 | Leveller state + lookahead (8 rings × 240 × 4) | ~7.7 KB |
@@ -2578,10 +2587,10 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | ADAT RX ring (`adat_rx_ring`, 2048 × 4, 8 KB aligned) | 8 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
-| **Total BSS** | **~347 KB** (measured 355,480 B after the tube preamp; was 354,920 B) |
-| RAM code+rodata+data (.data section, hot set only) | 91,288 B after the tube preamp (was 90,176 B), within the 92,160 B `check_ram_placement.py` budget |
+| **Total BSS** | **~326 KB** (measured 333,936 B after the 2026-09-22 buffer cleanup; was 348,584 B) |
+| RAM code+rodata+data (.data section, hot set only) | 93,568 B as of 2026-09-22, within the 94,208 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 77,520 B (per scripts/check_ram_placement.py, after the tube preamp; was 79,192 B; includes vector table + 2 KB heap reserve accounting) |
+| Free RAM | 96,784 B (per scripts/check_ram_placement.py, after the 2026-09-22 buffer cleanup; includes vector table + 2 KB heap reserve accounting) |
 | SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
@@ -4531,7 +4540,7 @@ Previously the hold was a `time_us_64()` busy-wait inside `dac_hw_mute_assert()`
 
 **`preset_loading` is floored to outlast a pending hold.** The deferrals above all hang off `preset_loading`, but that flag is not a plain latch: the soft-mute envelope (`update_preset_mute_envelope()`, `audio_pipeline.c`) auto-clears it once `preset_mute_counter` samples have been processed, and samples keep processing while a deferred consumer of the flag waits out the hardware-mute hold (`hold_ms` may be up to `DAC_HW_MUTE_HOLD_MS_MAX` = 500 ms). Two arming points enforce the floor (2026-07-14), both gated on `!dac_hw_mute_hold_elapsed()` and sized at `hold_ms` (via the `dac_hw_mute_hold_ms()` getter) + `PRESET_MUTE_HOLD_MARGIN_MS` (120 ms, `flash_storage.h`):
 - `prepare_pipeline_reset()` (`main.c`) — closes the re-lock window: the SPDIF/ADAT/I2S-slave RELOCKING handlers arm only `PRESET_MUTE_SAMPLES` = 256 (~5 ms), and after a fast re-lock (or a pin-swap input restart) the source's poll keeps feeding the pipeline while the prefill drain waits on `dac_hw_mute_hold_elapsed()`; with a long hold the flag expired before the drain could run, the prefill handshake never fired, and `dac_hw_mute_release()` was never called (stuck mute). The floor engages only on a fresh hold; the synchronous reset handlers pre-gate on `pipeline_reset_ready()`, so their hold has already elapsed when their body runs prepare, and USB-path mute durations are unchanged.
-- `flash_mute_hold_samples()` (`flash_storage.c`) — closes the non-streaming flash window: the flash brackets' fade-settle loop waits the hold out before the blackout, but only when the source is streaming; a flash write with the source dark leaves the hold pending at completion, and `flash_write_sector()`'s trailing re-arm (the last writer of `preset_mute_counter` before completion, ~10 ms un-floored) would let a subsequent fast lock burn the flag before the prefill block could run. The `preset_delete()` active-slot re-arm routes through the same helper. Note the streaming flash path never depended on the prepare-time floor: the settle loop's hold-wait plus the per-write re-arm already guarantee `preset_loading` is set with the hold elapsed at completion.
+- `flash_mute_hold_samples()` (`flash_storage.c`) — closes the non-streaming flash window: the flash brackets' fade-settle loop waits the hold out before the blackout, but only when the source is streaming; a flash write with the source dark leaves the hold pending at completion, and `flash_program_staged()`'s trailing re-arm (the last writer of `preset_mute_counter` before completion, ~10 ms un-floored) would let a subsequent fast lock burn the flag before the prefill block could run. The `preset_delete()` active-slot re-arm routes through the same helper. Note the streaming flash path never depended on the prepare-time floor: the settle loop's hold-wait plus the per-write re-arm already guarantee `preset_loading` is set with the hold elapsed at completion.
 
 The flash blackout itself costs nothing against the counter (IRQs off, no samples processed).
 
