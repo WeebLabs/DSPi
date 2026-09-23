@@ -1,6 +1,6 @@
 # Physical IO / Output Config — Independent vs. With-Preset Persistence
 
-*Last updated: 2026-06-01*
+*Last updated: 2026-09-22 (the output limiter settings follow the same mode, directory V22; 2026-06-01: original)*
 
 ## Summary
 
@@ -21,6 +21,16 @@ not that was wanted). The flag is now a *mode* governing the whole IO block.
 > needed — only a directory format bump (V3 → V4) that appends the device-global
 > `FlashOutputConfig` block. **Input source (USB vs SPDIF) is NOT part of this
 > block** — it stays per-preset, as it is a listening choice, not wiring.
+
+> **Output limiter (2026-09-22).** The per-output limiter settings (enable,
+> threshold, release, link group) follow `output_config_mode` exactly like the
+> IO block: with-preset takes them from the loaded slot (V39+, defaults
+> otherwise), independent applies a device-global copy at boot only and leaves
+> the live settings alone on preset load, active-slot delete and factory reset.
+> `REQ_SAVE_OUTPUT_CONFIG` (0x52) saves them alongside the IO block, and a bulk
+> SET applies its limiter section only in with-preset mode, as it does for pins.
+> The device-global copy is `FlashLimiterConfig` in directory V22. Details:
+> `output_limiter_spec.md` section 5.
 
 ## The contract
 

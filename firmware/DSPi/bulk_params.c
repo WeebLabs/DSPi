@@ -1002,15 +1002,19 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     tube_config.trim_db      = in->tube.trim_db;
     tube_update_pending = true;
 
-    // Output limiter (V32+).  Values are sanitized in limiter_apply_config.
-    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
-        const WireLimiterOutput *w = &in->limiter.outputs[k];
-        limiter_config[k].enabled      = (w->enabled != 0);
-        limiter_config[k].link_group   = w->link_group;
-        limiter_config[k].threshold_db = w->threshold_db;
-        limiter_config[k].release_ms   = w->release_ms;
+    // Output limiter (V32+).  Follows output_config_mode like the pins: in
+    // INDEPENDENT mode a bulk push leaves the device-global settings alone.
+    // Values are sanitized in limiter_apply_config.
+    if (apply_pins) {
+        for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+            const WireLimiterOutput *w = &in->limiter.outputs[k];
+            limiter_config[k].enabled      = (w->enabled != 0);
+            limiter_config[k].link_group   = w->link_group;
+            limiter_config[k].threshold_db = w->threshold_db;
+            limiter_config[k].release_ms   = w->release_ms;
+        }
+        limiter_update_pending = true;
     }
-    limiter_update_pending = true;
 
     // Stereo upmixer (V25+).  RP2350 only; RP2040 ignores the section.  Config
     // copied straight in (mode fields clamped; floats are clamped downstream in

@@ -1427,7 +1427,7 @@ Follows the psybass module pattern:
 ---
 
 ## Output Limiter
-*Last updated: 2026-09-22 (new; RAW test signals are limited)*
+*Last updated: 2026-09-22 (new; RAW test signals are limited; persistence follows `output_config_mode`, directory V22)*
 
 ### Purpose
 
@@ -1462,7 +1462,9 @@ The delay exists only while at least one output's limiter is enabled; with none 
 ### Persistence & Control
 
 - **Wire format V32:** `WireLimiterParams` (108 bytes, nine 12-byte `WireLimiterOutput` records: `enabled`, `link_group`, two reserved bytes, `threshold_db`, `release_ms`) is tail-appended at offset 6028, taking the total to **6136 bytes**. Records past `num_output_channels` are zero on collect and ignored on apply. Apply copies values raw. `limiter_apply_config()` sanitizes them in place (NaN falls back to the default, then clamps), so a GET always reports what the audio path uses.
-- **Preset slot V39:** per output `limiter_enabled[]`, `limiter_link_group[]`, `limiter_threshold_db[]`, `limiter_release_ms[]` (10 bytes x `NUM_OUTPUT_CHANNELS`) tail-appended to `PresetSlot` (`SLOT_DATA_SIZE_V39`), gated on `slot->version >= 39`. V21..V38 slots load every limiter off at the defaults, as does factory reset.
+- **Persistence follows `output_config_mode`** (added 2026-09-22), like the output pins. `apply_output_config_from_mode()` is the only place the live limiter settings are sourced on a context change. With-preset takes them from the slot (V39+, defaults for an empty or older slot). Independent applies the directory copy at boot only and leaves the live settings untouched on preset load, active-slot delete and factory reset. `apply_slot_to_live()` and `apply_factory_defaults()` no longer touch the limiter. `REQ_SAVE_OUTPUT_CONFIG` (0x52) also snapshots the limiter into the directory, and `bulk_params_apply()` applies the wire limiter section only when `apply_pins` (with-preset) is set.
+- **Preset slot V39:** per output `limiter_enabled[]`, `limiter_link_group[]`, `limiter_threshold_db[]`, `limiter_release_ms[]` (10 bytes x `NUM_OUTPUT_CHANNELS`) tail-appended to `PresetSlot` (`SLOT_DATA_SIZE_V39`). A save always stores the live settings; whether a load applies them follows the mode.
+- **Directory V22:** `FlashLimiterConfig` (112 bytes: version byte, 3 reserved, nine 12-byte records fixed at the RP2350 output count) appended after `cs_display`. See "Preset Directory Fields".
 - **Vendor command:** a single opcode, `REQ_LIMITER` `0x81`, in both dispatchers. OUT sets one parameter (`wValue = (output << 8) | index`, float32 payload; output `0xFF` sets every output). IN gets one parameter as float32, or the read-only blocks at index `0x80` (gain-reduction meter, one uint16 per output in 0.01 dB) and `0x81` (status: engaged, lookahead 32, block 16, output count). A bad output or index STALLs a GET and makes a SET a no-op. NaN is ignored. `limiter_set_param()` emits one `notify_param_write` per output changed.
 - **Control Surfaces:** no nouns yet.
 
@@ -1768,10 +1770,10 @@ Last 12 sectors (48 KB) of flash:
 | 1-10 | -44 KB to -8 KB | `0x44535033` ("DSP3") | Preset Slots 0-9 (full DSP state) |
 | 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
 
-### Preset Directory Fields (Version 21)
-*Last updated: 2026-09-07 (V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
+### Preset Directory Fields (Version 22)
+*Last updated: 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
 
-`DIR_VERSION_CURRENT` = 21. V4 renamed the former `include_pins` byte to
+`DIR_VERSION_CURRENT` = 22. V4 renamed the former `include_pins` byte to
 `output_config_mode` (same offset, 1:1 value mapping) and appended the
 device-global `FlashOutputConfig` block. V5 grew that block by 3 bytes for the
 I2S multichannel input pins (`i2s_rx_pin_ext[3]`). V6 appends the device-level
@@ -1854,7 +1856,7 @@ platform-dependent and validate at apply / render time). V20 appended a
 `sizeof(PresetDirectory)` to 3327 bytes. **V21 removes it again**, because
 auxiliary outputs became binding-slot components (caps v18) rather than a
 separate table, so `PresetDirectory` is back to 3035 bytes of the 4 KB sector
-and V21 is byte-identical to V19. `DIR_VERSION_CURRENT` is 21. The V19->V21
+and V21 is byte-identical to V19. The V19->V21
 step therefore copies the whole V19 data block unchanged (frozen
 `PresetDirectory_v19` snapshot plus `_Static_assert`s pinning the 3035-byte
 geometry and the `cs_display` offset). The V20->V21 step verifies the V20 CRC,
@@ -1872,12 +1874,24 @@ now accepts the flag. See
 `Documentation/Features/control_surfaces_display_spec.md`, and
 `Documentation/Features/control_surfaces_aux_spec.md`.
 
+**V22** appends `FlashLimiterConfig limiter` (112 bytes) directly after
+`cs_display`, taking `sizeof(PresetDirectory)` to 3147 bytes. It is the
+independent-mode store for the output limiter settings (see "Output Limiter").
+`DIR_VERSION_CURRENT` is 22. V19 and V21 directories migrate straight to V22 by
+the same whole-block copy, and V20 by its pre-`cs_aux` prefix. Older chains
+land the same way. Every path leaves the block at version 0, and
+`dir_sanitize_limiter()`, which runs before every `dir_cache_valid = true`,
+seeds the defaults (all off, -1 dBFS, 100 ms, unlinked). A stored block is
+sanitized by the audio path's rule: NaN takes the default, then values clamp.
+`_Static_assert`s pin the block at 112 bytes and at the offset where the V19
+layout ends.
+
 | Field | Description |
 |-------|-------------|
 | startup_mode | 0 = load specified default, 1 = load last active |
 | default_slot | Slot to load in "specified default" mode (0-9) |
 | last_active_slot | Last slot loaded/saved (always 0-9) |
-| output_config_mode | Physical IO persistence mode (was `include_pins`): 1 = with preset (default), 0 = independent (device-global). Governs output pins/types, I2S MCK/BCK, SPDIF RX pin. |
+| output_config_mode | Physical IO persistence mode (was `include_pins`): 1 = with preset (default), 0 = independent (device-global). Governs output pins/types, I2S MCK/BCK, SPDIF RX pin, and (since V22) the output limiter settings. |
 | slot_occupied | 16-bit bitmask (bit N = slot N has valid data) |
 | master_volume_mode | 0 = independent (default, mode 0 saved-to-directory), 1 = with preset (was include_master_volume) |
 | spdif_rx_pin | Device-level SPDIF RX GPIO pin (legacy; superseded by `output_config.spdif_rx_pin`) |
@@ -1893,6 +1907,7 @@ now accepts the flag. See
 | cs_groups | Control Surfaces target groups (V18+, 324-byte `CsGroupConfig`: version + 8x 40-byte `CsGroup`; all-zero = no groups; board-level, survives factory reset) |
 | cs_macros | Control Surfaces macros (V18+, 1060-byte `CsMacroConfig`: version + 8x 132-byte `CsMacro`, each 32-byte name + step count + 8x 12-byte `CsMacroStep`; all-zero = no macros; board-level, survives factory reset) |
 | cs_display | Control Surfaces display config and pages (V19+, 80-byte `CsDisplayFlash`: version + 12-byte `CsDisplayCfg` + 16x 4-byte `CsDisplayPage`; all-zero = display idle, no pages; board-level, survives factory reset) |
+| limiter | Output limiter settings for independent mode (V22+, 112-byte `FlashLimiterConfig`: version byte (0 = never saved) + 3 reserved + 9x 12-byte records of enabled, link group, threshold, release; RP2040 uses the first 5). Written by `REQ_SAVE_OUTPUT_CONFIG`, applied at boot in independent mode only |
 
 Auxiliary outputs have no directory field of their own. Since caps v18 they
 are `CS_TYPE_AUX_OUT` / `CS_TYPE_AUX_PWM` components inside `cs_config`, named
@@ -2285,7 +2300,7 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-09-22 (buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-09-22 (directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -2547,7 +2562,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Crossover filters + recipes (5 outputs × 4 bands cascades + 7 × 4 recipes) | ~3.1 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
 | Loudness per-output state (5 × 16 B) | 80 B |
-| Preset system (dir_cache 3,035 B + `flash_stage` 4 KB, 256-B aligned) | ~7 KB |
+| Preset system (dir_cache 3,147 B + `flash_stage` 4 KB, 256-B aligned) | ~7 KB |
 | Bulk param buffer (`sizeof(WireBulkParams)`, 6,136 B at V32) | ~6 KB |
 | Notification shadow (`param_shadow`, one `WireBulkParams`) | ~6 KB |
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
@@ -2573,7 +2588,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Crossover filters + recipes (9 outputs × 4 bands cascades + 17 × 4 recipes) | ~11.6 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
 | Input buffers (buf_l + buf_r + buf_in_ext[6][192], 8-channel USB) | ~6 KB |
-| Preset system (dir_cache 3,035 B + `flash_stage` 8 KB, 256-B aligned) | ~11 KB |
+| Preset system (dir_cache 3,147 B + `flash_stage` 8 KB, 256-B aligned) | ~11 KB |
 | Bulk param buffer (`sizeof(WireBulkParams)`, 6,136 B at V32) | ~6 KB |
 | Notification shadow (`param_shadow`, one `WireBulkParams`) | ~6 KB |
 | USB audio ring buffer (4 × 794, 8-channel packets) | ~3.2 KB |
@@ -3650,7 +3665,7 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-09-22 (output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+*Last updated: 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -3749,7 +3764,7 @@ lands on a hot path and the audio path is untouched.
 | REQ_UPMIX_GET_STATUS | 0x4E | IN | Get 16-byte `UpmixStatus` (active, parked_reason, corr_q14, balance_q14, center/ls/rs gains; RP2040 returns 16 zero bytes). 0x4F reserved |
 | REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
-| REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config to the directory's device-global block (independent mode; was the deprecated REQ_LOAD_PARAMS) |
+| REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config and output limiter settings to the directory's device-global blocks (independent mode; was the deprecated REQ_LOAD_PARAMS) |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
 | REQ_SET_CHANNEL_GAIN | 0x54 | OUT | Set legacy channel gain |
 | REQ_GET_CHANNEL_GAIN | 0x55 | IN | Get legacy channel gain |

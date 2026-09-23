@@ -621,6 +621,32 @@ typedef struct __attribute__((packed)) {
 // auxiliary outputs became binding-slot components rather than a separate
 // table.  V21 is therefore byte-identical to V19, and a V20 directory migrates
 // by a prefix copy that stops before the dropped block.
+//
+// V22 appends the device-global output limiter block (FlashLimiterConfig), the
+// INDEPENDENT-mode store beside output_config.  V19/V21 migrate by a whole-block
+// prefix copy and V20 by its pre-cs_aux prefix; the zeroed block then reads as
+// "never saved" and dir_sanitize_limiter() seeds the defaults.
+
+// Device-global output limiter settings, used when output_config_mode is
+// INDEPENDENT.  Fixed at the RP2350 output count so the layout is the same on
+// both platforms; RP2040 uses the first NUM_OUTPUT_CHANNELS records.
+#define FLASH_LIMITER_OUTPUTS 9
+typedef struct __attribute__((packed)) {
+    uint8_t  enabled;
+    uint8_t  link_group;
+    uint8_t  reserved[2];
+    float    threshold_db;
+    float    release_ms;
+} FlashLimiterOutput;                        // 12 bytes
+
+typedef struct __attribute__((packed)) {
+    uint8_t  version;                        // 0 = never saved (defaults), 1 = current
+    uint8_t  reserved[3];
+    FlashLimiterOutput out[FLASH_LIMITER_OUTPUTS];
+} FlashLimiterConfig;                        // 112 bytes
+#define FLASH_LIMITER_CONFIG_VERSION 1
+_Static_assert(NUM_OUTPUT_CHANNELS <= FLASH_LIMITER_OUTPUTS, "limiter directory records");
+
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
     uint16_t version;                        // Directory format version (4)
@@ -682,6 +708,10 @@ typedef struct __attribute__((packed)) {
     // V19 addition: Control Surfaces display config and page table.  Board-level
     // like cs_config; all-zero = feature idle, no pages configured.
     CsDisplayFlash cs_display;               // 80 bytes
+
+    // V22 addition: output limiter settings for INDEPENDENT mode (see
+    // apply_output_config_from_mode()).  version 0 = never saved.
+    FlashLimiterConfig limiter;              // 112 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1164,10 +1194,14 @@ _Static_assert(offsetof(PresetDirectory_v18, cs_macros) == offsetof(PresetDirect
 _Static_assert(sizeof(PresetDirectory_v18) == 2955,
                "V18 directory geometry is frozen; snapshot any struct that grew");
 
-// V21 restores the V19 layout, so the V19->V21 migration copies the whole V19
-// data block; the two must stay byte-identical, which the size check pins.
+// V21 restored the V19 layout and V22 only appends, so a V19 or V21 directory
+// migrates by copying its whole data block; the size check pins that layout.
 _Static_assert(offsetof(PresetDirectory_v19, cs_display) == offsetof(PresetDirectory, cs_display),
-               "V19 and V21 directories must share a byte-identical layout");
+               "V19/V21 directories must be a byte-identical prefix of V22");
+// The V19/V21 whole-block copy relies on the limiter block following directly.
+_Static_assert(offsetof(PresetDirectory, limiter) == sizeof(PresetDirectory_v19),
+               "V22 limiter block must directly follow the V19/V21 layout");
+_Static_assert(sizeof(FlashLimiterConfig) == 112, "V22 limiter block geometry is frozen");
 // Pins the on-flash V19 geometry, which the offset check above cannot.
 _Static_assert(sizeof(PresetDirectory_v19) == 3035,
                "V19 directory geometry is frozen; snapshot any struct that grew");
@@ -1180,7 +1214,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  21
+#define DIR_VERSION_CURRENT  22
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1449,7 +1483,7 @@ typedef struct __attribute__((packed)) {
     float    tube_reserved_f;
 
     // V39: output limiter, one entry per output (see limiter.h).  Gated on
-    // version >= 39 in apply_slot_to_live(); values are sanitized on apply.
+    // version >= 39 in apply_output_config_from_mode(); values are sanitized on apply.
     uint8_t  limiter_enabled[NUM_OUTPUT_CHANNELS];
     uint8_t  limiter_link_group[NUM_OUTPUT_CHANNELS];
     float    limiter_threshold_db[NUM_OUTPUT_CHANNELS];
@@ -1524,6 +1558,7 @@ static void dir_sanitize_cs_ir(void);                                 // defined
 static void dir_sanitize_cs_groups(void);                             // defined below
 static void dir_sanitize_cs_macros(void);                             // defined below
 static void dir_sanitize_cs_display(void);                            // defined below
+static void dir_sanitize_limiter(void);                               // defined below
 static void cs_config_from_v1(CsFlashConfig *dst, const CsFlashConfig_v1 *src);  // defined below
 static void cs_ir_from_v1(CsIrConfig *dst, const CsIrConfig_v1 *src);            // defined below
 // Forward declaration — defined alongside validate_slot() in the SLOT
@@ -1795,12 +1830,13 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         return true;
     }
 
     if (flash_dir->version == 20) {
-        // V20 -> V21 migration.  V21 drops the trailing aux output table, so
+        // V20 -> V22 migration.  V21 dropped the trailing aux output table, so
         // copy the V20 data block up to it and discard the rest; any aux output
         // configured on a V20 build is gone and must be rebuilt as a binding.
         const PresetDirectory_v20 *v20 = (const PresetDirectory_v20 *)flash_dir;
@@ -1821,14 +1857,15 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
     }
 
-    if (flash_dir->version == 19) {
-        // V19 -> V21 migration.  V21 restored the V19 layout, so the whole V19
-        // data block copies across unchanged.
+    if (flash_dir->version == 19 || flash_dir->version == 21) {
+        // V19 / V21 -> V22 migration.  V21 is byte-identical to V19 and V22
+        // only appends the limiter block, so the whole data block copies across.
         const PresetDirectory_v19 *v19 = (const PresetDirectory_v19 *)flash_dir;
         const uint8_t *v19_data_start = (const uint8_t *)&v19->startup_mode;
         size_t v19_data_len = sizeof(PresetDirectory_v19) - offsetof(PresetDirectory_v19, startup_mode);
@@ -1846,6 +1883,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1872,6 +1910,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1899,6 +1938,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1929,6 +1969,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1970,6 +2011,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2013,6 +2055,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2055,6 +2098,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2098,6 +2142,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2140,6 +2185,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2182,6 +2228,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2222,6 +2269,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_groups();
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
+        dir_sanitize_limiter();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2257,6 +2305,7 @@ static bool dir_load_cache(void) {
         dir_cache.uart_ctrl          = v8->uart_ctrl;
         dir_cache.i2c_ctrl           = v8->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v8->cs_config);
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2299,6 +2348,7 @@ static bool dir_load_cache(void) {
         dir_cache.uart_ctrl          = v7->uart_ctrl;
         dir_cache.i2c_ctrl           = v7->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v7->cs_config);
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2332,6 +2382,7 @@ static bool dir_load_cache(void) {
         dir_cache.uart_ctrl          = v6->uart_ctrl;
         dir_cache.i2c_ctrl           = v6->i2c_ctrl;
         dir_cache.cs_config.version  = CS_CONFIG_VERSION;
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2363,6 +2414,7 @@ static bool dir_load_cache(void) {
         memcpy(&dir_cache.output_config, &v5->output_config, sizeof(v5->output_config));
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2396,6 +2448,7 @@ static bool dir_load_cache(void) {
         memcpy(&dir_cache.output_config, &v4->output_config, sizeof(v4->output_config));
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();   // persist as V5
         return true;
@@ -2432,6 +2485,7 @@ static bool dir_load_cache(void) {
         io_config_defaults(&dir_cache.output_config);
         dir_cache.output_config.spdif_rx_pin = v3->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2466,6 +2520,7 @@ static bool dir_load_cache(void) {
         io_config_defaults(&dir_cache.output_config);      // V4 device-global IO
         dir_cache.output_config.spdif_rx_pin = v2->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2498,6 +2553,7 @@ static bool dir_load_cache(void) {
         dir_apply_dac_hw_mute_defaults();
         io_config_defaults(&dir_cache.output_config);      // V4 device-global IO (v1 has no RX pin)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
+        dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_cache_valid = true;
         (void)dir_flush();  // persist as V4; if the flush fails, cache stays valid in RAM
         return true;
@@ -2745,6 +2801,34 @@ static void dir_sanitize_cs_display(void) {
     c->version = CS_DISPLAY_CONFIG_VERSION;
 }
 
+// Seed the limiter block when it was never saved (fresh or migrated
+// directory), and clamp a stored one so corrupt flash cannot reach the audio path.
+static void dir_sanitize_limiter(void) {
+    FlashLimiterConfig *c = &dir_cache.limiter;
+    if (c->version != FLASH_LIMITER_CONFIG_VERSION) {
+        memset(c, 0, sizeof(*c));
+        c->version = FLASH_LIMITER_CONFIG_VERSION;
+        for (int k = 0; k < FLASH_LIMITER_OUTPUTS; k++) {
+            c->out[k].threshold_db = LIMITER_DEFAULT_THRESHOLD;
+            c->out[k].release_ms   = LIMITER_DEFAULT_RELEASE;
+        }
+        return;
+    }
+    for (int k = 0; k < FLASH_LIMITER_OUTPUTS; k++) {
+        FlashLimiterOutput *o = &c->out[k];
+        // Same rule as limiter_apply_config(): NaN takes the default, then clamp.
+        float t = o->threshold_db, r = o->release_ms;
+        if (t != t) t = LIMITER_DEFAULT_THRESHOLD;
+        if (r != r) r = LIMITER_DEFAULT_RELEASE;
+        o->threshold_db = t < LIMITER_THRESHOLD_MIN ? LIMITER_THRESHOLD_MIN
+                        : (t > LIMITER_THRESHOLD_MAX ? LIMITER_THRESHOLD_MAX : t);
+        o->release_ms   = r < LIMITER_RELEASE_MIN ? LIMITER_RELEASE_MIN
+                        : (r > LIMITER_RELEASE_MAX ? LIMITER_RELEASE_MAX : r);
+        o->enabled = (o->enabled != 0);
+        if (o->link_group > LIMITER_LINK_GROUP_MAX) o->link_group = LIMITER_LINK_GROUP_MAX;
+    }
+}
+
 // Write the RAM-cached directory back to flash.
 // Recomputes the CRC before writing.
 static int dir_flush(void) {
@@ -2786,6 +2870,7 @@ static void dir_ensure(void) {
     dir_apply_dac_hw_mute_defaults();
     io_config_defaults(&dir_cache.output_config);  // V4 device-global IO defaults
     ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 control interfaces
+    dir_sanitize_limiter();                        // V22 limiter defaults
     dir_cache_valid = true;
     // Don't flush yet — will be flushed on first preset save
 }
@@ -2802,6 +2887,7 @@ static void dir_ensure(void) {
 // dir_cache.output_config_mode.  A single snapshot/apply path is shared by the
 // per-slot and device-global sources so the two cannot diverge.  Input source
 // (USB vs SPDIF) is NOT part of this block — it stays per-preset.
+// The output limiter settings follow the same mode (limiter spec section 5).
 
 // True if `pin` is a usable output/RX GPIO on this platform.  (0 is allowed for
 // output pins; the SPDIF RX path additionally rejects 0 as "absent".)
@@ -3294,6 +3380,44 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
     }
 }
 
+// Output limiter helpers for apply_output_config_from_mode(), which sources the
+// limiter by output_config_mode like the IO config (limiter spec section 5).
+static void limiter_from_slot(const PresetSlot *slot) {
+    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        limiter_config[k].enabled      = (slot->limiter_enabled[k] != 0);
+        limiter_config[k].link_group   = slot->limiter_link_group[k];
+        limiter_config[k].threshold_db = slot->limiter_threshold_db[k];
+        limiter_config[k].release_ms   = slot->limiter_release_ms[k];
+    }
+}
+
+static void limiter_from_dir(void) {
+    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        const FlashLimiterOutput *o = &dir_cache.limiter.out[k];
+        limiter_config[k].enabled      = (o->enabled != 0);
+        limiter_config[k].link_group   = o->link_group;
+        limiter_config[k].threshold_db = o->threshold_db;
+        limiter_config[k].release_ms   = o->release_ms;
+    }
+}
+
+static void limiter_to_dir(void) {
+    memset(&dir_cache.limiter, 0, sizeof(dir_cache.limiter));
+    dir_cache.limiter.version = FLASH_LIMITER_CONFIG_VERSION;
+    for (int k = 0; k < FLASH_LIMITER_OUTPUTS; k++) {
+        FlashLimiterOutput *o = &dir_cache.limiter.out[k];
+        if (k < NUM_OUTPUT_CHANNELS) {
+            o->enabled      = limiter_config[k].enabled ? 1 : 0;
+            o->link_group   = limiter_config[k].link_group;
+            o->threshold_db = limiter_config[k].threshold_db;
+            o->release_ms   = limiter_config[k].release_ms;
+        } else {
+            o->threshold_db = LIMITER_DEFAULT_THRESHOLD;
+            o->release_ms   = LIMITER_DEFAULT_RELEASE;
+        }
+    }
+}
+
 // Re-derive the live physical IO config for a preset *context* change — the
 // exact analog of apply_master_volume_from_mode().  IO is sourced ONLY here;
 // apply_slot_to_live() / apply_factory_defaults() no longer touch it.
@@ -3313,10 +3437,16 @@ static void apply_output_config_from_mode(const PresetSlot *slot_or_null, bool i
         if (slot_or_null) io_config_from_slot(slot_or_null, &cfg);
         else              io_config_defaults(&cfg);
         io_config_apply(&cfg);
+        // Slots before V39 carry no limiter: every output off at the defaults.
+        if (slot_or_null && slot_or_null->version >= 39) limiter_from_slot(slot_or_null);
+        else                                             limiter_config_defaults();
+        limiter_update_pending = true;
     } else if (is_boot) {
         io_config_apply(&dir_cache.output_config);
+        limiter_from_dir();
+        limiter_update_pending = true;
     }
-    // INDEPENDENT + runtime: intentionally a no-op (live IO survives).
+    // INDEPENDENT + runtime: intentionally a no-op (live IO and limiter survive).
 }
 
 // ============================================================================
@@ -3813,20 +3943,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     }
     tube_update_pending = true;
 
-    // Output limiter (V39): older slots have none, so every output loads off
-    // at the defaults.  A change in whether any limiter is on is switched
-    // under a fade by the main loop (spec 2.3), never here.
-    if (slot->version >= 39) {
-        for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
-            limiter_config[k].enabled      = (slot->limiter_enabled[k] != 0);
-            limiter_config[k].link_group   = slot->limiter_link_group[k];
-            limiter_config[k].threshold_db = slot->limiter_threshold_db[k];
-            limiter_config[k].release_ms   = slot->limiter_release_ms[k];
-        }
-    } else {
-        limiter_config_defaults();
-    }
-    limiter_update_pending = true;
+    // Output limiter: sourced by apply_output_config_from_mode(), which follows
+    // output_config_mode like the physical IO config.
 
     // Stereo upmixer (V33): RP2350-only.  V33+ slots restore the stored config
     // (modes clamped; enabled = nonzero); older slots load the disabled
@@ -4525,16 +4643,14 @@ float preset_get_saved_master_volume(void) {
     return dir_cache.master_volume_db;
 }
 
-// Snapshot the live physical IO config into the directory's device-global block
-// and persist.  This is the explicit "save output config" action for INDEPENDENT
-// mode (REQ_SAVE_OUTPUT_CONFIG); accepted in both modes — in WITH_PRESET it is
-// dormant until the user switches to INDEPENDENT.  Mirrors
-// preset_save_master_volume().  Also keeps the legacy device-level spdif_rx_pin
-// field in sync so directory reads stay coherent.
+// REQ_SAVE_OUTPUT_CONFIG: snapshot the live IO config and output limiter
+// settings into the directory's device-global blocks and persist.  Accepted in
+// both modes (dormant in WITH_PRESET); also syncs the legacy spdif_rx_pin byte.
 uint8_t preset_save_output_config(void) {
     dir_ensure();
     io_config_from_live(&dir_cache.output_config);
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
+    limiter_to_dir();
     if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
     return PRESET_OK;
 }
@@ -4756,9 +4872,7 @@ static void apply_factory_defaults(void) {
     tube_config.trim_db      = TUBE_DEFAULT_TRIM;
     tube_update_pending = true;
 
-    // Output limiter: every output off at the defaults.
-    limiter_config_defaults();
-    limiter_update_pending = true;
+    // Output limiter: left to apply_output_config_from_mode() (see IO note above).
 
     // Stereo upmixer (RP2350-only): disabled, default engine params.
 #if PICO_RP2350

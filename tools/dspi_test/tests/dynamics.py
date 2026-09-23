@@ -627,29 +627,43 @@ def limiter_engage_follows_enable(dev, profile, chk):
         chk.ok(wait_engaged(1), "pre-test engaged state restored")
 
 
-@test("dynamics", mutating=True)
+@test("dynamics", mutating=True, flash=2)
 def limiter_bulk_roundtrip(dev, profile, chk):
-    """The V32 limiter wire section carries every output through GET/SET_ALL_PARAMS."""
+    """Bulk SET applies the V32 limiter section in with-preset mode and ignores it in independent mode."""
+    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
     before = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
     saved = _lim_save(dev, profile)
     last = profile.num_output_channels - 1
-    _lim_set(dev, last, L_THRESH, -12.5)
-    _lim_set(dev, last, L_RELEASE, 333.0)
-    _lim_set(dev, last, L_GROUP, 3.0)
-    _lim_set(dev, last, L_ENABLED, 1.0)
-    blob = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
-    _lim_set(dev, last, L_THRESH, -1.0)
-    _lim_set(dev, last, L_RELEASE, 100.0)
-    _lim_set(dev, last, L_GROUP, 0.0)
-    _lim_set(dev, last, L_ENABLED, 0.0)
-    dev.set(OP.SET_ALL_PARAMS, blob)
-    dev.wait_ready()
-    chk.approx(_lim_get(dev, last, L_THRESH), -12.5, 1e-4, "threshold restored")
-    chk.approx(_lim_get(dev, last, L_RELEASE), 333.0, 1e-3, "release restored")
-    chk.approx(_lim_get(dev, last, L_GROUP), 3.0, 1e-6, "group restored")
-    chk.approx(_lim_get(dev, last, L_ENABLED), 1.0, 1e-6, "enable restored")
-    dev.set(OP.SET_ALL_PARAMS, before)
-    dev.wait_ready()
+    marked = ((L_THRESH, -12.5), (L_RELEASE, 333.0), (L_GROUP, 3.0), (L_ENABLED, 1.0))
+    cleared = ((L_THRESH, -1.0), (L_RELEASE, 100.0), (L_GROUP, 0.0), (L_ENABLED, 0.0))
+    try:
+        for idx, v in marked:
+            _lim_set(dev, last, idx, v)
+        blob = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
+        dev.wait_ready()
+        for idx, v in cleared:
+            _lim_set(dev, last, idx, v)
+        dev.set(OP.SET_ALL_PARAMS, blob)
+        dev.wait_ready()
+        for idx, v in marked:
+            chk.approx(_lim_get(dev, last, idx), v, 1e-3, f"with-preset: index {idx} restored")
+
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
+        dev.wait_ready()
+        for idx, v in cleared:
+            _lim_set(dev, last, idx, v)
+        dev.set(OP.SET_ALL_PARAMS, blob)
+        dev.wait_ready()
+        for idx, v in cleared:
+            chk.approx(_lim_get(dev, last, idx), v, 1e-3, f"independent: index {idx} untouched")
+    finally:
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig_mode)
+        dev.wait_ready()
+        dev.set(OP.SET_ALL_PARAMS, before)
+        dev.wait_ready()
+        _lim_restore(dev, saved)   # bulk SET skips the limiter in independent mode
     for k, vals in enumerate(saved):
         for i, v in enumerate(vals):
             chk.approx(_lim_get(dev, k, i), v, 1e-3, f"pre-test out {k} index {i} restored")

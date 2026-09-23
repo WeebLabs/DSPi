@@ -257,10 +257,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_STATUS      0x50
 #define REQ_SAVE_PARAMS     0x51
 // REQ_SAVE_OUTPUT_CONFIG (0x52): persist the live physical IO/output configuration
-// (output pins, output types, I2S MCK/BCK, SPDIF RX pin) into the directory's
-// device-global block.  Used in OUTPUT_CONFIG_MODE_INDEPENDENT (the "stored
-// independently, like master volume" mode); accepted but dormant in WITH_PRESET
-// mode.  No payload.
+// (output pins, output types, I2S MCK/BCK, SPDIF RX pin) and the output limiter
+// settings into the directory's device-global blocks.  Used in
+// OUTPUT_CONFIG_MODE_INDEPENDENT (the "stored independently, like master
+// volume" mode); accepted but dormant in WITH_PRESET mode.  No payload.
 //
 // Reassigned from the former REQ_LOAD_PARAMS — a deprecated synchronous "revert
 // to saved" that ran flash_load_params()->preset_load() in the USB control/IRQ

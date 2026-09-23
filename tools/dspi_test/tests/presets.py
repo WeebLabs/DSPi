@@ -308,3 +308,49 @@ def output_config_independent_isolation(dev, profile, chk):
         dev.get(OP.PRESET_DELETE, 1, wvalue=scratch)       # scratch no longer active -> safe
         dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=orig_mult)
         dev.wait_ready()
+
+
+@test("presets", mutating=True, flash=10)
+def limiter_follows_output_config_mode(dev, profile, chk):
+    """The output limiter follows output_config_mode: INDEPENDENT keeps live settings across a load, WITH_PRESET applies the slot's.
+
+    Marker is the last output's limiter threshold with its limiter left off, so
+    it changes nothing audible.  It never sends 0x52, so the device-wide limiter
+    block in flash is left as it was.
+    """
+    scratch = _scratch_slot(dev)
+    if scratch is None:
+        chk.note("all preset slots occupied, skipping limiter persistence test")
+        return
+    out = profile.num_output_channels - 1
+    wv = (out << 8) | 1                                     # LIMITER_PARAM_THRESHOLD_DB
+    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
+    orig_active = dev.get_u8(OP.PRESET_GET_ACTIVE)
+    orig_thr = dev.get_f32(OP.LIMITER, wvalue=wv)
+    t_slot, t_live = -17.0, -5.0
+    try:
+        dev.set_f32(OP.LIMITER, t_slot, wvalue=wv)
+        chk.eq(dev.get(OP.PRESET_SAVE, 1, wvalue=scratch)[0], PRESET_OK, "scratch preset saved")
+        chk.ok(_poll(lambda: (_dir(dev)["occupied"] >> scratch) & 1, 1), "scratch occupied")
+
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
+        dev.wait_ready()
+        dev.set_f32(OP.LIMITER, t_live, wvalue=wv)
+        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
+        dev.wait_ready()
+        chk.approx(dev.get_f32(OP.LIMITER, wvalue=wv), t_live, 1e-3,
+                   "independent: preset load left the live limiter unchanged")
+
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
+        dev.wait_ready()
+        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
+        dev.wait_ready()
+        chk.approx(dev.get_f32(OP.LIMITER, wvalue=wv), t_slot, 1e-3,
+                   "with-preset: preset load applied the slot's limiter")
+    finally:
+        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig_mode)
+        dev.get(OP.PRESET_LOAD, 1, wvalue=orig_active)
+        dev.wait_ready()
+        dev.get(OP.PRESET_DELETE, 1, wvalue=scratch)
+        dev.set_f32(OP.LIMITER, orig_thr, wvalue=wv)
+        dev.wait_ready()

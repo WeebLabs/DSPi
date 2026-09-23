@@ -494,7 +494,8 @@ void bulk_params_collect(WireBulkParams *out);
 
 // Apply wire format to live DSP state.  Returns 0 on success, nonzero on error.
 // Caller must recalculate filters and delays after this returns.
-// If apply_pins is true, output pin assignments from the payload are applied.
+// If apply_pins is true (output_config_mode WITH_PRESET), the output pin
+// assignments and the output limiter settings from the payload are applied.
 int bulk_params_apply(const WireBulkParams *in, bool apply_pins);
 
 #endif // BULK_PARAMS_H

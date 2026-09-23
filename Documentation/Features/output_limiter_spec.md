@@ -115,7 +115,31 @@ A SET writes the live configuration and raises a main-loop recompute flag. The m
 
 Every SET emits `notify_param_write` at the parameter's offset in `WireBulkParams.limiter`, one notification per output changed (nine for an `output = 0xFF` SET on RP2350).
 
-## 5. Bulk Wire Format and Persistence
+## 5. Persistence and Bulk Wire Format
+
+### 5.1 Where the settings live
+
+The limiter settings follow the same persistence flag as the output pin configuration, `output_config_mode` (`REQ_SET/GET_OUTPUT_CONFIG_MODE` 0x98/0x99). A limiter usually protects specific hardware on specific outputs, so it belongs with the wiring rather than with a listening preset whenever the wiring is device-wide.
+
+| Context | Independent (mode 0) | With preset (mode 1, default) |
+|---|---|---|
+| **Boot** | Device-wide settings from the directory | The startup preset's settings, or defaults for an empty or pre-V39 slot |
+| **Preset load** | Live settings left untouched | The loaded preset's settings, or defaults for an empty or pre-V39 slot |
+| **Active preset deleted** | Live settings left untouched | Defaults |
+| **Factory reset** | Live settings left untouched | Defaults |
+| **Bulk SET (0xA1)** | Limiter section ignored | Limiter section applied |
+| **Preset save** | Live settings written into the slot (dormant until the mode changes) | Live settings written into the slot |
+| **`REQ_SAVE_OUTPUT_CONFIG` (0x52)** | Live settings written device-wide | Live settings written device-wide (dormant until the mode changes) |
+
+The defaults are every limiter off, -1 dBFS, 100 ms, unlinked. In independent mode a change made with `REQ_LIMITER` takes effect at once but only survives a reboot after `REQ_SAVE_OUTPUT_CONFIG`, exactly like a pin change. Switching the mode applies nothing by itself. The new mode takes effect at the next preset load or boot.
+
+Whenever a context change alters whether any limiter is on, the lookahead delay switches under the fade in section 2.3.
+
+### 5.2 Directory V22
+
+`PresetDirectory` appends a 112-byte `FlashLimiterConfig` after `cs_display`. It holds a version byte (0 = never saved, 1 = current), three reserved bytes, and nine 12-byte records in the same layout as the wire records. The record count is fixed at nine on both platforms so the layout is platform-independent; RP2040 uses the first five. V19 and V21 directories migrate by copying their whole data block, V20 by its prefix ahead of the dropped aux table, and older versions through their existing chains. Every path leaves the block at version 0, which is then seeded with the defaults. A stored block is sanitized on load by the audio path's own rule (NaN takes the default, then values clamp), so corrupt flash cannot reach the audio path.
+
+### 5.3 Wire format and preset slot
 
 **Wire format V32** appends a 108-byte `limiter` section to `WireBulkParams` at offset 6028 (total 6136 bytes).
 
@@ -135,7 +159,7 @@ typedef struct __attribute__((packed)) {
 
 Entries past `num_output_channels` are zero on GET and ignored on SET.
 
-**Preset slot V39** appends the same per-output record, one per `NUM_OUTPUT_CHANNELS`. Older slots (V21..V38) load with every limiter disabled at the defaults. Factory reset restores the defaults.
+**Preset slot V39** appends the same per-output values, one per `NUM_OUTPUT_CHANNELS`. A slot always stores the live settings when saved, whatever the mode. Whether they are applied on load is decided by section 5.1.
 
 ## 6. CPU and Memory
 
@@ -158,7 +182,7 @@ Static RAM: RP2350 about 2.1 KB of BSS (nine 128-byte delay rings, per-output st
 - **Switching one output's limiter off while it is reducing gain.** The output drains. Its ring was measured, so it keeps its own envelope with no threshold and releases to unity at its release rate. No sample overshoots and the gain never steps. Once it reaches exact unity it becomes a plain delay.
 - **Muted and matrix-disabled outputs.** A disabled output is not processed. Its ring is cleared and its limiter state reset, so it re-enters cleanly. A muted output keeps running through the delay with silence.
 - **Signal generator RAW outputs.** A RAW test signal is limited like any other signal on an output whose limiter is on. RAW skips the crossover, so a full-range sweep can reach a tweeter, which is when protection matters most. Signals below the threshold pass bit-exact. For an unaltered full-scale measurement, switch that output's limiter off first.
-- **Preset load, factory reset.** Delay rings and limiter state are cleared with the other delay lines. A preset whose limiter configuration changes the engaged state goes through the section 2.3 switch.
+- **Preset load, factory reset.** Delay rings and limiter state are cleared with the other delay lines. Whether the settings change follows section 5.1, and a change in the engaged state goes through the section 2.3 switch.
 - **Sample-rate change.** Release coefficients are recomputed. The lookahead stays 32 samples, so the attack time in milliseconds scales with the rate.
 - **Fade-to-silence accounting.** While the delay is engaged, `pipeline_max_active_delay_samples()` includes the 32 lookahead samples, so flash and reset brackets wait for the fade to drain through the limiter as well as the delay lines.
 - **Sample peaks, not true peaks.** The limiter holds sample values at or below the threshold. Reconstruction in a DAC can overshoot between samples by up to about 1 dB on worst-case material, which is why the default threshold is -1 dBFS.
@@ -171,4 +195,5 @@ Static RAM: RP2350 about 2.1 KB of BSS (nine 128-byte delay rings, per-output st
 - `pdm_generator.c`: `limiter_process_outputs()` for Core 1's outputs in the EQ worker.
 - `main.c`: coefficient recompute on the pending flag and the engage service (soft-mute hold, or a direct switch when nothing is streaming).
 - `vendor_commands.c`: `REQ_LIMITER` in both the SET and GET dispatchers.
-- `bulk_params.c`, `flash_storage.c`: wire V32 section and preset slot V39.
+- `bulk_params.c`: wire V32 section; the limiter section is applied only when `output_config_mode` is with-preset.
+- `flash_storage.c`: preset slot V39, directory V22 `FlashLimiterConfig`, and `apply_output_config_from_mode()`, the single owner of the live limiter settings across boot, preset load, active-slot delete and factory reset. `preset_save_output_config()` (0x52) also saves the limiter.
