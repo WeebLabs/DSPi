@@ -1427,11 +1427,11 @@ Follows the psybass module pattern:
 ---
 
 ## Output Limiter
-*Last updated: 2026-09-22 (new; RAW test signals are limited; persistence follows `output_config_mode`, directory V22)*
+*Last updated: 2026-09-26 (link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
 
 ### Purpose
 
-A brickwall peak limiter on every output, for protecting amplifiers, drivers and downstream converters and for keeping the output converter out of hard clipping. Every output has its own enable, threshold (-30..0 dBFS), release (10..1000 ms) and link group (0 = unlinked, 1-4). Outputs in the same group apply the deepest gain reduction any member needs. Both platforms. Module: `firmware/DSPi/limiter.c` / `limiter.h`. Full spec, including the no-overshoot proof: `Documentation/Features/output_limiter_spec.md`. Status: **HW-untested** (the real `limiter.c` is verified on the host against stub headers, both platform variants; see "Verification").
+A brickwall peak limiter on every output, for protecting amplifiers, drivers and downstream converters and for keeping the output converter out of hard clipping. Every output has its own enable, threshold (-30..0 dBFS), release (10..1000 ms) and link group (0 = unlinked, 1-4). Outputs in the same group act as one limiter: their enable, threshold and release are ganged, and every member applies the deepest gain reduction any member needs. Both platforms. Module: `firmware/DSPi/limiter.c` / `limiter.h`. Full spec, including the no-overshoot proof: `Documentation/Features/output_limiter_spec.md`. Status: **HW-untested** (the real `limiter.c` is verified on the host against stub headers, both platform variants; see "Verification").
 
 ### Algorithm
 
@@ -1466,6 +1466,7 @@ The delay exists only while at least one output's limiter is enabled; with none 
 - **Preset slot V39:** per output `limiter_enabled[]`, `limiter_link_group[]`, `limiter_threshold_db[]`, `limiter_release_ms[]` (10 bytes x `NUM_OUTPUT_CHANNELS`) tail-appended to `PresetSlot` (`SLOT_DATA_SIZE_V39`). A save always stores the live settings; whether a load applies them follows the mode.
 - **Directory V22:** `FlashLimiterConfig` (112 bytes: version byte, 3 reserved, nine 12-byte records fixed at the RP2350 output count) appended after `cs_display`. See "Preset Directory Fields".
 - **Vendor command:** a single opcode, `REQ_LIMITER` `0x81`, in both dispatchers. OUT sets one parameter (`wValue = (output << 8) | index`, float32 payload; output `0xFF` sets every output). IN gets one parameter as float32, or the read-only blocks at index `0x80` (gain-reduction meter, one uint16 per output in 0.01 dB) and `0x81` (status: engaged, lookahead 32, block 16, output count). A bad output or index STALLs a GET and makes a SET a no-op. NaN is ignored. `limiter_set_param()` emits one `notify_param_write` per output changed.
+- **Ganged link groups** (added 2026-09-26). A SET of enable, threshold or release on a linked output writes every member of its group. A `link_group` SET makes the joining output adopt the settings of the group's lowest-numbered other member (`lm_group_peer()`); the first member keeps its own. `limiter_apply_config()` runs `lm_gang_groups()` after sanitizing, so a raw bulk or preset restore with a disagreeing group is made consistent, with a notification per value changed. A stored `link_group` above 4 now falls back to 0 (unlinked) in both `limiter_apply_config()` and `dir_sanitize_limiter()`, so corrupt data cannot join a real group. Wire, slot and directory formats are unchanged. Spec section 2.2.
 - **Control Surfaces:** no nouns yet.
 
 ### Cost

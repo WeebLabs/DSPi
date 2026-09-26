@@ -10,9 +10,9 @@ Both platforms are supported. RP2350 runs the limiter in float. RP2040 runs it i
 
 ### Key characteristics
 
-- **Per output, all settings independent.** Every output has its own enable, threshold, release and link group.
+- **Per output settings.** Every output has its own enable, threshold, release and link group. Outputs in a link group share one set of settings (section 2.2).
 - **No overshoot.** A sample on a limited output never exceeds its threshold, including right after its limiter is switched on or off (section 7).
-- **Linked groups.** Outputs with the same non-zero link group all apply the deepest gain reduction any member needs. A stereo image cannot shift, and a pair of woofers stays matched.
+- **Linked groups.** Outputs with the same non-zero link group act as one limiter. Their controls are ganged, and every member applies the deepest gain reduction any member needs. A stereo image cannot shift, and a pair of woofers stays matched.
 - **Zero cost when unused.** While no output has its limiter enabled, the lookahead delay is removed from the signal path entirely. No CPU is spent and no latency is added.
 - **Alignment preserved.** While any limiter is enabled, every output carries the same 32-sample delay, including outputs whose own limiter is off. Inter-slot sample alignment never changes. Switching the delay in or out happens only under a short fade to silence (section 2.3).
 
@@ -54,6 +54,16 @@ The output emitted next is block `j-1`, because the delay is two blocks. Its gai
 
 Each output's `E` is computed from its own threshold, its own release and its own signal. For a linked output, the gain actually applied at each boundary is the minimum `E` over all participating members of its group. Every member stays at or below its own threshold, because the minimum is never above its own `E`. Members with different release times need no special rule.
 
+**Ganged settings.** The members of a group always share enable, threshold and release, so a host never has to compare them.
+
+- A SET of enable, threshold or release on a linked output writes the same value to every member of its group.
+- An output that joins a group adopts the settings of the group's lowest-numbered existing member. The first output in a group keeps its own settings.
+- Leaving a group (setting 0) keeps the output's current settings. Later edits to it no longer reach the group.
+- A SET of `link_group` with `output = 0xFF` puts every output in one group, and they all adopt output 0's settings.
+- Bulk and preset restores store raw values, so a group from an older preset can disagree. When the coefficients are next computed, every member copies the group's lowest-numbered member, with a change notification for each value changed.
+
+The kernel above still handles members with different settings correctly. Ganging only guarantees that they never have them.
+
 The dual-core pipeline splits the outputs between cores. On RP2350, Core 0 owns outputs 0-1 and Core 1 owns outputs 2-7. On RP2040, Core 0 owns 0-1 and Core 1 owns 2-3. When an active group has members on both cores, the cores meet once per packet. Each core measures its own outputs, the cores wait for each other, and then each applies the group gains to its own outputs. The meeting is skipped for any packet where no group spans the cores, and in single-core mode.
 
 ### 2.3 Engaging and releasing the lookahead delay
@@ -78,7 +88,7 @@ All parameters are per output. Output indices follow the output channel numberin
 | 0 | `enabled` | 0 / 1 | 0 | Any non-zero value enables |
 | 1 | `threshold_db` | -30.0 .. 0.0 dBFS | -1.0 | Ceiling. 1 dB of margin covers inter-sample overshoot in a DAC |
 | 2 | `release_ms` | 10 .. 1000 ms | 100 | Gain recovers 8.69 dB per release time |
-| 3 | `link_group` | 0 .. 4 | 0 | 0 = unlinked. Rounded to the nearest integer |
+| 3 | `link_group` | 0 .. 4 | 0 | 0 = unlinked. Rounded to the nearest integer. A stored value above 4 from a bulk or preset restore falls back to 0 |
 
 Out-of-range values are clamped. NaN is ignored and never stored.
 
@@ -113,7 +123,7 @@ A SET writes the live configuration and raises a main-loop recompute flag. The m
 
 ### Change notifications
 
-Every SET emits `notify_param_write` at the parameter's offset in `WireBulkParams.limiter`, one notification per output changed (nine for an `output = 0xFF` SET on RP2350).
+Every SET emits `notify_param_write` at the parameter's offset in `WireBulkParams.limiter`, one notification per output changed (nine for an `output = 0xFF` SET on RP2350). A SET on a linked output also notifies every group member it wrote, and a `link_group` SET notifies each setting the joining output adopted. A host that tracks notifications sees the whole group move without polling it.
 
 ## 5. Persistence and Bulk Wire Format
 

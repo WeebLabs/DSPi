@@ -517,9 +517,13 @@ def _lim_save(dev, profile):
 
 
 def _lim_restore(dev, saved):
+    # Unlink first: a SET on a linked output also writes its group members.
+    _lim_set(dev, L_ALL, L_GROUP, 0.0)
     for k, vals in enumerate(saved):
-        for i, v in enumerate(vals):
-            _lim_set(dev, k, i, v)
+        for i in (L_ENABLED, L_THRESH, L_RELEASE):
+            _lim_set(dev, k, i, vals[i])
+    for k, vals in enumerate(saved):
+        _lim_set(dev, k, L_GROUP, vals[L_GROUP])
 
 
 @test("dynamics")
@@ -559,6 +563,30 @@ def limiter_param_clamps(dev, profile, chk):
     for val, want, what in ((9.0, 4.0, "group hi"), (2.4, 2.0, "group rounds"), (-3.0, 0.0, "group lo")):
         _lim_set(dev, 0, L_GROUP, val)
         chk.approx(_lim_get(dev, 0, L_GROUP), want, 1e-6, what)
+    _lim_restore(dev, saved)
+
+
+@test("dynamics", mutating=True)
+def limiter_link_group_gangs(dev, profile, chk):
+    """Linked outputs share enable, threshold and release: joining adopts the group, edits reach every member."""
+    saved = _lim_save(dev, profile)
+    _lim_set(dev, L_ALL, L_GROUP, 0.0)
+    _lim_set(dev, 0, L_THRESH, -6.0)
+    _lim_set(dev, 0, L_RELEASE, 300.0)
+    _lim_set(dev, 1, L_THRESH, -2.0)
+    _lim_set(dev, 1, L_RELEASE, 50.0)
+    _lim_set(dev, 0, L_GROUP, 3.0)
+    chk.approx(_lim_get(dev, 0, L_THRESH), -6.0, 1e-4, "first member keeps its threshold")
+    _lim_set(dev, 1, L_GROUP, 3.0)
+    chk.approx(_lim_get(dev, 1, L_THRESH), -6.0, 1e-4, "joiner adopts group threshold")
+    chk.approx(_lim_get(dev, 1, L_RELEASE), 300.0, 1e-3, "joiner adopts group release")
+    _lim_set(dev, 1, L_THRESH, -9.0)
+    _lim_set(dev, 1, L_ENABLED, 1.0)
+    chk.approx(_lim_get(dev, 0, L_THRESH), -9.0, 1e-4, "edit on out 1 reaches out 0")
+    chk.approx(_lim_get(dev, 0, L_ENABLED), 1.0, 1e-6, "enable on out 1 reaches out 0")
+    _lim_set(dev, 1, L_GROUP, 0.0)
+    _lim_set(dev, 1, L_THRESH, -12.0)
+    chk.approx(_lim_get(dev, 0, L_THRESH), -9.0, 1e-4, "unlinked edit leaves out 0 alone")
     _lim_restore(dev, saved)
 
 

@@ -140,6 +140,35 @@ static void lm_set_one(uint8_t out, uint8_t index, float value) {
     }
 }
 
+// Lowest-index output other than `out` in group `gr`, or -1.  The lowest
+// member is the group's leader when stored settings disagree.
+static int lm_group_peer(uint8_t out, uint8_t gr) {
+    for (int m = 0; m < NUM_OUTPUT_CHANNELS; m++)
+        if (m != out && limiter_config[m].link_group == gr) return m;
+    return -1;
+}
+
+static void lm_copy_settings(uint8_t dst, uint8_t src) {
+    lm_set_one(dst, LIMITER_PARAM_ENABLED, limiter_config[src].enabled ? 1.0f : 0.0f);
+    lm_set_one(dst, LIMITER_PARAM_THRESHOLD_DB, limiter_config[src].threshold_db);
+    lm_set_one(dst, LIMITER_PARAM_RELEASE_MS, limiter_config[src].release_ms);
+}
+
+// Linked outputs share enable, threshold and release: every member copies
+// its group leader.  Expects sanitized values (spec 2.2).
+static void lm_gang_groups(void) {
+    for (uint8_t k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        uint8_t gr = limiter_config[k].link_group;
+        if (gr == 0) continue;
+        int lead = lm_group_peer(k, gr);
+        if (lead < 0 || lead > k) continue;
+        volatile LimiterOutputConfig *a = &limiter_config[k], *b = &limiter_config[lead];
+        if (a->enabled != b->enabled || a->threshold_db != b->threshold_db
+            || a->release_ms != b->release_ms)
+            lm_copy_settings(k, (uint8_t)lead);
+    }
+}
+
 bool limiter_set_param(uint8_t output, uint8_t index, float value) {
     if (index >= LIMITER_NUM_PARAMS) return false;
     if (output >= NUM_OUTPUT_CHANNELS && output != LIMITER_ALL_OUTPUTS) return false;
@@ -147,8 +176,18 @@ bool limiter_set_param(uint8_t output, uint8_t index, float value) {
 
     if (output == LIMITER_ALL_OUTPUTS) {
         for (uint8_t k = 0; k < NUM_OUTPUT_CHANNELS; k++) lm_set_one(k, index, value);
-    } else {
+        if (index == LIMITER_PARAM_LINK_GROUP) lm_gang_groups();
+    } else if (index == LIMITER_PARAM_LINK_GROUP) {
+        // Joining a group adopts its settings; the first member keeps its own.
         lm_set_one(output, index, value);
+        uint8_t gr = limiter_config[output].link_group;
+        int peer = gr ? lm_group_peer(output, gr) : -1;
+        if (peer >= 0) lm_copy_settings(output, (uint8_t)peer);
+    } else {
+        uint8_t gr = limiter_config[output].link_group;
+        for (uint8_t k = 0; k < NUM_OUTPUT_CHANNELS; k++)
+            if (k == output || (gr != 0 && limiter_config[k].link_group == gr))
+                lm_set_one(k, index, value);
     }
     limiter_update_pending = true;
     return true;
@@ -205,12 +244,16 @@ void limiter_apply_config(float sample_rate) {
         float t_db = cfg->threshold_db, r_ms = cfg->release_ms;
         if (t_db != t_db) t_db = LIMITER_DEFAULT_THRESHOLD;
         if (r_ms != r_ms) r_ms = LIMITER_DEFAULT_RELEASE;
-        t_db = lm_clampf(t_db, LIMITER_THRESHOLD_MIN, LIMITER_THRESHOLD_MAX);
-        r_ms = lm_clampf(r_ms, LIMITER_RELEASE_MIN, LIMITER_RELEASE_MAX);
-        cfg->threshold_db = t_db;
-        cfg->release_ms = r_ms;
-        if (cfg->link_group > LIMITER_LINK_GROUP_MAX) cfg->link_group = LIMITER_LINK_GROUP_MAX;
+        cfg->threshold_db = lm_clampf(t_db, LIMITER_THRESHOLD_MIN, LIMITER_THRESHOLD_MAX);
+        cfg->release_ms = lm_clampf(r_ms, LIMITER_RELEASE_MIN, LIMITER_RELEASE_MAX);
+        if (cfg->link_group > LIMITER_LINK_GROUP_MAX) cfg->link_group = 0;
+    }
+    // Raw restores can carry a group whose members disagree (older presets).
+    lm_gang_groups();
 
+    for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
+        volatile LimiterOutputConfig *cfg = &limiter_config[k];
+        float t_db = cfg->threshold_db, r_ms = cfg->release_ms;
         float thr = powf(10.0f, t_db / 20.0f);
         float x = (float)LIMITER_BLOCK / (r_ms * 1e-3f * sample_rate);
 #if PICO_RP2350

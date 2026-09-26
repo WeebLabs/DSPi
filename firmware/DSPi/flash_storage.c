@@ -2825,7 +2825,7 @@ static void dir_sanitize_limiter(void) {
         o->release_ms   = r < LIMITER_RELEASE_MIN ? LIMITER_RELEASE_MIN
                         : (r > LIMITER_RELEASE_MAX ? LIMITER_RELEASE_MAX : r);
         o->enabled = (o->enabled != 0);
-        if (o->link_group > LIMITER_LINK_GROUP_MAX) o->link_group = LIMITER_LINK_GROUP_MAX;
+        if (o->link_group > LIMITER_LINK_GROUP_MAX) o->link_group = 0;
     }
 }
 
