@@ -664,7 +664,7 @@ typedef struct __attribute__((packed)) {
 // Pre-release ordinal: 0 = final release, 1..255 = beta N of this patch.  Betas
 // share their patch number, so this byte is the only thing telling two of them
 // apart; it must be zeroed in the same commit that tags the final release.
-#define FW_VERSION_BETA             3
+#define FW_VERSION_BETA             4
 
 // Universal "reset to default" escape hatch for every single-pin SET command
 // (REQ_SET_OUTPUT_PIN, REQ_SET_I2S_BCK_PIN, REQ_SET_MCK_PIN, REQ_SET_ADAT_PIN,
