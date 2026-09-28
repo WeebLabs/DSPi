@@ -1291,7 +1291,7 @@ Follows the psybass module pattern:
 ---
 
 ## Tube Preamp Emulation
-*Last updated: 2026-09-28 (output stage on by default; default drive -12 dB; drive floor lowered to -30 dB; RP2040 drive and shaper-output terms now in per-coefficient-set shifted domains `t_shift` / `s_shift`; kernel 1,196 B; 2026-09-20: transformer split/saturation/HF rolloff replaced by a damping-factor output stage: bell at the speaker resonance plus a fixed top shelf, parameters 10 and 11 now xfmr_damping and xfmr_res_hz, 14 parameters in all; per-output saturation meter and its 0x81 command removed; 2026-09-19: drive range -6..24 dB with automatic makeup gain, level-neutral defaults, rescaled tube rows, RP2040 shaper-output clamp; RP2350 kernel rewritten branch-free, 660 B; 2026-09-18: RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
+*Last updated: 2026-09-28 (output stage on by default at 95 Hz; default drive -12 dB; drive floor lowered to -30 dB; RP2040 drive and shaper-output terms now in per-coefficient-set shifted domains `t_shift` / `s_shift`; kernel 1,196 B; 2026-09-20: transformer split/saturation/HF rolloff replaced by a damping-factor output stage: bell at the speaker resonance plus a fixed top shelf, parameters 10 and 11 now xfmr_damping and xfmr_res_hz, 14 parameters in all; per-output saturation meter and its 0x81 command removed; 2026-09-19: drive range -6..24 dB with automatic makeup gain, level-neutral defaults, rescaled tube rows, RP2040 shaper-output clamp; RP2350 kernel rewritten branch-free, 660 B; 2026-09-18: RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
 
 ### Purpose
 
@@ -1392,7 +1392,7 @@ One global config (`TubeConfig`) applied to the output channels selected by `out
 | 8 | rectifier | enum | 0..3 | 1 (GZ34) | 0 = solid state, which turns sag off |
 | 9 | xfmr_enabled | bool | 0/1 | true | Output stage (damping-factor bell plus top shelf) |
 | 10 | xfmr_damping | float | 1..20 | 2 | Damping factor; 1 gives +4.1 dB at the resonance and +2.5 dB on top, 20 is near flat. A stage setting, not a tube-row field: editing it leaves `tube_type` alone |
-| 11 | xfmr_res_hz | float | 30..150 Hz | 85 | Speaker resonance; the bell's centre frequency |
+| 11 | xfmr_res_hz | float | 30..150 Hz | 95 | Speaker resonance; the bell's centre frequency |
 | 12 | mix_pct | float | 0..100 % | 100 | Dry/wet blend; the dry path is the untouched input |
 | 13 | trim_db | float | -12..+12 dB | 0 | Level applied to the wet path only |
 

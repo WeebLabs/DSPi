@@ -67,7 +67,7 @@ enum {
 #define TUBE_DEFAULT_RECTIFIER      1     // GZ34
 #define TUBE_DEFAULT_XFMR_ENABLED   true
 #define TUBE_DEFAULT_XFMR_DAMPING   2.0f  // audible bump once the stage is enabled
-#define TUBE_DEFAULT_XFMR_RES      85.0f
+#define TUBE_DEFAULT_XFMR_RES      95.0f
 #define TUBE_DEFAULT_MIX          100.0f
 #define TUBE_DEFAULT_TRIM           0.0f
 #define TUBE_DEFAULT_OUTPUT_MASK 0xFFFFu
