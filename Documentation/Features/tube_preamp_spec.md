@@ -85,7 +85,7 @@ Every parameter is addressed by a small integer index (0 to 13) through one inde
 | 6 | `hardness_pct` | float | 0 .. 100 % | 40 | yes |
 | 7 | `sag_pct` | float | 0 .. 100 % | 15 | yes |
 | 8 | `rectifier` | enum | 0 .. 3 | 1 (GZ34) | yes |
-| 9 | `xfmr_enabled` | bool | 0 / 1 | 0 | yes |
+| 9 | `xfmr_enabled` | bool | 0 / 1 | 1 | yes |
 | 10 | `xfmr_damping` | float | 1 .. 20 | 2 | yes |
 | 11 | `xfmr_res_hz` | float | 30 .. 150 Hz | 85 | yes |
 | 12 | `mix_pct` | float | 0 .. 100 % | 100 | yes |
@@ -277,7 +277,7 @@ Send `REQ_SET_TUBE_PARAM` per knob change. The firmware clamps and notifies, so 
 
 ### Suggested starting points
 
-- Default: 12AX7, drive -12 dB, mix 100, output stage off. About 0.1 dB of level change, 0.23 % THD at -12 dBFS and 1.25 % at 0 dBFS.
+- Default: 12AX7, drive -12 dB, mix 100, output stage on (damping 2 at 85 Hz). The tube stage alone gives about 0.1 dB of level change, 0.23 % THD at -12 dBFS and 1.25 % at 0 dBFS.
 - Near transparent: any row, drive -30 dB. The 12AX7 row gives 0.03 % THD at -12 dBFS.
 - Warm hi-fi: 12AU7 or 6SN7, drive -3 to 0 dB, mix 100, output stage off or damping 10 and above.
 - Single-ended sweetness: 300B, drive 0 to 3 dB, output stage on, damping 2, resonance matched to the speaker.

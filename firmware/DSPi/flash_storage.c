@@ -3929,7 +3929,7 @@ static void apply_slot_to_live(const PresetSlot *slot) {
         tube_config.enabled      = false;
         tube_config.tube_type    = TUBE_DEFAULT_TUBE_TYPE;
         tube_config.rectifier    = TUBE_DEFAULT_RECTIFIER;
-        tube_config.xfmr_enabled = false;
+        tube_config.xfmr_enabled = TUBE_DEFAULT_XFMR_ENABLED;
         tube_config.output_mask  = TUBE_DEFAULT_OUTPUT_MASK;
         tube_config.drive_db     = TUBE_DEFAULT_DRIVE;
         tube_config.bias_pct     = TUBE_DEFAULT_BIAS;
@@ -4859,7 +4859,7 @@ static void apply_factory_defaults(void) {
     tube_config.enabled      = false;
     tube_config.tube_type    = TUBE_DEFAULT_TUBE_TYPE;
     tube_config.rectifier    = TUBE_DEFAULT_RECTIFIER;
-    tube_config.xfmr_enabled = false;
+    tube_config.xfmr_enabled = TUBE_DEFAULT_XFMR_ENABLED;
     tube_config.output_mask  = TUBE_DEFAULT_OUTPUT_MASK;
     tube_config.drive_db     = TUBE_DEFAULT_DRIVE;
     tube_config.bias_pct     = TUBE_DEFAULT_BIAS;
