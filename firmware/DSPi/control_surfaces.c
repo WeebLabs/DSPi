@@ -137,7 +137,7 @@ CsMacroStep      cs_set_macro_step_val;
 // ---------------------------------------------------------------------------
 
 static const CsCapsHeader s_caps = {
-    .caps_version = 19,
+    .caps_version = 20,
     .max_bindings = CS_MAX_BINDINGS,
     .type_count   = CS_TYPE_COUNT,
     .noun_count   = CS_NOUN_COUNT,
@@ -352,16 +352,17 @@ static const int8_t s_enc_table[16] = {
 
 // ---------------------------------------------------------------------------
 // Unit math.  Natural units are float (dB, Hz, Q, percent, ms); wire fields
-// are int16 (8.8 for dB/Q/percent/ms, plain integer for Hz).  HZ and Q step
-// and quantize logarithmically (in octaves), the rest linearly.
+// are int16 (8.8 for dB/Q/percent/ms, plain integer for Hz and log ms).  The
+// log units step and quantize in octaves, the rest linearly.
 // ---------------------------------------------------------------------------
 
-static bool cs_unit_is_log(uint8_t unit) {
-    return unit == CS_UNIT_HZ || unit == CS_UNIT_Q;
+bool cs_unit_is_log(uint8_t unit) {
+    return unit == CS_UNIT_HZ || unit == CS_UNIT_Q || unit == CS_UNIT_MS_LOG;
 }
 
 static float cs_decode(uint8_t unit, int16_t raw) {
-    return (unit == CS_UNIT_HZ) ? (float)raw : (float)raw * (1.0f / 256.0f);
+    return (unit == CS_UNIT_HZ || unit == CS_UNIT_MS_LOG)
+         ? (float)raw : (float)raw * (1.0f / 256.0f);
 }
 
 // Step size in natural units (linear) or octaves (log units).  step == 0

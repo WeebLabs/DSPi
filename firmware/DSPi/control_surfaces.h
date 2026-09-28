@@ -109,6 +109,11 @@
  * the bool and the enum included.  No structure sizes change.
  * See Documentation/Features/tube_preamp_spec.md.
  *
+ * Caps v20 appends the output limiter nouns (74-78: LIMITER, _THRESHOLD,
+ * _RELEASE, _LINK, _GR), all targeting an output, and the CS_UNIT_MS_LOG
+ * unit the release noun needs.  No structure sizes change.
+ * See Documentation/Features/output_limiter_spec.md.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -237,6 +242,12 @@ typedef enum {
     CS_NOUN_TUBE_DRIVE     = 71, // continuous dB -30..24
     CS_NOUN_TUBE_TYPE      = 72, // enum 0..TUBE_TYPE_MAX (0 = Custom)
     CS_NOUN_TUBE_MIX       = 73, // continuous percent 0..100 (dry/wet)
+    // --- caps v20 additions (target = output channel) ---
+    CS_NOUN_LIMITER        = 74, // bool (output limiter enable)
+    CS_NOUN_LIMITER_THRESHOLD = 75, // continuous dB -30..0
+    CS_NOUN_LIMITER_RELEASE = 76, // continuous ms 10..1000 (CS_UNIT_MS_LOG)
+    CS_NOUN_LIMITER_LINK   = 77, // enum 0..LIMITER_LINK_GROUP_MAX (0 = unlinked)
+    CS_NOUN_LIMITER_GR     = 78, // continuous dB 0..30, read-only (gain reduction)
     CS_NOUN_COUNT
 } CsNoun;
 
@@ -254,6 +265,8 @@ typedef enum {
 #define CS_UNIT_PERCENT  4   // 8.8 fixed point percent; linear stepping
 #define CS_UNIT_MS       5   // 8.8 fixed point milliseconds; linear stepping,
                              // default step 0.1 ms (caps v4+)
+#define CS_UNIT_MS_LOG   6   // plain integer ms; log stepping (step = 8.8
+                             // octaves); spans past 8.8's 127 ms (caps v20+)
 
 // Target kinds (CsNounDesc.target_kind); what CsBinding.target addresses.
 #define CS_TARGET_NONE      0   // target/index ignored
@@ -622,7 +635,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (19); see the file
+    uint8_t  caps_version; // capability format version (20); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)
@@ -908,6 +921,10 @@ uint8_t cs_noun_validate_target_ch(uint8_t noun, uint8_t ch, uint8_t index);
 // Grouped-reference check against the live group table (engine-owned);
 // exported for the display module's page validation.
 uint8_t cs_validate_grouped_target(const CsBinding *b);
+
+// True for units that step and map in octaves (Hz, Q, log ms); shared by
+// the engine and the display bar so the two never disagree.
+bool cs_unit_is_log(uint8_t unit);
 
 // A continuous noun's full range in natural units, decoded from min_q/max_q;
 // exported for the display module's level bars.  Returns false for nouns

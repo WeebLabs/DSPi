@@ -125,6 +125,10 @@ A SET writes the live configuration and raises a main-loop recompute flag. The m
 
 Every SET emits `notify_param_write` at the parameter's offset in `WireBulkParams.limiter`, one notification per output changed (nine for an `output = 0xFF` SET on RP2350). A SET on a linked output also notifies every group member it wrote, and a `link_group` SET notifies each setting the joining output adopted. A host that tracks notifications sees the whole group move without polling it.
 
+### Control Surfaces
+
+Caps v20 exposes the limiter to user-wired controls as five nouns, each targeting one output: `LIMITER` (enable), `LIMITER_THRESHOLD`, `LIMITER_RELEASE`, `LIMITER_LINK` and the read-only `LIMITER_GR` meter. The writable four dispatch through `REQ_LIMITER` exactly as a host SET does, so link-group ganging, clamping and notifications are identical. `LIMITER_GR` reads the same per-packet gain reduction as index 0x80, in dB. A front-panel edit is a live edit and persists the way section 5.1 describes. The noun table and units are in `control_surfaces_spec.md`.
+
 ## 5. Persistence and Bulk Wire Format
 
 ### 5.1 Where the settings live
@@ -205,5 +209,6 @@ Static RAM: RP2350 about 2.1 KB of BSS (nine 128-byte delay rings, per-output st
 - `pdm_generator.c`: `limiter_process_outputs()` for Core 1's outputs in the EQ worker.
 - `main.c`: coefficient recompute on the pending flag and the engage service (soft-mute hold, or a direct switch when nothing is streaming).
 - `vendor_commands.c`: `REQ_LIMITER` in both the SET and GET dispatchers.
+- `control_surfaces_nouns.c`: the caps v20 limiter nouns, dispatched through `REQ_LIMITER`.
 - `bulk_params.c`: wire V32 section; the limiter section is applied only when `output_config_mode` is with-preset.
 - `flash_storage.c`: preset slot V39, directory V22 `FlashLimiterConfig`, and `apply_output_config_from_mode()`, the single owner of the live limiter settings across boot, preset load, active-slot delete and factory reset. `preset_save_output_config()` (0x52) also saves the limiter.

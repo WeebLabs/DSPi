@@ -1429,7 +1429,7 @@ Follows the psybass module pattern:
 ---
 
 ## Output Limiter
-*Last updated: 2026-09-26 (link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
+*Last updated: 2026-09-28 (Control Surfaces nouns 74-78; 2026-09-26: link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
 
 ### Purpose
 
@@ -1469,7 +1469,7 @@ The delay exists only while at least one output's limiter is enabled; with none 
 - **Directory V22:** `FlashLimiterConfig` (112 bytes: version byte, 3 reserved, nine 12-byte records fixed at the RP2350 output count) appended after `cs_display`. See "Preset Directory Fields".
 - **Vendor command:** a single opcode, `REQ_LIMITER` `0x81`, in both dispatchers. OUT sets one parameter (`wValue = (output << 8) | index`, float32 payload; output `0xFF` sets every output). IN gets one parameter as float32, or the read-only blocks at index `0x80` (gain-reduction meter, one uint16 per output in 0.01 dB) and `0x81` (status: engaged, lookahead 32, block 16, output count). A bad output or index STALLs a GET and makes a SET a no-op. NaN is ignored. `limiter_set_param()` emits one `notify_param_write` per output changed.
 - **Ganged link groups** (added 2026-09-26). A SET of enable, threshold or release on a linked output writes every member of its group. A `link_group` SET makes the joining output adopt the settings of the group's lowest-numbered other member (`lm_group_peer()`); the first member keeps its own. `limiter_apply_config()` runs `lm_gang_groups()` after sanitizing, so a raw bulk or preset restore with a disagreeing group is made consistent, with a notification per value changed. A stored `link_group` above 4 now falls back to 0 (unlinked) in both `limiter_apply_config()` and `dir_sanitize_limiter()`, so corrupt data cannot join a real group. Wire, slot and directory formats are unchanged. Spec section 2.2.
-- **Control Surfaces:** no nouns yet.
+- **Control Surfaces:** caps v20 nouns 74-78, all targeting an output (added 2026-09-28). `LIMITER` (enable), `LIMITER_THRESHOLD` (-30..0 dB), `LIMITER_RELEASE` (10..1000 ms, in the new log-stepping `CS_UNIT_MS_LOG`) and `LIMITER_LINK` (enum 0-4, 0 = unlinked) dispatch through `REQ_LIMITER` with `wValue = (output << 8) | index`, so all four carry a float32 payload. They reach `limiter_set_param()` exactly as a host SET does, so a control on one member of a link group moves the whole group. `LIMITER_GR` is a read-only gain-reduction meter in dB (0..30, positive = reduction) read from `limiter_meter_centidb()`, for `IND_ABOVE` and `IND_LEVEL` LEDs. Front-panel edits are live edits: in independent `output_config_mode` they persist only when the host sends `REQ_SAVE_OUTPUT_CONFIG` (0x52), and in with-preset mode on the next preset save.
 
 ### Cost
 
@@ -2171,7 +2171,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-09-28 (tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-09-28 (Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2183,7 +2183,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | DCP | N/A | Double-precision coprocessor |
 | VREG | 1.20V (for OC) | 1.10V |
 | UART + I2C external control | Yes (identical) | Yes (identical) |
-| Control Surfaces nouns (caps v8) | 52 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 52, all usable |
+| Control Surfaces nouns (caps v20) | 79 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 79, all usable |
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
@@ -2855,7 +2855,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-09-18 (caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
+*Last updated: 2026-09-28 (caps v20: output limiter nouns 74-78 and unit `CS_UNIT_MS_LOG`; 2026-09-18 caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, an
@@ -3060,6 +3060,22 @@ parameter index in wValue, so all four carry a float32 payload, the bool and the
 enum included. `noun_count` goes to 74. Display labels are "Tube", "Tube Drive",
 "Tube Type" and "Tube Mix", and the type noun has its own 17-entry short-form
 label table. The authority for the effect is `tube_preamp_spec.md`.
+
+**Caps v20** (2026-09-28) appends five nouns (74-78) for the output limiter and
+one unit, with no structure or stored-config changes. `noun_count` goes to 79.
+Every limiter noun targets an output (`CS_TARGET_OUTPUT_CH`). `LIMITER`,
+`LIMITER_THRESHOLD`, `LIMITER_RELEASE` and `LIMITER_LINK` dispatch through
+`REQ_LIMITER` (`0x81`) with `wValue = (output << 8) | index` and a float32
+payload, and `LIMITER_GR` is a read-only gain-reduction meter (0..30 dB). The
+release spans 10..1000 ms, past the 127.99 ms ceiling of 8.8 `CS_UNIT_MS`, so it
+uses the new `CS_UNIT_MS_LOG` (6): plain integer ms in the value and range
+fields, stepping and pot mapping in octaves exactly like `CS_UNIT_HZ`, and a
+default step of 1/12 octave. `cs_unit_is_log()` is now exported so the display
+level bar and the engine share one list of octave-domain units. Display labels
+are "Limiter", "Lim Thr", "Lim Rel", "Lim Link" and "Lim GR", with link groups
+shown as "Off" and "1".."4". A host that does not know unit 6 must learn it
+before it can label or encode the release noun. Link-group ganging stays in
+`limiter_set_param()`, so a bound control behaves exactly like a host SET.
 
 ### File layout
 

@@ -30,6 +30,7 @@
 #include "psybass.h"
 #include "subharm.h"
 #include "tube.h"
+#include "limiter.h"
 #include "upmix.h"
 #include "loudness.h"
 #if PICO_RP2350
@@ -104,6 +105,10 @@ extern volatile bool sync_started;
 // Same 8.8 ceiling caps the subharm selectivity hold: the command accepts up
 // to SUBHARM_HOLD_MAX (400 ms), the front panel reaches 127 ms.
 #define CS_SUBHARM_HOLD_MAX_MS     127.0f
+
+// Gain-reduction meter span.  The limiter reports up to 120 dB; past the
+// deepest threshold the reading no longer tells a listener anything new.
+#define CS_LIMITER_GR_MAX_DB       30.0f
 
 // Q(8.8) helper for table literals; rounds to nearest (a plain cast would
 // truncate, encoding Q 0.1 as 25 instead of the documented 26).  Must stay a
@@ -310,6 +315,25 @@ const CsNounDesc cs_noun_table[CS_NOUN_COUNT] = {
     [CS_NOUN_TUBE_MIX]        = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
                                   Q8(TUBE_MIX_MIN), Q8(TUBE_MIX_MAX),
                                   CS_UNIT_PERCENT, CS_TARGET_NONE, 0, 0 },
+    // Output limiter (caps v20).  A write to one member of a link group
+    // gangs the whole group inside limiter_set_param(), as a host SET does.
+    [CS_NOUN_LIMITER]         = { CS_KIND_BOOL, 0, CS_BOOL_RW, 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_OUTPUT_CH,
+                                  NUM_OUTPUT_CHANNELS, 0 },
+    [CS_NOUN_LIMITER_THRESHOLD] = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  Q8(LIMITER_THRESHOLD_MIN), Q8(LIMITER_THRESHOLD_MAX),
+                                  CS_UNIT_DB, CS_TARGET_OUTPUT_CH,
+                                  NUM_OUTPUT_CHANNELS, 0 },
+    [CS_NOUN_LIMITER_RELEASE] = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
+                                  (int16_t)LIMITER_RELEASE_MIN, (int16_t)LIMITER_RELEASE_MAX,
+                                  CS_UNIT_MS_LOG, CS_TARGET_OUTPUT_CH,
+                                  NUM_OUTPUT_CHANNELS, 0 },
+    [CS_NOUN_LIMITER_LINK]    = { CS_KIND_ENUM, LIMITER_LINK_GROUP_MAX + 1, CS_ENUM_RW,
+                                  0, 0, CS_UNIT_NONE, CS_TARGET_OUTPUT_CH,
+                                  NUM_OUTPUT_CHANNELS, 0 },
+    [CS_NOUN_LIMITER_GR]      = { CS_KIND_CONTINUOUS, 0, CS_CONT_RO,
+                                  0, Q8(CS_LIMITER_GR_MAX_DB), CS_UNIT_DB,
+                                  CS_TARGET_OUTPUT_CH, NUM_OUTPUT_CHANNELS, 0 },
 };
 
 // ---------------------------------------------------------------------------
@@ -498,6 +522,14 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
         case CS_NOUN_TUBE_DRIVE:         return tube_config.drive_db;
         case CS_NOUN_TUBE_TYPE:          return (float)tube_config.tube_type;
         case CS_NOUN_TUBE_MIX:           return tube_config.mix_pct;
+        case CS_NOUN_LIMITER:            return limiter_config[target].enabled ? 1.0f : 0.0f;
+        case CS_NOUN_LIMITER_THRESHOLD:  return limiter_config[target].threshold_db;
+        case CS_NOUN_LIMITER_RELEASE:    return limiter_config[target].release_ms;
+        case CS_NOUN_LIMITER_LINK:       return (float)limiter_config[target].link_group;
+        case CS_NOUN_LIMITER_GR: {
+            float gr = (float)limiter_meter_centidb(target) * 0.01f;
+            return (gr > CS_LIMITER_GR_MAX_DB) ? CS_LIMITER_GR_MAX_DB : gr;
+        }
         default: return 0.0f;
     }
 }
@@ -590,6 +622,25 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_TUBE_PARAM,
                                     tube_param[noun - CS_NOUN_TUBE], 0,
                                     (const uint8_t *)&f, sizeof(f));
+            break;
+        }
+        case CS_NOUN_LIMITER:
+        case CS_NOUN_LIMITER_THRESHOLD:
+        case CS_NOUN_LIMITER_RELEASE:
+        case CS_NOUN_LIMITER_LINK: {
+            // One opcode, wValue = (output << 8) | index, float32 payload for
+            // every parameter; the bool and enum must not reach the byte arm.
+            static const uint8_t limiter_param[] = {
+                LIMITER_PARAM_ENABLED, LIMITER_PARAM_THRESHOLD_DB,
+                LIMITER_PARAM_RELEASE_MS, LIMITER_PARAM_LINK_GROUP,
+            };
+            float f = (noun == CS_NOUN_LIMITER) ? ((value >= 0.5f) ? 1.0f : 0.0f)
+                    : (noun == CS_NOUN_LIMITER_LINK) ? (float)(uint8_t)value
+                                                     : value;
+            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_LIMITER,
+                                    (uint16_t)((target << 8) |
+                                               limiter_param[noun - CS_NOUN_LIMITER]),
+                                    0, (const uint8_t *)&f, sizeof(f));
             break;
         }
 #if PICO_RP2350

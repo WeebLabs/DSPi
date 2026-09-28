@@ -26,6 +26,7 @@
 #include "upmix.h"
 #include "subharm.h"
 #include "tube.h"
+#include "limiter.h"
 
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
@@ -591,6 +592,9 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
     [CS_NOUN_AUX] = "Aux",                 [CS_NOUN_AUX_LEVEL] = "Aux",
     [CS_NOUN_TUBE] = "Tube",               [CS_NOUN_TUBE_DRIVE] = "Tube Drive",
     [CS_NOUN_TUBE_TYPE] = "Tube Type",     [CS_NOUN_TUBE_MIX] = "Tube Mix",
+    [CS_NOUN_LIMITER] = "Limiter",         [CS_NOUN_LIMITER_THRESHOLD] = "Lim Thr",
+    [CS_NOUN_LIMITER_RELEASE] = "Lim Rel", [CS_NOUN_LIMITER_LINK] = "Lim Link",
+    [CS_NOUN_LIMITER_GR] = "Lim GR",
 };
 
 static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",
@@ -605,6 +609,8 @@ static const char *const s_tube_type_label[] = {
     "Custom", "12AX7", "5751", "12AT7", "12AY7", "12AU7", "6SN7", "6SL7",
     "6DJ8", "EF86", "6SJ7", "EL84", "EL34", "6L6", "6V6", "KT88", "300B",
 };
+// Indexed by link group; 0 means the output limits on its own.
+static const char *const s_limiter_link_label[] = {"Off", "1", "2", "3", "4"};
 static const char *const s_center_mode_label[]   = {"Sinner", "Logician", "Off"};
 static const char *const s_surround_mode_label[] = {"Off", "Sinner", "Logician"};
 // Indexed by FilterType; includes the host-only types above the CS cycling
@@ -639,6 +645,8 @@ _Static_assert(DISP_N(s_subharm_select_label) == SUBHARM_SELECT_MODE_MAX + 1,
                "subharm selectivity names must cover the enum");
 _Static_assert(DISP_N(s_tube_type_label) == TUBE_TYPE_MAX + 1,
                "tube type names must cover the enum");
+_Static_assert(DISP_N(s_limiter_link_label) == LIMITER_LINK_GROUP_MAX + 1,
+               "limiter link names must cover the enum");
 #if PICO_RP2350
 _Static_assert(DISP_N(s_center_mode_label) == UPMIX_CENTER_OFF + 1,
                "centre mode names must cover the enum");
@@ -660,6 +668,7 @@ static const char *disp_enum_label(uint8_t noun, int v, bool large) {
         case CS_NOUN_LEVELLER_SPEED:      DISP_TAB(s_lev_speed_label); break;
         case CS_NOUN_SUBHARM_SELECT:      DISP_TAB(s_subharm_select_label); break;
         case CS_NOUN_TUBE_TYPE:           DISP_TAB(s_tube_type_label); break;
+        case CS_NOUN_LIMITER_LINK:        DISP_TAB(s_limiter_link_label); break;
         case CS_NOUN_UPMIX_CENTER_MODE:   DISP_TAB(s_center_mode_label); break;
         case CS_NOUN_UPMIX_SURROUND_MODE: DISP_TAB(s_surround_mode_label); break;
         case CS_NOUN_FILTER_TYPE:
@@ -764,6 +773,9 @@ static void disp_format_value(const CsDisplayPage *p, char *out, size_t n,
         case CS_UNIT_MS:
             fmt_fix1(num, sizeof(num), v);
             snprintf(out, n, "%s ms", num);
+            break;
+        case CS_UNIT_MS_LOG:
+            snprintf(out, n, "%d ms", (int)lroundf(v));
             break;
         default:
             snprintf(out, n, "%d", (int)v);
@@ -907,7 +919,7 @@ static bool disp_bar_norm(const CsDisplayPage *p, float *out) {
     if (!ok) return false;
     const CsNounDesc *nd = &cs_noun_table[p->noun];
     float norm;
-    if (nd->unit == CS_UNIT_HZ || nd->unit == CS_UNIT_Q) {
+    if (cs_unit_is_log(nd->unit)) {
         if (!(lo > 0.0f) || !(v > 0.0f)) return false;
         norm = log2f(v / lo) / log2f(hi / lo);
     } else {
