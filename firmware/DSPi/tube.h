@@ -39,8 +39,8 @@ enum {
 #define TUBE_RECT_MAX            3
 
 // Parameter limits and defaults
-#define TUBE_DRIVE_MIN           -6.0f   // knee 6 dB above full scale; floor keeps s_n = kn/(c1 m) <= 5.3 in Q28
-#define TUBE_DRIVE_MAX           24.0f   // 10^(24/20) = 15.85: carried in Q24 on RP2040
+#define TUBE_DRIVE_MIN          -30.0f   // knee 30 dB above full scale; floor keeps s_p + s_n <= 105, inside the RP2040 s_shift 4 domain
+#define TUBE_DRIVE_MAX           24.0f   // 10^(24/20) = 15.85: t_shift 4 (Q24) on RP2040
 #define TUBE_BIAS_MIN          -100.0f
 #define TUBE_BIAS_MAX           100.0f
 #define TUBE_ASYM_MIN           -12.0f
@@ -59,7 +59,7 @@ enum {
 #define TUBE_TRIM_MAX            12.0f
 
 #define TUBE_DEFAULT_TUBE_TYPE      1     // 12AX7
-#define TUBE_DEFAULT_DRIVE         -6.0f  // clean: 0.5 % THD at -12 dBFS, level-neutral
+#define TUBE_DEFAULT_DRIVE        -12.0f  // subtle colour: 12AX7 row 0.23 % THD at -12 dBFS
 #define TUBE_DEFAULT_BIAS          10.0f  // 12AX7 row
 #define TUBE_DEFAULT_ASYM           3.0f
 #define TUBE_DEFAULT_HARDNESS      40.0f
@@ -120,8 +120,9 @@ typedef int32_t tb_num_t;
 int32_t fast_mul_q28(int32_t a, int32_t b);   // dsp_pipeline.c
 #endif
 
-// Shared coefficient set.  On RP2040, `m`, `sagk` and `bias` are Q24 raw
-// values (value * 2^24) so drive up to 15.85 fits; everything else is Q28.
+// Shared coefficient set.  On RP2040, `m`, `sagk` and `bias` are in
+// Q(28 - t_shift) and `s_p`, `s_n`, `v0` in Q(28 - s_shift), both shifts
+// picked per set so the Q28 budget holds at every drive; the rest is Q28.
 typedef struct {
     tb_num_t m;            // drive gain (knee fixed at t = 1)
     tb_num_t sagk;         // m * sag depth
@@ -142,6 +143,8 @@ typedef struct {
     tb_num_t wet_lim;      // RP2040 wet clamp: (7.5 - 4 dry_w) / wet_w capped at Y2_LIM; unused on RP2350
     uint8_t  xfmr_on;
     uint8_t  sag_on;
+    uint8_t  t_shift;      // RP2040 drive-product domain shift, 1..4; 0 on RP2350
+    uint8_t  s_shift;      // RP2040 shaper-output domain shift, 0..4; 0 on RP2350
 } TubeCoeffs;
 
 typedef struct {

@@ -234,7 +234,7 @@ typedef enum {
                                  // a CS_TYPE_AUX_PWM output
     // --- caps v19 additions ---
     CS_NOUN_TUBE           = 70, // bool (tube preamp enable)
-    CS_NOUN_TUBE_DRIVE     = 71, // continuous dB 0..24
+    CS_NOUN_TUBE_DRIVE     = 71, // continuous dB -30..24
     CS_NOUN_TUBE_TYPE      = 72, // enum 0..TUBE_TYPE_MAX (0 = Custom)
     CS_NOUN_TUBE_MIX       = 73, // continuous percent 0..100 (dry/wet)
     CS_NOUN_COUNT

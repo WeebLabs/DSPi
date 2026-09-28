@@ -414,7 +414,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  xfmr_enabled;           // 0/1: output stage
     uint16_t output_mask;            // Bit k: tube processes output channel k
     uint8_t  reserved[2];            // Zero
-    float    drive_db;               // Gain into the shaper, -6..24 dB
+    float    drive_db;               // Gain into the shaper, -30..24 dB
     float    bias_pct;               // Operating point, -100..+100 %
     float    asym_db;                // Negative-knee offset, -12..+12 dB
     float    hardness_pct;           // Cubic to quintic knee blend, 0..100

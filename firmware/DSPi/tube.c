@@ -252,8 +252,8 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     uint8_t rect   = config->rectifier > TUBE_RECT_MAX ? TUBE_RECT_MAX : config->rectifier;
 
     // Shaper: knee fixed at t = 1; the 1/m makeup keeps small-signal gain at
-    // unity so drive moves the knee, not the level (s_n <= 5.3 at -6 dB)
-    float m = powf(10.0f, drive_db / 20.0f);              // 0.5 .. 15.85
+    // unity so drive moves the knee, not the level (s_n <= 84 at -30 dB)
+    float m = powf(10.0f, drive_db / 20.0f);              // 0.032 .. 15.85
     float h = hard_pct * 0.01f;
     float c1 = 1.5f + 0.375f * h;
     float c3 = -0.5f - 0.75f * h;
@@ -302,6 +302,8 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
 
     coeffs->xfmr_on = config->xfmr_enabled ? 1 : 0;
     coeffs->sag_on = sag_on ? 1 : 0;
+    coeffs->t_shift = 0;
+    coeffs->s_shift = 0;
 
 #if PICO_RP2350
     coeffs->m = m;           coeffs->sagk = sagk;       coeffs->bias = b;
@@ -314,20 +316,29 @@ void tube_compute_coefficients(TubeCoeffs *coeffs, const TubeConfig *config, flo
     coeffs->bl_m1 = bl_m1;   coeffs->sh_a = sh_a;       coeffs->sh_g = sh_g;
     coeffs->dry_w = dry_w;   coeffs->wet_w = wet_w;     coeffs->wet_lim = wet_lim;
 #else
-    // m, sagk and bias live in Q24 so the kernel's drive product lands in a
-    // "/16" domain that cannot wrap; everything else is Q28 (all < 8.0).
+    // Drive product 4 m + |b| and shaper output s_p + s_n must each stay under
+    // 7.5 in their own domain.  t_shift starts at 1 because the kernel's +/-4
+    // pre-clamp times ratio_n (up to 3.98) must stay under 8.  Drive limits
+    // cap both shifts at 4 (spec section 7).
+    uint8_t ts = 1, ss = 0;
+    while (ts < 4 && m >= 1.75f * (float)(1 << ts)) ts++;
+    while (ss < 4 && s_p + s_n >= 7.5f * (float)(1 << ss)) ss++;
+    coeffs->t_shift = ts;
+    coeffs->s_shift = ss;
+
     const float q28 = (float)(1LL << FILTER_SHIFT);
-    const float q24 = (float)(1LL << (FILTER_SHIFT - 4));
-    coeffs->m = (int32_t)(m * q24);
-    coeffs->sagk = (int32_t)(sagk * q24);
-    coeffs->bias = (int32_t)(b * q24);
+    const float qt = (float)(1LL << (FILTER_SHIFT - ts));
+    const float qs = (float)(1LL << (FILTER_SHIFT - ss));
+    coeffs->m = (int32_t)(m * qt);
+    coeffs->sagk = (int32_t)(sagk * qt);
+    coeffs->bias = (int32_t)(b * qt);
     coeffs->ratio_n = (int32_t)(ratio_n * q28);
     coeffs->c1 = (int32_t)(c1 * q28);
     coeffs->c3 = (int32_t)(c3 * q28);
     coeffs->c5 = (int32_t)(c5 * q28);
-    coeffs->s_p = (int32_t)(s_p * q28);
-    coeffs->s_n = (int32_t)(s_n * q28);
-    coeffs->v0 = (int32_t)(v0 * q28);
+    coeffs->s_p = (int32_t)(s_p * qs);
+    coeffs->s_n = (int32_t)(s_n * qs);
+    coeffs->v0 = (int32_t)(v0 * qs);
     coeffs->sag_att = (int32_t)(sag_att * q28);
     coeffs->sag_rel = (int32_t)(sag_rel * q28);
     coeffs->dc_r = (int32_t)(dc_r * q28);
@@ -441,9 +452,11 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
     int32_t env = st->env, dc_x1 = st->dc_x1, dc_y1 = st->dc_y1;
     int32_t bl_ic1 = st->bl_ic1, bl_ic2 = st->bl_ic2, sh_lp = st->sh_lp;
     const bool sag_on = c->sag_on, xfmr_on = c->xfmr_on;
-    const int32_t one16 = 1 << (FILTER_SHIFT - 4);
+    const uint32_t ts = c->t_shift, ss = c->s_shift;
+    const int32_t one_t = 1 << (FILTER_SHIFT - ts);
     const int32_t four = 4 << FILTER_SHIFT;
     const int32_t y_lim = (int32_t)(TUBE_Q28_Y_LIM * (1 << FILTER_SHIFT));
+    const int32_t y_lim_s = y_lim >> ss;
     const int32_t y2_lim = (int32_t)(TUBE_Q28_Y2_LIM * (1 << FILTER_SHIFT));
     const int32_t bell_in = (int32_t)(TUBE_Q28_BELL_IN * (1 << FILTER_SHIFT));
     const int32_t wet_lim = c->wet_lim;
@@ -452,21 +465,20 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
         int32_t x = buf[i];
         int32_t x4 = clamp_lim(x, four);
 
-        // Drive product in a /16 domain: m (Q24) x input clamped to +/-4.0
-        // stays under 4.0.  Pre-clamping t to +/-4 before the negative knee
-        // ratio keeps that product in range; see spec 2.4 for the one lossy
-        // corner (past +12 dBFS at 0 dB drive with extreme bias and asymmetry).
+        // Drive product in the /2^ts domain stays under 7.5.  Pre-clamping t
+        // to +/-4 before the negative knee ratio keeps that product in range;
+        // see spec 2.4 for the one lossy corner past +12 dBFS.
         int32_t m_eff = sag_on ? c->m - fast_mul_q28(c->sagk, env) : c->m;
-        int32_t t16 = fast_mul_q28(m_eff, x4) + c->bias;
-        if (t16 < 0) t16 = fast_mul_q28(clamp_lim(t16, 4 * one16), c->ratio_n);
-        if (t16 > one16) t16 = one16; else if (t16 < -one16) t16 = -one16;
-        int32_t t = t16 << 4;
+        int32_t tt = fast_mul_q28(m_eff, x4) + c->bias;
+        if (tt < 0) tt = fast_mul_q28(clamp_lim(tt, 4 * one_t), c->ratio_n);
+        if (tt > one_t) tt = one_t; else if (tt < -one_t) tt = -one_t;
+        int32_t t = tt << ts;
 
         int32_t t2 = fast_mul_q28(t, t);
         int32_t p = fast_mul_q28(t, c->c1 + fast_mul_q28(t2, c->c3 + fast_mul_q28(t2, c->c5)));
-        // v clamp: s_n reaches 5.3 at -6 dB drive, and the DC blocker output
-        // is bounded by 2 max|v|, which must stay under the 8.0 Q28 ceiling.
-        int32_t v = clamp_lim(fast_mul_q28(p, t >= 0 ? c->s_p : c->s_n) - c->v0, y_lim);
+        // Shaper output is formed in the /2^ss domain (s_n reaches 84), then
+        // clamped so the DC blocker's 2 max|v| stays under the Q28 ceiling.
+        int32_t v = clamp_lim(fast_mul_q28(p, t >= 0 ? c->s_p : c->s_n) - c->v0, y_lim_s) << ss;
 
         // DC blocker output <= 6.8; the state keeps the true value, the
         // clamped copy bounds every later operand.
