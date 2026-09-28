@@ -4934,8 +4934,10 @@ static void apply_factory_defaults(void) {
     leveller_update_pending = true;
     leveller_reset_pending = true;
 
-    // Input source: default to USB
+    // Input source: default to USB.  This bypasses the main-loop switch
+    // handler, so apply any host volume parked while a non-USB input was live.
     active_input_source = INPUT_SOURCE_USB;
+    audio_thaw_host_volume();
 
     // LG Sound Sync — reset to firmware default (off).  Run through the
     // public setter so any side-effects (demote, restore vol_mul) fire

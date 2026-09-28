@@ -327,9 +327,8 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     //
     // Mute sources:
     //   1. UAC1 host MUTE control (audio_state.mute) — USB-gated so the OS
-    //      mute key can't silence SPDIF playback.  audio_state.vol_mul itself
-    //      is already frozen at the last USB-active value because
-    //      audio_set_volume() bails before touching it when source != USB.
+    //      mute key can't silence SPDIF playback.  Host volume is likewise
+    //      parked by audio_set_volume() when source != USB.
     //   2. REQ_SET_USER_MUTE vendor channel (user_mute) — always honored, no
     //      input-source guard.  Symmetric with REQ_SET_USER_VOLUME's
     //      always-apply contract: an external control surface that mutes via

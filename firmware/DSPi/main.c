@@ -1855,7 +1855,7 @@ void core0_init() {
     // Initial loudness table computation (uses loaded or default params)
     loudness_recompute_table(loudness_ref_spl, loudness_intensity_pct, 48000.0f);
     if (loudness_enabled && loudness_active_table) {
-        audio_set_volume(audio_state.volume);  // Re-select loudness coefficients
+        current_loudness_coeffs = loudness_active_table[effective_vol_index];
     }
 
     // Initial volume leveller setup (uses loaded or default params)
@@ -3776,7 +3776,7 @@ int main(void) {
 
                 // Notify the LG Sound Sync module of the source change.
                 // On a switch away from SPDIF it demotes to absent without
-                // touching vol_mul (the audio_set_volume() thaw below
+                // touching vol_mul (audio_thaw_host_volume() below
                 // handles vol_mul on USB transitions); on a switch into
                 // SPDIF it re-arms the streaks for fresh detection.
                 lg_sound_sync_on_input_source_change(active_input_source);
@@ -3829,13 +3829,7 @@ int main(void) {
                     usb_audio_flush_ring();
                     complete_pipeline_reset();
 
-                    // Thaw the cached host volume.  audio_set_volume() bails
-                    // when source != USB, so any host SET_CUR Volume requests
-                    // received during SPDIF mode were recorded into
-                    // audio_state.volume but never applied to vol_mul or the
-                    // loudness coefficient pointer.  Re-applying here brings
-                    // the live gain path in line with what Windows last sent.
-                    audio_set_volume(audio_state.volume);
+                    audio_thaw_host_volume();
 
                     // Close the switch-window race: a host SET_CUR that
                     // landed after the old-source branch read the retained

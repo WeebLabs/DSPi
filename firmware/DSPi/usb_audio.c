@@ -381,6 +381,12 @@ void usb_notify_master_volume(float db) {
     notify_push_master_volume_v1(db);
 }
 
+// Last UAC1 SET_CUR Volume received while USB was not the input source.  Held
+// here, not in audio_state.volume, so the LCD, Console and preset save never
+// report a volume that is not being applied.
+static int16_t uac1_host_volume;
+static bool uac1_host_volume_pending;
+
 // See header for the contract.  Implementation mirrors audio_set_volume()'s
 // arithmetic (CENTER_VOLUME_INDEX shift, clamp, 8-bit truncation to vol_index)
 // minus the "if (active_input_source != INPUT_SOURCE_USB) return" guard, so
@@ -406,6 +412,7 @@ void update_user_volume(float db) {
 
     int16_t v = (int16_t)lrintf(db * 256.0f);
     audio_state.volume = v;
+    uac1_host_volume_pending = false;  // Latest writer wins over a parked host value
 
     int32_t vol = (int32_t)v + (int32_t)CENTER_VOLUME_INDEX * 256;
     if (vol < 0) vol = 0;
@@ -531,22 +538,26 @@ void apply_vol_index_to_audio(uint8_t vol_index) {
     }
 }
 
-void audio_set_volume(int16_t volume) {
-    // Always record the host's last-set value so GET_CUR round-trips correctly
-    // — Windows compares what it read back against what it last wrote.
+bool audio_set_volume(int16_t volume) {
+    // Host volume is inert on non-USB inputs: park it for GET_CUR round-trips
+    // and for audio_thaw_host_volume() on the next switch to USB.
+    if (active_input_source != INPUT_SOURCE_USB) {
+        uac1_host_volume = volume;
+        uac1_host_volume_pending = true;
+        return false;
+    }
     audio_state.volume = volume;
-
-    // Host volume control is inert when USB isn't the DSP input source.  The
-    // SPDIF→USB transition in the input-source switch handler calls
-    // audio_set_volume(audio_state.volume) to thaw the cached value into the
-    // live gain path.  When SPDIF is selected, LG Sound Sync (if active) owns
-    // vol_mul instead — see lg_sound_sync.c.
-    if (active_input_source != INPUT_SOURCE_USB) return;
+    uac1_host_volume_pending = false;
 
     volume += CENTER_VOLUME_INDEX * 256;
     if (volume < 0) volume = 0;
     if (volume >= (CENTER_VOLUME_INDEX + 1) * 256) volume = (CENTER_VOLUME_INDEX + 1) * 256 - 1;
     apply_vol_index_to_audio((uint8_t)(((uint16_t)volume) >> 8u));
+}
+
+void audio_thaw_host_volume(void) {
+    if (!uac1_host_volume_pending) return;
+    update_user_volume((float)uac1_host_volume / 256.0f);
 }
 
 // ----------------------------------------------------------------------------
@@ -1268,7 +1279,7 @@ static bool uac1_handle_fu_get(uint8_t rhport, tusb_control_request_t const *req
             }
             if (cs == UAC1_FU_CTRL_VOLUME) {
                 static int16_t v;
-                v = audio_state.volume;
+                v = uac1_host_volume_pending ? uac1_host_volume : audio_state.volume;
                 return tud_control_xfer(rhport, req, &v, 2);
             }
             break;
@@ -1412,17 +1423,15 @@ static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_cont
                 // same shared field — hosts that watch user_volume.user_volume_db
                 // can attribute the change correctly.
                 notify_set_source(PARAM_SRC_UAC1);
-                audio_set_volume(v);
-                // Mirror update_user_volume()'s emit so v2 hosts see the
-                // OS volume slider move on the same WireBulkParams field
-                // they listen to for vendor-channel writes.  Clamp to the
-                // documented apply range; the dB the listener actually
-                // hears is what the device should report.
-                float notify_db = (float)v / 256.0f;
-                if (notify_db < -(float)CENTER_VOLUME_INDEX) notify_db = -(float)CENTER_VOLUME_INDEX;
-                if (notify_db > 0.0f) notify_db = 0.0f;
-                notify_param_write(offsetof(WireBulkParams, user_volume.user_volume_db),
-                                   sizeof(float), &notify_db);
+                // Notify only when applied, so v2 hosts never show a parked
+                // value.  Clamped to the range the listener actually hears.
+                if (audio_set_volume(v)) {
+                    float notify_db = (float)v / 256.0f;
+                    if (notify_db < -(float)CENTER_VOLUME_INDEX) notify_db = -(float)CENTER_VOLUME_INDEX;
+                    if (notify_db > 0.0f) notify_db = 0.0f;
+                    notify_param_write(offsetof(WireBulkParams, user_volume.user_volume_db),
+                                       sizeof(float), &notify_db);
+                }
                 notify_set_source(PARAM_SRC_UNKNOWN);
             }
         } else if (uac1.pending_recipient == TUSB_REQ_RCPT_ENDPOINT) {

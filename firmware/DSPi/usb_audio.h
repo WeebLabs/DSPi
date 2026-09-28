@@ -254,7 +254,14 @@ void apply_vol_index_to_audio(uint8_t vol_index);
 // ----------------------------------------------------------------------------
 
 void usb_sound_card_init(void);
-void audio_set_volume(int16_t volume);
+
+// UAC1 host volume write.  Applies and returns true only while USB is the input
+// source; otherwise parks the value and leaves audio_state.volume untouched.
+bool audio_set_volume(int16_t volume);
+
+// On a switch to USB, apply a host volume parked while another input was live.
+// No-op if a vendor, control-surface or preset write has superseded it.
+void audio_thaw_host_volume(void);
 
 // Push a master-volume change to the host over the interrupt IN endpoint.
 // Called internally from update_master_volume(); vendor_commands.c brackets
