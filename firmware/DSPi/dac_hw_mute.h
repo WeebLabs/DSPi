@@ -155,8 +155,8 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg);
  *   - active_low ∈ {0,1}
  *   - each non-NONE pin is in the platform's valid GPIO range
  *   - no non-NONE pin collides with output_pins[], i2s_bck_pin (or
- *     its +1 LRCLK partner), i2s_mck_pin (if MCK enabled), or
- *     spdif_rx_pin
+ *     its +1 LRCLK partner), i2s_mck_pin (if MCK enabled),
+ *     spdif_rx_pin, or an enabled ADAT output/input pin (RP2350)
  *   - no duplicate pins within the config itself
  *   - hold_ms ∈ [DAC_HW_MUTE_HOLD_MS_MIN, _MAX]
  *   - release_ms ∈ [DAC_HW_MUTE_RELEASE_MS_MIN, _MAX]
@@ -184,7 +184,7 @@ uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg);
  *   - active_low ∈ {0,1}
  *   - pin is either DAC_HW_MUTE_PIN_NONE or in the platform's valid GPIO range
  *   - pin does not collide with output_pins[], i2s_bck_pin (or +1 LRCLK),
- *     i2s_mck_pin (if enabled), or spdif_rx_pin
+ *     i2s_mck_pin (if enabled), spdif_rx_pin, or an enabled ADAT pin
  *   - hold_ms ∈ [DAC_HW_MUTE_HOLD_MS_MIN, _MAX]
  *   - release_ms ∈ [DAC_HW_MUTE_RELEASE_MS_MIN, _MAX]
  */

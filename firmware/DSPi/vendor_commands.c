@@ -348,17 +348,14 @@ bool is_valid_gpio_pin(uint8_t pin) {
 #endif
 }
 
-// Pin claimed by a "fixed" peripheral: a pin output, the I2S MCK, the SPDIF RX
-// input, or the DAC hardware-mute.  Deliberately EXCLUDES the I2S BCK/LRCLK
-// clocks and the I2S RX data pins — those have use-dependent rules the callers
-// below apply (the clocks are reserved only while running for general queries,
-// but treated as always-claimed when validating an I2S RX data pin).
-static bool pin_used_by_fixed_peripheral(uint8_t pin, uint8_t exclude_output) {
+// Pin claimed by a "fixed" peripheral other than MCK (outputs, SPDIF RX, ADAT,
+// DAC mute, control pins).  Excludes the I2S clocks and RX data pins, whose
+// use-dependent rules the callers below apply.
+static bool pin_used_by_fixed_peripheral_except_mck(uint8_t pin, uint8_t exclude_output) {
     for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
         if (i == exclude_output) continue;
         if (output_pins[i] == pin) return true;
     }
-    if (i2s_mck_enabled && pin == i2s_mck_pin) return true;   // MCK (if enabled)
 #if PICO_RP2350
     // ADAT data pin: claimed only while ADAT is config-enabled (mirrors MCK).
     if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
@@ -377,6 +374,12 @@ static bool pin_used_by_fixed_peripheral(uint8_t pin, uint8_t exclude_output) {
     if (i2c_ctrl_owns_pin(pin)) return true;                  // I2C control (if live)
     if (control_surfaces_owns_pin(pin)) return true;         // Control Surfaces (live bindings)
     return false;
+}
+
+// The full fixed-peripheral set: the above plus an enabled MCK.
+static bool pin_used_by_fixed_peripheral(uint8_t pin, uint8_t exclude_output) {
+    if (i2s_mck_enabled && pin == i2s_mck_pin) return true;   // MCK (if enabled)
+    return pin_used_by_fixed_peripheral_except_mck(pin, exclude_output);
 }
 
 bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
@@ -442,9 +445,8 @@ bool spdif_input_enable_acceptable(uint8_t idx) {
 // `bck_pin`: each active pin must be a valid GPIO, not a clock pin (BCK/LRCLK),
 // not used by a fixed peripheral, and mutually distinct.  The bulk/preset
 // restore paths use this to reject an inconsistent pushed/stored I2S config as a
-// unit before it can reach i2s_input_start().  `bck_pin` is passed explicitly
-// because a restore may set BCK in the same transaction, so the live value is
-// not yet updated when this runs.  `bck2_pin` is the secondary (slave-pair)
+// unit before it can reach i2s_input_start().  `bck_pin` is the master clock
+// base to check against.  `bck2_pin` is the secondary (slave-pair)
 // clock base when SPLIT clock-pin mode is in force, or 0xFF for none; data
 // pins must avoid both pairs.
 bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
@@ -483,6 +485,13 @@ bool i2s_bck_pin_acceptable(uint8_t bck_pin) {
     return true;
 }
 
+// True if an enabled MCK may drive `pin` in a restore: valid and owned by no
+// other fixed peripheral.  Ignores MCK's own claim so a kept pin passes.  The
+// later BCK check covers the clock pair against MCK; RX data pins check MCK.
+bool i2s_mck_pin_acceptable(uint8_t pin) {
+    return is_valid_gpio_pin(pin) && !pin_used_by_fixed_peripheral_except_mck(pin, 0xFF);
+}
+
 #if PICO_RP2350
 // True if `pin` is acceptable as the ADAT data GPIO for the bulk/preset
 // restore paths.  ADAT is a push-pull output driver, so a collision with any
@@ -496,10 +505,11 @@ bool adat_pin_acceptable(uint8_t pin) {
 // True if `pin` is acceptable as the ADAT input (RX) GPIO for the bulk/preset
 // restore paths.  The RX only listens (input-enable, no funcsel), so sharing
 // the ADAT TX pin is the supported zero-hardware loopback self-test; any other
-// owned pin is a conflict.
+// owned pin is a conflict.  The share applies only while ADAT output is enabled:
+// a disabled output's stored pin is free for anything else to take.
 bool adat_input_pin_acceptable(uint8_t pin) {
     if (!is_valid_gpio_pin(pin)) return false;
-    if (pin == adat_output_pin()) return true;
+    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
     return !is_pin_in_use(pin, 0xFF);
 }
 #endif
@@ -3448,7 +3458,12 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
 
             case REQ_SET_MCK_ENABLE: {
                 bool enable = (setup->wValue != 0);
-                if (enable && !i2s_mck_enabled) {
+                uint8_t status = PIN_CONFIG_SUCCESS;
+                // MCK claims its pin only while enabled, so another function may
+                // have taken it in the meantime; enabling would then contend.
+                if (enable && !i2s_mck_enabled && is_pin_in_use(i2s_mck_pin, 0xFF)) {
+                    status = PIN_CONFIG_PIN_IN_USE;
+                } else if (enable && !i2s_mck_enabled) {
                     // Order matters: divider must be loaded *before* the
                     // GPOUTn block is enabled so the DAC sees a valid clock
                     // on the first cycle.  Reversing the order would briefly
@@ -3463,8 +3478,9 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     i2s_mck_enabled = false;
                 }
                 uint8_t v = i2s_mck_enabled ? 1 : 0;
-                notify_param_write(offsetof(WireBulkParams, i2s_config.mck_enabled), 1, &v);
-                resp_buf[0] = PIN_CONFIG_SUCCESS;
+                if (status == PIN_CONFIG_SUCCESS)
+                    notify_param_write(offsetof(WireBulkParams, i2s_config.mck_enabled), 1, &v);
+                resp_buf[0] = status;
                 vendor_send_response(resp_buf, 1);
                 return true;
             }

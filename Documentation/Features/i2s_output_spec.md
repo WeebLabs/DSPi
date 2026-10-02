@@ -126,7 +126,7 @@ All I2S commands use USB EP0 control transfers on the vendor interface (interfac
 | `REQ_GET_OUTPUT_TYPE` | `0xC1` | IN | slot (0-3) | 1 | Get slot's current output type |
 | `REQ_SET_I2S_BCK_PIN` | `0xC2` | IN | new_pin | 1 | Set BCK GPIO (LRCLK = pin + 1) |
 | `REQ_GET_I2S_BCK_PIN` | `0xC3` | IN | 0 | 1 | Get current BCK GPIO |
-| `REQ_SET_MCK_ENABLE` | `0xC4` | IN | 0 or 1 | 1 | Enable or disable MCK output |
+| `REQ_SET_MCK_ENABLE` | `0xC4` | IN | 0 or 1 | 1 | Enable or disable MCK output. Returns `PIN_CONFIG_PIN_IN_USE` (MCK stays off) if the MCK pin is claimed by another function |
 | `REQ_GET_MCK_ENABLE` | `0xC5` | IN | 0 | 1 | Get MCK enabled state |
 | `REQ_SET_MCK_PIN` | `0xC6` | IN | new_pin | 1 | Set MCK GPIO |
 | `REQ_GET_MCK_PIN` | `0xC7` | IN | 0 | 1 | Get current MCK GPIO |

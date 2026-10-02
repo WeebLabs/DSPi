@@ -486,7 +486,11 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         channel_delays_ms[CH_OUT_1 + o] = in->outputs[o].delay_ms;
     }
 
-    // Pin config
+    // Pin config, phase 1: installs and releases only.  The ordering of every pin
+    // step in this function is load-bearing; see current_architecture.md
+    // "Restore Order in io_config_apply() and bulk_params_apply()".
+    const uint8_t ext_enc  = in->input_config.spdif_rx_enabled_ext_p1;
+    const uint8_t ext_mask = (uint8_t)((ext_enc - 1) & SPDIF_RX_ENABLED_EXT_MASK);
     if (apply_pins) {
 #if PICO_RP2350
         static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
@@ -553,184 +557,50 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             }
         }
 
-        // Optional SPDIF 2..4 enable mask.  Encoded PLUS ONE on the wire: 0 =
-        // absent (keep the live mask), else mask = enc - 1.  Applied AFTER the
-        // ext-pin block so a pin+enable pair pushed together validates against
-        // the new pin.  A newly enabled bit is accepted only if that input's
-        // pin is valid and unclaimed; a newly disabled bit that is the live
-        // source is refused (a pushed config must not silently kill the running
-        // input).
-        {
-            uint8_t enc = in->input_config.spdif_rx_enabled_ext_p1;
-            if (enc != 0) {
-                uint8_t mask = (uint8_t)((enc - 1) & SPDIF_RX_ENABLED_EXT_MASK);
-                // Commit each bit as it is decided so a later enable in one
-                // payload validates against the earlier ones (two pushed enables
-                // on the same GPIO must not both pass); disables run first so a
-                // push that moves an enable between inputs validates cleanly.
-                for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-                    uint8_t bit = (uint8_t)(1u << i);
-                    if ((mask & bit) || !(spdif_rx_enabled_ext & bit)) continue;
-                    if (input_source_is_spdif(active_input_source) &&
-                        spdif_index_for_source(active_input_source) == (uint8_t)(i + 1)) {
-                        printf("Bulk apply: SPDIF input %u disable ignored (active source); kept enabled\n",
-                               (unsigned)(i + 2));
-                    } else {
-                        spdif_rx_enabled_ext &= (uint8_t)~bit;
-                    }
-                }
-                for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-                    uint8_t bit = (uint8_t)(1u << i);
-                    if (!(mask & bit) || (spdif_rx_enabled_ext & bit)) continue;
-                    if (spdif_input_enable_acceptable(i + 1)) {
-                        spdif_rx_enabled_ext |= bit;
-                    } else {
-                        printf("Bulk apply: SPDIF input %u enable rejected (pin invalid/conflict); left disabled\n",
-                               (unsigned)(i + 2));
-                    }
-                }
-            }
-        }
-
-        // I2S RX data pins (pair 0 + multichannel extras) and channel count,
-        // validated as a SET so a pushed config can't bring two state machines
-        // up on one GPIO or on a clock pin.  0 = keep-live per field; an invalid
-        // count keeps the live count.  The proposed active set is checked against
-        // the BCK pin THIS transfer installs (in->i2s_config.bck_pin, applied
-        // unconditionally below), and applied only if acceptable — otherwise the
-        // whole I2S RX section is ignored (live config retained) and logged.  A
-        // change restarts the input so every pair re-syncs.
-        {
-            uint8_t proposed[I2S_RX_MAX_PAIRS];
-            proposed[0] = (in->input_config.i2s_rx_pin != 0)
-                              ? in->input_config.i2s_rx_pin : i2s_rx_pin[0];
-#if I2S_RX_MAX_PAIRS > 1
-            for (int p = 1; p < I2S_RX_MAX_PAIRS; p++) {
-                uint8_t pin = in->input_config.i2s_rx_pin_ext[p - 1];
-                proposed[p] = (pin != 0) ? pin : i2s_rx_pin[p];
-            }
-#endif
-            uint8_t ch = in->input_config.i2s_input_channels;
-            uint8_t count = (ch == 2 || ch == 4 || ch == 6 || ch == 8)
-                                ? ch : i2s_input_channels;
-            if (count / 2 > I2S_RX_MAX_PAIRS) count = i2s_input_channels;
-
-            // Validate the RX set against the BCK that will ACTUALLY be installed
-            // (the pushed BCK if it passes its own check below, else the kept-live
-            // pin), so a rejected/invalid BCK doesn't leave the RX validated
-            // against a value the device never adopts.  Output pins are already
-            // applied, so this matches the install-time check.
-            uint8_t eff_bck = i2s_bck_pin_acceptable(in->i2s_config.bck_pin)
-                                  ? in->i2s_config.bck_pin : i2s_bck_pin;
-            // Same reasoning for the clock-pin mode and slave BCK: the payload
-            // may change them below, so validate the RX set against the values
-            // that will actually be installed, not the live ones.
-            uint8_t eff_pin_mode =
-                (in->i2s_config.clock_pin_mode_p1 != 0 &&
-                 (uint8_t)(in->i2s_config.clock_pin_mode_p1 - 1) <= 1)
-                    ? (uint8_t)(in->i2s_config.clock_pin_mode_p1 - 1)
-                    : i2s_clock_pin_mode;
-            uint8_t inc_slave = in->i2s_config.bck_pin_slave;
-            uint8_t eff_slave =
-                (inc_slave != 0 && i2s_bck_pin_acceptable(inc_slave) &&
-                 inc_slave != eff_bck && inc_slave != (uint8_t)(eff_bck + 1) &&
-                 (uint8_t)(inc_slave + 1) != eff_bck)
-                    ? inc_slave : i2s_bck_pin_slave;
-            if (i2s_rx_pin_set_acceptable(proposed, count / 2, eff_bck,
-                                          (eff_pin_mode == I2S_CLOCK_PIN_MODE_SPLIT)
-                                              ? eff_slave : 0xFF)) {
-                bool changed = false;
-                for (int p = 0; p < I2S_RX_MAX_PAIRS; p++)
-                    if (proposed[p] != i2s_rx_pin[p]) {
-                        i2s_rx_pin[p] = proposed[p];
-                        changed = true;
-                    }
-                if (count != i2s_input_channels) {
-                    i2s_input_channels = count;
-                    changed = true;
-                }
-                if (changed && active_input_source == INPUT_SOURCE_I2S)
-                    i2s_input_restart_pending = true;
-            } else {
-                printf("Bulk apply: I2S RX pin/count config rejected (conflict); kept live\n");
-            }
-        }
-
-        // ADAT input pin + enable (V24+, RP2350).  0 = absent (keep live) for the
-        // pin; enable encoded PLUS ONE (0 absent, 1 disabled, 2 enabled).  Pin
-        // validated with adat_input_pin_acceptable; enable applied after so an
-        // enable+pin pair validates against the new pin (mirrors the SPDIF-ext
-        // ordering).  Enabling needs a valid pin (mirrors REQ_SET_ADAT_INPUT_ENABLE);
-        // a disable of the live source is refused (mirrors the SPDIF-ext precedent).
-        // A pin/enable change while ADAT is active arms a deferred input restart.
-#if PICO_RP2350
-        {
-            uint8_t pin = in->input_config.adat_input_pin;
-            if (pin != 0 && pin != adat_input_pin) {
-                if (adat_input_pin_acceptable(pin)) {
-                    adat_input_pin = pin;
-                    if (active_input_source == INPUT_SOURCE_ADAT)
-                        adat_input_restart_pending = true;
+        // Optional SPDIF 2..4 disables.  Encoded PLUS ONE on the wire: 0 = absent
+        // (keep the live mask), else mask = enc - 1.  A disable of the live source
+        // is refused.  Enables run in phase 2, after the I2S clocks are installed.
+        if (ext_enc != 0) {
+            for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
+                uint8_t bit = (uint8_t)(1u << i);
+                if ((ext_mask & bit) || !(spdif_rx_enabled_ext & bit)) continue;
+                if (input_source_is_spdif(active_input_source) &&
+                    spdif_index_for_source(active_input_source) == (uint8_t)(i + 1)) {
+                    printf("Bulk apply: SPDIF input %u disable ignored (active source); kept enabled\n",
+                           (unsigned)(i + 2));
                 } else {
-                    printf("Bulk apply: ADAT input pin %u rejected (invalid/conflict); kept live\n",
-                           (unsigned)pin);
-                }
-            }
-            uint8_t enc = in->input_config.adat_input_enabled_p1;
-            if (enc == 1 || enc == 2) {
-                uint8_t want = (enc == 2) ? 1 : 0;
-                if (want && !adat_input_enabled) {
-                    if (adat_input_pin != 0xFF && adat_input_pin_acceptable(adat_input_pin)) {
-                        adat_input_enabled = 1;
-                        if (active_input_source == INPUT_SOURCE_ADAT)
-                            adat_input_restart_pending = true;
-                    } else {
-                        printf("Bulk apply: ADAT input enable rejected (pin unset/conflict); left disabled\n");
-                    }
-                } else if (!want && adat_input_enabled) {
-                    if (active_input_source == INPUT_SOURCE_ADAT ||
-                        (input_source_change_pending &&
-                         pending_input_source == INPUT_SOURCE_ADAT)) {
-                        printf("Bulk apply: ADAT input disable ignored (active source); kept enabled\n");
-                    } else {
-                        adat_input_enabled = 0;
-                    }
+                    spdif_rx_enabled_ext &= (uint8_t)~bit;
                 }
             }
         }
+    }
+
+#if PICO_RP2350
+    // Release ADAT claims this payload drops or moves, so MCK and BCK are not
+    // judged against them; the claim blocks below re-validate against the final
+    // clocks.  The snapshots keep a net no-op from dirtying or restarting ADAT.
+    const bool    adat_out_was_en    = adat_output_config_enabled();
+    const uint8_t adat_out_was_pin   = adat_output_pin();
+    const bool    adat_out_was_dirty = adat_output_config_dirty;
+    const uint8_t adat_in_was_pin    = adat_input_pin;
+    const uint8_t adat_in_was_en     = adat_input_enabled;
+    const bool    adat_in_live = (active_input_source == INPUT_SOURCE_ADAT ||
+                                  (input_source_change_pending &&
+                                   pending_input_source == INPUT_SOURCE_ADAT));
+    {
+        uint8_t want_pin = (in->adat_config.pin != 0) ? in->adat_config.pin : PICO_ADAT_PIN;
+        if (adat_out_was_en && !(in->adat_config.enabled != 0 && want_pin == adat_out_was_pin))
+            adat_output_set_config(false, adat_out_was_pin);
+        uint8_t in_pin = in->input_config.adat_input_pin;
+        uint8_t in_enc = in->input_config.adat_input_enabled_p1;
+        if (apply_pins && adat_in_was_en && !adat_in_live &&
+            (in_enc == 1 || (in_pin != 0 && in_pin != adat_in_was_pin)))
+            adat_input_enabled = 0;
+    }
 #endif
-    }
 
-    // EQ bands
-    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
-        for (int b = 0; b < MAX_BANDS; b++) {
-            filter_recipes[ch][b].channel = ch;
-            filter_recipes[ch][b].band = b;
-            filter_recipes[ch][b].type = in->eq[ch][b].type;
-            // Normalize at the boundary: 0xFF padding from legacy hosts
-            // must not accidentally bypass the band.
-            filter_recipes[ch][b].bypass = (in->eq[ch][b].bypass == 1) ? 1 : 0;
-            filter_recipes[ch][b].freq = in->eq[ch][b].freq;
-            filter_recipes[ch][b].Q = in->eq[ch][b].q;
-            filter_recipes[ch][b].gain_db = in->eq[ch][b].gain_db;
-            // LT target Q rides in reserved[2] (Q*512 LE); zero for non-LT types.
-            // Caller recomputes all filters after apply returns.
-            if (in->eq[ch][b].type == FILTER_LINKWITZ_TRANSFORM) {
-                peq_qp_x512[ch][b] = (uint16_t)(in->eq[ch][b].reserved[0] |
-                                                (in->eq[ch][b].reserved[1] << 8));
-            } else {
-                peq_qp_x512[ch][b] = 0;
-            }
-        }
-    }
-
-    // Channel names
-    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
-        memcpy(channel_names[ch], in->channel_names.names[ch], PRESET_NAME_LEN);
-        channel_names[ch][PRESET_NAME_LEN - 1] = '\0';  // Enforce NUL termination
-    }
-
-    // I2S configuration.
+    // I2S configuration.  Runs after phase 1 so MCK and BCK see the pushed SPDIF
+    // pins, and before the claims that check against the clocks.
     {
         extern uint8_t output_types[];
         extern uint8_t i2s_bck_pin;
@@ -741,12 +611,29 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         // Snapshot the effective input BCK before any pin install so we can tell
         // whether the active pair actually moved and arm a restart below.
         uint8_t old_eff_bck = i2s_effective_bck_pin();
-        // Validate the pushed BCK before installing it raw: BCK/LRCLK are clock
-        // OUTPUTS, so an invalid GPIO can fault pio_gpio_init() and a collision
-        // with an output pin is driver contention.  Reject (keep the live, known-
-        // valid pin) on failure.  Output pins are already applied above, so the
-        // conflict check sees the final config; the RX set is validated against
-        // the BCK separately.
+
+        // MCK must map to clk_gpoutN on this platform (a cross-platform payload
+        // may not): fall back to the default pin with MCK off.  An enabled MCK on
+        // a pin another fixed peripheral owns is forced off too.
+        if (GPIO_TO_GPOUT_CLOCK_HANDLE(in->i2s_config.mck_pin, clk_sys) == clk_sys) {
+            i2s_mck_pin = PICO_I2S_MCK_PIN;
+            i2s_mck_enabled = false;
+        } else {
+            bool en = (in->i2s_config.mck_enabled != 0);
+            if (en && !i2s_mck_pin_acceptable(in->i2s_config.mck_pin)) {
+                printf("Bulk apply: MCK pin %u in use; MCK disabled\n",
+                       (unsigned)in->i2s_config.mck_pin);
+                en = false;
+            }
+            i2s_mck_pin = in->i2s_config.mck_pin;
+            i2s_mck_enabled = en;
+        }
+        // mck_multiplier encoding: 0 = 128×, 1 = 256×.
+        i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 1) ? 256 : 128;
+
+        // BCK/LRCLK are clock outputs: validate before installing, keep the live
+        // pin on failure.  The check reads live globals; claims installed later
+        // (ext enables, DAC mute, ADAT) check against BCK themselves.
         if (i2s_bck_pin_acceptable(in->i2s_config.bck_pin)) {
             i2s_bck_pin = in->i2s_config.bck_pin;
         } else {
@@ -782,24 +669,176 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         if (i2s_effective_bck_pin() != old_eff_bck &&
             active_input_source == INPUT_SOURCE_I2S)
             i2s_input_restart_pending = true;
+    }
 
-        // MCK pin migration mirrors flash_storage.c apply_slot_to_live():
-        // CLK_GPOUTn requires the pin to map to clk_gpout0..3 on this
-        // platform.  An RP2040 receiving a bulk payload from an RP2350
-        // host (or vice versa) can have an mck_pin that is invalid on
-        // this side — fall back to the platform default and disable
-        // MCK so the user-visible failure mode is "MCK off" rather than
-        // "MCK on a dead pin".
-        if (GPIO_TO_GPOUT_CLOCK_HANDLE(in->i2s_config.mck_pin, clk_sys) == clk_sys) {
-            i2s_mck_pin = PICO_I2S_MCK_PIN;
-            i2s_mck_enabled = false;
-        } else {
-            i2s_mck_pin = in->i2s_config.mck_pin;
-            i2s_mck_enabled = (in->i2s_config.mck_enabled != 0);
+    // Pin config, phase 2: claims validated against the clocks installed above.
+    if (apply_pins) {
+        // Optional SPDIF 2..4 enables.  Each bit commits as it is decided so two
+        // pushed enables on one GPIO cannot both pass.
+        if (ext_enc != 0) {
+            for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
+                uint8_t bit = (uint8_t)(1u << i);
+                if (!(ext_mask & bit) || (spdif_rx_enabled_ext & bit)) continue;
+                if (spdif_input_enable_acceptable(i + 1)) {
+                    spdif_rx_enabled_ext |= bit;
+                } else {
+                    printf("Bulk apply: SPDIF input %u enable rejected (pin invalid/conflict); left disabled\n",
+                           (unsigned)(i + 2));
+                }
+            }
         }
 
-        // mck_multiplier encoding: 0 = 128×, 1 = 256×.
-        i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 1) ? 256 : 128;
+        // I2S RX data pins (pair 0 + multichannel extras) and channel count,
+        // validated as a SET against the installed clock pairs so a pushed config
+        // can't bring two state machines up on one GPIO or on a clock pin.  0 =
+        // keep-live per field.  Rejected as a unit; a change restarts the input.
+        {
+            uint8_t proposed[I2S_RX_MAX_PAIRS];
+            proposed[0] = (in->input_config.i2s_rx_pin != 0)
+                              ? in->input_config.i2s_rx_pin : i2s_rx_pin[0];
+#if I2S_RX_MAX_PAIRS > 1
+            for (int p = 1; p < I2S_RX_MAX_PAIRS; p++) {
+                uint8_t pin = in->input_config.i2s_rx_pin_ext[p - 1];
+                proposed[p] = (pin != 0) ? pin : i2s_rx_pin[p];
+            }
+#endif
+            uint8_t ch = in->input_config.i2s_input_channels;
+            uint8_t count = (ch == 2 || ch == 4 || ch == 6 || ch == 8)
+                                ? ch : i2s_input_channels;
+            if (count / 2 > I2S_RX_MAX_PAIRS) count = i2s_input_channels;
+
+            if (i2s_rx_pin_set_acceptable(proposed, count / 2, i2s_bck_pin,
+                                          (i2s_clock_pin_mode == I2S_CLOCK_PIN_MODE_SPLIT)
+                                              ? i2s_bck_pin_slave : 0xFF)) {
+                bool changed = false;
+                for (int p = 0; p < I2S_RX_MAX_PAIRS; p++)
+                    if (proposed[p] != i2s_rx_pin[p]) {
+                        i2s_rx_pin[p] = proposed[p];
+                        changed = true;
+                    }
+                if (count != i2s_input_channels) {
+                    i2s_input_channels = count;
+                    changed = true;
+                }
+                if (changed && active_input_source == INPUT_SOURCE_I2S)
+                    i2s_input_restart_pending = true;
+            } else {
+                printf("Bulk apply: I2S RX pin/count config rejected (conflict); kept live\n");
+            }
+        }
+
+    }
+
+    // DAC hardware mute (V10+).  Placed after the clocks and before the ADAT
+    // claims, so its collision check sees final clocks and only the ADAT pins
+    // that are kept, and the ADAT checks below see the new mute pin.
+    // Funnel through dac_hw_mute_set_config()
+    // so validation, persistence, and pin re-claim all run consistently
+    // with the vendor-command path.  An invalid config in the payload
+    // (out-of-range pin, collision, bad timing) is silently ignored —
+    // the bulk SET dispatcher has no per-section error channel, so this
+    // matches every other section that "best-effort applies" what it
+    // can.  Bulk SETs that include a dac_hw_mute section that fails
+    // validation leave the previous config in place.
+    {
+        DacHwMuteConfig hw;
+        _Static_assert(sizeof(hw) == sizeof(in->dac_hw_mute),
+                       "WireDacHwMute and DacHwMuteConfig must match");
+        memcpy(&hw, &in->dac_hw_mute, sizeof(hw));
+        (void)dac_hw_mute_set_config(&hw);
+    }
+
+    // ADAT output configuration (V17+).  RP2350 only; RP2040 ignores the section.
+    // ADAT is a push-pull output driver, so the pin gets the full ownership
+    // check (adat_pin_acceptable).  A rejected pin falls back to the live pin,
+    // which is re-checked too (the release above may have let BCK take it).
+#if PICO_RP2350
+    {
+        uint8_t enabled = (in->adat_config.enabled != 0) ? 1 : 0;
+        uint8_t pin = (in->adat_config.pin != 0) ? in->adat_config.pin : PICO_ADAT_PIN;
+        if (!adat_pin_acceptable(pin)) {
+            printf("Bulk apply: ADAT pin %u rejected (invalid/conflict); kept %u\n",
+                   (unsigned)pin, (unsigned)adat_output_pin());
+            pin = adat_output_pin();
+            if (enabled && !adat_pin_acceptable(pin)) {
+                printf("Bulk apply: ADAT pin %u also in use; ADAT disabled\n", (unsigned)pin);
+                enabled = 0;
+            }
+        }
+        adat_output_set_config(enabled != 0, pin);
+        if (adat_output_config_enabled() == adat_out_was_en &&
+            adat_output_pin() == adat_out_was_pin)
+            adat_output_config_dirty = adat_out_was_dirty;
+    }
+#endif
+
+    // ADAT input runs after ADAT output so the loopback share sees the final
+    // output pin.
+    if (apply_pins) {
+        // ADAT input pin + enable (V24+, RP2350).  Pin: 0 = absent (keep live).
+        // Enable encoded PLUS ONE (0 absent = keep the pre-apply state, 1 off,
+        // 2 on).  Enabling needs a valid, unclaimed pin; disabling the live source
+        // is refused.  A net change while ADAT is active arms a deferred restart.
+#if PICO_RP2350
+        {
+            uint8_t pin = in->input_config.adat_input_pin;
+            if (pin != 0 && pin != adat_input_pin) {
+                if (adat_input_pin_acceptable(pin)) {
+                    adat_input_pin = pin;
+                } else {
+                    printf("Bulk apply: ADAT input pin %u rejected (invalid/conflict); kept live\n",
+                           (unsigned)pin);
+                }
+            }
+            uint8_t enc  = in->input_config.adat_input_enabled_p1;
+            uint8_t want = (enc == 2) ? 1 : (enc == 1) ? 0 : adat_in_was_en;
+            if (want && !adat_input_enabled) {
+                if (adat_input_pin != 0xFF && adat_input_pin_acceptable(adat_input_pin)) {
+                    adat_input_enabled = 1;
+                } else {
+                    printf("Bulk apply: ADAT input enable rejected (pin unset/conflict); left disabled\n");
+                }
+            } else if (!want && adat_input_enabled) {
+                if (adat_in_live) {
+                    printf("Bulk apply: ADAT input disable ignored (active source); kept enabled\n");
+                } else {
+                    adat_input_enabled = 0;
+                }
+            }
+            if ((adat_input_pin != adat_in_was_pin || adat_input_enabled != adat_in_was_en) &&
+                active_input_source == INPUT_SOURCE_ADAT)
+                adat_input_restart_pending = true;
+        }
+#endif
+    }
+
+    // EQ bands
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        for (int b = 0; b < MAX_BANDS; b++) {
+            filter_recipes[ch][b].channel = ch;
+            filter_recipes[ch][b].band = b;
+            filter_recipes[ch][b].type = in->eq[ch][b].type;
+            // Normalize at the boundary: 0xFF padding from legacy hosts
+            // must not accidentally bypass the band.
+            filter_recipes[ch][b].bypass = (in->eq[ch][b].bypass == 1) ? 1 : 0;
+            filter_recipes[ch][b].freq = in->eq[ch][b].freq;
+            filter_recipes[ch][b].Q = in->eq[ch][b].q;
+            filter_recipes[ch][b].gain_db = in->eq[ch][b].gain_db;
+            // LT target Q rides in reserved[2] (Q*512 LE); zero for non-LT types.
+            // Caller recomputes all filters after apply returns.
+            if (in->eq[ch][b].type == FILTER_LINKWITZ_TRANSFORM) {
+                peq_qp_x512[ch][b] = (uint16_t)(in->eq[ch][b].reserved[0] |
+                                                (in->eq[ch][b].reserved[1] << 8));
+            } else {
+                peq_qp_x512[ch][b] = 0;
+            }
+        }
+    }
+
+    // Channel names
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        memcpy(channel_names[ch], in->channel_names.names[ch], PRESET_NAME_LEN);
+        channel_names[ch][PRESET_NAME_LEN - 1] = '\0';  // Enforce NUL termination
     }
 
     // Volume Leveller
@@ -899,22 +938,6 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
                            sizeof(uint8_t), &mv);
     }
 
-    // DAC hardware mute (V10+).  Funnel through dac_hw_mute_set_config()
-    // so validation, persistence, and pin re-claim all run consistently
-    // with the vendor-command path.  An invalid config in the payload
-    // (out-of-range pin, collision, bad timing) is silently ignored —
-    // the bulk SET dispatcher has no per-section error channel, so this
-    // matches every other section that "best-effort applies" what it
-    // can.  Bulk SETs that include a dac_hw_mute section that fails
-    // validation leave the previous config in place.
-    {
-        DacHwMuteConfig hw;
-        _Static_assert(sizeof(hw) == sizeof(in->dac_hw_mute),
-                       "WireDacHwMute and DacHwMuteConfig must match");
-        memcpy(&hw, &in->dac_hw_mute, sizeof(hw));
-        (void)dac_hw_mute_set_config(&hw);
-    }
-
     // Crossover bands.  Output rows applied; input rows skipped (crossover is
     // output-channel-only).  Band-field is always overwritten with the wire
     // index `XOVER_BAND_BASE + i` so a stale local index in the payload cannot
@@ -932,23 +955,6 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         }
     }
     // Caller invokes dsp_recalculate_all_filters() after this returns.
-
-    // ADAT output configuration (V17+).  RP2350 only; RP2040 ignores the section.
-    // ADAT is a push-pull output driver, so the pin gets the full ownership
-    // check (adat_pin_acceptable) and a bad pin is rejected-and-kept-live.
-    // pin == 0 means the platform default.
-#if PICO_RP2350
-    {
-        uint8_t enabled = (in->adat_config.enabled != 0) ? 1 : 0;
-        uint8_t pin = (in->adat_config.pin != 0) ? in->adat_config.pin : PICO_ADAT_PIN;
-        if (!adat_pin_acceptable(pin)) {
-            printf("Bulk apply: ADAT pin %u rejected (invalid/conflict); kept %u\n",
-                   (unsigned)pin, (unsigned)adat_output_pin());
-            pin = adat_output_pin();
-        }
-        adat_output_set_config(enabled != 0, pin);
-    }
-#endif
 
     // Psychoacoustic bass (V23+).  One global config copied straight in; the
     // main loop recomputes coefficients from the raised pending flag, mirroring

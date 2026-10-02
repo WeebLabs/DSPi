@@ -313,6 +313,10 @@ bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
 // vendor_commands.c; declared here for the same reason as above.
 bool i2s_bck_pin_acceptable(uint8_t bck_pin);
 
+// True if a restored, enabled MCK may drive `pin` (no other fixed-peripheral
+// owner; MCK's own claim ignored).  Defined in vendor_commands.c.
+bool i2s_mck_pin_acceptable(uint8_t pin);
+
 // True if SPDIF input `idx` (1..SPDIF_RX_NUM_INPUTS-1) could be enabled right now: its configured
 // GPIO is valid and not claimed by any other function.  Defined in
 // vendor_commands.c (alongside the other pin helpers); declared here so the

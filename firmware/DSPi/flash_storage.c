@@ -3143,12 +3143,90 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
     }
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) output_types[i] = cfg->output_types[i];
-    // Validate the stored/restored BCK before installing it raw (see
-    // i2s_bck_pin_acceptable): BCK/LRCLK are clock OUTPUTS, so an invalid GPIO
-    // can fault pio_gpio_init() and a collision with an output pin is driver
-    // contention.  Output pins are applied above, so the conflict check sees the
-    // final config; keep the live (known-valid) pin on failure.  The RX set
-    // below is validated against whatever BCK ends up installed.
+
+    // SPDIF RX pin (reject 0 = "absent"; hot-swap if it changed while RX active).
+    if (cfg->spdif_rx_pin != 0 && io_pin_valid(cfg->spdif_rx_pin) &&
+        cfg->spdif_rx_pin != spdif_rx_pin) {
+        spdif_rx_pin = cfg->spdif_rx_pin;
+        if (input_source_is_spdif(active_input_source) &&
+            spdif_index_for_source(active_input_source) == 0)
+            spdif_rx_pin_change_pending = true;
+    }
+
+    // Optional SPDIF inputs 2..4: pins first (0 = unset, platform default),
+    // then disables.  Enables wait until after BCK, since their conflict check
+    // includes the clock pairs while I2S is in use.
+    for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
+        uint8_t dflt = spdif_rx_pin_default_for_index((uint8_t)(i + 1));
+        uint8_t stored = cfg_spdif_ext_pin_get(cfg, i);
+        uint8_t pin = stored ? stored : dflt;
+        if (!io_pin_valid(pin)) pin = dflt;
+        if (pin != spdif_rx_pin_ext[i]) {
+            spdif_rx_pin_ext[i] = pin;
+            if (input_source_is_spdif(active_input_source) &&
+                spdif_index_for_source(active_input_source) == (uint8_t)(i + 1))
+                spdif_rx_pin_change_pending = true;
+        }
+    }
+    const uint8_t want_ext = cfg->spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
+    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++) {
+        uint8_t bit = (uint8_t)(1u << (i - 1));
+        if ((want_ext & bit) || !spdif_input_enabled(i)) continue;
+        if (input_source_is_spdif(active_input_source) &&
+            spdif_index_for_source(active_input_source) == i) {
+            printf("io_config: SPDIF input %u kept enabled (active source)\n",
+                   (unsigned)(i + 1));
+            continue;   // never disable the live input
+        }
+        spdif_rx_enabled_ext &= (uint8_t)~bit;
+    }
+
+#if PICO_RP2350
+    // Release ADAT claims this cfg drops or moves, so MCK and BCK are not judged
+    // against them; the ADAT blocks at the end re-claim against the final clocks.
+    // The snapshots keep a net no-op from dirtying or restarting ADAT.
+    const bool    adat_out_was_en    = adat_output_config_enabled();
+    const uint8_t adat_out_was_pin   = adat_output_pin();
+    const bool    adat_out_was_dirty = adat_output_config_dirty;
+    const uint8_t adat_in_was_pin    = adat_input_pin;
+    const uint8_t adat_in_was_en     = adat_input_enabled;
+    const bool    adat_in_live = (active_input_source == INPUT_SOURCE_ADAT ||
+                                  (input_source_change_pending &&
+                                   pending_input_source == INPUT_SOURCE_ADAT));
+    {
+        uint8_t want_pin = cfg->adat_pin ? cfg->adat_pin : PICO_ADAT_PIN;
+        if (adat_out_was_en && !(cfg->adat_enabled && want_pin == adat_out_was_pin))
+            adat_output_set_config(false, adat_out_was_pin);
+        if (adat_in_was_en && !adat_in_live &&
+            !(cfg->adat_input_enabled && cfg->adat_input_pin == adat_in_was_pin))
+            adat_input_enabled = 0;
+    }
+#endif
+
+    // MCK pin must map to clk_gpoutN on this platform (see the V9 apply note);
+    // otherwise reset to default and force MCK off so the change is visible.
+    // An enabled MCK on a pin another fixed peripheral owns is forced off too.
+    if (GPIO_TO_GPOUT_CLOCK_HANDLE(cfg->i2s_mck_pin, clk_sys) == clk_sys) {
+        printf("Output-config MCK pin %u not GPOUT-capable on this platform; "
+               "resetting to default %u and disabling MCK\n",
+               (unsigned)cfg->i2s_mck_pin, (unsigned)PICO_I2S_MCK_PIN);
+        i2s_mck_pin = PICO_I2S_MCK_PIN;
+        i2s_mck_enabled = false;
+    } else {
+        bool en = (cfg->i2s_mck_enabled != 0);
+        if (en && !i2s_mck_pin_acceptable(cfg->i2s_mck_pin)) {
+            printf("io_config: MCK pin %u in use; MCK disabled\n",
+                   (unsigned)cfg->i2s_mck_pin);
+            en = false;
+        }
+        i2s_mck_pin = cfg->i2s_mck_pin;
+        i2s_mck_enabled = en;
+    }
+    i2s_mck_multiplier = (cfg->i2s_mck_multiplier == 1) ? 256 : 128;
+
+    // BCK/LRCLK are clock outputs, so validate before installing.  The check reads
+    // live globals: a cfg pin it covers that is installed below is judged at its
+    // stale value (the compile-time default at boot) and can falsely reject BCK.
     if (i2s_bck_pin_acceptable(cfg->i2s_bck_pin)) {
         i2s_bck_pin = cfg->i2s_bck_pin;
     } else {
@@ -3176,69 +3254,16 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
         }
     }
 
-    // MCK pin must map to clk_gpoutN on this platform (see the V9 apply note);
-    // otherwise reset to default and force MCK off so the change is visible.
-    if (GPIO_TO_GPOUT_CLOCK_HANDLE(cfg->i2s_mck_pin, clk_sys) == clk_sys) {
-        printf("Output-config MCK pin %u not GPOUT-capable on this platform; "
-               "resetting to default %u and disabling MCK\n",
-               (unsigned)cfg->i2s_mck_pin, (unsigned)PICO_I2S_MCK_PIN);
-        i2s_mck_pin = PICO_I2S_MCK_PIN;
-        i2s_mck_enabled = false;
-    } else {
-        i2s_mck_pin = cfg->i2s_mck_pin;
-        i2s_mck_enabled = (cfg->i2s_mck_enabled != 0);
-    }
-    i2s_mck_multiplier = (cfg->i2s_mck_multiplier == 1) ? 256 : 128;
-
-    // SPDIF RX pin (reject 0 = "absent"; hot-swap if it changed while RX active).
-    if (cfg->spdif_rx_pin != 0 && io_pin_valid(cfg->spdif_rx_pin) &&
-        cfg->spdif_rx_pin != spdif_rx_pin) {
-        spdif_rx_pin = cfg->spdif_rx_pin;
-        if (input_source_is_spdif(active_input_source) &&
-            spdif_index_for_source(active_input_source) == 0)
-            spdif_rx_pin_change_pending = true;
-    }
-
-    // Optional SPDIF inputs 2..4: pins first (0 = unset, platform default),
-    // then the enable mask, so a stored pin+enable pair is validated against
-    // the pin it arrives with.  A disabled input's pin is only a stored
-    // preference; enabling is what must pass the conflict check.
-    {
-        for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-            uint8_t dflt = spdif_rx_pin_default_for_index((uint8_t)(i + 1));
-            uint8_t stored = cfg_spdif_ext_pin_get(cfg, i);
-            uint8_t pin = stored ? stored : dflt;
-            if (!io_pin_valid(pin)) pin = dflt;
-            if (pin != spdif_rx_pin_ext[i]) {
-                spdif_rx_pin_ext[i] = pin;
-                if (input_source_is_spdif(active_input_source) &&
-                    spdif_index_for_source(active_input_source) == (uint8_t)(i + 1))
-                    spdif_rx_pin_change_pending = true;
-            }
-        }
-        // Two passes (disables, then enables) so a stored config that moves an
-        // enable from one input to another's old pin still validates cleanly.
-        uint8_t want = cfg->spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
-        for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++) {
-            uint8_t bit = (uint8_t)(1u << (i - 1));
-            if ((want & bit) || !spdif_input_enabled(i)) continue;
-            if (input_source_is_spdif(active_input_source) &&
-                spdif_index_for_source(active_input_source) == i) {
-                printf("io_config: SPDIF input %u kept enabled (active source)\n",
-                       (unsigned)(i + 1));
-                continue;   // never disable the live input
-            }
-            spdif_rx_enabled_ext &= (uint8_t)~bit;
-        }
-        for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++) {
-            uint8_t bit = (uint8_t)(1u << (i - 1));
-            if (!(want & bit) || spdif_input_enabled(i)) continue;
-            if (spdif_input_enable_acceptable(i)) {
-                spdif_rx_enabled_ext |= bit;
-            } else {
-                printf("io_config: SPDIF input %u enable rejected (pin %u in use)\n",
-                       (unsigned)(i + 1), (unsigned)spdif_rx_pin_for_index(i));
-            }
+    // Optional SPDIF input enables: after BCK and the slave pair, so the
+    // conflict check sees the final clock pins.  Disables ran above.
+    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++) {
+        uint8_t bit = (uint8_t)(1u << (i - 1));
+        if (!(want_ext & bit) || spdif_input_enabled(i)) continue;
+        if (spdif_input_enable_acceptable(i)) {
+            spdif_rx_enabled_ext |= bit;
+        } else {
+            printf("io_config: SPDIF input %u enable rejected (pin %u in use)\n",
+                   (unsigned)(i + 1), (unsigned)spdif_rx_pin_for_index(i));
         }
     }
 
@@ -3330,6 +3355,9 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
             pin_ok = adat_pin_acceptable(pin);
         }
         adat_output_set_config(cfg->adat_enabled != 0 && pin_ok, pin);
+        if (adat_output_config_enabled() == adat_out_was_en &&
+            adat_output_pin() == adat_out_was_pin)
+            adat_output_config_dirty = adat_out_was_dirty;
     }
 #endif
 
@@ -3347,17 +3375,20 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
             printf("io_config: ADAT input pin %u rejected (invalid/conflict); unset\n",
                    (unsigned)pin);
             pin = 0xFF;
+        } else if (pin != 0xFF && en && !adat_input_enabled &&
+                   !adat_input_pin_acceptable(pin)) {
+            // Unchanged pin being newly enabled: keep the pin, leave input off.
+            printf("io_config: ADAT input pin %u in use; input left disabled\n",
+                   (unsigned)pin);
+            en = 0;
         }
         if (pin == 0xFF) en = 0;   // no valid pin -> cannot be enabled
-        if (en == 0 && adat_input_enabled &&
-            (active_input_source == INPUT_SOURCE_ADAT ||
-             (input_source_change_pending &&
-              pending_input_source == INPUT_SOURCE_ADAT))) {
+        if (en == 0 && adat_input_enabled && adat_in_live) {
             printf("io_config: ADAT input kept enabled (active source)\n");
             pin = adat_input_pin;
             en  = 1;
         }
-        bool changed = (pin != adat_input_pin) || (en != adat_input_enabled);
+        bool changed = (pin != adat_in_was_pin) || (en != adat_in_was_en);
         adat_input_pin     = pin;
         adat_input_enabled = en;
         if (changed && active_input_source == INPUT_SOURCE_ADAT)

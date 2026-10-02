@@ -274,7 +274,7 @@ All lifecycle helpers early-exit (treating the hold as already elapsed) if the f
 `dac_hw_mute_set_config()` validates:
 
 - Each non-`PIN_NONE` pin is in the platform's valid GPIO range.
-- No pin collides with: S/PDIF TX (`output_pins[]`), I²S BCK / LRCLK, I²S MCK, PDM, S/PDIF RX (`spdif_rx_pin`).
+- No pin collides with: S/PDIF TX (`output_pins[]`), I²S BCK / LRCLK, I²S MCK, PDM, S/PDIF RX (`spdif_rx_pin`). On RP2350 it also may not collide with an enabled ADAT output or ADAT input pin (added 2026-10-02).
 - No duplicate pins within the config itself.
 - `hold_ms` ∈ [1, 500]; `release_ms` ∈ [0, 500].
 

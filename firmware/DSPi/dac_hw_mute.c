@@ -61,7 +61,8 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "audio_input.h"       /* spdif_rx_pin(_ext), spdif_input_enabled */
+#include "audio_input.h"       /* spdif_rx_pin(_ext), spdif_input_enabled, adat_input_* */
+#include "adat_output.h"       /* adat_output_config_enabled, adat_output_pin */
 
 /* External pin-conflict state lives in vendor_commands.c / usb_audio.c.
  * Imported here only for validation; we never write these. */
@@ -174,6 +175,11 @@ static bool collides_with_other_subsystem(uint8_t pin) {
         if (spdif_input_enabled(i) && pin == spdif_rx_pin_for_index(i)) return true;
     /* Live UART / I2C control interface pins */
     if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return true;
+#if PICO_RP2350
+    /* ADAT output and input, only while enabled */
+    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
+    if (adat_input_enabled && pin == adat_input_pin) return true;
+#endif
     return false;
 }
 

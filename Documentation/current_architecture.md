@@ -2083,6 +2083,38 @@ Vendor commands `REQ_SET_OUTPUT_PIN` (0x7C) / `REQ_GET_OUTPUT_PIN` (0x7D).
 
 **PDM:** Applied inline (must be disabled first; rebuilds PIO config). PDM has no running audio to realign at change time, so it needs no deferral or synchronized restart.
 
+### Restore Order in `io_config_apply()` and `bulk_params_apply()`
+*Last updated: 2026-10-02*
+
+`io_config_apply()` (flash_storage.c) installs a stored `FlashOutputConfig` into the live pin globals at boot and on preset loads. `bulk_params_apply()` (bulk_params.c) does the same for a pushed `WireBulkParams`. Apart from the DAC hardware-mute GPIO claim in the bulk path, which is unrelated to the output slots, both only set globals. The audio hardware is rebuilt later in the normal pipeline-reset bracket, so the install order has no effect on slot timing.
+
+The install order does matter for validation. Each pin check (`i2s_mck_pin_acceptable()`, `i2s_bck_pin_acceptable()`, `spdif_input_enable_acceptable()`, the I2S RX set check, the DAC-mute collision check, the ADAT checks) compares the incoming pin against whatever is live at that moment. A field that has not been installed yet still holds its previous value, which at boot is the compile-time default. Both paths therefore install or release pins first, then the I2S clocks, then the claims that check against the clocks.
+
+1. Output pins. The flash path also installs output types here.
+2. SPDIF RX pin 1, the optional SPDIF input 2..4 pins, and the optional-input disable pass.
+3. ADAT release (RP2350). An enabled ADAT output or input that the incoming config disables or moves is switched off, so later checks are not judged against its old pin. The live ADAT input source is never released. Snapshots taken here let the ADAT claims restore `adat_output_config_dirty` and skip the ADAT input restart when the net result is unchanged.
+4. MCK pin, enable and multiplier. The bulk path installs output types first. A non-GPOUT pin falls back to the default with MCK off. An enabled MCK on a pin another fixed peripheral owns is forced off.
+5. Master BCK/LRCLK, then clock-pin mode and the slave BCK pair.
+6. The optional-input enable pass, then the I2S RX data pins and channel count.
+7. Bulk path only: the DAC hardware mute. Its collision check sees the final clocks, and only the ADAT pins that were kept.
+8. ADAT output claim, then ADAT input claim (RP2350). Output goes first so the loopback share (ADAT input may sit on an enabled ADAT output's pin) sees the final output pin. A rejected ADAT output pin falls back to an acceptable pin or ADAT output is disabled. An ADAT input being newly enabled on its unchanged stored pin is checked too; on conflict, the flash path leaves it off and keeps the pin.
+
+With one exception, each pair of claims is checked by whichever claim is installed second. For example, MCK against BCK is caught by the BCK check, BCK against an ADAT pin by the ADAT check, and the DAC mute against ADAT by the DAC-mute check. The exception is the clock pairs. Steps 6 to 8 check against them through `is_pin_in_use()`, which reserves BCK/LRCLK and the slave pair only while an I2S output or I2S input is active. A restore can therefore place an optional SPDIF input, ADAT pin or DAC mute on an idle clock pin, exactly as the live vendor commands allow. Only the I2S RX data pins, and MCK through the later BCK check, are always checked against the clock pairs.
+
+In `bulk_params_apply()`, the SPDIF steps, the ADAT input release and claim, and the I2S RX step run only when `apply_pins` is true. Output types, MCK, BCK, clock-pin mode, the slave pair, the DAC mute and ADAT output run on every push, as they did before the reorder.
+
+Before this order was established, the flash path checked BCK before installing SPDIF RX and MCK. At boot the BCK check then saw SPDIF RX on its default GPIO 5. A saved BCK of GPIO 4 (LRCLK 5) was rejected on every power-up and fell back to GPIO 14, even when the saved config had moved SPDIF RX elsewhere. Any new pin field added to either path must be installed before every check that reads it.
+
+**Known residuals.**
+- A rejected BCK, slave pair or RX set falls back to the live value, and that value is not re-checked against the newly installed pins.
+- An optional SPDIF input that stays enabled while its pin moves is not re-checked.
+- In the bulk path, the MCK and BCK checks still see the old DAC-mute pin, so a payload that moves the mute off a pin while moving MCK or BCK onto it is falsely rejected.
+- `REQ_SET_OUTPUT_TYPE` does not check the clock pins when it turns an idle pair into a driven one.
+
+**MCK enable.** MCK claims its pin only while enabled, so another function can take `i2s_mck_pin` while MCK is off. `REQ_SET_MCK_ENABLE` (0xC4) therefore checks `is_pin_in_use()` before enabling, and on a conflict returns PIN_IN_USE with MCK left off. Like `REQ_SET_MCK_PIN`, it reserves the clock pairs only while I2S is active. The restore paths use `i2s_mck_pin_acceptable()` instead, and rely on the later BCK check for the clock pair.
+
+**ADAT loopback share.** `adat_input_pin_acceptable()` lets ADAT input share the ADAT output pin only while ADAT output is enabled. A disabled output's stored pin gets the normal ownership check.
+
 ---
 
 ## Core 1 Architecture
@@ -3687,7 +3719,7 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+*Last updated: 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -3884,7 +3916,7 @@ lands on a hot path and the audio path is untouched.
 | GET_OUTPUT_TYPE | 0xC1 | IN | Get output slot type |
 | SET_I2S_BCK_PIN | 0xC2 | OUT | Set an I2S BCK pin (LRCLK = BCK + 1). `wValue = (role << 8) | GPIO`: role 0 = master/unified pair (legacy hosts send role 0 implicitly), role 1 = slave pair (`i2s_bck_pin_slave`, meaningful in SPLIT clock-pin mode; storable any time). Rejects with OUTPUT_ACTIVE while I2S output slots run on the pair being moved, PIN_IN_USE on overlap/collision, INVALID_OUTPUT for role > 1. The two pairs are kept mutually distinct. GPIO 0xFF = reset the addressed role's pair to its default. |
 | GET_I2S_BCK_PIN | 0xC3 | IN | Get an I2S BCK pin. `wValue = role` (0 = master/unified pair, 1 = slave pair; invalid role returns 0) |
-| SET_MCK_ENABLE | 0xC4 | OUT | Set MCK enable |
+| SET_MCK_ENABLE | 0xC4 | OUT | Set MCK enable. Returns `PIN_CONFIG_*`: enabling returns PIN_IN_USE (MCK stays off) if another function claimed `i2s_mck_pin` while MCK was disabled. |
 | GET_MCK_ENABLE | 0xC5 | IN | Get MCK enable |
 | SET_MCK_PIN | 0xC6 | OUT | Set MCK pin (0xFF = reset to platform default) |
 | GET_MCK_PIN | 0xC7 | IN | Get MCK pin |
