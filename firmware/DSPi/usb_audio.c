@@ -450,10 +450,9 @@ volatile uint64_t start_time_us = 0;
 volatile bool sync_started = false;
 static volatile uint64_t last_packet_time_us = 0;
 static volatile uint8_t usb_input_bit_depth = 16;
-// Active USB input channel count: 2 for the stereo alts (1/2), or 4/6/8 for the
-// RP2350-only multichannel alts (3/4/5).  Read by the audio pipeline to size the
-// per-input EQ + metering and the matrix, and to bypass the stereo master chain
-// in multichannel mode.  Always 2 on RP2040 (no multichannel alts advertised).
+// Active USB input channel count: 2 (stereo alts 1/2) or 4/6/8
+// (RP2350 alts 3..6). Used by the input-agnostic audio pipeline to
+// select the number of active input channels. Always 2 on RP2040.
 volatile uint8_t usb_input_channels = 2;
 #define AUDIO_GAP_THRESHOLD_US 50000  // 50ms - reset sync if packets stop this long
 
@@ -560,6 +559,63 @@ void audio_thaw_host_volume(void) {
     update_user_volume((float)uac1_host_volume / 256.0f);
 }
 
+#if PICO_RP2350
+// Alias-safe 32-bit view of the byte-backed USB ring slots.
+typedef uint32_t usb_s24_word_t __attribute__((may_alias));
+
+// Unpack four consecutive packed little-endian signed 24-bit PCM samples.
+// 12 input bytes -> four float samples. The caller assigns channel meaning:
+// stereo = L0,R0,L1,R1; 4ch = C0,C1,C2,C3.
+// `in` must be 4-byte aligned; USB ring slots and 12-byte strides guarantee it.
+static inline __attribute__((always_inline))
+void unpack_s24x4(const usb_s24_word_t *in,
+                  float *s0, float *s1, float *s2, float *s3) {
+    int32_t i0 = (int32_t)in[0];
+    int32_t i1 = (int32_t)in[1];
+    int32_t i2 = (int32_t)in[2];
+    int32_t temp;
+    float f0, f1, f2, f3;
+
+    __asm__ volatile (
+        "sbfx %[TEMP], %[I0], #0, #24\n\t"
+        "vmov %[S0], %[TEMP]\n\t"
+        "vcvt.f32.s32 %[S0], %[S0]\n\t"
+
+        "sxth %[TEMP], %[I1]\n\t"
+        "lsl %[TEMP], %[TEMP], #8\n\t"
+        "asr %[I0], %[I0], #24\n\t"
+        "bfi %[TEMP], %[I0], #0, #8\n\t"
+        "vmov %[S1], %[TEMP]\n\t"
+        "vcvt.f32.s32 %[S1], %[S1]\n\t"
+
+        "asr %[TEMP], %[I1], #8\n\t"
+        "bfi %[TEMP], %[I2], #24, #8\n\t"
+        "asr %[TEMP], %[TEMP], #8\n\t"
+        "vmov %[S2], %[TEMP]\n\t"
+        "vcvt.f32.s32 %[S2], %[S2]\n\t"
+
+        "asr %[TEMP], %[I2], #8\n\t"
+        "vmov %[S3], %[TEMP]\n\t"
+        "vcvt.f32.s32 %[S3], %[S3]\n\t"
+
+        : [S0] "=w" (f0),
+          [S1] "=w" (f1),
+          [S2] "=w" (f2),
+          [S3] "=w" (f3),
+          [TEMP] "=&r" (temp),
+          [I0] "+&r" (i0)
+        : [I1] "r" (i1),
+          [I2] "r" (i2)
+    );
+
+    *s0 = f0;
+    *s1 = f1;
+    *s2 = f2;
+    *s3 = f3;
+}
+#endif
+
+
 // ----------------------------------------------------------------------------
 // USB-specific wrapper: byte decode + gap detection, then pipeline
 // (process_input_block is in audio_pipeline.c)
@@ -568,10 +624,18 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // USB format snapshot
     const uint8_t bit_depth = usb_input_bit_depth;  // snapshot once — avoid double-read of volatile
     const uint8_t channels  = usb_input_channels;   // 2 (stereo alts) or 4/6/8 (multichannel alts)
-    // Multichannel alts are always 16-bit; stereo alts are 16- or 24-bit.
-    uint32_t bytes_per_frame = (channels > NUM_STEREO_INPUTS)
-                                   ? (uint32_t)channels * 2
-                                   : (bit_depth == 24) ? 6 : 4;
+
+#if PICO_RP2350
+    // The only advertised 24-bit formats are stereo and 4-channel.
+    // Reject any future/invalid combination before touching stream state.
+    if (bit_depth == 24 &&
+        channels != NUM_STEREO_INPUTS &&
+        channels != 4) {
+        return;
+    }
+#endif
+
+    uint32_t bytes_per_frame = (uint32_t)channels * (bit_depth / 8u);
     uint32_t sample_count = data_len / bytes_per_frame;
     // Clamp to the fixed decode-buffer depth.  The iso OUT EP is armed for
     // AUDIO_EP_MAX_PKT (788 on RP2350 to fit 8-channel frames); a conformant
@@ -602,12 +666,66 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
     // PASS 1: USB byte decode → buf_l/buf_r + preamp
 #if PICO_RP2350
     {
-        if (channels > NUM_STEREO_INPUTS) {
-            // Multichannel USB input (4/6/8 ch, 48 kHz / 16-bit).  Frame layout
+        if (bit_depth == 24) {
+            const usb_s24_word_t *in = (const usb_s24_word_t *)data;
+            const float inv_8388608 = 1.0f / 8388608.0f;
+
+            if (channels == 4) {
+                // One 4-channel S24 frame is exactly 12 bytes, matching one
+                // unpack_s24x4() operation.
+                const float gain0 = inv_8388608 * global_preamp_linear[0];
+                const float gain1 = inv_8388608 * global_preamp_linear[1];
+                const float gain2 = inv_8388608 * global_preamp_linear[2];
+                const float gain3 = inv_8388608 * global_preamp_linear[3];
+
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    float s0, s1, s2, s3;
+                    unpack_s24x4(in, &s0, &s1, &s2, &s3);
+                    in += 3;  // 3 x 32-bit = 12 bytes
+
+                    buf_l[i]         = s0 * gain0;
+                    buf_r[i]         = s1 * gain1;
+                    buf_in_ext[0][i] = s2 * gain2;
+                    buf_in_ext[1][i] = s3 * gain3;
+                }
+            } else {
+                // Stereo: each 12-byte unpack contains two L/R frames.
+                const float gain_l = inv_8388608 * global_preamp_linear[0];
+                const float gain_r = inv_8388608 * global_preamp_linear[1];
+                uint32_t i = 0;
+
+                for (; i + 1 < sample_count; i += 2) {
+                    float s0, s1, s2, s3;
+                    unpack_s24x4(in, &s0, &s1, &s2, &s3);
+                    in += 3;
+
+                    buf_l[i]     = s0 * gain_l;
+                    buf_r[i]     = s1 * gain_r;
+                    buf_l[i + 1] = s2 * gain_l;
+                    buf_r[i + 1] = s3 * gain_r;
+                }
+
+                // A stereo USB packet can contain an odd number of frames.
+                // Decode the final 6 bytes without reading past the packet.
+                if (i < sample_count) {
+                    const uint8_t *p = (const uint8_t *)in;
+                    uint32_t raw_l = (uint32_t)p[0]
+                                   | ((uint32_t)p[1] << 8)
+                                   | ((uint32_t)p[2] << 16);
+                    uint32_t raw_r = (uint32_t)p[3]
+                                   | ((uint32_t)p[4] << 8)
+                                   | ((uint32_t)p[5] << 16);
+                    int32_t sample_l = (int32_t)(raw_l ^ 0x800000u) - 0x800000;
+                    int32_t sample_r = (int32_t)(raw_r ^ 0x800000u) - 0x800000;
+
+                    buf_l[i] = (float)sample_l * gain_l;
+                    buf_r[i] = (float)sample_r * gain_r;
+                }
+            }
+        } else if (channels > NUM_STEREO_INPUTS) {
+            // Multichannel USB input (4/6/8 ch, 48 kHz / 16-bit). Frame layout
             // is c0,c1,...,c(N-1) interleaved (stride = channels); channels 0/1
-            // land in buf_l/buf_r (the shared stereo bus), channels 2..N-1 in
-            // buf_in_ext.  Per-channel preamp applied here; the stereo master
-            // chain is bypassed downstream (process_input_block multichannel).
+            // land in buf_l/buf_r, channels 2..N-1 in buf_in_ext.
             const int16_t *in = (const int16_t *)data;
             const float inv_32768 = 1.0f / 32768.0f;
             float gain[NUM_INPUT_CHANNELS];
@@ -620,93 +738,6 @@ static void __not_in_flash_func(process_audio_packet)(const uint8_t *data, uint1
                 for (int c = NUM_STEREO_INPUTS; c < channels; c++)
                     buf_in_ext[c - NUM_STEREO_INPUTS][i] =
                         (float)frame[c] * gain[c];
-            }
-        } else if (bit_depth == 24) {
-            //     input 32 bit word to 24 bit output packing
-            //        in0     in1      in2
-            //     +-------+-------+-------+
-            //       (beware of l-endian)
-            //     +-----+-----+-----+-----+
-            //        l1    r1    l2    r2
-
-            const uint32_t *in = (const uint32_t *)data;
-            float *out_l = &buf_l[0], *out_r = &buf_r[0];
-            const float inv_8388608 = 1.0f / 8388608.0f;
-            const float gain_l = inv_8388608 * global_preamp_linear[0];
-            const float gain_r = inv_8388608 * global_preamp_linear[1];
-
-            //unpack 3 32bit words into 4 24 bit l,r,l,r samples
-            for (uint32_t i = 0; i < sample_count/2; i++) {
-                int32_t i0 = *in++;
-                int32_t i1 = *in++;
-                int32_t i2 = *in++;
-                int32_t temp;
-                float l1, l2, r1, r2;
-
-                __asm__ volatile (
-                    "sbfx %[TEMP], %[I0], #0, #24\n\t"  //sign extend i0[23:0] to 32 bits
-                    "vmov %[L1], %4\n\t"
-                    "vcvt.f32.s32 %[L1], %[L1]\n\t"     // l1 result
-
-                    "sxth %[TEMP], %[I1]\n\t"           // extract and sign extend halfword i1[15:0]
-                    "lsl %[TEMP], %[TEMP], #8\n\t"      // shift left 8 bits
-                    "asr %[I0], %[I0], #24\n\t"         // shift i0 right 24 bits
-                    "bfi %[TEMP], %[I0], #0, #8\n\t"    // insert i0[7:0] into temp[7:0]
-                    "vmov %[R1], %[TEMP]\n\t"
-                    "vcvt.f32.s32 %[R1], %[R1]\n\t"     // r1 result
-
-                    "asr %[TEMP], %[I1], #8\n\t"        // arithmetic shift right 8 bits i1
-                    "bfi %[TEMP], %[I2], #24, #8\n\t"   // copy 8 lsb of i2 into temp[31:24]
-                    "asr %[TEMP], %[TEMP], #8\n\t"      // arithmetic shift right temp left 8
-                    "vmov %[L2], %[TEMP]\n\t"
-                    "vcvt.f32.s32 %[L2], %[L2]\n\t"     // l2 result
-
-                    "asr %[TEMP], %[I2], #8\n\t"        // arithmetic shift right i2[31:8] by 8 into temp
-                    "vmov %[R2], %[TEMP]\n\t"
-                    "vcvt.f32.s32 %[R2], %[R2]\n\t"     // r2 result
-
-                    : [L1] "=w" (l1),
-                    [R1] "=w" (r1),
-                    [L2] "=w" (l2),
-                    [R2] "=w" (r2),
-                    [TEMP] "=&r" (temp)
-                    : [I0] "r" (i0),
-                    [I1] "r" (i1),
-                    [I2] "r" (i2)
-                );
-
-                *out_l++ = l1 * gain_l;
-                *out_l++ = l2 * gain_l;
-                *out_r++ = r1 * gain_r;
-                *out_r++ = r2 * gain_r;
-            }
-            //if sample count is not divisible by 2 pick up the remaining l,r sample
-            if(sample_count % 2) {
-                int32_t i0 = *in++;
-                int32_t i1 = *in++;
-                int32_t temp;
-                float l1, r1;
-
-                __asm__ volatile (
-                    "sbfx %[TEMP], %[I0], #0, #24\n\t"  //sign extend i0[23:0] to 32 bits
-                    "vmov %[L1], %[TEMP]\n\t"
-                    "vcvt.f32.s32 %[L1], %[L1]\n\t"     // l1 result
-
-                    "sxth %[TEMP], %[I1]\n\t"           // extract and sign extend halfword i1[15:0]
-                    "lsl %[TEMP], %[TEMP], #8\n\t"      // shift left 8 bits
-                    "asr %[I0], %[I0], #24\n\t"         // shift i0 right 24 bits
-                    "bfi %[TEMP], %[I0], #0, #8\n\t"    // insert i0[7:0] into temp[7:0]
-                    "vmov %[R1], %[TEMP]\n\t"
-                    "vcvt.f32.s32 %[R1], %[R1]\n\t"     // r1 result
-
-                    : [L1] "=w" (l1),
-                    [R1] "=w" (r1),
-                    [TEMP] "=&r" (temp)
-                    : [I0] "r" (i0),
-                    [I1] "r" (i1)
-                );
-                *out_l++ = l1 * gain_l;
-                *out_r++ = r1 * gain_r;
             }
         } else {
             const int16_t *in = (const int16_t *)data;
@@ -812,7 +843,7 @@ static struct {
     uint8_t ac_itf;
     uint8_t as_itf;
     uint8_t vendor_itf;      // 0xFF = not claimed
-    uint8_t cur_alt;         // Current AS alt setting (0, 1, or 2)
+    uint8_t cur_alt;         // Current AS alt setting (0..6 on RP2350, 0..2 on RP2040)
     bool    ep_data_open;
     bool    ep_fb_open;
     bool    notify_ep_open;  // Interrupt IN EP 0x83 on the vendor interface
@@ -949,7 +980,7 @@ static uint16_t uac1_driver_open(uint8_t rhport, tusb_desc_interface_t const *it
         p_desc += tu_desc_len(p_desc);
     }
 
-    // Walk all AS alt settings (0, 1, 2) and their endpoints.
+    // Walk all AS alt settings and their endpoints.
     // Reserve worst-case DPRAM for the data OUT and feedback IN endpoints.
 #ifdef TUP_DCD_EDPT_ISO_ALLOC
     bool allocated_out = false;
@@ -1015,10 +1046,10 @@ static inline void uac1_arm_feedback(uint8_t rhport) {
     usbd_edpt_xfer(rhport, AUDIO_IN_ENDPOINT, ep_fb_buf, 3);
 }
 
-// Open isochronous endpoints for the specified alt (1..5 on RP2350, 1..2 else).
+// Open isochronous endpoints for the specified alt (1..6 on RP2350, 1..2 else).
 static bool uac1_open_stream_eps(uint8_t rhport, uint8_t alt) {
 #if PICO_RP2350
-    if (alt < 1 || alt > 5) return false;   // alts 3/4/5 = 4/6/8-channel input
+    if (alt < 1 || alt > 6) return false;   // alts 3..6 = multichannel input
 #else
     if (alt != 1 && alt != 2) return false;
 #endif
@@ -1146,10 +1177,10 @@ static void uac1_close_stream_eps(uint8_t rhport) {
 }
 
 // Apply a new AS alt setting.  Alts: 0 = zero-bw; 1 = 2ch/16; 2 = 2ch/24;
-// and (RP2350 only) 3 = 4ch, 4 = 6ch, 5 = 8ch (all 48 kHz / 16-bit).
+// and (RP2350 only) 3/4/5 = 4/6/8ch 16-bit, 6 = 4ch 24-bit (all 48 kHz).
 static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
 #if PICO_RP2350
-    if (alt > 5) return false;   // alts 3/4/5 = 4/6/8-channel input (RP2350 only)
+    if (alt > 6) return false;   // alts 3..6 = multichannel input (RP2350 only)
 #else
     if (alt > 2) return false;
 #endif
@@ -1161,11 +1192,12 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
     // pause in the stream and a risk of DCD state desync — bail early.
     if (alt == prev_alt) return true;
 
-    uint8_t  new_bit_depth = (alt == 2) ? 24 : 16;  // only alt 2 is 24-bit
+    uint8_t  new_bit_depth = (alt == 2 || alt == 6) ? 24 : 16;
     uint8_t  new_channels;
     switch (alt) {
 #if PICO_RP2350
-        case 3:  new_channels = 4; break;
+        case 3:
+        case 6:  new_channels = 4; break;
         case 4:  new_channels = 6; break;
         case 5:  new_channels = 8; break;
 #endif

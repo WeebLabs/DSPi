@@ -1,12 +1,12 @@
 # Multichannel USB Input — App Developer Integration Guide
 
-*Last updated: 2026-06-25*
+*Last updated: 2026-09-17*
 
 > **Updated for the unified channel model (firmware wire V16 / slot V21).** Three things
 > changed from the original 8-channel-only design and supersede older framing anywhere in this
 > guide:
 > 1. **Inputs are 2 / 4 / 6 / 8** (RP2350), selected by the host audio format (USB alt). Not just
->    2-or-8. All multichannel formats are 48 kHz / 16-bit.
+>    2-or-8. All multichannel formats are 48 kHz; 4ch supports 16/24-bit, 6ch/8ch 16-bit.
 > 2. **There is no "master" channel.** Every *input* channel is now a first-class channel with
 >    its own 10-band PEQ and peak/clip metering (no crossover). Output channels keep PEQ +
 >    crossover + gain/delay/mute. Channel indices are **inputs first (0..7), then outputs
@@ -57,8 +57,12 @@ room correction, or surround processing.
 
 - **Multichannel (>2) is RP2350-only.** RP2040 has only 2 S/PDIF pairs (4 output channels) and
   stays stereo. Your app must detect this (Section 4) and only show multichannel UI on RP2350.
-- **Multichannel input is fixed at 48 kHz / 16-bit** (all of 4ch/6ch/8ch). Stereo input keeps
-  its 16/24-bit × 44.1/48/96 kHz options.
+- **Multichannel input is fixed at 48 kHz.** 4ch supports 16-bit (alt 3) and packed
+  24-bit (alt 6); 6ch/8ch remain 16-bit. Stereo input keeps its 16/24-bit ×
+  44.1/48/96 kHz options. On ALSA, open 4ch/24-bit as `S24_3LE`, 4 channels,
+  48000 Hz. Alt 6 needs at most 49 × 4 × 3 = 588 bytes per packet and uses
+  the existing 788-byte endpoint/ring allocation. No 6ch/24-bit or 8ch/24-bit
+  format is advertised.
 - **The active input count is 2/4/6/8 and is live.** It follows whichever audio format the host
   selected. Read it from the status packet (Section 7.7) and a push event signals changes — lay
   out exactly that many input strips.
@@ -589,14 +593,14 @@ Compatibility is **intentionally broken at V16/V21** — there is no forward/bac
 |---|---|
 | Vendor interface | 2 |
 | VID / PID | 0x2E8B / 0xFEAA |
-| `bcdDevice` | 0x0203 |
+| `bcdDevice` | 0x0204 |
 | WinUSB GUID | {9D9B8609-E6D1-4FF0-92AF-403119CB7692} |
 | `WIRE_FORMAT_VERSION` | 16 |
 | `SLOT_DATA_VERSION` | 21 |
 | `WireBulkParams` size (V16) | 5864 bytes |
 | Bulk transfer buffer | 8192 bytes |
-| USB input alts (RP2350) | 1=2ch/16, 2=2ch/24, 3=4ch, 4=6ch, 5=8ch |
-| 8-channel format | 8 ch / 48 kHz / 16-bit (USB AS alt 3) |
+| USB input alts (RP2350) | 1=2ch/16, 2=2ch/24, 3=4ch/16, 4=6ch/16, 5=8ch/16, 6=4ch/24 |
+| 8-channel format | 8 ch / 48 kHz / 16-bit (USB AS alt 5) |
 | Matrix (RP2350) | 8 inputs × 9 outputs |
 
 ---
