@@ -553,6 +553,7 @@ bool audio_set_volume(int16_t volume) {
     if (volume < 0) volume = 0;
     if (volume >= (CENTER_VOLUME_INDEX + 1) * 256) volume = (CENTER_VOLUME_INDEX + 1) * 256 - 1;
     apply_vol_index_to_audio((uint8_t)(((uint16_t)volume) >> 8u));
+    return true;
 }
 
 void audio_thaw_host_volume(void) {
