@@ -27,14 +27,10 @@ FLASH_LO, FLASH_HI = 0x10000000, 0x20000000  # XIP flash window
 ROM_HI = 0x00008000                          # bootrom below here is always fine
 
 RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
-# rp2350 raised 64K -> 72K for the ADAT input receiver (2026-07-13): the
-# RAM-pinned decode path (adat_input_poll + rate machine + shared servo)
-# adds ~3 KB of deliberately hot code.
-# Raised 2026-09-07 with the spectrum analyser: RP2040 sat 368 B under the
-# old 60K and the RP2350 image had already outgrown 72K before this change.
-# Raised 2 KB each 2026-09-22 for the output limiter's RAM hooks (2.2 KB
-# RP2350, 2.4 KB RP2040); both images sat under 1 KB from the old budgets.
-DATA_BUDGET = {"rp2040": 67584, "rp2350": 94208}
+# RAM-resident code+data budgets, set about 2.5 KB above the measured image.
+# Raise deliberately and record the measured numbers in current_architecture.md
+# "Memory Layout" (history of every raise is there).
+DATA_BUDGET = {"rp2040": 72704, "rp2350": 100352}
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {
@@ -543,11 +539,17 @@ def check_elf(elf, baseline):
     bss = sec.get(".bss", 0)
     vtab = sec.get(".ram_vector_table", 0)
     heap = sec.get(".heap", 0)
-    ram_used = vtab + data + bss + heap
+    rings = sec.get(".slot_rings", 0)
+    ram_used = vtab + data + bss + heap + rings
     free_ram = RAM_LEN[platform] - ram_used
+    # Real heap left for runtime allocation (the producer pools): __HeapLimit
+    # minus end, which also counts the alignment gaps the sum above ignores.
+    sym_addr = {s["name"]: s["addr"] for s in syms}
+    heap_free = sym_addr.get("__HeapLimit", 0) - sym_addr.get("end", 0)
     flash_code = sec.get(".text", 0) + sec.get(".rodata", 0) + sec.get(".boot2", 0)
-    lines.append("  .data=%d  .bss=%d  vtab=%d  heap=%d  ram_used=%d  free_ram=%d" %
-                 (data, bss, vtab, heap, ram_used, free_ram))
+    lines.append("  .data=%d  .bss=%d  vtab=%d  heap=%d  slot_rings=%d  ram_used=%d  free_ram=%d" %
+                 (data, bss, vtab, heap, rings, ram_used, free_ram))
+    lines.append("  heap_free (__HeapLimit - end, before runtime allocation)=%d" % heap_free)
     lines.append("  flash_code (.text+.rodata%s)=%d" %
                  ("+.boot2" if ".boot2" in sec else "", flash_code))
 

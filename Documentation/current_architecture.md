@@ -2301,7 +2301,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2317,8 +2317,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
-| RAM code+rodata+data (.data) | 64,448 B of the 65,536 B budget | 91,288 B of the 92,160 B budget |
-| Free RAM | 46,756 B | 77,520 B |
+| RAM code+rodata+data (.data) | 70,064 B of the 72,704 B budget | 97,560 B of the 100,352 B budget |
+| Free heap before runtime allocation (`__HeapLimit - end`) | 45,256 B (about 19 KB after the producer pools) | 82,804 B (about 31 KB after the producer pools) |
+| Output slot rings | 2 × 16 KB `.slot_rings` at the top of RAM | 4 × 16 KB `.slot_rings` at the top of RAM |
 | Custom XIP linker script | `memmap_dspi_rp2040_xip.ld` (+divider/int64/bit-ops IN_RAM defines) | `memmap_dspi_rp2350_xip.ld` |
 
 ### DSP Processing
@@ -2446,7 +2447,20 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+
+> **SPDIF RX overhaul merge (2026-10-11).** The consumer pools (24 KB RP2040,
+> 48 KB RP2350) are gone; each output slot plays from a 16 KB ring in a NOLOAD
+> `.slot_rings` section placed at the top of RAM by both linker scripts, so its
+> 16 KB alignment costs no padding (as a tentative definition it landed in
+> COMMON and dragged all of `.bss` onto 16 KB boundaries, leaving RP2040 too
+> little heap for its producer pools). The heap ends below it. The ADAT TX ring
+> grew from 896 to 960 frames (+2 KB) to hold its cushion plus a full slot
+> ring. Measured with diagnostics off: `.data` 70,064 B / 97,560 B against new
+> budgets of 72,704 B / 100,352 B (RP2040 / RP2350); `.bss` 110,392 B /
+> 277,644 B plus `.slot_rings` 32 KB / 64 KB; free heap before runtime
+> allocation (`__HeapLimit - end`, now reported by `check_ram_placement.py`)
+> 45,256 B / 82,804 B, leaving about 19 KB / 31 KB after the producer pools.
+*Last updated: 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -2729,14 +2743,14 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead (2 rings × 240 × 4, plus limiter caps) | ~2.0 KB (2,004 B) |
 | Per-channel preamp + master volume | ~48 B |
-| Output slot rings (static, 2 × 16 KB, shared SPDIF/I2S) + up to 16 KB align pad | ~32-48 KB |
-| I2S RX DMA ring (1024 × 4, 4 KB aligned) | 4 KB |
+| Output slot rings (`.slot_rings`, 2 × 16 KB at the top of RAM, shared SPDIF/I2S, no padding) | 32 KB |
+| Input capture arena (SPDIF RX FIFO / I2S RX ring union, 4 KB aligned) | 12 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~137 KB** (measured 140,532 B after the 2026-09-22 buffer cleanup; was 151,412 B) |
-| RAM code+rodata+data (.data section, hot set only) | 67,040 B as of 2026-09-22, within the 67,584 B `check_ram_placement.py` budget |
+| **Total BSS** | **~108 KB** `.bss` (measured 110,392 B on 2026-10-11) plus the 32 KB `.slot_rings` section |
+| RAM code+rodata+data (.data section, hot set only) | 70,064 B as of 2026-10-11, within the 72,704 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 54,572 B (per scripts/check_ram_placement.py, after the 2026-09-22 buffer cleanup) |
-| SPDIF producer pools (heap, 2 × 8 × 192 × 8) | ~24 KB |
+| Free heap before runtime allocation | 45,256 B (`__HeapLimit - end`, 2026-10-11) |
+| SPDIF producer pools (heap, 2 × (8 × 192 × 8 B + headers)) | ~25 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
 ### RP2350 (520 KB SRAM)
@@ -2757,16 +2771,16 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Per-channel preamp (8 ch) + master volume | ~120 B |
 | Matrix mixer (8 × 9 crosspoints + outputs) | ~1.3 KB |
 | Loudness tables + per-output state (2 × 61 × 2 coeffs + 9 × 16 B) | ~3 KB |
-| Output slot rings (static, 4 × 16 KB, shared SPDIF/I2S) + up to 16 KB align pad | ~64-80 KB |
-| I2S RX DMA ring (2048 × 4, 8 KB aligned) | 8 KB |
-| ADAT RX ring (`adat_rx_ring`, 2048 × 4, 8 KB aligned) | 8 KB |
+| Output slot rings (`.slot_rings`, 4 × 16 KB at the top of RAM, shared SPDIF/I2S, no padding) | 64 KB |
+| Input capture arena (SPDIF RX FIFO / I2S RX rings / ADAT RX ring union, 8 KB aligned) | 32 KB |
+| ADAT TX ring (`adat_ring`, 960 × 32 B) | 30 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
-| **Total BSS** | **~326 KB** (measured 333,936 B after the 2026-09-22 buffer cleanup; was 348,584 B) |
-| RAM code+rodata+data (.data section, hot set only) | 93,568 B as of 2026-09-22, within the 94,208 B `check_ram_placement.py` budget |
+| **Total BSS** | **~271 KB** `.bss` (measured 277,644 B on 2026-10-11) plus the 64 KB `.slot_rings` section |
+| RAM code+rodata+data (.data section, hot set only) | 97,560 B as of 2026-10-11, within the 100,352 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free RAM | 96,784 B (per scripts/check_ram_placement.py, after the 2026-09-22 buffer cleanup; includes vector table + 2 KB heap reserve accounting) |
-| SPDIF producer pools (heap, 4 × 8 × 192 × 8) | ~48 KB |
+| Free heap before runtime allocation | 82,804 B (`__HeapLimit - end`, 2026-10-11) |
+| SPDIF producer pools (heap, 4 × (8 × 192 × 8 B + headers)) | ~51 KB |
 | Stack + remaining heap | drawn from the free-RAM pool above |
 
 ### Flash Layout
