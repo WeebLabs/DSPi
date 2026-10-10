@@ -49,6 +49,7 @@
 #include "audio_input.h"
 #include "audio_pipeline.h"
 #include "input_capture_arena.h"
+#include "audio_clock_div.h"
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "usb_audio.h"
@@ -206,12 +207,10 @@ static struct pio_program i2s_slave_prog = {
 // HELPERS
 // ============================================================================
 
-// 24.8 fixed-point divider for the clock-master role; identical math to
-// the I2S TX library (2x the SPDIF ceiling divider, see
-// i2s_compute_divider) so input BCK matches output BCK exactly.
+// 24.8 fixed-point divider for the clock-master role: 2x the shared base,
+// exactly as the I2S TX library derives it, so input BCK matches output BCK.
 static uint32_t rx_master_divider_24_8(uint32_t sample_freq) {
-    uint32_t sys = clock_get_hz(clk_sys);
-    return 2u * (sys / sample_freq + (sys % sample_freq != 0));
+    return audio_base_divider_16_8(sample_freq) * 2u;
 }
 
 // Patch the 5-bit GPIO index field of a `wait gpio` instruction.

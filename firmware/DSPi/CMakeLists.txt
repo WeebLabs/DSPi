@@ -28,6 +28,7 @@ add_executable(DSPi
     adat_output.h
     audio_input.c
     audio_input.h
+    audio_clock_div.h
     audio_pipeline.c
     audio_pipeline.h
     bulk_params.c

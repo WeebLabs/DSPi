@@ -40,6 +40,7 @@
 #include "pico/audio_i2s_multi.h"
 #include "usb_audio.h"
 #include "audio_pipeline.h"
+#include "audio_clock_div.h"
 #include "notify.h"
 
 #define ADAT_PIO                pio1   // PDM owns SM 0 on this block
@@ -184,9 +185,9 @@ static void adat_write_silence(uint32_t frames) {
 // Hardware bring-up / teardown
 // ---------------------------------------------------------------------------
 
-// Nominal 16.8 clkdiv for PIO clock = 256*Fs: the SAME formula and value as
-// the S/PDIF TX library, so ADAT consumes at the identical rate in every
-// mode.  Computed at resync; adat_update_divider must stay flash-free.
+// Nominal 16.8 clkdiv for PIO clock = 256*Fs: the shared base the S/PDIF TX
+// library also runs (audio_clock_div.h), so ADAT consumes at the identical
+// rate.  Computed at resync; adat_update_divider must stay flash-free.
 static uint32_t adat_nom_div;
 
 DSP_TIME_CRITICAL
@@ -382,8 +383,7 @@ void adat_output_resync(void) {
         pio_sm_set_consecutive_pindirs(ADAT_PIO, ADAT_SM, adat_hw_pin, 1, true);
     }
     {
-        uint32_t sys = clock_get_hz(clk_sys);
-        adat_nom_div = sys / adat_cur_freq + (sys % adat_cur_freq != 0);
+        adat_nom_div = audio_base_divider_16_8(adat_cur_freq);
     }
     adat_sm_configure();
 

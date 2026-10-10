@@ -40,6 +40,7 @@
 #include "hardware/clocks.h"   // CLK_GPOUTn config + clock_gpio_init_int_frac8()
 #include "hardware/sync.h"
 #include "pico/time.h"
+#include "audio_clock_div.h"
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -462,16 +463,10 @@ static uint i2s_extclk_load_program(PIO pio, uint8_t bck_pin) {
 
 // Compute the I2S clock divider in 24.8 fixed-point for a given sample rate.
 static uint32_t i2s_compute_divider(uint32_t sample_freq) {
-    uint32_t system_clock_frequency = clock_get_hz(clk_sys);
-    assert(system_clock_frequency < 0x40000000);
-
-    // divider = exactly 2x the SPDIF TX divider ceil(sys_clk / sample_freq),
-    // NOT ceil(sys_clk * 2 / sample_freq): the two can differ by one LSB
-    // (e.g. 176.4 kHz), and a divider RATIO error is a rate offset between
-    // output types that no common sys_clk trim (soft VCXO) can correct.
-    // Identical at every currently supported rate.
-    uint32_t divider = 2u * (system_clock_frequency / sample_freq +
-                             (system_clock_frequency % sample_freq != 0));
+    // Exactly 2x the shared base, never an independently rounded sys*2/Fs
+    // (audio_clock_div.h): a ratio error between output types is a rate
+    // offset no common sys_clk trim can correct.
+    uint32_t divider = audio_base_divider_16_8(sample_freq) * 2u;
     assert(divider < 0x1000000);
     return divider;
 }
@@ -1206,26 +1201,10 @@ void audio_i2s_mck_update_frequency(uint32_t sample_freq, uint32_t multiplier) {
         multiplier = 128;
     }
 
-    uint32_t sys_clk = clock_get_hz(clk_sys);
-
-    // 24.8 fixed-point divider:
-    //   div         = sys_clk / MCK = sys_clk / (Fs × multiplier)
-    //   div_24.8    = div × 256
-    //               = sys_clk × 256 / (Fs × multiplier)
-    //
-    // NB: the previous PIO toggle program needed a ÷2 in the denominator
-    // (PIO clk = 2 × MCK because the program emits one transition per
-    // PIO cycle, so a full MCK period spans two PIO cycles).  With
-    // CLK_GPOUTn the divider applies one-to-one — net result: 2× more
-    // effective divider precision at the same Fs.  See the reference
-    // table at the top of this section for which Fs/mult combinations
-    // are now integer.
-    //
-    // 64-bit intermediate avoids overflow: sys_clk × 256 for sys_clk =
-    // 307.2 MHz already exceeds 2^32.
-    uint64_t num = (uint64_t)sys_clk * 256u;
-    uint64_t den = (uint64_t)sample_freq * multiplier;
-    uint32_t divider = (uint32_t)(num / den);
+    // CLK_GPOUTn 24.8 divider = sys / (Fs * multiplier), taken from the shared
+    // base by exact scaling (audio_clock_div.h); an independently truncated
+    // sys*256/(Fs*mult) lands one LSB (~144 ppm at 44.1 kHz) off BCK.
+    uint32_t divider = audio_base_divider_16_8(sample_freq) * (256u / multiplier);
 
     printf("MCK divider 0x%x/256 (%u.%u) for %d Hz × %u = %u Hz (CLK_GPOUTn)\n",
            (uint)divider, (uint)(divider >> 8), (uint)(divider & 0xff),

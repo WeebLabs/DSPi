@@ -10,8 +10,9 @@
 #ifndef SOFT_VCXO_H
 #define SOFT_VCXO_H
 
-// One-time hardware bring-up (DMA channels, DMA timer, PWM pacer). Inert
-// when sys_clk is not the 307.2 MHz / fbdiv 128 plan the constants assume.
+// One-time hardware bring-up (DMA channels, DMA timer, PWM pacer); reads the
+// clock plan from pll_sys. Inert unless clk_sys runs from pll_sys. A runtime
+// sys_clk change must stop the pulse train first: it rewrites fbdiv_int.
 void soft_vcxo_init(void);
 
 // Command a sys_clk offset in ppm (clamped to +-SOFT_VCXO_MAX_PPM);

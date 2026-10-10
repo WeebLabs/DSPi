@@ -31,7 +31,7 @@
 #include "audio_pipeline.h"
 #include "usb_audio.h"
 
-#include "hardware/clocks.h"
+#include "audio_clock_div.h"
 
 // Loop B gains, re-derived 2026-07-23 for the sample-granular fill signal
 // (get_slot_consumer_fill_frac; see that function for what it measures).
@@ -80,11 +80,9 @@ void input_servo_apply(float actual_freq, int fill_slot) {
     if (freq_nom == 0) return;
     uint32_t sys_clk = clock_get_hz(clk_sys);   // nominal by convention
 
-    // Programmed SPDIF-type divider: ceil(sys/freq), bit-identical to
-    // update_pio_frequency() in the TX library. Outputs actually run at
-    // sys/div, so referencing div (not freq_nom) folds the divider
-    // rounding residual into the feed-forward.
-    uint32_t div = sys_clk / freq_nom + (sys_clk % freq_nom != 0);
+    // The divider every output actually runs (audio_clock_div.h): referencing
+    // it rather than freq_nom folds its rounding residual into the feed-forward.
+    uint32_t div = audio_base_divider_16_8(freq_nom);
     float ppm = ((actual_freq * (float)div) / (float)sys_clk - 1.0f) * 1e6f;
 
     // Feed-forward far outside VCXO authority means the caller applied

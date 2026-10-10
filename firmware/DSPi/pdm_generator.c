@@ -10,6 +10,7 @@
 #include "tube.h"
 #include "limiter.h"
 #include "output_s24.h" // RP2350 EQ worker: in-place S24 finalization
+#include "audio_clock_div.h"
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -149,9 +150,13 @@ void pdm_flash_silence(void) {
     __dmb();
 }
 
+_Static_assert(PDM_OVERSAMPLE == 256, "PDM runs the shared 256*Fs base divider");
+
 void pdm_update_clock(uint32_t freq) {
-    float div = (float)clock_get_hz(clk_sys) / (float)(freq * PDM_OVERSAMPLE);
-    pio_sm_set_clkdiv(PDM_PIO, PDM_SM, div);
+    // The shared base (audio_clock_div.h), never a float division whose
+    // rounding could differ from the other outputs' divider.
+    uint32_t div = audio_base_divider_16_8(freq);
+    pio_sm_set_clkdiv_int_frac(PDM_PIO, PDM_SM, (uint16_t)(div >> 8), (uint8_t)(div & 0xFFu));
 }
 
 void pdm_setup_hw(uint8_t pin) {

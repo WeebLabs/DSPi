@@ -42,8 +42,6 @@ extern audio_spdif_instance_t *spdif_instance_ptrs[];
 extern audio_i2s_instance_t   *i2s_instance_ptrs[];
 extern volatile bool output_type_switch_in_progress;
 
-#define VCXO_SYS_NOM_HZ 307200000u
-
 // ---------------------------------------------------------------------------
 // Windowed aggregates (reset each dump)
 // ---------------------------------------------------------------------------
@@ -106,10 +104,10 @@ static void fmt_hz(char *s, float v) {
     snprintf(s, 20, "%ld.%03ld", w, m);
 }
 
-// sys_clk offset in ppm*100 vs the 307.2 MHz nominal, as an integer.
+// sys_clk offset in ppm*100 vs the nominal clock plan, as an integer.
 static long hz_to_ppm100(uint32_t hz) {
-    long diff = (long)hz - (long)VCXO_SYS_NOM_HZ;
-    return diff * 1000 / 3072;   // ppm*100 = diff / 307.2 * 100
+    int64_t nom = (int64_t)clock_get_hz(clk_sys);
+    return (long)(((int64_t)hz - nom) * 100000000 / nom);
 }
 
 // ---------------------------------------------------------------------------

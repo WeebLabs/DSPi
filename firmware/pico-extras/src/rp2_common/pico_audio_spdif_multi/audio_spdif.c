@@ -21,6 +21,7 @@
 #include "hardware/clocks.h"
 #include "hardware/sync.h"
 #include "pico/time.h"
+#include "audio_clock_div.h"
 
 // ---------------------------------------------------------------------------
 // Ring output model
@@ -471,12 +472,8 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
 // ---------------------------------------------------------------------------
 
 static void update_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq) {
-    uint32_t system_clock_frequency = clock_get_hz(clk_sys);
-    assert(system_clock_frequency < 0x40000000);
-
-    // ceil the divider; must stay bit-identical to the input servo's
-    // feed-forward reference (input_servo.c) and the I2S 2x derivation.
-    uint32_t divider = system_clock_frequency / sample_freq + (system_clock_frequency % sample_freq != 0);
+    // The shared base every output clock derives from (audio_clock_div.h).
+    uint32_t divider = audio_base_divider_16_8(sample_freq);
     assert(divider < 0x1000000);
     pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm, divider >> 8u, divider & 0xffu);
     inst->freq = sample_freq;
