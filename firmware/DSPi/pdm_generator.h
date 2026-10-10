@@ -41,7 +41,9 @@ extern volatile Core1Mode core1_mode;
 extern Core1EqWork core1_eq_work;
 extern volatile bool pdm_enabled;
 
-// Free sample slots in the PDM push queue (see pdm_generator.c).
+// Free sample slots in the PDM push queue (see pdm_generator.c), and whether
+// Core 1 is draining it; ring admission counts the queue only while it is.
 uint32_t pdm_ring_free_slots(void);
+bool pdm_queue_is_draining(void);
 
 #endif // PDM_GENERATOR_H

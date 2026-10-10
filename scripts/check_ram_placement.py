@@ -63,6 +63,8 @@ COMMON = [
     ("pdm_core1_entry", False),
     ("pdm_processing_loop", True),
     ("pdm_push_sample", False),
+    ("pdm_ring_free_slots", False),
+    ("pdm_queue_is_draining", False),
     ("pdm_get_dma_fill_pct", False),
     ("pdm_get_ring_fill_pct", False),
     ("eq_worker_loop", True),

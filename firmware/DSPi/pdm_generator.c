@@ -256,6 +256,13 @@ uint32_t __not_in_flash_func(pdm_ring_free_slots)(void) {
     return 255u - (uint8_t)(pdm_head - pdm_tail);
 }
 
+// True while Core 1 is actually emptying the push queue: PDM mode, enabled,
+// not held, hardware running (fade-outs included, they drain it too).  An
+// undrained queue fills and would stall ring admission for every output.
+bool __not_in_flash_func(pdm_queue_is_draining)(void) {
+    return core1_mode == CORE1_MODE_PDM && pdm_enabled && !pdm_hold && pdm_hw_active;
+}
+
 void __not_in_flash_func(pdm_push_sample)(int32_t sample, bool reset) {
     uint8_t next_head = pdm_head + 1;
     if (next_head != pdm_tail) {
