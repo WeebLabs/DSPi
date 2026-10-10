@@ -406,24 +406,55 @@ static void stop_foreign_input_receivers(uint8_t keep) {
 #endif
 }
 
+// Hardware data pin of slot i's live instance, or 0xFF if the slot is not set up.
+static uint8_t live_slot_data_pin(int i) {
+    extern uint8_t output_types[];
+    extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+    if (output_types[i] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+        return (inst && inst->consumer_pool) ? inst->data_pin : 0xFF;
+    }
+    audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+    return (inst && inst->consumer_pool) ? (uint8_t)inst->pin : 0xFF;
+}
+
+// Release a slot-owned pin to high-Z.  Skips a pad another subsystem has since
+// muxed to itself (e.g. the DAC hardware-mute GPIO a bulk SET just claimed).
+static void release_slot_gpio(uint pin) {
+    if (gpio_get_function(pin) != (gpio_function_t)pio_get_funcsel(PICO_AUDIO_SPDIF_PIO)) return;
+    gpio_set_function(pin, GPIO_FUNC_NULL);
+    gpio_set_dir(pin, GPIO_IN);
+}
+
+// MCK runs only when locally clocked and something uses I2S (an output slot or
+// the input); one rule for every path so a restore can't start a stray MCK.
+static void apply_mck_policy(void) {
+    extern uint8_t output_types[];
+    extern uint8_t  i2s_mck_pin;
+    extern bool     i2s_mck_enabled;
+    extern uint16_t i2s_mck_multiplier;
+    bool any_i2s = (active_input_source == INPUT_SOURCE_I2S);
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++)
+        if (output_types[i] == OUTPUT_TYPE_I2S) any_i2s = true;
+    audio_i2s_mck_apply_state(i2s_mck_pin,
+                              !i2s_slave_mode_active() && any_i2s && i2s_mck_enabled,
+                              audio_state.freq, i2s_mck_multiplier);
+}
+
 // ---------------------------------------------------------------------------
-// process_type_switches — unified output type transition handler
+// process_type_switches: the unified output transition
 //
-// Handles any combination of SPDIF↔I2S slot changes atomically with correct
-// I2S master/slave election.  Used by three callers:
-//   1. Vendor command (output_type_change_mask from USB ISR)
-//   2. Boot (slots loaded from preset that need I2S)
-//   3. Preset load (slots whose type differs between old and new preset)
+// Brings the live outputs to the configured state (types, I2S clocking, slot
+// data pins, MCK pin, PDM pin) in one muted transition with a synchronized
+// restart.  Ordering and pin-ownership rules: Documentation/current_architecture.md
+// "Runtime Reconfiguration".  Returns false (no disruption) if nothing differs.
 //
-// Two-pass approach:
-//   Pass 1: Teardown all outgoing types (I2S→SPDIF or SPDIF→I2S transitions)
-//   Pass 2: Setup new types with master election, then restart all in sync
-//
-// change_mask: bitmask of slots that need a type change (bit N = slot N)
+// change_mask: bitmask of slots whose type may change (bit N = slot N)
 // new_types[]: desired output type per slot (only slots in change_mask are read)
 // ---------------------------------------------------------------------------
-static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]) {
-    if (change_mask == 0) return;
+static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]) {
+    if (change_mask == 0) return false;
 
     extern uint8_t output_types[];
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
@@ -491,7 +522,22 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
             }
         }
     }
-    if (!any_change) return;
+    // Restores can also move a slot's data pin, the MCK pin or the PDM pin.
+    for (int i = 0; i < NUM_SPDIF_INSTANCES && !any_change; i++) {
+        uint8_t live = live_slot_data_pin(i);
+        if (live != 0xFF && live != output_pins[i]) any_change = true;
+    }
+    // A stopped MCK or PDM moves as bookkeeping, so only a running one forces
+    // the transition; if it runs anyway, both still move in its middle step.
+    const uint8_t live_mck_pin = audio_i2s_mck_get_pin();
+    const bool mck_pin_moves = (live_mck_pin != 0xFF && live_mck_pin != i2s_mck_pin &&
+                                audio_i2s_mck_is_enabled());
+    if (mck_pin_moves) any_change = true;
+#if ENABLE_SUB
+    const bool pdm_pin_moves = pdm_pin_needs_move(output_pins[NUM_PIN_OUTPUTS - 1]);
+    if (pdm_pin_moves && (pdm_enabled || pdm_hw_is_active())) any_change = true;
+#endif
+    if (!any_change) return false;
 
     // Fade the outputs to silence BEFORE masking the USB IRQ below.  The fade
     // needs the producer to keep delivering packets; once the IRQ is off the
@@ -500,6 +546,13 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     // every real caller: the vendor path pre-gates on pipeline_reset_ready(),
     // preset load has already settled, and boot has no producer.
     pipeline_settle_to_silence();
+
+#if ENABLE_SUB
+    // PDM's SM/DMA belong to Core 1 while it runs; take them with an explicit
+    // acknowledgement (its ~21 ms fade-out) before the USB IRQ is masked below.
+    // On timeout the PDM pin stays put.
+    const bool pdm_held = pdm_pin_moves && pdm_hold_hw(PDM_HOLD_TIMEOUT_US);
+#endif
 
     output_type_switch_in_progress = true;
     __dmb();
@@ -583,6 +636,43 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
+#if PICO_RP2350
+    adat_output_release_moving_pin();
+#endif
+
+    // ---- Release stage: every outgoing slot pin is freed before any pin is
+    // claimed.  Teardowns release their own pins, so all of them run here too;
+    // setup and attach_pin only claim. ----
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        uint8_t live = live_slot_data_pin(i);
+        if (live != 0xFF && live != output_pins[i]) release_slot_gpio(live);
+        if (current_types[i] != OUTPUT_TYPE_I2S) continue;
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+        if (!inst || !inst->consumer_pool || !inst->clock_master) continue;
+        bool clocks_kept = (target_master_slot >= 0 &&
+                            inst->clock_pin_base == i2s_effective_bck_pin());
+        if (!clocks_kept) {
+            release_slot_gpio(inst->clock_pin_base);
+            release_slot_gpio(inst->clock_pin_base + 1);
+        }
+    }
+
+    // Same-type I2S slots whose clocking changed are rebuilt: tear them down now.
+    bool i2s_rebuild[NUM_SPDIF_INSTANCES] = {false};
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (current_types[i] != OUTPUT_TYPE_I2S || target_types[i] != OUTPUT_TYPE_I2S) continue;
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+        if (!inst->consumer_pool || inst->clock_master != (i == target_master_slot) ||
+            inst->external_clock != want_extclk ||
+            inst->clock_pin_base != i2s_effective_bck_pin()) {
+            if (inst->enabled) {
+                audio_i2s_set_enabled(inst, false);
+            }
+            audio_i2s_teardown(inst);
+            i2s_rebuild[i] = true;
+        }
+    }
+
     // ---- Pass 1: Teardown outgoing types ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (target_types[i] == current_types[i]) continue;  // No type change
@@ -601,6 +691,15 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
+    // ---- Single-owner pins: MCK and PDM release their old pin and claim the
+    // new one here, after every slot release and before any slot claim. ----
+    if (mck_pin_moves) {
+        audio_i2s_mck_apply_state(i2s_mck_pin, false, audio_state.freq, i2s_mck_multiplier);
+    }
+#if ENABLE_SUB
+    if (pdm_held) pdm_change_pin(output_pins[NUM_PIN_OUTPUTS - 1]);
+#endif
+
     // ---- Pass 2: Setup final types and enforce deterministic master/slave roles ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         bool had_i2s = (current_types[i] == OUTPUT_TYPE_I2S);
@@ -608,22 +707,13 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 
         if (want_i2s) {
             bool want_master = (i == target_master_slot);
-            bool need_rebuild = !had_i2s;
+            bool need_rebuild = !had_i2s || i2s_rebuild[i];
 
-            if (had_i2s) {
+            if (!need_rebuild) {
                 audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-                if (!inst->consumer_pool || inst->clock_master != want_master ||
-                    inst->external_clock != want_extclk ||
-                    inst->clock_pin_base != i2s_effective_bck_pin()) {
-                    if (inst->enabled) {
-                        audio_i2s_set_enabled(inst, false);
-                    }
-                    audio_i2s_teardown(inst);
-                    need_rebuild = true;
-                }
-            }
-
-            if (need_rebuild) {
+                if (inst->data_pin != output_pins[i])
+                    audio_i2s_attach_data_pin(inst, output_pins[i]);
+            } else {
                 audio_i2s_config_t i2s_cfg = {
                     .data_pin = output_pins[i],
                     .clock_pin_base = i2s_effective_bck_pin(),
@@ -666,6 +756,11 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
             audio_spdif_connect_extra(spdif_inst, producer_pools[i], false,
                                       slot_consumer_pools[i], NULL);
             memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
+        } else {
+            // SPDIF stays SPDIF: claim a moved pin (the old one was released above).
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->consumer_pool && inst->pin != output_pins[i])
+                audio_spdif_attach_pin(inst, output_pins[i]);
         }
     }
 
@@ -691,32 +786,15 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 
     memcpy(output_types, target_types, NUM_SPDIF_INSTANCES);
 
-    // Start/stop MCK based on whether any slot is now I2S, or I2S is the
-    // active input (the external source may need MCK regardless of the
-    // output types).  In I2S clock-slave mode MCK is forced off: a locally
-    // generated MCK would be asynchronous to the external BCK/LRCLK, which
-    // is invalid for downstream converters.
-    bool any_i2s = (active_input_source == INPUT_SOURCE_I2S);
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_I2S) { any_i2s = true; break; }
-    }
-    if (want_extclk) {
-        audio_i2s_mck_set_enabled(false);
-    } else if (any_i2s && i2s_mck_enabled) {
-        // Set divider BEFORE enabling the GPOUTn block so MCK starts at the
-        // correct frequency.  Reversed order would briefly run MCK at the
-        // previous divider, causing a transient PLL relock chirp on
-        // connected DACs.  Matches the REQ_SET_MCK_ENABLE vendor command
-        // order.  No multiplier sanitization needed — CLK_GPOUTn handles
-        // every Fs × multiplier combination.
-        audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier);
-        audio_i2s_mck_set_enabled(true);
-    } else if (!any_i2s) {
-        audio_i2s_mck_set_enabled(false);
-    }
+    // In I2S clock-slave mode MCK is forced off: a local MCK would be
+    // asynchronous to the external BCK/LRCLK, invalid for downstream converters.
+    apply_mck_policy();
 
     // Restart all outputs in sync (handles both SPDIF and I2S instances)
     complete_pipeline_reset();
+#if ENABLE_SUB
+    if (pdm_pin_moves) pdm_release_hw();
+#endif
 
     __dmb();
     output_type_switch_in_progress = false;
@@ -743,18 +821,12 @@ static void process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     }
 
     printf("Type switch complete: mask=0x%02x\n", change_mask);
+    return true;
 }
 
-// Rebuild every I2S output slot's clocking without changing types: called
-// when a transition crosses the I2S clock-slave boundary (mode change, or a
-// source switch into/out of slave-clocked I2S), so the slots swap between
-// the internal clkout/dataout programs and the external-clock program, and
-// after bulk/preset restores, which can install a new i2s_bck_pin with an
-// unchanged type map.  process_type_switches detects the clocking mismatch
-// (master election / external-clock mode / BCK pin) against the live
-// instances and does all the heavy lifting (quiesce, rebuild, MCK policy,
-// synchronized restart); with nothing mismatched it returns without
-// disruption.  No-op when no slot is I2S.
+// Rebuild every I2S output slot's clocking without changing types, when a
+// transition crosses the I2S clock-slave boundary (mode change, or a source
+// switch into/out of slave-clocked I2S).  No-op when nothing mismatches.
 static void rebuild_i2s_output_clocking(void) {
     extern uint8_t output_types[];
     uint8_t mask = 0;
@@ -762,6 +834,31 @@ static void rebuild_i2s_output_clocking(void) {
         if (output_types[i] == OUTPUT_TYPE_I2S) mask |= (uint8_t)(1u << i);
     }
     if (mask) process_type_switches(mask, output_types);
+}
+
+// Shared tail of boot and the restore handlers: old_types is the live type map
+// from before the restore wrote output_types[] and the pin globals.  Returns
+// true if it ran a transition, else false after the bookkeeping-only moves
+// (stopped MCK/PDM), leaving the caller's own completion to run.
+static bool apply_restored_outputs(const uint8_t old_types[]) {
+    extern uint8_t output_types[];
+    extern uint8_t output_pins[];
+
+    uint8_t new_types[NUM_SPDIF_INSTANCES];
+    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
+    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
+    if (process_type_switches((uint8_t)((1u << NUM_SPDIF_INSTANCES) - 1), new_types))
+        return true;
+    memcpy(output_types, new_types, NUM_SPDIF_INSTANCES);
+#if ENABLE_SUB
+    uint8_t pdm_pin = output_pins[NUM_PIN_OUTPUTS - 1];
+    if (pdm_pin_needs_move(pdm_pin)) {
+        if (pdm_hold_hw(PDM_HOLD_TIMEOUT_US)) pdm_change_pin(pdm_pin);
+        pdm_release_hw();
+    }
+#endif
+    apply_mck_policy();
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,12 +1772,14 @@ static void resume_i2s_after_flash(void) {
 // DAC mute release; dropping the restart for topology-unchanged writes is
 // the separate no-teardown-completions work.  Full history and rationale:
 // Documentation/current_architecture.md "Flash Operation Safety".
-static void complete_flash_write_operation_full(void) {
+// Input/ADAT half of the flash completion, shared with callers whose own
+// output transition already did the synchronized restart.
+static void complete_flash_write_resume_inputs(void) {
 #if PICO_RP2350
     // The slots counted a starvation per silence buffer through the window,
     // but ADAT's own IRQ-less ring free-ran for the same span and is not
     // behind; mirroring the backlog would push the ADAT-to-slot offset the
-    // wrong way.  Drop it; the synchronized restart below (or the SPDIF
+    // wrong way.  Drop it; the synchronized restart (or the SPDIF
     // prefill's enable_outputs_in_sync()) re-canonicalizes via a resync.
     adat_output_rebaseline_starvations();
 #endif
@@ -1691,10 +1790,14 @@ static void complete_flash_write_operation_full(void) {
     resume_spdif_after_flash();
 
     // Restart I2S input likewise.  Unlike SPDIF it has no lock handshake:
-    // the input falls through to complete_pipeline_reset() below (the
+    // the input falls through to complete_pipeline_reset() (the
     // non-SPDIF branch), whose trailing i2s_input_resync() re-phases a
     // slave against the freshly restarted TX master.
     resume_i2s_after_flash();
+}
+
+static void complete_flash_write_operation_full(void) {
+    complete_flash_write_resume_inputs();
 
     if (input_source_is_spdif(active_input_source)) {
         // For SPDIF input: the slots played continuous silence across the
@@ -1779,71 +1882,30 @@ void core0_init() {
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
 
-    // DAC hardware mute init.  Must come AFTER preset_boot_load() so the
-    // directory's persisted config (mute pin assignments, polarity, hold
-    // time) is available; the config arrives via preset_get_dac_hw_mute()
-    // which reads dir_cache.  Claims GPIOs and drives them to un-muted
-    // level per polarity.  No-op when feature is disabled in flash
-    // (factory-fresh state).
-    {
-        DacHwMuteConfig hw;
-        preset_get_dac_hw_mute(&hw);
-        dac_hw_mute_init(&hw);
-    }
-
-    // Sync MCK library state with the just-loaded globals.  usb_sound_card_init()
-    // (above) called audio_i2s_mck_setup() with the boot-default pin; if the
-    // preset specifies a different mck_pin or wants mck_enabled=true, the
-    // library would otherwise drive the wrong pin (or fail to start) once
-    // process_type_switches() below tries to enable MCK.  This is the
-    // sole boot-time apply-path sync point.
-    {
-        extern uint8_t  i2s_mck_pin;
-        extern bool     i2s_mck_enabled;
-        extern uint16_t i2s_mck_multiplier;
-        audio_i2s_mck_apply_state(i2s_mck_pin, i2s_mck_enabled,
-                                  audio_state.freq, i2s_mck_multiplier);
-    }
-
     {
         uint32_t flags = save_and_disable_interrupts();
         dsp_recalculate_all_filters(48000.0f);
         dsp_update_delay_samples(48000.0f);
         restore_interrupts(flags);
 
-        // Apply output type + pin configuration from preset (before Core 1 starts).
-        // usb_sound_card_init() created all slots as SPDIF; convert any that the
-        // preset saved as I2S using process_type_switches() for correct master election.
+        // Apply output types and pins from the preset (before Core 1 starts).
+        // usb_sound_card_init() created every slot as SPDIF on the default
+        // pins and set MCK up on its default pin; this also syncs MCK.
         {
-            extern uint8_t output_types[];
-            extern uint8_t output_pins[];
-            extern audio_spdif_instance_t *spdif_instance_ptrs[];
-
-            // Build change mask for slots that need I2S + apply SPDIF pin changes
-            uint8_t boot_mask = 0;
-            uint8_t boot_types[NUM_SPDIF_INSTANCES];
-            for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                boot_types[i] = output_types[i];
-                if (output_types[i] == OUTPUT_TYPE_I2S) {
-                    boot_mask |= (1u << i);
-                } else {
-                    // SPDIF slot — apply pin config if changed
-                    if (output_pins[i] != spdif_instance_ptrs[i]->pin) {
-                        audio_spdif_set_enabled(spdif_instance_ptrs[i], false);
-                        audio_spdif_change_pin(spdif_instance_ptrs[i], output_pins[i]);
-                        audio_spdif_set_enabled(spdif_instance_ptrs[i], true);
-                    }
-                }
-            }
-
-            // Temporarily mark all slots as SPDIF (they were set up as SPDIF at init).
-            // process_type_switches() compares against output_types[] to detect changes.
+            uint8_t boot_live_types[NUM_SPDIF_INSTANCES];
             for (int i = 0; i < NUM_SPDIF_INSTANCES; i++)
-                output_types[i] = OUTPUT_TYPE_SPDIF;
-
-            if (boot_mask)
-                process_type_switches(boot_mask, boot_types);
+                boot_live_types[i] = OUTPUT_TYPE_SPDIF;
+            apply_restored_outputs(boot_live_types);
         }
+    }
+
+    // DAC hardware mute init: after preset_boot_load() (its config lives in
+    // dir_cache) and after the output pins settle, so no slot release can
+    // take back a GPIO this claims.
+    {
+        DacHwMuteConfig hw;
+        preset_get_dac_hw_mute(&hw);
+        dac_hw_mute_init(&hw);
     }
 
 #if PICO_RP2350
@@ -2933,63 +2995,21 @@ int main(void) {
                 // would be torn down and re-acquired twice, doubling the audible
                 // glitch on a preset switch that also flips an output type.
 
-                // Sync MCK library state with the freshly-applied preset
-                // globals.  Handles three transitions in one call:
-                //   • mck_pin changed → disable, change_pin, (re-)enable
-                //   • mck_enabled flipped → start or stop on current pin
-                //   • mck_enabled unchanged but multiplier/Fs changed →
-                //     glitchless DIV reload
-                // Any subsequent process_type_switches() may still gate
-                // MCK off if no I2S slots end up active, which is the
-                // pre-existing "auto-disable when no I2S" behaviour.
-                {
-                    extern uint8_t  i2s_mck_pin;
-                    extern bool     i2s_mck_enabled;
-                    extern uint16_t i2s_mck_multiplier;
-                    audio_i2s_mck_apply_state(i2s_mck_pin, i2s_mck_enabled,
-                                              audio_state.freq, i2s_mck_multiplier);
+                // Move the outputs to the loaded config (types, clocking, pins)
+                // in one transition; with nothing to move, finish as before.
+                if (!apply_restored_outputs(old_types)) {
+                    if (input_source_is_spdif(active_input_source)) {
+                        // SPDIF input: don't drain/re-enable the output pipeline.
+                        // The pool holds muted samples queued by the preset-mute
+                        // window; draining them would force outputs to restart
+                        // against empty pools and produce pops/uneven fill.  Let
+                        // DMA resume chaining after the flash blackout and play
+                        // out silence until the mute envelope fades back in.
+                        reset_usb_feedback_loop();
+                    } else {
+                        complete_pipeline_reset();
+                    }
                 }
-
-                // Build change mask for slots whose type changed
-                uint8_t change_mask = 0;
-                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                    if (output_types[i] != old_types[i])
-                        change_mask |= (1u << i);
-                }
-
-                if (change_mask) {
-                    // preset_load() already wrote new types to output_types[].
-                    // Restore old types so process_type_switches() sees the
-                    // delta correctly (it compares against output_types[]).
-                    // RX is INACTIVE here (we suspended it pre-flash), so
-                    // process_type_switches' own RX management is a no-op
-                    // for this caller — we restart RX once below.
-                    uint8_t new_types[NUM_SPDIF_INSTANCES];
-                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
-                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
-                    process_type_switches(change_mask, new_types);
-                } else if (input_source_is_spdif(active_input_source)) {
-                    // SPDIF input: don't drain/re-enable the output pipeline.
-                    // The pool holds muted samples queued by the preset-mute
-                    // window; draining them would force outputs to restart
-                    // against empty pools and produce pops/uneven fill.  Let
-                    // DMA resume chaining after the flash blackout and play
-                    // out silence until the mute envelope fades back in.
-                    reset_usb_feedback_loop();
-                } else {
-                    // No type changes — just resync pipelines
-                    complete_pipeline_reset();
-                }
-
-                // BCK-only restore: a bulk/preset restore can install a new
-                // i2s_bck_pin with an unchanged type map, which the mask above
-                // cannot see.  rebuild_i2s_output_clocking() re-invokes
-                // process_type_switches over the I2S slots; its clocking
-                // mismatch detection (master election / external-clock mode /
-                // BCK pin) rebuilds only when something actually differs, so
-                // this is a cheap no-op in the common case (including when the
-                // type switch above already rebuilt everything).
-                rebuild_i2s_output_clocking();
 
                 // The load may have forced the source (empty/corrupt slot
                 // applies factory defaults, which writes active_input_source
@@ -3098,33 +3118,14 @@ int main(void) {
                     }
                 }
 
-                // Check if output types changed (active slot deleted →
-                // factory defaults → all SPDIF).  If so, do a proper
-                // hardware type switch instead of just a pipeline reset.
-                uint8_t change_mask = 0;
-                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                    if (output_types[i] != old_types[i])
-                        change_mask |= (1u << i);
-                }
-
-                if (change_mask) {
-                    uint8_t new_types[NUM_SPDIF_INSTANCES];
-                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
-                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
-                    process_type_switches(change_mask, new_types);
+                // Deleting the active slot applies factory defaults, which can
+                // change output types and pins.  A transition does the restart
+                // itself; the flash bracket's input resume still has to run.
+                if (apply_restored_outputs(old_types)) {
+                    complete_flash_write_resume_inputs();
                 } else {
                     complete_flash_write_operation_full();
                 }
-
-                // BCK-only restore: a bulk/preset restore can install a new
-                // i2s_bck_pin with an unchanged type map, which the mask above
-                // cannot see.  rebuild_i2s_output_clocking() re-invokes
-                // process_type_switches over the I2S slots; its clocking
-                // mismatch detection (master election / external-clock mode /
-                // BCK pin) rebuilds only when something actually differs, so
-                // this is a cheap no-op in the common case (including when the
-                // type switch above already rebuilt everything).
-                rebuild_i2s_output_clocking();
             }
 
             extern volatile bool factory_reset_pending;
@@ -3201,31 +3202,9 @@ int main(void) {
                     __sev();
                 }
 
-                // Check if output types changed (factory defaults = all SPDIF)
-                uint8_t change_mask = 0;
-                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                    if (output_types[i] != old_types[i])
-                        change_mask |= (1u << i);
-                }
-
-                if (change_mask) {
-                    uint8_t new_types[NUM_SPDIF_INSTANCES];
-                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
-                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
-                    process_type_switches(change_mask, new_types);
-                } else {
+                if (!apply_restored_outputs(old_types)) {
                     complete_pipeline_reset();
                 }
-
-                // BCK-only restore: a bulk/preset restore can install a new
-                // i2s_bck_pin with an unchanged type map, which the mask above
-                // cannot see.  rebuild_i2s_output_clocking() re-invokes
-                // process_type_switches over the I2S slots; its clocking
-                // mismatch detection (master election / external-clock mode /
-                // BCK pin) rebuilds only when something actually differs, so
-                // this is a cheap no-op in the common case (including when the
-                // type switch above already rebuilt everything).
-                rebuild_i2s_output_clocking();
 
                 // flash_factory_reset() forces the source back to USB without
                 // going through the deferred switch handler, so nothing above
@@ -3359,17 +3338,6 @@ int main(void) {
                 dsp_recalculate_all_filters(rate);
                 dsp_update_delay_samples(rate);
 
-                // Sync MCK library state with the freshly-applied bulk
-                // globals — same rationale and three-transition coverage
-                // as the preset_load_pending block above.
-                {
-                    extern uint8_t  i2s_mck_pin;
-                    extern bool     i2s_mck_enabled;
-                    extern uint16_t i2s_mck_multiplier;
-                    audio_i2s_mck_apply_state(i2s_mck_pin, i2s_mck_enabled,
-                                              audio_state.freq, i2s_mck_multiplier);
-                }
-
                 // Transition Core 1 mode to match new output enable state
                 Core1Mode new_mode = derive_core1_mode();
                 if (new_mode != core1_mode) {
@@ -3380,42 +3348,16 @@ int main(void) {
                     __sev();
                 }
 
-                // Build change mask for slots whose type changed
-                uint8_t change_mask = 0;
-                for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-                    if (output_types[i] != old_types[i])
-                        change_mask |= (1u << i);
+                if (!apply_restored_outputs(old_types)) {
+                    if (input_source_is_spdif(active_input_source)) {
+                        // SPDIF input: don't drain/re-enable the output pipeline.
+                        // Same rationale as the preset_load_pending path.
+                        reset_usb_feedback_loop();
+                    } else {
+                        // Resync so the post-mute restart is sample-aligned.
+                        complete_pipeline_reset();
+                    }
                 }
-
-                if (change_mask) {
-                    // bulk_params_apply() already wrote new types to output_types[].
-                    // Restore old types so process_type_switches() sees the
-                    // delta correctly (it compares against output_types[]).
-                    uint8_t new_types[NUM_SPDIF_INSTANCES];
-                    memcpy(new_types, output_types, NUM_SPDIF_INSTANCES);
-                    memcpy(output_types, old_types, NUM_SPDIF_INSTANCES);
-                    process_type_switches(change_mask, new_types);
-                } else if (input_source_is_spdif(active_input_source)) {
-                    // SPDIF input: don't drain/re-enable the output pipeline.
-                    // Same rationale as the preset_load_pending path — draining
-                    // mid-prefill would force outputs to restart against empty
-                    // pools.  Just reset the feedback loop.
-                    reset_usb_feedback_loop();
-                } else {
-                    // No type changes — resync pipelines so the post-mute
-                    // restart is sample-aligned across all slots.
-                    complete_pipeline_reset();
-                }
-
-                // BCK-only restore: a bulk/preset restore can install a new
-                // i2s_bck_pin with an unchanged type map, which the mask above
-                // cannot see.  rebuild_i2s_output_clocking() re-invokes
-                // process_type_switches over the I2S slots; its clocking
-                // mismatch detection (master election / external-clock mode /
-                // BCK pin) rebuilds only when something actually differs, so
-                // this is a cheap no-op in the common case (including when the
-                // type switch above already rebuilt everything).
-                rebuild_i2s_output_clocking();
             }
 
             // Same reconcile as the preset/factory paths: the payload may have

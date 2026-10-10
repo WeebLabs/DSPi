@@ -371,6 +371,13 @@ void adat_output_stream_stop(void) {
     adat_stop_hw();
 }
 
+void adat_output_release_moving_pin(void) {
+    if (adat_hw_pin == 0xFF) return;
+    if (adat_cfg_enabled && adat_hw_pin == adat_cfg_pin) return;
+    adat_stop_hw();
+    adat_release_pin();
+}
+
 void adat_output_resync(void) {
     adat_stop_hw();
     adat_output_config_dirty = false;

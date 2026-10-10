@@ -182,6 +182,18 @@ void audio_spdif_set_enabled(audio_spdif_instance_t *inst, bool enabled);
  */
 void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin);
 
+/** \brief Move an S/PDIF output instance onto a new GPIO without releasing the old one
+ * \ingroup audio_spdif
+ *
+ * Same as audio_spdif_change_pin() except the old pin is left untouched, for
+ * callers that release outgoing pins themselves before claiming incoming ones
+ * (so a pin swap between outputs cannot release a pin another output just took).
+ *
+ * \param inst The S/PDIF instance (must be disabled)
+ * \param new_pin The new GPIO pin number
+ */
+void audio_spdif_attach_pin(audio_spdif_instance_t *inst, uint new_pin);
+
 /** \brief Fully tear down an S/PDIF output instance for output-type switching
  * \ingroup audio_spdif
  *

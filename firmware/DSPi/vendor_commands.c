@@ -2609,7 +2609,7 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     status = PIN_CONFIG_SUCCESS;
                 } else {
                     // PDM output (out_idx == 4): must be disabled first
-                    if (pdm_enabled || core1_mode == CORE1_MODE_PDM) {
+                    if (pdm_enabled || core1_mode == CORE1_MODE_PDM || pdm_hw_is_active()) {
                         status = PIN_CONFIG_OUTPUT_ACTIVE;
                     } else {
                         pdm_change_pin(new_pin);

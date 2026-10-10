@@ -464,7 +464,27 @@ void __isr __time_critical_func(audio_spdif_dma_irq_handler)() {
 // audio_spdif_change_pin
 // ---------------------------------------------------------------------------
 
+// Release the pin to high-Z, but only while it is still muxed to our PIO: a
+// pin another subsystem claimed (SIO, GPCK, another PIO) is no longer ours.
+static void spdif_release_pin(audio_spdif_instance_t *inst) {
+    if (gpio_get_function(inst->pin) != (gpio_function_t)pio_get_funcsel(inst->pio)) return;
+    gpio_set_function(inst->pin, GPIO_FUNC_NULL);
+    gpio_set_dir(inst->pin, GPIO_IN);
+}
+
 void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin) {
+    assert(!inst->enabled);
+
+    spdif_release_pin(inst);
+
+    audio_spdif_attach_pin(inst, new_pin);
+}
+
+// ---------------------------------------------------------------------------
+// audio_spdif_attach_pin
+// ---------------------------------------------------------------------------
+
+void audio_spdif_attach_pin(audio_spdif_instance_t *inst, uint new_pin) {
     assert(!inst->enabled);
 
     // Mask DMA IRQ for this channel so the handler can't restart transfers
@@ -480,10 +500,6 @@ void audio_spdif_change_pin(audio_spdif_instance_t *inst, uint new_pin) {
         give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
         inst->playing_buffer = NULL;
     }
-
-    // Release old pin from PIO mux → high-Z
-    gpio_set_function(inst->pin, GPIO_FUNC_NULL);
-    gpio_set_dir(inst->pin, GPIO_IN);
 
     // Claim new pin for PIO
     pio_gpio_init(inst->pio, new_pin);
@@ -595,9 +611,7 @@ void audio_spdif_teardown(audio_spdif_instance_t *inst) {
     // buffer is backed by static instance storage — also nothing to free.
     inst->consumer_pool = NULL;
 
-    // Release the pin to high-Z.
-    gpio_set_function(inst->pin, GPIO_FUNC_NULL);
-    gpio_set_dir(inst->pin, GPIO_IN);
+    spdif_release_pin(inst);
 
     // Unclaim DMA channel and PIO SM so this slot's I2S instance can claim them.
     dma_channel_unclaim(inst->dma_channel);
@@ -635,6 +649,19 @@ void audio_spdif_teardown(audio_spdif_instance_t *inst) {
 // the gate-to-start latency to a few hundred nanoseconds).
 uint32_t audio_spdif_enable_sync_prepare(audio_spdif_instance_t *instances[], uint count) {
     assert(count > 0 && count <= PICO_AUDIO_SPDIF_MAX_INSTANCES);
+
+    // Rewind every SM to the state spdif_program_init() leaves: a stopped SM
+    // keeps a full TX FIFO and partial OSR, a re-inited one (pin move, type
+    // switch) starts empty, and that difference is ~2 frames of inter-slot skew.
+    for (uint i = 0; i < count; i++) {
+        audio_spdif_instance_t *inst = instances[i];
+        uint pio_idx = pio_get_index(inst->pio);
+        assert(pio_program_offset[pio_idx] >= 0);
+        pio_sm_clear_fifos(inst->pio, inst->pio_sm);
+        pio_sm_restart(inst->pio, inst->pio_sm);
+        pio_sm_exec(inst->pio, inst->pio_sm,
+                    pio_encode_jmp((uint)pio_program_offset[pio_idx] + audio_spdif_offset_output_low));
+    }
 
     // Enable DMA IRQ and prime DMA for all instances
     for (uint i = 0; i < count; i++) {

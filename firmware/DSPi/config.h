@@ -80,6 +80,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 // PDM Soft Start/Stop
 #define PDM_FADE_IN_SHIFT   10                        // 2^10 = 1024 samples
 #define PDM_FADE_IN_SAMPLES (1u << PDM_FADE_IN_SHIFT) // ~21ms at 48kHz
+#define PDM_HOLD_TIMEOUT_US 100000u   // pdm_hold_hw: covers the fade-out at 44.1 kHz with margin
 
 // SPDIF Buffer Configuration
 #define AUDIO_BUFFER_COUNT    8   // Producer buffers per SPDIF instance

@@ -183,6 +183,18 @@ void audio_i2s_set_enabled(audio_i2s_instance_t *inst, bool enabled);
  */
 void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin);
 
+/** \brief Move an I2S output's data line onto a new GPIO without releasing the old one
+ * \ingroup pico_audio_i2s_multi
+ *
+ * Same as audio_i2s_change_data_pin() except the old data pin is left
+ * untouched, for callers that release outgoing pins themselves before claiming
+ * incoming ones.
+ *
+ * \param inst    The I2S instance (must be disabled)
+ * \param new_pin The new data GPIO pin number
+ */
+void audio_i2s_attach_data_pin(audio_i2s_instance_t *inst, uint new_pin);
+
 /** \brief Enable multiple I2S instances with synchronized PIO start
  * \ingroup pico_audio_i2s_multi
  *

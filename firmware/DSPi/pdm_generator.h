@@ -13,7 +13,16 @@ void pdm_setup_hw(uint8_t pin);
 void pdm_core1_entry(void);
 void pdm_update_clock(uint32_t freq);
 void pdm_push_sample(int32_t sample, bool reset);
-void pdm_change_pin(uint8_t new_pin);
+void pdm_change_pin(uint8_t new_pin);   // only while !pdm_hw_is_active()
+uint8_t pdm_get_pin(void);
+bool pdm_hw_is_active(void);
+bool pdm_pin_needs_move(uint8_t want);   // false until pdm_setup_hw() has run
+
+// Ask Core 1 to stop the PDM SM/DMA (its normal fade-out) and wait for the
+// acknowledgement.  Returns false on timeout, with the hold still raised;
+// always pair with pdm_release_hw(), which lets Core 1 restart if enabled.
+bool pdm_hold_hw(uint32_t timeout_us);
+void pdm_release_hw(void);
 
 // Fill the free-running PDM DMA ring with true silence and arm a write-lead
 // re-anchor for the Core 1 processing loop.  Called from Core 0 immediately

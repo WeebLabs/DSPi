@@ -43,6 +43,12 @@ static uint8_t pdm_current_pin = PICO_PDM_PIN;
 // Enable/disable flag — set by Core 0 via pdm_set_enabled(), read by Core 1
 volatile bool pdm_enabled = false;
 
+// Hold handshake (pdm_hold_hw): Core 0 sets pdm_hold, Core 1 stops the SM/DMA
+// and clears pdm_hw_active.  Both sides store-then-dmb-then-load the other's
+// flag, so Core 1 never starts hardware that Core 0 believes is stopped.
+static volatile bool pdm_hold = false;
+static volatile bool pdm_hw_active = false;
+
 // Core 1 mode and EQ worker handshake
 volatile Core1Mode core1_mode = CORE1_MODE_IDLE;
 Core1EqWork core1_eq_work = {0};
@@ -181,16 +187,17 @@ void pdm_setup_hw(uint8_t pin) {
 }
 
 void pdm_change_pin(uint8_t new_pin) {
-    assert(!pdm_enabled);
-    assert(core1_mode != CORE1_MODE_PDM);
+    assert(!pdm_hw_active);
 
     // Safety: stop SM and abort DMA (should already be stopped)
     pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
     dma_channel_abort(pdm_dma_chan);
 
-    // Release old pin → high-Z
-    gpio_set_function(pdm_current_pin, GPIO_FUNC_NULL);
-    gpio_set_dir(pdm_current_pin, GPIO_IN);
+    // Release old pin → high-Z, only while it is still muxed to our PIO.
+    if (gpio_get_function(pdm_current_pin) == (gpio_function_t)pio_get_funcsel(PDM_PIO)) {
+        gpio_set_function(pdm_current_pin, GPIO_FUNC_NULL);
+        gpio_set_dir(pdm_current_pin, GPIO_IN);
+    }
 
     // Init new pin for PIO
     pio_gpio_init(PDM_PIO, new_pin);
@@ -204,10 +211,41 @@ void pdm_change_pin(uint8_t new_pin) {
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
     pio_sm_init(PDM_PIO, PDM_SM, pdm_pio_offset, &c);
 
-    // Restore clock divider (pio_sm_init resets it)
-    pdm_update_clock(48000);
+    // Restore clock divider (pio_sm_init resets it) at the live rate.
+    pdm_update_clock(audio_state.freq);
 
     pdm_current_pin = new_pin;
+}
+
+uint8_t pdm_get_pin(void) {
+    return pdm_current_pin;
+}
+
+bool pdm_pin_needs_move(uint8_t want) {
+    return pdm_dma_chan >= 0 && want != pdm_current_pin;
+}
+
+bool pdm_hw_is_active(void) {
+    return pdm_hw_active;
+}
+
+bool pdm_hold_hw(uint32_t timeout_us) {
+    pdm_hold = true;
+    __dmb();
+    __sev();
+    uint32_t start = time_us_32();
+    while (pdm_hw_active) {
+        if (time_us_32() - start > timeout_us) return false;
+        tight_loop_contents();
+    }
+    __dmb();
+    return true;
+}
+
+void pdm_release_hw(void) {
+    __dmb();
+    pdm_hold = false;
+    __sev();
 }
 
 void __not_in_flash_func(pdm_push_sample)(int32_t sample, bool reset) {
@@ -247,7 +285,8 @@ static void __not_in_flash_func(pdm_processing_loop)() {
 
     while (core1_mode == CORE1_MODE_PDM || fade_out_pos > 0) {
         // ---- Enable/disable state machine ----
-        if (!pdm_enabled && fade_out_pos == 0) {
+        const bool run = pdm_enabled && !pdm_hold;
+        if (!run && fade_out_pos == 0) {
             if (hw_running) {
                 // Start fade-out instead of immediate stop
                 fade_out_pos = PDM_FADE_IN_SAMPLES;
@@ -258,12 +297,21 @@ static void __not_in_flash_func(pdm_processing_loop)() {
         }
 
         // Cancel fade-out if re-enabled
-        if (pdm_enabled && fade_out_pos > 0) {
+        if (run && fade_out_pos > 0) {
             fade_in_pos = PDM_FADE_IN_SAMPLES - fade_out_pos;
             fade_out_pos = 0;
         }
 
         if (!hw_running) {
+            // Claim the hardware, then back off if Core 0 raised a hold in
+            // the meantime (pairs with pdm_hold_hw's store-dmb-load).
+            pdm_hw_active = true;
+            __dmb();
+            if (pdm_hold) {
+                pdm_hw_active = false;
+                continue;
+            }
+
             // Re-enable: reset state, refill silence, restart hardware
             for (int i = 0; i < PDM_DMA_BUFFER_SIZE; i++)
                 pdm_dma_buffer[i] = 0xAAAAAAAA;
@@ -371,6 +419,8 @@ static void __not_in_flash_func(pdm_processing_loop)() {
                 pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
                 dma_channel_abort(pdm_dma_chan);
                 hw_running = false;
+                __dmb();
+                pdm_hw_active = false;
                 global_status.cpu1_load = 0;
                 continue;
             }
@@ -455,6 +505,8 @@ static void __not_in_flash_func(pdm_processing_loop)() {
         pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
         dma_channel_abort(pdm_dma_chan);
         hw_running = false;
+        __dmb();
+        pdm_hw_active = false;
     }
     global_status.cpu1_load = 0;
 }

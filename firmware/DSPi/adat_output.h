@@ -60,6 +60,11 @@ void adat_output_stream_stop(void);
 // re-established at exactly ADAT_ALIGN_LEAD_FRAMES each epoch.
 void adat_output_resync(void);
 
+// Stop and release the live ADAT pin if the config moves or disables it, so a
+// unified output transition can free every outgoing pin before claiming any.
+// The next adat_output_resync() claims the configured pin.
+void adat_output_release_moving_pin(void);
+
 // Mirrors the DMA-starvation monitoring state (usb_audio.c SOF/alt handling):
 // while true, silence insertion is slaved 1:1 to slot 0's starvation counter;
 // while false (host stream stopped) the cushion free-runs on silence.

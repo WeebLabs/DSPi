@@ -683,7 +683,27 @@ void audio_i2s_set_enabled(audio_i2s_instance_t *inst, bool enabled) {
 // audio_i2s_change_data_pin
 // ---------------------------------------------------------------------------
 
+// Release a pin to high-Z, but only while it is still muxed to `pio`: a pin
+// another subsystem claimed (SIO, GPCK, another PIO) is no longer ours.
+static void i2s_release_pin(PIO pio, uint pin) {
+    if (gpio_get_function(pin) != (gpio_function_t)pio_get_funcsel(pio)) return;
+    gpio_set_function(pin, GPIO_FUNC_NULL);
+    gpio_set_dir(pin, GPIO_IN);
+}
+
 void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
+    assert(!inst->enabled);
+
+    i2s_release_pin(inst->pio, inst->data_pin);
+
+    audio_i2s_attach_data_pin(inst, new_pin);
+}
+
+// ---------------------------------------------------------------------------
+// audio_i2s_attach_data_pin
+// ---------------------------------------------------------------------------
+
+void audio_i2s_attach_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
     assert(!inst->enabled);
 
     // Mask DMA IRQ for this channel during reinit
@@ -697,10 +717,6 @@ void audio_i2s_change_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
         give_audio_buffer(inst->consumer_pool, inst->playing_buffer);
         inst->playing_buffer = NULL;
     }
-
-    // Release old data pin from PIO mux -> high-Z
-    gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);
-    gpio_set_dir(inst->data_pin, GPIO_IN);
 
     // Claim new data pin for PIO
     pio_gpio_init(inst->pio, new_pin);
@@ -904,8 +920,7 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
     inst->consumer_pool = NULL;
 
     // Release data pin
-    gpio_set_function(inst->data_pin, GPIO_FUNC_NULL);
-    gpio_set_dir(inst->data_pin, GPIO_IN);
+    i2s_release_pin(inst->pio, inst->data_pin);
 
     // Unclaim DMA channel and PIO SM
     dma_channel_unclaim(inst->dma_channel);
@@ -930,10 +945,8 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
 
         if (i2s_instance_count == 0) {
             // Last I2S instance removed — release BCK/LRCLK to high-Z
-            gpio_set_function(inst->clock_pin_base, GPIO_FUNC_NULL);
-            gpio_set_dir(inst->clock_pin_base, GPIO_IN);
-            gpio_set_function(inst->clock_pin_base + 1, GPIO_FUNC_NULL);
-            gpio_set_dir(inst->clock_pin_base + 1, GPIO_IN);
+            i2s_release_pin(inst->pio, inst->clock_pin_base);
+            i2s_release_pin(inst->pio, inst->clock_pin_base + 1);
         }
         // If other instances remain, do NOT release BCK/LRCLK — the pins
         // hold their last driven level (no high-Z glitch). The caller is
@@ -1123,8 +1136,11 @@ void audio_i2s_mck_set_enabled(bool enabled) {
         // make that explicit), no clock leaves the chip.  The generator
         // continues running internally — quiescent draw is a few µA, well
         // below the noise floor of the rest of the design.
-        gpio_set_function(mck_pin_current, GPIO_FUNC_NULL);
-        gpio_set_dir(mck_pin_current, GPIO_IN);
+        // Only while the pad is still ours (another subsystem may own it now).
+        if (gpio_get_function(mck_pin_current) == GPIO_FUNC_GPCK) {
+            gpio_set_function(mck_pin_current, GPIO_FUNC_NULL);
+            gpio_set_dir(mck_pin_current, GPIO_IN);
+        }
         mck_running = false;
         printf("MCK disabled on GPIO %u\n", (uint)mck_pin_current);
     }
