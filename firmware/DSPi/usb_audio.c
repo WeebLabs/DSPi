@@ -1212,11 +1212,6 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
     bool active = (alt > 0);
     audio_spdif_set_starvation_monitoring(active);
     audio_i2s_set_starvation_monitoring(active);
-#if PICO_RP2350
-    // ADAT slaves its silence insertion to slot 0's starvation counter while
-    // the stream is active (see adat_output.c).
-    adat_output_set_stream_active(active);
-#endif
     audio_ring_last_push_us = 0;
 
     if (active) {

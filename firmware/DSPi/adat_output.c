@@ -17,19 +17,13 @@
 // S24 in place in buf_out (see output_s24.h); the pipeline's single
 // float->S24 pass feeds both the S/PDIF slots and this encoder.
 //
-// Buffering: a single 896-frame ring (28 KB BSS) drained by a free-running
-// DMA data channel; a chained control channel rewrites the read address at
-// the ring end (no IRQ, no power-of-2 size).  Frames are pushed after the
-// slot gives, so the ring lead equals the slot-0 consumer fill plus a fixed
-// ADAT_ALIGN_LEAD_FRAMES cushion.  The blocking give caps the fill at
-// 16 x 48 samples, which bounds the lead below the ring size; overwrite is
-// structurally impossible while the DMA runs.
-//
-// Underruns: slot 0's starvation counter now reports frames of silence
-// exposed to the wire, so ADAT inserts that same frame delta 1:1 and shifts
-// by exactly the amount the slots shift; the constant ADAT-to-slot offset
-// survives host underruns.  While the host stream is stopped (no gives) the
-// cushion is simply kept topped up with silence.
+// Buffering: a single ring drained by a free-running DMA data channel; a
+// chained control channel rewrites the read address at the ring end (no IRQ,
+// no power-of-2 size).  Frames are pushed after the slot ring writes, and the
+// lead is held at exactly ADAT_ALIGN_LEAD_FRAMES + slot 0's ring fill + the
+// silence ADAT has written ahead of the slot timeline (adat_excess_frames).
+// Slot skips are mirrored synchronously from the ring admission; see
+// current_architecture.md "ADAT Bulk Output" for the accounting.
 // ----------------------------------------------------------------------------
 
 #include "adat_output.h"
@@ -45,6 +39,7 @@
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "usb_audio.h"
+#include "audio_pipeline.h"
 #include "notify.h"
 
 #define ADAT_PIO                pio1   // PDM owns SM 0 on this block
@@ -52,9 +47,13 @@
 #define ADAT_DMA_DATA_CH        13     // 13/14 are unused in every config:
 #define ADAT_DMA_CTRL_CH        14     // outputs 0-3, PDM 4, input 5-12
 #define ADAT_FRAME_WORDS        8      // 256 bits
-#define ADAT_RING_FRAMES        896    // 28 KB; > cushion + blocking-give cap (96 + 768)
+#define ADAT_RING_FRAMES        960    // 30 KB; must exceed cushion + slot ring fill cap
 #define ADAT_ALIGN_LEAD_FRAMES  96     // constant ADAT-vs-slot lead; underrun cushion
 #define ADAT_SYNC_HEADER        0x8010u // [1][10x0][1][0000]; user bits always 0
+
+_Static_assert(ADAT_RING_FRAMES > ADAT_ALIGN_LEAD_FRAMES +
+               PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD,
+               "ADAT ring must hold the cushion plus a full slot ring");
 
 // The wire data is pre-NRZI-encoded line levels, so the program is a bare
 // 1 cycle/bit shifter (same as the PDM program): out pins, 1.
@@ -84,8 +83,9 @@ static uint8_t  adat_hw_pin = 0xFF;       // GPIO currently routed to the PIO
 static uint     adat_pio_offset;
 static uint32_t adat_cur_freq = 48000;
 static bool     adat_rate_ok = true;
-static bool     adat_stream_active_mode;  // starvation counting is live
-static uint32_t adat_slot0_starv_seen;
+// Silence written ahead of the slot timeline while slot 0 ran dry, not yet
+// matched by the slot skip that re-anchors it.
+static uint32_t adat_excess_frames;
 static bool     adat_need_local_resync;
 
 static volatile uint8_t adat_cfg_enabled;
@@ -96,7 +96,6 @@ static uint16_t adat_resync_count;
 static uint16_t adat_slip_count;
 static uint32_t adat_last_notified_state = 0xFFFFFFFF;
 
-extern uint8_t output_types[];  // usb_audio.c; slot 0 type selects starvation source
 
 // ---------------------------------------------------------------------------
 // Frame construction
@@ -160,8 +159,16 @@ static inline uint32_t adat_lead_frames(void) {
     return (adat_wr_frame + ADAT_RING_FRAMES - adat_rd_frame()) % ADAT_RING_FRAMES;
 }
 
+// Silence frames carry an even number of ones, so they leave the line level
+// unchanged and an all-silence ring replays seamlessly.
+DSP_TIME_CRITICAL
 static void adat_write_silence(uint32_t frames) {
     uint32_t wf = adat_wr_frame;
+    if (frames > ADAT_RING_FRAMES) {
+        // Only the last ring's worth can survive; skip straight to it.
+        wf = (wf + (frames - ADAT_RING_FRAMES)) % ADAT_RING_FRAMES;
+        frames = ADAT_RING_FRAMES;
+    }
     uint32_t lvl = adat_line_level;
     for (uint32_t i = 0; i < frames; i++) {
         memcpy(&adat_ring[wf * ADAT_FRAME_WORDS], adat_silence_nrzi[lvl],
@@ -262,12 +269,6 @@ static void adat_arm_dma(void) {
     channel_config_set_high_priority(&dc, true);
     dma_channel_configure(ADAT_DMA_DATA_CH, &dc, &ADAT_PIO->txf[ADAT_SM],
                           adat_ring, ADAT_RING_FRAMES * ADAT_FRAME_WORDS, true);
-}
-
-static inline uint32_t adat_slot0_starvations(void) {
-    return (output_types[0] == OUTPUT_TYPE_I2S)
-        ? audio_i2s_get_dma_starvations_instance(0)
-        : audio_spdif_get_dma_starvations_instance(0);
 }
 
 static void adat_notify_if_changed(void) {
@@ -386,31 +387,55 @@ void adat_output_resync(void) {
     }
     adat_sm_configure();
 
-    // Line starts low: force the pin and seed the NRZI encoder to match.
+    // Line starts low: force the pin and fill the whole ring with silence at
+    // that level, so the anchor below only has to place the write pointer.
     pio_sm_exec(ADAT_PIO, ADAT_SM, pio_encode_set(pio_pins, 0));
     adat_line_level = 0;
-
-    // Alignment cushion: the constant ADAT-vs-slot lead, re-established at
-    // every synchronized output restart.
     adat_wr_frame = 0;
-    adat_write_silence(ADAT_ALIGN_LEAD_FRAMES);
+    adat_write_silence(ADAT_RING_FRAMES);
 
-    adat_slot0_starv_seen = adat_slot0_starvations();
+    // Anchor against slot 0 as it stands at the SM start, within one frame
+    // (ADAT is on another PIO block and cannot join the synchronized start).
+    uint32_t save = save_and_disable_interrupts();
+    int32_t lead = (int32_t)ADAT_ALIGN_LEAD_FRAMES + output_ring_fill_signed(0);
+    adat_excess_frames = 0;
+    if (lead < (int32_t)ADAT_ALIGN_LEAD_FRAMES) {
+        adat_excess_frames = (uint32_t)((int32_t)ADAT_ALIGN_LEAD_FRAMES - lead);
+        lead = ADAT_ALIGN_LEAD_FRAMES;
+    }
+    adat_wr_frame = (uint32_t)lead;
     adat_arm_dma();
     pio_sm_set_enabled(ADAT_PIO, ADAT_SM, true);
+    restore_interrupts(save);
     adat_running = true;
     adat_resync_count++;
     adat_notify_if_changed();
 }
 
-void adat_output_set_stream_active(bool active) {
-    if (active && !adat_stream_active_mode)
-        adat_slot0_starv_seen = adat_slot0_starvations();  // re-baseline
-    adat_stream_active_mode = active;
+DSP_TIME_CRITICAL
+void adat_output_keepalive(void) {
+    if (!adat_running) return;
+    // Exact from slot 0's counters even after the reader overtook the writer,
+    // where the ring position alone is ambiguous.
+    int32_t lead = (int32_t)ADAT_ALIGN_LEAD_FRAMES + output_ring_fill_signed(0)
+                 + (int32_t)adat_excess_frames;
+    if (lead >= (int32_t)ADAT_ALIGN_LEAD_FRAMES) return;
+    uint32_t n = (uint32_t)((int32_t)ADAT_ALIGN_LEAD_FRAMES - lead);
+    adat_write_silence(n);
+    adat_excess_frames += n;
 }
 
-void adat_output_rebaseline_starvations(void) {
-    adat_slot0_starv_seen = adat_slot0_starvations();
+DSP_TIME_CRITICAL
+void adat_output_on_slot_skip(uint32_t frames) {
+    if (!adat_running) return;
+    if (adat_excess_frames > frames) {
+        // Unreachable: excess only accrues while slot 0 is dry, and the skip
+        // that ends a dry spell covers its whole deficit.
+        adat_need_local_resync = true;
+        return;
+    }
+    adat_write_silence(frames - adat_excess_frames);
+    adat_excess_frames = 0;
 }
 
 void adat_output_task(void) {
@@ -419,36 +444,7 @@ void adat_output_task(void) {
         adat_output_resync();
         return;
     }
-    if (!adat_running) return;
-
-    if (adat_stream_active_mode) {
-        // Slaved insertion: the starvation counter is in frames, so mirror
-        // slot 0's underrun-frame delta 1:1 to keep the ADAT-to-slot offset
-        // exact across underruns.
-        uint32_t starv = adat_slot0_starvations();
-        uint32_t pending = starv - adat_slot0_starv_seen;
-        if (pending > 256 * PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT) {
-            // Impossible as a real backlog: the counter was reset (stream
-            // (re)start, stats reset).  Re-baseline without inserting.
-            adat_slot0_starv_seen = starv;
-        } else if (pending) {
-            // Bound the insert per pass in frames; carry the rest next call.
-            uint32_t cap = 8 * PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT;
-            if (pending > cap) pending = cap;
-            adat_write_silence(pending);
-            adat_slot0_starv_seen += pending;
-        }
-    } else {
-        // Host stream stopped: no gives, no starvation counting.  Keep the
-        // cushion topped up; alignment re-canonicalizes at the next resync.
-        uint32_t lead = adat_lead_frames();
-        if (lead < ADAT_ALIGN_LEAD_FRAMES)
-            adat_write_silence(ADAT_ALIGN_LEAD_FRAMES - lead);
-    }
-
-    // The DMA passing the write pointer means the cushion is gone (stalled
-    // main loop or dead DMA); restart cleanly instead of playing the ring.
-    if (adat_lead_frames() == 0) adat_need_local_resync = true;
+    adat_output_keepalive();
 }
 
 DSP_TIME_CRITICAL

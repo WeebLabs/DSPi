@@ -54,10 +54,10 @@ void adat_output_on_rate_change(uint32_t freq);
 // Stop the stream (outputs draining / disruptive work ahead).
 void adat_output_stream_stop(void);
 
-// Full stream (re)start against current config: reconfigure pin/divider,
-// prefill the alignment cushion, re-arm DMA, start the SM.  Called at the end
-// of every synchronized output restart so the ADAT-to-slot offset is
-// re-established at exactly ADAT_ALIGN_LEAD_FRAMES each epoch.
+// Full stream (re)start against current config: reconfigure pin/divider, fill
+// the ring with silence, anchor the lead to the cushion plus slot 0's ring
+// fill, re-arm DMA, start the SM.  Called after every synchronized output
+// restart (complete_pipeline_reset, enable_outputs_in_sync) and at boot.
 void adat_output_resync(void);
 
 // Stop and release the live ADAT pin if the config moves or disables it, so a
@@ -65,27 +65,20 @@ void adat_output_resync(void);
 // The next adat_output_resync() claims the configured pin.
 void adat_output_release_moving_pin(void);
 
-// Mirrors the DMA-starvation monitoring state (usb_audio.c SOF/alt handling):
-// while true, silence insertion is slaved 1:1 to slot 0's starvation counter;
-// while false (host stream stopped) the cushion free-runs on silence.
-void adat_output_set_stream_active(bool active);
+// Mirror a skip applied identically to every slot ring (output ring
+// admission), before the block that follows it is pushed.  RAM-resident.
+void adat_output_on_slot_skip(uint32_t frames);
 
-// Drop any accumulated slot-0 starvation backlog without inserting silence
-// for it.  Called at the end of a flash bracket: during the erase/program
-// window the slots keep clocking (selective NVIC blackout) and count
-// starvations, but ADAT is not behind by that amount; its own ring lapped
-// and it emitted a frame per sample clock the whole time.  Mirroring the
-// backlog would therefore shift the ADAT-to-slot offset in the wrong
-// direction; the synchronized restart (or the input prefill's) re-canonical-
-// izes the offset instead.
-void adat_output_rebaseline_starvations(void);
+// Top the ring up with silence while slot 0 is dry, so the reader never
+// passes the writer.  Main-loop task and output-ring stall alarm; RAM-resident.
+void adat_output_keepalive(void);
 
-// Main-loop service: slaved/idle silence top-up and deferred local resync.
+// Main-loop service: keep-alive and deferred local resync.
 void adat_output_task(void);
 
 // DSP push: encode and enqueue sample_count frames from the 8 finalized
 // output channels, already converted to S24 in place in buf_out (see
-// output_s24.h).  Called from process_input_block() after the slot gives;
+// output_s24.h).  Called from process_input_block() after the slot ring writes;
 // no-op while the stream is down.
 void adat_output_push_block(const out_s24_t (*bufs)[192], uint32_t sample_count);
 

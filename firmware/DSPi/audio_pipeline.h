@@ -107,6 +107,11 @@ uint32_t output_rings_stall_nvic_mask(void);
 // poll until every enabled reader has played extra_frames past them.
 void output_rings_silence_mark_arm(uint32_t extra_frames);
 bool output_rings_silence_mark_reached(void);
+#if PICO_RP2350
+// Signed ring fill in frames (negative = reader ahead of writer); 0 when the
+// slot is not running.  RAM-resident; the ADAT output anchors to it.
+int32_t output_ring_fill_signed(uint slot);
+#endif
 // Live sample-granular fill in frames; false = no valid reading.
 bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames);
 void get_slot_consumer_stats(uint slot, uint *cons_free,

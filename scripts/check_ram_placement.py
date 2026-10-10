@@ -183,6 +183,10 @@ RP2350_EXTRA = [
     ("memcpy", False),
     ("memmove", False),
     ("adat_ring_base_holder", False),
+    # ADAT keep-alive and skip mirror run from ring admission and the stall alarm.
+    ("adat_output_keepalive", False),
+    ("adat_output_on_slot_skip", False),
+    ("output_ring_fill_signed", False),
 ]
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the

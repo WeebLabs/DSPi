@@ -1497,6 +1497,9 @@ static bool output_rings_pre_give(uint32_t frames) {
                     audio_spdif_ring_skip(inst, skip);
             }
         }
+#if PICO_RP2350
+        adat_output_on_slot_skip(skip);
+#endif
         extern volatile int overruns;
         extern volatile bool preset_loading;
         if (!preset_loading) overruns++;
@@ -1589,8 +1592,9 @@ void output_rings_stamp_silence_ahead(void) {
 // main loop cannot run its idle pump, so a stalled ring never replays stale or
 // mis-framed content (current_architecture.md "Output Ring Stall Bracket").
 
-// Well inside one ring lap at 96 kHz (1024 frames, 10.7 ms).
-#define OUTPUT_RINGS_STALL_PERIOD_US 2000u
+// Inside one slot ring lap at 96 kHz (10.7 ms) and half the ADAT cushion
+// (96 frames, 2 ms at 48 kHz), which the ADAT keep-alive must top up in time.
+#define OUTPUT_RINGS_STALL_PERIOD_US 1000u
 
 static int stall_alarm = -1;
 static uint stall_irq;
@@ -1602,6 +1606,9 @@ static void output_rings_stall_irq(void) {
     timer_hw_t *t = PICO_DEFAULT_TIMER_INSTANCE();
     t->intr = 1u << stall_alarm;
     output_rings_stamp_silence_ahead();
+#if PICO_RP2350
+    adat_output_keepalive();
+#endif
     t->alarm[stall_alarm] = t->timerawl + OUTPUT_RINGS_STALL_PERIOD_US;
 }
 
@@ -1680,6 +1687,20 @@ bool output_rings_silence_mark_reached(void) {
     }
     return true;
 }
+
+#if PICO_RP2350
+DSP_TIME_CRITICAL
+int32_t output_ring_fill_signed(uint slot) {
+    if (output_types[slot] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[slot];
+        if (!inst || !inst->ring || !inst->enabled) return 0;
+        return (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_frames(inst));
+    }
+    audio_spdif_instance_t *inst = spdif_instance_ptrs[slot];
+    if (!inst || !inst->ring || !inst->enabled) return 0;
+    return (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_frames(inst));
+}
+#endif
 
 // One "bucket" = 48 frames (the old consumer-buffer size); the vendor
 // stats wire format and every prefill threshold keep bucket units.

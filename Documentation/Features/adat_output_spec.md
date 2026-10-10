@@ -1,6 +1,6 @@
 # ADAT Bulk Output
 
-*Last updated: 2026-07-13*
+*Last updated: 2026-10-11*
 
 ## Overview
 
@@ -33,21 +33,18 @@ ADAT channel N is bit-identical in level to what goes to slot output N.
 Alignment guarantees:
 
 - ADAT cannot drift against the output slots. Its PIO clock is 256 x Fs, the
-  same as SPDIF TX, and its clock divider is the identical value: nominal in
-  USB/I2S modes, and in SPDIF-input mode the clock servo (which trims the
-  output dividers to track the source) writes ADAT the same divider it writes
-  the SPDIF slots.
+  same as SPDIF TX, and it always runs the identical nominal divider. Input
+  clock tracking trims `sys_clk` itself (the soft VCXO), which moves ADAT and
+  every slot together.
 - ADAT runs a constant 96-sample lead cushion (2 ms at 48 kHz) relative to the
-  slot outputs. The offset is fixed and is re-established at every synchronized
-  output restart (rate change, preset load, output type/pin change, input
-  source switch).
-- During host underruns, ADAT inserts silence slaved one-for-one to the slot-0
-  DMA starvation counter, so the ADAT-to-slot offset survives underruns
-  exactly while a USB stream is open.
-- Corner case: if the host closes its USB stream while a non-USB input
-  (SPDIF/I2S) keeps playing, a transient output underrun in that state can
-  shift ADAT by up to one 48-sample chunk relative to the slots until the next
-  pipeline restart re-canonicalizes the offset.
+  slot outputs. Every output restart anchors it against slot 0's measured ring
+  fill, exact to within one frame (ADAT is on another PIO block and cannot join
+  the slots' synchronized start).
+- Every slot underrun re-anchor is mirrored into ADAT in the same call, before
+  the next block is pushed, so the offset survives underruns exactly, whatever
+  the input source or USB stream state. A keep-alive tops ADAT up with silence
+  while the slots are dry, including through flash writes. The accounting is in
+  `current_architecture.md`, "ADAT Bulk Output".
 
 ## Vendor commands
 
@@ -198,9 +195,9 @@ the float clamp/convert path including +/-1.0, denormals and infinities.
 
 - Engine: `firmware/DSPi/adat_output.c`; NRZI is encoded on the CPU (line-level
   state carried across frames), so the PIO program is a single `out pins, 1`
-  at 256 x Fs and the clkdiv is identical to the SPDIF TX divider
-  (servo-tracked in SPDIF-input mode). DMA channels 13 (data) + 14 (control)
-  run a free-running 896-frame (28 KB) ring with an IRQ-less chained wrap.
+  at 256 x Fs and the clkdiv is identical to the SPDIF TX divider. DMA
+  channels 13 (data) + 14 (control) run a free-running 960-frame (30 KB) ring
+  with an IRQ-less chained wrap.
 - Encoder (2026-07-13, LUT-driven; bit-identical to the original stuff +
   prefix-XOR implementation): each PCM byte maps to a fixed 10-bit stuffed
   token `[1][hi nibble][1][lo nibble]`, and NRZI is linear, so the

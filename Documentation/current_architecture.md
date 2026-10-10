@@ -1045,7 +1045,7 @@ Output S/PDIF and I2S generate **no DMA IRQs** at all: the rings are drained by 
 
 A slot ring is 1024 frames, so it laps every 21.3 ms at 48 kHz and every 10.7 ms at 96 kHz. While the producer runs, the writer keeps an erase-ahead margin of silence in front of the reader, and the main loop's `output_rings_idle_pump()` keeps the ring silent when no producer runs. Neither happens while the main loop is stalled. If the reader laps during a stall, it replays whatever the ring held one lap earlier. Even when that content is silence, its S/PDIF framing is wrong: every frame carries its IEC 60958 block position from its absolute frame number (`frames mod 192`), and 1024 is not a multiple of 192, so replayed frames sit 64 frames out of block step on every lap. Receivers that check preamble spacing can unlock.
 
-The stall bracket (`output_rings_stall_begin()` / `output_rings_stall_end()`, `audio_pipeline.c`) closes that gap. `output_rings_stall_init()` claims a spare hardware timer alarm at boot and installs `output_rings_stall_irq` as its handler. While a bracket is open, the alarm fires every 2 ms (`OUTPUT_RINGS_STALL_PERIOD_US`) and runs `output_rings_stamp_silence_ahead()`, which stamps correctly framed silence from the write position up to one full ring ahead of every enabled slot's reader. It never touches unplayed audio, so pending frames play exactly once and are followed by silence with continuous block framing. The 2 ms period is well inside the 10.7 ms lap at 96 kHz.
+The stall bracket (`output_rings_stall_begin()` / `output_rings_stall_end()`, `audio_pipeline.c`) closes that gap. `output_rings_stall_init()` claims a spare hardware timer alarm at boot and installs `output_rings_stall_irq` as its handler. While a bracket is open, the alarm fires every 1 ms (`OUTPUT_RINGS_STALL_PERIOD_US`) and runs `output_rings_stamp_silence_ahead()`, which stamps correctly framed silence from the write position up to one full ring ahead of every enabled slot's reader. It never touches unplayed audio, so pending frames play exactly once and are followed by silence with continuous block framing. On RP2350 the same tick runs `adat_output_keepalive()`. The 1 ms period is set by ADAT: its 96-frame cushion lasts 2 ms at 48 kHz, while a slot ring lap is 10.7 ms even at 96 kHz.
 
 Rules for using it:
 
@@ -1055,7 +1055,7 @@ Rules for using it:
 - **Flash windows.** `flash_irq_blackout_begin()` keeps exactly this alarm's NVIC line live (`output_rings_stall_nvic_mask()`). The handler and everything it calls are RAM-resident, enforced by `scripts/check_ram_placement.py`: the handler is the single `FLASH_WINDOW_ROOTS` entry and is also in the Check A/B hot list.
 - **Flash prepare.** `prepare_flash_write_operation()` ends with one `output_rings_stamp_silence_ahead()` call, which covers the short main-loop stretch before the first flash primitive opens its bracket.
 
-PDM and ADAT are outside the alarm. PDM keeps its own producer on Core 1 except in a flash window, where `pdm_flash_silence()` covers it. ADAT output's handling across stalls is described under "ADAT Bulk Output".
+PDM is outside the alarm. It keeps its own producer on Core 1 except in a flash window, where `pdm_flash_silence()` covers it. ADAT output's handling across stalls is described under "ADAT Bulk Output".
 
 ### Synchronized Start
 
@@ -1828,11 +1828,9 @@ What stays masked: every other timer alarm (so `pico_spdif_rx`'s decode-timeout 
 
 **PDM through the window.** PDM's ring DMA is IRQ-less and free-running, so it keeps clocking regardless, but Core 1 (its producer) is parked, so it would loop the last ~45 ms of modulator output. `pdm_flash_silence()` fills the ring with the modulator's `0xAAAAAAAA` 50 % duty silence pattern and sets `pdm_force_reanchor`; content only, so the DMA, PIO and every pointer are untouched and PDM phase stays continuous. On resume the processing loop unconditionally re-seats its write lead to `read + TARGET_LEAD`: the ring lapped an unknown number of times while Core 1 was parked, and the loop's modulo write-read delta cannot distinguish a multi-lap underrun from a valid lead (the `delta > half-ring` test misses roughly half the outcomes), so without this PDM could resume with an arbitrary wrong lead. It is called only when the lockout actually parked Core 1 — a still-running Core 1 keeps filling the ring itself, and a forced re-anchor would then be a gratuitous phase jump.
 
-**ADAT bulk output through the window (RP2350).** Its data/control DMA chain is IRQ-less and free-running, so the lightpipe stays framed — that was already true before this change, since ADAT never depended on an IRQ. The ring (896 frames, ~18.7 ms at 48 kHz) drains past the write pointer because the main loop, its producer, is blocked for ~45 ms; it keeps replaying valid pre-encoded frames whose audio content is muted (the fade ran first), so the receiver stays locked on silence. The offset is then re-canonicalized by `adat_output_resync()` — from `complete_pipeline_reset()` Phase 6, from the input prefill's `enable_outputs_in_sync()`, or from the lap detector.
+**ADAT bulk output through the window (RP2350).** Its data/control DMA chain is IRQ-less and free-running, so the lightpipe stays framed. Since 2026-10-11 the output-ring stall alarm also runs `adat_output_keepalive()`, which keeps the ADAT ring topped up with level-neutral silence for the whole window, and the skip mirror keeps ADAT's offset to the slots exact when the slots re-anchor afterwards (see "ADAT Bulk Output", Alignment). The pool-era starvation rebaseline (`adat_output_rebaseline_starvations()`) is gone.
 
-What the selective blackout *does* change for ADAT is the starvation mirror. Slot 0 now keeps completing DMA transfers through the window and counts a starvation per silence buffer (~45 at 48 kHz) where it previously counted ~1 (a single latched completion serviced after re-enable). `adat_output_task()`'s 1:1 slaved insertion must not mirror that backlog: ADAT was not behind by 45 buffers — it emitted a frame per sample clock for the same span — so inserting ~2160 frames of silence would push the ADAT-to-slot offset the wrong way (and overflow the 896-frame ring, forcing a slip). `complete_flash_write_operation_full()` therefore calls `adat_output_rebaseline_starvations()` first, dropping the backlog without insertion; the resync that follows re-establishes the canonical `ADAT_ALIGN_LEAD_FRAMES` cushion. On the USB path Phase 6's resync would have re-baselined anyway (`adat_output_resync()` re-samples the counter); the explicit call is what covers the SPDIF path, whose completion returns early and hands the restart to the re-lock prefill.
-
-**Completion policy (2026-07-23): every runtime flash write ends in a synchronized output restart.** All flash-write call sites complete via `complete_flash_write_operation_full()`: preset save/delete and the legacy save path as before, and now also every metadata-only directory write (preset rename, startup policy, output-config mode/save, master-volume mode/save, UART/I2C control-interface config, Control Surface save, DAC-mute config). The former `complete_flash_write_operation_light()`, which skipped the output rebuild because DSP/output topology was unchanged, was removed. Rationale: during the ~45 ms IRQ blackout the output DMA handlers could not re-arm, the PIO TX FIFOs drained within tens of microseconds of the in-flight buffer completing, and every output SM stalled with BCK/LRCLK/DATA frozen mid-frame; the light path then resumed those clocks mid-frame with no DAC mute cycle and no restart. External DACs that derive their system clock from BCK (e.g. PCM5102 with SCK grounded, BCK PLL mode) can exit that halt mis-locked and render all subsequent, perfectly correct samples as full-scale distortion until the clocks are stopped and restarted cleanly. Field-reported (2026-07-22) as persistent "full scale noise resembling the music" after a preset rename and after a Control Surface save (Win10 USB source, I2S output to a PCM5102); pressing preset save fixed it because that path already ran the full completion. **The clock halt itself is gone as of 2026-07-25** (selective NVIC blackout, above), so that failure mode no longer exists; the unified completion is nevertheless retained, because it is what refills the drained pools from a deterministic synchronized state and is the shared owner of the feedback reset and the DAC mute release. It preserves the inviolable inter-slot alignment: `complete_pipeline_reset()` restarts every SM in sync, and for SPDIF/I2S/ADAT sources the input's prefill/re-lock handshake performs the equivalent synchronized restart. Dropping the restart for topology-unchanged writes is separate future work (no-teardown completions). One exception (2026-10-10): when deleting the active preset makes `apply_restored_outputs()` run an output transition, that transition is the synchronized restart, and the handler calls only `complete_flash_write_resume_inputs()` (the ADAT rebaseline and the SPDIF/I2S input resume) instead of the full completion. Output type switches (`process_type_switches()`) and output data-pin changes (`process_pin_changes()`) need no equivalent treatment: they perform no flash writes and already end in a synchronized restart; their persistence commands (output-config save/mode) are among the metadata writes covered above.
+**Completion policy (2026-07-23): every runtime flash write ends in a synchronized output restart.** All flash-write call sites complete via `complete_flash_write_operation_full()`: preset save/delete and the legacy save path as before, and now also every metadata-only directory write (preset rename, startup policy, output-config mode/save, master-volume mode/save, UART/I2C control-interface config, Control Surface save, DAC-mute config). The former `complete_flash_write_operation_light()`, which skipped the output rebuild because DSP/output topology was unchanged, was removed. Rationale: during the ~45 ms IRQ blackout the output DMA handlers could not re-arm, the PIO TX FIFOs drained within tens of microseconds of the in-flight buffer completing, and every output SM stalled with BCK/LRCLK/DATA frozen mid-frame; the light path then resumed those clocks mid-frame with no DAC mute cycle and no restart. External DACs that derive their system clock from BCK (e.g. PCM5102 with SCK grounded, BCK PLL mode) can exit that halt mis-locked and render all subsequent, perfectly correct samples as full-scale distortion until the clocks are stopped and restarted cleanly. Field-reported (2026-07-22) as persistent "full scale noise resembling the music" after a preset rename and after a Control Surface save (Win10 USB source, I2S output to a PCM5102); pressing preset save fixed it because that path already ran the full completion. **The clock halt itself is gone as of 2026-07-25** (selective NVIC blackout, above), so that failure mode no longer exists; the unified completion is nevertheless retained, because it is what refills the drained pools from a deterministic synchronized state and is the shared owner of the feedback reset and the DAC mute release. It preserves the inviolable inter-slot alignment: `complete_pipeline_reset()` restarts every SM in sync, and for SPDIF/I2S/ADAT sources the input's prefill/re-lock handshake performs the equivalent synchronized restart. Dropping the restart for topology-unchanged writes is separate future work (no-teardown completions). One exception (2026-10-10): when deleting the active preset makes `apply_restored_outputs()` run an output transition, that transition is the synchronized restart, and the handler calls only `complete_flash_write_resume_inputs()` (the SPDIF/I2S input resume) instead of the full completion. Output type switches (`process_type_switches()`) and output data-pin changes (`process_pin_changes()`) need no equivalent treatment: they perform no flash writes and already end in a synchronized restart; their persistence commands (output-config save/mode) are among the metadata writes covered above.
 
 ### Preset System (replaces single-sector storage)
 
@@ -2520,10 +2518,11 @@ masked, and PDM claims its channel once at init.
 > `DSP_TIME_CRITICAL` and RAM-resident.
 
 > **ADAT bulk output (2026-07-06, RP2350 only; encoder LUT added 2026-07-13).**
-> The ADAT engine adds a fixed 28 KB BSS frame ring (896 frames x 32 bytes,
-> `adat_ring` in adat_output.c) plus small state; the ring is sized to cover
-> the alignment cushion (96 frames) plus the blocking-give fill cap (16 x 48
-> samples) so overwrite of unplayed frames is structurally impossible. The
+> The ADAT engine adds a fixed 30 KB BSS frame ring (960 frames x 32 bytes,
+> `adat_ring` in adat_output.c; 896 frames / 28 KB before 2026-10-11) plus
+> small state; the ring is sized to cover the alignment cushion (96 frames)
+> plus a full slot ring's fill cap (1024 - 192 frames) so overwrite of
+> unplayed frames is structurally impossible. The
 > LUT-driven encoder adds 528 bytes of BSS (`adat_token_lut[256]` uint16 = 512 B,
 > plus the per-entry-level header variants `adat_hdr_nrzi`/`adat_hdr_exit`),
 > built once in `adat_output_init()`. The single float->S24 conversion point
@@ -4240,7 +4239,7 @@ Full specification: `Documentation/Features/i2s_output_spec.md`
 ---
 
 ## ADAT Bulk Output
-*Last updated: 2026-07-13 (LUT-driven NRZI encoder; single float->S24 conversion point shared with the slots)*
+*Last updated: 2026-10-11 (output rings: synchronous skip mirror, keep-alive, measured resync anchor, 960-frame ring). Previously, 2026-07-13 (LUT-driven NRZI encoder; single float->S24 conversion point shared with the slots)*
 
 RP2350 only. Streams all 8 main output channels (post-matrix, post per-output
 EQ/gain/delay/mute, the same finalized samples the SPDIF/I2S slots receive) as
@@ -4259,7 +4258,7 @@ see "Clock Servo"), and because ADAT TX derives from `sys_clk` like the SPDIF/I2
 slots it stays rate-locked to them with zero long-term drift by construction, no
 per-clock coordination needed. Frames (256 bits: `[1][10x0][1][u3..u0]` then 8 x 6 x `[1][nibble]`, user
 bits 0) are encoded on Core 0 in `process_input_block()` after the slot gives
-and written into a 896-frame (28 KB BSS) ring drained by DMA CH13, with CH14 as
+and written into a 960-frame (30 KB BSS) ring drained by DMA CH13, with CH14 as
 an IRQ-less control channel that rewrites the read address at the ring end.
 
 Encoding is LUT-driven. Each PCM byte stuffs to a fixed 10-bit token
@@ -4290,25 +4289,17 @@ rejected (a two-mode encoder would need mid-stream resync); the encode LUT is in
 not shared with the planned ADAT input, whose NRZI decode is `x ^ (x >> 1)` and
 whose destuffing is two masks, needing no LUT.
 
-**Alignment:** pushing after the blocking gives makes the ring lead track the
-slot-0 consumer fill plus a constant 96-frame cushion; the blocking-give cap
-(16 x 48 samples) bounds the lead under the ring size, so overwrite of unplayed
-frames is impossible. The 96-sample (2 ms at 48 kHz) ADAT-to-slot offset is
-re-established at every synchronized output restart (`complete_pipeline_reset`
-Phase 6, `enable_outputs_in_sync`). During host underruns silence frames are
-inserted slaved 1:1 to slot 0's DMA starvation counter (SPDIF or I2S; the I2S
-multi library gained matching counters), so the offset survives underruns while
-a USB stream is open; counter resets are detected by delta bounds and only
-re-baseline. The existing slots' sync-start machinery is untouched: ADAT is a
-PDM-style independent consumer, never a member of the Phase 2 sync start.
+**Alignment** *(rewritten 2026-10-11 for the output rings)*. ADAT plays a constant 96 frames (`ADAT_ALIGN_LEAD_FRAMES`, 2 ms at 48 kHz) behind the slots. The invariant is exact accounting: ADAT's ring lead always equals 96 + slot 0's signed ring fill (`output_ring_fill_signed(0)`) + `adat_excess_frames`, where the excess is silence ADAT has written ahead of the slot timeline and not yet matched. Three operations keep it:
 
-A flash window is the one case where mirroring is the wrong recovery: the slots
-keep clocking (and counting starvations) through the erase/program, but ADAT's
-free-running ring also kept emitting a frame per sample clock, so it is not
-behind by the starvation count. `complete_flash_write_operation_full()` calls
-`adat_output_rebaseline_starvations()` to drop that backlog without inserting
-for it, and the following resync re-establishes the canonical cushion. See
-"Selective NVIC blackout" under Flash Storage. *Last updated: 2026-07-25*
+- **Push.** `adat_output_push_block()` encodes the same admitted block the slot rings just received, so lead and fill grow together. Blocks the ring admission refuses are pushed nowhere.
+- **Skip mirror.** When the ring admission (`output_rings_pre_give()`) applies an underrun re-anchor skip of S frames to every slot, it calls `adat_output_on_slot_skip(S)` in the same call, before the block that follows is pushed. ADAT writes S minus its excess in silence and clears the excess. The slots and ADAT therefore shift by the same amount, in the same order relative to the audio.
+- **Keep-alive.** `adat_output_keepalive()` tops the lead back up to 96 frames whenever slot 0 runs dry, adding what it writes to the excess. It runs from `adat_output_task()` in the main loop and from the output-ring stall alarm (1 ms period, see "Output Ring Stall Bracket"), so the ADAT reader never passes its writer, even through a flash write. It computes the lead from slot 0's counters rather than the ring position, so it stays correct even if a stall outside any bracket let the reader overtake the writer. Excess only accrues while slot 0 is in deficit, and the skip that ends the deficit always covers it. A skip smaller than the excess is therefore unreachable, and is handled as a local resync.
+
+Silence frames carry an even number of ones (2 in the header, 48 forced stuffing bits), so they leave the NRZI line level unchanged. An all-silence region replays seamlessly, and the write pointer can be placed anywhere inside one.
+
+**Resync anchor.** `adat_output_resync()` fills the whole ring with silence, then with interrupts off measures slot 0's signed fill, sets the write pointer to 96 + fill frames ahead of the DMA start (or to 96 with the difference recorded as excess when slot 0 is in deficit), arms the DMA and starts the SM. ADAT sits on PIO1 and cannot join the slots' synchronized start, so the anchor is exact to within one frame of slot 0's sub-frame position. It runs after every synchronized output restart (`complete_pipeline_reset` Phase 6, `enable_outputs_in_sync`), at boot, and for a local resync. Before 2026-10-11 the resync always seeded exactly 96 frames and ignored the slots' fill, so the ADAT-to-slot offset varied with how far slot 0 had played or been prefilled at that moment.
+
+**Ring size.** The ring must hold the cushion plus a full slot ring: 96 + (1024 - 192) = 928 frames, so `ADAT_RING_FRAMES` is 960 (static-asserted). The pool-era 896 frames only covered the 768-frame blocking-give cap.
 
 **Config/state machine:** vendor commands 0xCA-0xCE (see reference table)
 record intent and set `adat_output_config_dirty`; the main loop applies it

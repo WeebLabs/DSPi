@@ -1648,18 +1648,9 @@ static void resume_i2s_after_flash(void) {
 // DAC mute release; dropping the restart for topology-unchanged writes is
 // the separate no-teardown-completions work.  Full history and rationale:
 // Documentation/current_architecture.md "Flash Operation Safety".
-// Input/ADAT half of the flash completion, shared with callers whose own
+// Input half of the flash completion, shared with callers whose own
 // output transition already did the synchronized restart.
 static void complete_flash_write_resume_inputs(void) {
-#if PICO_RP2350
-    // The slots counted a starvation per silence buffer through the window,
-    // but ADAT's own IRQ-less ring free-ran for the same span and is not
-    // behind; mirroring the backlog would push the ADAT-to-slot offset the
-    // wrong way.  Drop it; the synchronized restart (or the SPDIF
-    // prefill's enable_outputs_in_sync()) re-canonicalizes via a resync.
-    adat_output_rebaseline_starvations();
-#endif
-
     // Restart SPDIF RX if prepare_flash_write_operation() suspended it.
     // The lock-acquisition block in the main loop will drain outputs and
     // run the prefill handshake once RX re-locks.
