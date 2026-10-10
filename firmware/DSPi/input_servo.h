@@ -19,8 +19,9 @@
 // wrong nominal divider.
 void input_servo_apply(float actual_freq, int fill_slot);
 
-// Zero the integrator and park the VCXO at nominal. Call when tracking
-// starts or stops and when lock is (re)acquired.
+// Zero the integrator and park the VCXO at nominal. Call only when tracking
+// starts or stops: a relock holds the last-good trim, and a call on the
+// pipeline-reset path would park a locked VCXO mid-lock.
 void input_servo_reset(void);
 
 #include "config.h"

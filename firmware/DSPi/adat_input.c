@@ -516,6 +516,7 @@ void adat_input_start(void) {
     uint32_t widx = adat_rx_write_index();
     adat_rx_meas_arm(now, widx);
     adat_rx_resync_scan(widx);
+    input_servo_reset();   // tracking (re)starts from nominal
 
     if (adat_clock_mode == ADAT_CLOCK_MODE_SLAVE) {
         adat_rx_detected_rate = 0;
@@ -612,7 +613,7 @@ uint32_t adat_input_poll(void) {
         }
         hdr_fail_run = 0;
         if (adat_rx_lock_count < 255) adat_rx_lock_count++;
-        input_servo_reset();   // fresh integrator for the new lock
+        // No servo reset: a relock holds the last-good trim (soft_vcxo_spec.md).
         adat_rx_set_state(ADAT_INPUT_LOCKED);
         return 0;
     }
