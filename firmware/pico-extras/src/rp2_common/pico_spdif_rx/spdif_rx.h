@@ -132,12 +132,8 @@ spdif_rx_state_t spdif_rx_get_state();
 float spdif_rx_get_samp_freq_actual();
 
 /**
-* DSPi patch: coherent snapshot of {decoded block count, entry timestamp of
-* the DMA IRQ that completed that block}. While the receiver is stable and
-* block-aligned every block is exactly SPDIF_BLOCK_SIZE sub frames
-* (SPDIF_BLOCK_SIZE / 2 frames), so deltas of this pair give an exact
-* samples-over-time rate measurement with only IRQ-latency jitter at the
-* endpoints. Seqlock read; callable from thread context on either core.
+* DSPi patch: coherent {decoded block count, completing IRQ time} pair; each
+* stable block is SPDIF_BLOCK_SIZE / 2 frames. Seqlock read, thread context.
 *
 * @param[out] block_cnt decoded-block count
 * @param[out] time_us IRQ entry timestamp (us since boot) pairing block_cnt
@@ -145,18 +141,15 @@ float spdif_rx_get_samp_freq_actual();
 void spdif_rx_get_block_ref(uint32_t* block_cnt, uint64_t* time_us);
 
 /**
-* DSPi patch: fifo count including the words the in-flight DMA block
-* transfer has already written (word-granular availability, not gated on
-* block completion).
+* DSPi patch: fifo count including in-flight words; 0 unless STABLE.
 *
 * @return uint32_t fifo count in 32bit words (2 words per sample for stereo)
 */
 uint32_t spdif_rx_get_fifo_count_live();
 
 /**
-* DSPi patch: spdif_rx_read_fifo, but allowed to consume into the in-flight
-* block for word-granular delivery. Returned words are always already
-* written by DMA; the in-flight block's sync/parity are not yet verified.
+* DSPi patch: spdif_rx_read_fifo that may consume into the in-flight block
+* (sync/parity not yet verified). Returns 0 words unless STABLE.
 *
 * @param[out] buff pointer to get fifo address to read
 * @param[in] req_count 32bit word count to request

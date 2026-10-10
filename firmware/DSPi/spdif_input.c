@@ -288,6 +288,13 @@ uint32_t spdif_input_poll(void) {
     // --- Handle lock acquisition event ---
     if (spdif_rx_stable_flag) {
         spdif_rx_stable_flag = false;
+
+        // Stable-then-lost between polls leaves both flags set, and the lost
+        // branch above runs first; do not re-enter LOCKED on a dead receiver.
+        if (spdif_rx_get_state() != SPDIF_RX_STATE_STABLE) {
+            spdif_state = SPDIF_INPUT_RELOCKING;
+            return 0;
+        }
         if (spdif_lock_count < 255) spdif_lock_count++;
 
         uint32_t rate = spdif_rx_detected_rate;
