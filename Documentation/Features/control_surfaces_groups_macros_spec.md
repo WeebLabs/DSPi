@@ -264,7 +264,10 @@ The sequencer owns one op-state and one group context. Per step: wait out
 `pre_delay`, revalidate, resolve the action exactly as a button press on an
 equivalent binding would (anchor rule, group fan-out included), then wait
 for the step's dispatches to leave the BUSY-pending state before starting
-the next step's delay. Cancellation (new fire, `REQ_CS_MACRO_FIRE` 0xFFFF,
+the next step's delay. A queued preset load, factory reset or bulk apply
+also counts as unfinished work until it lands after the pipeline fade, and
+no step fires while one is queued, so later steps are never overwritten by
+it. Cancellation (new fire, `REQ_CS_MACRO_FIRE` 0xFFFF,
 or revert) drops remaining steps; anything already dispatched stands.
 
 ## 5. Persistence (directory V18)

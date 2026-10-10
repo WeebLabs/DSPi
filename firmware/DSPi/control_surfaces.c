@@ -42,6 +42,7 @@
 #include "audio_input.h"
 #include "notify.h"
 #include "i2c_control.h"
+#include "usb_audio.h"
 
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
@@ -2122,18 +2123,27 @@ static void cs_macro_advance(uint8_t step) {
     s_macro_fired = false;
 }
 
+// A whole-state replace queued behind the fade (preset load, factory reset,
+// bulk params) would overwrite anything a step dispatches before it lands.
+static bool cs_state_replace_pending(void) {
+    return preset_load_pending || factory_reset_pending || bulk_params_pending;
+}
+
 static void cs_tick_macro(void) {
     if (s_macro_run == 0xFF) return;
     const CsMacro *m = &s_macros.macros[s_macro_run];
 
     if (s_macro_fired) {
-        // Drain the step's BUSY-pending work before the next step's delay
-        // starts, so sequences serialize even across flash blackouts.
+        // Drain the step's BUSY-pending and deferred work before the next
+        // step's delay starts, so the delay counts from a landed preset load.
         if (s_macro_op.pending || s_macro_gop.pend_mask) return;
+        if (cs_state_replace_pending()) return;
         cs_macro_advance((uint8_t)(s_macro_step + 1));
         return;
     }
     if (s_macro_delay > 0) { s_macro_delay--; return; }
+    // Covers a replace queued by another source mid-macro.
+    if (cs_state_replace_pending()) return;
 
     // A header SET may have cut step_count while this step sat in its
     // pre-delay; the shortened macro ends here instead of firing the cut tail.

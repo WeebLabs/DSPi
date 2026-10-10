@@ -3348,6 +3348,8 @@ payload of one NUL byte clears the name; names are not part of
 
 ### Target groups and macros (caps v9, 0x20-0x26)
 
+*Last updated: 2026-10-10 (macro steps wait for a queued preset load, factory reset or bulk apply to land)*
+
 Wire detail (every struct, status code and command payload) is in
 `Documentation/Features/control_surfaces_groups_macros_spec.md`; this
 subsection covers the firmware structure only.
@@ -3424,6 +3426,16 @@ the existing deferred, pipeline-safe apply machinery; nothing here adds a path
 to the audio pipeline and output slot alignment is untouched by construction.
 The sequencer waits for a step's dispatches to leave the BUSY-pending state
 before starting the next step's delay.
+
+A dispatch that queues a whole-state replace (`preset_load_pending`,
+`factory_reset_pending` or `bulk_params_pending`) returns "accepted" at once,
+but the replace only lands after the pipeline fade, which can take tens of
+milliseconds. Any step dispatched in that window would be overwritten when the
+replace lands. The sequencer therefore treats a step as unfinished until all
+three flags are clear, so the next step's `pre_delay` counts from the landed
+load. It also holds a step at its fire point while one of the flags is set,
+which covers a load queued mid-macro by the host or another control. The fade
+is time-capped, so a held macro always resumes.
 
 **Control plumbing.** `REQ_SET_CS_GROUP`, `REQ_SET_CS_MACRO` and
 `REQ_SET_CS_MACRO_STEP` are single-deep deferred SETs in the established shape
