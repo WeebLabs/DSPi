@@ -3266,10 +3266,9 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
             case REQ_SET_OUTPUT_TYPE: {
                 // wValue = (new_type << 8) | slot_index
                 //
-                // Type switching is DEFERRED to the main loop because it involves
-                // heap allocation (consumer pool creation) which cannot safely run
-                // in USB ISR context (malloc uses a spin lock that can deadlock if
-                // the main loop is also in malloc).
+                // Type switching is DEFERRED to the main loop: it needs the muted
+                // pipeline-reset bracket, which waits on the fade and the DAC
+                // mute and must not block a control request.
                 //
                 uint8_t slot = setup->wValue & 0xFF;
                 uint8_t new_type = (setup->wValue >> 8) & 0xFF;

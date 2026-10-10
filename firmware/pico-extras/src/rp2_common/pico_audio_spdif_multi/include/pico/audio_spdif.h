@@ -39,27 +39,10 @@ extern "C" {
 #endif
 #endif
 
-#ifndef PICO_AUDIO_SPDIF_BUFFERS_PER_CHANNEL
-#ifdef PICO_AUDIO_BUFFERS_PER_CHANNEL
-#define PICO_AUDIO_SPDIF_BUFFERS_PER_CHANNEL PICO_AUDIO_BUFFERS_PER_CHANNEL
-#else
-#define PICO_AUDIO_SPDIF_BUFFERS_PER_CHANNEL 3u
-#endif
-#endif
 
-// fixed by S/PDIF
+// IEC 60958 block length in frames (channel-status / preamble period).
 #define PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT 192u
 
-// DMA transfer granularity — must divide PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT evenly
-#ifndef PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT
-#define PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT 48u
-#endif
-
-// Bytes per stereo frame in the S/PDIF consumer buffer (2 x sizeof(spdif_subframe_t)).
-// This is the largest output-type consumer stride, so it sizes the shared per-slot
-// consumer pool's data blocks (I2S, stride 8, under-fills them). Asserted against the
-// real type in audio_spdif.c.
-#define PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES 16u
 
 // Allow use of pico_audio driver without actually doing anything much
 #ifndef PICO_AUDIO_SPDIF_NOOP
@@ -87,7 +70,7 @@ extern "C" {
 /** \brief Per-instance state for an S/PDIF output
  * \ingroup audio_spdif
  */
-// Ring geometry: one encoded ring per slot replaces the consumer pool.
+// Ring geometry: one encoded ring per slot.
 // Power of 2 (hardware read-address wrap on RP2350); 1024 frames = 21.3 ms
 // at 48 kHz. The writer keeps ERASE_AHEAD frames of valid silence stamped
 // ahead of real audio so a stalled producer plays silence, never a loop of
@@ -172,8 +155,7 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
  * \param inst The S/PDIF instance
  * \param producer The producer buffer pool
  * \param buffer_on_give If true, buffer on give side
- * \param consumer_pool Caller-owned consumer pool (re-formatted for S/PDIF here);
- *                      enables one static pool to be reused across output types
+ * \param consumer_pool Unused by the ring output; pass NULL
  * \param connection Optional custom connection (NULL for default)
  */
 bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,

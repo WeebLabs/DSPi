@@ -48,8 +48,6 @@
     ((type *)((char *)(ptr) - offsetof(type, member)))
 #endif
 
-_Static_assert(PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT % PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT == 0,
-    "DMA sample count must divide block sample count (192) evenly");
 _Static_assert((PICO_AUDIO_SPDIF_RING_FRAMES & (PICO_AUDIO_SPDIF_RING_FRAMES - 1)) == 0,
     "ring frame count must be a power of two");
 
@@ -221,7 +219,7 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames) {
     uint32_t e = inst->erased_frames;
     if ((int32_t)(target - e) > (int32_t)RING_FRAMES) e = target - RING_FRAMES;
     while ((int32_t)(target - e) > 0) {
-        stamp_frame(&ring[(e & RING_MASK) * 2u], e % 192u, 0, 0);
+        stamp_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT, 0, 0);
         e++;
     }
     inst->erased_frames = e;
@@ -241,7 +239,7 @@ void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_fr
     uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
     spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
     while (n--) {
-        stamp_frame(&ring[(e & RING_MASK) * 2u], e % 192u, 0, 0);
+        stamp_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT, 0, 0);
         e++;
     }
     inst->erased_frames = e;
@@ -277,7 +275,7 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
     uint32_t w = inst->wr_frames;
     for (uint32_t i = 0; i < frames; i++) {
-        stamp_frame(&ring[(w & RING_MASK) * 2u], w % 192u,
+        stamp_frame(&ring[(w & RING_MASK) * 2u], w % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT,
                     lr[i * 2u], lr[i * 2u + 1u]);
         w++;
     }
@@ -289,7 +287,7 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_SPDIF_ERASE_AHEAD;
     while ((int32_t)(target - e) > 0) {
-        stamp_frame(&ring[(e & RING_MASK) * 2u], e % 192u, 0, 0);
+        stamp_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT, 0, 0);
         e++;
     }
     inst->erased_frames = e;

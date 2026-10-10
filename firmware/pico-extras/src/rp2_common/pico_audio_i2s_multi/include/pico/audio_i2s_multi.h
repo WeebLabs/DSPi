@@ -19,8 +19,8 @@
  * own data pin, sharing BCK/LRCLK clock signals via PIO side-set.
  *
  * Follows the same architectural patterns as pico_audio_spdif_multi:
- * instance-based API, shared DMA IRQ handler, reference-counted IRQ
- * enable/disable, and synchronized multi-instance start.
+ * instance-based API, one free-running DMA ring per slot with no IRQs, and
+ * synchronized multi-instance start.
  *
  * Audio format: 24-bit samples left-justified in 32-bit I2S frames.
  * Standard Philips I2S timing: MSB-first, 1 BCK delay after LRCLK edge.
@@ -41,12 +41,6 @@ extern "C" {
 /** Maximum number of I2S instances that can be registered */
 #define PICO_AUDIO_I2S_MAX_INSTANCES 4
 
-/** Samples per DMA transfer — matches SPDIF for pipeline compatibility */
-#define PICO_AUDIO_I2S_DMA_SAMPLE_COUNT 48u
-
-/** Bytes per stereo frame in the I2S consumer buffer (2 x int32). Must not exceed
- *  PICO_AUDIO_SPDIF_CONSUMER_FRAME_BYTES, which sizes the shared per-slot pool. */
-#define PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES 8u
 
 // ---------------------------------------------------------------------------
 // Instance structure
@@ -197,15 +191,13 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
 /** \brief Connect a producer pool to an I2S instance with extra options
  * \ingroup pico_audio_i2s_multi
  *
- * Re-formats the caller's consumer pool for I2S and establishes the
- * producer-to-consumer connection. The connection callback left-shifts 24-bit
- * samples into 32-bit I2S frames (MSB-aligned).
+ * Links the producer pool to the instance; each give writes the block into
+ * the slot ring, left-shifting 24-bit samples into 32-bit I2S frames.
  *
  * \param inst           The I2S instance
  * \param producer       The producer buffer pool (PCM_S32, stride 8)
  * \param buffer_on_give If true, buffer on give side
- * \param consumer_pool  Caller-owned consumer pool (re-formatted for I2S here);
- *                       enables one static pool to be reused across output types
+ * \param consumer_pool  Unused by the ring output; pass NULL
  * \param connection     Optional custom connection (NULL for default)
  */
 bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,

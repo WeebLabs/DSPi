@@ -201,6 +201,15 @@ general; section 9 includes a bench check for this.
 
 ## 5. Pillar B: no-teardown silent operations
 
+> **Not implemented (status 2026-10-11).** Nothing in this section exists in
+> the firmware: there is no `prepare_silent_operation()`,
+> `complete_silent_operation()`, `usb_silent_fill_recovery()` or
+> `UNMUTE_MIN_FILL`. Every flash write still completes through
+> `complete_flash_write_operation_full()` and a synchronized restart. The output
+> rings make this design achievable: ring content and the stall bracket keep the
+> wire clean without a teardown, and the underrun skip keeps the slots aligned.
+> The text below is the original proposal, written for the pool design.
+
 ### 5.1 prepare_silent_operation()
 
 Factored out of `prepare_flash_write_operation()` (which now calls it and

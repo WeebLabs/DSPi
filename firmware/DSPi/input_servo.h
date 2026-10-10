@@ -13,7 +13,7 @@
 #include <stdint.h>
 
 // Track the measured input rate: ppm feed-forward plus a fill trim from
-// the given output slot's consumer pool (fill_slot < 0 = rate term only).
+// the given output slot's ring fill (fill_slot < 0 = rate term only).
 // Callers must not apply until the pipeline runs at the detected rate
 // (audio_state.freq matches), or the feed-forward is computed against the
 // wrong nominal divider.

@@ -117,9 +117,8 @@ _Static_assert(I2S_RX_DMA_BASE + 2 * I2S_RX_MAX_PAIRS <= SOFT_VCXO_DMA_PULSE,
 // meter is budget-based (busy_us / (frames / Fs)), so the fixed per-block
 // cost (Core 1 EQ-worker handshake, pipeline setup) divided by a tiny frame
 // count reads as a large inflation.  Batching to 48 frames matches the USB
-// packet / consumer-buffer granularity, bringing I2S CPU in line with USB.
-// At 48 kHz this adds ~1 ms of input latency; the consumer pool (50% prefill)
-// absorbs the resulting sub-buffer fill ripple.
+// packet granularity, bringing I2S CPU in line with USB.  At 48 kHz this adds
+// ~1 ms of input latency; the output rings' 50% prefill absorbs the ripple.
 #define I2S_INPUT_MIN_BLOCK 48u
 
 // Per-pair ring storage in the shared input-capture arena

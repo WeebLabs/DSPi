@@ -236,17 +236,12 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     // (or the caller's prefill block) restarts in sync afterwards.
     apply_nominal_output_rate(new_freq);
 
-    // Drain all consumer pools (old-rate audio) and restart outputs in sync
-    // at the new PIO divider. The SPDIF wrap_consumer_take path would
-    // otherwise update the divider lazily mid-stream with old-rate audio
-    // still queued in each consumer pool.
+    // Reset the output rings (old-rate audio) and restart outputs in sync at
+    // the new PIO divider.
     //
-    // Exception: if the SPDIF lock-acquisition block is currently prefilling
-    // the pools (spdif_prefilling == true), complete_pipeline_reset() would
-    // drain the half-filled pools and re-enable outputs against an empty
-    // pool — the exact underrun/pop the prefill handshake exists to prevent.
-    // Let the prefill block's own enable_outputs_in_sync() restart outputs
-    // when the 50 % fill threshold is reached instead.
+    // Exception: while the SPDIF lock-acquisition block is prefilling the
+    // rings (spdif_prefilling), a reset here would discard that prefill; its
+    // own enable_outputs_in_sync() restarts the outputs at the fill threshold.
     //
     // Likewise skip when the eventual input is I2S (defer_output_to_input_prefill):
     // the main-loop I2S prefill block will drain, re-enable in sync, and own the
@@ -271,8 +266,8 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
 // and set active_input_source = INPUT_SOURCE_I2S. This applies the selected
 // rate and MCK, starts the input, and deliberately does NOT enable outputs:
 // it leaves preset_loading set so the main-loop I2S block drains the outputs,
-// fills the consumer pools to 50%, and starts them in sync (mirroring the
-// SPDIF lock-acquisition prefill, minus the lock wait).
+// prefills the rings to 50%, and starts them in sync (mirroring the SPDIF
+// lock-acquisition prefill, minus the lock wait).
 //
 // When the selected rate differs from the live pipeline rate, perform_rate_change
 // is used: it must run its full reset so SPDIF TX dividers are reprogrammed
@@ -1204,14 +1199,10 @@ static bool pipeline_reset_ready(void) {
     return dac_hw_mute_hold_elapsed();
 }
 
-// Per-slot teardown: stop the output PIO SM and its free-running ring DMA,
-// then reset the slot's ring accounting so the next synchronized start
-// begins at frame 0.  The elaborate pool-era race chain (IRQ mask, abort,
-// playing-buffer recovery) is gone with the DMA IRQs themselves: the ring
-// path has no IRQ handler, no consumer pool, and no in-flight buffer.  The
-// USB SOF ISR reads the DMA read pointer, which is simply frozen once the
-// DMA is stopped.  Core 1 is idle here (prepare_pipeline_reset spin-waited
-// for work_done), so nothing races the ring reset.
+// Per-slot teardown: stop the SM and its free-running ring DMA, then reset the
+// ring accounting so the next synchronized start begins at frame 0.  Core 1 is
+// idle here (prepare_pipeline_reset waited for work_done); the SOF ISR's
+// consumed read is made atomic inside the ring reset itself.
 static void teardown_output_slot(int slot_idx) {
     extern uint8_t output_types[];
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
@@ -1426,8 +1417,8 @@ static void complete_pipeline_reset(void) {
 #endif
 }
 
-// Disable all outputs, abort DMA, drain consumer pipelines. Outputs stay
-// disabled so consumer buffers can be prefilled before starting playback.
+// Disable all outputs, stop their DMA and reset their rings. Outputs stay
+// disabled so the rings can be prefilled before starting playback.
 // Counterpart: enable_outputs_in_sync().
 //
 // Like complete_pipeline_reset(), runs the per-slot teardown with main
@@ -1480,11 +1471,9 @@ static void enable_outputs_in_sync(void) {
 #endif
 }
 
-// Flash writes disable interrupts for tens of milliseconds. Even when DSP
-// parameters are unchanged (e.g. preset save or directory writes), that
-// blackout can leave output consumer pools underfilled and inter-slot phase
-// skewed.  Bracket every deferred flash write with these helpers so audio
-// always resumes from a deterministic, synchronized state.
+// Flash writes stall the main loop for tens of milliseconds.  Bracket every
+// deferred flash write with these helpers so audio always resumes from a
+// deterministic, synchronized state.
 //
 // Additional anti-pop handling:
 //  1) Use a rate-aware mute window (ms-based, not fixed sample count).
@@ -1652,13 +1641,10 @@ static void complete_flash_write_operation_full(void) {
     complete_flash_write_resume_inputs();
 
     if (input_source_is_spdif(active_input_source)) {
-        // For SPDIF input: the slots played continuous silence across the
-        // window (pre-filled pools, then the framed silence buffers).  Skip
-        // complete_pipeline_reset(); draining the pools here would force
-        // outputs to restart against an empty pool, causing pops and
-        // uneven inter-slot fill.  The hardware mute is likewise left asserted;
-        // the lock-acquisition prefill path re-enables outputs in sync after
-        // re-lock and owns the matching dac_hw_mute_release().
+        // For SPDIF input the lock-acquisition prefill path owns the
+        // synchronized restart and the DAC mute release once RX re-locks; a
+        // reset here would only be undone by it.  The hardware mute stays
+        // asserted until then.
         reset_usb_feedback_loop();
         return;
     }
@@ -1874,8 +1860,8 @@ void core0_init() {
         // path that sets the source directly before we get here.
         //
         // Bring up the input with the rate applied but outputs left muted;
-        // the main-loop I2S block prefills the consumer pools to 50% then
-        // enables in sync (same handshake as the runtime switch).
+        // the main-loop I2S block prefills the rings to 50% then enables in
+        // sync (same handshake as the runtime switch).
         prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
         i2s_input_bringup_prefill();
     }
@@ -2199,7 +2185,7 @@ int main(void) {
             bool i2s_master = i2s_input_is_clock_master();
 
             if (preset_loading && !i2s_prefilling && dac_hw_mute_hold_elapsed()) {
-                // Disable outputs and drain consumer pools so they can be
+                // Disable outputs and reset their rings so they can be
                 // prefilled before playback begins.
                 drain_and_disable_outputs();
                 preset_loading = false;
@@ -3571,8 +3557,8 @@ int main(void) {
                     // Apply rate + MCK and start the input, but do NOT enable
                     // outputs here.  The mute is already engaged (the
                     // prepare_pipeline_reset above), so the main-loop I2S block
-                    // drains the outputs, prefills the consumer pools to 50%,
-                    // and starts them in sync.  This gives I2S the same startup
+                    // drains the outputs, prefills the rings to 50%, and
+                    // starts them in sync.  This gives I2S the same startup
                     // fill margin as USB/SPDIF instead of whatever low level the
                     // transient leaves.
                     i2s_input_bringup_prefill();
@@ -3680,7 +3666,7 @@ int main(void) {
         // restart after a BCK pin change in the input-master role.  Gated on
         // pipeline_reset_ready() like every other reset handler.  Outputs are
         // left muted after the restart; the main-loop I2S block above prefills
-        // the consumer pools to 50% and enables them in sync, so no explicit
+        // the rings to 50% and enables them in sync, so no explicit
         // complete_pipeline_reset() is needed here.
         if ((i2s_rx_pin_change_pending || i2s_input_restart_pending) &&
             pipeline_reset_ready()) {

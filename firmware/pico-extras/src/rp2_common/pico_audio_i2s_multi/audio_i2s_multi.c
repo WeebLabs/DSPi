@@ -5,18 +5,18 @@
  *
  * Multi-instance I2S audio output library for RP2040/RP2350.
  *
- * Architecture mirrors pico_audio_spdif_multi: instance-based API, shared
- * DMA IRQ handler with reference-counted enable/disable, per-PIO-block
- * program caching, and synchronized multi-instance start.
+ * Architecture mirrors pico_audio_spdif_multi: instance-based API, one
+ * free-running DMA ring per slot with no IRQs, per-PIO-block program caching,
+ * and synchronized multi-instance start.
  *
  * Key differences from SPDIF:
  *   - PIO program: 8-instruction I2S master (vs 4-instruction SPDIF NRZI)
- *   - Consumer stride: 8 bytes/sample (2 × int32) vs 16 bytes (2 × subframe)
+ *   - Ring stride: 8 bytes/frame (2 × int32) vs 16 bytes (2 × subframe)
  *   - DMA words per sample: 2 (vs 4 for SPDIF)
  *   - Encoding: simple left-shift by 8 (vs NRZI lookup table)
  *   - No preambles, channel status, or block structure
  *   - BCK/LRCLK shared across instances (side-set), data pin independent
- *   - Includes MCK generator on a separate PIO SM
+ *   - Includes the MCK generator (CLK_GPOUTn, no PIO SM)
  */
 
 // Per-block producer/consumer path; must stay in RAM under XIP builds
@@ -507,13 +507,6 @@ void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_f
 }
 
 // ---------------------------------------------------------------------------
-// Connection callbacks
-// ---------------------------------------------------------------------------
-
-// (Consumer-take wrapper removed: the ring path has no consumer pool; the
-// lazy rate follow lives in the producer-give wrapper.)
-
-// ---------------------------------------------------------------------------
 // I2S sample encoding: left-justify 24-bit audio into 32-bit I2S frames
 //
 // Producer buffer: interleaved int32_t L/R pairs, 24-bit audio in bits [23:0]
@@ -535,11 +528,6 @@ void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_f
 // 24-bit-configured DACs are not helped by this trick (they can't see [7:0]);
 // for them the muted-output click problem must be addressed elsewhere.
 // (I2S_PAD_PATTERN itself is defined with the ring geometry near the top.)
-
-// The shared per-slot consumer pool sizes its data blocks to the S/PDIF stride;
-// the I2S stride must fit within that. Pin it to the real frame size here.
-_Static_assert(PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES == 2 * sizeof(int32_t),
-               "PICO_AUDIO_I2S_CONSUMER_FRAME_BYTES must equal the stereo I2S frame stride");
 
 // I2S producer-give callback.
 //
@@ -735,13 +723,6 @@ bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
     producer->connection = connection;
     return true;
 }
-
-// ---------------------------------------------------------------------------
-// DMA transfer
-// ---------------------------------------------------------------------------
-
-// (Pool-mode DMA transfer starter and DMA IRQ handler removed: the ring
-// path runs free-running DMA with zero IRQs; see i2s_ring_dma_arm/stop.)
 
 // ---------------------------------------------------------------------------
 // audio_i2s_set_enabled

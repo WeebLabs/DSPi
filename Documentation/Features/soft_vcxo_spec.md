@@ -1,7 +1,7 @@
 # Soft VCXO: Fractional-N System PLL Trim for Input Clock Tracking
 
-*Last updated: 2026-07-22*
-*Status: implemented on branch `spdif_rx_overhaul`; RP2350 mechanism bench-proven standalone; full-firmware behavior HW-untested; RP2040 fbdiv dithering HW-untested.*
+*Last updated: 2026-10-11 (clock plan read from pll_sys at init)*
+*Status: implemented, merged into release/v1.1.6 through `merge/spdif-rx-overhaul` (2026-10-11); RP2350 mechanism bench-proven standalone; full-firmware behavior HW-untested; RP2040 fbdiv dithering HW-untested.*
 
 ## 1. Purpose
 
@@ -32,10 +32,11 @@ write to get wrong and no divider rounding to coordinate.
 
 ### 2.1 Clock plan (identical on both platforms)
 
-sys_clk = 307.2 MHz: XOSC 12 MHz ref, refdiv 1, FBDIV 128 (VCO 1536 MHz),
-postdiv 5 x 1. `soft_vcxo_init()` verifies `clock_get_hz(clk_sys) ==
-307200000` and stays inert otherwise (covers the RP2350 150 MHz boot
-fallback).
+Default plan: sys_clk = 307.2 MHz from XOSC 12 MHz ref, refdiv 1, FBDIV 128
+(VCO 1536 MHz), postdiv 5 x 1. Since 2026-10-11 `soft_vcxo_init()` reads
+refdiv, FBDIV and both post-dividers from `pll_sys_hw` and stays inert unless
+they reproduce `clock_get_hz(clk_sys)` (covers the RP2350 150 MHz boot
+fallback), so any clock plan works.
 
 ### 2.2 Pulse-density modulation of FBDIV
 
@@ -54,7 +55,8 @@ sys cycles/pulse     = 5.859375 / postdiv1(5)           = 1.171875
 pulse rate for 1 ppm = 307.2 / 1.171875                 = 262.144 Hz
 ```
 
-`SOFT_VCXO_HZ_PER_PPM = 262.144`. A standalone RP2350 bench test measured
+In general the rate is sys_MHz x FBDIV / `SOFT_VCXO_PULSE_CYCLES` (150) Hz
+per ppm, computed at init; 262.144 at the default plan. A standalone RP2350 bench test measured
 0.003843 ppm/Hz against the analytic 0.003815 ppm/Hz (within 1%); since
 the constant sits inside the input servo's feedback loop, residual gain
 error is absorbed by the fill terms and **no calibration pass is needed**

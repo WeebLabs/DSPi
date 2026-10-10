@@ -84,7 +84,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 
 // SPDIF Buffer Configuration
 #define AUDIO_BUFFER_COUNT    8   // Producer buffers per SPDIF instance
-#define SPDIF_CONSUMER_BUFFER_COUNT 16  // Consumer buffers per SPDIF instance (DMA side)
+// Slot ring fill scale in 48-frame buckets (16 = 768 frames): the unit of the
+// prefill thresholds, the clock servo target and REQ_GET_BUFFER_STATS.
+#define SPDIF_CONSUMER_BUFFER_COUNT 16
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
@@ -99,10 +101,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
-// Latency alignment (in samples - automatically adapts to sample rate)
-// SPDIF path: watermark = AUDIO_BUFFER_COUNT/2 buffers
-// PDM path: DMA buffer = PDM_DMA_BUFFER_SIZE/8 PCM samples
-#define SPDIF_BUFFER_SAMPLES  384  // Consumer path depth at 50% fill (16 buffers * 48 samples * 50%)
+// Sub alignment (in samples).  Known defect: PDM's real latency is not its
+// DMA ring size, so this offset is miscalibrated; see current_architecture.md
+// PDM "Known alignment defect" before changing either value.
+#define SPDIF_BUFFER_SAMPLES  384  // slot ring steady-state fill (OUTPUT_RING_TARGET_FILL_FRAMES)
 #define PDM_BUFFER_SAMPLES    (PDM_DMA_BUFFER_SIZE / 8)                           // 256
 #define SUB_ALIGN_SAMPLES     (SPDIF_BUFFER_SAMPLES - PDM_BUFFER_SAMPLES)         // 128
 
