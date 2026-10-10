@@ -1,35 +1,47 @@
 /*
- * input_servo.h; shared output-clock servo actuation for externally
- * clocked inputs (SPDIF input, ADAT input in slave clock mode).
+ * input_servo.h; shared clock servo for externally clocked inputs
+ * (SPDIF input, ADAT input in slave clock mode, I2S slave).
  *
  * Callers own lock gating, rate limiting, and the input rate measurement;
- * this module owns the divider math and PIO/MCK writes.
+ * this module owns the servo terms and actuates the soft VCXO (system PLL
+ * trim, soft_vcxo.c). Output PIO dividers stay at their nominal values.
  */
 
 #ifndef INPUT_SERVO_H
 #define INPUT_SERVO_H
 
-#include <stdbool.h>
 #include <stdint.h>
 
-// Servo all output slots (SPDIF/I2S types), the ADAT output, and MCK to the
-// measured input rate: rate-based dividers plus a proportional trim from
-// slot 0's consumer fill. Returns the SPDIF-format divider written (16.8),
-// or 0 if actual_freq failed the sanity check. Skips PIO writes when the
-// dividers are unchanged.
-uint32_t input_servo_apply(float actual_freq);
+// Track the measured input rate: ppm feed-forward plus a fill trim from
+// the given output slot's consumer pool (fill_slot < 0 = rate term only).
+// Callers must not apply until the pipeline runs at the detected rate
+// (audio_state.freq matches), or the feed-forward is computed against the
+// wrong nominal divider.
+void input_servo_apply(float actual_freq, int fill_slot);
 
-// Rewrite the cached dividers to every slot, the ADAT output and MCK, for
-// slots re-initialized at nominal while the servo stays locked. Returns false
-// (and writes nothing) when nothing has been applied since the last reset.
-bool input_servo_reapply(void);
-
-// Clear the written-divider cache so the next apply performs a full rewrite.
-// Call when (re)acquiring lock or after outputs restart at nominal dividers.
+// Zero the integrator and park the VCXO at nominal. Call when tracking
+// starts or stops and when lock is (re)acquired.
 void input_servo_reset(void);
 
-// Last SPDIF-format divider written (0 if none since reset). Callers gate
-// this on their own lock state for *_current_tx_divider() semantics.
-uint32_t input_servo_current_divider(void);
+#include "config.h"
+#if DSPI_CLOCK_DIAG
+// Per-tick servo snapshot for the CLKDIAG dump.  ppm fields are the last
+// computed term; min/max total ppm are windowed (reset on read).  Written
+// only from input_servo_apply (plain stores); read from the main loop.
+typedef struct {
+    float    actual_freq;   // measured input rate fed in
+    float    ppm_ff;        // feed-forward ppm
+    float    ppm_total;     // total commanded ppm (ff + fill)
+    float    ppm_min;       // min total ppm since last read
+    float    ppm_max;       // max total ppm since last read
+    float    integral_ppm;  // integrator value, in ppm
+    int32_t  fill_error;    // consumer fill minus centre (8)
+    int32_t  fill_slot;     // slot used for fill term (-1 = rate only)
+    uint32_t ticks;         // total servo ticks that actuated (cumulative)
+} InputServoDiag;
+
+// Fill *out and reset the windowed min/max total ppm.  Main-loop context.
+void input_servo_get_diag(InputServoDiag *out);
+#endif // DSPI_CLOCK_DIAG
 
 #endif // INPUT_SERVO_H

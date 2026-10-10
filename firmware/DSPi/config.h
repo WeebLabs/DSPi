@@ -327,6 +327,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_BUILD_INFO          0x80  // 64-byte git-describe/date blob; provenance for
                                           // humans only, no software may gate on it
 
+// Clock / audio-path diagnostics (read-only snapshot; DSPI_CLOCK_DIAG builds
+// only).  Returns the packed ClockDiagPacket latched by the 1 Hz clock_diag
+// poll.  0x80/0x81 stay free.
+#define REQ_GET_CLOCK_DIAG          0x82
+
 // Clip Detection Commands
 #define REQ_CLEAR_CLIPS             0x83
 
@@ -736,6 +741,47 @@ typedef struct __attribute__((packed)) {
 #define PICO_SPDIF_RX_DMA_CH1      5
 #endif
 
+// Soft VCXO (system PLL fractional trim, soft_vcxo.c): two explicit DMA
+// channels, DMA timer 0, and one PWM slice used purely as a DREQ pacer
+// (no GPIO).  RP2350 slice 8 has no bondable GPIO on RP2350A, so it can
+// never conflict; RP2040 slice 7 (GPIOs 14/15) is guarded against in the
+// control-surface PWM LED bind path.
+#if PICO_RP2350
+#define SOFT_VCXO_DMA_PULSE        11
+#define SOFT_VCXO_DMA_PACE         12
+#define SOFT_VCXO_PWM_SLICE         8
+#else
+#define SOFT_VCXO_DMA_PULSE        10
+#define SOFT_VCXO_DMA_PACE         11
+#define SOFT_VCXO_PWM_SLICE         7
+#endif
+#define SOFT_VCXO_DMA_TIMER         0
+
+// Output slot rings: RP2040 lacks ENDLESS-mode DMA, so each slot's
+// free-running ring needs a reload partner channel (slot i uses
+// OUTPUT_SLOT_RELOAD_DMA_BASE + i). RP2350 uses ENDLESS mode, no partner.
+#if !PICO_RP2350
+#define OUTPUT_SLOT_RELOAD_DMA_BASE 6
+#endif
+
+// ---------------------------------------------------------------------------
+// Clock / audio-path diagnostics (bench instrumentation)
+// ---------------------------------------------------------------------------
+// Master switch for the CLKDIAG serial console dump (clock_diag.c) and all the
+// diagnostic statics/getters it reads (soft_vcxo.c, input_servo.c,
+// spdif_input.c).  Everything is compiled out when 0; set 0 for release.
+#define DSPI_CLOCK_DIAG            1
+
+// A/B switches, default 0, honored in soft_vcxo.c / input_servo.c only when
+// DSPI_CLOCK_DIAG is 1.  Both leave the servo running so its commands are still
+// visible in the dump; they only cut the actuation or the accumulation:
+//   FORCE_PARK: soft_vcxo_set_ppm clamps every command to 0 (PLL never moves).
+//     If cutouts persist with this on, the VCXO/PLL is exonerated (H1/H5).
+//   FREEZE_INTEGRATOR: input_servo.c skips integrator accumulation (isolates
+//     integrator windup/oscillation, H2).
+#define SOFT_VCXO_DIAG_FORCE_PARK        0
+#define SOFT_VCXO_DIAG_FREEZE_INTEGRATOR 0
+
 // Number of configurable outputs (SPDIF + PDM)
 #if PICO_RP2350
 #define NUM_SPDIF_INSTANCES         4
@@ -1105,7 +1151,9 @@ typedef struct __attribute__((packed)) {
     uint8_t consumer_fill_pct;   // Consumer pipeline fill %
     uint8_t consumer_min_fill_pct; // Lowest consumer fill since last reset
     uint8_t consumer_max_fill_pct; // Highest consumer fill since last reset
-    uint8_t pad[2];
+    uint16_t fill_centi_pct;     // Sample-granular fill, 0.01% units on the
+                                 // same 16-bucket scale (5000 = 50.00%).
+                                 // Was pad[2]; zero on older firmware.
 } SpdifBufferStats;              // 8 bytes
 
 typedef struct __attribute__((packed)) {

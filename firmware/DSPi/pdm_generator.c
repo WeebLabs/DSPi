@@ -101,7 +101,7 @@ typedef struct {
     int32_t err_acc;   // Error accumulator for feedback
 } noise_shaper_t;
 
-static inline int32_t noise_shaped_dither(noise_shaper_t *ns, int32_t raw_dither, int32_t quant_error) {
+static inline int32_t pdm_noise_shaped_dither(noise_shaper_t *ns, int32_t raw_dither, int32_t quant_error) {
     // Accumulate quantization error with decay (LP filter on error)
     // Decay factor 0.97 in Q8 = 248
     ns->err_acc = ((ns->err_acc * 248) >> 8) + (quant_error >> 6);
@@ -246,6 +246,14 @@ void pdm_release_hw(void) {
     __dmb();
     pdm_hold = false;
     __sev();
+}
+
+// Free sample slots in the Core 0 to Core 1 message ring (SPSC, 256
+// entries, one kept open). Producer-side read; Core 1 only ADDS space,
+// so a caller-side admission check on this value stays valid until the
+// pushes that follow it.
+uint32_t __not_in_flash_func(pdm_ring_free_slots)(void) {
+    return 255u - (uint8_t)(pdm_head - pdm_tail);
 }
 
 void __not_in_flash_func(pdm_push_sample)(int32_t sample, bool reset) {
@@ -456,7 +464,7 @@ static void __not_in_flash_func(pdm_processing_loop)() {
         // 256x Oversampling with 2nd-order sigma-delta modulator
         for (int chunk = 0; chunk < 8; chunk++) {
             int32_t raw_rand = (int32_t)(fast_rand() & PDM_DITHER_MASK) - (PDM_DITHER_MASK >> 1);
-            int32_t dither = noise_shaped_dither(&ns, raw_rand, local_pdm_err2 >> 8);
+            int32_t dither = pdm_noise_shaped_dither(&ns, raw_rand, local_pdm_err2 >> 8);
 
             uint32_t pdm_word = 0;
             for (int k = 0; k < 32; k++) {

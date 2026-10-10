@@ -551,6 +551,7 @@ void adat_input_stop(void) {
     adat_rx_running = false;
     adat_rx_detected_rate = 0;
     meas_measured_hz = 0;
+    input_servo_reset();   // park the VCXO; no longer tracking
     adat_rx_set_state(ADAT_INPUT_INACTIVE);
     input_arena_release(INPUT_ARENA_ADAT);
     printf("ADAT RX: stopped\n");
@@ -611,7 +612,7 @@ uint32_t adat_input_poll(void) {
         }
         hdr_fail_run = 0;
         if (adat_rx_lock_count < 255) adat_rx_lock_count++;
-        input_servo_reset();   // force a full divider rewrite on first servo
+        input_servo_reset();   // fresh integrator for the new lock
         adat_rx_set_state(ADAT_INPUT_LOCKED);
         return 0;
     }
@@ -682,7 +683,7 @@ void adat_input_update_clock_servo(void) {
     adat_rx_servo_skip = 0;
 
     float actual = long_valid ? meas_hz_long : meas_hz_smooth;
-    input_servo_apply(actual);
+    input_servo_apply(actual, 0);
 }
 
 bool adat_input_check_rate_change(void) {
@@ -717,12 +718,6 @@ void adat_input_on_rate_change(uint32_t freq) {
     }
     // Slave mode: the device rate follows the detected wire rate, so the RX
     // divider is already nominal for it; nothing to retune.
-}
-
-uint32_t adat_input_current_tx_divider(void) {
-    return (adat_clock_mode == ADAT_CLOCK_MODE_SLAVE &&
-            adat_rx_state == ADAT_INPUT_LOCKED)
-               ? input_servo_current_divider() : 0;
 }
 
 AdatInputState adat_input_get_state(void) {

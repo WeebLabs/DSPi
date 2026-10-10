@@ -287,9 +287,19 @@ SECTIONS
         end = __end__;
         KEEP(*(.heap*))
     } > RAM
+    /* Output slot rings (usb_audio.c slot_ring_store) at the top of RAM: DMA ring
+       wrap needs ring-size alignment, which costs no padding here. NOLOAD and not
+       zeroed by crt0; every slot setup stamps its whole ring. */
+    SLOT_RINGS_BYTES = 0x8000;
+    .slot_rings (ORIGIN(RAM) + LENGTH(RAM) - SLOT_RINGS_BYTES) (NOLOAD) :
+    {
+        KEEP(*(.slot_rings))
+    } > RAM
+    ASSERT(SIZEOF(.slot_rings) == SLOT_RINGS_BYTES, "slot_ring_store size must match SLOT_RINGS_BYTES")
+
     /* historically on GCC sbrk was growing past __HeapLimit to __StackLimit, however
        to be more compatible, we now set __HeapLimit explicitly to where the end of the heap is */
-    __HeapLimit = ORIGIN(RAM) + LENGTH(RAM);
+    __HeapLimit = ADDR(.slot_rings);
 
     /* Start and end symbols must be word-aligned */
     .scratch_x : {

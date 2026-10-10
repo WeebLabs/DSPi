@@ -15,6 +15,7 @@
 #include "usb_audio.h"
 #include "audio_input.h"
 #include "spdif_input.h"
+#include "clock_diag.h"
 #include "i2s_input.h"
 #include "lg_sound_sync.h"
 #include "dac_hw_mute.h"
@@ -3183,6 +3184,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     pkt.spdif[i].consumer_fill_pct = (uint8_t)(cons_fill * 100 / consumer_capacity);
                     pkt.spdif[i].consumer_min_fill_pct = spdif_consumer_min_fill_pct[i];
                     pkt.spdif[i].consumer_max_fill_pct = spdif_consumer_max_fill_pct[i];
+                    // Sample-granular fill in 0.01% units of the 16-bucket
+                    // (768-frame) scale; can exceed 100% (ring holds more).
+                    uint32_t fill_frames;
+                    if (get_slot_consumer_fill_frames(i, &fill_frames)) {
+                        uint32_t centi = fill_frames * 10000u / 768u;
+                        pkt.spdif[i].fill_centi_pct = (centi > 65535u) ? 65535u
+                                                                       : (uint16_t)centi;
+                    }
                 }
 
                 if (pdm_enabled) {
@@ -4094,6 +4103,22 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 uint8_t ch_status[24];
                 spdif_input_get_channel_status(ch_status);
                 vendor_send_response(ch_status, 24);
+                return true;
+            }
+
+            case REQ_GET_CLOCK_DIAG: {
+#if DSPI_CLOCK_DIAG
+                // Read-only latch of the 1 Hz clock/audio-path diagnostics.
+                // Static so it outlives the EP0 transfer (control transfers
+                // are serialised by TinyUSB).
+                static ClockDiagPacket diag;
+                clock_diag_get_snapshot(&diag);
+                vendor_send_response(&diag, sizeof(diag));
+#else
+                // Compiled out in release builds: report absence with a
+                // zero-length response rather than stalling.
+                vendor_send_response(NULL, 0);
+#endif
                 return true;
             }
 

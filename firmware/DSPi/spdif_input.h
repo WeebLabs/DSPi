@@ -44,13 +44,9 @@ void spdif_input_stop(void);
 // Returns number of stereo samples processed (0 if no data).
 uint32_t spdif_input_poll(void);
 
-// Clock servo: adjust output PIO dividers to track SPDIF input clock.
+// Clock servo: trim the soft VCXO to track the SPDIF input clock.
 // Called from main loop after spdif_input_poll().
 void spdif_input_update_clock_servo(void);
-
-// Current servoed S/PDIF TX divider (16.8), 0 unless locked and applied.
-// ADAT runs the same 256*Fs PIO clock and pulls this on resync.
-uint32_t spdif_input_current_tx_divider(void);
 
 // Get current SPDIF input state
 SpdifInputState spdif_input_get_state(void);
@@ -68,5 +64,20 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 // Called by main loop when lock event fires and rate differs from current
 // Returns true if rate change was needed
 bool spdif_input_check_rate_change(void);
+
+#include "config.h"
+#if DSPI_CLOCK_DIAG
+// Rate-estimator internals for the CLKDIAG dump (no getter existed for the
+// servo statics).  which_long is true when the long-window count-based rate
+// is in use, false while the IIR bridge estimate covers the first ~1 s.
+typedef struct {
+    float    hz_long;      // count-based long-window rate estimate
+    float    hz_smooth;    // IIR bridge estimate
+    bool     which_long;   // true = hz_long applied, false = hz_smooth
+    uint32_t span_ms;      // long-window anchor span in ms
+} SpdifServoDiag;
+
+void spdif_input_get_servo_diag(SpdifServoDiag *out);
+#endif // DSPI_CLOCK_DIAG
 
 #endif // SPDIF_INPUT_H

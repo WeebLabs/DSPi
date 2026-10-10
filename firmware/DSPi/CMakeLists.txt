@@ -40,6 +40,7 @@ add_executable(DSPi
     control_surfaces_ir.c
     control_surfaces_ir.h
     control_surfaces_nouns.c
+    clock_diag.c
     crossfeed.c
     crossfeed.h
     crossover.c
@@ -90,6 +91,8 @@ add_executable(DSPi
     rta_fft.c
     rta_fft.h
     rta_tables.h
+    soft_vcxo.c
+    soft_vcxo.h
     spdif_input.c
     spdif_input.h
     uart_control.c
