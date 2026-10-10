@@ -1827,6 +1827,7 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
                 upmix_config.decorr_pct         = pkt.decorr_pct;
                 upmix_config.presence_db        = upmix_presence_decode(pkt.presence_q1);
                 upmix_update_pending = true;
+                upmix_notify_config();
             }
 #endif
             break;
@@ -1867,6 +1868,7 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
                     case UPMIX_PARAM_PRESENCE:      upmix_config.presence_db = v; break;
                 }
                 upmix_update_pending = true;
+                upmix_notify_config();
             }
 #endif
             break;
@@ -4173,20 +4175,7 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 vendor_send_response(resp_buf, 44);
 #else
                 UpmixConfigPacket pkt;
-                pkt.enabled       = upmix_config.enabled ? 1 : 0;
-                pkt.center_mode   = upmix_config.center_mode;
-                pkt.surround_mode = upmix_config.surround_mode;
-                pkt.presence_q1   = upmix_presence_encode(upmix_config.presence_db);
-                pkt.strength_pct       = upmix_config.strength_pct;
-                pkt.center_width_pct   = upmix_config.center_width_pct;
-                pkt.corr_threshold_pct = upmix_config.corr_threshold_pct;
-                pkt.attack_ms          = upmix_config.attack_ms;
-                pkt.release_ms         = upmix_config.release_ms;
-                pkt.detector_hpf_hz    = upmix_config.detector_hpf_hz;
-                pkt.surround_delay_ms  = upmix_config.surround_delay_ms;
-                pkt.surround_hpf_hz    = upmix_config.surround_hpf_hz;
-                pkt.surround_lpf_hz    = upmix_config.surround_lpf_hz;
-                pkt.decorr_pct         = upmix_config.decorr_pct;
+                upmix_config_to_packet(&pkt);
                 memcpy(resp_buf, &pkt, sizeof(pkt));
                 vendor_send_response(resp_buf, sizeof(pkt));
 #endif

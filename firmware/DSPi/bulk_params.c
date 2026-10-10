@@ -376,20 +376,9 @@ void bulk_params_collect(WireBulkParams *out) {
     // Stereo upmixer (V25+).  RP2350 only; the whole section (including reserved)
     // stays zeroed on RP2040 from the memset above.
 #if PICO_RP2350
-    out->upmix.enabled            = upmix_config.enabled ? 1 : 0;
-    out->upmix.center_mode        = upmix_config.center_mode;
-    out->upmix.surround_mode      = upmix_config.surround_mode;
-    out->upmix.presence_q1        = upmix_presence_encode(upmix_config.presence_db);
-    out->upmix.strength_pct       = upmix_config.strength_pct;
-    out->upmix.center_width_pct   = upmix_config.center_width_pct;
-    out->upmix.corr_threshold_pct = upmix_config.corr_threshold_pct;
-    out->upmix.attack_ms          = upmix_config.attack_ms;
-    out->upmix.release_ms         = upmix_config.release_ms;
-    out->upmix.detector_hpf_hz    = upmix_config.detector_hpf_hz;
-    out->upmix.surround_delay_ms  = upmix_config.surround_delay_ms;
-    out->upmix.surround_hpf_hz    = upmix_config.surround_hpf_hz;
-    out->upmix.surround_lpf_hz    = upmix_config.surround_lpf_hz;
-    out->upmix.decorr_pct         = upmix_config.decorr_pct;
+    UpmixConfigPacket pkt;
+    upmix_config_to_packet(&pkt);
+    memcpy(&out->upmix, &pkt, sizeof(pkt));   // layout identity asserted above
 #endif
 }
 

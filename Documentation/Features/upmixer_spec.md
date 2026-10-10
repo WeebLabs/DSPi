@@ -1,6 +1,6 @@
 # DSPi Stereo Upmixer Specification
 
-*Version 1.3, 2026-08-01. Firmware: wire format V27, preset slot V34, vendor commands 0x4A-0x4E. RP2350 only. Hardware-untested at time of writing (implemented and audited on the bench build only).*
+*Version 1.4, 2026-10-10 (change notifications, section 6.5). Firmware: upmixer wire layout final at V27 (current wire format V32), upmixer slot layout final at V34 (current preset slot V39), vendor commands 0x4A-0x4E. RP2350 only. Hardware-untested at time of writing (implemented and audited on the bench build only).*
 
 This document contains everything an application developer needs to integrate the DSPi stereo upmixer: the concept, the routing model, every command byte layout, parameter semantics with ranges and defaults, status telemetry, persistence behavior, and recommended UX patterns.
 
@@ -91,7 +91,7 @@ Surrounds only (stereo front kept exactly as recorded): centre mode OFF, surroun
 
 ## 4. Parameters
 
-All persisted in presets (slot V34) and carried in bulk params (wire V27). Floats are IEEE 754 single precision little-endian. Out-of-range floats are clamped by the firmware when coefficients are computed (the stored config keeps the written value).
+All persisted in presets (slot V34+) and carried in bulk params (wire V27+). Floats are IEEE 754 single precision little-endian. Out-of-range floats are clamped by the firmware when coefficients are computed (the stored config keeps the written value).
 
 | # | Param id | Field | Range | Default | Meaning |
 |---|---|---|---|---|---|
@@ -197,16 +197,43 @@ Poll at 5-20 Hz for a responsive "what is the upmixer doing" display (correlatio
 - SET STALLs on RP2350: wrong length (0x4A), unknown param id (0x4C). Treat as a client bug.
 - Any SET STALL on a device you have identified as RP2040: expected; hide the feature.
 
+### 6.5 Change notifications
+
+*Added 2026-10-10. Firmware before this date sent no notification for 0x4A or 0x4C.*
+
+Every accepted upmixer SET emits a `NOTIFY_EVT_PARAM_CHANGED` event on the notification endpoint for each field whose stored wire value actually changed. The event's offset is the field's position in `WireBulkParams` (section 7), its size is the field's size, and its payload is the new wire value. A SET that changes nothing emits nothing. A SET_PARAM normally emits one event. A SET_CONFIG emits one event per changed field, up to 14.
+
+This covers every route into those two commands: USB, the UART and I2C control transports, and the Control Surfaces nouns. The event's source byte tells them apart (`PARAM_SRC_HOST_SET`, `_UART`, `_I2C` or `_GPIO`). Preset load, factory reset and bulk SET are unchanged. They emit one bulk-invalidation event, not per-field events (section 8).
+
+| Wire offset | Size | Field |
+|---|---|---|
+| 5900 | 1 | enabled |
+| 5901 | 1 | center_mode |
+| 5902 | 1 | surround_mode |
+| 5903 | 1 | presence_q1 (int8, dB x 2) |
+| 5904 | 4 | strength_pct |
+| 5908 | 4 | center_width_pct |
+| 5912 | 4 | corr_threshold_pct |
+| 5916 | 4 | attack_ms |
+| 5920 | 4 | release_ms |
+| 5924 | 4 | detector_hpf_hz |
+| 5928 | 4 | surround_delay_ms |
+| 5932 | 4 | surround_hpf_hz |
+| 5936 | 4 | surround_lpf_hz |
+| 5940 | 4 | decorr_pct |
+
+Presence is the one field where the notified value can differ from `GET_PARAM`. SET_PARAM stores the float dB exactly, but the wire byte carries it in 0.5 dB steps. A SET of 3.3 dB therefore notifies `presence_q1` = 7 (3.5 dB), and a further SET that rounds to the same step emits nothing. Float fields are notified as stored, before the downstream range clamp, which matches what GET_CONFIG and bulk GET return.
+
 ---
 
-## 7. Bulk parameters (wire V27)
+## 7. Bulk parameters (wire V25-V27, current V32)
 
-`REQ_GET/SET_ALL_PARAMS` (0xA0/0xA1, chunked 0xA2/0xA3) now carry the upmixer as the final section of `WireBulkParams`:
+`REQ_GET/SET_ALL_PARAMS` (0xA0/0xA1, chunked 0xA2/0xA3) carry the upmixer as a section of `WireBulkParams`:
 
-- `WIRE_FORMAT_VERSION` = 25. Total struct size = **5944 bytes** (was 5900 at V24).
+- The section arrived at `WIRE_FORMAT_VERSION` 25 as the final section (total 5944 bytes, was 5900 at V24). Later versions appended the subharmonic, tube and limiter sections after it, so the current V32 total is **6136 bytes**. The upmix offset has not moved.
 - The upmix section is a `WireUpmixParams` at **byte offset 5900**, byte-identical to `UpmixConfigPacket` (section 6.1).
 - On RP2040 the section is present but zero on GET and ignored on SET (platform-independent wire format).
-- Version discipline is strict: the header's format_version must match exactly, so a V26 client's SET is rejected against V27 firmware even though V27 changed no layout at all (it only widened the centre-mode enum). Update clients to send format_version 27.
+- Version discipline is strict: the header's format_version must match exactly, so a V26 client's SET is rejected against V27 firmware even though V27 changed no layout at all (it only widened the centre-mode enum). Clients must send the firmware's current format_version (32 at the time of writing).
 
 A bulk SET applies the upmix section exactly like SET_CONFIG (deferred coefficient recompute, no audio glitch).
 
@@ -214,7 +241,7 @@ A bulk SET applies the upmix section exactly like SET_CONFIG (deferred coefficie
 
 ## 8. Persistence
 
-- **Preset slots:** `SLOT_DATA_VERSION` = 34. The upmix config is a 44-byte tail-append to the slot (V33); V34 claims the reserved byte for presence_q1 with no size change. Presets saved by older firmware (V21-V32) load with the upmixer **disabled at defaults**; V33 presets load with presence 0 dB (the byte was always written 0). Preset save/load round-trips all 14 fields. Loading a preset that disables the upmixer unpublishes it within one main-loop pass.
+- **Preset slots:** the upmix layout is final at `SLOT_DATA_VERSION` 34 (current firmware writes 39; later versions append other features' data after it). The upmix config is a 44-byte tail-append to the slot (V33); V34 claims the reserved byte for presence_q1 with no size change. Presets saved by older firmware (V21-V32) load with the upmixer **disabled at defaults**; V33 presets load with presence 0 dB (the byte was always written 0). Preset save/load round-trips all 14 fields. Loading a preset that disables the upmixer unpublishes it within one main-loop pass.
 - **Factory reset:** upmixer disabled, all params to defaults.
 - **RP2040 slots:** fields are stored (zeros) for layout uniformity but never applied.
 - After any preset load or bulk SET, re-read the upmix config (0x4B) rather than assuming your cached copy; the standard bulk-invalidation notification (notify endpoint) fires as usual and is your refresh trigger.
@@ -269,7 +296,8 @@ SET 0x90-series preset save as usual; upmix config rides along (slot V34)
 | Item | Value |
 |---|---|
 | Vendor commands | 0x4A-0x4E (0x4F reserved) |
-| Wire format | V27 (`WireUpmixParams` at offset 5900; total 5944 B; V27 widened the centre-mode enum only, no layout change) |
+| Wire format | Upmix layout final at V27 (`WireUpmixParams` at offset 5900; V27 widened the centre-mode enum only, no layout change). Current firmware V32, total 6136 B |
+| Change notifications | One `PARAM_CHANGED` per changed field on every SET_CONFIG / SET_PARAM (section 6.5) |
 | Preset slot | V34 (44-byte tail-append; presence byte claimed from reserved, size unchanged). Centre `OFF` needed no slot bump: firmware predating it clamps the unknown byte to the ADAPTIVE default |
 | Platforms | RP2350 only (RP2040: SETs STALL, GETs zero) |
 | Matrix rows | 2 = C, 3 = Ls, 4 = Rs (shared with multichannel inputs 3-5) |

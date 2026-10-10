@@ -24,6 +24,8 @@
 #include <math.h>
 #include <string.h>
 #include "upmix.h"
+#include "bulk_params.h"   // WireBulkParams offsets for change notifications
+#include "notify.h"
 
 #if PICO_RP2350
 
@@ -210,6 +212,47 @@ void upmix_get_status(UpmixStatus *st) {
     st->center_gain_q15 = (uint16_t)(clampf(um.p_gc * 1.4142135624f, 0.0f, 1.0f) * 32767.0f);
     st->ls_gain_q15 = (uint16_t)(clampf(um.p_gls, 0.0f, 1.0f) * 32767.0f);
     st->rs_gain_q15 = (uint16_t)(clampf(um.p_grs, 0.0f, 1.0f) * 32767.0f);
+}
+
+void upmix_config_to_packet(UpmixConfigPacket *out) {
+    out->enabled            = upmix_config.enabled ? 1 : 0;
+    out->center_mode        = upmix_config.center_mode;
+    out->surround_mode      = upmix_config.surround_mode;
+    out->presence_q1        = upmix_presence_encode(upmix_config.presence_db);
+    out->strength_pct       = upmix_config.strength_pct;
+    out->center_width_pct   = upmix_config.center_width_pct;
+    out->corr_threshold_pct = upmix_config.corr_threshold_pct;
+    out->attack_ms          = upmix_config.attack_ms;
+    out->release_ms         = upmix_config.release_ms;
+    out->detector_hpf_hz    = upmix_config.detector_hpf_hz;
+    out->surround_delay_ms  = upmix_config.surround_delay_ms;
+    out->surround_hpf_hz    = upmix_config.surround_hpf_hz;
+    out->surround_lpf_hz    = upmix_config.surround_lpf_hz;
+    out->decorr_pct         = upmix_config.decorr_pct;
+}
+
+void upmix_notify_config(void) {
+    UpmixConfigPacket p;
+    upmix_config_to_packet(&p);
+    // Offsets come from WireBulkParams by name so each event lands on its own
+    // field; one PARAM_CHANGED per field the SET actually moved.
+    #define UM_NOTIFY(f) notify_param_write(offsetof(WireBulkParams, upmix.f), \
+                                            sizeof(p.f), (const void *)&p.f)
+    UM_NOTIFY(enabled);
+    UM_NOTIFY(center_mode);
+    UM_NOTIFY(surround_mode);
+    UM_NOTIFY(presence_q1);
+    UM_NOTIFY(strength_pct);
+    UM_NOTIFY(center_width_pct);
+    UM_NOTIFY(corr_threshold_pct);
+    UM_NOTIFY(attack_ms);
+    UM_NOTIFY(release_ms);
+    UM_NOTIFY(detector_hpf_hz);
+    UM_NOTIFY(surround_delay_ms);
+    UM_NOTIFY(surround_hpf_hz);
+    UM_NOTIFY(surround_lpf_hz);
+    UM_NOTIFY(decorr_pct);
+    #undef UM_NOTIFY
 }
 
 DSP_TIME_CRITICAL

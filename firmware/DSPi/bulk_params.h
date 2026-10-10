@@ -359,7 +359,7 @@ typedef struct __attribute__((packed)) {
 // so only enabled/mode fields need validation on apply.
 typedef struct __attribute__((packed)) {
     uint8_t  enabled;                // 0/1
-    uint8_t  center_mode;            // UPMIX_CENTER_* (0-1)
+    uint8_t  center_mode;            // UPMIX_CENTER_* (0-2)
     uint8_t  surround_mode;          // UPMIX_SURROUND_* (0-2)
     int8_t   presence_q1;            // V26+: presence bell dB * 2 (was reserved)
     float    strength_pct;

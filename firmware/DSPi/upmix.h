@@ -291,6 +291,14 @@ static inline void upmix_park(void) {
 // Fill a status packet from the live processing state.
 void upmix_get_status(UpmixStatus *st);
 
+// Encode the live config as its wire image.  Single encoder shared by
+// GET_CONFIG, bulk collect and notify, so the notify shadow matches collect.
+void upmix_config_to_packet(UpmixConfigPacket *out);
+
+// Push every upmix field through notify_param_write; only changed fields emit
+// PARAM_CHANGED.  Every SET path must call this after writing upmix_config.
+void upmix_notify_config(void);
+
 #endif // PICO_RP2350
 
 #endif // UPMIX_H
