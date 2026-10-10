@@ -364,7 +364,7 @@ void adat_output_on_rate_change(uint32_t freq) {
 DSP_TIME_CRITICAL
 void adat_output_servo_divider(uint32_t div_16_8) {
     adat_servo_div = div_16_8;
-    if (adat_running && div_16_8) adat_update_divider();
+    if (adat_running) adat_update_divider();
 }
 
 void adat_output_stream_stop(void) {

@@ -259,6 +259,10 @@ static void i2s_update_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample
     inst->freq = sample_freq;
 }
 
+void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_freq) {
+    i2s_update_pio_frequency(inst, sample_freq);
+}
+
 // ---------------------------------------------------------------------------
 // Connection callbacks
 // ---------------------------------------------------------------------------
@@ -1237,6 +1241,11 @@ void audio_i2s_mck_set_divider(uint32_t div_24_8) {
                                   div_24_8 >> 8u,
                                   (uint8_t)(div_24_8 & 0xFFu));
     }
+}
+
+I2S_TIME_CRITICAL
+uint32_t audio_i2s_mck_get_divider(void) {
+    return mck_div_24_8;
 }
 
 void audio_i2s_mck_apply_state(uint pin, bool enabled,

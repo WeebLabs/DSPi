@@ -31,6 +31,7 @@
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "adat_input.h"
+#include "input_servo.h"
 #include "pdm_generator.h"
 #include "siggen.h"
 #include "rta.h"
@@ -132,27 +133,44 @@ static bool i2s_input_should_be_master(void) {
     return true;
 }
 
-// Rewrite every SPDIF-type slot's PIO divider to nominal for the given rate.
-// The input clock servos (SPDIF input, I2S slave) trim these SMs directly and
-// never update the library's inst->freq bookkeeping, so the library's lazy
-// wrap_consumer_take update is blind to the trim and won't fire when the
-// pipeline rate value is unchanged; without an explicit restore the trim
-// outlives its servo.  That matters beyond an off-nominal carrier: ADAT
-// resyncs to nominal inside complete_pipeline_reset()/enable_outputs_in_sync()
-// (the input servo dividers read 0 once the input is stopped), and a
-// nominal-ADAT vs trimmed-SPDIF split makes ADAT drift against the slots it
-// mirrors, eroding its alignment cushion until the slip machinery forces a
-// resync.  All SPDIF slots get the same value, so inter-slot alignment is
-// unaffected.  I2S-type slots are excluded: their SMs run other programs
-// (extclk slots at divider 1.0) and are rebuilt by their own paths.
-static void restore_nominal_spdif_dividers(uint32_t sample_freq) {
+// Rewrite every output clock (SPDIF and I2S slot SMs, MCK) to nominal for the
+// rate and drop the input servo's divider cache. Servos trim these behind the
+// libraries' backs, so equal-rate exits must call this; a synchronized restart
+// must follow. See current_architecture.md "Output Clock Restore".
+static void restore_nominal_output_clocks(uint32_t sample_freq) {
     extern uint8_t output_types[];
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+    extern bool i2s_mck_enabled;
+    extern uint16_t i2s_mck_multiplier;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
-            audio_spdif_apply_pio_frequency(spdif_instance_ptrs[i], sample_freq);
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->consumer_pool) audio_i2s_apply_pio_frequency(inst, sample_freq);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->consumer_pool) audio_spdif_apply_pio_frequency(inst, sample_freq);
         }
     }
+    if (i2s_mck_enabled) audio_i2s_mck_update_frequency(sample_freq, i2s_mck_multiplier);
+#if PICO_RP2350
+    adat_output_servo_divider(0);
+#endif
+    input_servo_reset();
+}
+
+// Put every output clock on one divider (the locked servo's, else nominal) while
+// the slots are disabled. Slot re-inits and servo relocks leave them split; run
+// by complete_pipeline_reset() and enable_outputs_in_sync() before each start.
+static void align_output_clocks(void) {
+    bool servo_locked = spdif_input_current_tx_divider() != 0;
+#if PICO_RP2350
+    servo_locked = servo_locked || adat_input_current_tx_divider() != 0;
+#endif
+    if (servo_locked && input_servo_reapply()) return;
+    if (i2s_slave_reapply_clock_servo()) return;
+    // The libraries' rate, not audio_state.freq: they differ at boot.
+    restore_nominal_output_clocks(audio_format_48k.sample_freq);
 }
 
 // defer_output_to_input_prefill: when true, the caller's input prefill handshake
@@ -235,23 +253,10 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     // master/slave divider mismatch from lazy per-instance callbacks)
     audio_i2s_update_all_frequencies(new_freq);
 
-    // SPDIF TX dividers: restore nominal eagerly, even when new_freq equals
-    // the old rate.  The library's lazy update is gated on a rate mismatch
-    // against inst->freq, which an input clock servo's trim never creates,
-    // so an equal-rate call through here (e.g. a source switch away from a
-    // servoed input) would otherwise leave the trim in place.  The mute
-    // bracket above covers the write, and complete_pipeline_reset() (or the
-    // caller's prefill block) drains and restarts in sync afterwards.
-    restore_nominal_spdif_dividers(new_freq);
-
-    // Update MCK frequency for new sample rate (if enabled).  No per-rate
-    // multiplier sanitization — CLK_GPOUTn handles every Fs × multiplier
-    // combination this firmware supports.
-    extern bool i2s_mck_enabled;
-    extern uint16_t i2s_mck_multiplier;
-    if (i2s_mck_enabled) {
-        audio_i2s_mck_update_frequency(new_freq, i2s_mck_multiplier);
-    }
+    // Slot dividers and MCK: restore nominal eagerly, even at an unchanged
+    // rate, so a servo trim cannot outlive its input. complete_pipeline_reset()
+    // (or the caller's prefill block) restarts in sync afterwards.
+    restore_nominal_output_clocks(new_freq);
 
     // Drain all consumer pools (old-rate audio) and restart outputs in sync
     // at the new PIO divider. The SPDIF wrap_consumer_take path would
@@ -1451,6 +1456,7 @@ static void complete_pipeline_reset(void) {
             if (inst && inst->consumer_pool) spdif_sync[spdif_count++] = inst;
         }
     }
+    align_output_clocks();
 
     // Phase 2: tiny IRQ-disabled section — synchronized PIO start.
     // See block comment above for why this wraps BOTH enable_sync calls.
@@ -1578,6 +1584,7 @@ static void enable_outputs_in_sync(void) {
     uint spdif_count = 0;
     uint i2s_count = 0;
 
+    align_output_clocks();
     uint32_t flags = save_and_disable_interrupts();
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
@@ -3442,11 +3449,11 @@ int main(void) {
                     // the rates differ, perform_rate_change restores nominal
                     // dividers itself; when they match it is skipped, so
                     // restore the slave servo's divider trim explicitly (see
-                    // restore_nominal_spdif_dividers).
+                    // restore_nominal_output_clocks).
                     if (i2s_input_rate != audio_state.freq) {
                         perform_rate_change(i2s_input_rate, true);
                     } else {
-                        restore_nominal_spdif_dividers(audio_state.freq);
+                        restore_nominal_output_clocks(audio_state.freq);
                     }
                     if (i2s_mck_enabled && i2s_input_should_be_master()) {
                         audio_i2s_mck_update_frequency(i2s_input_rate,
@@ -3503,7 +3510,7 @@ int main(void) {
                     if (i2s_input_rate != audio_state.freq) {
                         perform_rate_change(i2s_input_rate, true);
                     } else {
-                        restore_nominal_spdif_dividers(audio_state.freq);
+                        restore_nominal_output_clocks(audio_state.freq);
                     }
                 }
                 adat_input_start();
@@ -3606,11 +3613,11 @@ int main(void) {
                     // dividers to the departed external master's rate; the
                     // conditional perform_rate_change below skips equal-rate
                     // switches, so restore nominal explicitly (see
-                    // restore_nominal_spdif_dividers; ADAT resyncs to nominal
+                    // restore_nominal_output_clocks; ADAT resyncs to nominal
                     // in the reset below and would drift against trimmed
                     // slots).  No-op cost in master mode, and harmless before
                     // a SPDIF target (its servo re-trims after lock).
-                    restore_nominal_spdif_dividers(audio_state.freq);
+                    restore_nominal_output_clocks(audio_state.freq);
 
                     // USB endpoint rate is retained while another source is
                     // active; apply it now without letting USB retune I2S live.
@@ -3640,7 +3647,7 @@ int main(void) {
                     // Slave-mode servo may have trimmed the output dividers to
                     // the departed external clock; restore nominal (same
                     // rationale as the I2S branch above).
-                    restore_nominal_spdif_dividers(audio_state.freq);
+                    restore_nominal_output_clocks(audio_state.freq);
 
                     // USB endpoint rate is retained while another source is
                     // active; apply it now (mirrors the I2S branch).

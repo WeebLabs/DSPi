@@ -109,6 +109,10 @@ void i2s_slave_poll(void);
 // while LOCKED; rate-limits internally.
 void i2s_slave_update_clock_servo(void);
 
+// Rewrite the cached servo divider to every SPDIF slot and the ADAT output,
+// for slots re-initialized at nominal while LOCKED. False if nothing to replay.
+bool i2s_slave_reapply_clock_servo(void);
+
 // Arm a deferred pipeline rate change if the locked external rate differs
 // from audio_state.freq. Returns true if a change was armed.
 bool i2s_slave_check_rate_change(void);

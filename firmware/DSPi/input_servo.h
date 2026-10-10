@@ -9,6 +9,7 @@
 #ifndef INPUT_SERVO_H
 #define INPUT_SERVO_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 // Servo all output slots (SPDIF/I2S types), the ADAT output, and MCK to the
@@ -17,6 +18,11 @@
 // or 0 if actual_freq failed the sanity check. Skips PIO writes when the
 // dividers are unchanged.
 uint32_t input_servo_apply(float actual_freq);
+
+// Rewrite the cached dividers to every slot, the ADAT output and MCK, for
+// slots re-initialized at nominal while the servo stays locked. Returns false
+// (and writes nothing) when nothing has been applied since the last reset.
+bool input_servo_reapply(void);
 
 // Clear the written-divider cache so the next apply performs a full rewrite.
 // Call when (re)acquiring lock or after outputs restart at nominal dividers.

@@ -268,6 +268,14 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst);
  */
 void audio_i2s_update_all_frequencies(uint32_t sample_freq);
 
+/** \brief Rewrite the nominal divider on every internally clocked I2S SM
+ * \ingroup pico_audio_i2s_multi
+ *
+ * No stop or restart. Input clock servos trim these SMs behind the library's
+ * back; this restores nominal at an unchanged rate. External-clock SMs are skipped.
+ */
+void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_freq);
+
 /** \brief Get the index of the current I2S clock master (-1 if none)
  * \ingroup pico_audio_i2s_multi
  */
@@ -379,6 +387,11 @@ bool audio_i2s_mck_is_enabled(void);
  * \param div_24_8 Clock divider in 24.8 fixed-point format
  */
 void audio_i2s_mck_set_divider(uint32_t div_24_8);
+
+/** \brief Last MCK divider written or stashed (24.8 fixed-point, 0 if none)
+ * \ingroup pico_audio_i2s_multi
+ */
+uint32_t audio_i2s_mck_get_divider(void);
 
 /** \brief Atomically synchronize MCK library state with a desired tuple
  * \ingroup pico_audio_i2s_multi

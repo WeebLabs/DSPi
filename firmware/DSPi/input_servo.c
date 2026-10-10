@@ -30,11 +30,51 @@
 // Last written dividers; skip PIO writes when unchanged
 static uint32_t last_spdif_div = 0;
 static uint32_t last_i2s_div = 0;
-static uint32_t last_mck_div = 0;
+// Rate and fill trim behind the cached dividers, kept so MCK can be recomputed
+// on replay (it may have been enabled or rewritten since the last apply).
+static float last_freq = 0.0f;
+static float last_fill_trim = 0.0f;
 
 // Apply a divider (16.8 fixed-point) to a PIO SM
 static inline void set_divider(PIO pio, uint sm, uint32_t div_16_8) {
     pio_sm_set_clkdiv_int_frac(pio, sm, div_16_8 >> 8, div_16_8 & 0xFF);
+}
+
+DSP_TIME_CRITICAL
+static void write_slot_dividers(uint32_t spdif_div, uint32_t i2s_div) {
+    extern struct audio_spdif_instance *spdif_instance_ptrs[];
+    extern struct audio_i2s_instance *i2s_instance_ptrs[];
+    extern uint8_t output_types[];
+
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
+            set_divider(spdif_instance_ptrs[i]->pio,
+                        spdif_instance_ptrs[i]->pio_sm, spdif_div);
+        } else if (output_types[i] == OUTPUT_TYPE_I2S && i2s_instance_ptrs[i]) {
+            set_divider(i2s_instance_ptrs[i]->pio,
+                        i2s_instance_ptrs[i]->pio_sm, i2s_div);
+        }
+    }
+
+#if PICO_RP2350
+    // ADAT bulk output runs the same 256*Fs PIO clock as the S/PDIF TX SMs;
+    // apply the identical divider so it stays rate-locked to the slots.
+    adat_output_servo_divider(spdif_div);
+#endif
+}
+
+// MCK servo: keep master clock frequency-locked to the servoed I2S data rate.
+// Compared against the library's live divider, not a local cache, because MCK
+// enable and multiplier changes write nominal behind the servo's back.
+DSP_TIME_CRITICAL
+static void write_mck_divider(uint32_t sys_clk, float freq, float fill_trim) {
+    extern bool i2s_mck_enabled;
+    extern uint16_t i2s_mck_multiplier;
+    if (!i2s_mck_enabled || i2s_mck_multiplier == 0) return;
+    float mck_div_f = (float)sys_clk * 256.0f / (freq * (float)i2s_mck_multiplier);
+    uint32_t mck_div = (uint32_t)(mck_div_f * (1.0f + fill_trim) + 0.5f);
+    if (mck_div != audio_i2s_mck_get_divider())
+        audio_i2s_mck_set_divider(mck_div);
 }
 
 DSP_TIME_CRITICAL
@@ -58,52 +98,28 @@ uint32_t input_servo_apply(float actual_freq) {
     uint32_t spdif_div = (uint32_t)(spdif_div_f * (1.0f + fill_trim) + 0.5f);
     uint32_t i2s_div   = spdif_div * 2;
 
-    if (spdif_div == last_spdif_div && i2s_div == last_i2s_div)
-        return spdif_div;
-    last_spdif_div = spdif_div;
-    last_i2s_div = i2s_div;
-
-    extern struct audio_spdif_instance *spdif_instance_ptrs[];
-    extern struct audio_i2s_instance *i2s_instance_ptrs[];
-    extern uint8_t output_types[];
-
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
-            set_divider(spdif_instance_ptrs[i]->pio,
-                        spdif_instance_ptrs[i]->pio_sm, spdif_div);
-        } else if (output_types[i] == OUTPUT_TYPE_I2S && i2s_instance_ptrs[i]) {
-            set_divider(i2s_instance_ptrs[i]->pio,
-                        i2s_instance_ptrs[i]->pio_sm, i2s_div);
-        }
+    if (spdif_div != last_spdif_div || i2s_div != last_i2s_div) {
+        last_spdif_div = spdif_div;
+        last_i2s_div = i2s_div;
+        last_freq = actual_freq;
+        last_fill_trim = fill_trim;
+        write_slot_dividers(spdif_div, i2s_div);
     }
-
-#if PICO_RP2350
-    // ADAT bulk output runs the same 256*Fs PIO clock as the S/PDIF TX SMs;
-    // apply the identical divider so it stays rate-locked to the slots.
-    adat_output_servo_divider(spdif_div);
-#endif
-
-    // MCK servo: keep master clock frequency-locked to the servoed I2S data
-    // rate. MCK is driven by CLK_GPOUTn, so the divider is the direct 24.8
-    // form: div_24.8 = sys_clk * 256 / (actual_freq * multiplier).
-    extern bool i2s_mck_enabled;
-    extern uint16_t i2s_mck_multiplier;
-    if (i2s_mck_enabled && i2s_mck_multiplier > 0) {
-        float mck_div_f = (float)sys_clk * 256.0f / (actual_freq * (float)i2s_mck_multiplier);
-        uint32_t mck_div = (uint32_t)(mck_div_f * (1.0f + fill_trim) + 0.5f);
-        if (mck_div != last_mck_div) {
-            last_mck_div = mck_div;
-            audio_i2s_mck_set_divider(mck_div);
-        }
-    }
+    write_mck_divider(sys_clk, last_freq, last_fill_trim);
 
     return spdif_div;
+}
+
+bool input_servo_reapply(void) {
+    if (last_spdif_div == 0) return false;
+    write_slot_dividers(last_spdif_div, last_i2s_div);
+    write_mck_divider(clock_get_hz(clk_sys), last_freq, last_fill_trim);
+    return true;
 }
 
 void input_servo_reset(void) {
     last_spdif_div = 0;
     last_i2s_div = 0;
-    last_mck_div = 0;
 }
 
 uint32_t input_servo_current_divider(void) {

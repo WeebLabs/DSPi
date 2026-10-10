@@ -983,6 +983,25 @@ bool i2s_slave_check_rate_change(void) {
     return false;
 }
 
+// No I2S output divider writes (external-clock SMs are edge-driven at
+// divider 1.0) and no MCK servo (MCK output is forced off in slave mode).
+DSP_TIME_CRITICAL
+static void i2s_slave_write_dividers(uint32_t spdif_div) {
+    extern uint8_t output_types[];
+    extern struct audio_spdif_instance *spdif_instance_ptrs[];
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
+            pio_sm_set_clkdiv_int_frac(spdif_instance_ptrs[i]->pio,
+                                       spdif_instance_ptrs[i]->pio_sm,
+                                       spdif_div >> 8, spdif_div & 0xFF);
+        }
+    }
+#if PICO_RP2350
+    // ADAT runs the same 256*Fs PIO clock as SPDIF TX; identical divider.
+    adat_output_servo_divider(spdif_div);
+#endif
+}
+
 DSP_TIME_CRITICAL
 void i2s_slave_update_clock_servo(void) {
     if (i2s_slave_state != I2S_SLAVE_LOCKED) return;
@@ -1016,21 +1035,13 @@ void i2s_slave_update_clock_servo(void) {
     uint32_t spdif_div = (uint32_t)(spdif_div_f * (1.0f + fill_trim) + 0.5f);
     if (spdif_div == i2s_slave_last_div) return;
     i2s_slave_last_div = spdif_div;
+    i2s_slave_write_dividers(spdif_div);
+}
 
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_SPDIF && spdif_instance_ptrs[i]) {
-            pio_sm_set_clkdiv_int_frac(spdif_instance_ptrs[i]->pio,
-                                       spdif_instance_ptrs[i]->pio_sm,
-                                       spdif_div >> 8, spdif_div & 0xFF);
-        }
-    }
-
-#if PICO_RP2350
-    // ADAT runs the same 256*Fs PIO clock as SPDIF TX; identical divider.
-    adat_output_servo_divider(spdif_div);
-#endif
-    // No I2S output divider writes (external-clock SMs are edge-driven at
-    // divider 1.0) and no MCK servo (MCK output is forced off in slave mode).
+bool i2s_slave_reapply_clock_servo(void) {
+    if (i2s_slave_state != I2S_SLAVE_LOCKED || i2s_slave_last_div == 0) return false;
+    i2s_slave_write_dividers(i2s_slave_last_div);
+    return true;
 }
 
 I2sSlaveState i2s_slave_get_state(void) {
