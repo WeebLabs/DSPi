@@ -19,6 +19,7 @@
 #include "usb_audio.h"
 #include "spdif_rx.h"
 
+#include "hardware/irq.h"
 #include "hardware/sync.h"
 #include "hardware/clocks.h"
 #include "hardware/pio.h"
@@ -166,6 +167,9 @@ static void servo_meas_arm(void) {
 
 void spdif_input_init(void) {
     spdif_state = SPDIF_INPUT_INACTIVE;
+    // The receiver's DMA IRQ must preempt its own decode-timeout alarm
+    // (default priority); see _spdif_rx_common_end.
+    irq_set_priority(DMA_IRQ_0 + PICO_SPDIF_RX_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
 }
 
 void spdif_input_start(void) {
@@ -201,11 +205,6 @@ void spdif_input_start(void) {
     spdif_rx_set_callback_on_stable(on_stable_callback);
     spdif_rx_set_callback_on_lost_stable(on_lost_stable_callback);
 
-    // Hold the SPDIF TX library's DMA IRQ refcount so that
-    // audio_spdif_set_enabled(false) during pipeline resets doesn't
-    // disable the entire DMA_IRQ_1 line while we still need it.
-    audio_spdif_irq_refcount_adjust(PICO_SPDIF_RX_DMA_IRQ, +1);
-
     spdif_rx_start(&cfg);
 
     spdif_state = SPDIF_INPUT_ACQUIRING;
@@ -225,8 +224,6 @@ void spdif_input_start(void) {
 void spdif_input_stop(void) {
     if (spdif_state != SPDIF_INPUT_INACTIVE) {
         spdif_rx_end();
-        // Release the DMA IRQ refcount hold we took in start()
-        audio_spdif_irq_refcount_adjust(PICO_SPDIF_RX_DMA_IRQ, -1);
         // The library's teardown leaves the pad muxed to PIO input; reset it
         // so a pin/input switch actually frees the old GPIO (mirrors
         // i2s_input_stop).

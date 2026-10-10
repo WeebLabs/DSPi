@@ -1210,8 +1210,6 @@ static bool uac1_apply_alt(uint8_t rhport, uint8_t alt) {
 #endif
 
     bool active = (alt > 0);
-    audio_spdif_set_starvation_monitoring(active);
-    audio_i2s_set_starvation_monitoring(active);
     audio_ring_last_push_us = 0;
 
     if (active) {
@@ -1657,7 +1655,6 @@ struct audio_spdif_config spdif_config_1 = {
 #endif
     .pio_sm = 0,
     .pio = PICO_AUDIO_SPDIF_PIO,
-    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
     .ring_base = slot_ring_store[0],
 };
 
@@ -1669,7 +1666,6 @@ struct audio_spdif_config spdif_config_2 = {
 #endif
     .pio_sm = 1,
     .pio = PICO_AUDIO_SPDIF_PIO,
-    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
     .ring_base = slot_ring_store[1],
 };
 
@@ -1679,7 +1675,6 @@ struct audio_spdif_config spdif_config_3 = {
     .dma_channel = 2,
     .pio_sm = 2,
     .pio = PICO_AUDIO_SPDIF_PIO,
-    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
     .ring_base = slot_ring_store[2],
 };
 
@@ -1688,7 +1683,6 @@ struct audio_spdif_config spdif_config_4 = {
     .dma_channel = 3,
     .pio_sm = 3,
     .pio = PICO_AUDIO_SPDIF_PIO,
-    .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
     .ring_base = slot_ring_store[3],
 };
 #endif
@@ -1785,9 +1779,6 @@ void usb_sound_card_init(void) {
     // GPOUT-capable pin set.  setup() only records the pin; the actual GPOUT
     // block is configured on the first audio_i2s_mck_set_enabled(true) call.
     audio_i2s_mck_setup(i2s_mck_pin);
-
-    irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
-    irq_set_priority(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ, PICO_HIGHEST_IRQ_PRIORITY);
 
     // Start all outputs synchronized
 #if PICO_RP2350

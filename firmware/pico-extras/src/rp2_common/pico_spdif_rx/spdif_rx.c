@@ -403,9 +403,8 @@ static void _spdif_rx_capture_start()
     );
 
     // DMA IRQ
-    // DSPi patch: use our own flag instead of irq_has_shared_handler() which
-    // returns true if ANY handler is on this IRQ (e.g. SPDIF TX), preventing
-    // our RX handler from ever being registered.
+    // DSPi patch: use our own flag instead of irq_has_shared_handler(), which
+    // is true if ANY handler is on this IRQ and would then skip registering ours.
     if (!irq_handler_registered) {
         irq_add_shared_handler(DMA_IRQ_x, spdif_rx_dma_irq_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
         irq_handler_registered = true;
@@ -440,9 +439,7 @@ static void _spdif_rx_common_end()
 
     dma_irqn_set_channel_enabled(PICO_SPDIF_RX_DMA_IRQ, gcfg.dma_channel0, false);
     dma_irqn_set_channel_enabled(PICO_SPDIF_RX_DMA_IRQ, gcfg.dma_channel1, false);
-    // DSPi patch: removed irq_set_enabled(DMA_IRQ_x, false) — it disables the
-    // ENTIRE DMA IRQ line, killing SPDIF TX output DMA handlers that share the
-    // same IRQ. The per-channel disable above is sufficient.
+    irq_set_enabled(DMA_IRQ_x, false);
     dma_channel_abort(gcfg.dma_channel0);
     dma_channel_wait_for_finish_blocking(gcfg.dma_channel0);
     dma_irqn_acknowledge_channel(PICO_SPDIF_RX_DMA_IRQ, gcfg.dma_channel0);
@@ -686,9 +683,8 @@ static void _spdif_rx_decode_start(spdif_rx_samp_freq_t samp_freq, bool inverted
     buff_wr_pre_ptr = _ptr_inc(buff_wr_pre_ptr, SPDIF_BLOCK_SIZE);
 
     // DMA IRQ
-    // DSPi patch: use our own flag instead of irq_has_shared_handler() which
-    // returns true if ANY handler is on this IRQ (e.g. SPDIF TX), preventing
-    // our RX handler from ever being registered.
+    // DSPi patch: use our own flag instead of irq_has_shared_handler(), which
+    // is true if ANY handler is on this IRQ and would then skip registering ours.
     if (!irq_handler_registered) {
         irq_add_shared_handler(DMA_IRQ_x, spdif_rx_dma_irq_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
         irq_handler_registered = true;

@@ -581,7 +581,6 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->pio = i2s_pio_block_from_index(config->pio);
     inst->pio_sm = config->pio_sm;
     inst->dma_channel = config->dma_channel;
-    inst->dma_irq = config->dma_irq;
     inst->data_pin = config->data_pin;
     inst->clock_pin_base = config->clock_pin_base;
     inst->external_clock = config->external_clock;
@@ -602,11 +601,6 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     // Clear carry-over connection state so a stale staging pointer from a
     // previous lifetime cannot be consumed after reconnect.
     memset(&inst->connection, 0, sizeof(inst->connection));
-
-    // Assert all instances share the same DMA IRQ line
-    if (i2s_instance_count > 0) {
-        assert(inst->dma_irq == i2s_instances[0]->dma_irq);
-    }
 
     // GPIO init for data pin (always)
     pio_gpio_init(inst->pio, config->data_pin);
@@ -685,15 +679,11 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
 
     __mem_fence_release();
 
-    // Claim DMA; configuration happens at each arm. Ensure no stale
-    // completion latch or per-channel IRQ enable survives from a prior
-    // pool-mode user of this channel.
+    // Claim DMA; configuration happens at each arm.
     dma_channel_claim(inst->dma_channel);
 #if !PICO_RP2350
     dma_channel_claim(inst->dma_reload_channel);
 #endif
-    dma_irqn_set_channel_enabled(inst->dma_irq, inst->dma_channel, false);
-    dma_irqn_acknowledge_channel(inst->dma_irq, inst->dma_channel);
 
     // Register instance.
     uint32_t save = save_and_disable_interrupts();
@@ -916,12 +906,8 @@ void audio_i2s_enable_sync(audio_i2s_instance_t *instances[], uint count) {
     restore_interrupts(save);
 }
 
-// Starvation API, unit change: counts are FRAMES of silence exposed to the
-// wire (ring underrun accounting, always on).
-void audio_i2s_set_starvation_monitoring(bool enabled) {
-    (void)enabled;
-}
-
+// Starvation counters are FRAMES of silence exposed to the wire (ring
+// underrun accounting, always on).
 void audio_i2s_reset_dma_starvations(void) {
     for (uint i = 0; i < i2s_instance_count; i++) {
         i2s_instances[i]->underrun_frames = 0;

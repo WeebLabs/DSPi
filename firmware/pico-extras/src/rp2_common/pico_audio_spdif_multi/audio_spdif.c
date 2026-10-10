@@ -82,10 +82,6 @@ static int pio_program_offset[3] = {-1, -1, -1};
 static audio_spdif_instance_t *spdif_instances[PICO_AUDIO_SPDIF_MAX_INSTANCES];
 static uint spdif_instance_count = 0;
 
-// Reference count for DMA IRQ enable/disable. The ring TX path uses no DMA
-// IRQs; this survives solely for external holders (SPDIF RX keeps line 1
-// alive across pipeline resets via audio_spdif_irq_refcount_adjust).
-static uint8_t irq_enable_count[2] = {0, 0};
 
 // ---------------------------------------------------------------------------
 // S/PDIF constants
@@ -420,7 +416,6 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
     inst->pio_sm = config->pio_sm;
     inst->dma_channel = config->dma_channel;
     inst->dma_reload_channel = config->dma_reload_channel;
-    inst->dma_irq = config->dma_irq;
     inst->pin = config->pin;
     inst->freq = 0;
     inst->enabled = false;
@@ -724,10 +719,6 @@ void audio_spdif_enable_sync(audio_spdif_instance_t *instances[], uint count) {
 // silence exposed to the wire, not silence-buffer DMA starts)
 // ---------------------------------------------------------------------------
 
-void audio_spdif_set_starvation_monitoring(bool enabled) {
-    (void)enabled;   // ring underrun accounting is always on
-}
-
 void audio_spdif_reset_dma_starvations(void) {
     for (uint i = 0; i < spdif_instance_count; i++) {
         spdif_instances[i]->underrun_frames = 0;
@@ -750,15 +741,4 @@ uint32_t audio_spdif_get_dma_starvations_instance(uint index) {
         }
     }
     return 0;
-}
-
-void audio_spdif_irq_refcount_adjust(uint dma_irq, int delta) {
-    assert(dma_irq <= 1);
-    if (delta > 0) {
-        if (irq_enable_count[dma_irq]++ == 0)
-            irq_set_enabled(DMA_IRQ_0 + dma_irq, true);
-    } else if (delta < 0 && irq_enable_count[dma_irq] > 0) {
-        if (--irq_enable_count[dma_irq] == 0)
-            irq_set_enabled(DMA_IRQ_0 + dma_irq, false);
-    }
 }

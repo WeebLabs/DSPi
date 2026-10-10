@@ -144,12 +144,8 @@ static void fc_service(void) {
 // ---------------------------------------------------------------------------
 
 void clock_diag_init(void) {
-    // Enable the TX libraries' per-instance consumer-starvation monitors; the
-    // increment already exists in each DMA IRQ path (a silence buffer is
-    // substituted when the consumer pool is empty), gated on these flags.
-    audio_spdif_set_starvation_monitoring(true);
+    // Ring underrun accounting is always on; start the windows from zero.
     audio_spdif_reset_dma_starvations();
-    audio_i2s_set_starvation_monitoring(true);
     audio_i2s_reset_dma_starvations();
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {

@@ -190,17 +190,11 @@ add_dependencies(DSPi dspi_build_info)
 target_compile_definitions(DSPi PRIVATE
     AUDIO_FREQ_MAX=48000
 
-    # S/PDIF output configuration (pins defined in config.h)
+    # S/PDIF output configuration (pins defined in config.h).  The output
+    # rings use no DMA IRQ.
     PICO_AUDIO_SPDIF_PIO=0
-    PICO_AUDIO_SPDIF_DMA_IRQ=1
-    # I2S TX on DMA_IRQ_0 — must stay separate from SPDIF TX (DMA_IRQ_1)
-    # to avoid cross-driver IRQ gating between the two output libraries.
-    PICO_AUDIO_I2S_DMA_IRQ=0
 
-    # S/PDIF RX on DMA_IRQ_1 with SPDIF TX. Our library patches ensure
-    # safe coexistence: private irq_handler_registered flag (not
-    # irq_has_shared_handler), removed irq_set_enabled in teardown,
-    # interrupt-safe _spdif_rx_common_end.
+    # S/PDIF RX: the only DMA IRQ user (spdif_input_init sets its priority).
     PICO_SPDIF_RX_DMA_IRQ=1
 
     # RAM-places the TinyUSB rp2040-port IRQ path; both platforms use this USB port.

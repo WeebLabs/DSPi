@@ -539,14 +539,10 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     while (!dac_hw_mute_hold_elapsed()) tight_loop_contents();
     output_rings_stall_end();
 
-    // Suspend SPDIF RX across the type-switch window.  The DMA IRQ disable
-    // below kills DMA_IRQ_1 servicing (which RX shares with SPDIF TX), and
-    // the alarm-pool decode-timeout alarms in pico_spdif_rx use a separate
-    // timer IRQ that can fire mid-transition and access PIO/DMA state we
-    // are mutating.  Stop cleanly here; restart at the end if it was running.
-    // If a caller already stopped RX (e.g. preset_load_pending across the
-    // flash blackout), state==INACTIVE and we leave it that way — caller
-    // is responsible for restart.
+    // Suspend SPDIF RX across the type-switch window: its decode-timeout
+    // alarms can fire mid-transition and touch PIO/DMA state being mutated.
+    // Restart at the end if it was running; a caller that already stopped it
+    // (state INACTIVE) owns the restart.
     bool rx_was_running = (input_source_is_spdif(active_input_source) &&
                            spdif_input_get_state() != SPDIF_INPUT_INACTIVE);
     if (rx_was_running) {
@@ -561,15 +557,6 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                                i2s_input_get_state() != I2S_INPUT_INACTIVE);
     if (i2s_rx_was_running) {
         i2s_input_stop();
-    }
-
-    // Prevent DMA IRQ handlers from touching registries while we teardown/setup
-    // instances and mutate hardware ownership.
-    const uint spdif_dma_irq_num = DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ;
-    const uint i2s_dma_irq_num = DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ;
-    irq_set_enabled(spdif_dma_irq_num, false);
-    if (i2s_dma_irq_num != spdif_dma_irq_num) {
-        irq_set_enabled(i2s_dma_irq_num, false);
     }
 
     // Quiesce ALL currently active outputs before any teardown/setup work.
@@ -678,7 +665,6 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 #endif
                     .pio_sm = i,
                     .pio = PICO_AUDIO_SPDIF_PIO,
-                    .dma_irq = PICO_AUDIO_I2S_DMA_IRQ,
                     .clock_master = want_master,
                     .external_clock = want_extclk,
                     .ring_base = slot_ring_store[i],
@@ -703,7 +689,6 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 #endif
                 .pio_sm = i,
                 .pio = PICO_AUDIO_SPDIF_PIO,
-                .dma_irq = PICO_AUDIO_SPDIF_DMA_IRQ,
                 .ring_base = slot_ring_store[i],
             };
             audio_spdif_setup(spdif_inst, &audio_format_48k, &spdif_cfg);
@@ -1751,11 +1736,6 @@ void core0_init() {
     fb_ctrl_init(&fb_ctrl);
     nominal_feedback_10_14 = ((uint64_t)audio_state.freq << 14) / 1000;
     feedback_10_14 = nominal_feedback_10_14;
-
-    // Assert USB SOF cannot be preempted by DMA IRQs — required for
-    // the non-atomic multi-field read in usb_sof_irq() to be safe.
-    assert(NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ));
-    assert(NVIC_GetPriority(USBCTRL_IRQ) <= NVIC_GetPriority(DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ));
 
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.

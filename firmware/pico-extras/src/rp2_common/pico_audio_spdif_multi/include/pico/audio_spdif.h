@@ -22,13 +22,6 @@
 extern "C" {
 #endif
 
-#ifndef PICO_AUDIO_SPDIF_DMA_IRQ
-#ifdef PICO_AUDIO_DMA_IRQ
-#define PICO_AUDIO_SPDIF_DMA_IRQ PICO_AUDIO_DMA_IRQ
-#else
-#define PICO_AUDIO_SPDIF_DMA_IRQ 0
-#endif
-#endif
 
 #ifndef PICO_AUDIO_SPDIF_PIO
 #ifdef PICO_AUDIO_PIO
@@ -109,7 +102,6 @@ typedef struct audio_spdif_instance {
     uint8_t pio_sm;
     uint8_t dma_channel;
     uint8_t dma_reload_channel; // RP2040 only: free-running reload pair partner
-    uint8_t dma_irq;            // 0 or 1; kept for the shared refcount API (RX hold)
     uint8_t pin;
     uint8_t instance_index;     // Stable slot identity (== dma_channel)
 
@@ -158,7 +150,6 @@ typedef struct audio_spdif_config {
     uint8_t dma_reload_channel; // RP2040 only: reload partner (ignored on RP2350)
     uint8_t pio_sm;
     uint8_t pio;        // PIO block index (0, 1, or 2 on RP2350)
-    uint8_t dma_irq;    // DMA IRQ index (0 or 1)
     void   *ring_base;  // caller-owned per-slot ring storage,
                         // PICO_AUDIO_SPDIF_RING_BYTES, aligned to its size;
                         // shared with the slot's I2S instance across retypes
@@ -318,14 +309,6 @@ uint32_t audio_spdif_enable_sync_prepare(audio_spdif_instance_t *instances[], ui
  */
 void audio_spdif_apply_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq);
 
-/** \brief Enable/disable DMA-starvation monitoring
- * \ingroup audio_spdif
- *
- * When enabled, the driver counts consumer-empty DMA starts (silence fallback).
- * Intended for dropout diagnostics during active USB streaming.
- */
-void audio_spdif_set_starvation_monitoring(bool enabled);
-
 /** \brief Reset DMA-starvation counters
  * \ingroup audio_spdif
  */
@@ -340,18 +323,6 @@ uint32_t audio_spdif_get_dma_starvations(void);
  * \ingroup audio_spdif
  */
 uint32_t audio_spdif_get_dma_starvations_instance(uint index);
-
-/** \brief Adjust the DMA IRQ enable reference count for a given IRQ line.
- * \ingroup audio_spdif
- *
- * External subsystems sharing the same DMA IRQ line (e.g. SPDIF RX) must
- * call this to prevent audio_spdif_set_enabled(false) from disabling the
- * entire IRQ line while the external subsystem still needs it.
- *
- * \param dma_irq  DMA IRQ index (0 or 1)
- * \param delta    +1 to hold the IRQ enabled, -1 to release
- */
-void audio_spdif_irq_refcount_adjust(uint dma_irq, int delta);
 
 #ifdef __cplusplus
 }
