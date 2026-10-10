@@ -6,7 +6,7 @@ hex + decoded lines to clkdiag.log in the current directory.
 
 No console backend exists in the shipped firmware (USB CDC off, UART stdio
 off), so the 1 Hz CLKDIAG values are read over the vendor control endpoint.
-Requires DSPI_CLOCK_DIAG=1 firmware and pyusb.
+Requires firmware configured with -DDSPI_CLOCK_DIAG=ON, and pyusb.
 
 Usage: python3 clkdiag_poll.py [seconds]   (default 130)
 """

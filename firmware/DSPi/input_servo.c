@@ -118,11 +118,9 @@ void input_servo_apply(float actual_freq, int fill_slot) {
             p_ppm += (fill_error + 2.0f) * SERVO_FILL_KP2_PPM;
 
         // I: continuous error, no gate needed (see the gain comment).
-#if !(DSPI_CLOCK_DIAG && SOFT_VCXO_DIAG_FREEZE_INTEGRATOR)
         fill_integral_ppm += fill_error * SERVO_FILL_KI_PPM;
         if (fill_integral_ppm >  SERVO_FILL_ICLAMP_PPM) fill_integral_ppm =  SERVO_FILL_ICLAMP_PPM;
         if (fill_integral_ppm < -SERVO_FILL_ICLAMP_PPM) fill_integral_ppm = -SERVO_FILL_ICLAMP_PPM;
-#endif
 
         ppm += p_ppm + fill_integral_ppm;
     }

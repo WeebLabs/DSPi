@@ -126,6 +126,14 @@ if (DSPI_LOOPBACK)
     target_compile_definitions(DSPi PRIVATE DSPI_LOOPBACK)
 endif()
 
+# DSPI_CLOCK_DIAG (bench instrumentation): clock/servo/ring diagnostics and
+# the REQ_GET_CLOCK_DIAG (0x82) snapshot read by tools/clkdiag_poll.py.
+# Release builds leave it OFF; 0x82 then answers with zero bytes.
+option(DSPI_CLOCK_DIAG "Build the clock/audio-path diagnostics (vendor GET 0x82)" OFF)
+if (DSPI_CLOCK_DIAG)
+    target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
+endif()
+
 if (PICO_PLATFORM STREQUAL "rp2040")
     # RP2040: SPDIF RX on PIO1 SM2 (SM0=PDM; SM1 free since MCK moved to
     # CLK_GPOUT). I2S RX reuses the same SM when SPDIF RX is inactive.

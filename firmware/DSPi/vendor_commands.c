@@ -4108,15 +4108,19 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
 
             case REQ_GET_CLOCK_DIAG: {
 #if DSPI_CLOCK_DIAG
-                // Read-only latch of the 1 Hz clock/audio-path diagnostics.
-                // Static so it outlives the EP0 transfer (control transfers
-                // are serialised by TinyUSB).
+                // Static so it outlives the EP0 transfer.  A transport whose
+                // response buffer cannot hold the packet gets zero bytes
+                // rather than a silently truncated snapshot.
                 static ClockDiagPacket diag;
-                clock_diag_get_snapshot(&diag);
-                vendor_send_response(&diag, sizeof(diag));
+                if (_active_source != CTRL_SOURCE_USB &&
+                    sizeof(diag) > sizeof(_ext_resp_copy)) {
+                    vendor_send_response(NULL, 0);
+                } else {
+                    clock_diag_get_snapshot(&diag);
+                    vendor_send_response(&diag, sizeof(diag));
+                }
 #else
-                // Compiled out in release builds: report absence with a
-                // zero-length response rather than stalling.
+                // Compiled out in release builds: zero-length, not a stall.
                 vendor_send_response(NULL, 0);
 #endif
                 return true;

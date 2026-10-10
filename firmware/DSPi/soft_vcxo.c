@@ -142,11 +142,6 @@ void soft_vcxo_init(void) {
 DSP_TIME_CRITICAL
 void soft_vcxo_set_ppm(float ppm) {
     if (!vcxo_ready) return;
-#if DSPI_CLOCK_DIAG && SOFT_VCXO_DIAG_FORCE_PARK
-    // A/B: force every command to 0 so the servo still runs but the PLL never
-    // moves.  Persistent cutouts with this on exonerate the VCXO (H1/H5).
-    ppm = 0.0f;
-#endif
     if (ppm >  SOFT_VCXO_MAX_PPM) { ppm =  SOFT_VCXO_MAX_PPM;
 #if DSPI_CLOCK_DIAG
         diag_clamp_sats++;

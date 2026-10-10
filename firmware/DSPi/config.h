@@ -327,9 +327,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_BUILD_INFO          0x80  // 64-byte git-describe/date blob; provenance for
                                           // humans only, no software may gate on it
 
-// Clock / audio-path diagnostics (read-only snapshot; DSPI_CLOCK_DIAG builds
-// only).  Returns the packed ClockDiagPacket latched by the 1 Hz clock_diag
-// poll.  0x80/0x81 stay free.
+// Clock / audio-path diagnostics: the packed ClockDiagPacket latched by the
+// 1 Hz clock_diag poll.  Zero-length unless built with -DDSPI_CLOCK_DIAG=ON,
+// or when the packet does not fit the requesting transport (UART/I2C).
 #define REQ_GET_CLOCK_DIAG          0x82
 
 // Clip Detection Commands
@@ -764,23 +764,12 @@ typedef struct __attribute__((packed)) {
 #define OUTPUT_SLOT_RELOAD_DMA_BASE 6
 #endif
 
-// ---------------------------------------------------------------------------
-// Clock / audio-path diagnostics (bench instrumentation)
-// ---------------------------------------------------------------------------
-// Master switch for the CLKDIAG serial console dump (clock_diag.c) and all the
-// diagnostic statics/getters it reads (soft_vcxo.c, input_servo.c,
-// spdif_input.c).  Everything is compiled out when 0; set 0 for release.
-#define DSPI_CLOCK_DIAG            1
-
-// A/B switches, default 0, honored in soft_vcxo.c / input_servo.c only when
-// DSPI_CLOCK_DIAG is 1.  Both leave the servo running so its commands are still
-// visible in the dump; they only cut the actuation or the accumulation:
-//   FORCE_PARK: soft_vcxo_set_ppm clamps every command to 0 (PLL never moves).
-//     If cutouts persist with this on, the VCXO/PLL is exonerated (H1/H5).
-//   FREEZE_INTEGRATOR: input_servo.c skips integrator accumulation (isolates
-//     integrator windup/oscillation, H2).
-#define SOFT_VCXO_DIAG_FORCE_PARK        0
-#define SOFT_VCXO_DIAG_FREEZE_INTEGRATOR 0
+// Clock / audio-path diagnostics (clock_diag.c and the statics it reads in
+// soft_vcxo.c, input_servo.c, spdif_input.c): set by the DSPI_CLOCK_DIAG CMake
+// option, compiled out otherwise.
+#ifndef DSPI_CLOCK_DIAG
+#define DSPI_CLOCK_DIAG            0
+#endif
 
 // Number of configurable outputs (SPDIF + PDM)
 #if PICO_RP2350

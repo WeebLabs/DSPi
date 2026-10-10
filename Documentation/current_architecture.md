@@ -283,15 +283,15 @@ Any host-driven format change (SET_INTERFACE between AS alts for a bit-depth swi
 **Output dividers at rate changes (`apply_nominal_output_rate()`, main.c):** output dividers are never trimmed. Input clock tracking pulls `sys_clk` in ppm through the soft VCXO, which moves every output together (see "Soft VCXO" and "Clock Servo"). `perform_rate_change()` therefore only programs the nominal divider for the new rate on each set-up S/PDIF slot and MCK, while `audio_i2s_update_all_frequencies()` retunes the I2S slots. Leaving a tracked input (SPDIF, ADAT slave, I2S slave) needs no divider work at all: its stop path calls `input_servo_reset()`, which parks the VCXO at nominal. `input_servo_reset()` must never run on the pipeline-reset path, because it would park a locked VCXO mid-lock. *Last updated: 2026-10-10*
 
 ### Clock Diagnostics (bench instrument)
-*Last updated: 2026-07-23*
+*Last updated: 2026-10-11 (CMake option, off by default; A/B switches removed; transport-size guard)*
+
+**Building it.** Diagnostics are compiled in only with `-DDSPI_CLOCK_DIAG=ON` at configure time (a CMake option, OFF by default, like `DSPI_LOOPBACK`); release builds answer `REQ_GET_CLOCK_DIAG` with zero bytes. The UART and I2C control transports also get zero bytes, because the roughly 190-byte `ClockDiagPacket` exceeds their response buffer and would otherwise arrive silently truncated; read it over USB with `tools/clkdiag_poll.py`.
 
 `clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and a read-only `REQ_GET_CLOCK_DIAG` (0x82) vendor GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf output is otherwise discarded). Gated entirely by `DSPI_CLOCK_DIAG` (config.h, default 1 for bench; set 0 for release, which compiles everything to no-op inlines and makes `REQ_GET_CLOCK_DIAG` return a zero-length response). `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
 
-Two A/B switches (config.h, default 0, honored only under the flag): `SOFT_VCXO_DIAG_FORCE_PARK` makes `soft_vcxo_set_ppm()` clamp every command to 0 (the servo still computes and its intent is still logged, but the PLL never moves; persistent cutouts then exonerate the VCXO), and `SOFT_VCXO_DIAG_FREEZE_INTEGRATOR` makes `input_servo.c` skip integrator accumulation (isolates integrator windup/oscillation).
-
 The dump is six-to-eight lines, each prefixed `CLKDIAG ` for grepping:
 
-- `sysclk:` fc0-measured sys_clk `hz`/`min`/`max`, derived `ppm` offset vs 307.2 MHz `[min..max]`, sample count `n`, PLL `lock` bit. (fc0 is otherwise unused in the tree.)
+- `sysclk:` fc0-measured sys_clk `hz`/`min`/`max`, derived `ppm` offset vs the nominal `clock_get_hz(clk_sys)` `[min..max]`, sample count `n`, PLL `lock` bit. (fc0 is otherwise unused in the tree.)
 - `vcxo:` last commanded `ppm[min..max]`, `park` state, commanded `fbdiv0` (127/128/129), effective `pulseHz`, PWM `div`/`wrap`, cumulative `set`/`clamp`/`sflip` (sign-flip) counts, live `fbdivLive` (pll_sys `fbdiv_int`), PLL `cs` lock.
 - `vcxoloop:` PULSE and PACE DMA channel `busy`/`en`/`tcr` (transfer count remaining, from the debug registers)/PULSE `rd` addr/PACE `ctdreq` (DREQ counter), plus the PWM pacer `pwmctr` and its `moves` count since last dump (loop-alive evidence).
 - `servo:` measured input `in` Hz, `ff` feed-forward ppm, total `tot[min..max]` ppm, integrator `int` ppm, `ferr` fill error, `slot` used, `ticks`.
@@ -4003,7 +4003,7 @@ lands on a hot path and the audio path is untouched.
 | REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
 | REQ_GET_PLATFORM | 0x7F | IN | Get platform ID, fw version (legacy nibbles + full-width minor/patch + beta ordinal), output count; 7 bytes |
 | REQ_GET_BUILD_INFO | 0x80 | IN | Get 64-byte build stamp: git describe [0..47] + build date [48..59]; provenance only, never gated on |
-| REQ_GET_CLOCK_DIAG | 0x82 | IN | Get packed ClockDiagPacket clock/audio-path snapshot (DSPI_CLOCK_DIAG builds; zero-length otherwise). See Clock Diagnostics |
+| REQ_GET_CLOCK_DIAG | 0x82 | IN | Get packed ClockDiagPacket clock/audio-path snapshot. Built only with `-DDSPI_CLOCK_DIAG=ON`, USB only; zero-length otherwise. See Clock Diagnostics |
 | REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
 | REQ_SET_CS_BINDING | 0x84 | OUT | Set a Control Surfaces binding (wValue=slot 0-15, payload=24-byte CsBinding, required; short payload = INVALID_VALUE); apply-live-only preview, deferred, poll 0x87; persist via REQ_CS_SAVE (see Control Surfaces) |
 | REQ_GET_CS_BINDING | 0x85 | IN | Get the live 24-byte CsBinding for a slot (wValue=slot) |
