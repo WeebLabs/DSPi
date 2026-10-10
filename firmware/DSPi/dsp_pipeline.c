@@ -385,8 +385,10 @@ void dsp_update_delay_samples(float sample_rate) {
             delay_ms += align_ms;
         }
 
+        // Cap at MAX-1: a delay of exactly MAX_DELAY_SAMPLES reads the slot just
+        // written, i.e. zero delay.  Sub hits the cap 128 samples early (see doc).
         int32_t samples = (int32_t)(delay_ms * sample_rate / 1000.0f);
-        if (samples > MAX_DELAY_SAMPLES) samples = MAX_DELAY_SAMPLES;
+        if (samples > MAX_DELAY_SAMPLES - 1) samples = MAX_DELAY_SAMPLES - 1;
         if (samples < 0) samples = 0;
         channel_delay_samples[out] = samples;
 

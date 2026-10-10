@@ -422,7 +422,7 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 The `process_input_block()` function reads from `buf_l[]`/`buf_r[]` arrays (extern, defined in `audio_pipeline.c`, filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly. Buffer statistics helpers (`get_slot_consumer_fill()`, `get_slot_consumer_stats()`, `reset_buffer_watermarks()`) also live in `audio_pipeline.c`.
 
 ### RP2350 Float Pipeline
-*Last updated: 2026-09-22 (output limiter row; 2026-08-01: upmixer centre engine gains an OFF mode)*
+*Last updated: 2026-10-10 (delay row: ring size and cap; 2026-09-22: output limiter row; 2026-08-01: upmixer centre engine gains an OFF mode)*
 
 All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
@@ -438,14 +438,14 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 | Output gain | Per-output gain × host volume × master volume |
 | Loudness | Per masked output, post-gain: 2 SVF shelf filters, volume-keyed; `loudness_output_mask` selects outputs; skipped-and-cleared when masked off / muted / RAW test signal |
 | Output limiter | Per output, post-loudness, pre-delay: brickwall lookahead peak limiter (16-sample blocks, 32-sample lookahead, float). The lookahead delay is on every output while any limiter is enabled and absent otherwise (see "Output Limiter") |
-| Delay | Float circular buffers, 2048 samples max (42ms at 48kHz) |
+| Delay | Float circular buffers, 2048-sample ring, 2047 samples max (42 ms at 48kHz) |
 | S24 finalization | Mode is snapshotted once per packet from `adat_output_is_active()` and shared with Core 1 via `core1_eq_work.finalize_s24`. ADAT active: after the last float consumer, each output row of `buf_out` (rows 0-7) is converted to a clamped 24-bit sample **in place** via `output_block_to_s24_inplace()` (`output_s24.h`, `out_s24_t` = `may_alias` int32), once per sample per channel, even when a slot pool is starved, so ADAT always sees converted data. ADAT inactive: the staging pass is skipped and each slot pair uses the fused `output_pair_convert_interleave()` (rows stay float; no second memory pass). Slot bytes are bit-identical in both modes. Row 8 (PDM sub) stays float always. |
 | SPDIF output | ADAT active: pure integer copy of the finalized S24 rows into the 4 stereo slot pairs (`output_pair_interleave_s24()`). ADAT inactive: fused float->int24 convert+interleave per pair |
 | ADAT output | Encodes the same finalized S24 rows 0-7 directly; the push is gated on the same per-packet snapshot (see "ADAT Bulk Output") |
 | PDM output | Float → Q28 for sigma-delta modulation |
 
 ### RP2040 Fixed-Point Pipeline
-*Last updated: 2026-09-22 (output limiter row; 2026-07-10: crossfeed now per-output-pair, post-matrix)*
+*Last updated: 2026-10-10 (delay row: 1024-sample ring, cap is ring size minus one; 2026-09-22: output limiter row; 2026-07-10: crossfeed now per-output-pair, post-matrix)*
 
 Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixed-point (28 fractional bits). 2 S/PDIF stereo pairs + 1 PDM sub (5 output channels).
 
@@ -467,7 +467,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 | Output gain + volume | Combined Q15 multiply via `fast_mul_q15()` (output gain × host volume × master volume) |
 | Loudness | Per masked output, post-gain: 2 Q28 biquads via `fast_mul_q28()`, volume-keyed; `loudness_output_mask` selects outputs; skipped-and-cleared when masked off / muted / RAW test signal |
 | Output limiter | Per output, post-loudness, pre-delay: same algorithm as RP2350 with Q30 gains, one hardware divide per 16-sample block and a two-multiply Q15 gain apply (see "Output Limiter") |
-| Delay | int32 circular buffers, 2048 samples max (42ms at 48kHz) |
+| Delay | int32 circular buffers, 1024-sample ring, 1023 samples max (21 ms at 48kHz) |
 | SPDIF output | Q28 → int24 (`>> 6` with rounding), 2 stereo pairs |
 | PDM output | Q28 direct to sigma-delta modulator (single-core fallback only) |
 
@@ -755,17 +755,22 @@ Spec: [`Documentation/Features/band_bypass_spec.md`](Features/band_bypass_spec.m
 | RP2040 | 10 bands | 10 bands × 5 outputs | 70 |
 
 ### Delay Lines
+*Last updated: 2026-10-10*
 
 NUM_DELAY_CHANNELS = NUM_OUTPUT_CHANNELS (platform-dependent).
 
-| Platform | Channels | Type | Max samples | Max delay (48kHz) | RAM usage |
-|----------|----------|------|-------------|--------------------|-----------|
-| RP2350 | 9 | float | 2048 | 42 ms | 72 KB |
-| RP2040 | 5 | int32_t | 2048 | 42 ms | 40 KB |
+| Platform | Channels | Type | Ring size | Max delay (48kHz) | RAM usage |
+|----------|----------|------|-----------|--------------------|-----------|
+| RP2350 | 9 | float | 2048 | 42.6 ms (2047 samples) | 72 KB |
+| RP2040 | 5 | int32_t | 1024 | 21.3 ms (1023 samples) | 20 KB |
 
 Circular buffer: `delay_lines[ch][(write_idx - delay_samples) & MAX_DELAY_MASK]`
 
-PDM sub gets automatic alignment compensation: +SUB_ALIGN_SAMPLES (128 samples = 2.67ms).
+`dsp_update_delay_samples()` caps every channel at `MAX_DELAY_SAMPLES - 1`. A delay of exactly `MAX_DELAY_SAMPLES` would read back the sample written in the same step, which is zero delay. Before 2026-10-10 the cap was `MAX_DELAY_SAMPLES`, so any over-range request (which the vendor handlers accept unbounded) silently played undelayed. The cap is applied in samples at recompute time, so a stored millisecond value that fits at 48 kHz is capped, not rejected, after a switch to 96 kHz. GET returns the stored, uncapped value.
+
+PDM sub gets automatic alignment compensation: +SUB_ALIGN_SAMPLES (128 samples = 2.67ms), added before the cap.
+
+**Known limitation (temporary, until PDM becomes an assignable slot type without hardcoded alignment):** because the sub's 128-sample offset is added before the cap, the sub reaches the cap 128 samples of user delay earlier than the other outputs. With a user delay within 128 samples of the ring size, the sub plays up to 128 samples (2.7 ms at 48 kHz) earlier than other outputs set to the same delay. Below that band all outputs align exactly. A sub-aware cap (`MAX_DELAY_SAMPLES - 1 - SUB_ALIGN_SAMPLES` applied to the user delay, offset added after) was considered and deferred to the PDM overhaul, which removes the offset entirely. The Console delay sliders (42 ms RP2040, 85 ms RP2350) also exceed the ring and should be bounded by a firmware-reported maximum.
 
 ---
 
@@ -2205,7 +2210,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-09-28 (Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-10-10 (Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2272,9 +2277,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 |---------|--------|--------|
 | Channels | 5 | 9 |
 | Type | int32_t | float |
-| Max samples | 2048 | 2048 |
-| Max delay (48kHz) | 42 ms | 42 ms |
-| RAM usage | 40 KB | 72 KB |
+| Ring size | 1024 | 2048 |
+| Max delay (48kHz) | 21.3 ms (1023 samples) | 42.6 ms (2047 samples) |
+| RAM usage | 20 KB | 72 KB |
 
 ### Core 1 Usage
 
