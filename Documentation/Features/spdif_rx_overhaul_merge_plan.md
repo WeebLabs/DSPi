@@ -535,3 +535,11 @@ The servo applies only while locked and only once the detected rate equals `audi
 **Phase 2 is complete.** Commits from `0c3a762` (merge) to `5a2a7e5` (2k), plus this one. Every build variant compiles clean and `check_ram_placement.py` passes on both platforms. Nothing has run on hardware yet.
 
 **Next:** Phase 4 (hardware verification) comes before Phase 3 (producer-pool removal), as planned.
+
+2j was committed as `006b3de`.
+
+### Phase 4 preparation
+
+*Last updated: 2026-10-11*
+
+The bench images are built clean from `006b3de`. Each reports `v1.1.6-beta4-35-g006b3de`, without the dirty flag. They are saved in `custom-builds/merge-bench-006b3de/`: a normal, a loopback and a clock-diagnostics UF2 for each chip, plus the normal ELFs. The step-by-step checklist is `spdif_rx_overhaul_bench_checklist.md`. Its first section is the still-owed Phase 0 baseline run.
