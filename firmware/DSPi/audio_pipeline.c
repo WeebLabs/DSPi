@@ -1374,11 +1374,10 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
 #ifdef DSPI_LOOPBACK
     // Loopback capture tap (debug build): copy slot 0's finalized, interleaved
-    // 24-bit output into the capture ring just before the buffer is handed to
-    // the output DMA.  By here slot 0 is fully written for every pipeline
-    // variant (RP2350 dual/single-core, RP2040 dual/single-core), including the
-    // silence (memset) branch.  Read-only — does not perturb inter-slot phase.
-    if (audio_buf[0]) {
+    // 24-bit output into the capture ring.  By here slot 0 is fully written for
+    // every pipeline variant, including the silence (memset) branch.  Gated on
+    // admission like every output, so the capture holds exactly what slot 0 plays.
+    if (audio_buf[0] && rings_admit) {
         loopback_push_slot0((const int32_t *)audio_buf[0]->buffer->bytes, sample_count);
     }
 #endif

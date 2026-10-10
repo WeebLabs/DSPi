@@ -184,6 +184,9 @@ uint32_t audio_spdif_ring_fill_frames(audio_spdif_instance_t *inst) {
 
 void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     // DMA must be stopped. Re-anchors all accounting to ring position 0.
+    // Atomic against the SOF ISR's consumed read: between the anchor and the
+    // hardware re-point it would count the stale address as a full lap.
+    uint32_t save = save_and_disable_interrupts();
     inst->wr_frames = 0;
     inst->erased_frames = 0;
     inst->consumed_words = 0;
@@ -200,6 +203,7 @@ void audio_spdif_ring_reset(audio_spdif_instance_t *inst) {
     // skewing this slot's accounting (and its re-arm offset) against the
     // others. DMA is stopped here per the contract, so the write is safe.
     dma_channel_set_read_addr(inst->dma_channel, inst->ring, false);
+    restore_interrupts(save);
     // Stamp the whole ring with valid CURRENT-format silence: the re-arm
     // prefetches into the PIO FIFO straight from position 0, and after an
     // output-type switch (shared store) or at boot (uninitialized RAM) the raw
@@ -314,6 +318,8 @@ static void ring_dma_arm(audio_spdif_instance_t *inst) {
     // after a (re)start is the ring's, not leftovers (audible click).
     pio_sm_clear_fifos(inst->pio, inst->pio_sm);
 
+    // Anchor and hardware address move together (see the ring reset).
+    uint32_t save = save_and_disable_interrupts();
     uint32_t offset = (inst->consumed_words * 4u) & (RING_BYTES - 1u);
     uint8_t *start = (uint8_t *)inst->ring + offset;
     // Keep the unwrap anchor exactly in step with the address programmed
@@ -353,6 +359,7 @@ static void ring_dma_arm(audio_spdif_instance_t *inst) {
     dma_channel_set_read_addr(inst->dma_channel, start, false);
     dma_channel_set_trans_count(inst->dma_channel, RING_WORDS, true);
 #endif
+    restore_interrupts(save);
 }
 
 static void ring_dma_stop(audio_spdif_instance_t *inst) {
