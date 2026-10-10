@@ -4948,8 +4948,8 @@ static void apply_factory_defaults(void) {
     // master volume is left to apply_master_volume_from_mode().
 
     // Reset channel names to factory defaults (USB input, all-SPDIF outputs).
-    // active_input_source is reset below; pass NULL for output_types so the
-    // function uses its all-SPDIF fallback for naming purposes.
+    // The source switch to USB is queued below; pass NULL for output_types so
+    // the function uses its all-SPDIF fallback for naming purposes.
     for (int ch = 0; ch < NUM_CHANNELS; ch++)
         get_default_channel_name(ch, INPUT_SOURCE_USB, NULL, channel_names[ch]);
 
@@ -4965,10 +4965,14 @@ static void apply_factory_defaults(void) {
     leveller_update_pending = true;
     leveller_reset_pending = true;
 
-    // Input source: default to USB.  This bypasses the main-loop switch
-    // handler, so apply any host volume parked while a non-USB input was live.
-    active_input_source = INPUT_SOURCE_USB;
-    audio_thaw_host_volume();
+    // Input source: default to USB through the deferred switch handler, never by
+    // writing active_input_source.  Only the handler restores the USB rate and
+    // nominal dividers.  Also retargets an in-flight switch to another source.
+    if (active_input_source != INPUT_SOURCE_USB || input_source_change_pending) {
+        pending_input_source = INPUT_SOURCE_USB;
+        __dmb();
+        input_source_change_pending = true;
+    }
 
     // LG Sound Sync — reset to firmware default (off).  Run through the
     // public setter so any side-effects (demote, restore vol_mul) fire

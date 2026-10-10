@@ -269,7 +269,7 @@ Any host-driven format change — SET_INTERFACE between AS alts (bit-depth switc
 
 **SET_CUR sampling_freq validation:** unsupported rates are now stalled at EP0 rather than silently committed. Previously any 24-bit value was accepted — `audio_state.freq` would store garbage that `perform_rate_change()` later coerced to 44100, so a subsequent GET_CUR returned a rate the device never actually applied. The accepted set is {44100, 48000, 96000} to match the Type-I format descriptors on both alts.
 
-**USB rate ownership:** `usb_selected_rate` is the UAC1 playback endpoint's host-selected rate, while `audio_state.freq` is the rate actually applied to the live DSP pipeline. SET_CUR and the fixed-48-kHz multichannel alts always update the USB selection, but arm a live rate change only while USB is the active input; GET_CUR returns the retained USB selection. A later source switch into USB applies that selection, so decorative USB control traffic cannot interrupt S/PDIF or I2S playback and the host does not need to resend its rate when USB becomes active. Two races are closed inside the source-switch handler: `rate_change_pending` is cleared right after `active_input_source` flips (a SET_CUR armed for the old source in the same loop iteration would otherwise fire under the new source; mirrors the clock-mode flip handler's clear), and the switching-to-USB tail re-checks the retained selection against `audio_state.freq` and re-arms if a SET_CUR landed in USB IRQ context between the branch reading the selection and the source flip.
+**USB rate ownership:** `usb_selected_rate` is the UAC1 playback endpoint's host-selected rate, while `audio_state.freq` is the rate actually applied to the live DSP pipeline. SET_CUR and the fixed-48-kHz multichannel alts always update the USB selection, but arm a live rate change only while USB is the active input; GET_CUR returns the retained USB selection. A later source switch into USB applies that selection, so decorative USB control traffic cannot interrupt S/PDIF or I2S playback and the host does not need to resend its rate when USB becomes active. Two races are closed inside the source-switch handler: `rate_change_pending` is cleared right after `active_input_source` flips (a SET_CUR armed for the old source in the same loop iteration would otherwise fire under the new source; mirrors the clock-mode flip handler's clear), and the switching-to-USB tail re-checks the retained selection against `audio_state.freq` and re-arms if a SET_CUR landed in USB IRQ context between the branch reading the selection and the source flip. Every return to USB goes through this handler, including a factory reset, an empty-slot preset load, and an active-slot preset delete, so each one applies the retained USB rate and restores nominal output dividers. *Last updated: 2026-10-10*
 
 **`perform_rate_change()` (main.c):** bracketed with `prepare_pipeline_reset(PRESET_MUTE_SAMPLES)` / `complete_pipeline_reset()`. Without the bracket, the SPDIF `wrap_consumer_take` callback updates the PIO divider lazily on the next buffer-take, so old-rate audio already queued in each consumer pool plays out at the new bit-clock — audible pitch wobble for ~16 ms. `complete_pipeline_reset()` aborts DMA on every enabled slot, drains the consumer pool back to the free list, and restarts all outputs in sync at the new divider. The I2S `audio_i2s_update_all_frequencies()` call inside `perform_rate_change()` still runs for its own divider+clkdiv_restart pass; the subsequent `complete_pipeline_reset()` re-aborts/re-enables idempotently and costs only microseconds.
 
@@ -4305,7 +4305,7 @@ Master volume is re-derived on every preset *context* change (preset load, activ
 ---
 
 ## Audio Input Source System
-*Last updated: 2026-08-06 (input capture arena + receiver exclusivity invariant; see "Input Capture Arena")*
+*Last updated: 2026-10-10 (only the deferred switch handler writes `active_input_source`; factory defaults queue a switch to USB)*
 
 Abstraction layer enabling selection between multiple audio input sources. Supports USB (default), up to three SPDIF inputs, I2S, and (RP2350 only) an 8-channel ADAT lightpipe input.
 
@@ -4368,8 +4368,8 @@ This reclaims 4,092 B of BSS on RP2040 and 20,480 B on RP2350. Each module alias
 
 **Ownership invariant.** At most one receiver runs, and only the one the active source owns. `input_arena_claim()` panics if the arena is already held by a different owner; each `*_input_start()` claims (USB claims nothing) and each `*_input_stop()` releases. Two enforcement points keep the invariant true rather than merely asserted:
 
-- `stop_foreign_input_receivers(keep)` (main.c) stops every receiver that is *actually running* but is not `keep`, keyed on running state rather than on the old source enum. It runs once per main-loop iteration, at the top of the deferred source switch (with the incoming source as `keep`, making the per-branch stops no-ops), and at the restart points of preset load, factory reset and bulk apply.
-- Those three paths matter because `apply_factory_defaults()` writes `active_input_source = INPUT_SOURCE_USB` directly, bypassing the deferred switch handler; before this, a factory reset / empty-slot preset load / active-slot preset delete while ADAT was live left the ADAT receiver running (ENDLESS DMA into its ring) with no path that would ever stop it, since the switch handler's stop chain keys on the old source. SPDIF and I2S were already interlocked by their shared DMA channels and PIO SM; ADAT has its own (DMA 15, PIO1 SM2), so only convention protected it.
+- `stop_foreign_input_receivers(keep)` (main.c) stops every receiver that is *actually running* but is not `keep`, keyed on running state rather than on the old source enum. It runs once per main-loop iteration, and at the top of the deferred source switch with the incoming source as `keep`, which makes the per-branch stops no-ops.
+- **Only the deferred switch handler writes `active_input_source`** (added 2026-10-10). `apply_factory_defaults()`, which a factory reset, an empty or corrupt slot load, and an active-slot preset delete all run, queues a switch to USB through `pending_input_source` + `input_source_change_pending` instead. It also retargets an in-flight switch to another source, so a factory reset always lands on USB. Earlier firmware wrote the source directly, which skipped the handler's rate change to the retained USB rate, the nominal divider restore after a servoed input, the receiver stop, the MCK stop, the LG Sound Sync and host notifications, and the stale `rate_change_pending` clear. The old post-restore receiver-stop calls at the preset-load, factory-reset and bulk-apply restart points were removed with it, since none of those paths can change the source underneath a running receiver any more. ADAT is the receiver this protects most, because it has its own DMA channel and PIO SM (DMA 15, PIO1 SM2) and nothing else interlocks it.
 
 The flash-blackout behavior is unchanged: ADAT may keep running through a blackout while it *remains* the active source (see "ADAT Input", flash-write bracket).
 
@@ -4388,9 +4388,9 @@ To prevent the host stream from disturbing the SPDIF audio path, several spots t
 
 ### Host Volume / Mute in Non-USB Mode (2026-05-04)
 
-`audio_set_volume()` parks the host's value (`uac1_host_volume` + pending flag) instead of writing `audio_state.volume` when source isn't USB, and does not touch `audio_state.vol_mul` or `current_loudness_coeffs`. GET_CUR returns the parked value while pending so the host round-trip stays consistent. Mute application is gated symmetrically in the audio pipeline: both the RP2350 float and RP2040 Q15 gain paths guard `audio_state.mute` with `active_input_source == INPUT_SOURCE_USB`. Result: Windows volume slider and mute key have no audible or displayed effect during SPDIF playback. *Last updated: 2026-09-28*
+`audio_set_volume()` parks the host's value (`uac1_host_volume` + pending flag) instead of writing `audio_state.volume` when source isn't USB, and does not touch `audio_state.vol_mul` or `current_loudness_coeffs`. GET_CUR returns the parked value while pending so the host round-trip stays consistent. Mute application is gated symmetrically in the audio pipeline: both the RP2350 float and RP2040 Q15 gain paths guard `audio_state.mute` with `active_input_source == INPUT_SOURCE_USB`. Result: Windows volume slider and mute key have no audible or displayed effect during SPDIF playback. *Last updated: 2026-10-10*
 
-The switch to USB in the deferred input-source switch handler calls `audio_thaw_host_volume()`, which applies a parked host value if no other controller has written user volume since. `apply_factory_defaults()` sets the source to USB directly, bypassing that handler, so it calls `audio_thaw_host_volume()` too. This keeps the rule that a parked value only ever exists while a non-USB input is live. See "User volume" above for the invariant.
+The switch to USB in the deferred input-source switch handler calls `audio_thaw_host_volume()`, which applies a parked host value if no other controller has written user volume since. Factory defaults reach USB through the same handler, so it is the only thaw site. This keeps the rule that a parked value only ever exists while a non-USB input is live. See "User volume" above for the invariant.
 
 This matches the user's product-level decision; it differs from the industry-standard pattern (RME TotalMix / UA Apollo, where host volume continues to act as master output gain on external sources) on purpose.
 
@@ -4510,11 +4510,11 @@ How the pools get filled depends on the input's clock role, because the prefill 
 *0xE4/0xE9/0xF1 use the immediate-response SET pattern (same as `REQ_SET_I2S_BCK_PIN`).
 
 ### Persistence
-*Last updated: 2026-08-02 (fourth SPDIF input persisted: wire V28, slot V35, directory V16)*
+*Last updated: 2026-10-10 (factory reset switches to USB through the deferred handler)*
 
 - `SLOT_DATA_VERSION` 13 adds `input_source` (uint8_t) to `PresetSlot`
 - Slots with version < 13 leave input source at its current value (USB by default)
-- Factory reset sets `active_input_source = INPUT_SOURCE_USB`
+- Factory reset, an empty-slot load and an active-slot delete queue a deferred switch to USB; they never write `active_input_source` directly
 - `WireInputConfig` (16 bytes) section in `WireBulkParams` V7+; wire V12 claims two of its reserved bytes for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000), same byte size as V11
 - SPDIF RX pin stored in `PresetDirectory` (consumed existing padding byte, no directory format change)
 - `SLOT_DATA_VERSION` 17 appends `i2s_rx_pin` (0 = unset, use default) and `i2s_input_rate` to `PresetSlot` (struct grows 2 bytes; per-version CRC ranges via `slot_data_size_for_version()`, same mechanism as V16)

@@ -323,7 +323,7 @@ Vendor SETs (0xED, 0xF1) are always RAM-live only; nothing hits flash until the 
 
 - `SLOT_DATA_VERSION` is now **17**: `i2s_rx_pin` and `i2s_input_rate` are appended after the V16 crossover block (struct grows 2 bytes). Older slots remain CRC-valid via the per-version size table; V16-and-older slots simply leave the live pin/rate alone on load.
 - The device-global `FlashOutputConfig` stores the rate as **encoding + 1** so that directories written by older firmware (zeros in reserved bytes) read as "unset" instead of 44.1 kHz. Slot storage uses the plain enum because reads are gated on `version >= 17`.
-- Factory reset returns the input source to USB and the I2S pin/rate to defaults (GPIO 4, 48 kHz) per the normal factory-defaults flow.
+- Factory reset returns the I2S pin/rate to defaults (GPIO 4, 48 kHz) per the normal factory-defaults flow, and queues the standard deferred switch to USB, which stops the input and applies the retained USB rate.
 
 ### 6.3 Loading a preset that selects I2S
 
