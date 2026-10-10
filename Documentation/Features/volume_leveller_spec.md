@@ -14,7 +14,7 @@ It runs on the active input channels (2 to 8 on RP2350; always 2 on RP2040), pre
 - **Channel-linked:** A single shared gain is applied to every selected channel. The link is the loudest selected envelope (the maximum over the detector_mask channels), so one gain preserves the mix balance across channels; for stereo this is exactly the old "louder of L/R" behavior.
 - **Channel masks:** `detector_mask` selects which inputs feed the RMS detector; `apply_mask` selects which inputs the shared gain is applied to. Both default to all channels (0xFF), so stereo behavior is unchanged. CPU is only spent on selected channels.
 - **Optional lookahead:** A 5ms delay buffer allows the compressor to "see" transitions before they arrive. Less critical with upward compression since loud content receives 0 dB gain (no overshoot to anticipate), but still available for marginally smoother transitions.
-- **Gain-reduction limiter:** Safety limiter at -6 dBFS ceiling uses gain reduction (instant attack, 100ms release) rather than hard clipping, avoiding waveform distortion. Rarely engages since loud content passes through at unity.
+- **Safety limiter:** A smoothed peak limiter on the boost keeps the leveller from pushing any sample above -3 dBFS. It never clips and never cuts below unity (see section 6.7).
 
 ### Signal chain position
 
@@ -700,7 +700,7 @@ The gain computer then determines the upward compression boost in dB using a sof
 |-----------|-------|
 | Threshold | -20 dBFS |
 | Knee width | 6 dB |
-| Limiter ceiling | -6 dBFS (0.50119 linear) |
+| Limiter ceiling | -3 dBFS (0.70795 linear) |
 
 **Silence gate:** If `rms_db < gate_threshold_db`, the gain adjustment is 0 dB (unity). This prevents the compressor from boosting near-silence, which would amplify background noise ("noise pumping"). The gate threshold is a user-configurable parameter (see section 2.6); the default is -96.0 dBFS (effectively disabled).
 
@@ -773,19 +773,20 @@ write_idx = (write_idx + 1) % 240
 
 The rings are always allocated in BSS (one per input channel, 240 samples each) but only used when `cfg->lookahead` is true.
 
-### 6.7 Gain-reduction limiter
+### 6.7 Safety limiter
 
-A gain-reduction style safety limiter at -6 dBFS ceiling (`LEVELLER_LIMITER_CEIL = 0.50119` linear) prevents downstream clipping without waveform distortion.
+The safety limiter caps the leveller's boost so the leveller never pushes a sample above the -3 dBFS ceiling (`LEVELLER_LIMITER_CEIL = 0.70795`). It is a peak limiter on the gain, not on the signal. The cap never goes below unity, so content already above the ceiling passes untouched and the leveller never attenuates. Applied gain = min(leveller gain, limiter ramp, instant cap), shared by the apply-mask channels.
 
-**Operation:**
-1. Scan the current block for predicted output peaks (input sample * leveller gain).
-2. If the peak exceeds the ceiling, compute the gain reduction: `limiter_gain = ceiling / peak`.
-3. Smooth the limiter gain with instant attack (0ms) and 100ms release using a per-block one-pole IIR.
-4. Multiply each output sample by the smoothed limiter gain.
+**Operation (48-sample limiter blocks, five per lookahead ring):**
+1. Each block's cap is `ceiling / block peak` over the applied channels, clamped to at least unity. With lookahead on it is measured from the incoming samples, five blocks before they play.
+2. At each block boundary the gain ramps linearly across the next block to the smaller of the held envelope and every cap in the ring. A peak's cap is therefore in force about 4 ms before it plays (at 48 kHz), reached by a one-block linear ramp.
+3. With lookahead off, an instant cap drops at the sample that would cross the ceiling and holds for the rest of the block.
+4. Caps of blocks that have played feed a hold envelope. A new cap at or under the held one re-arms a 50 ms hold, after which the envelope releases at 60 dB/s.
+5. A change to the apply set (or a lookahead toggle) re-measures the caps from the ring contents, because masks change without a state reset.
 
-Unlike a hard clipper, this approach scales the entire waveform down when peaks would exceed the ceiling, preserving the waveform shape. The limiter gain is always <= 1.0 (unity = no limiting).
+A per-sample cap of `ceiling / |x|` is a hard clipper, which is why the cap is a smoothed envelope. The no-overshoot argument, measurements and platform notes are in the "Safety Limiter" section of `Documentation/current_architecture.md`.
 
-With upward compression, the limiter rarely engages because loud content (which is most likely to clip) receives 0 dB gain from the compressor. The limiter primarily acts as a safety net for edge cases where the upward boost of quiet content combines with subsequent gain stages to approach the ceiling.
+With upward compression the limiter engages mainly at the onset of a loud passage after a quiet one. That is when the boost is still high and the RMS detector has not caught up yet.
 
 ---
 

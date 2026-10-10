@@ -20,7 +20,7 @@
  *   - Soft-knee upward compression for transparent gain control
  *   - Asymmetric attack/release with configurable speed presets
  *   - Optional 5ms lookahead for predictive transient handling
- *   - Safety limiter (gain cap) to prevent downstream clipping
+ *   - Safety limiter: a smoothed peak limiter on the boost, never a clipper
  *   - Silence gate to prevent noise-floor pumping
  *
  * Coefficient convention (Form A; "retention" form):
@@ -44,6 +44,13 @@
 
 #define LEVELLER_LOOKAHEAD_SAMPLES  240   // 5ms at 48kHz
 
+// Safety limiter granularity.  The lookahead must hold a whole number of
+// blocks: the limiter keeps one peak cap per ring block.
+#define LEVELLER_LIM_BLOCK          48
+#define LEVELLER_LIM_BLOCKS         (LEVELLER_LOOKAHEAD_SAMPLES / LEVELLER_LIM_BLOCK)
+_Static_assert(LEVELLER_LOOKAHEAD_SAMPLES % LEVELLER_LIM_BLOCK == 0,
+               "lookahead ring must split into whole limiter blocks");
+
 // Speed presets
 #define LEVELLER_SPEED_SLOW    0   // Music, orchestral
 #define LEVELLER_SPEED_MEDIUM  1   // General purpose
@@ -62,6 +69,8 @@
 #define LEVELLER_THRESHOLD_DB     (-20.0f)   // Compression threshold (dBFS)
 #define LEVELLER_KNEE_WIDTH_DB      6.0f     // Soft knee width (dB)
 #define LEVELLER_LIMITER_CEIL     0.70795f   // -3 dBFS gain ceiling
+#define LEVELLER_LIM_HOLD_SEC       0.050f   // Covers a half cycle down to 10 Hz
+#define LEVELLER_LIM_RELEASE_DBPS  60.0f     // Release rate after the hold
 
 // ---------------------------------------------------------------------------
 // Configuration (persisted to flash and wire format)
@@ -108,6 +117,11 @@ typedef struct {
     // Pre-computed limits
     float max_gain_db;       // Cached from config for hot path
 
+    // Safety limiter, per LEVELLER_LIM_BLOCK samples
+    float    lim_release;      // Release multiplier on the held cap
+    int32_t  lim_release_q28;  // Same, Q28 (RP2040)
+    uint16_t lim_hold_blocks;  // Hold before the release starts
+
 } LevellerCoeffs;
 
 // ---------------------------------------------------------------------------
@@ -132,6 +146,18 @@ typedef struct {
     // Active-input count seen last block; rings of newly activated inputs
     // are cleared so stale samples never reach the matrix.
     uint8_t active_prev;
+
+    // Safety limiter: gain caps (max boost keeping peaks under the ceiling).
+    // lim_cap[b] covers ring block b, so the ramp can meet it before it plays.
+    float lim_cap[LEVELLER_LIM_BLOCKS];
+    float lim_l0, lim_step;  // Cap ramp over the current block
+    float lim_end;           // Ramp value at the next block boundary
+    float lim_inst;          // Instant cap this block (lookahead off)
+    float lim_env;           // Held / releasing cap from blocks already played
+    float lim_pin, lim_pout; // Running peaks of incoming / outgoing samples
+    uint16_t lim_hold;
+    uint16_t lim_app_prev;   // Apply set (+0x100 lookahead) the caps measured
+    uint8_t lim_pos;         // Sample position inside the limiter block
 } LevellerState;
 
 #else  // RP2040
@@ -150,6 +176,17 @@ typedef struct {
     uint32_t la_write_idx;
 
     uint8_t active_prev;    // Unused on RP2040 (input count fixed at 2)
+
+    // Safety limiter, Q28 gains (see the RP2350 struct)
+    int32_t lim_cap[LEVELLER_LIM_BLOCKS];
+    int32_t lim_l0, lim_step;
+    int32_t lim_end;
+    int32_t lim_inst;
+    int32_t lim_env;
+    uint32_t lim_pin, lim_pout;
+    uint16_t lim_hold;
+    uint16_t lim_app_prev;
+    uint8_t lim_pos;
 } LevellerState;
 
 #endif
@@ -172,7 +209,7 @@ void leveller_reset_state(LevellerState *state);
 // bufs[k] is input channel k's block (the pipeline's input_bufs).
 // Applies RMS envelope update (detector_mask), shared gain computation,
 // lookahead delay on ALL active channels (if enabled), gain interpolation
-// and safety limiter on apply_mask channels.
+// and the safety limiter on apply_mask channels.
 // Marked DSP_TIME_CRITICAL; runs in the audio callback.
 #if PICO_RP2350
 void leveller_process_block(LevellerState *state,

@@ -430,7 +430,7 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 |-------|-------------|
 | Input conversion | USB int16/24-bit or SPDIF RX 24-bit → float full-scale, per-channel preamp gain (`global_preamp_linear[ch]`) |
 | Per-Input EQ + metering | Per active input: block-based `dsp_process_channel_block()`, 10 bands, hybrid SVF/biquad; then peak/clip into `peaks[k]`/`clip_flags` |
-| Volume Leveller | Upward RMS compressor over active inputs (2 to 8), mask-driven detector/apply link, gain-reduction limiter, 5 ms per-channel lookahead (float throughout) |
+| Volume Leveller | Upward RMS compressor over active inputs (2 to 8), mask-driven detector/apply link, smoothed peak limiter on the boost, 5 ms per-channel lookahead (float throughout) |
 | Stereo Upmixer | Stereo input only: derives Centre/Ls/Rs into matrix source rows 2..4 and removes centre from L/R (nothing removed with the centre engine OFF, leaving L/R bit-exact); raises the matrix source count to 3 or 5. Parks in multichannel modes. Zero-latency steering; deliberate identical-per-row surround Haas delay (see "Stereo Upmixer") |
 | Matrix mixing | Block-based: 2 inputs × 9 outputs (8 inputs in 8-channel USB mode, or 3/5 sources with the upmixer active) with gain/phase (loudness now per-output post-gain; leveller still runs) |
 | Crossfeed | BS2B lowpass + allpass (ILD + ITD) per output pair, post-matrix (PASS 4.5), pre-output-EQ; `output_pair_mask`-selected (up to 4 pairs); works in every input mode |
@@ -455,7 +455,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 |-------|-------------|
 | Input conversion | USB int16 → Q28 (`<< 14`), USB/SPDIF RX 24-bit → Q28 (`sample << 6`), per-channel preamp via `fast_mul_q28()` (`global_preamp_mul[ch]`) — block loop to `buf_l[192]`, `buf_r[192]` |
 | Per-Input EQ + metering | Per active input: **block-based** `dsp_process_channel_block()`, 10 bands; then peak/clip into `peaks[k]`/`clip_flags` |
-| Volume Leveller | Upward RMS compressor on the 2 inputs, mask-driven detector/apply link, gain-reduction limiter, 5 ms per-channel lookahead (Q28 envelope + float gain) |
+| Volume Leveller | Upward RMS compressor on the 2 inputs, mask-driven detector/apply link, smoothed peak limiter on the boost (Q28 gains), 5 ms per-channel lookahead (Q28 envelope + float gain) |
 | Matrix mixing | Q15 gains via `fast_mul_q15()` (16-bit partial products), 2 inputs × 5 outputs → `buf_out[5][192]` |
 | Crossfeed | BS2B block via `fast_mul_q28()` (Q28 coefficients) per output pair, post-matrix (PASS 4.5), pre-output-EQ; `output_pair_mask`-selected (up to 2 pairs) |
 
@@ -1569,7 +1569,7 @@ One global config (`UpmixConfig`); ranges are clamped downstream in `upmix_compu
 ---
 
 ## Volume Leveller
-*Last updated: 2026-07-10 (crossfeed no longer stereo-only; runs per output pair)*
+*Last updated: 2026-10-10 (safety limiter rebuilt as a smoothed peak limiter on the boost, see "Safety Limiter"; 2026-07-10: crossfeed no longer stereo-only; runs per output pair)*
 
 ### Purpose
 
@@ -1583,9 +1583,32 @@ Automatic volume levelling via a feedforward, channel-linked, single-band RMS co
 - **Envelope:** Asymmetric attack/release smoothing on the per-channel RMS envelopes
 - **Lookahead:** Optional 5 ms (240-sample) lookahead, one ring per input channel. When enabled, EVERY active input is delayed through its ring (applied channels through the gain stage, others as a plain delay), so inter-channel and inter-output-slot alignment is preserved exactly and mask changes cause zero time shift. Rings of newly activated inputs are cleared via the `active_prev` field
 - **Gain computation:** Upward compression curve: content below threshold is boosted by `(threshold - x_db) * (1 - 1/ratio)`, content above threshold + knee/2 passes at unity (0 dB gain), with soft knee transition between
-- **Limiter:** Gain-reduction style at -6 dBFS ceiling (instant attack, 100ms release) — computes gain reduction rather than hard clipping, rarely engages since loud content is untouched
+- **Safety limiter:** Caps the boost so the leveller never pushes a sample above -3 dBFS. It is a smoothed peak limiter with a one-block attack ramp, 50 ms hold and 60 dB/s release, and never cuts below unity. See "Safety Limiter" below
 - **Gate:** User-configurable silence gate prevents noise amplification when input is below the gate threshold
 - **Glitch-free masks:** Writing masks (0xDE) recomputes coefficients but does NOT reset state; the rings keep running so a mask change is glitch-free
+
+### Safety Limiter
+*Last updated: 2026-10-10*
+
+The limiter caps the leveller's boost so that the leveller never pushes a sample above the -3 dBFS ceiling (`LEVELLER_LIMITER_CEIL`). It only ever lowers the boost, and never below unity. Content already above the ceiling therefore passes untouched, and the leveller never attenuates. The gain applied to each sample is the smallest of the leveller gain, the limiter ramp and the instant cap. The cap is computed over the apply-mask channels only and shared by them, so the mix balance holds.
+
+**Why it is an envelope, not a clamp.** The earlier limiter set the gain per sample to `min(gain, ceiling / |x|)` with no smoothing, which is a hard clipper. After a quiet passage at about +14 dB of boost, every sample of a loud hit above about -17 dBFS came out flat at -3 dBFS. A host run of the real `leveller.c` measured -11.6 dB THD+N over the first 20 ms of a -6 dBFS, 1 kHz burst on RP2350 and -10.9 dB on RP2040, with clipping lasting about 400 ms until the leveller's own attack caught up.
+
+**Limiter blocks.** Timing works on 48-sample blocks (`LEVELLER_LIM_BLOCK`). The 240-sample lookahead ring holds exactly five of them, and `lim_cap[b]` holds the cap for ring block b. A block's cap is the largest gain that keeps its peak under the ceiling, clamped to at least unity. Blocks follow stream position, not packets, so a packet may start or end anywhere inside a block. With lookahead on, the block phase is derived from `la_write_idx`, so it can never walk off the ring.
+
+**Attack with lookahead.** When a block finishes, the block just written into the ring gets its cap, measured from the incoming samples. The next block's ramp then runs linearly from `l0` to `l1`. `l0` is the gain actually in force at the boundary. `l1` is the smaller of the held envelope and every cap in the ring. A cap therefore binds from the first boundary after it is measured, four blocks before its samples play. Every later boundary includes it as well. Both ends of the ramp across a block are then at or under its cap, and a straight line between two such values stays under it, so no sample ever exceeds the ceiling. In practice the gain reaches its final value about 4 ms before the hit (at 48 kHz) through a 1 ms linear ramp on the quieter audio ahead of it, where the hit masks it. The same 1 kHz burst now measures -150 dB THD+N in the first 20 ms (-143 dB on RP2040).
+
+The window minimum was chosen over a ramp that aims at each block's cap just in time. That alternative keeps more boost, but on a 50 Hz burst it follows the rising first quarter cycle down and measured -29.8 dB THD+N over the first 40 ms. The window minimum measured -64.6 dB on both platforms, against -13.9 dB for the old clipper.
+
+**Attack without lookahead.** With no future samples to see, the instant cap (`lim_inst`) drops at the sample that would cross the ceiling and holds for the rest of the block. The waveform is shaped only while the first rising quarter cycle keeps deepening the cap. That measured about -26 dB THD+N at 1 kHz and -21 dB at 50 Hz in the first window, against about -10 dB and -13 dB for the clipper. Turning lookahead off trades this onset cleanliness for 5 ms less latency.
+
+**Hold and release.** The cap of each block that has finished playing feeds `lim_env`. A cap at or under the held value replaces it and re-arms a 50 ms hold (`LEVELLER_LIM_HOLD_SEC`). That spans a half cycle down to 10 Hz, so steady peaks never let the gain rise between crests. Once the hold runs out, the envelope rises at 60 dB/s (`LEVELLER_LIM_RELEASE_DBPS`). On a sustained loud passage the leveller's own RMS detector catches up within its window. The leveller gain then falls under the cap and the limiter goes idle. After a short isolated hit the leveller's detector also dips the gain, and the limiter's hold stays inside that dip.
+
+**Mask changes and lookahead toggles.** Masks change without a state reset (0xDE). A channel newly added to the apply set therefore has 5 ms of samples in its ring that no cap has measured. `lim_rescan` re-measures every ring block from the ring and drops the ramp straight to the lowest cap, a single step at most once per change. The last apply set is kept together with the lookahead flag in `lim_app_prev`. A lookahead toggle that the audio path sees before the main loop's state reset therefore rescans too.
+
+**Platform notes.** RP2350 runs the limiter in float. RP2040 keeps the gains in Q28 with `LIM_GMAX = INT32_MAX` (just under 8.0, above the 18 dB boost limit). `fast_mul_q28` floors, so the ramp step is rounded toward zero instead. A floored falling step overshoots its target and can carry a ramp down to unity slightly below it, which would attenuate. `lim_cap_of` holds the only float divide, which runs once per block, and per sample only while a no-lookahead attack is still deepening. The per-segment loops are channel-major and share one per-sample gain array (`gv`). Sample-major inner channel loops were fully unrolled by `-O3` and overflowed the `.data` budget. The limiter costs 56 B of `LevellerState` and adds 336 B (RP2040) and 496 B (RP2350) of RAM code. That leaves 144 B and 64 B under the `.data` budgets.
+
+**Verification.** A host harness compiles the real `leveller.c` for both platforms. It covers the THD+N figures above and 180 randomized stress runs (2-channel on both platforms, 8-channel with changing active counts on RP2350; random packet sizes, masks, levels and spikes). Those runs check that applied outputs never cross the ceiling unless the input already did, never fall below the input, and that unapplied channels stay exact delayed copies. Removing the rescan or limiting the window to the newest block makes the stress runs fail. The limiter is untested on hardware, and its CPU cost has not been measured on the CPU meter.
 
 ### Parameters
 
@@ -2225,7 +2248,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-10-10 (Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2275,7 +2298,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | S/PDIF bit depth | 24-bit | 24-bit |
 | S/PDIF input conversion | 24-bit sign-extended full-scale → Q28 via `>> 2` (equivalent to `sample << 6`) | 24-bit sign-extended full-scale → float via `÷ 2147483648.0f` |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
-| Volume leveller | Q28 envelope + float gain; 2 channels, 2 lookahead rings; max boost clamped to 18 dB (Q28 gain range) | Float throughout; 2 to 8 active channels, mask-driven, 8 lookahead rings; full 35 dB max boost |
+| Volume leveller | Q28 envelope + float gain; 2 channels, 2 lookahead rings; max boost clamped to 18 dB (Q28 gain range); safety limiter in Q28 gains, floored steps, float divide only in `lim_cap_of` | Float throughout; 2 to 8 active channels, mask-driven, 8 lookahead rings; full 35 dB max boost; safety limiter in float. Both platforms: same block caps, hold and release (see "Safety Limiter") |
 | Loudness | Per output, post-gain: 2 Q28 shelf biquads; `loudness_output_mask` (5 outputs) | Per output, post-gain: 2 SVF shelves; `loudness_output_mask` (9 outputs). Both platforms: volume-keyed, works in stereo and multichannel input modes |
 | Crossfeed | Per output pair, post-matrix (PASS 4.5); 2 pairs; `output_pair_mask` (default pair 1) | Per output pair, post-matrix (PASS 4.5); 4 pairs; `output_pair_mask` (default pair 1). Both platforms: shared coeffs, per-pair state, works in every input mode |
 | Psychoacoustic bass | Per output, pre-crossover; RBJ Q28 biquads (with pre-drive low-band clamp) | Per output, pre-crossover; TPT SVF float. Both platforms: missing-fundamental NLD, `output_mask`, zero added latency |
@@ -2357,7 +2380,7 @@ masked, and PDM claims its channel once at init.
 ---
 
 ## Memory Layout
-*Last updated: 2026-09-28 (RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -2625,7 +2648,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Notification shadow (`param_shadow`, one `WireBulkParams`) | ~6 KB |
 | USB audio ring buffer (4 × 578) | ~2.3 KB |
 | Channel names (7 × 32) | ~224 B |
-| Leveller state + lookahead (2 rings × 240 × 4) | ~1.9 KB |
+| Leveller state + lookahead (2 rings × 240 × 4, plus limiter caps) | ~2.0 KB (2,004 B) |
 | Per-channel preamp + master volume | ~48 B |
 | Consumer pools + silence (static, 2 slots × 16 × 48 × 16, shared SPDIF/I2S) | ~27 KB |
 | I2S RX DMA ring (1024 × 4, 4 KB aligned) | 4 KB |
@@ -2651,7 +2674,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Notification shadow (`param_shadow`, one `WireBulkParams`) | ~6 KB |
 | USB audio ring buffer (4 × 794, 8-channel packets) | ~3.2 KB |
 | Channel names (11 × 32) | ~352 B |
-| Leveller state + lookahead (8 rings × 240 × 4) | ~7.7 KB |
+| Leveller state + lookahead (8 rings × 240 × 4, plus limiter caps) | ~7.6 KB (7,788 B) |
 | Per-channel preamp (8 ch) + master volume | ~120 B |
 | Matrix mixer (8 × 9 crosspoints + outputs) | ~1.3 KB |
 | Loudness tables + per-output state (2 × 61 × 2 coeffs + 9 × 16 B) | ~3 KB |
