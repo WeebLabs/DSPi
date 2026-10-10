@@ -70,9 +70,24 @@ COMMON = [
     ("_check_block", True),
     ("_dma_done_and_restart", True),
     ("spdif_rx_callback_func", False),
-    # Output DMA IRQ handlers (primary streaming interrupts).
-    ("audio_spdif_dma_irq_handler", True),
-    ("audio_i2s_dma_irq_handler", True),
+    # Output rings: block writers, group admission and the silence pumps.
+    ("audio_spdif_ring_write_s32", False),
+    ("audio_spdif_ring_consumed_words", False),
+    ("audio_spdif_ring_silence_pump", False),
+    ("audio_spdif_ring_skip", False),
+    ("audio_i2s_ring_write_s32", False),
+    ("audio_i2s_ring_consumed_words", False),
+    ("audio_i2s_ring_silence_pump", False),
+    ("audio_i2s_ring_skip", False),
+    ("output_rings_pre_give", True),
+    ("output_rings_idle_pump", False),
+    ("output_rings_stamp_silence_ahead", False),
+    ("output_rings_stall_nvic_mask", False),
+    ("output_rings_stall_irq", False),
+    # Words a DMA reads while XIP is down; a flash-resident one stalls the DMA.
+    ("slot_ring_store", False),
+    ("fbdivs", False),
+    ("fbdivs_addr", False),
     ("take_audio_buffer", False),
     ("give_audio_buffer", False),
     ("get_free_audio_buffer", True),
@@ -167,6 +182,7 @@ RP2350_EXTRA = [
     ("memset", False),
     ("memcpy", False),
     ("memmove", False),
+    ("adat_ring_base_holder", False),
 ]
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the
@@ -188,6 +204,9 @@ RP2040_EXTRA = [
     ("__wrap___aeabi_idivmod", False),
     ("__wrap___aeabi_uidiv", False),
     ("__wrap___aeabi_uidivmod", False),
+    # Reload-channel source words (RP2040 has no ENDLESS DMA mode).
+    ("spdif_ring_words_const", False),
+    ("i2s_ring_words_const", False),
 ]
 
 LOOPBACK_EXTRA = [
@@ -200,17 +219,10 @@ LOOPBACK_EXTRA = [
 # Core-1 roots for the literal-pool scan (Check B2).
 CORE1_ROOTS = ["pdm_core1_entry", "pdm_processing_loop", "eq_worker_loop"]
 
-# Flash-window roots for the literal-pool scan (Check B2).
-#
-# These two output DMA completion handlers are the only interrupts left
-# unmasked across a flash erase/program (flash_irq_blackout_begin/end in
-# flash_storage.c), which is what keeps every output slot clocking framed
-# silence instead of freezing mid-frame.  XIP is unavailable while they run, so
-# neither they nor anything they call may touch flash — not via a branch (Check
-# B covers that) and not via a literal-pool pointer into flash-range data,
-# which is what this scan catches.  A missing root is a hard failure: it means
-# the handler is no longer RAM-resident and the blackout would fault.
-FLASH_WINDOW_ROOTS = ["audio_spdif_dma_irq_handler", "audio_i2s_dma_irq_handler"]
+# Flash-window roots for the literal-pool scan (Check B2): the output-ring stall
+# alarm is the only interrupt left unmasked across a flash erase/program, and
+# runs with XIP down.  A missing or flash-resident root is a hard failure.
+FLASH_WINDOW_ROOTS = ["output_rings_stall_irq"]
 
 BRANCH_MNEMONICS = {"bl", "blx", "b", "b.w", "b.n"}
 
@@ -496,7 +508,7 @@ def check_elf(elf, baseline):
         if not ram_matches:
             where = "not found" if not matches else "not in RAM"
             lines.append("  FAIL  flash-window root %s %s (must be RAM-resident: "
-                         "it services output DMA while flash is unavailable)" % (name, where))
+                         "it runs while flash is unavailable)" % (name, where))
             b2_fail += 1
             continue
         for s in ram_matches:

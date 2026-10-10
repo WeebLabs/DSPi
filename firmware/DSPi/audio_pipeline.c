@@ -33,6 +33,7 @@
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "hardware/timer.h"
+#include "hardware/irq.h"
 #include "hardware/sync.h"
 #include "hardware/dma.h"
 #include <math.h>
@@ -1482,7 +1483,7 @@ static bool output_rings_pre_give(uint32_t frames) {
             ref_fill > PICO_AUDIO_SPDIF_RING_FRAMES) {
             // No successful content since reset (or corrupt snapshot): there
             // is no established PDM/content mapping to preserve.
-            ref_fill = 8u * 48u;
+            ref_fill = OUTPUT_RING_TARGET_FILL_FRAMES;
         }
         uint32_t skip = max_deficit + ref_fill;
         for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
@@ -1563,11 +1564,11 @@ void output_rings_idle_pump(void) {
     }
 }
 
-// Flash blackouts stall the main loop (and so the idle pump) for ~45 ms,
-// longer than the erase-ahead margin; pre-stamp a full ring of silence so
-// the wire stays clean throughout. Called from the flash-write bracket.
-void output_rings_prestamp_full_silence(void) {
-    if (output_type_switch_in_progress) return;
+// Stamp correctly framed silence one full ring ahead of every enabled slot's
+// reader; never touches unplayed audio. Callers guarantee that no ring is
+// being written, reset or torn down meanwhile (flash prepare, stall bracket).
+DSP_TIME_CRITICAL
+void output_rings_stamp_silence_ahead(void) {
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
@@ -1579,6 +1580,105 @@ void output_rings_prestamp_full_silence(void) {
                 audio_spdif_ring_silence_pump(inst, PICO_AUDIO_SPDIF_RING_FRAMES);
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// STALL BRACKET
+// ----------------------------------------------------------------------------
+// A RAM-resident timer alarm re-stamps silence ahead of every reader while the
+// main loop cannot run its idle pump, so a stalled ring never replays stale or
+// mis-framed content (current_architecture.md "Output Ring Stall Bracket").
+
+// Well inside one ring lap at 96 kHz (1024 frames, 10.7 ms).
+#define OUTPUT_RINGS_STALL_PERIOD_US 2000u
+
+static int stall_alarm = -1;
+static uint stall_irq;
+static uint stall_depth;
+
+// Flash-window root (check_ram_placement.py): runs while XIP is unavailable.
+DSP_TIME_CRITICAL
+static void output_rings_stall_irq(void) {
+    timer_hw_t *t = PICO_DEFAULT_TIMER_INSTANCE();
+    t->intr = 1u << stall_alarm;
+    output_rings_stamp_silence_ahead();
+    t->alarm[stall_alarm] = t->timerawl + OUTPUT_RINGS_STALL_PERIOD_US;
+}
+
+void output_rings_stall_init(void) {
+    stall_alarm = hardware_alarm_claim_unused(true);
+    stall_irq = hardware_alarm_get_irq_num((uint)stall_alarm);
+    irq_set_exclusive_handler(stall_irq, output_rings_stall_irq);
+    hw_set_bits(&PICO_DEFAULT_TIMER_INSTANCE()->inte, 1u << stall_alarm);
+}
+
+// Called from the RAM-resident flash blackout.
+DSP_TIME_CRITICAL
+uint32_t output_rings_stall_nvic_mask(void) {
+    return (stall_alarm < 0) ? 0u : (1u << stall_irq);
+}
+
+void output_rings_stall_begin(void) {
+    if (stall_alarm < 0 || stall_depth++ != 0) return;
+    output_rings_stamp_silence_ahead();
+    timer_hw_t *t = PICO_DEFAULT_TIMER_INSTANCE();
+    t->alarm[stall_alarm] = t->timerawl + OUTPUT_RINGS_STALL_PERIOD_US;
+    irq_set_enabled(stall_irq, true);
+}
+
+void output_rings_stall_end(void) {
+    if (stall_alarm < 0 || stall_depth == 0 || --stall_depth != 0) return;
+    irq_set_enabled(stall_irq, false);
+    timer_hw_t *t = PICO_DEFAULT_TIMER_INSTANCE();
+    t->armed = 1u << stall_alarm;   // write-1-to-disarm
+    t->intr = 1u << stall_alarm;
+}
+
+// ----------------------------------------------------------------------------
+// SILENCE MARK
+// ----------------------------------------------------------------------------
+// Per-slot write positions latched when the mute envelope reaches zero. Every
+// frame from mark + extra on is rendered silence, so the wire is silent once
+// each reader has passed that point (main.c pipeline_fade_to_silence_poll).
+
+static uint32_t silence_mark_wr[NUM_SPDIF_INSTANCES];
+static uint32_t silence_mark_extra;
+
+void output_rings_silence_mark_arm(uint32_t extra_frames) {
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        uint32_t wr = 0;
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->ring) wr = inst->wr_frames;
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->ring) wr = inst->wr_frames;
+        }
+        silence_mark_wr[i] = wr;
+    }
+    silence_mark_extra = extra_frames;
+}
+
+bool output_rings_silence_mark_reached(void) {
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        uint32_t wr, consumed;
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (!inst || !inst->ring || !inst->enabled) continue;
+            wr = inst->wr_frames;
+            consumed = audio_i2s_ring_consumed_frames(inst);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (!inst || !inst->ring || !inst->enabled) continue;
+            wr = inst->wr_frames;
+            consumed = audio_spdif_ring_consumed_frames(inst);
+        }
+        // A ring reset since arming restarted from stamped silence.
+        if ((int32_t)(wr - silence_mark_wr[i]) < 0) continue;
+        if ((int32_t)(consumed - (silence_mark_wr[i] + silence_mark_extra)) < 0)
+            return false;
+    }
+    return true;
 }
 
 // One "bucket" = 48 frames (the old consumer-buffer size); the vendor

@@ -66,6 +66,14 @@ output is ever stopped.
 
 ## 4. Pillar A: selective flash IRQ blackout
 
+> **Superseded in part (2026-10-10).** Since the output rings landed, the
+> outputs use no DMA interrupts. The blackout now keeps the output-ring stall
+> alarm alive instead of the two output DMA handlers, and that alarm keeps
+> framed silence ahead of every slot reader. The masking mechanics in 4.1 still
+> apply. Sections 4.2, 4.3 and 4.5 describe the pool-era handlers. The current
+> design is in `current_architecture.md`, "Output Ring Stall Bracket" and
+> "Selective NVIC blackout".
+
 ### 4.1 Mechanism
 
 `flash_irq_blackout_begin()` / `flash_irq_blackout_end()` in

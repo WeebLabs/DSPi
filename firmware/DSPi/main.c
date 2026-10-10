@@ -398,6 +398,18 @@ static void apply_mck_policy(void) {
                               audio_state.freq, i2s_mck_multiplier);
 }
 
+#if ENABLE_SUB
+// Take PDM's SM/DMA from Core 1 for a pin move.  The handshake can stall the
+// main loop for up to PDM_HOLD_TIMEOUT_US, so the slot rings are held silent
+// meanwhile.
+static bool pdm_hold_for_pin_move(void) {
+    output_rings_stall_begin();
+    bool held = pdm_hold_hw(PDM_HOLD_TIMEOUT_US);
+    output_rings_stall_end();
+    return held;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 // process_type_switches: the unified output transition
 //
@@ -506,7 +518,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     // PDM's SM/DMA belong to Core 1 while it runs; take them with an explicit
     // acknowledgement (its ~21 ms fade-out) before the USB IRQ is masked below.
     // On timeout the PDM pin stays put.
-    const bool pdm_held = pdm_pin_moves && pdm_hold_hw(PDM_HOLD_TIMEOUT_US);
+    const bool pdm_held = pdm_pin_moves && pdm_hold_for_pin_move();
 #endif
 
     output_type_switch_in_progress = true;
@@ -523,7 +535,9 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     // wait it out so the teardown below never stops clocks before the DAC's
     // analog ramp.  Instant for every pre-gated caller (hold already
     // elapsed), so existing paths are unaffected.
+    output_rings_stall_begin();
     while (!dac_hw_mute_hold_elapsed()) tight_loop_contents();
+    output_rings_stall_end();
 
     // Suspend SPDIF RX across the type-switch window.  The DMA IRQ disable
     // below kills DMA_IRQ_1 servicing (which RX shares with SPDIF TX), and
@@ -793,7 +807,7 @@ static bool apply_restored_outputs(const uint8_t old_types[]) {
 #if ENABLE_SUB
     uint8_t pdm_pin = output_pins[NUM_PIN_OUTPUTS - 1];
     if (pdm_pin_needs_move(pdm_pin)) {
-        if (pdm_hold_hw(PDM_HOLD_TIMEOUT_US)) pdm_change_pin(pdm_pin);
+        if (pdm_hold_for_pin_move()) pdm_change_pin(pdm_pin);
         pdm_release_hw();
     }
 #endif
@@ -897,9 +911,9 @@ static void reset_usb_feedback_loop(void) {
 //
 // Arming the mute envelope does not make the wire silent: it advances only
 // when a packet is processed, and its gain applies ahead of the per-output
-// delay lines and consumer queues.  Disruptive brackets therefore wait on
-// pipeline_fade_to_silence_poll(), which reports true only once rendered
-// zeros have had time to reach the wire; when no producer is running (no
+// delay lines and output rings.  Disruptive brackets therefore wait on
+// pipeline_fade_to_silence_poll(), which reports true only once every ring
+// reader has played past the rendered zeros; when no producer is running (no
 // packet will ever advance the envelope) it latches the envelope at zero
 // instead.  Call paths, ordering against the DAC hardware mute, and the full
 // design: Documentation/current_architecture.md "Preset-Switch Mute &
@@ -911,16 +925,6 @@ static void reset_usb_feedback_loop(void) {
 // refresh and prepare_pipeline_reset() taking ownership.  Kept short so a
 // fade that is armed and then abandoned unmutes promptly.
 #define PIPELINE_FADE_REQUEST_MS    40u
-// Post-fade dwell, in samples of output: a full consumer pool
-// (PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT per buffer) plus a couple of producer
-// blocks still in the connection.  The longest active output delay line is
-// added on top at runtime, and the whole thing is converted to a wall-clock
-// deadline at the live sample rate, so 44.1 / 48 / 96 kHz all wait the same
-// amount of AUDIO rather than the same amount of time.
-#define PIPELINE_FADE_DRAIN_SAMPLES \
-    ((uint32_t)(SPDIF_CONSUMER_BUFFER_COUNT * PICO_AUDIO_SPDIF_DMA_SAMPLE_COUNT) + 2u * 192u)
-// Fixed margin on top, covering scheduling slack in the settle loop.
-#define PIPELINE_FADE_DRAIN_MARGIN_MS 4u
 // Defensive cap on the whole settle (fade + drain), for a producer that
 // stalls after being declared live.  Comfortably above the worst real case
 // (8 ms fade + ~30 ms of queue + 42 ms of delay line).
@@ -929,15 +933,13 @@ static void reset_usb_feedback_loop(void) {
 // operation; the next poll starts a fresh one rather than inheriting its
 // "already silent" verdict.
 #define PIPELINE_FADE_STALE_US   50000u
-// Dwell held at zero after the synchronized restart, before the envelope
-// ramps back up: long enough for the consumer pools to refill from empty
-// (~16 ms of audio per slot) with margin.  Any configured DAC hardware-mute
-// release dwell is added on top at runtime.
-#define PIPELINE_POST_RESET_MUTE_MS 24u
+// Floor on an operation's mute counter: outlasts packets produced between
+// prepare_pipeline_reset() and the restart, so the envelope cannot fade back
+// up inside the disruptive window.
+#define PIPELINE_OP_MUTE_FLOOR_MS 24u
 
 static uint64_t fade_last_poll_us = 0;
 static uint64_t fade_start_us = 0;
-static uint64_t fade_drain_deadline_us = 0;
 static bool fade_drain_armed = false;
 // Set when a settle has run to completion and cleared as soon as the envelope
 // is seen above zero again.  Lets a nested or back-to-back prepare (a handler
@@ -952,7 +954,6 @@ static bool pipeline_wire_silent = false;
 // tracks the state of the outputs rather than of any one operation).
 static void pipeline_fade_reset(void) {
     fade_drain_armed = false;
-    fade_drain_deadline_us = 0;
     fade_last_poll_us = 0;
     fade_start_us = 0;
 }
@@ -1064,16 +1065,12 @@ static bool pipeline_fade_to_silence_poll(void) {
 
     if (!fade_drain_armed) {
         if (!pipeline_mute_is_silent()) return false;
-        // The envelope reached zero; now let those zeros reach the wire.
-        uint64_t drain_samples =
-            (uint64_t)PIPELINE_FADE_DRAIN_SAMPLES + pipeline_max_active_delay_samples();
-        uint32_t drain_ms = PIPELINE_FADE_DRAIN_MARGIN_MS +
-            (uint32_t)((drain_samples * 1000u + fs - 1u) / fs);
-        fade_drain_deadline_us = now + (uint64_t)drain_ms * 1000u;
+        // The envelope reached zero; delay lines still hold pre-fade audio.
+        output_rings_silence_mark_arm(pipeline_max_active_delay_samples());
         fade_drain_armed = true;
     }
 
-    if ((int64_t)(now - fade_drain_deadline_us) < 0) return false;
+    if (!output_rings_silence_mark_reached()) return false;
 
     pipeline_latch_mute_silence();
     pipeline_wire_silent = true;
@@ -1117,7 +1114,7 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
     {
         uint32_t min_samples = samples_for_duration_ms(
             audio_state.freq ? audio_state.freq : 48000u,
-            PIPELINE_POST_RESET_MUTE_MS);
+            PIPELINE_OP_MUTE_FLOOR_MS);
         if (mute_samples < min_samples) mute_samples = min_samples;
     }
     preset_mute_counter = mute_samples;
@@ -1379,9 +1376,9 @@ static void complete_pipeline_reset(void) {
     reset_usb_feedback_loop();
 
     // Phase 3.5: arm the fade back up.  Hold the envelope at zero until the
-    // just-restarted pools refill and the DAC mute pin deasserts; a ramp that
-    // starts earlier runs into a starved pool or completes under the analog
-    // mute (see current_architecture.md "Preset-Switch Mute", fade back up).
+    // restarted rings reach their target fill and the DAC mute pin deasserts;
+    // a ramp that starts earlier completes under the analog mute (see
+    // current_architecture.md "Preset-Switch Mute", fade back up).
     // Floor only, never a shortening: the prefill handshakes own their own
     // unmute, and the flash bracket's longer window is left intact.  Without
     // preset_loading set (a completion with no matching prepare) the dwell
@@ -1389,8 +1386,8 @@ static void complete_pipeline_reset(void) {
     // prefill-handshake signal.
     {
         uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
-        uint32_t dwell = samples_for_duration_ms(
-            fs, PIPELINE_POST_RESET_MUTE_MS + (uint32_t)dac_hw_mute_release_ms());
+        uint32_t dwell = OUTPUT_RING_TARGET_FILL_FRAMES +
+            samples_for_duration_ms(fs, (uint32_t)dac_hw_mute_release_ms());
         if (preset_loading) {
             if (preset_mute_counter < dwell) preset_mute_counter = dwell;
         } else {
@@ -1553,11 +1550,10 @@ static void prepare_flash_write_operation(void) {
                                                    FLASH_WRITE_PREMUTE_MS));
 
     // The fade already ran inside prepare_pipeline_reset(); this loop does
-    // not own it.  It keeps the consumer pools topped up with muted samples
-    // right up to the blackout (the SPDIF completion path relies on that
-    // pre-fill) and absorbs the DAC hardware-mute hold so the DAC has its
-    // full ramp time before the clocks stop.  Skipped when nothing streams:
-    // no audio, so no hold to honor.
+    // not own it.  It keeps the output rings topped up with muted samples
+    // right up to the blackout and absorbs the DAC hardware-mute hold so the
+    // DAC has its full ramp time before the window.  Skipped when nothing
+    // streams: no audio, so no hold to honor.
     if (pipeline_producer_is_streaming()) {
         uint64_t start_us = time_us_64();
         while ((time_us_64() - start_us) < FLASH_WRITE_FADE_SETTLE_US
@@ -1572,12 +1568,6 @@ static void prepare_flash_write_operation(void) {
     if (active_input_source == INPUT_SOURCE_USB) {
         usb_audio_drain_ring();
     }
-
-    // The blackout stalls the main loop far longer than the output rings'
-    // erase-ahead margin; stamp a full ring of silence on every enabled
-    // slot so the free-running DMAs play clean silence, never stale audio,
-    // for the entire flash window.
-    output_rings_prestamp_full_silence();
 
     // For SPDIF: fully tear down the RX pipeline before the flash blackout.
     // The alternative (keeping SPDIF RX running while IRQs are disabled for
@@ -1608,6 +1598,10 @@ static void prepare_flash_write_operation(void) {
     // sync after the ring laps.  preset_loading is still set from
     // prepare_pipeline_reset() above, so the main-loop ADAT lock block
     // re-runs the drain/prefill/enable handshake once LOCKED returns.
+
+    // Last step: one full ring of framed silence covers the main loop until
+    // the flash primitives open their stall bracket.
+    output_rings_stamp_silence_ahead();
 }
 
 // Restart SPDIF RX if prepare_flash_write_operation() tore it down, so
@@ -1740,6 +1734,10 @@ void core0_init() {
     // Soft VCXO (system PLL trim): claims its explicit DMA channels, DMA
     // timer 0 and PWM pacer slice before any dynamic DMA claims below.
     soft_vcxo_init();
+
+    // Claim the output-ring stall alarm before any flash write can open a
+    // stall bracket.
+    output_rings_stall_init();
 
     // Bench clock/audio-path diagnostics: enable the TX starvation monitors
     // and seed the timing baselines.  No-op when DSPI_CLOCK_DIAG is 0.

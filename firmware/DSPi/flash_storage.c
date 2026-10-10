@@ -50,10 +50,10 @@
 #include "i2c_control.h"     // i2c_ctrl_owns_pin (io_pin_valid guard)
 #include "bulk_params.h"     // WireBulkParams offsets for user_mute notify
 #include "dac_hw_mute.h"     // hold query for flash_mute_hold_samples floor
+#include "audio_pipeline.h"  // output-ring stall bracket around the flash window
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
-#include "hardware/irq.h"            // DMA_IRQ_0 (selective flash blackout keep mask)
 #include "hardware/structs/nvic.h"   // nvic_hw (selective flash blackout)
 #include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
 #include "pico/stdlib.h"
@@ -1606,35 +1606,28 @@ static inline uint32_t flash_mute_hold_samples(void) {
 // ============================================================================
 //
 // Masks at the NVIC instead of PRIMASK across the ~45 ms erase/program window,
-// keeping exactly the two output DMA IRQ lines alive so every slot keeps
-// clocking framed silence while XIP is unavailable.  Full rationale (why the
-// clocks must not halt, what the wire carries, what stays masked and why):
-// Documentation/current_architecture.md "Selective NVIC blackout" and
-// Documentation/Features/silent_state_changes_spec.md section 4.
+// keeping exactly the output-ring stall alarm alive so it can keep stamping
+// framed silence ahead of every slot reader while XIP is unavailable.  Full
+// rationale: Documentation/current_architecture.md "Selective NVIC blackout"
+// and "Output Ring Stall Bracket".
 //
 // Constraints a future edit must not break:
-//   - Everything reachable from the two kept handlers must stay RAM-resident
-//     and read no flash data; scripts/check_ram_placement.py enforces this
+//   - Everything reachable from the kept handler must stay RAM-resident and
+//     read no flash data; scripts/check_ram_placement.py enforces this
 //     (FLASH_WINDOW_ROOTS in Check B2 is a hard failure).
 //   - ICER/ISER are written directly, never via irq_set_mask_n_enabled():
 //     the SDK helper clears pending bits on re-enable, and IRQs latched
 //     during the window must survive to be serviced after it.
 //   - (RP2350) NVIC word 1 must be masked too: UART/I2C control ISRs live
 //     there and are flash-resident, so one firing mid-window faults.
-//   - In IRQ context NVIC masking cannot guarantee the DMA handlers preempt
+//   - In IRQ context NVIC masking cannot guarantee the stall alarm preempts
 //     the current exception frame, so the PRIMASK fallback stays (defensive;
 //     every runtime flash write is deferred to the main loop).
-_Static_assert((DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ) < 32 &&
-               (DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ) < 32,
-               "output DMA IRQs must live in NVIC word 0");
-
-#define FLASH_BLACKOUT_KEEP_MASK                              \
-    ((1u << (DMA_IRQ_0 + PICO_AUDIO_SPDIF_DMA_IRQ)) |         \
-     (1u << (DMA_IRQ_0 + PICO_AUDIO_I2S_DMA_IRQ)))
+//   - The kept alarm is a timer IRQ (0..3), always in NVIC word 0.
 
 // The register shape differs per core: RP2040 (M0+) has scalar iser/icer,
-// RP2350 (M33) has iser[2]/icer[2].  The keep mask lives entirely in word 0
-// (asserted above); on RP2350 word 1 is masked wholesale.
+// RP2350 (M33) has iser[2]/icer[2].  The keep mask lives entirely in word 0;
+// on RP2350 word 1 is masked wholesale.
 #if PICO_RP2350
 #define FLASH_BLACKOUT_ISER   (nvic_hw->iser[0])
 #define FLASH_BLACKOUT_ICER   (nvic_hw->icer[0])
@@ -1667,7 +1660,7 @@ static void __no_inline_not_in_flash_func(flash_irq_blackout_begin)(void) {
     FLASH_BLACKOUT_ICER1 = flash_blackout_saved_iser1;
 #endif
     flash_blackout_saved_iser = FLASH_BLACKOUT_ISER;
-    FLASH_BLACKOUT_ICER = flash_blackout_saved_iser & ~FLASH_BLACKOUT_KEEP_MASK;
+    FLASH_BLACKOUT_ICER = flash_blackout_saved_iser & ~output_rings_stall_nvic_mask();
     __dsb();
     __isb();
 }
@@ -1749,6 +1742,9 @@ static int flash_program_staged(uint32_t offset, size_t len) {
     // internals are unsafe.  No flash write runs from an IRQ today.
     bool do_lockout = multicore_lockout_victim_is_initialized(1)
                       && (__get_current_exception() == 0);
+    // The slot rings are held silent from here: lockout, PDM silence and the
+    // erase/program window all stall the main loop's idle pump.
+    output_rings_stall_begin();
     if (do_lockout) multicore_lockout_start_blocking();
 
     // PDM's ring DMA free-runs through the window; with Core 1 parked nothing
@@ -1760,21 +1756,22 @@ static int flash_program_staged(uint32_t offset, size_t len) {
     // jump against the other slots.
     if (do_lockout) pdm_flash_silence();
 
-    // Selective blackout: the output DMA IRQ lines stay live so every slot
-    // keeps clocking framed silence for the whole erase/program window.
+    // Selective blackout: the stall alarm stays live so every slot keeps
+    // playing framed silence for the whole erase/program window.
     flash_irq_blackout_begin();
     dspi_flash_range_erase(offset, erase_size);
     dspi_flash_range_program(offset, flash_stage.bytes, write_size);
     flash_irq_blackout_end();
 
     if (do_lockout) multicore_lockout_end_blocking();
+    output_rings_stall_end();
 
     // Re-seed USB feedback controller after ~45ms interrupt blackout
     // (see preset_bugfix.md for details)
     fb_ctrl_reset(&fb_ctrl, nominal_feedback_10_14 << 2);
     feedback_10_14 = nominal_feedback_10_14;
 
-    // Re-arm mute to cover SPDIF consumer pool refill (~4-8ms)
+    // Re-arm mute across the restart that completes every flash write.
     preset_mute_counter = flash_mute_hold_samples();
     preset_loading = true;
 
@@ -4425,11 +4422,12 @@ uint8_t preset_delete(uint8_t slot) {
     // Same lockout guard as flash_program_staged().
     bool do_lockout = multicore_lockout_victim_is_initialized(1)
                       && (__get_current_exception() == 0);
+    output_rings_stall_begin();
     if (do_lockout) multicore_lockout_start_blocking();
 
-    // Same treatment as flash_program_staged(): PDM ring to true silence (only
-    // when Core 1 is parked), then a blackout that leaves the output DMA IRQ
-    // lines alive so the slots keep clocking through the erase.
+    // Same treatment as flash_program_staged(): stall bracket, PDM ring to
+    // true silence (only when Core 1 is parked), then a blackout that leaves
+    // the stall alarm alive through the erase.
     if (do_lockout) pdm_flash_silence();
 
     flash_irq_blackout_begin();
@@ -4437,6 +4435,7 @@ uint8_t preset_delete(uint8_t slot) {
     flash_irq_blackout_end();
 
     if (do_lockout) multicore_lockout_end_blocking();
+    output_rings_stall_end();
 
     // Re-seed feedback controller after interrupt blackout
     fb_ctrl_reset(&fb_ctrl, nominal_feedback_10_14 << 2);

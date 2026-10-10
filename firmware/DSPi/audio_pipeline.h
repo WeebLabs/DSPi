@@ -88,10 +88,25 @@ uint get_slot_consumer_fill(uint slot);
 // Sample-granular fill in buffer units (0..16) for the clock servo;
 // negative when no valid reading exists (type switch, slot not running).
 float get_slot_consumer_fill_frac(uint slot);
-// Ring stale-audio protection: main-loop idle pump and the pre-flash
-// full-silence stamp (see audio_pipeline.c).
+// Steady-state slot ring fill (8 buckets of 48 frames): the underrun re-anchor
+// target, and the post-restart hold before the fade back up.
+#define OUTPUT_RING_TARGET_FILL_FRAMES (SPDIF_CONSUMER_BUFFER_COUNT / 2u * 48u)
+// Ring stale-audio protection (see audio_pipeline.c): main-loop idle pump and
+// a one-shot full-ring silence stamp.
 void output_rings_idle_pump(void);
-void output_rings_prestamp_full_silence(void);
+void output_rings_stamp_silence_ahead(void);
+// Stall bracket: while open, a RAM-resident timer alarm keeps every enabled
+// ring stamped with framed silence ahead of its reader. Open only where no
+// ring is written, reset or torn down. Nestable.
+void output_rings_stall_init(void);
+void output_rings_stall_begin(void);
+void output_rings_stall_end(void);
+// NVIC bit of the stall alarm, for the flash blackout keep mask (0 before init).
+uint32_t output_rings_stall_nvic_mask(void);
+// Fade drain: latch write positions when the mute envelope reaches zero, then
+// poll until every enabled reader has played extra_frames past them.
+void output_rings_silence_mark_arm(uint32_t extra_frames);
+bool output_rings_silence_mark_reached(void);
 // Live sample-granular fill in frames; false = no valid reading.
 bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames);
 void get_slot_consumer_stats(uint slot, uint *cons_free,
