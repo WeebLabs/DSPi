@@ -116,6 +116,20 @@ static inline void stamp_frame(spdif_subframe_t *p, uint phase,
     spdif_update_subframe(&p[1], r);
 }
 
+// Zero PCM encodes to alternating bits, with only the preamble, channel
+// status and its matching parity bit varying. Write those words directly
+// instead of running the sample lookup/parity encoder twice per frame.
+// Always inline: the silence pump also runs while flash is unavailable.
+static inline __attribute__((always_inline))
+void stamp_silence_frame(spdif_subframe_t *p, uint phase) {
+    uint32_t c = get_channel_status_bit(phase);
+    uint32_t h = 0x55555555u | (c << 29u) | (c << 31u);
+    p[0].l = 0x55555500u | ((phase == 0) ? PREAMBLE_Z : PREAMBLE_X);
+    p[0].h = h;
+    p[1].l = 0x55555500u | PREAMBLE_Y;
+    p[1].h = h;
+}
+
 // ---------------------------------------------------------------------------
 // Consumed-side accounting
 // ---------------------------------------------------------------------------
@@ -224,7 +238,7 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames) {
     uint32_t e = inst->erased_frames;
     if ((int32_t)(target - e) > (int32_t)RING_FRAMES) e = target - RING_FRAMES;
     while ((int32_t)(target - e) > 0) {
-        stamp_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT, 0, 0);
+        stamp_silence_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
         e++;
     }
     inst->erased_frames = e;
@@ -244,7 +258,7 @@ void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_fr
     uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
     spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
     while (n--) {
-        stamp_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT, 0, 0);
+        stamp_silence_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
         e++;
     }
     inst->erased_frames = e;
@@ -292,7 +306,7 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_SPDIF_ERASE_AHEAD;
     while ((int32_t)(target - e) > 0) {
-        stamp_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT, 0, 0);
+        stamp_silence_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
         e++;
     }
     inst->erased_frames = e;
