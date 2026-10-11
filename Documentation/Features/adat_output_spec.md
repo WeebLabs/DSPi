@@ -37,9 +37,13 @@ Alignment guarantees:
   clock tracking trims `sys_clk` itself (the soft VCXO), which moves ADAT and
   every slot together.
 - ADAT runs a constant 96-sample lead cushion (2 ms at 48 kHz) relative to the
-  slot outputs. Every output restart anchors it against slot 0's measured ring
-  fill, exact to within one frame (ADAT is on another PIO block and cannot join
-  the slots' synchronized start).
+  slot outputs, counted in DMA words consumed. On the wire the offset is 95
+  frames behind an S/PDIF slot 0 or 93 behind an I2S slot 0, because each
+  counter also includes the 8 words prefetched into its PIO FIFO (1 ADAT
+  frame, 2 S/PDIF frames, 4 I2S frames). It is constant per slot-0 type, so
+  nothing drifts. Every output restart anchors it against slot 0's measured
+  ring fill, exact to within one frame (ADAT is on another PIO block and
+  cannot join the slots' synchronized start).
 - Every slot underrun re-anchor is mirrored into ADAT in the same call, before
   the next block is pushed, so the offset survives underruns exactly, whatever
   the input source or USB stream state. A keep-alive tops ADAT up with silence

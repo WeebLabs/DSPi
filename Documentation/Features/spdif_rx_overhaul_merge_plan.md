@@ -194,7 +194,7 @@ It frees about 25 KB of heap on RP2040 and about 51 KB on RP2350, minus any stag
 ## Phase 5: Landing
 
 - Fast-forward release/v1.1.6 to the integration branch only when you say so. The same applies to every commit and push along the way.
-- **DSPi Console** must know three things. The starvation counters in `GET_STATUS` 17 to 21 are now frames. `fill_centi_pct` is available in buffer stats. RP2040 Control Surface bindings on GPIO 14 and 15 now report `CS_STATUS_PWM_CONFLICT`, because PWM slice 7 is the VCXO pacer.
+- **DSPi Console** must know four things. The starvation counters in `GET_STATUS` 17 to 21 are now frames. Those counters also climb at the sample rate whenever the outputs are enabled but nothing is producing (host stream stopped, source gap): the idle re-anchor counts every frame of silence it skips, where the pool-era counters were gated on an active USB stream. The Console must not present a climbing counter alone as an underrun fault. `fill_centi_pct` is available in buffer stats. RP2040 Control Surface bindings on GPIO 14 and 15 now report `CS_STATUS_PWM_CONFLICT`, because PWM slice 7 is the VCXO pacer.
 - **ESP32 front panel**: no scalar GET it validates changes length or range, so no action is expected. Confirm it does not read buffer stats before release.
 - Release notes should describe the user-visible effects. Flash writes no longer interrupt any output, clock tracking is smoother on every input, and PDM is now clock-tracked.
 
@@ -543,3 +543,14 @@ The servo applies only while locked and only once the detected rate equals `audi
 *Last updated: 2026-10-11*
 
 The bench images are built clean from `006b3de`. Each reports `v1.1.6-beta4-35-g006b3de`, without the dirty flag. They are saved in `custom-builds/merge-bench-006b3de/`: a normal, a loopback and a clock-diagnostics UF2 for each chip, plus the normal ELFs. The step-by-step checklist is `spdif_rx_overhaul_bench_checklist.md`. Its first section is the still-owed Phase 0 baseline run.
+
+### Post-merge audit
+
+*Last updated: 2026-10-11*
+
+A read-through audit of the whole branch after Phase 2j found no alignment defect. Three code fixes landed from it, all after `006b3de`, so the bench images predate them and must be rebuilt before Phase 4:
+- **Heap bound.** Both linker scripts set `__StackLimit` to the `.slot_rings` address. The SDK's `_sbrk` and `pico_malloc` bound the heap by that symbol, not `__HeapLimit`, so the merge's `__HeapLimit` move alone left malloc free to grow into the rings. Not reachable today (the producer pools are the only heap users), but silent corruption if it ever were.
+- **SPDIF lost-then-stable.** `spdif_input_poll()` read the rate from the IRQ-written copy that its own loss branch had just zeroed, so a loss and relock between two polls held RELOCKING, muted, until the next loss. The lock branch now reads the library's rate. Pre-existing on release.
+- **ADAT lead bound.** `ADAT_MAX_LEAD_FRAMES` (928) bounds the resync write pointer (clamped, `slip_count` incremented) and the skip mirror (local resync instead of lapping the reader). Only reachable through a broken slot reading; without it that reading became an out-of-ring write.
+
+Doc corrections from the same audit: the I2S slave parks on every loss (its RELOCKING path is a receiver restart), the ADAT wire offset is 95 or 93 frames once FIFO prefetch is counted, and the Console note above about idle starvation counters.

@@ -39,9 +39,9 @@ void dspi_flash_apply_clkdiv(void) { dspi_set_clkdiv(); }
 // Caller is responsible for the interrupt blackout + Core 1 parked, same
 // contract as the SDK's flash_range_erase/program.  Note the blackout is
 // deliberately NOT total: flash_irq_blackout_begin() (flash_storage.c) masks
-// at the NVIC and leaves the two output DMA IRQ lines enabled so the audio
-// slots keep clocking through the window.  Those handlers and everything they
-// call are RAM-resident and touch no flash (enforced by
+// at the NVIC and leaves the output-ring stall alarm enabled so framed silence
+// stays stamped ahead of every slot reader through the window.  That handler
+// and everything it calls are RAM-resident and touch no flash (enforced by
 // scripts/check_ram_placement.py), which is the only thing that matters here:
 // nothing below assumes exclusivity, it just requires that no interrupted
 // code path performs an XIP access.

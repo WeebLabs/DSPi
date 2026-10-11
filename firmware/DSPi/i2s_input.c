@@ -1009,8 +1009,9 @@ void i2s_slave_poll(void) {
                 long_us[0] = long_us[1] = now;
                 long_words[0] = long_words[1] = meas_total_words;
                 long_valid = false;
-                // No servo reset: a relock holds the last-good trim
-                // (soft_vcxo_spec.md); i2s_slave_arm() parks at start.
+                // No servo reset here. Unlike SPDIF and ADAT this input does
+                // not hold its trim across a loss: the main loop restarts
+                // the receiver on every RELOCKING, and i2s_slave_arm() parks.
                 notify_push_i2s_slave_state(I2S_SLAVE_LOCKED, snapped);
             }
         } else {

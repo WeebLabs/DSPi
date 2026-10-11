@@ -294,7 +294,11 @@ uint32_t spdif_input_poll(void) {
         }
         if (spdif_lock_count < 255) spdif_lock_count++;
 
-        uint32_t rate = spdif_rx_detected_rate;
+        // Read the rate from the library, not the IRQ-written copy: a
+        // lost-then-stable pair between polls has just zeroed that copy, and
+        // a 0 here would hold RELOCKING until the next loss.
+        uint32_t rate = spdif_freq_to_hz(spdif_rx_get_samp_freq());
+        spdif_rx_detected_rate = rate;
         if (rate == 0 || !is_supported_rate(rate)) {
             // Unsupported rate — stay in relocking, output muted
             spdif_state = SPDIF_INPUT_RELOCKING;

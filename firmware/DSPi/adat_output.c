@@ -51,10 +51,16 @@
 #define ADAT_RING_FRAMES        960    // 30 KB; must exceed cushion + slot ring fill cap
 #define ADAT_ALIGN_LEAD_FRAMES  96     // constant ADAT-vs-slot lead; underrun cushion
 #define ADAT_SYNC_HEADER        0x8010u // [1][10x0][1][0000]; user bits always 0
+// Largest lead the slot admission cap can produce; any larger value means
+// the slot accounting is broken and must not be written into the ring.
+#define ADAT_MAX_LEAD_FRAMES    (ADAT_ALIGN_LEAD_FRAMES + \
+                                 PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD)
 
-_Static_assert(ADAT_RING_FRAMES > ADAT_ALIGN_LEAD_FRAMES +
-               PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD,
+_Static_assert(ADAT_RING_FRAMES > ADAT_MAX_LEAD_FRAMES,
                "ADAT ring must hold the cushion plus a full slot ring");
+_Static_assert(PICO_AUDIO_I2S_RING_FRAMES - PICO_AUDIO_I2S_ERASE_AHEAD <=
+               PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD,
+               "ADAT lead bound assumes the I2S slot fill cap is no larger");
 
 // The wire data is pre-NRZI-encoded line levels, so the program is a bare
 // 1 cycle/bit shifter (same as the PDM program): out pins, 1.
@@ -402,6 +408,11 @@ void adat_output_resync(void) {
     if (lead < (int32_t)ADAT_ALIGN_LEAD_FRAMES) {
         adat_excess_frames = (uint32_t)((int32_t)ADAT_ALIGN_LEAD_FRAMES - lead);
         lead = ADAT_ALIGN_LEAD_FRAMES;
+    } else if (lead > (int32_t)ADAT_MAX_LEAD_FRAMES) {
+        // Slot 0 reports more fill than admission allows: never index past
+        // the ring on a broken reading; count it so the bench can see it.
+        lead = ADAT_MAX_LEAD_FRAMES;
+        adat_slip_count++;
     }
     adat_wr_frame = (uint32_t)lead;
     adat_arm_dma();
@@ -428,9 +439,12 @@ void adat_output_keepalive(void) {
 DSP_TIME_CRITICAL
 void adat_output_on_slot_skip(uint32_t frames) {
     if (!adat_running) return;
-    if (adat_excess_frames > frames) {
-        // Unreachable: excess only accrues while slot 0 is dry, and the skip
-        // that ends a dry spell covers its whole deficit.
+    // Post-skip lead, exact from slot 0's counters. Excess above the skip is
+    // unreachable (excess only accrues while slot 0 is dry, and the skip that
+    // ends a dry spell covers its whole deficit); a lead the ring cannot hold
+    // means broken slot accounting. Re-anchor rather than lap the reader.
+    int32_t lead = (int32_t)ADAT_ALIGN_LEAD_FRAMES + output_ring_fill_signed(0);
+    if (adat_excess_frames > frames || lead > (int32_t)ADAT_MAX_LEAD_FRAMES) {
         adat_need_local_resync = true;
         return;
     }

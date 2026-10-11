@@ -355,8 +355,10 @@ SECTIONS
         PROVIDE(__flash_binary_end = .);
     } > FLASH =0xaa
 
-    /* stack limit is poorly named, but historically is maximum heap ptr */
-    __StackLimit = ORIGIN(RAM) + LENGTH(RAM);
+    /* stack limit is poorly named, but historically is maximum heap ptr: the SDK's
+       _sbrk and pico_malloc bound the heap by THIS symbol, not __HeapLimit, so it
+       must stop below the slot rings or malloc could grow into live DMA rings. */
+    __StackLimit = ADDR(.slot_rings);
     __StackOneTop = ORIGIN(SCRATCH_X) + LENGTH(SCRATCH_X);
     __StackTop = ORIGIN(SCRATCH_Y) + LENGTH(SCRATCH_Y);
     __StackOneBottom = __StackOneTop - SIZEOF(.stack1_dummy);
