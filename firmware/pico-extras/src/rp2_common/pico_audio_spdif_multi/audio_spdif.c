@@ -139,13 +139,18 @@ uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
     // nothing consumes; elapsed time must not inject phantom laps there.
     if (inst->enabled && inst->freq != 0 &&
         (inst->pio->ctrl & (1u << inst->pio_sm))) {
-        uint64_t expected_words =
-            ((uint64_t)elapsed_us * inst->freq * 4u + 500000u) / 1000000u;
-        if (expected_words > words) {
-            uint64_t missing = expected_words - words;
-            uint32_t laps = (uint32_t)((missing + RING_WORDS / 2u) /
-                                       RING_WORDS);
-            words += laps * RING_WORDS;
+        // Fast path: under half a ring of elapsed time the rounded lap count
+        // below is provably zero, so the 64-bit divide (about 13 reads per
+        // block on the hot path) runs only after a genuinely late read.
+        uint64_t scaled = (uint64_t)elapsed_us * inst->freq * 4u + 500000u;
+        if (scaled >= (uint64_t)(RING_WORDS / 2u) * 1000000u) {
+            uint64_t expected_words = scaled / 1000000u;
+            if (expected_words > words) {
+                uint64_t missing = expected_words - words;
+                uint32_t laps = (uint32_t)((missing + RING_WORDS / 2u) /
+                                           RING_WORDS);
+                words += laps * RING_WORDS;
+            }
         }
     }
     inst->consumed_words += words;

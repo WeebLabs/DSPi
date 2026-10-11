@@ -542,7 +542,7 @@ The servo applies only while locked and only once the detected rate equals `audi
 
 *Last updated: 2026-10-11*
 
-The bench images are built clean from `006b3de`. Each reports `v1.1.6-beta4-35-g006b3de`, without the dirty flag. They are saved in `custom-builds/merge-bench-006b3de/`: a normal, a loopback and a clock-diagnostics UF2 for each chip, plus the normal ELFs. The step-by-step checklist is `spdif_rx_overhaul_bench_checklist.md`. Its first section is the still-owed Phase 0 baseline run.
+The bench images are built clean from `f223724` (the post-merge audit fixes; the earlier `006b3de` set in `custom-builds/merge-bench-006b3de/` is superseded). Each reports `v1.1.6-beta4-37-gf223724`, without the dirty flag. They are saved in `custom-builds/merge-bench-f223724/`: a normal, a loopback and a clock-diagnostics UF2 for each chip, plus the normal ELFs. The step-by-step checklist is `spdif_rx_overhaul_bench_checklist.md`. Its first section is the still-owed Phase 0 baseline run.
 
 ### Post-merge audit
 
