@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-// Per-block producer path; must stay in RAM under XIP builds on both
-// platforms (reached via connection function pointers).
+// Per-block ring writer and pumps; must stay in RAM under XIP builds on both
+// platforms (called from the RAM-resident pipeline and the stall alarm).
 #define SPDIF_TIME_CRITICAL __attribute__((noinline, section(".time_critical")))
 
 #include <stdio.h>
@@ -43,11 +43,6 @@
 // applies an identical audio_spdif_ring_skip() to every enabled slot (both
 // output types), preserving inter-slot alignment deterministically.
 // ---------------------------------------------------------------------------
-
-#ifndef container_of
-#define container_of(ptr, type, member) \
-    ((type *)((char *)(ptr) - offsetof(type, member)))
-#endif
 
 _Static_assert((PICO_AUDIO_SPDIF_RING_FRAMES & (PICO_AUDIO_SPDIF_RING_FRAMES - 1)) == 0,
     "ring frame count must be a power of two");
@@ -476,12 +471,36 @@ static void ring_dma_stop(audio_spdif_instance_t *inst) {
 }
 
 // ---------------------------------------------------------------------------
+// update_pio_frequency
+// ---------------------------------------------------------------------------
+
+static void update_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq) {
+    // The shared base every output clock derives from (audio_clock_div.h).
+    uint32_t divider = audio_base_divider_16_8(sample_freq);
+    assert(divider < 0x1000000);
+    pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm, divider >> 8u, divider & 0xffu);
+    inst->freq = sample_freq;
+
+    // Update IEC 60958-3 channel status byte 3 (sample rate)
+    switch (sample_freq) {
+        case 44100: spdif_channel_status[3] = 0x00; break;  // IEC958_AES3_CON_FS_44100
+        case 48000: spdif_channel_status[3] = 0x02; break;  // IEC958_AES3_CON_FS_48000
+        case 96000: spdif_channel_status[3] = 0x0A; break;  // IEC958_AES3_CON_FS_96000
+        default:    spdif_channel_status[3] = 0x01; break;  // not indicated
+    }
+}
+
+// Nothing retunes lazily: every rate change must reach each set-up slot here.
+void audio_spdif_apply_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq) {
+    update_pio_frequency(inst, sample_freq);
+}
+
+// ---------------------------------------------------------------------------
 // audio_spdif_setup
 // ---------------------------------------------------------------------------
 
-const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
-                                        const audio_format_t *intended_audio_format,
-                                        const audio_spdif_config_t *config) {
+void audio_spdif_setup(audio_spdif_instance_t *inst, uint32_t sample_freq,
+                       const audio_spdif_config_t *config) {
     assert(spdif_instance_count < PICO_AUDIO_SPDIF_MAX_INSTANCES);
 
     // Build NRZI lookup table once
@@ -532,9 +551,6 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
                         : spdif_pio_encoder_requested[config->pio];
     audio_spdif_ring_reset(inst);
 
-    // This instance struct may be reused across output-type switches.
-    memset(&inst->connection, 0, sizeof(inst->connection));
-
     // GPIO init for this PIO block
     pio_gpio_init(inst->pio, config->pin);
 
@@ -555,6 +571,7 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
     }
     assert(inst->pio_bmc == spdif_pio_encoder_loaded[config->pio]);
     spdif_sm_init(inst, config->pin);
+    update_pio_frequency(inst, sample_freq);
 
     __mem_fence_release();
 
@@ -566,94 +583,6 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
 
     // Register instance
     spdif_instances[spdif_instance_count++] = inst;
-
-    return intended_audio_format;
-}
-
-// ---------------------------------------------------------------------------
-// update_pio_frequency
-// ---------------------------------------------------------------------------
-
-static void update_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq) {
-    // The shared base every output clock derives from (audio_clock_div.h).
-    uint32_t divider = audio_base_divider_16_8(sample_freq);
-    assert(divider < 0x1000000);
-    pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm, divider >> 8u, divider & 0xffu);
-    inst->freq = sample_freq;
-
-    // Update IEC 60958-3 channel status byte 3 (sample rate)
-    switch (sample_freq) {
-        case 44100: spdif_channel_status[3] = 0x00; break;  // IEC958_AES3_CON_FS_44100
-        case 48000: spdif_channel_status[3] = 0x02; break;  // IEC958_AES3_CON_FS_48000
-        case 96000: spdif_channel_status[3] = 0x0A; break;  // IEC958_AES3_CON_FS_96000
-        default:    spdif_channel_status[3] = 0x01; break;  // not indicated
-    }
-}
-
-// Public eager variant: rate-change paths restore the nominal divider
-// explicitly (the ring path has no lazy consumer-take hook).
-void audio_spdif_apply_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq) {
-    update_pio_frequency(inst, sample_freq);
-}
-
-// ---------------------------------------------------------------------------
-// Connection callback (until the direct ring-write migration removes the
-// producer pools)
-// ---------------------------------------------------------------------------
-
-SPDIF_TIME_CRITICAL static void wrap_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
-    struct producer_pool_blocking_give_connection *pbc =
-        (struct producer_pool_blocking_give_connection *)connection;
-    audio_spdif_instance_t *inst =
-        container_of(pbc, audio_spdif_instance_t, connection);
-
-    assert(buffer->format->format->format == AUDIO_BUFFER_FORMAT_PCM_S32);
-
-    // Lazy rate follow (replaces the old wrap_consumer_take hook).
-    if (connection->producer_pool->format->sample_freq != inst->freq) {
-        update_pio_frequency(inst, connection->producer_pool->format->sample_freq);
-    }
-
-    audio_spdif_ring_write_s32(inst, (const int32_t *)buffer->buffer->bytes,
-                               buffer->sample_count);
-    queue_free_audio_buffer(connection->producer_pool, buffer);
-}
-
-// ---------------------------------------------------------------------------
-// audio_spdif_connect_*
-// ---------------------------------------------------------------------------
-
-bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
-                               audio_buffer_pool_t *producer,
-                               bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
-                               audio_connection_t *connection) {
-    (void)buffer_on_give;
-    (void)consumer_pool;   // ring path: the shared static pool is unused
-    printf("Connecting PIO S/PDIF audio (ring)\n");
-
-    assert(producer->format->format == AUDIO_BUFFER_FORMAT_PCM_S32);
-    inst->consumer_format.format = AUDIO_BUFFER_FORMAT_PIO_SPDIF;
-    inst->consumer_format.sample_freq = producer->format->sample_freq;
-    inst->consumer_format.channel_count = 2;
-    inst->consumer_buffer_format.format = &inst->consumer_format;
-    inst->consumer_buffer_format.sample_stride = 2 * sizeof(spdif_subframe_t);
-
-    update_pio_frequency(inst, producer->format->sample_freq);
-
-    __mem_fence_release();
-
-    if (!connection) {
-        inst->connection.core.consumer_pool_take = NULL;
-        inst->connection.core.consumer_pool_give = NULL;
-        inst->connection.core.producer_pool_take = producer_pool_take_buffer_default;
-        inst->connection.core.producer_pool_give = wrap_producer_give;
-        connection = &inst->connection.core;
-    }
-    // Manual link: there is no consumer pool to complete a connection with.
-    connection->producer_pool = producer;
-    connection->consumer_pool = NULL;
-    producer->connection = connection;
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -726,18 +655,6 @@ void audio_spdif_teardown(audio_spdif_instance_t *inst) {
     } else {
         ring_dma_stop(inst);
     }
-
-    // Break the producer connection link.
-    if (inst->connection.core.producer_pool &&
-        inst->connection.core.producer_pool->connection == &inst->connection.core) {
-        inst->connection.core.producer_pool->connection = NULL;
-    }
-    inst->connection.core.producer_pool_take = NULL;
-    inst->connection.core.producer_pool_give = NULL;
-    inst->connection.core.consumer_pool_take = NULL;
-    inst->connection.core.consumer_pool_give = NULL;
-    inst->connection.core.producer_pool = NULL;
-    inst->connection.core.consumer_pool = NULL;
 
     // Setup reassigns ring from config; NULL marks the slot as not set up.
     inst->ring = NULL;

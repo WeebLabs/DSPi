@@ -15,7 +15,6 @@
 #include <math.h>
 
 #include "pico/stdlib.h"
-#include "pico/audio.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "hardware/sync.h"
@@ -471,18 +470,9 @@ bool usb_audio_stream_active(void) {
 // (no longer part of the active feedback path).
 volatile uint8_t spdif0_consumer_fill = 0;
 
-// Audio Pools (S/PDIF stereo pairs)
-struct audio_buffer_pool *producer_pool_1 = NULL;  // S/PDIF 1 (Out 1-2)
-struct audio_buffer_pool *producer_pool_2 = NULL;  // S/PDIF 2 (Out 3-4)
-#if PICO_RP2350
-struct audio_buffer_pool *producer_pool_3 = NULL;  // S/PDIF 3 (Out 5-6)
-struct audio_buffer_pool *producer_pool_4 = NULL;  // S/PDIF 4 (Out 7-8)
-#endif
-struct audio_format audio_format_48k = { .format = AUDIO_BUFFER_FORMAT_PCM_S32, .sample_freq = 48000, .channel_count = 2 };
-
-// Legacy aliases
-#define producer_pool producer_pool_1
-#define sub_producer_pool producer_pool_2
+// Rate every output slot SM is programmed at; written only by
+// perform_rate_change(), read when a slot is set up.
+uint32_t output_rate_hz = 48000;
 
 // ----------------------------------------------------------------------------
 // VOLUME
@@ -1609,7 +1599,6 @@ static audio_i2s_instance_t i2s_instance_4 = {0};
 
 // Indexed arrays for both instance types (populated in usb_sound_card_init)
 audio_i2s_instance_t *i2s_instance_ptrs[NUM_SPDIF_INSTANCES];
-struct audio_buffer_pool *producer_pools[NUM_SPDIF_INSTANCES];
 
 // One encoded output ring per slot, shared by its S/PDIF and I2S instances and
 // sized for S/PDIF (I2S uses the first half). Placed at the top of RAM by the
@@ -1687,14 +1676,6 @@ struct audio_spdif_config spdif_config_4 = {
 };
 #endif
 
-struct audio_buffer_format producer_format = { .format = &audio_format_48k, .sample_stride = 8 };
-
-// Legacy aliases
-#define spdif_instance spdif_instance_1
-#define spdif_sub_instance spdif_instance_2
-#define config spdif_config_1
-#define sub_config spdif_config_2
-
 // Initialize matrix mixer with default stereo pass-through
 static void matrix_init_defaults(void) {
     memset(&matrix_mixer, 0, sizeof(matrix_mixer));
@@ -1726,27 +1707,13 @@ void usb_sound_card_init(void) {
     matrix_init_defaults();
     reset_buffer_watermarks();
 
-    // S/PDIF Setup (this must happen before USB init to claim DMA channels)
-    producer_pool_1 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
-    producer_pool_2 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
+    // S/PDIF setup (this must happen before USB init to claim DMA channels).
+    // Rings are static, so there is nothing to allocate per slot.
+    audio_spdif_setup(&spdif_instance_1, output_rate_hz, &spdif_config_1);
+    audio_spdif_setup(&spdif_instance_2, output_rate_hz, &spdif_config_2);
 #if PICO_RP2350
-    producer_pool_3 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
-    producer_pool_4 = audio_new_producer_pool(&producer_format, AUDIO_BUFFER_COUNT, 192);
-#endif
-
-    // Setup S/PDIF instances (rings are static, nothing to build per slot)
-    audio_spdif_setup(&spdif_instance_1, &audio_format_48k, &spdif_config_1);
-    audio_spdif_connect_extra(&spdif_instance_1, producer_pool_1, false, NULL, NULL);
-
-    audio_spdif_setup(&spdif_instance_2, &audio_format_48k, &spdif_config_2);
-    audio_spdif_connect_extra(&spdif_instance_2, producer_pool_2, false, NULL, NULL);
-
-#if PICO_RP2350
-    audio_spdif_setup(&spdif_instance_3, &audio_format_48k, &spdif_config_3);
-    audio_spdif_connect_extra(&spdif_instance_3, producer_pool_3, false, NULL, NULL);
-
-    audio_spdif_setup(&spdif_instance_4, &audio_format_48k, &spdif_config_4);
-    audio_spdif_connect_extra(&spdif_instance_4, producer_pool_4, false, NULL, NULL);
+    audio_spdif_setup(&spdif_instance_3, output_rate_hz, &spdif_config_3);
+    audio_spdif_setup(&spdif_instance_4, output_rate_hz, &spdif_config_4);
 #endif
 
     // Populate instance pointer arrays for pin/type config commands
@@ -1763,14 +1730,6 @@ void usb_sound_card_init(void) {
 #if PICO_RP2350
     i2s_instance_ptrs[2] = &i2s_instance_3;
     i2s_instance_ptrs[3] = &i2s_instance_4;
-#endif
-
-    // Indexed producer pool array for type-switching convenience
-    producer_pools[0] = producer_pool_1;
-    producer_pools[1] = producer_pool_2;
-#if PICO_RP2350
-    producer_pools[2] = producer_pool_3;
-    producer_pools[3] = producer_pool_4;
 #endif
 
     // MCK generator setup — uses hardware CLK_GPOUTn, not a PIO state machine.

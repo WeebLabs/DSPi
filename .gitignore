@@ -30,6 +30,7 @@ __pycache__/
 !Documentation/current_architecture.md
 !Documentation/Roadmap.md
 !Documentation/commands.md
+!Documentation/SPDIF_Multi_Instance_Library.md
 !Documentation/Features/*.md
 !tools/dspi_test/test_harness.md
 !tools/dspi_test/test_failures_diag.md

@@ -166,8 +166,8 @@ void clock_diag_sample(void) {
     loop_prev_us = now;
     if (gap > loop_gap_max_us) loop_gap_max_us = gap;
 
-    // Per-slot min consumer fill (skip the type-switch window; the pool
-    // pointers are being mutated and the fill read is not meaningful).
+    // Per-slot min ring fill (skip the type-switch window; the slot
+    // instances are being rebuilt and the fill read is not meaningful).
     if (!output_type_switch_in_progress) {
         for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
             uint f = get_slot_consumer_fill((uint)i);

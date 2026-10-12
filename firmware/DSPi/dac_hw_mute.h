@@ -253,7 +253,7 @@ bool dac_hw_mute_is_asserted(void);
  * pipeline keeps draining the USB ring and feeding the SPDIF/I²S
  * DMA throughout the pulse, and only the DAC's analog output
  * actually mutes.  A synchronous busy-wait here would starve the
- * producer pool (~48 ms depth at 48 kHz) and the unmuted outputs
+ * output rings (8 ms of fill at 48 kHz) and the unmuted outputs
  * would underrun audibly even though the firmware never asked them
  * to silence.
  *

@@ -60,6 +60,7 @@
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
@@ -732,14 +733,14 @@ uint32_t i2s_input_poll(void) {
     return frames;
 }
 
-// Push one silent block through the DSP pipeline to prefill the output consumer
-// pools when the input cannot supply samples itself.
+// Push one silent block through the DSP pipeline to prefill the output slot
+// rings when the input cannot supply samples itself.
 //
 // This is only used during a SLAVE-role prefill.  In slave mode the input is
 // clocked by the I2S output clock master, so draining the outputs to prefill
 // (the SPDIF-style handshake) also stops the input's BCK/LRCLK and no input
-// samples arrive; the pools could never reach the 50% target and outputs would
-// never re-enable.  Synthesizing silence fills the pools deterministically;
+// samples arrive; the rings could never reach the 50% target and outputs would
+// never re-enable.  Synthesizing silence fills the rings deterministically;
 // real audio resumes after enable_outputs_in_sync() restarts the clock master
 // and re-phases the input rings.  Master-role prefill uses real input audio via
 // i2s_input_poll() and never calls this.

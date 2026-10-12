@@ -1,10 +1,12 @@
 # Buffer Fill Level Statistics
 
+*Last updated: 2026-10-12*
+
 ## Overview
 
-Real-time buffer fill level monitoring for SPDIF consumer (DMA-side) pools and PDM buffers in the DSPi firmware. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health via USB vendor commands.
+Real-time fill level monitoring for the output slot rings (S/PDIF or I2S, one per slot) and the PDM buffers in the DSPi firmware. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health via USB vendor commands.
 
-Producer (USB-side) pool stats are not tracked because `producer_pool_blocking_give` returns the producer buffer to the free list synchronously within `give_audio_buffer()` — the producer pool is always fully free between USB packets, so instantaneous and watermark values would always read 0%.
+Each slot's fill is the number of frames written into its ring and not yet read by the free-running output DMA. The wire format predates the rings and reports in "buckets" of 48 frames on a 16-bucket (768-frame) scale. The same bucket unit drives every prefill threshold and the clock servo target, so a reading here means the same thing as the firmware's own decisions. The pipeline stages each block in a fixed per-slot buffer before copying it into the rings, and that staging is always empty between blocks, so it is not reported.
 
 ## Wire Format
 
@@ -25,14 +27,16 @@ Offset  Size  Field
 
 ```
 Offset  Size  Field
-0       1     consumer_free          [0-4] SPDIF buffers available for DMA
-1       1     consumer_prepared      [0-4] SPDIF buffers queued for DMA playback
-2       1     consumer_playing       [0-1] DMA in-flight buffer
-3       1     consumer_fill_pct      Consumer pipeline fill %
-4       1     consumer_min_fill_pct  Lowest consumer fill since last reset
-5       1     consumer_max_fill_pct  Highest consumer fill since last reset
-6-7     2     pad                    Reserved (zero)
+0       1     consumer_free          [0-16] 16 minus consumer_prepared
+1       1     consumer_prepared      [0-16] ring fill in 48-frame buckets (clamped)
+2       1     consumer_playing       [0-1] slot output enabled
+3       1     consumer_fill_pct      consumer_prepared as % of 16 buckets
+4       1     consumer_min_fill_pct  Lowest consumer_fill_pct since last reset
+5       1     consumer_max_fill_pct  Highest consumer_fill_pct since last reset
+6-7     2     fill_centi_pct         Sample-granular fill, 0.01% of 768 frames (u16 LE)
 ```
+
+`fill_centi_pct` can exceed 10000 because a ring holds more than 768 frames. It saturates at 65535. All slot fields read zero while a slot is not set up. During an output-type switch `consumer_free` reads 16 and the rest read zero.
 
 ### PdmBufferStats (8 bytes)
 
@@ -69,15 +73,17 @@ Resets min watermarks to 100 and max watermarks to 0 for all SPDIF instances and
 
 ## Fill Percentage Formulas
 
-### SPDIF Consumer Fill (DMA side)
+### Slot Ring Fill
 
 ```
-consumer_fill_pct = (consumer_prepared + consumer_playing) * 100 / (AUDIO_BUFFER_COUNT / 2)
+consumer_prepared = min(fill_frames / 48, 16)
+consumer_fill_pct = consumer_prepared * 100 / 16
+fill_centi_pct    = min(fill_frames * 10000 / 768, 65535)
 ```
 
-- **Capacity:** `AUDIO_BUFFER_COUNT / 2` = 4 consumer buffers per instance
-- **Healthy range:** 25-75% (1-3 buffers queued)
-- **Warning:** Sustained 0% indicates underrun risk; sustained 100% indicates overrun risk
+- **Scale:** 16 buckets of 48 frames (`SPDIF_CONSUMER_BUFFER_COUNT`), 768 frames in all
+- **Healthy range:** around 50% (the servo target is 8 buckets, 384 frames, 8 ms at 48 kHz)
+- **Warning:** Sustained 0% indicates underrun risk. 100% means the ring is at or beyond the top of the scale
 
 ### PDM DMA Fill
 
@@ -102,9 +108,9 @@ fill_pct = ((head - tail) & 0xFF) * 100 / RING_SIZE
 ## Watermark Behavior
 
 - Watermarks track the minimum and maximum fill percentages observed since the last reset
-- Updated once per USB audio packet (~1ms) in `process_audio_packet()`
-- Consumer SPDIF pool watermarks tracked per instance
-- Only updated while audio is streaming (watermarks freeze when USB audio stops)
+- Updated on every eighth pipeline block in `process_input_block()` (about every 8 ms)
+- Slot ring watermarks tracked per slot, whichever output type the slot has
+- Only updated while the pipeline is processing blocks (watermarks freeze when the input stops)
 - PDM watermarks only update while PDM is enabled
 - Watermarks reset via `REQ_RESET_BUFFER_STATS` (0xB1) with wValue bit 0 set
 - Also reset at firmware initialization (`usb_sound_card_init()`)
@@ -140,9 +146,9 @@ Poll `REQ_GET_BUFFER_STATS` every 100-500ms to build a time series. Use the `seq
 
 ## Implementation Details
 
-### List Counting
+### Ring Fill Reading
 
-`audio_buffer_list_count()` is a `static inline` function in `pico/audio.h` that traverses a buffer linked list under the caller's spinlock. Lists have max 4 nodes (consumer pool size); traversal takes ~50ns.
+The fill is the ring's produced frame count minus its consumed frame count (`audio_spdif_ring_fill_frames()` or `audio_i2s_ring_fill_frames()`). The consumed count is unwrapped from the DMA read address under a brief interrupt-off section, so a reading costs one register read and a few arithmetic operations. A reader that has overtaken the writer reads as zero fill.
 
 ### PDM Write Index
 
@@ -150,7 +156,7 @@ Poll `REQ_GET_BUFFER_STATS` every 100-500ms to build a time series. Use the `seq
 
 ### Overhead
 
-Watermark update runs once per USB packet (~1ms). Overhead: ~1-2us total (4-8 spinlock-protected list traversals of max 4 nodes each for consumer pools, plus PDM DMA address read). Negligible vs the 500-800us packet processing budget.
+Watermark update runs on every eighth pipeline block. Overhead is one ring fill reading per slot plus the PDM DMA address read, negligible against the per-block processing budget.
 
 ### BSS Impact
 

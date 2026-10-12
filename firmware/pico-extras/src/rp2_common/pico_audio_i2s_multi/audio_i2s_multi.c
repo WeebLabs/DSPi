@@ -19,8 +19,8 @@
  *   - Includes the MCK generator (CLK_GPOUTn, no PIO SM)
  */
 
-// Per-block producer/consumer path; must stay in RAM under XIP builds
-// on both platforms (reached via connection function pointers).
+// Per-block ring writer and pumps; must stay in RAM under XIP builds on both
+// platforms (called from the RAM-resident pipeline and the stall alarm).
 #define I2S_TIME_CRITICAL __attribute__((noinline, section(".time_critical")))
 
 #include <stdio.h>
@@ -41,11 +41,6 @@
 #include "hardware/sync.h"
 #include "pico/time.h"
 #include "audio_clock_div.h"
-
-#ifndef container_of
-#define container_of(ptr, type, member) \
-    ((type *)((char *)(ptr) - offsetof(type, member)))
-#endif
 
 // ---------------------------------------------------------------------------
 // Global shared state
@@ -521,23 +516,13 @@ static void i2s_update_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample
             other->freq = sample_freq;
         }
     }
-    // Also update the triggering instance (it may not be registered yet during setup)
-    if (!inst->external_clock) {
-        pio_sm_set_clkdiv_int_frac(inst->pio, inst->pio_sm,
-                                    divider >> 8u, divider & 0xffu);
-    }
-    inst->freq = sample_freq;
-}
-
-void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_freq) {
-    i2s_update_pio_frequency(inst, sample_freq);
 }
 
 // ---------------------------------------------------------------------------
 // I2S sample encoding: left-justify 24-bit audio into 32-bit I2S frames
 //
-// Producer buffer: interleaved int32_t L/R pairs, 24-bit audio in bits [23:0]
-// Consumer buffer: interleaved int32_t L/R pairs, 24-bit audio in bits [31:8]
+// Writer input: interleaved int32_t L/R pairs, 24-bit audio in bits [23:0]
+// Ring words:   interleaved int32_t L/R pairs, 24-bit audio in bits [31:8]
 //
 // The PIO shifts MSB-first, so audio must be in the upper 24 bits.
 // The lower 8 bits carry an anti-zero-detect-mute marker so DACs configured
@@ -556,40 +541,12 @@ void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_f
 // for them the muted-output click problem must be addressed elsewhere.
 // (I2S_PAD_PATTERN itself is defined with the ring geometry near the top.)
 
-// I2S producer-give callback.
-//
-// Follows the same pattern as SPDIF's stereo_to_spdif_producer_give_s32():
-//   1. Take a free consumer buffer (blocking — waits for DMA to return one)
-//   2. Convert producer samples into consumer format
-//   3. Return producer buffer to free list via queue_free_audio_buffer()
-//      (NOT give_audio_buffer, which would re-trigger this callback → recursion)
-//   4. Give consumer buffer to prepared list for DMA pickup
-//
-I2S_TIME_CRITICAL
-static void i2s_wrap_producer_give(audio_connection_t *connection, audio_buffer_t *buffer) {
-    struct producer_pool_blocking_give_connection *pbc =
-        (struct producer_pool_blocking_give_connection *)connection;
-    audio_i2s_instance_t *inst =
-        container_of(pbc, audio_i2s_instance_t, connection);
-
-    // Lazy rate follow (replaces the old consumer-take hook). External-clock
-    // SMs run at divider 1.0 and are skipped inside the update.
-    if (connection->producer_pool->format->sample_freq != inst->freq) {
-        i2s_update_pio_frequency(inst, connection->producer_pool->format->sample_freq);
-    }
-
-    audio_i2s_ring_write_s32(inst, (const int32_t *)buffer->buffer->bytes,
-                             buffer->sample_count);
-    queue_free_audio_buffer(connection->producer_pool, buffer);
-}
-
 // ---------------------------------------------------------------------------
 // audio_i2s_setup
 // ---------------------------------------------------------------------------
 
-const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
-                                       const audio_format_t *intended_audio_format,
-                                       const audio_i2s_config_t *config) {
+void audio_i2s_setup(audio_i2s_instance_t *inst, uint32_t sample_freq,
+                     const audio_i2s_config_t *config) {
     assert(i2s_instance_count < PICO_AUDIO_I2S_MAX_INSTANCES);
 
     // Store hardware config into instance
@@ -611,11 +568,6 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     inst->underrun_frames = 0;
     inst->drop_frames = 0;
     audio_i2s_ring_reset(inst);
-
-    // This instance struct may be reused across output-type switches.
-    // Clear carry-over connection state so a stale staging pointer from a
-    // previous lifetime cannot be consumed after reconnect.
-    memset(&inst->connection, 0, sizeof(inst->connection));
 
     // GPIO init for data pin (always)
     pio_gpio_init(inst->pio, config->data_pin);
@@ -690,8 +642,6 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
                inst->pio_sm, inst->data_pin);
     }
 
-    inst->consumer_buffer_format.format = &inst->consumer_format;
-
     __mem_fence_release();
 
     // Claim DMA; configuration happens at each arm.
@@ -705,50 +655,8 @@ const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
     i2s_instances[i2s_instance_count++] = inst;
     restore_interrupts(save);
 
-    return intended_audio_format;
-}
-
-// ---------------------------------------------------------------------------
-// audio_i2s_connect_extra
-// ---------------------------------------------------------------------------
-
-bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
-                              audio_buffer_pool_t *producer,
-                              bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
-                              audio_connection_t *connection) {
-    printf("Connecting PIO I2S audio (SM%d, data GPIO %d, BCK GPIO %d)\n",
-           inst->pio_sm, inst->data_pin, inst->clock_pin_base);
-
-    assert(producer->format->format == AUDIO_BUFFER_FORMAT_PCM_S32);
-
-    // Consumer format: raw PCM for I2S (2 × int32 per stereo sample)
-    inst->consumer_format.format = AUDIO_BUFFER_FORMAT_PIO_I2S;
-    inst->consumer_format.sample_freq = producer->format->sample_freq;
-    inst->consumer_format.channel_count = 2;
-    inst->consumer_buffer_format.format = &inst->consumer_format;
-    inst->consumer_buffer_format.sample_stride = 2 * sizeof(int32_t);  // 8 bytes
-
-    (void)buffer_on_give;
-    (void)consumer_pool;   // ring path: the shared static pool is unused
-
-    i2s_update_pio_frequency(inst, producer->format->sample_freq);
-
-    __mem_fence_release();
-
-    if (!connection) {
-        printf("I2S stereo 24-bit at %d Hz (ring)\n", (int)producer->format->sample_freq);
-
-        inst->connection.core.consumer_pool_take = NULL;
-        inst->connection.core.consumer_pool_give = NULL;
-        inst->connection.core.producer_pool_take = producer_pool_take_buffer_default;
-        inst->connection.core.producer_pool_give = i2s_wrap_producer_give;
-        connection = &inst->connection.core;
-    }
-    // Manual link: there is no consumer pool to complete a connection with.
-    connection->producer_pool = producer;
-    connection->consumer_pool = NULL;
-    producer->connection = connection;
-    return true;
+    // After registration: the update retunes every I2S SM on this block.
+    i2s_update_pio_frequency(inst, sample_freq);
 }
 
 // ---------------------------------------------------------------------------
@@ -844,7 +752,7 @@ void audio_i2s_attach_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
 // audio_i2s_enable_sync — synchronized start for multiple instances
 // ---------------------------------------------------------------------------
 
-// Prepare-only half of the synchronized start: SM rewind, IRQ refcounts, DMA
+// Prepare-only half of the synchronized start: SM rewind, ring DMA
 // priming and enabled-flag bookkeeping, WITHOUT starting the SMs.  Returns
 // the SM mask for the (single, shared) PIO block; the caller performs the
 // pio_enable_sm_mask_in_sync.  Lets a caller prime BOTH output types first
@@ -952,19 +860,6 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
         i2s_ring_dma_stop(inst);
     }
 
-    // Break the producer connection link so accidental post-teardown give
-    // paths fail fast.
-    if (inst->connection.core.producer_pool &&
-        inst->connection.core.producer_pool->connection == &inst->connection.core) {
-        inst->connection.core.producer_pool->connection = NULL;
-    }
-    inst->connection.core.producer_pool_take = NULL;
-    inst->connection.core.producer_pool_give = NULL;
-    inst->connection.core.consumer_pool_take = NULL;
-    inst->connection.core.consumer_pool_give = NULL;
-    inst->connection.core.producer_pool = NULL;
-    inst->connection.core.consumer_pool = NULL;
-
     // Setup reassigns ring from config; NULL marks the slot as not set up.
     inst->ring = NULL;
 
@@ -978,7 +873,7 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
 #endif
     pio_sm_unclaim(inst->pio, inst->pio_sm);
 
-    // Remove from instance registry atomically against DMA IRQ iteration.
+    // Remove from the instance registry atomically against interrupt-context readers.
     bool was_master = inst->clock_master;
     uint32_t save = save_and_disable_interrupts();
     for (uint i = 0; i < i2s_instance_count; i++) {

@@ -335,14 +335,9 @@ uint32_t spdif_input_poll(void) {
     uint32_t fifo_count = spdif_rx_get_fifo_count_live();
 
     // Batch into ~1 ms granules (the pipeline's native USB-packet cadence).
-    // Word-granular availability is what keeps the consumer fill smooth, but
-    // processing the few frames that land per main-loop iteration lets
-    // process_input_block()'s fixed cost (producer pool takes/gives, gain
-    // ramp + filter state setup, core metering) dominate: 54% CPU0 measured
-    // on hardware at 48 kHz from sliver-sized calls, 9% batched. Waiting for
-    // a ~1 ms granule restores the USB-like call profile and also keeps every
-    // consumer buffer carrying a full payload, so the 16-buffer fill count
-    // keeps meaning ~16 ms of real cushion.
+    // process_input_block() has a fixed per-call cost (ring admission, gain
+    // ramp and filter setup, metering): sliver-sized calls measured 54% CPU0
+    // at 48 kHz on hardware, against 9% batched.
     uint32_t min_subframes = (audio_state.freq / 1000) * 2;
     if (min_subframes < 2) min_subframes = 2;
     if (fifo_count < min_subframes)

@@ -1,6 +1,6 @@
 # Bench Checklist: SPDIF RX Overhaul Merge (Phase 4)
 
-*Written 2026-10-11 for images built from `006b3de` on `merge/spdif-rx-overhaul`.*
+*Written 2026-10-11; updated 2026-10-12 for images built from `9cc9f1e` on `merge/spdif-rx-overhaul` (includes the post-merge audit fixes, the ring performance changes and the S/PDIF PIO biphase-mark encoder).*
 
 This is the hardware verification the merge plan (`spdif_rx_overhaul_merge_plan.md`, Phase 4) calls for. Nothing in the merge has run on hardware yet. The RP2040 output-ring path and RP2040 PLL dithering have never run on hardware at all, so treat every RP2040 step as a first run.
 
@@ -13,11 +13,11 @@ All images are in `custom-builds/`.
 | Image | Use |
 |---|---|
 | `merge-baseline-3272007/DSPi-<chip>-baseline-3272007-loopback.uf2` | Section 1 only: the pre-merge reference run |
-| `merge-bench-006b3de/DSPi-<chip>-merge-006b3de.uf2` | Normal firmware: sections 3, 4, 5, 6, 9, 10, 12, 13 |
-| `merge-bench-006b3de/DSPi-<chip>-merge-006b3de-loopback.uf2` | Loopback test suite: section 2, and the soak in section 11 |
-| `merge-bench-006b3de/DSPi-<chip>-merge-006b3de-clkdiag.uf2` | Clock diagnostics: sections 7 and 8 |
+| `merge-bench-9cc9f1e/DSPi-<chip>-merge-9cc9f1e.uf2` | Normal firmware: sections 3, 3a, 4, 5, 6, 9, 10, 12, 13 |
+| `merge-bench-9cc9f1e/DSPi-<chip>-merge-9cc9f1e-loopback.uf2` | Loopback test suite: section 2, and the soak in section 11 |
+| `merge-bench-9cc9f1e/DSPi-<chip>-merge-9cc9f1e-clkdiag.uf2` | Clock diagnostics: sections 7 and 8 |
 
-Every merge image reports `v1.1.6-beta4-35-g006b3de` as its build stamp. Before each section, confirm which image is running:
+**These images predate Phase 3 (producer-pool removal, 2026-10-12).** Rebuild the set from the Phase 3 commit before benching; this table is updated when that happens. Every merge image reports `v1.1.6-beta4-40-g9cc9f1e` as its build stamp. The older `merge-bench-006b3de` and `merge-bench-f223724` sets are superseded. Before each section, confirm which image is running:
 
 ```bash
 python3 tools/dspi_poke/dspi_poke.py get REQ_GET_BUILD_INFO 64
@@ -57,6 +57,20 @@ The suite counts `GET_STATUS` values 17 to 21 differently now. They report frame
 - [ ] RP2040 with one slot switched to I2S plays correctly on both types.
 - [ ] Neither chip reboots or faults over five minutes of playback. A watchdog reset shows up as re-enumeration.
 
+## 3a. S/PDIF PIO encoder (normal image)
+
+S/PDIF output now uses a PIO biphase-mark encoder by default. It falls back to the software encoder only when I2S clock-slave mode is on and at least one output slot is I2S (`spdif_pio_bmc_encoder_spec.md`). The loopback suite taps slot 0 before encoding, so it never exercises the encoder; only an external receiver or the scope does.
+
+- [ ] Scope one S/PDIF line: every subframe is exactly 128 PIO cycles (two cycles per half-cell). This settles the spec's `JMP !OSRE` open item.
+- [ ] An external receiver locks on every S/PDIF slot at 44.1, 48 and 96 kHz, reports no parity or validity errors, and shows the right sample rate in channel status.
+- [ ] Bit-exactness: play a known test file into the receiver and compare its capture against the source (null test). Repeat once with the software encoder active (I2S clock-slave mode with one I2S slot).
+- [ ] Every encoder flip leaves all receivers relocked with clean audio:
+    - [ ] Slave mode on, then off, with I2S slots present.
+    - [ ] The last I2S slot retyped to S/PDIF under slave mode.
+    - [ ] The first I2S slot added under slave mode.
+    - [ ] Boot into a saved slave-mode preset that has I2S slots.
+- [ ] I2S master-clock mode with PIO0 full (32 of 32): retype slots between S/PDIF and I2S in every order without a panic or reboot.
+
 ## 4. Alignment matrix (normal image)
 
 This is the inviolable constraint, so it gets the most care. Set the signal generator to single-sample impulses (type 7, `SIGGEN_IMPULSE`, period 100 ms) routed to every output. Capture all output pins at once on the logic analyser. For each pair of outputs, measure the frame offset at which the same impulse appears.
@@ -85,6 +99,8 @@ Record the offsets once at the start. Repeat after each operation below and comp
 | MCK enable, multiplier change | | | |
 | USB alt change (RP2350: 2ch to 8ch to 2ch) | | | |
 | I2S slave unlock and relock | | | |
+| S/PDIF encoder flip to software (slave mode on with an I2S slot) | | | |
+| S/PDIF encoder flip back to PIO (slave mode off) | | | |
 | ADAT slave unlock and relock (RP2350) | | | |
 
 - [ ] RP2350 matrix complete with no slot or ADAT failures.
@@ -134,7 +150,8 @@ RP2040 PLL dithering has never run on hardware. If the RP2040 `vcxo` line shows 
 For SPDIF in, ADAT slave and I2S slave, pull the source cable for about 2 seconds while logging, then reconnect.
 
 - [ ] Each input relocks without a reboot.
-- [ ] The commanded ppm resumes near its pre-pull value instead of restarting from 0. This is the 2e change.
+- [ ] SPDIF in and ADAT slave: the commanded ppm resumes near its pre-pull value instead of restarting from 0. This is the 2e change.
+- [ ] I2S slave: the commanded ppm restarts from 0 and re-converges. That is expected, because its relock restarts the receiver, which parks the VCXO.
 - [ ] No starvation after relock.
 
 ## 9. MCK at 44.1 kHz (normal image)
@@ -174,4 +191,4 @@ Force underruns by stalling the host: pause and resume playback, and switch the 
 
 ## Afterwards
 
-Record the results in the merge plan's Progress section under "Phase 4 results". Any section-4 slot failure, or any section-5 receiver unlock, blocks the merge from landing. Phase 3 (producer-pool removal) starts only after this checklist passes.
+Record the results in the merge plan's Progress section under "Phase 4 results". Any section-4 slot failure, or any section-5 receiver unlock, blocks the merge from landing. Phase 3 (producer-pool removal) was done before this bench, so the bench must run on images that include it.

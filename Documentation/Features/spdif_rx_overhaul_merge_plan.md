@@ -171,7 +171,7 @@ Also mark sections 5.2 and 5.3 of `silent_state_changes_spec.md` as unimplemente
 
 ## Phase 3: Producer-pool removal (follow-up)
 
-Do this after Phase 4 has proven the merged build on hardware. Removal is behaviour-neutral, so it can be verified against a known-good baseline.
+Originally planned for after Phase 4. On 2026-10-12 it was done first, at your direction, so the Phase 4 bench covers it. See "Phase 3 results" under Progress.
 
 The steps are as follows:
 - Point all four pipeline variants and Core 1's `spdif_out` pointers at per-slot staging.
@@ -194,6 +194,7 @@ It frees about 25 KB of heap on RP2040 and about 51 KB on RP2350, minus any stag
 ## Phase 5: Landing
 
 - Fast-forward release/v1.1.6 to the integration branch only when you say so. The same applies to every commit and push along the way.
+- **DSPi Console** must also know that `REQ_GET_STATUS` wValue 7 (`spdif_overruns`, shown in its stats view) is retired by Phase 3 and always reads 0.
 - **DSPi Console** must know four things. The starvation counters in `GET_STATUS` 17 to 21 are now frames. Those counters also climb at the sample rate whenever the outputs are enabled but nothing is producing (host stream stopped, source gap): the idle re-anchor counts every frame of silence it skips, where the pool-era counters were gated on an active USB stream. The Console must not present a climbing counter alone as an underrun fault. `fill_centi_pct` is available in buffer stats. RP2040 Control Surface bindings on GPIO 14 and 15 now report `CS_STATUS_PWM_CONFLICT`, because PWM slice 7 is the VCXO pacer.
 - **ESP32 front panel**: no scalar GET it validates changes length or range, so no action is expected. Confirm it does not read buffer stats before release.
 - Release notes should describe the user-visible effects. Flash writes no longer interrupt any output, clock tracking is smoother on every input, and PDM is now clock-tracked.
@@ -221,7 +222,7 @@ It frees about 25 KB of heap on RP2040 and about 51 KB on RP2350, minus any stag
 *Decided 2026-10-10.*
 
 1. Stall handling keeps the selective blackout with a RAM silence alarm (2a).
-2. Producer-pool removal is Phase 3, after hardware proof.
+2. Producer-pool removal is Phase 3, after hardware proof. *Revised 2026-10-12:* done before the bench, at your direction.
 3. Clock diagnostics become an off-by-default CMake option (2h).
 
 ## Progress
@@ -540,9 +541,16 @@ The servo applies only while locked and only once the detected rate equals `audi
 
 ### Phase 4 preparation
 
-*Last updated: 2026-10-11*
+*Last updated: 2026-10-12*
 
-The bench images are built clean from `f223724` (the post-merge audit fixes; the earlier `006b3de` set in `custom-builds/merge-bench-006b3de/` is superseded). Each reports `v1.1.6-beta4-37-gf223724`, without the dirty flag. They are saved in `custom-builds/merge-bench-f223724/`: a normal, a loopback and a clock-diagnostics UF2 for each chip, plus the normal ELFs. The step-by-step checklist is `spdif_rx_overhaul_bench_checklist.md`. Its first section is the still-owed Phase 0 baseline run.
+The bench images are built clean from `9cc9f1e`, which includes:
+- the post-merge audit fixes (`f223724`);
+- the two ring performance changes (`f948109`, `01d598a`);
+- the S/PDIF PIO biphase-mark encoder (`9cc9f1e`).
+
+Each image reports `v1.1.6-beta4-40-g9cc9f1e`, without the dirty flag. They are saved in `custom-builds/merge-bench-9cc9f1e/`: a normal, a loopback and a clock-diagnostics UF2 for each chip, plus the normal ELFs. The earlier `merge-bench-006b3de` and `merge-bench-f223724` sets are superseded.
+
+The checklist gained a section 3a for the encoder's open bench items and encoder-flip rows in the alignment matrix. Its relock step now expects the I2S slave to re-converge from nominal. The step-by-step checklist is `spdif_rx_overhaul_bench_checklist.md`. Its first section is the still-owed Phase 0 baseline run.
 
 ### Post-merge audit
 
@@ -554,3 +562,32 @@ A read-through audit of the whole branch after Phase 2j found no alignment defec
 - **ADAT lead bound.** `ADAT_MAX_LEAD_FRAMES` (928) bounds the resync write pointer (clamped, `slip_count` incremented) and the skip mirror (local resync instead of lapping the reader). Only reachable through a broken slot reading; without it that reading became an out-of-ring write.
 
 Doc corrections from the same audit: the I2S slave parks on every loss (its RELOCKING path is a receiver restart), the ADAT wire offset is 95 or 93 frames once FIFO prefetch is counted, and the Console note above about idle starvation counters.
+
+### Phase 3 results
+
+*Last updated: 2026-10-12*
+
+Phase 3 is done but not committed. It was brought ahead of Phase 4, so the bench images must be rebuilt from its commit.
+
+**What changed.**
+- The pipeline renders each slot's block into `slot_stage` (audio_pipeline.c, BSS, 1.5 KB per slot). Core 1's `spdif_out[]` always points at staging, so its NULL guards are gone.
+- After admission, `output_rings_write_block()` copies staging into every set-up ring in slot order, by `output_types[]`, enabled or not. That matches the old give path exactly: same rings, same order, same gate, still before the ADAT push.
+- `audio_spdif_setup()` and `audio_i2s_setup()` take the rate in Hz and program the divider. The lazy rate follow is gone; it never fired, because `perform_rate_change()` already retuned every slot eagerly before any block could reach the old give callback. The firmware's rate source is `output_rate_hz`, replacing `audio_format_48k`.
+- Deleted: `audio_*_connect_extra`, both give callbacks, the connection and format members of both instance structs, `sample_encoding.cpp` (dead encoder variants), `audio_i2s_apply_pio_frequency()` (no callers), the `pico_audio` link from both libraries, `AUDIO_BUFFER_COUNT`, the producer pool globals and the unused legacy aliases in usb_audio.c.
+- `spdif_overruns` counted failed pool takes, which could not happen, so it is deleted. `REQ_GET_STATUS` wValue 7 returns 0 for wire compatibility.
+- `siggen_pump()`'s "outputs not initialised" test now checks `spdif_instance_ptrs[0]`.
+- `check_ram_placement.py` drops the six `pico_audio` pool roots and adds `output_rings_write_block` (inlined into `process_input_block`).
+
+**Memory.** No `malloc` is linked into either image. The pools held about 25.5 KB of heap on RP2040 and 51 KB on RP2350. Against `9cc9f1e`, measured:
+
+| | RP2040 | RP2350 |
+|---|---|---|
+| `.data` | 67,984 B (-2,368) | 95,800 B (-2,240) |
+| `.bss` | 112,876 B (+2,484) | 283,304 B (+5,660) |
+| Free heap, nothing allocated | 42,772 B | 77,144 B |
+| Usable RAM after boot | about 20 KB to 42.8 KB | about 24 KB to 77.1 KB |
+
+**Checks.** All six variants (normal, loopback, clkdiag on each chip) clean-build with no warnings, and `check_ram_placement.py` passes on all six. Every `process_input_block()` caller runs on the main loop, so the static staging adds no re-entrancy hazard; `buf_out` was already shared the same way.
+
+**Comments and docs.** Twelve firmware comments that still said "pools" for the rings now say rings. `current_architecture.md` covers staging, the rate rule, the memory tables, the comparison table and status wValue 7. `SPDIF_Multi_Instance_Library.md` and the feature specs are rewritten or annotated for the pool-free libraries.
+

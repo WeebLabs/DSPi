@@ -658,7 +658,7 @@ and returns a combined packet.
 | 4 | `pdm_ring_underruns` |
 | 5 | `pdm_dma_overruns` |
 | 6 | `pdm_dma_underruns` |
-| 7 | `spdif_overruns` |
+| 7 | Retired, always 0 (kept so the wValue numbering is stable) |
 | 8 | `spdif_underruns` |
 | 9 | **Combined packet** (see below) |
 | 10 | `usb_audio_packets` |

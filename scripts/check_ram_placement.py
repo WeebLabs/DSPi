@@ -78,6 +78,7 @@ COMMON = [
     ("audio_i2s_ring_silence_pump", False),
     ("audio_i2s_ring_skip", False),
     ("output_rings_pre_give", True),
+    ("output_rings_write_block", True),
     ("output_rings_idle_pump", False),
     ("output_rings_stamp_silence_ahead", False),
     ("output_rings_stall_nvic_mask", False),
@@ -86,12 +87,6 @@ COMMON = [
     ("slot_ring_store", False),
     ("fbdivs", False),
     ("fbdivs_addr", False),
-    ("take_audio_buffer", False),
-    ("give_audio_buffer", False),
-    ("get_free_audio_buffer", True),
-    ("get_full_audio_buffer", True),
-    ("queue_full_audio_buffer", True),
-    ("queue_free_audio_buffer", True),
     ("usbd_edpt_xfer", False),
     ("dcd_int_handler", True),
     ("dcd_event_handler", False),
@@ -542,7 +537,7 @@ def check_elf(elf, baseline):
     rings = sec.get(".slot_rings", 0)
     ram_used = vtab + data + bss + heap + rings
     free_ram = RAM_LEN[platform] - ram_used
-    # Real heap left for runtime allocation (the producer pools): __HeapLimit
+    # Heap left for runtime allocation (nothing allocates today): __HeapLimit
     # minus end, which also counts the alignment gaps the sum above ignores.
     sym_addr = {s["name"]: s["addr"] for s in syms}
     heap_free = sym_addr.get("__HeapLimit", 0) - sym_addr.get("end", 0)

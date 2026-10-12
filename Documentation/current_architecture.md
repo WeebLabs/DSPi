@@ -429,7 +429,7 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 
 **Gap detection:** USB packet arrival gap measurement runs in `uac1_driver_xfer_cb` (task context under TinyUSB) using file-scope `audio_ring_last_push_us`, reset on stream lifecycle transitions in `uac1_apply_alt()` and `usb_audio_flush_ring()`.
 
-**Ring overruns:** Separate `audio_ring.overrun_count` counter (distinct from `spdif_overruns`). Queryable via `REQ_GET_STATUS` wValue=22.
+**Ring overruns:** `audio_ring.overrun_count`, queryable via `REQ_GET_STATUS` wValue=22. wValue=7 (`spdif_overruns`, producer-pool take failures) is retired and always reads 0. *Last updated: 2026-10-12*
 
 **Deferred flash SET commands:** `REQ_PRESET_SET_NAME`, `REQ_PRESET_SET_STARTUP`, `REQ_SET_OUTPUT_CONFIG_MODE` (and the action-style `REQ_SAVE_OUTPUT_CONFIG`) use separate pending flags per command type. Main loop copies payload under brief interrupt-off (~1µs) to prevent ISR/thread race, then drains ring and executes the flash write. GET-style flash commands (SAVE/LOAD/DELETE) remain synchronous in the vendor handler with real result codes.
 
@@ -555,7 +555,7 @@ its `wMaxPacketSize`, `iso_alloc`, and `g_pkt` all derive from
 
 ### Data path
 ```
-slot-0 final 24-bit samples (audio_pipeline.c, before give_audio_buffer)
+slot-0 final 24-bit samples (audio_pipeline.c slot_stage[0], admitted blocks only)
   -> loopback_push_slot0() -> SPSC ring (1024 frames, .bss, ~8 KB)
       -> rate-matching servo (fill_audio_packet, per USB frame, in xfer_cb)
           -> iso async IN EP 0x81 -> USB host
@@ -974,7 +974,7 @@ Both programs run two PIO cycles per half-cell (256 cycles per frame, 256 Fs PIO
 The PIO0 budget per configuration is 16 slots with no I2S output slots, 32 of 32 with I2S slots under internal clocking (16 + clkout 8 + dataout 8), and 30 with I2S slots under an external master (4 + extclk 26). Every encoder flip empties the block before reloading, and the internal-clock programs are all multiples of 8 slots, so the top-down placement in `pio_add_program()` cannot fragment the memory. Clock divider automatically adjusted for 44.1/48/96 kHz.
 
 ### Instance State
-*Last updated: 2026-07-23 (pre-write recovery fill snapshot added)*
+*Last updated: 2026-10-12 (producer connection and formats removed). Previously 2026-07-23 (pre-write recovery fill snapshot added)*
 
 ```c
 typedef struct audio_spdif_instance {
@@ -991,17 +991,17 @@ typedef struct audio_spdif_instance {
     volatile uint32_t consumed_words;
     volatile uint32_t snap_produced_frames, snap_consumed_frames;  // servo snapshot
     volatile uint32_t recovery_prewrite_fill_frames;  // UINT32_MAX until first write
-    // ... producer format + embedded connection (retained pending direct write)
 } audio_spdif_instance_t;
 ```
 
 ### Buffer Configuration
-*Last updated: 2026-10-11 (dedicated S/PDIF silence stamper; consumed-count reader: whole-lap selector moved to a slow path). Previously 2026-07-23 (PDM/slot recovery made block-size exact)*
+*Last updated: 2026-10-12 (producer pools removed: per-slot staging, direct ring writes). Previously 2026-10-11 (dedicated S/PDIF silence stamper; consumed-count reader: whole-lap selector moved to a slow path). Previously 2026-07-23 (PDM/slot recovery made block-size exact)*
 
 The consumer buffer pool is gone. Each slot now drains a single **encoded ring** filled by the writer and read by a free-running DMA with **zero output IRQs**:
 
 - One static 16 KB ring per slot (`slot_ring_store[NUM_SPDIF_INSTANCES][PICO_AUDIO_SPDIF_RING_BYTES]` in usb_audio.c), caller-owned and passed via `config.ring_base`. The same store backs the slot's S/PDIF and I2S instances across output-type switches. `PICO_AUDIO_SPDIF_RING_FRAMES = 1024` frames (21.3 ms at 48 kHz), 2 channels × 8 bytes per frame; I2S uses the identical geometry (`_Static_assert`ed equal).
-- The writer encodes directly into the ring at give time (`audio_spdif_ring_write_s32`), stamping IEC preamble and channel-status per frame from the absolute frame index; the producer pools are retained for now (the blocking-give connection still drives the writer) pending a direct-write follow-up.
+- **Staging and direct writes** (2026-10-12). The pipeline renders each slot's block into a static per-slot staging buffer, `slot_stage[NUM_SPDIF_INSTANCES][AUDIO_BUFFER_SAMPLES * 2]` in audio_pipeline.c (interleaved S24, 1.5 KB per slot). Core 0 writes pair 0 and, in the single-core variants, every pair. The Core 1 EQ worker writes its pairs through `core1_eq_work.spdif_out[]`, which always points at staging. Once `output_rings_pre_give()` admits the block, `output_rings_write_block()` copies staging into every set-up slot ring in slot order with `audio_spdif_ring_write_s32()` or `audio_i2s_ring_write_s32()`, chosen by `output_types[]`. The copy covers set-up rings that are not yet enabled, because a ring may be prefilling before its synchronized start. A refused block is never copied. The S/PDIF writer stamps the IEC preamble and channel status per frame from the absolute frame index. There is no `pico_audio` producer pool, connection or heap allocation anywhere in the output path, and neither output library links `pico_audio`.
+- **Rate.** `audio_spdif_setup()` and `audio_i2s_setup()` take the rate in Hz and program the nominal divider themselves; the firmware passes `output_rate_hz` (usb_audio.c), which only `perform_rate_change()` writes. Nothing retunes lazily: `perform_rate_change()` reprograms every set-up slot (`apply_nominal_output_rate()` and `audio_i2s_update_all_frequencies()`) and then restarts the outputs in sync.
 - Erase-ahead silence margin: the writer keeps `PICO_AUDIO_SPDIF_ERASE_AHEAD` = 192 frames (one IEC block) of valid silence stamped ahead of real audio, so a stalled producer plays silence rather than a loop of stale ring content.
 - On both platforms, `stamp_silence_frame()` writes zero-PCM S/PDIF words directly, retaining the phase-dependent Z/X and Y preambles, live channel-status bit, and matching parity. The writer's erase-ahead pass, underrun skip, and silence pump (including reset and flash-stall protection) use it instead of the general sample encoder. It is byte-identical to `stamp_frame(..., 0, 0)`, requires no lookup table or new storage, and is forced inline into the RAM-resident callers. Ring positions, frame counts, silence margin, and group alignment behavior are unchanged. Since 2026-10-11 the writer, skip and pump go through `stamp_audio_run()` / `stamp_silence_run()`, which pick the word format once per run from the instance's `pio_bmc` flag: `stamp_frame_bmc()` / `stamp_silence_frame_bmc()` write the PIO-encoder control and data words, the original stampers write the NRZI words, and both carry a running IEC phase.
 - Free-running DMA: **ENDLESS** transfer count with hardware read-address wrap on RP2350 (power-of-two ring, no reload channel); on RP2040 a data + reload channel pair (`dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + slot`, base 6) rewrites the read address at the ring end. No DMA completes, so there is no output DMA IRQ on either platform.
@@ -2326,8 +2326,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
-| RAM code+rodata+data (.data) | 70,064 B of the 72,704 B budget | 97,560 B of the 100,352 B budget |
-| Free heap before runtime allocation (`__HeapLimit - end`) | 45,256 B (about 19 KB after the producer pools) | 82,804 B (about 31 KB after the producer pools) |
+| RAM code+rodata+data (.data) | 67,984 B of the 72,704 B budget (2026-10-12) | 95,800 B of the 100,352 B budget (2026-10-12) |
+| Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 42,772 B (2026-10-12) | 77,144 B (2026-10-12) |
+| Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
 | Output slot rings | 2 × 16 KB `.slot_rings` at the top of RAM | 4 × 16 KB `.slot_rings` at the top of RAM |
 | Custom XIP linker script | `memmap_dspi_rp2040_xip.ld` (+divider/int64/bit-ops IN_RAM defines) | `memmap_dspi_rp2350_xip.ld` |
 
@@ -2452,6 +2453,18 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 
 ## Memory Layout
 
+> **Producer pools removed (2026-10-12).** The `pico_audio` producer pools are
+> gone, and nothing allocates from the heap at runtime any more (no `malloc` is
+> linked). The pools held 8 × 192-frame buffers per slot, about 12.7 KB each with
+> headers, so the change returns about 25.5 KB of heap on RP2040 and 51 KB on
+> RP2350. The pipeline now renders into `slot_stage` (BSS, 1.5 KB per slot) and
+> copies admitted blocks straight into the slot rings. Measured with diagnostics
+> off, against `9cc9f1e`: `.data` 67,984 B / 95,800 B (down 2,368 B / 2,240 B, the
+> RAM-resident pool code), `.bss` 112,876 B / 283,304 B (up 2,484 B / 5,660 B:
+> staging less the instances' connection state), and free heap 42,772 B /
+> 77,144 B (RP2040 / RP2350). Usable RAM after boot rises from about 20 KB to
+> 42.8 KB on RP2040 and from about 24 KB to 77.1 KB on RP2350.
+
 > **SPDIF RX overhaul merge (2026-10-11).** The consumer pools (24 KB RP2040,
 > 48 KB RP2350) are gone; each output slot plays from a 16 KB ring in a NOLOAD
 > `.slot_rings` section placed at the top of RAM by both linker scripts, so its
@@ -2468,7 +2481,7 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > 277,644 B plus `.slot_rings` 32 KB / 64 KB; free heap before runtime
 > allocation (`__HeapLimit - end`, now reported by `check_ram_placement.py`)
 > 45,256 B / 82,804 B, leaving about 19 KB / 31 KB after the producer pools.
-*Last updated: 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -2605,10 +2618,9 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > RP2350 / 2 × 16 KB on RP2040, plus up to 16 KB of alignment padding (the RP2350
 > ENDLESS read-address wrap requires the ring aligned to its own size). Drained by
 > free-running DMA (see "Buffer Configuration"), the footprint stays deterministic
-> and link-time-budgeted (a BSS overflow fails the build). The producer pools remain
-> heap-resident (allocated once at boot, never churn); they still drive the writer
-> via the blocking-give connection and are retained pending the direct-write
-> follow-up that will encode into the ring without an intermediate pool. Each
+> and link-time-budgeted (a BSS overflow fails the build). The producer pools that
+> still fed the writer at this point were removed on 2026-10-12 (see the note
+> at the top of this section). Each
 > statically allocated S/PDIF and I2S instance now also carries a 4-byte
 > `recovery_prewrite_fill_frames` snapshot and a 4-byte `last_read_time_us`
 > whole-lap anchor: +32 B BSS on RP2040 (two instances of each type) and +64 B
@@ -2740,6 +2752,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 |---------|---------------|
 | Delay lines (5 × 2048 × 4) | 40 KB |
 | Output buffers (5 × 192 × 4 + 2 × 192 × 4) | ~5.25 KB |
+| Output slot staging (`slot_stage`, 2 × 192 × 2 × 4) | 3 KB |
 | Filters + recipes (7 channels) | ~8 KB |
 | Crossover filters + recipes (5 outputs × 4 bands cascades + 7 × 4 recipes) | ~3.1 KB |
 | Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
@@ -2754,12 +2767,11 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Output slot rings (`.slot_rings`, 2 × 16 KB at the top of RAM, shared SPDIF/I2S, no padding) | 32 KB |
 | Input capture arena (SPDIF RX FIFO / I2S RX ring union, 4 KB aligned) | 12 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~108 KB** `.bss` (measured 110,392 B on 2026-10-11) plus the 32 KB `.slot_rings` section |
-| RAM code+rodata+data (.data section, hot set only) | 70,064 B as of 2026-10-11, within the 72,704 B `check_ram_placement.py` budget |
+| **Total BSS** | **~110 KB** `.bss` (measured 112,876 B on 2026-10-12) plus the 32 KB `.slot_rings` section |
+| RAM code+rodata+data (.data section, hot set only) | 67,984 B as of 2026-10-12, within the 72,704 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free heap before runtime allocation | 45,256 B (`__HeapLimit - end`, 2026-10-11) |
-| SPDIF producer pools (heap, 2 × (8 × 192 × 8 B + headers)) | ~25 KB |
-| Stack + remaining heap | drawn from the free-RAM pool above |
+| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 42,772 B (2026-10-12) |
+| Stack | drawn from the free-RAM pool above |
 
 ### RP2350 (520 KB SRAM)
 
@@ -2769,6 +2781,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Filters + recipes | ~18 KB |
 | Crossover filters + recipes (9 outputs × 4 bands cascades + 17 × 4 recipes) | ~11.6 KB |
 | Output buffers (9 × 192 × 4) | ~7 KB |
+| Output slot staging (`slot_stage`, 4 × 192 × 2 × 4) | 6 KB |
 | Input buffers (buf_l + buf_r + buf_in_ext[6][192], 8-channel USB) | ~6 KB |
 | Preset system (dir_cache 3,147 B + `flash_stage` 8 KB, 256-B aligned) | ~11 KB |
 | Bulk param buffer (`sizeof(WireBulkParams)`, 6,136 B at V32) | ~6 KB |
@@ -2784,12 +2797,11 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | ADAT TX ring (`adat_ring`, 960 × 32 B) | 30 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
-| **Total BSS** | **~271 KB** `.bss` (measured 277,644 B on 2026-10-11) plus the 64 KB `.slot_rings` section |
-| RAM code+rodata+data (.data section, hot set only) | 97,560 B as of 2026-10-11, within the 100,352 B `check_ram_placement.py` budget |
+| **Total BSS** | **~277 KB** `.bss` (measured 283,304 B on 2026-10-12) plus the 64 KB `.slot_rings` section |
+| RAM code+rodata+data (.data section, hot set only) | 95,800 B as of 2026-10-12, within the 100,352 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free heap before runtime allocation | 82,804 B (`__HeapLimit - end`, 2026-10-11) |
-| SPDIF producer pools (heap, 4 × (8 × 192 × 8 B + headers)) | ~51 KB |
-| Stack + remaining heap | drawn from the free-RAM pool above |
+| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 77,144 B (2026-10-12) |
+| Stack | drawn from the free-RAM pool above |
 
 ### Flash Layout
 
@@ -2812,7 +2824,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | S/PDIF IEC block | 192 samples (IEC 60958-1 standard) |
 | S/PDIF DMA transfer | Free-running (whole ring; no fixed transfer quantum) |
 | S/PDIF slot ring | 1024 frames per slot (21.3 ms at 48 kHz); target fill ~50% |
-| S/PDIF producer pool | 8 buffers × 192 samples per output pair (retained, feeds the ring writer) |
+| Output slot staging | 192 frames per slot (one block), copied into the slot ring on admission |
 | PDM DMA ring | 2048 words |
 | PDM sample ring | 256 entries (Core 0 → Core 1) |
 
@@ -4153,7 +4165,7 @@ Transfers the complete DSP state in a single USB control transfer (3664 bytes at
 ### Buffer Statistics
 *Last updated: 2026-07-23 (consumer pool replaced by the slot ring; stats via a 48-frames-per-bucket mapping)*
 
-Real-time buffer fill level monitoring for the SPDIF slot rings (DMA-side) and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. Producer (USB-side) pool stats are not tracked because `producer_pool_blocking_give` returns buffers synchronously; the producer pool is always fully free between USB packets.
+Real-time buffer fill level monitoring for the SPDIF slot rings (DMA-side) and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. There is no producer-side buffer to report: the pipeline renders into per-slot staging and copies it into the ring in the same call.
 
 **Ring-to-bucket mapping (2026-07-23).** The wire format and thresholds are unchanged: each slot's ring fill is mapped to legacy "buffer" buckets of 48 frames (a ring fill of N frames reports N/48 buckets, capped at `SPDIF_CONSUMER_BUFFER_COUNT` = 16), so `REQ_GET_BUFFER_STATS`, the fill percentages, and every prefill threshold keep byte- and semantics-compatibility with the old consumer-pool counts.
 
@@ -4191,10 +4203,10 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 - **MCK:** Generated by hardware **CLK_GPOUTn** (clock peripheral output), not PIO. No state machine consumed — see "Master Clock (CLK_GPOUTn)" below. **PIO1 SM1 is now free** (previously the MCK toggle program); reserved for future use.
 - **OutputSlot abstraction** in `usb_audio.c` manages per-slot type, holding either a SPDIF or I2S instance.
 - **DMA IRQ:** none. Both output types play from free-running rings (see "IRQ Handling"); S/PDIF RX alone uses DMA_IRQ_1.
-- **Producer pools** are format-identical (PCM_S32, stride 8). The I2S library's connection callback left-shifts samples by 8 for MSB-first I2S framing, then ORs `I2S_PAD_PATTERN` (0x01) into the unused bottom 8 padding bits — the 24-bit audio at [31:8] stays bit-perfect, but the 32-bit wire word is never zero. This defeats DAC zero-detect mute on chips configured for 32-bit input (PCM5102, ES9018/9038, CS43198, AKM in 32-bit mode), eliminating the auto-mute click on quiet content / stream gaps. 24-bit-mode DAC configs ignore the padding bits and are unaffected. The I2S silence buffer (substituted on consumer-pool underrun) and the consumer-pool pre-fill at `audio_i2s_connect_extra()` are filled with the same pattern so the DAC sees non-zero frames during DMA underruns and on first stream start. *Last updated: 2026-05-06*
+- **Slot staging is format-identical** for both output types (interleaved S24 in int32, stride 8). `audio_i2s_ring_write_s32()` left-shifts samples by 8 for MSB-first I2S framing, then ORs `I2S_PAD_PATTERN` (0x01) into the unused bottom 8 padding bits. The 24-bit audio at [31:8] stays bit-perfect, but the 32-bit wire word is never zero. This defeats DAC zero-detect mute on chips configured for 32-bit input (PCM5102, ES9018/9038, CS43198, AKM in 32-bit mode), eliminating the auto-mute click on quiet content and stream gaps. 24-bit-mode DAC configs ignore the padding bits and are unaffected. The ring reset, erase-ahead silence and silence pump stamp the same pattern, so the DAC sees non-zero frames through underruns and on first stream start. *Last updated: 2026-10-12*
 - **No audio callback changes.** Core 1 remains output-type-agnostic.
-- **Pipeline reset API** (`main.c`): two-phase `prepare_pipeline_reset()` / `complete_pipeline_reset()` brackets any disruptive output work. `complete_pipeline_reset()` is structured to keep the IRQ-disabled critical section tiny; only the synchronized start (`start_output_slots_in_sync()`, single combined SM mask for both output types since 2026-07-21; see "Synchronized Start") needs atomicity (so all output slots start their PIO SMs on the same clock cycle, preserving CLAUDE.md's slot-alignment invariant). Per-slot teardown (`teardown_output_slot()` helper) runs with main interrupts ENABLED: the per-instance `enabled` flag is set false first (the shared DMA IRQ handler skips disabled instances), the channel's DMA IRQ is masked, and the pool/abort operations only touch this instance's state. The USB audio class ISR can continue to drain packets into the SPSC `audio_ring` throughout the teardown, eliminating the prior ~1 ms USB starvation that compounded I2S DAC pops during input-source switches. Core 1 is held idle by `prepare_pipeline_reset()` (spin-wait for `work_done`) and `preset_loading=true` (blocks new dispatch). `drain_and_disable_outputs()` shares the same `teardown_output_slot()` helper. I2S→S/PDIF switch restores the SPDIF connection before zeroing the I2S instance to prevent a dangling `producer_pool->connection` pointer. *Last updated: 2026-05-12*
-- **Boot-time I2S restoration:** `core0_init()` inspects `output_types[]` after `preset_boot_load()` and converts preset-saved I2S slots from the default SPDIF instances created by `usb_sound_card_init()`. For each I2S slot: disables SPDIF, unclaims the PIO SM, calls `audio_i2s_setup()` + `audio_i2s_connect_extra()`, and enables the I2S instance. MCK is started if any I2S slot exists and `i2s_mck_enabled` is set.
+- **Pipeline reset API** (`main.c`): two-phase `prepare_pipeline_reset()` / `complete_pipeline_reset()` brackets any disruptive output work. `complete_pipeline_reset()` is structured to keep the IRQ-disabled critical section tiny; only the synchronized start (`start_output_slots_in_sync()`, single combined SM mask for both output types since 2026-07-21; see "Synchronized Start") needs atomicity (so all output slots start their PIO SMs on the same clock cycle, preserving CLAUDE.md's slot-alignment invariant). Per-slot teardown (`teardown_output_slot()` helper) runs with main interrupts ENABLED: the per-instance `enabled` flag is set false first (the shared DMA IRQ handler skips disabled instances), the channel's DMA IRQ is masked, and the pool/abort operations only touch this instance's state. The USB audio class ISR can continue to drain packets into the SPSC `audio_ring` throughout the teardown, eliminating the prior ~1 ms USB starvation that compounded I2S DAC pops during input-source switches. Core 1 is held idle by `prepare_pipeline_reset()` (spin-wait for `work_done`) and `preset_loading=true` (blocks new dispatch). `drain_and_disable_outputs()` shares the same `teardown_output_slot()` helper. *Last updated: 2026-05-12*
+- **Boot-time I2S restoration:** `core0_init()` inspects `output_types[]` after `preset_boot_load()` and converts preset-saved I2S slots from the default SPDIF instances created by `usb_sound_card_init()`. For each I2S slot: disables SPDIF, unclaims the PIO SM, calls `audio_i2s_setup()` (which programs the divider for `output_rate_hz`), and enables the I2S instance. MCK is started if any I2S slot exists and `i2s_mck_enabled` is set.
 - **MCK pin migration on preset apply:** Preset and bulk-params apply paths validate the loaded `i2s_mck_pin` against `GPIO_TO_GPOUT_CLOCK_HANDLE()`. If the stored pin has no GPOUTn mapping on the current platform (typical case: an RP2040 board loading a preset saved with `mck_pin = 13`, which is GPOUTn-capable on RP2350 only), the pin falls back to `PICO_I2S_MCK_PIN` (platform default) and `i2s_mck_enabled` is forced to `false`. Defaults: GPIO 13 on RP2350, GPIO 21 on RP2040 (the only board-friendly GPOUTn pin on RP2040 — GPIOs 23–25 are also GPOUTn-capable but reserved for control / SMPS / LED).
 - **MCK enable order:** `process_type_switches()` writes the MCK clkdiv via `audio_i2s_mck_update_frequency()` *before* calling `audio_i2s_mck_set_enabled(true)`, so the CLK_GPOUTn block starts at the correct frequency rather than briefly running at whatever DIV value the block previously held (which would cause a transient PLL-relock chirp on connected DACs). Matches the `REQ_SET_MCK_ENABLE` vendor command order.
 - **SPDIF RX is suspended across `process_type_switches()`:** its decode-timeout alarms (timer IRQ) could fire mid-transition and access PIO/DMA state being mutated. The function snapshots RX state at entry, calls `spdif_input_stop()` if it was running, and restarts it after `complete_pipeline_reset()` finishes — guarded by `active_input_source == INPUT_SOURCE_SPDIF && !input_source_change_pending` so a deferred input-source switch isn't pre-empted. Callers that have already stopped RX (e.g. `preset_load_pending` across the flash blackout) see no double-stop because `state == INACTIVE` triggers the no-op path; those callers are responsible for their own restart, which `preset_load_pending` now does once at the end of its block rather than before `process_type_switches`.
@@ -5102,8 +5114,8 @@ sweeps are bit-identical (needed for coherent averaging in room correction).
 calls `siggen_pump()` (`audio_pipeline.c`), feeding zero-input blocks through the
 full pipeline paced by the slot-0 consumer fill level (top-up to half full). It
 stands down while a source streams, an input-source change or output-type switch is
-pending, or the producer pool is unallocated, so a real stream seamlessly takes
-over pacing.
+pending, or before `usb_sound_card_init()` has set up the slots, so a real stream
+seamlessly takes over pacing.
 
 **Lifecycle.** Transient only: off at boot, never persisted; `siggen_stop_immediate
 (SIGGEN_STOP_PRESET)` hard-stops it on preset load and factory reset. `main.c`

@@ -1,7 +1,7 @@
 # Silent State Changes
 
-*Last updated: 2026-07-19 (live fade completion is observed; stopped producers retain a 130 ms drain floor)*
-*Status: implemented; hardware verification pending (see section 9)*
+*Last updated: 2026-10-12 (sections 3, 5 and 7 describe the output rings; Pillar B proposal-only status made explicit in sections 5 to 7)*
+*Status: Pillar A implemented, hardware verification pending (see section 9). Pillar B (section 5) is not implemented.*
 
 ## 1. Purpose
 
@@ -49,13 +49,12 @@ hardware reconfiguration was needed at all.
 Two independent mechanisms, both built on machinery that already existed:
 
 **Pillar A, selective flash IRQ blackout.** During flash erase/program, mask
-interrupts at the NVIC instead of via PRIMASK, keeping only the audio output
-DMA IRQ lines enabled. The output DMA handlers are fully RAM-resident, so
-they keep re-arming through the window. The consumer pools starve within
-about 16 ms and the handlers fall back to the existing per-instance silence
-buffers, which carry correct IEC 60958 preambles and channel status. Every
-slot keeps clocking real, correctly framed silence; nothing is ever aborted;
-receivers never unlock.
+interrupts at the NVIC instead of via PRIMASK, keeping only the output-ring
+stall alarm enabled. The output DMA free-runs with no interrupt, so every slot
+keeps clocking through the window. The RAM-resident alarm stamps silence with
+correct IEC 60958 preambles and channel status ahead of every slot reader.
+Every slot keeps clocking real, correctly framed silence. Nothing is ever
+aborted, and receivers never unlock.
 
 **Pillar B, no-teardown completions.** Operations whose output topology is
 unchanged (no PIO program, clkdiv, or pin change) no longer call
@@ -202,9 +201,12 @@ general; section 9 includes a bench check for this.
 ## 5. Pillar B: no-teardown silent operations
 
 > **Not implemented (status 2026-10-11).** Nothing in this section exists in
-> the firmware: there is no `prepare_silent_operation()`,
-> `complete_silent_operation()`, `usb_silent_fill_recovery()` or
-> `UNMUTE_MIN_FILL`. Every flash write still completes through
+> the firmware. There is no `prepare_silent_operation()`,
+> `complete_silent_operation()`, `usb_silent_fill_recovery()`,
+> `pipeline_prime_muted_silence()`, `UNMUTE_MIN_FILL`,
+> `UNMUTE_FILL_TIMEOUT_US`, `USB_SILENT_POST_PRIME_MUTE_MS` or
+> `PRESET_LOAD_FADE_UP_DELAY_MS`, no fill-gated fade-in (5.3) and no servo trim
+> hold (5.4). Every flash write still completes through
 > `complete_flash_write_operation_full()` and a synchronized restart. The output
 > rings make this design achievable: ring content and the stall bracket keep the
 > wire clean without a teardown, and the underrun skip keeps the slots aligned.
@@ -246,7 +248,7 @@ changes output topology.
 
 The signal generator counts as a producer: whenever it is running and no
 input source is delivering blocks (any selected source, not just USB), its
-idle pump is what fills the pools.  The settle therefore includes a
+idle pump is what fills the slot rings.  The settle therefore includes a
 `siggen_pumping` case and calls `siggen_pump()` in its loop, so generator
 audio fades out on the wire like any other source; without this the
 envelope would never advance and unfaded old-state generator audio would
@@ -274,8 +276,8 @@ EQ work, and only then mutate DSP state.
 The shared completion for operations that kept every slot clocking. Per
 active source:
 
-- SPDIF input: `reset_usb_feedback_loop()` only. The pools must not be
-  drained; the lock-acquisition prefill block owns the refill and the DAC
+- SPDIF input: `reset_usb_feedback_loop()` only. The slot rings must not be
+  reset; the lock-acquisition prefill block owns the refill and the DAC
   mute release after re-lock.
 - USB input: `reset_usb_feedback_loop()` plus
   `release_hw_mute_if_outputs_live()`. Before either, deterministic muted
@@ -316,10 +318,10 @@ call sites changing.
 
 ### 5.3 Fill-gated fade-in
 
-After a flash window or a stream restart the consumer pools refill from
-empty while the outputs bridge on the silence fallback. If the envelope
-faded in against a near-empty pool, jitter would punch audible gaps into
-real audio. A gate alone is insufficient for a rate-matched USB source:
+After a flash window or a stream restart the slot rings refill from empty
+while the outputs play the framed silence kept ahead of each reader. If the
+envelope faded in against a near-empty ring, jitter would punch audible gaps
+into real audio. A gate alone is insufficient for a rate-matched USB source:
 steady-state production and consumption are both 1:1, and the feedback servo
 raises fill only slowly.
 
@@ -328,10 +330,10 @@ USB no-teardown completion therefore calls `usb_silent_fill_recovery()` while
 mute floor by two producer blocks plus at least
 `USB_SILENT_POST_PRIME_MUTE_MS` (12 ms), then calls
 `pipeline_prime_muted_silence()` for at most two 192-sample zero-input blocks,
-stopping early when slot 0 reaches `UNMUTE_MIN_FILL`. Each producer block
-creates four 48-sample consumer buffers per slot, so two blocks can raise an
-empty pool to 8 of 16. The prime uses `process_input_block()` rather than
-writing any individual pool; every SPDIF/I2S slot, PDM, delay index, envelope,
+stopping early when slot 0 reaches `UNMUTE_MIN_FILL`. Each 192-frame block
+adds four 48-frame fill buckets to every slot ring, so two blocks can raise an
+empty ring to 8 of 16. The prime uses `process_input_block()` rather than
+writing any individual ring; every SPDIF/I2S slot, PDM, delay index, envelope,
 and recursive DSP state advances by the same number of samples. Exact
 inter-output alignment is therefore preserved.
 
@@ -347,7 +349,7 @@ The original main-loop gate remains as a bounded fallback. It holds
 
 - `preset_loading` is set, and
 - the active source is USB with `sync_started`, and
-- slot 0's consumer fill is below `UNMUTE_MIN_FILL` (6 of 16 buffers),
+- slot 0's ring fill is below `UNMUTE_MIN_FILL` (6 of 16 48-frame buckets),
 
 bounded per low-fill episode by `UNMUTE_FILL_TIMEOUT_US` (500 ms) so a
 struggling stream can never leave the device muted. The gate is a floor
@@ -360,11 +362,15 @@ idle pump is the producer it tops fill to 50% itself and passes the gate.
 
 `input_servo_apply()` holds its fill-trim (Loop B) at the last value while
 `preset_loading` is true, instead of integrating against a starved or
-refilling pool; the rate loop and every divider write continue unchanged,
+refilling ring; the rate loop and every divider write continue unchanged,
 using the frozen trim, so SPDIF/I2S/MCK/ADAT dividers stay mutually
 consistent. `input_servo_reset()` clears the held trim.
 
 ## 6. Per-operation behavior
+
+The "Now" column describes Pillar A as built and Pillar B as proposed. Until
+Pillar B exists, preset saves, loads, factory reset, bulk SET and stream
+resyncs still end in a full pipeline completion and a synchronized restart.
 
 | Operation | Before | Now |
 |---|---|---|
@@ -385,21 +391,22 @@ coreaudiod alt-setting toggles (host IO overload recoveries).
 The inviolable constraint is sample-level alignment across the SPDIF
 instances, I2S slots, and PDM.
 
-- Pillar A never stops or aborts anything. Each output DMA delivers exactly
-  48 samples per period (audio or silence) at the shared, phase-locked PIO
-  rate; PDM's ring DMA free-runs with only its content rewritten. Alignment
+- Pillar A never stops or aborts anything. Every slot's DMA free-runs
+  through its ring at the shared, phase-locked PIO rate, and only the ring
+  content (audio, or the alarm's framed silence) changes. PDM's ring DMA
+  free-runs the same way. Alignment
   during and after a flash window is therefore identical to steady-state
   streaming.
-- Pillar B removes teardown/restart cycles; it adds no operation that
+- Pillar B (proposed, not built) would remove teardown/restart cycles; it adds no operation that
   touches PIO state, DMA state, clkdivs, or per-slot timing. Muted fill
   recovery runs the ordinary shared block path, advancing every slot, PDM,
   delay index, and DSP state by the same sample count; it never injects into
-  an individual output pool. The paths that do touch output hardware
+  an individual output ring. The paths that do touch output hardware
   (type/pin/rate/clock-mode) still use the synchronized teardown/restart
   machinery unchanged.
-- The servo hold (5.4) keeps the single divider trim applied uniformly to
-  all output types, unchanged from the existing invariant that I2S divider
-  = 2x SPDIF divider exactly.
+- The servo hold (5.4) is proposed only. Under the soft VCXO no output
+  divider is trimmed at all; input tracking moves `sys_clk`, which moves every
+  output type together.
 
 ## 8. Deferred scope
 
@@ -441,8 +448,8 @@ All of this is bench work; the implementation is static-checked only
 
 ## 10. Cost
 
-- RAM: no new audio buffers; muted recovery reuses `input_bufs` and the
-  existing producer/consumer pools. `process_input_block()` remains a single
+- RAM: no new audio buffers. Muted recovery reuses `input_bufs`, the slot
+  staging buffers and the slot rings. `process_input_block()` remains a single
   RAM-resident body via `noclone`. Standard-build `.data` is 57,184 bytes on
   RP2040 (61,440-byte budget) and 70,600 bytes on RP2350 (73,728-byte budget).
 - Flash/code: the recovery and synchronous DSP-state helpers plus comments;

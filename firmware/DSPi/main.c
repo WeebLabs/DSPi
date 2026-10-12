@@ -87,15 +87,12 @@ volatile uint32_t pdm_ring_overruns = 0;   // Core 0 couldn't push (ring full)
 volatile uint32_t pdm_ring_underruns = 0;  // Core 1 needed sample but ring empty
 volatile uint32_t pdm_dma_overruns = 0;    // Core 1 write caught up to DMA read
 volatile uint32_t pdm_dma_underruns = 0;   // Core 1 write fell behind DMA read
-volatile uint32_t spdif_overruns = 0;      // USB callback couldn't get buffer (pool full)
 volatile uint32_t spdif_underruns = 0;     // USB packet gap > 2ms (consumer likely starved)
 volatile uint32_t usb_audio_packets = 0;   // Debug: count of USB audio packets received
 volatile uint32_t usb_audio_alt_set = 0;   // Debug: last alt setting selected
 volatile uint32_t usb_audio_mounted = 0;   // Debug: audio mounted state
 static volatile uint8_t clock_176mhz = 0;
 
-#include "pico/audio.h"
-extern struct audio_format audio_format_48k;
 extern MatrixMixer matrix_mixer;
 
 // Volume Leveller globals (defined in usb_audio.c)
@@ -164,7 +161,7 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
 
     // Engage mute and wait for Core 1 EQ worker to drain before touching
     // filter coefficients or PIO dividers. Without this bracket, old-rate
-    // consumer-pool buffers would play at the new PIO bit-clock for ~16ms
+    // audio still in the slot rings would play at the new PIO bit-clock
     // (audible pitch shift + resync click).
     prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
 
@@ -178,8 +175,8 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
         i2s_input_stop();
     }
 
-    // Update the audio format so pico_audio_spdif can update the PIO divider
-    audio_format_48k.sample_freq = new_freq;
+    // Slots set up from here on (type switches) start at the new rate.
+    output_rate_hz = new_freq;
 
     // Keep the global rate coherent for device-initiated changes (SPDIF
     // lock, I2S rate select). The USB host path already wrote it; for the
@@ -228,8 +225,8 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     adat_input_on_rate_change(new_freq);
 #endif
 
-    // Atomically update all I2S instances and restart in sync (avoids brief
-    // master/slave divider mismatch from lazy per-instance callbacks)
+    // Atomically update all I2S instances and restart in sync, so master and
+    // slave SMs never run at different dividers.
     audio_i2s_update_all_frequencies(new_freq);
 
     // S/PDIF slot dividers and MCK at the new rate. complete_pipeline_reset()
@@ -318,11 +315,11 @@ static void drain_and_disable_outputs(void);
 static void enable_outputs_in_sync(void);
 static uint32_t samples_for_duration_ms(uint32_t sample_rate_hz, uint32_t duration_ms);
 
-// SPDIF input prefill: outputs disabled while consumer buffers fill to 50%
+// SPDIF input prefill: outputs disabled while the slot rings fill to 50%
 static bool spdif_prefilling = false;
 
-// I2S input prefill: same handshake as SPDIF (drain outputs, fill consumer
-// pools to 50%, then enable in sync) but with no lock wait, since the I2S
+// I2S input prefill: same handshake as SPDIF (drain outputs, fill the slot
+// rings to 50%, then enable in sync) but with no lock wait, since the I2S
 // input is synchronous to our own clock domain and runs as soon as started.
 // Cleared by prepare_pipeline_reset() so every disruptive op restarts the
 // handshake cleanly. Driven by the main-loop I2S block.
@@ -423,7 +420,6 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
     extern audio_i2s_instance_t *i2s_instance_ptrs[];
     extern uint8_t output_pins[];
-    extern struct audio_buffer_pool *producer_pools[];
     extern bool i2s_mck_enabled;
     extern uint16_t i2s_mck_multiplier;
 
@@ -692,9 +688,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                     .external_clock = want_extclk,
                     .ring_base = slot_ring_store[i],
                 };
-                audio_i2s_setup(i2s_instance_ptrs[i], &audio_format_48k, &i2s_cfg);
-                audio_i2s_connect_extra(i2s_instance_ptrs[i], producer_pools[i],
-                                        false, NULL, NULL);
+                audio_i2s_setup(i2s_instance_ptrs[i], output_rate_hz, &i2s_cfg);
                 if (had_i2s) {
                     printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
                 }
@@ -714,9 +708,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                 .pio = PICO_AUDIO_SPDIF_PIO,
                 .ring_base = slot_ring_store[i],
             };
-            audio_spdif_setup(spdif_inst, &audio_format_48k, &spdif_cfg);
-            audio_spdif_connect_extra(spdif_inst, producer_pools[i], false,
-                                      NULL, NULL);
+            audio_spdif_setup(spdif_inst, output_rate_hz, &spdif_cfg);
             if (had_i2s) memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
         } else {
             // SPDIF stays SPDIF: claim a moved pin (the old one was released above).
@@ -968,7 +960,7 @@ static void pipeline_fade_reset(void) {
 
 // True while something is actually feeding process_input_block(); mirrors the
 // producer set the main loop services (and the generator's idle pump, which
-// is what fills the pools when no source is streaming).  Public: the CS
+// is what fills the rings when no source is streaming).  Public: the CS
 // INPUT_LEVEL_MAX noun gates on it (peaks[] freezes when blocks stop).
 bool pipeline_producer_is_streaming(void) {
     extern volatile bool sync_started;
@@ -1298,9 +1290,9 @@ static void i2s_slave_gate_on_lrclk(void) {
 //
 // Caller must hold interrupts disabled across this call: the DMAs primed
 // by the prepare calls sit stalled against their stopped SMs (the 8-word
-// PIO TX FIFO absorbs the head of the transfer), and a stale DMA IRQ or
-// SOF firing between prime and start could complete an extra transfer for
-// one type before the clocks run, producing a 1-frame inter-type skew.
+// PIO TX FIFO absorbs the head of the transfer). No ISR that reads or
+// writes ring state (SOF consumed read, stall alarm) may run between prime
+// and start, or one type can start a frame off the other.
 static void start_output_slots_in_sync(audio_spdif_instance_t *spdif_sync[], uint spdif_count,
                                        audio_i2s_instance_t *i2s_sync[], uint i2s_count) {
     uint32_t mask = 0;
@@ -1645,7 +1637,7 @@ static void resume_i2s_after_flash(void) {
 // metadata-only "light" path once resumed halted clocks mid-frame and left
 // BCK-PLL DACs (PCM5102 with SCK grounded) persistently mis-locked in the
 // field.  The clocks no longer halt (selective blackout), but this unified
-// completion is still what refills the drained pools from a deterministic
+// completion is still what refills the drained rings from a deterministic
 // synchronized state and is the shared owner of the feedback reset and the
 // DAC mute release; dropping the restart for topology-unchanged writes is
 // the separate no-teardown-completions work.  Full history and rationale:
@@ -2138,7 +2130,7 @@ int main(void) {
             // Clock-slave mode: SPDIF-style lock-gated flow.  The external
             // master owns BCK/LRCLK, so outputs stay muted/drained until the
             // measured external rate locks; the input keeps producing during
-            // the prefill (its clocks never stop), so the pools fill with
+            // the prefill (its clocks never stop), so the rings fill with
             // real audio like the SPDIF path.
             i2s_slave_poll();
             I2sSlaveState sl_state = i2s_slave_get_state();
@@ -2196,7 +2188,7 @@ int main(void) {
             // rate, and producing would also drain the soft-mute counter
             // before the prefill drain runs.  The RX DMA ring free-runs and
             // self-wraps meanwhile; the prefill starts from freshly drained
-            // pools, so nothing stale is played.
+            // rings, so nothing stale is played.
             if (sl_state == I2S_SLAVE_LOCKED) {
                 i2s_input_poll();
             }
@@ -2232,7 +2224,7 @@ int main(void) {
                 // Slave role: the drain above stopped the I2S output clock
                 // master that supplies the input's BCK/LRCLK, so the input
                 // produces no samples and i2s_input_poll() cannot fill the
-                // pools. Synthesize a silent block instead; real audio resumes
+                // rings. Synthesize a silent block instead; real audio resumes
                 // after enable_outputs_in_sync() restarts the clock master and
                 // re-phases the input ring (i2s_input_resync). Master role
                 // self-clocks and fills with real audio via the poll below.
@@ -2882,11 +2874,10 @@ int main(void) {
                 if (!apply_restored_outputs(old_types)) {
                     if (input_source_is_spdif(active_input_source)) {
                         // SPDIF input: don't drain/re-enable the output pipeline.
-                        // The pool holds muted samples queued by the preset-mute
-                        // window; draining them would force outputs to restart
-                        // against empty pools and produce pops/uneven fill.  Let
-                        // DMA resume chaining after the flash blackout and play
-                        // out silence until the mute envelope fades back in.
+                        // The rings hold muted samples queued by the preset-mute
+                        // window; draining them would restart the outputs against
+                        // empty rings and produce pops or uneven fill. The rings
+                        // play on and stay silent until the mute envelope fades in.
                         reset_usb_feedback_loop();
                     } else {
                         complete_pipeline_reset();

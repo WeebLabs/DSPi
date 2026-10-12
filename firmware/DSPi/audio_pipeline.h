@@ -9,8 +9,8 @@
 #ifndef AUDIO_PIPELINE_H
 #define AUDIO_PIPELINE_H
 
+#include "pico.h"
 #include "config.h"
-#include "pico/audio.h"
 
 // Generic DSP pipeline entry point — processes buf_l/buf_r through
 // loudness, EQ, leveller, crossfeed, matrix mixer, per-output

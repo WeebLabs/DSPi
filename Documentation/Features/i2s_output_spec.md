@@ -4,7 +4,7 @@
 
 The DSPi firmware supports per-slot I2S output alongside S/PDIF. Each output slot (0–1 on RP2040, 0–3 on RP2350) can be individually switched between S/PDIF and I2S mode at runtime. I2S slots share a common BCK/LRCLK clock pair and can optionally generate a master clock (MCK). All output slots run on the same PIO block (PIO0) and can be synchronized to start sample-aligned.
 
-The DSP pipeline is identical for both output types. Only the final consumer buffer encoding differs — S/PDIF uses BMC/NRZI encoding (16 bytes per stereo sample) while I2S uses left-justified raw PCM (8 bytes per stereo sample). From the host application's perspective, the audio processing chain is unchanged; only the physical output format and its pin configuration are different.
+The DSP pipeline is identical for both output types. Only the final encoding into the slot's output ring differs. S/PDIF stores 16 bytes per stereo frame (words for the PIO biphase-mark encoder, or software NRZI words in the I2S external-clock configuration) while I2S stores left-justified raw PCM (8 bytes per stereo frame). From the host application's perspective, the audio processing chain is unchanged; only the physical output format and its pin configuration are different.
 
 ## Concepts
 
@@ -23,7 +23,7 @@ Each slot corresponds to a stereo pair of audio outputs:
 
 ### Output Type
 
-Each slot is either S/PDIF (`OUTPUT_TYPE_SPDIF = 0`) or I2S (`OUTPUT_TYPE_I2S = 1`). The type determines which PIO program the slot's state machine runs and how audio samples are encoded into the consumer buffer.
+Each slot is either S/PDIF (`OUTPUT_TYPE_SPDIF = 0`) or I2S (`OUTPUT_TYPE_I2S = 1`). The type determines which PIO program the slot's state machine runs and how audio samples are encoded into the slot's output ring.
 
 **All slots default to S/PDIF at boot.** The preset system may restore a different configuration if the active preset was saved with I2S slots.
 
@@ -178,8 +178,8 @@ Switch an output slot between S/PDIF and I2S mode.
 1. Validates slot index and type value
 2. If the slot is already the requested type, returns success immediately (no-op)
 3. Audio is muted for ~5 ms (256 samples at 48 kHz) to prevent clicks
-4. For SPDIF-to-I2S: disables SPDIF instance, sets up I2S instance with same SM/DMA/pin, connects producer pool, enables I2S
-5. For I2S-to-SPDIF: tears down I2S instance, re-sets up SPDIF instance, connects, enables
+4. For SPDIF-to-I2S: tears down the S/PDIF instance, sets up the I2S instance on the same SM, DMA channel, pin and ring storage, then restarts all outputs in sync
+5. For I2S-to-SPDIF: tears down the I2S instance, sets up the S/PDIF instance on the same resources, then restarts all outputs in sync
 6. Updates the stored output type
 
 **Notes:**
@@ -541,4 +541,4 @@ All pins are assignable. The diagram above shows default assignments.
 | RP2040 | ~127 KB | ~127 KB | +292 bytes |
 | RP2350 | ~205 KB | ~206 KB | +528 bytes |
 
-The I2S library adds I2S instance structs, MCK state, and PIO program offset caches. Consumer pool buffers are only allocated when a slot is switched to I2S.
+The I2S library adds I2S instance structs, MCK state, and PIO program offset caches. Ring storage is a fixed per-slot store shared by the slot's S/PDIF and I2S instances, so switching a slot to I2S allocates nothing.

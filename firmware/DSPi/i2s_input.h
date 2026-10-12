@@ -57,8 +57,8 @@ void i2s_input_resync(void);
 // Returns number of stereo frames processed.
 uint32_t i2s_input_poll(void);
 
-// Push one silent block through the pipeline to prefill the output consumer
-// pools. Used only during a slave-role prefill, where the input is clocked by
+// Push one silent block through the pipeline to prefill the output slot
+// rings. Used only during a slave-role prefill, where the input is clocked by
 // an I2S output and so cannot supply samples while the outputs are drained.
 void i2s_input_prefill_silence(uint32_t frames);
 

@@ -268,7 +268,7 @@ The rookie's lookup table. Find your topic, jump to the code.
 flowchart TD
     A["main() :1231\nLED, set clock"] --> B["core0_init() :1023"]
     B --> C["Clock 307.2 MHz + RP2350 flash clkdiv"]
-    C --> D["usb_sound_card_init()\n(pools, SPDIF/I2S instances, tud_init)"]
+    C --> D["usb_sound_card_init()\n(SPDIF/I2S instances, tud_init)"]
     D --> E["preset_boot_load()\n(load slot or factory defaults)"]
     E --> F["dac_hw_mute_init()"]
     F --> G["Recalc all DSP filters @ 48k + delays"]
@@ -423,10 +423,11 @@ Outputs are abstracted as **slots**. Each slot can be a SPDIF or I2S instance; t
 | Array | Location | Meaning |
 |---|---|---|
 | `output_types[]` | `usb_audio.c:1420` | Per-slot type: SPDIF (0) or I2S (1) |
-| `spdif_instance_ptrs[]` | `usb_audio.c:1413` | Active SPDIF instance per slot (NULL if I2S) |
+| `spdif_instance_ptrs[]` | `usb_audio.c:1583` | S/PDIF instance per slot; set once at boot and never cleared, so `output_types[]` decides which instance is live |
 | `i2s_instance_ptrs[]` | `usb_audio.c:1431` | Active I2S instance per slot (NULL if SPDIF) |
-| `producer_pools[]` | `usb_audio.c:1432` | Producer pool per slot (fixed across type) |
-| `slot_consumer_pools[]` | `usb_audio.c:1445` | Static consumer pool per slot (sized for SPDIF, reused) |
+| `slot_ring_store[]` | `usb_audio.c:1607` | Encoded output ring storage per slot (sized for SPDIF, shared by both types) |
+| `output_rate_hz` | `usb_audio.c:475` | Rate every slot SM is set up at. Written only by `perform_rate_change()` |
+| `slot_stage[]` | `audio_pipeline.c:75` | One block of interleaved S24 per slot, copied into the slot ring when admitted |
 
 **Type switch** (deferred, runs in `process_type_switches()` `main.c:229`):
 
@@ -435,8 +436,7 @@ flowchart LR
     A[disable + mute] --> B[quiesce all slots\nabort DMA, drain]
     B --> C[teardown outgoing type]
     C --> D[setup incoming type\naudio_spdif/i2s_setup]
-    D --> E[reconnect pools]
-    E --> F[complete_pipeline_reset\nsynchronized restart]
+    D --> F[complete_pipeline_reset\nsynchronized restart]
 ```
 
 **DAC hardware mute** (`dac_hw_mute.c`) drives an optional GPIO to mute the DAC during pipeline resets, asynchronously (non-blocking). Key calls: `dac_hw_mute_assert()` `:318`, `dac_hw_mute_release()` `:340`, `dac_hw_mute_hold_elapsed()` `:358`, `dac_hw_mute_tick()` `:393`.
@@ -512,11 +512,11 @@ Master volume and physical I/O can be stored **per-preset** or **independently**
 
 ### 6.11 Pico Audio Libraries
 
-Instance-based PIO+DMA drivers under `firmware/pico-extras/src/rp2_common/`. All three share the "register instances, shared IRQ handler, synchronized start" pattern.
+Instance-based PIO+DMA drivers under `firmware/pico-extras/src/rp2_common/`. The two output libraries register instances, drain a caller-owned ring per slot with free-running DMA and no DMA interrupts, and share one synchronized start.
 
-**`pico_audio_spdif_multi`** (`audio_spdif.c/.h`) — up to 4 SPDIF TX instances, each a PIO SM + DMA + pin, BMC/IEC 60958 encoded 24-bit. Key API: `audio_spdif_setup()` (`audio_spdif.c:140`), `audio_spdif_connect_extra()`, `audio_spdif_set_enabled()`, `audio_spdif_change_pin()`, `audio_spdif_enable_sync()` (synchronized multi-instance start — the mechanism that keeps slots aligned). Instance struct: `audio_spdif_instance_t` (`audio_spdif.h:97`).
+**`pico_audio_spdif_multi`** (`audio_spdif.c/.h`): up to 4 SPDIF TX instances, each a PIO SM + DMA ring + pin, BMC/IEC 60958 encoded 24-bit (PIO biphase-mark encoder, or software NRZI words in the I2S external-clock configuration). Key API: `audio_spdif_setup()` (`audio_spdif.c:502`), `audio_spdif_ring_write_s32()`, `audio_spdif_ring_skip()`, `audio_spdif_set_enabled()`, `audio_spdif_change_pin()`, `audio_spdif_teardown()`, `audio_spdif_apply_pio_frequency()`, `audio_spdif_enable_sync_prepare()` (prepare half of the synchronized multi-instance start, the mechanism that keeps slots aligned). Instance struct: `audio_spdif_instance_t` (`audio_spdif.h:59`).
 
-**`pico_audio_i2s_multi`** (`audio_i2s_multi.c/.h`) — up to 4 I2S TX instances sharing BCK/LRCLK via PIO side-set (one master SM), plus optional hardware MCK via CLK_GPOUTn. Key API: `audio_i2s_setup()`, `audio_i2s_connect_extra()`, `audio_i2s_teardown()`, `audio_i2s_enable_sync()`, `audio_i2s_update_all_frequencies()`, and the `audio_i2s_mck_*` family (enable/pin/multiplier/divider/apply_state). Instance struct: `audio_i2s_instance_t`.
+**`pico_audio_i2s_multi`** (`audio_i2s_multi.c/.h`): up to 4 I2S TX instances sharing BCK/LRCLK via PIO side-set (one master SM), plus optional hardware MCK via CLK_GPOUTn. Key API: `audio_i2s_setup()`, `audio_i2s_ring_write_s32()`, `audio_i2s_teardown()`, `audio_i2s_enable_sync()`, `audio_i2s_update_all_frequencies()`, and the `audio_i2s_mck_*` family (enable/pin/multiplier/divider/apply_state). Instance struct: `audio_i2s_instance_t`.
 
 **`pico_spdif_rx`** (`spdif_rx.c`, `spdif_rx.h`) — SPDIF receiver: PIO BMC decode, auto Fs detection (44.1-192 kHz), channel-status (C bits), parity. Key API: `spdif_rx_start/end`, `spdif_rx_set_callback_on_stable/_on_lost_stable`, `spdif_rx_get_state`, `spdif_rx_get_samp_freq_actual`, `spdif_rx_get_c_bits`, `spdif_rx_get_fifo_count`, `spdif_rx_read_fifo`.
 
@@ -757,7 +757,7 @@ This lives in the main loop's EQ-update block (`main.c` ~1463-1541).
 - **TDF2** — Transposed Direct Form II biquad; the standard filter form, used everywhere on RP2040 and for mid/high bands on RP2350.
 - **PASS 1/2/2.5/3...** — the ordered stages of `process_input_block`. See [4.2](#42-the-dsp-pipeline-passes).
 - **Slot** — an output position that can host a SPDIF or I2S instance.
-- **Producer/consumer pool** — the Pico audio buffer pattern: the pipeline fills producer buffers, the DMA drains consumer buffers.
+- **Slot ring**: a slot's 1024-frame encoded output ring. The pipeline writes each admitted block into it, and free-running DMA drains it into the slot's PIO SM.
 - **Core1EqWork** — the shared struct + flags by which Core 0 hands a block of output work to Core 1.
 - **Feedback (10.14)** — the async USB endpoint value telling the host how fast to send audio; computed by `usb_feedback_controller.c`.
 - **BMC / IEC 60958** — the SPDIF line code and frame format produced by the SPDIF TX library.

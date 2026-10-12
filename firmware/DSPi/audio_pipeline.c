@@ -29,7 +29,6 @@
 #include "adat_output.h"
 #include "output_s24.h"
 #include "loopback.h"   // DSPI_LOOPBACK slot-0 capture tap (self-guarded; empty otherwise)
-#include "pico/audio.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "hardware/timer.h"
@@ -37,10 +36,12 @@
 #include "hardware/sync.h"
 #include "hardware/dma.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Defined with the buffer statistics helpers below.
 static bool output_rings_pre_give(uint32_t frames);
+static void output_rings_write_block(uint32_t frames);
 
 // spdif0_consumer_fill is defined in usb_audio.c and read by main.c
 extern volatile uint8_t spdif0_consumer_fill;
@@ -68,6 +69,10 @@ float buf_out[NUM_OUTPUT_CHANNELS][192];
 #else
 int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 #endif
+
+// Per-slot staging: one block of interleaved S24 frames per slot, written by
+// both cores, copied into the slot ring only when the block is admitted.
+static int32_t slot_stage[NUM_SPDIF_INSTANCES][AUDIO_BUFFER_SAMPLES * 2];
 
 // Shared input buffers — file scope for pipeline access.  `input_bufs[]` lets
 // the per-input EQ + metering and the matrix address any input channel
@@ -285,23 +290,10 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // after work_ready, and rta_packet_end() reads it back after work_done.
     rta_packet_begin(sample_count);
 
-    // Get audio buffers for S/PDIF outputs
-#if PICO_RP2350
-    struct audio_buffer* audio_buf[4] = {NULL, NULL, NULL, NULL};
-    if (producer_pool_1) audio_buf[0] = take_audio_buffer(producer_pool_1, false);
-    if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
-    if (producer_pool_3) audio_buf[2] = take_audio_buffer(producer_pool_3, false);
-    if (producer_pool_4) audio_buf[3] = take_audio_buffer(producer_pool_4, false);
-#else
-    struct audio_buffer* audio_buf[2] = {NULL, NULL};
-    if (producer_pool_1) audio_buf[0] = take_audio_buffer(producer_pool_1, false);
-    if (producer_pool_2) audio_buf[1] = take_audio_buffer(producer_pool_2, false);
-#endif
-
     update_slot0_fill_fast();
 
-    // Pre-give gate, hoisted ABOVE every output side effect (PDM pushes
-    // mid-function, slot gives and the ADAT push at the end): a rejected
+    // Admission gate, hoisted ABOVE every output side effect (PDM pushes
+    // mid-function, slot ring writes and the ADAT push at the end): a rejected
     // block must vanish from EVERY output together, PDM included, or the
     // outputs acquire a permanent content offset. Space only grows between
     // here and the writes, so early admission stays valid.
@@ -316,14 +308,6 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
     uint32_t sample_rate_hz = audio_state.freq;
     float preset_mute_gain = update_preset_mute_envelope(sample_count, sample_rate_hz);
-
-    for (int b = 0; b < NUM_SPDIF_INSTANCES; b++) {
-        if (audio_buf[b]) {
-            audio_buf[b]->sample_count = sample_count;
-        } else if (!preset_loading && (matrix_mixer.outputs[b*2].enabled || matrix_mixer.outputs[b*2+1].enabled)) {
-            spdif_overruns++;
-        }
-    }
 
 #if PICO_RP2350
     // ------------------------------------------------------------------------
@@ -582,9 +566,9 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.subharm_mask = sh_mask;
         core1_eq_work.subharm_flags = sh_flags;
         core1_eq_work.subharm_phase = sh_phase;
-        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
-        core1_eq_work.spdif_out[1] = audio_buf[2] ? (int32_t *)audio_buf[2]->buffer->bytes : NULL;
-        core1_eq_work.spdif_out[2] = audio_buf[3] ? (int32_t *)audio_buf[3]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[0] = slot_stage[1];
+        core1_eq_work.spdif_out[1] = slot_stage[2];
+        core1_eq_work.spdif_out[2] = slot_stage[3];
         core1_eq_work.work_done = false;
         __dmb();
         core1_eq_work.work_ready = true;
@@ -722,24 +706,19 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         global_status.peaks[CH_OUT_SUB] = 0;
 
         // Core 0: finalize outputs 0-1 (see output_s24.h).  ADAT active:
-        // convert to S24 in place, even with no slot buffer, so ADAT always
-        // sees converted samples; otherwise fuse convert+interleave and skip
-        // the staging pass.  Then S/PDIF pair 0.
+        // convert to S24 in place first, so ADAT always sees converted
+        // samples; otherwise fuse convert+interleave and skip the in-place
+        // pass.  Then S/PDIF pair 0.
         if (finalize_s24) {
             output_block_to_s24_inplace(buf_out[0], sample_count);
             output_block_to_s24_inplace(buf_out[1], sample_count);
         }
-        if (audio_buf[0]) {
-            int left_ch = 0, right_ch = 1;
-            if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 8);
-            } else {
-                int32_t *out_ptr = (int32_t *)audio_buf[0]->buffer->bytes;
-                if (finalize_s24)
-                    output_pair_interleave_s24(out_ptr, buf_out[0], buf_out[1], sample_count);
-                else
-                    output_pair_convert_interleave(out_ptr, buf_out[0], buf_out[1], sample_count);
-            }
+        if (!matrix_mixer.outputs[0].enabled && !matrix_mixer.outputs[1].enabled) {
+            memset(slot_stage[0], 0, sample_count * 8);
+        } else if (finalize_s24) {
+            output_pair_interleave_s24(slot_stage[0], buf_out[0], buf_out[1], sample_count);
+        } else {
+            output_pair_convert_interleave(slot_stage[0], buf_out[0], buf_out[1], sample_count);
         }
 
         // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-7)
@@ -866,22 +845,20 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         }
 
         // Finalize outputs 0-7 (see output_s24.h).  ADAT active: convert to
-        // S24 in place, even with no slot buffer, so ADAT always sees
-        // converted samples; otherwise fuse convert+interleave per pair and
-        // skip the staging pass.
+        // S24 in place first, so ADAT always sees converted samples; otherwise
+        // fuse convert+interleave per pair and skip the in-place pass.
         if (finalize_s24) {
             for (int out = 0; out < NUM_SPDIF_INSTANCES * 2; out++)
                 output_block_to_s24_inplace(buf_out[out], sample_count);
         }
         for (int pair = 0; pair < 4; pair++) {
-            if (!audio_buf[pair]) continue;
             int left_ch = pair * 2;
             int right_ch = pair * 2 + 1;
             if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 8);
+                memset(slot_stage[pair], 0, sample_count * 8);
                 continue;
             }
-            int32_t *out_ptr = (int32_t *)audio_buf[pair]->buffer->bytes;
+            int32_t *out_ptr = slot_stage[pair];
             if (finalize_s24)
                 output_pair_interleave_s24(out_ptr, buf_out[left_ch], buf_out[right_ch], sample_count);
             else
@@ -1064,7 +1041,7 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.subharm_mask = sh_mask;
         core1_eq_work.subharm_flags = sh_flags;
         core1_eq_work.subharm_phase = sh_phase;
-        core1_eq_work.spdif_out[0] = audio_buf[1] ? (int32_t *)audio_buf[1]->buffer->bytes : NULL;
+        core1_eq_work.spdif_out[0] = slot_stage[1];
         core1_eq_work.work_done = false;
         __dmb();
         core1_eq_work.work_ready = true;
@@ -1195,11 +1172,11 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
         global_status.peaks[CH_OUT_SUB] = 0;
 
         // Core 0: S/PDIF conversion for pair 1
-        if (audio_buf[0]) {
+        {
             if (!matrix_mixer.outputs[0].enabled && !matrix_mixer.outputs[1].enabled) {
-                memset(audio_buf[0]->buffer->bytes, 0, sample_count * 8);
+                memset(slot_stage[0], 0, sample_count * 8);
             } else {
-                int32_t *out_ptr = (int32_t *)audio_buf[0]->buffer->bytes;
+                int32_t *out_ptr = slot_stage[0];
                 for (uint32_t i = 0; i < sample_count; i++) {
                     out_ptr[i*2]   = clip_s24((buf_out[0][i] + (1 << 5)) >> 6);
                     out_ptr[i*2+1] = clip_s24((buf_out[1][i] + (1 << 5)) >> 6);
@@ -1332,14 +1309,13 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
         // S/PDIF conversion (2 stereo pairs)
         for (int pair = 0; pair < NUM_SPDIF_INSTANCES; pair++) {
-            if (!audio_buf[pair]) continue;
             int left_ch = pair * 2;
             int right_ch = pair * 2 + 1;
             if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(audio_buf[pair]->buffer->bytes, 0, sample_count * 8);
+                memset(slot_stage[pair], 0, sample_count * 8);
                 continue;
             }
-            int32_t *out_ptr = (int32_t *)audio_buf[pair]->buffer->bytes;
+            int32_t *out_ptr = slot_stage[pair];
             for (uint32_t i = 0; i < sample_count; i++) {
                 out_ptr[i*2]   = clip_s24((buf_out[left_ch][i] + (1 << 5)) >> 6);
                 out_ptr[i*2+1] = clip_s24((buf_out[right_ch][i] + (1 << 5)) >> 6);
@@ -1377,41 +1353,23 @@ void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // 24-bit output into the capture ring.  By here slot 0 is fully written for
     // every pipeline variant, including the silence (memset) branch.  Gated on
     // admission like every output, so the capture holds exactly what slot 0 plays.
-    if (audio_buf[0] && rings_admit) {
-        loopback_push_slot0((const int32_t *)audio_buf[0]->buffer->bytes, sample_count);
+    if (rings_admit) {
+        loopback_push_slot0(slot_stage[0], sample_count);
     }
 #endif
 
     // rings_admit was decided at the top of this function, before the PDM
     // pushes; monotone space keeps it valid here.
+    if (rings_admit) output_rings_write_block(sample_count);
 
-    // Return all buffers
 #if PICO_RP2350
-    for (int b = 0; b < 4; b++) {
-        if (audio_buf[b]) {
-            struct audio_buffer_pool *pool = (b == 0) ? producer_pool_1 :
-                                              (b == 1) ? producer_pool_2 :
-                                              (b == 2) ? producer_pool_3 : producer_pool_4;
-            if (rings_admit) give_audio_buffer(pool, audio_buf[b]);
-            else queue_free_audio_buffer(pool, audio_buf[b]);
-        }
-    }
-
     // ADAT bulk output tap: in finalize_s24 mode buf_out[0..7] hold in-place
     // S24 for every pipeline variant here (see output_s24.h), and pushing
-    // AFTER the (blocking) gives keeps the ADAT ring lead bounded by the
-    // slot-0 consumer fill; see adat_output.c.  The snapshot gate keeps the
-    // push and the conversion mode consistent within the packet.
+    // AFTER the slot writes keeps the ADAT ring lead bounded by the slot-0
+    // fill; see adat_output.c.  The snapshot gate keeps the push and the
+    // conversion mode consistent within the packet.
     if (finalize_s24 && rings_admit)
         adat_output_push_block((const out_s24_t (*)[192])buf_out, sample_count);
-#else
-    if (rings_admit) {
-        if (audio_buf[0]) give_audio_buffer(producer_pool_1, audio_buf[0]);
-        if (audio_buf[1]) give_audio_buffer(producer_pool_2, audio_buf[1]);
-    } else {
-        if (audio_buf[0]) queue_free_audio_buffer(producer_pool_1, audio_buf[0]);
-        if (audio_buf[1]) queue_free_audio_buffer(producer_pool_2, audio_buf[1]);
-    }
 #endif
 
     rta_packet_end(sample_count);
@@ -1534,6 +1492,21 @@ static bool output_rings_pre_give(uint32_t frames) {
         }
     }
     return true;
+}
+
+// Copy one admitted block from staging into every set-up slot ring, enabled
+// or not (a ring may be prefilling before its synchronized start).
+DSP_TIME_CRITICAL
+static void output_rings_write_block(uint32_t frames) {
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->ring) audio_i2s_ring_write_s32(inst, slot_stage[i], frames);
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->ring) audio_spdif_ring_write_s32(inst, slot_stage[i], frames);
+        }
+    }
 }
 
 // Idle silence pump: with outputs enabled but no producer running (USB
@@ -1839,7 +1812,7 @@ void siggen_pump(void) {
 
     // Never pump while the pipeline is owned by someone else: an input
     // source actively delivering blocks, a pending source change, an output
-    // type switch mutating the pools, or a flash operation (preset mute).
+    // type switch rebuilding the slots, or a flash operation (preset mute).
     //
     // preset_loading needs care: it is only ever cleared by the block path
     // consuming preset_mute_counter (preset_mute_gain_step), which needs
@@ -1854,8 +1827,9 @@ void siggen_pump(void) {
     // doubles as the lock-acquisition / prefill handshake signal
     // (main-loop SPDIF/I2S blocks) and must not be consumed by the pump.
     if (preset_loading && active_input_source != INPUT_SOURCE_USB) return;
+    // No slot instance yet means usb_sound_card_init() has not run.
     if (input_source_change_pending ||
-        output_type_switch_in_progress || producer_pool_1 == NULL)
+        output_type_switch_in_progress || spdif_instance_ptrs[0] == NULL)
         return;
     bool streaming =
         (active_input_source == INPUT_SOURCE_USB && usb_audio_stream_active()) ||

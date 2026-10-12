@@ -36,6 +36,7 @@
 #include "hardware/pio.h"
 #include "hardware/dma.h"
 #include "hardware/clocks.h"
+#include "hardware/sync.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "usb_audio.h"

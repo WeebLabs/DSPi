@@ -2,6 +2,8 @@
 
 *Status: implemented 2026-10-11 as a hybrid (PIO encoder by default, software encoder only when the I2S external-clock program needs the block). Waveform equivalence proven in simulation (`tools/spdif_pio_bmc_sim.py`) and the assembled program checked against the simulated one. Not yet verified on hardware.*
 
+*Last updated: 2026-10-12*
+
 ## Summary
 
 Before this change each enabled S/PDIF output slot cost about 1.3% of core 0 at 307.2 MHz, almost all of it the software biphase-mark encoder in `audio_spdif_ring_write_s32()`: three table lookups plus parity per subframe, a modulo-192 phase per frame, and a block of silence restamped behind every block. The PIO now does that encoding. A 16-instruction program (`audio_spdif_bmc.pio`) fed with raw 24-bit samples produces a waveform identical, cycle for cycle, to the original 4-instruction NRZI program fed with software-encoded words: the same 256 PIO cycles per frame, the same four ring words per frame, the same DMA and consumed-word accounting, and the same two-cycle start lead-in. The CPU side is four stores and two masks per frame.
@@ -101,4 +103,4 @@ Cycle budget per subframe. The preamble is 6 + lead + 2 + trail = 16 cycles with
 ## Known limits
 
 - PIO0 has no spare instruction in the internal-clock I2S configuration, so any future PIO0 program needs this encoder off or the master-clock programs merged (slaves could run clkout with side-set on the clock pins, freeing 8).
-- The software encoder stays in the build for the external-clock configuration. The dead producer-give variants in `sample_encoding.cpp` were already unreferenced before this change and remain a cleanup candidate.
+- The software encoder (the `spdif_lookup` table and `spdif_update_subframe()` in `sample_encoding.h`) stays in the build for the external-clock configuration.

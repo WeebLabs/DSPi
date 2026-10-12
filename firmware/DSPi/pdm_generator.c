@@ -697,8 +697,8 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         // Finalize Core 1's outputs (see output_s24.h), using Core 0's
         // per-packet mode snapshot so both cores agree.  ADAT active:
-        // convert rows 2-7 to S24 in place, even with no slot buffer, so
-        // ADAT always sees converted samples; otherwise fuse
+        // convert rows 2-7 to S24 in place first, so ADAT always sees
+        // converted samples; otherwise fuse
         // convert+interleave per pair.  Then interleave pairs 1-3.
         bool finalize_s24 = core1_eq_work.finalize_s24 != 0;
         if (finalize_s24) {
@@ -707,7 +707,6 @@ static void __not_in_flash_func(eq_worker_loop)() {
         }
         for (int p = 0; p < 3; p++) {
             int32_t *out_ptr = core1_eq_work.spdif_out[p];
-            if (!out_ptr) continue;
             int left_out = CORE1_EQ_FIRST_OUTPUT + p * 2;
             int right_out = left_out + 1;
             if (!matrix_mixer.outputs[left_out].enabled &&
@@ -913,17 +912,15 @@ static void __not_in_flash_func(eq_worker_loop)() {
         // S/PDIF conversion for Core 1's pair (outputs 2-3 → int32 24-bit)
         {
             int32_t *out_ptr = core1_eq_work.spdif_out[0];
-            if (out_ptr) {
-                int left_out = CORE1_EQ_FIRST_OUTPUT;
-                int right_out = CORE1_EQ_FIRST_OUTPUT + 1;
-                if (!matrix_mixer.outputs[left_out].enabled &&
-                    !matrix_mixer.outputs[right_out].enabled) {
-                    memset(out_ptr, 0, sample_count * 8);
-                } else {
-                    for (uint32_t i = 0; i < sample_count; i++) {
-                        out_ptr[i*2]   = clip_s24((buf_out[left_out][i] + (1 << 5)) >> 6);
-                        out_ptr[i*2+1] = clip_s24((buf_out[right_out][i] + (1 << 5)) >> 6);
-                    }
+            int left_out = CORE1_EQ_FIRST_OUTPUT;
+            int right_out = CORE1_EQ_FIRST_OUTPUT + 1;
+            if (!matrix_mixer.outputs[left_out].enabled &&
+                !matrix_mixer.outputs[right_out].enabled) {
+                memset(out_ptr, 0, sample_count * 8);
+            } else {
+                for (uint32_t i = 0; i < sample_count; i++) {
+                    out_ptr[i*2]   = clip_s24((buf_out[left_out][i] + (1 << 5)) >> 6);
+                    out_ptr[i*2+1] = clip_s24((buf_out[right_out][i] + (1 << 5)) >> 6);
                 }
             }
         }

@@ -1,7 +1,7 @@
 # Test Signal Generator Specification
 
 *Status: implemented*
-*Last updated: 2026-07-05*
+*Last updated: 2026-10-12*
 
 ## 1. Overview
 
@@ -444,7 +444,7 @@ When the generator is running and no source is streaming, nothing would call it 
 the outputs would drain to silence. The main loop instead calls `siggen_pump()`
 (`audio_pipeline.c`), which feeds zero-input blocks through the full pipeline.
 
-- The pump is paced by the **slot-0 consumer fill level** (the same signal the USB
+- The pump is paced by the **slot-0 ring fill level** (the same signal the USB
   feedback servo and the S/PDIF prefill use), topping up to half full. It runs a
   bounded number of blocks per call to keep the main loop responsive.
 - Every pumped block traverses the full pipeline, so the delay-line write index and
@@ -452,8 +452,8 @@ the outputs would drain to silence. The main loop instead calls `siggen_pump()`
   preserved**.
 - The pump refuses to run while the pipeline is owned by someone else: a source
   actively streaming (`usb_audio_stream_active()`, S/PDIF locked, I2S running), a
-  pending input-source change, an output-type switch in progress, or a
-  not-yet-allocated producer pool. So starting a real stream **seamlessly takes over
+  pending input-source change, an output-type switch in progress, or output
+  slots that are not yet set up (before `usb_sound_card_init()` has run). So starting a real stream **seamlessly takes over
   pacing** from the pump; the generator keeps playing across the handover.
 
 ---

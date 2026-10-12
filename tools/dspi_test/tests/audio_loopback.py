@@ -1175,8 +1175,8 @@ def alignment_after_output_type_switch(dev, profile, chk):
 # The loopback taps slot 0's finalized DSP output BEFORE the S/PDIF or I2S
 # encoder, so the captured samples are identical for either output type. That
 # makes signal PRESENCE a real liveness probe for the active output path: if the
-# I2S consumer is not draining slot 0's producer pool, the pool backs up, the DSP
-# callback starves, and the tone vanishes from the capture. These tests measure
+# I2S DMA is not draining slot 0's ring, the ring fills, admission rejects every
+# block (the tap is gated on it), and the tone vanishes. These tests measure
 # real audio with slot 0 as I2S, and stress repeated type switches (which
 # exercise the shared-DMA-channel teardown/re-setup path).
 

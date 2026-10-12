@@ -7,7 +7,7 @@
 #ifndef _PICO_AUDIO_I2S_MULTI_H
 #define _PICO_AUDIO_I2S_MULTI_H
 
-#include "pico/audio.h"
+#include "pico.h"
 #include "hardware/pio.h"
 
 /** \file audio_i2s_multi.h
@@ -34,9 +34,6 @@ extern "C" {
 // Configuration defaults
 // ---------------------------------------------------------------------------
 
-
-/** Consumer buffer format identifier for I2S (raw PCM, not BMC-encoded) */
-#define AUDIO_BUFFER_FORMAT_PIO_I2S 1301
 
 /** Maximum number of I2S instances that can be registered */
 #define PICO_AUDIO_I2S_MAX_INSTANCES 4
@@ -89,12 +86,6 @@ typedef struct audio_i2s_instance {
     // Fill immediately before the most recent successful block write.
     // UINT32_MAX means no successful write has occurred since ring reset.
     volatile uint32_t recovery_prewrite_fill_frames;
-
-    // Producer-side formats + embedded connection (until the direct
-    // ring-write migration removes the producer pools)
-    audio_format_t consumer_format;
-    audio_buffer_format_t consumer_buffer_format;
-    struct producer_pool_blocking_give_connection connection;
 } audio_i2s_instance_t;
 
 // Ring geometry: shares the slot's 16 KB store with the S/PDIF instance
@@ -174,36 +165,19 @@ void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames
  * \ingroup pico_audio_i2s_multi
  *
  * Initializes the PIO state machine with the 24-bit I2S program, claims the
- * DMA channel, and registers the instance in the shared IRQ handler.
+ * DMA channel, resets the slot ring, registers the instance and programs the
+ * nominal divider for \p sample_freq on every I2S SM of the block. Audio
+ * reaches the instance only through audio_i2s_ring_write_s32().
  *
- * All instances must share the same DMA IRQ line (asserted).
  * All instances on the same PIO block share the same BCK/LRCLK pins
  * (PIO side-set constraint).
  *
- * \param inst   Caller-allocated, zero-initialized instance
- * \param intended_audio_format  Desired audio format (48kHz stereo S32)
- * \param config Hardware configuration
+ * \param inst        Caller-allocated, zero-initialized instance
+ * \param sample_freq Output sample rate in Hz
+ * \param config      Hardware configuration
  */
-const audio_format_t *audio_i2s_setup(audio_i2s_instance_t *inst,
-                                       const audio_format_t *intended_audio_format,
-                                       const audio_i2s_config_t *config);
-
-/** \brief Connect a producer pool to an I2S instance with extra options
- * \ingroup pico_audio_i2s_multi
- *
- * Links the producer pool to the instance; each give writes the block into
- * the slot ring, left-shifting 24-bit samples into 32-bit I2S frames.
- *
- * \param inst           The I2S instance
- * \param producer       The producer buffer pool (PCM_S32, stride 8)
- * \param buffer_on_give If true, buffer on give side
- * \param consumer_pool  Unused by the ring output; pass NULL
- * \param connection     Optional custom connection (NULL for default)
- */
-bool audio_i2s_connect_extra(audio_i2s_instance_t *inst,
-                              audio_buffer_pool_t *producer,
-                              bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
-                              audio_connection_t *connection);
+void audio_i2s_setup(audio_i2s_instance_t *inst, uint32_t sample_freq,
+                     const audio_i2s_config_t *config);
 
 /** \brief Enable or disable an I2S output instance
  * \ingroup pico_audio_i2s_multi
@@ -286,7 +260,7 @@ uint32_t audio_i2s_get_dma_starvations_instance(uint index);
  * \ingroup pico_audio_i2s_multi
  *
  * Disables the instance, aborts DMA, unclaims the DMA channel and PIO SM,
- * releases GPIO pins, and removes the instance from the IRQ handler registry.
+ * releases GPIO pins, and removes the instance from the registry.
  *
  * Used when switching an output slot from I2S back to S/PDIF.
  * The instance struct is zeroed and can be re-used with audio_i2s_setup().
@@ -300,20 +274,11 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst);
  *
  * Stops all active I2S state machines, updates every registered instance's
  * clock divider, and restarts all in sync. Called from perform_rate_change()
- * to avoid the brief master/slave divider mismatch that occurs with lazy
- * per-instance updates.
+ * so master and slave SMs never run at different dividers.
  *
  * \param sample_freq New sample rate in Hz
  */
 void audio_i2s_update_all_frequencies(uint32_t sample_freq);
-
-/** \brief Rewrite the nominal divider on every internally clocked I2S SM
- * \ingroup pico_audio_i2s_multi
- *
- * No stop or restart. Input clock servos trim these SMs behind the library's
- * back; this restores nominal at an unchanged rate. External-clock SMs are skipped.
- */
-void audio_i2s_apply_pio_frequency(audio_i2s_instance_t *inst, uint32_t sample_freq);
 
 /** \brief Get the index of the current I2S clock master (-1 if none)
  * \ingroup pico_audio_i2s_multi

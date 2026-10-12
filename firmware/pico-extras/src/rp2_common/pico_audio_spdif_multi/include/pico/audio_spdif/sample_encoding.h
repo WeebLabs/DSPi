@@ -7,15 +7,11 @@
 #ifndef _PICO_AUDIO_SPDIF_SAMPLE_ENCODING_H
 #define _PICO_AUDIO_SPDIF_SAMPLE_ENCODING_H
 
-#include "pico/audio.h"
+#include "pico.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-void mono_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer);
-void stereo_to_spdif_producer_give(audio_connection_t *connection, audio_buffer_t *buffer);
-void stereo_to_spdif_producer_give_s32(audio_connection_t *connection, audio_buffer_t *buffer);
 
 typedef struct {
     uint32_t l;

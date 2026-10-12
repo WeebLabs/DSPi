@@ -11,4 +11,4 @@ target_sources(pico_audio_i2s_multi INTERFACE
 )
 
 target_include_directories(pico_audio_i2s_multi INTERFACE ${CMAKE_CURRENT_LIST_DIR}/include)
-target_link_libraries(pico_audio_i2s_multi INTERFACE hardware_dma hardware_pio hardware_irq hardware_clocks hardware_sync pico_audio)
+target_link_libraries(pico_audio_i2s_multi INTERFACE hardware_dma hardware_pio hardware_irq hardware_clocks hardware_sync)

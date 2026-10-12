@@ -16,7 +16,6 @@ extern volatile uint32_t pdm_ring_overruns;   // Core 0 couldn't push (ring full
 extern volatile uint32_t pdm_ring_underruns;  // Core 1 needed sample but ring empty
 extern volatile uint32_t pdm_dma_overruns;    // Core 1 write caught up to DMA read
 extern volatile uint32_t pdm_dma_underruns;   // Core 1 write fell behind DMA read
-extern volatile uint32_t spdif_overruns;      // USB callback couldn't get buffer (pool full)
 extern volatile uint32_t spdif_underruns;     // USB packet gap > 2ms (consumer likely starved)
 extern volatile uint32_t usb_audio_packets;   // Debug: count of USB audio packets received
 extern volatile uint32_t usb_audio_alt_set;   // Debug: last alt setting selected
@@ -83,7 +82,6 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define PDM_HOLD_TIMEOUT_US 100000u   // pdm_hold_hw: covers the fade-out at 44.1 kHz with margin
 
 // SPDIF Buffer Configuration
-#define AUDIO_BUFFER_COUNT    8   // Producer buffers per SPDIF instance
 // Slot ring fill scale in 48-frame buckets (16 = 768 frames): the unit of the
 // prefill thresholds, the clock servo target and REQ_GET_BUFFER_STATS.
 #define SPDIF_CONSUMER_BUFFER_COUNT 16
@@ -897,7 +895,7 @@ typedef struct {
     float             vol_mul_start;   // Master-scaled vol at sample 0
     float             vol_mul_step;    // Per-sample increment
     uint32_t          delay_write_idx;  // Snapshot for Core 1 delay processing
-    int32_t          *spdif_out[3];     // Pairs 1-3 output buffers (NULL = skip)
+    int32_t          *spdif_out[3];     // Pairs 1-3 slot staging (interleaved S24)
     // ADAT-active snapshot for THIS packet: both cores must pick the same
     // slot finalization mode (in-place S24 staging vs fused convert+
     // interleave) so ADAT never reads unconverted rows.  See output_s24.h.
@@ -908,7 +906,7 @@ typedef struct {
     int32_t           vol_mul_start;   // Q15 master-scaled vol at sample 0
     int32_t           vol_mul_step;    // Q15 per-sample increment
     uint32_t          delay_write_idx;
-    int32_t          *spdif_out[1];    // SPDIF pair 2 output buffer (NULL = skip)
+    int32_t          *spdif_out[1];    // Pair 2 slot staging (interleaved S24)
 #endif
     // Loudness snapshot for THIS packet; Core 0 samples the coefficient
     // pointer and output mask once and both cores use the same view, so a
@@ -1136,8 +1134,8 @@ typedef struct __attribute__((packed)) {
 
 // Buffer Statistics Wire Format — fits in a single 64-byte control transfer
 typedef struct __attribute__((packed)) {
-    uint8_t consumer_free;       // [0-4] SPDIF buffers available for DMA
-    uint8_t consumer_prepared;   // [0-4] SPDIF buffers queued for DMA playback
+    uint8_t consumer_free;       // [0-16] free ring space, 48-frame buckets
+    uint8_t consumer_prepared;   // [0-16] ring fill, 48-frame buckets
     uint8_t consumer_playing;    // [0-1] DMA in-flight
     uint8_t consumer_fill_pct;   // Consumer pipeline fill %
     uint8_t consumer_min_fill_pct; // Lowest consumer fill since last reset

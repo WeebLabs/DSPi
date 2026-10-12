@@ -2358,7 +2358,7 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     case 4: resp = pdm_ring_underruns; break;
                     case 5: resp = pdm_dma_overruns; break;
                     case 6: resp = pdm_dma_underruns; break;
-                    case 7: resp = spdif_overruns; break;
+                    case 7: resp = 0; break;  // Retired (producer-pool take failures); kept for the wire
                     case 8: resp = spdif_underruns; break;
                     case 10: resp = usb_audio_packets; break;
                     case 11: resp = usb_audio_alt_set; break;

@@ -89,9 +89,9 @@ void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
     // -----------------------------------------------------------------------
     // Loop B: Fill-level servo (proportional, direct measurement)
     //
-    // Uses the consumer buffer fill count directly — immune to the counter
-    // ratchet effect that breaks epoch-relative produced/consumed tracking
-    // during producer pool backpressure stalls.
+    // Uses the slot ring fill directly. That is immune to the counter ratchet
+    // that breaks epoch-relative produced/consumed tracking across producer
+    // stalls.
     // -----------------------------------------------------------------------
     int32_t servo_q16 = 0;
 

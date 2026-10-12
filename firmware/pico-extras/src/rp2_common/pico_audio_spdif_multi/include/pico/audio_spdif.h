@@ -7,7 +7,7 @@
 #ifndef _PICO_AUDIO_SPDIF_H
 #define _PICO_AUDIO_SPDIF_H
 
-#include "pico/audio.h"
+#include "pico.h"
 
 /** \file audio_spdif.h
  *  \defgroup pico_audio_spdif pico_audio_spdif
@@ -31,37 +31,14 @@ extern "C" {
 #endif
 #endif
 
-#ifndef PICO_AUDIO_SPDIF_MAX_CHANNELS
-#ifdef PICO_AUDIO_MAX_CHANNELS
-#define PICO_AUDIO_SPDIF_MAX_CHANNELS PICO_AUDIO_MAX_CHANNELS
-#else
-#define PICO_AUDIO_SPDIF_MAX_CHANNELS 2u
-#endif
-#endif
-
 
 // IEC 60958 block length in frames (channel-status / preamble period).
 #define PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT 192u
 
 
-// Allow use of pico_audio driver without actually doing anything much
-#ifndef PICO_AUDIO_SPDIF_NOOP
-#ifdef PICO_AUDIO_NOOP
-#define PICO_AUDIO_SPDIF_NOOP PICO_AUDIO_NOOP
-#else
-#define PICO_AUDIO_SPDIF_NOOP 0
-#endif
-#endif
-
-#ifndef PICO_AUDIO_SPDIF_MONO_INPUT
-#define PICO_AUDIO_SPDIF_MONO_INPUT 0
-#endif
-
 #ifndef PICO_AUDIO_SPDIF_PIN
 #define PICO_AUDIO_SPDIF_PIN 0
 #endif
-
-#define AUDIO_BUFFER_FORMAT_PIO_SPDIF 1300
 
 #define PICO_AUDIO_SPDIF_MAX_INSTANCES 4
 
@@ -119,12 +96,6 @@ typedef struct audio_spdif_instance {
     // Fill immediately before the most recent successful block write.
     // UINT32_MAX means no successful write has occurred since ring reset.
     volatile uint32_t recovery_prewrite_fill_frames;
-
-    // Producer-side formats + embedded connection (kept until the direct
-    // ring-write migration removes the producer pools)
-    audio_format_t consumer_format;
-    audio_buffer_format_t consumer_buffer_format;
-    struct producer_pool_blocking_give_connection connection;
 } audio_spdif_instance_t;
 
 /** \brief Configuration for an S/PDIF output instance
@@ -144,27 +115,15 @@ typedef struct audio_spdif_config {
 /** \brief Set up an S/PDIF audio output instance
  * \ingroup audio_spdif
  *
+ * Resets the slot ring and programs the nominal divider for \p sample_freq.
+ * Audio reaches the instance only through audio_spdif_ring_write_s32().
+ *
  * \param inst The instance to initialize (caller-allocated, zero-initialized)
- * \param intended_audio_format The desired audio format
+ * \param sample_freq Output sample rate in Hz
  * \param config The hardware configuration to apply
  */
-const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
-                                        const audio_format_t *intended_audio_format,
-                                        const audio_spdif_config_t *config);
-
-/** \brief Connect a producer pool to an S/PDIF instance with extra options
- * \ingroup audio_spdif
- *
- * \param inst The S/PDIF instance
- * \param producer The producer buffer pool
- * \param buffer_on_give If true, buffer on give side
- * \param consumer_pool Unused by the ring output; pass NULL
- * \param connection Optional custom connection (NULL for default)
- */
-bool audio_spdif_connect_extra(audio_spdif_instance_t *inst,
-                               audio_buffer_pool_t *producer,
-                               bool buffer_on_give, audio_buffer_pool_t *consumer_pool,
-                               audio_connection_t *connection);
+void audio_spdif_setup(audio_spdif_instance_t *inst, uint32_t sample_freq,
+                       const audio_spdif_config_t *config);
 
 /** \brief Enable or disable an S/PDIF output instance
  * \ingroup audio_spdif
@@ -203,8 +162,8 @@ void audio_spdif_attach_pin(audio_spdif_instance_t *inst, uint new_pin);
  *
  * Counterpart to audio_spdif_setup() and mirror of audio_i2s_teardown().
  * Releases the DMA channel, PIO SM, pin, and registry slot so this slot's DMA
- * channel can be re-claimed by its I2S instance.  The caller-owned consumer
- * pool is detached but not freed (re-formatted on the next connect).
+ * channel can be re-claimed by its I2S instance.  The caller-owned ring
+ * storage is kept for the next setup.
  *
  * \param inst The S/PDIF instance to tear down
  */
@@ -285,22 +244,20 @@ void audio_spdif_enable_sync(audio_spdif_instance_t *instances[], uint count);
 /*! \brief Prepare-only half of audio_spdif_enable_sync
  * \ingroup pico_audio_spdif_multi
  *
- * Primes DMA / IRQ refcounts and marks the instances enabled without
+ * Rewinds the SMs, arms the ring DMAs and marks the instances enabled without
  * starting the SMs; returns the SM mask for the shared PIO block so the
  * caller can perform one combined pio_enable_sm_mask_in_sync (used by the
  * I2S clock-slave path to gate the start on an external LRCLK edge).
  */
 uint32_t audio_spdif_enable_sync_prepare(audio_spdif_instance_t *instances[], uint count);
 
-/*! \brief Eagerly program the instance's PIO clock divider for a sample rate
+/*! \brief Program the instance's PIO clock divider for a sample rate
  * \ingroup pico_audio_spdif_multi
  *
  * Recomputes and writes the nominal divider for \p sample_freq and updates
  * the instance's rate bookkeeping (inst->freq) and the IEC 60958-3 channel
- * status rate byte.  The normal divider update is lazy (wrap_consumer_take,
- * gated on a rate mismatch against inst->freq); callers that trim the SM
- * divider behind the library's back (input clock servos) use this to restore
- * nominal even when the rate value is unchanged.
+ * status rate byte.  Nothing retunes lazily, so a rate change must call this
+ * for every set-up instance and then restart the outputs in sync.
  */
 void audio_spdif_apply_pio_frequency(audio_spdif_instance_t *inst, uint32_t sample_freq);
 

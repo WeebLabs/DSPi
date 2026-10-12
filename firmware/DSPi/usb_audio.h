@@ -136,21 +136,13 @@ extern uint8_t output_pins[];
 extern uint8_t output_types[];
 extern struct audio_spdif_instance *spdif_instance_ptrs[];
 extern struct audio_i2s_instance *i2s_instance_ptrs[];
-extern struct audio_buffer_pool *producer_pools[];
+extern uint32_t output_rate_hz;
 // Per-slot output ring storage, shared by the slot's S/PDIF and I2S
 // instances across output-type switches (see usb_audio.c). Sized by the
 // S/PDIF ring geometry; the row length macro comes from pico/audio_spdif.h,
 // so include it only where that header is already present.
 #include "pico/audio_spdif.h"
 extern uint8_t slot_ring_store[][PICO_AUDIO_SPDIF_RING_BYTES];
-
-// Producer pool aliases (individual named, used by pipeline)
-extern struct audio_buffer_pool *producer_pool_1;
-extern struct audio_buffer_pool *producer_pool_2;
-#if PICO_RP2350
-extern struct audio_buffer_pool *producer_pool_3;
-extern struct audio_buffer_pool *producer_pool_4;
-#endif
 
 // I2S clock configuration
 extern uint8_t i2s_bck_pin;

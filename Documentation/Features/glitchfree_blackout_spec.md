@@ -2,6 +2,8 @@
 
 *Last updated: 2026-05-13*
 
+> **Status (2026-10-12): superseded.** This is a historical design record. It was never implemented as written (see `silent_state_changes_spec.md`), and the pool-based output path it builds on no longer exists. Outputs now play from per-slot free-running DMA rings fed directly by the pipeline. The current design is in `Documentation/current_architecture.md`.
+
 ## 1. Executive summary
 
 This document specifies a glitch-free "blackout" mechanism that eliminates

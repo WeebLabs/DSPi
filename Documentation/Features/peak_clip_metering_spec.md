@@ -162,7 +162,7 @@ These return a `uint32_t` counter value:
 | 4 | `pdm_ring_underruns` | Core 1 needed PDM sample but ring empty |
 | 5 | `pdm_dma_overruns` | Core 1 PDM write caught up to DMA read |
 | 6 | `pdm_dma_underruns` | Core 1 PDM write fell behind DMA read |
-| 7 | `spdif_overruns` | USB callback couldn't get S/PDIF buffer (pool full) |
+| 7 | (retired) | Always 0. The index is kept so later wValues keep their numbers |
 | 8 | `spdif_underruns` | USB packet gap > 2 ms (consumer likely starved) |
 
 ---
