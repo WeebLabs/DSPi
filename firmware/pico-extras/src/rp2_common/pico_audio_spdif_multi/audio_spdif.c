@@ -14,6 +14,7 @@
 #include "pico/audio_spdif.h"
 #include <pico/audio_spdif/sample_encoding.h>
 #include "audio_spdif.pio.h"
+#include "audio_spdif_bmc.pio.h"
 #include "hardware/pio.h"
 #include "hardware/gpio.h"
 #include "hardware/dma.h"
@@ -73,8 +74,15 @@ static uint32_t spdif_ring_words_const = RING_WORDS;
 uint32_t spdif_lookup[256];
 static bool spdif_lookup_initialized = false;
 
-// PIO program offset per PIO block -- loaded once per block
+// PIO program offset per PIO block -- loaded at the first setup after the
+// block's last teardown, released again when its last instance goes.
 static int pio_program_offset[3] = {-1, -1, -1};
+
+// Encoder per block: requested by audio_spdif_select_encoder(), applied at
+// the next program load. The DSPi drops to the software words only while
+// the I2S external-clock program needs the block's instruction memory.
+static bool spdif_pio_encoder_requested[3] = {true, true, true};
+static bool spdif_pio_encoder_loaded[3];
 
 // Instance registry (starvation getters and group operations)
 static audio_spdif_instance_t *spdif_instances[PICO_AUDIO_SPDIF_MAX_INSTANCES];
@@ -128,6 +136,87 @@ void stamp_silence_frame(spdif_subframe_t *p, uint phase) {
     p[0].h = h;
     p[1].l = 0x55555500u | PREAMBLE_Y;
     p[1].h = h;
+}
+
+// PIO-encoder words (audio_spdif_bmc.pio). Control word: preamble as lead
+// and trail low-run counts, [2:0] and [5:3]. Data word: sample [23:0], V, U,
+// C at bits 24..26; parity comes from the PIO.
+#define BMC_CTRL_X  (4u | (1u << 3))
+#define BMC_CTRL_Y  (2u | (3u << 3))
+#define BMC_CTRL_Z  (0u | (5u << 3))
+
+static inline __attribute__((always_inline))
+void stamp_frame_bmc(spdif_subframe_t *p, uint phase, int32_t l, int32_t r) {
+    uint32_t c = (uint32_t)get_channel_status_bit(phase) << 26u;
+    p[0].l = (phase == 0) ? BMC_CTRL_Z : BMC_CTRL_X;
+    p[0].h = ((uint32_t)l & 0xFFFFFFu) | c;
+    p[1].l = BMC_CTRL_Y;
+    p[1].h = ((uint32_t)r & 0xFFFFFFu) | c;
+}
+
+static inline __attribute__((always_inline))
+void stamp_silence_frame_bmc(spdif_subframe_t *p, uint phase) {
+    uint32_t c = (uint32_t)get_channel_status_bit(phase) << 26u;
+    p[0].l = (phase == 0) ? BMC_CTRL_Z : BMC_CTRL_X;
+    p[0].h = c;
+    p[1].l = BMC_CTRL_Y;
+    p[1].h = c;
+}
+
+// Stamp n silence frames at absolute frames [e, e+n) in the instance's word
+// format. Always inline: callers run while flash may be unavailable.
+static inline __attribute__((always_inline))
+void stamp_silence_run(const audio_spdif_instance_t *inst, uint32_t e, uint32_t n) {
+    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
+    uint phase = e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;
+    if (inst->pio_bmc) {
+        while (n--) {
+            stamp_silence_frame_bmc(&ring[(e++ & RING_MASK) * 2u], phase);
+            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
+        }
+    } else {
+        while (n--) {
+            stamp_silence_frame(&ring[(e++ & RING_MASK) * 2u], phase);
+            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
+        }
+    }
+}
+
+// Stamp n audio frames from interleaved L/R samples at absolute frames [w, w+n).
+static inline __attribute__((always_inline))
+void stamp_audio_run(const audio_spdif_instance_t *inst, uint32_t w,
+                     const int32_t *lr, uint32_t n) {
+    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
+    uint phase = w % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT;
+    if (inst->pio_bmc) {
+        for (uint32_t i = 0; i < n; i++) {
+            stamp_frame_bmc(&ring[(w++ & RING_MASK) * 2u], phase, lr[i * 2u], lr[i * 2u + 1u]);
+            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
+        }
+    } else {
+        for (uint32_t i = 0; i < n; i++) {
+            stamp_frame(&ring[(w++ & RING_MASK) * 2u], phase, lr[i * 2u], lr[i * 2u + 1u]);
+            if (++phase == PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT) phase = 0;
+        }
+    }
+}
+
+// (Re)initialise an instance's SM with the block's loaded program.
+static void spdif_sm_init(audio_spdif_instance_t *inst, uint pin) {
+    uint idx = pio_get_index(inst->pio);
+    assert(pio_program_offset[idx] >= 0);
+    uint offset = (uint)pio_program_offset[idx];
+    if (inst->pio_bmc) spdif_bmc_program_init(inst->pio, inst->pio_sm, offset, pin);
+    else               spdif_program_init(inst->pio, inst->pio_sm, offset, pin);
+}
+
+// Both entry points emit two low cycles before the first preamble bit, so the
+// synchronized start lands on the same frame edge whichever program is loaded.
+static inline uint spdif_entry_offset(const audio_spdif_instance_t *inst) {
+    uint idx = pio_get_index(inst->pio);
+    assert(pio_program_offset[idx] >= 0);
+    return (uint)pio_program_offset[idx] +
+           (inst->pio_bmc ? audio_spdif_bmc_offset_entry_point : audio_spdif_offset_output_low);
 }
 
 // ---------------------------------------------------------------------------
@@ -233,13 +322,12 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames) {
     // Restamp silence through the new margin: the reader immediately
     // traverses the skipped span, which beyond the old erase-ahead may
     // still hold stale audio from the previous lap.
-    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
     uint32_t target = inst->wr_frames + PICO_AUDIO_SPDIF_ERASE_AHEAD;
     uint32_t e = inst->erased_frames;
     if ((int32_t)(target - e) > (int32_t)RING_FRAMES) e = target - RING_FRAMES;
-    while ((int32_t)(target - e) > 0) {
-        stamp_silence_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
-        e++;
+    if ((int32_t)(target - e) > 0) {
+        stamp_silence_run(inst, e, target - e);
+        e = target;
     }
     inst->erased_frames = e;
 }
@@ -256,12 +344,8 @@ void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_fr
     int32_t need = (int32_t)(target - e);
     if (need <= 0) return;
     uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
-    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
-    while (n--) {
-        stamp_silence_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
-        e++;
-    }
-    inst->erased_frames = e;
+    stamp_silence_run(inst, e, n);
+    inst->erased_frames = e + n;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,13 +375,9 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     // Phase = w mod 192. Known limit: at the uint32 wrap (~24.8 h of
     // uninterrupted streaming, and any ring reset restarts the clock) the
     // phase steps by 64 for one block; receivers resync on the next Z.
-    spdif_subframe_t *ring = (spdif_subframe_t *)inst->ring;
     uint32_t w = inst->wr_frames;
-    for (uint32_t i = 0; i < frames; i++) {
-        stamp_frame(&ring[(w & RING_MASK) * 2u], w % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT,
-                    lr[i * 2u], lr[i * 2u + 1u]);
-        w++;
-    }
+    stamp_audio_run(inst, w, lr, frames);
+    w += frames;
     inst->wr_frames = w;
 
     // Extend the erase-ahead silence margin.
@@ -305,9 +385,9 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     uint32_t e = inst->erased_frames;
     if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_SPDIF_ERASE_AHEAD;
-    while ((int32_t)(target - e) > 0) {
-        stamp_silence_frame(&ring[(e & RING_MASK) * 2u], e % PICO_AUDIO_SPDIF_BLOCK_SAMPLE_COUNT);
-        e++;
+    if ((int32_t)(target - e) > 0) {
+        stamp_silence_run(inst, e, target - e);
+        e = target;
     }
     inst->erased_frames = e;
 
@@ -446,6 +526,10 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
     inst->ring = (uint32_t *)config->ring_base;
     inst->underrun_frames = 0;
     inst->drop_frames = 0;
+    // Fixed before the ring reset below stamps silence in this format.
+    inst->pio_bmc = (pio_program_offset[config->pio] >= 0)
+                        ? spdif_pio_encoder_loaded[config->pio]
+                        : spdif_pio_encoder_requested[config->pio];
     audio_spdif_ring_reset(inst);
 
     // This instance struct may be reused across output-type switches.
@@ -457,13 +541,20 @@ const audio_format_t *audio_spdif_setup(audio_spdif_instance_t *inst,
     // Claim SM
     pio_sm_claim(inst->pio, inst->pio_sm);
 
-    // Load PIO program once per PIO block
+    // Load the selected program once per block. No room means the I2S
+    // external-clock program is resident: the slot rebuild must have selected
+    // the software encoder for that configuration before setting slots up.
     if (pio_program_offset[config->pio] < 0) {
-        pio_program_offset[config->pio] = pio_add_program(inst->pio, &audio_spdif_program);
+        bool bmc = spdif_pio_encoder_requested[config->pio];
+        int off = pio_add_program(inst->pio,
+                                  bmc ? &audio_spdif_bmc_program : &audio_spdif_program);
+        if (off < 0) panic("S/PDIF %s program does not fit in PIO%u",
+                           bmc ? "PIO-encoder" : "NRZI", config->pio);
+        pio_program_offset[config->pio] = off;
+        spdif_pio_encoder_loaded[config->pio] = bmc;
     }
-    uint offset = (uint)pio_program_offset[config->pio];
-
-    spdif_program_init(inst->pio, inst->pio_sm, offset, config->pin);
+    assert(inst->pio_bmc == spdif_pio_encoder_loaded[config->pio]);
+    spdif_sm_init(inst, config->pin);
 
     __mem_fence_release();
 
@@ -597,11 +688,8 @@ void audio_spdif_attach_pin(audio_spdif_instance_t *inst, uint new_pin) {
     // Claim new pin for PIO
     pio_gpio_init(inst->pio, new_pin);
 
-    // Reinitialize SM with new pin using cached program offset
-    uint pio_idx = pio_get_index(inst->pio);
-    assert(pio_program_offset[pio_idx] >= 0);
-    uint offset = (uint)pio_program_offset[pio_idx];
-    spdif_program_init(inst->pio, inst->pio_sm, offset, new_pin);
+    // Reinitialize SM with new pin using the block's loaded program
+    spdif_sm_init(inst, new_pin);
 
     // Restore clock divider (pio_sm_init resets it to default)
     if (inst->freq != 0) {
@@ -677,6 +765,22 @@ void audio_spdif_teardown(audio_spdif_instance_t *inst) {
     }
     restore_interrupts(save);
 
+    // Last instance on the block: release the program so the next setup can
+    // load whichever encoder is selected by then, and so the I2S
+    // external-clock program has the room when it is needed instead.
+    bool block_idle = true;
+    for (uint i = 0; i < spdif_instance_count; i++) {
+        if (spdif_instances[i]->pio == inst->pio) { block_idle = false; break; }
+    }
+    uint idx = pio_get_index(inst->pio);
+    if (block_idle && pio_program_offset[idx] >= 0) {
+        pio_remove_program(inst->pio,
+                           spdif_pio_encoder_loaded[idx] ? &audio_spdif_bmc_program
+                                                         : &audio_spdif_program,
+                           (uint)pio_program_offset[idx]);
+        pio_program_offset[idx] = -1;
+    }
+
     inst->enabled = false;
 
     printf("S/PDIF teardown: SM%d, GPIO %d (instances remaining: %u)\n",
@@ -699,12 +803,9 @@ uint32_t audio_spdif_enable_sync_prepare(audio_spdif_instance_t *instances[], ui
     // Must precede ring_dma_arm: its FIFO prefill already counts as consumed.
     for (uint i = 0; i < count; i++) {
         audio_spdif_instance_t *inst = instances[i];
-        uint pio_idx = pio_get_index(inst->pio);
-        assert(pio_program_offset[pio_idx] >= 0);
         pio_sm_clear_fifos(inst->pio, inst->pio_sm);
         pio_sm_restart(inst->pio, inst->pio_sm);
-        pio_sm_exec(inst->pio, inst->pio_sm,
-                    pio_encode_jmp((uint)pio_program_offset[pio_idx] + audio_spdif_offset_output_low));
+        pio_sm_exec(inst->pio, inst->pio_sm, pio_encode_jmp(spdif_entry_offset(inst)));
     }
 
     for (uint i = 0; i < count; i++) {
@@ -758,4 +859,19 @@ uint32_t audio_spdif_get_dma_starvations_instance(uint index) {
         }
     }
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Encoder selection (see audio_spdif.h)
+// ---------------------------------------------------------------------------
+
+void audio_spdif_select_encoder(uint pio_index, bool pio_bmc) {
+    assert(pio_index < 3);
+    spdif_pio_encoder_requested[pio_index] = pio_bmc;
+}
+
+int audio_spdif_loaded_encoder(uint pio_index) {
+    assert(pio_index < 3);
+    if (pio_program_offset[pio_index] < 0) return -1;
+    return spdif_pio_encoder_loaded[pio_index] ? 1 : 0;
 }

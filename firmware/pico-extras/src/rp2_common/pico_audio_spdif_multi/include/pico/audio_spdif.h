@@ -91,6 +91,9 @@ typedef struct audio_spdif_instance {
     // Runtime state
     uint32_t freq;
     bool enabled;
+    // Ring word format of the block's loaded program: PIO biphase encoder
+    // (control + data words) or software NRZI transition words. Fixed at setup.
+    bool pio_bmc;
 
     // Ring state. Frame counters are monotonic since the last ring reset;
     // uint32 wrap is harmless (all consumers use differences).
@@ -256,6 +259,16 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames);
 // reader, bounded by max_frames per call. Keeps a stalled producer from
 // ever looping stale ring content; cheap no-op while streaming.
 void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_frames);
+
+/** \brief Select a block's encoder: true = 16-instruction PIO biphase encoder,
+ * false = 4-instruction NRZI program with software words. Applied at the next
+ * program load (first setup after the block's last teardown); instances already
+ * set up keep their format. Cannot share a block with the I2S extclk program. */
+void audio_spdif_select_encoder(uint pio_index, bool pio_bmc);
+
+/** \brief Encoder currently loaded on a block: 1 = PIO encoder, 0 = NRZI
+ * program, -1 = no program loaded (no instance set up on that block). */
+int audio_spdif_loaded_encoder(uint pio_index);
 
 /** \brief Enable multiple S/PDIF instances with synchronized PIO start
  * \ingroup audio_spdif

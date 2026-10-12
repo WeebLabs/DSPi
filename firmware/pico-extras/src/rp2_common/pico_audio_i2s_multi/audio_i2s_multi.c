@@ -422,6 +422,24 @@ static void i2s_extclk_evict_program(PIO pio) {
     i2s_extclk_patched_bck[idx] = 0xFF;
 }
 
+// Release every I2S program on a block with no I2S instance left, so the
+// S/PDIF library can load its 16-slot PIO encoder there; the next I2S setup
+// reloads lazily. Called only from teardown once the registry is updated.
+static void i2s_release_block_programs(PIO pio) {
+    uint idx = pio_get_index(pio);
+    i2s_extclk_evict_program(pio);
+    if (i2s_pio_program_offset[idx] >= 0) {
+        pio_remove_program(pio, &audio_i2s_clkout_program,
+                           (uint)i2s_pio_program_offset[idx]);
+        i2s_pio_program_offset[idx] = -1;
+    }
+    if (i2s_slave_pio_program_offset[idx] >= 0) {
+        pio_remove_program(pio, &audio_i2s_dataout_program,
+                           (uint)i2s_slave_pio_program_offset[idx]);
+        i2s_slave_pio_program_offset[idx] = -1;
+    }
+}
+
 // (Re)load the external-clock slave program on a PIO block with the current
 // BCK/LRCLK GPIOs patched into its wait instructions.  Reloads (remove + add)
 // only when the patched pin differs; no extclk SM on the block may be enabled
@@ -462,8 +480,12 @@ static uint i2s_extclk_load_program(PIO pio, uint8_t bck_pin) {
         i2s_extclk_prog_ram[i] = i2s_patch_wait_gpio(instr, pin);
     }
     i2s_extclk_patched_bck[idx] = bck_pin;
-    i2s_extclk_pio_program_offset[idx] = pio_add_program(pio, &i2s_extclk_prog);
-    return (uint)i2s_extclk_pio_program_offset[idx];
+    // Cannot share the block with the 16-slot S/PDIF PIO encoder; the slot
+    // rebuild selects the software S/PDIF encoder before any setup runs.
+    int off = pio_add_program(pio, &i2s_extclk_prog);
+    if (off < 0) panic("I2S extclk program does not fit in PIO%u", idx);
+    i2s_extclk_pio_program_offset[idx] = off;
+    return (uint)off;
 }
 
 // Compute the I2S clock divider in 24.8 fixed-point for a given sample rate.
@@ -983,6 +1005,12 @@ void audio_i2s_teardown(audio_i2s_instance_t *inst) {
         // responsible for promoting a slave to master and restarting in sync.
     }
     restore_interrupts(save);
+
+    bool block_idle = true;
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        if (i2s_instances[i]->pio == inst->pio) { block_idle = false; break; }
+    }
+    if (block_idle) i2s_release_block_programs(inst->pio);
 
     printf("I2S teardown: SM%d %s, data GPIO %d (instances remaining: %d)\n",
            inst->pio_sm, was_master ? "(was master)" : "(slave)",

@@ -1,6 +1,7 @@
 add_library(pico_audio_spdif_multi INTERFACE)
 
 pico_generate_pio_header(pico_audio_spdif_multi ${CMAKE_CURRENT_LIST_DIR}/audio_spdif.pio)
+pico_generate_pio_header(pico_audio_spdif_multi ${CMAKE_CURRENT_LIST_DIR}/audio_spdif_bmc.pio)
 
 target_sources(pico_audio_spdif_multi INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/audio_spdif.c

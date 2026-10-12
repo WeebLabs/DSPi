@@ -457,7 +457,21 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
-    bool any_change = false;
+    // S/PDIF encoder selection (PIO0 instruction budget): the 16-slot PIO
+    // biphase encoder cannot share the block with the I2S external-clock
+    // program, so slave-clocked I2S slots force the software encoder. A flip
+    // rebuilds every S/PDIF slot, since the ring word format follows the program.
+    bool target_any_i2s = false;
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (target_types[i] == OUTPUT_TYPE_I2S) target_any_i2s = true;
+    }
+    const bool want_pio_spdif = !(want_extclk && target_any_i2s);
+    audio_spdif_select_encoder(PICO_AUDIO_SPDIF_PIO, want_pio_spdif);
+    const int loaded_spdif = audio_spdif_loaded_encoder(PICO_AUDIO_SPDIF_PIO);
+    const bool spdif_encoder_flip =
+        (loaded_spdif >= 0) && ((loaded_spdif != 0) != want_pio_spdif);
+
+    bool any_change = spdif_encoder_flip;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (target_types[i] != current_types[i]) {
             any_change = true;
@@ -607,6 +621,20 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
+    // Encoder flip: staying S/PDIF slots are torn down too and re-set-up in
+    // Pass 2 (the last teardown releases the block's program).  Retyped slots
+    // already pass through teardown/setup below.
+    bool spdif_rebuild[NUM_SPDIF_INSTANCES] = {false};
+    if (spdif_encoder_flip) {
+        for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+            if (current_types[i] == OUTPUT_TYPE_I2S || target_types[i] == OUTPUT_TYPE_I2S) continue;
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (!inst || !inst->ring) continue;
+            audio_spdif_teardown(inst);
+            spdif_rebuild[i] = true;
+        }
+    }
+
     // ---- Pass 1: Teardown outgoing types ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (target_types[i] == current_types[i]) continue;  // No type change
@@ -671,10 +699,10 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                     printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
                 }
             }
-        } else if (had_i2s) {
-            // I2S → SPDIF: the I2S teardown in Pass 1 released DMA channel i
-            // and PIO SM i.  Fully re-set-up the S/PDIF instance on the same
-            // channel/SM (mirrors boot), reclaiming the shared resources.
+        } else if (had_i2s || spdif_rebuild[i]) {
+            // I2S → SPDIF (the Pass 1 I2S teardown released DMA channel i and
+            // PIO SM i) or an encoder flip: fully re-set-up the S/PDIF instance
+            // on the same channel/SM (mirrors boot).
             audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
             audio_spdif_config_t spdif_cfg = {
                 .pin = output_pins[i],
@@ -689,7 +717,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
             audio_spdif_setup(spdif_inst, &audio_format_48k, &spdif_cfg);
             audio_spdif_connect_extra(spdif_inst, producer_pools[i], false,
                                       NULL, NULL);
-            memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
+            if (had_i2s) memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
         } else {
             // SPDIF stays SPDIF: claim a moved pin (the old one was released above).
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];

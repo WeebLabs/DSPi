@@ -1,0 +1,58 @@
+;
+; Copyright (c) 2026 WeebLabs
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+; S/PDIF transmitter with biphase-mark encoding done in the PIO: per subframe a
+; control word (preamble low-run counts [2:0] lead, [5:3] trail) then a data word
+; ([23:0] sample, [24] V, [25] U, [26] C); parity comes from the line level.
+; Word format, timing and equivalence proof: Documentation/Features/spdif_pio_bmc_encoder_spec.md
+
+.program audio_spdif_bmc
+.side_set 1
+
+.wrap_target
+L_bit:
+    out x, 1            side 1          ; bit half 1, forced transition to high
+    jmp !x H_high2      side 1          ; bit 0: half 2 stays high
+L_low2:
+    jmp !osre L_bit     side 0 [1]      ; bit 1: half 2 low; 27 bits done at low: P=1
+    nop                 side 1 [1]      ;   P half 1
+public entry_point:
+    pull                side 0 [1]      ;   P half 2, OSR = control word
+common:
+    nop                 side 1 [5]      ; preamble high x6
+    out y, 3            side 0          ; lead low count
+lead:
+    jmp y-- lead        side 0          ; low x (y+1), lead total y+2
+    out y, 3            side 1          ; high x2, trail low count
+    pull                side 1          ;   OSR = data word
+trail:
+    jmp y-- trail       side 0          ; low x (y+1), then wrap to L_bit
+.wrap
+H_bit:
+    out x, 1            side 0          ; bit half 1, forced transition to low
+    jmp !x L_low2       side 0          ; bit 0: half 2 stays low
+H_high2:
+    jmp !osre H_bit     side 1 [1]      ; bit 1: half 2 high; 27 bits done at high: P=0
+    pull                side 0 [2]      ;   P both halves low (3 cycles), OSR = control word
+    jmp common          side 0          ;   4th low cycle
+
+; Total: 16 instructions.
+
+% c-sdk {
+static inline void spdif_bmc_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_config sm_config = audio_spdif_bmc_program_get_default_config(offset);
+    // Threshold 27 makes OSRE the data-loop terminator; autopull stays off so
+    // the control and data pulls land at the cycles the program expects.
+    sm_config_set_out_shift(&sm_config, true, false, 27);
+    sm_config_set_sideset(&sm_config, 1, false, false);
+    sm_config_set_sideset_pins(&sm_config, pin);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+    pio_sm_init(pio, sm, offset, &sm_config);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+    pio_sm_set_pins(pio, sm, 0);
+    pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_spdif_bmc_offset_entry_point));
+}
+%}
