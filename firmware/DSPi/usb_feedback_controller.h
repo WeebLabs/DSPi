@@ -1,9 +1,10 @@
 /*
- * USB Feedback Controller — Q16.16 rate + fill servo
+ * USB Feedback Controller: Q16.16 rate + fill servo
  *
  * Pure module with no Pico SDK dependencies.
- * Loop A: rounded IIR rate estimator (α=1/16, Q16.16).
- * Loop B: proportional fill-level servo using direct consumer fill measurement.
+ * Loop A: long-window (8-16 s) count-based rate; a rounded IIR (α=1/16) bridges startup.
+ * Loop B: dual-slope proportional fill servo on the direct consumer fill.
+ * Design and tuning: Documentation/current_architecture.md "Asynchronous Feedback Endpoint".
  */
 
 #ifndef USB_FEEDBACK_CONTROLLER_H
@@ -29,9 +30,13 @@ static inline int32_t round_div_pow2_s32(int32_t x, uint32_t n) {
 // Constants
 // ---------------------------------------------------------------------------
 
-// Fill servo: direct consumer buffer fill (0-16 buffers)
+// Fill servo: direct consumer buffer fill (0-16 buffers of 48 frames).
+// Inner slope 1/256 sample/frame per buffer keeps packet and processing jitter out
+// of the feedback; past the knee the slope rises to 1/16 so real displacements clear fast.
 #define FB_FILL_TARGET             8       // 50% of 16 consumer buffers
-#define FB_FILL_KP_Q16             4096    // old Kp=1024 in 10.14 → 1024<<2 in Q16.16
+#define FB_FILL_KP_Q16             256     // inner slope
+#define FB_FILL_KP2_Q16            3840    // added slope beyond the knee (total 4096)
+#define FB_FILL_KNEE_Q16           (1 << 16)   // ±1 buffer
 
 // Servo clamp: ±0.5 sample/frame in Q16.16 (matches old ±8192 in 10.14)
 #define FB_SERVO_CLAMP_Q16         32768
@@ -56,17 +61,42 @@ static inline int32_t round_div_pow2_s32(int32_t x, uint32_t n) {
 // reaches 25%, so this leaves margin; rejecting one half of a pair breaks cancellation.
 #define FB_RATE_SANE_SHIFT         1
 
+// Long-window rate: dual anchors rotate every HALF frames, so the span is 8-16 s.
+// 2 * HALF * 4 words must stay below 65536 (the remainder division's limit).
+#define FB_LONG_HALF_FRAMES        8000
+#define FB_LONG_MIN_FRAMES         1000    // trust the long rate after 1 s
+#define FB_LONG_SANE_SHIFT         7       // long rate within ±nominal >> 7 (0.78%)
+
+// A long-window anchor or sample is taken only from a window whose short rate is
+// within this of the IIR (0.5 sample/frame): a late SOF ISR would bias 8-16 s.
+#define FB_LONG_ANCHOR_TOL_Q16     (1 << 15)
+
 // ---------------------------------------------------------------------------
 // Controller state
 // ---------------------------------------------------------------------------
 
 typedef struct {
     // Rate estimator (Loop A)
-    uint32_t rate_estimate_q16;     // IIR-filtered device clock rate
+    uint32_t rate_estimate_q16;     // IIR-filtered device clock rate (startup bridge)
     uint32_t nominal_rate_q16;      // Pre-computed nominal for current Fs
+    uint32_t rate_long_q16;         // Long-window rate, valid when long_valid
+    uint32_t frame_total;           // USB frames since reset, extended past the 11-bit wrap
+    uint32_t long_frames[2];        // Long-window anchors: [0] older, [1] newer
+    uint32_t long_words[2];
+    bool     long_seeded;           // Anchors hold a clean sample
+    bool     long_valid;            // rate_long_q16 is in use
 
-    // Fill servo (Loop B) — direct measurement
+    // Fill servo (Loop B), direct measurement
     int32_t  fill_error_filtered;   // IIR-filtered fill error (in buffer counts, Q16.16)
+    int32_t  servo_q16;             // Last servo term (diagnostics)
+
+    // Diagnostics: counters are cumulative since init, min/max since fb_ctrl_get_diag
+    uint32_t diag_updates;
+    uint32_t diag_merged_windows;   // windows longer than FB_UPDATE_FRAMES
+    uint32_t diag_rejected;         // short-window samples outside the plausibility band
+    uint32_t diag_long_reanchors;   // long window discarded (gap or implausible rate)
+    uint32_t diag_fb_min_q16;
+    uint32_t diag_fb_max_q16;
 
     // Output
     uint32_t feedback_out_q16;      // Final feedback value (Q16.16)
@@ -111,5 +141,24 @@ void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
 // Get the current feedback value as 10.14 fixed-point for the USB endpoint.
 // Returns 0 if the controller has never been reset (caller should use nominal).
 uint32_t fb_ctrl_get_10_14(const usb_feedback_ctrl_t *ctrl);
+
+typedef struct {
+    uint32_t feedback_q16;          // controller output (the wire value is nominal in non-USB modes)
+    uint32_t fb_min_q16;
+    uint32_t fb_max_q16;
+    uint32_t rate_iir_q16;
+    uint32_t rate_long_q16;         // 0 while the long window is not valid
+    uint32_t long_span_frames;      // 0 while unseeded
+    int32_t  servo_q16;
+    int32_t  fill_error_q16;        // filtered
+    uint32_t updates;
+    uint32_t merged_windows;
+    uint32_t rejected;
+    uint32_t long_reanchors;
+} fb_ctrl_diag_t;
+
+// Snapshot for diagnostics and restart the min/max window. Main-loop context;
+// tearing against the SOF ISR is acceptable.
+void fb_ctrl_get_diag(usb_feedback_ctrl_t *ctrl, fb_ctrl_diag_t *out);
 
 #endif // USB_FEEDBACK_CONTROLLER_H

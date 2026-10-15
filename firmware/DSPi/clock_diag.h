@@ -103,6 +103,20 @@ typedef struct __attribute__((packed)) {
 
     // main loop
     uint32_t loop_gapmax_us;     // windowed worst gap
+
+    // USB feedback controller (version >= 2); rates in Q16.16 samples/frame
+    uint32_t fb_q16;             // controller output (wire is nominal unless USB input)
+    uint32_t fb_min_q16;         // windowed
+    uint32_t fb_max_q16;         // windowed
+    uint32_t fb_rate_iir_q16;    // short-window IIR (startup bridge)
+    uint32_t fb_rate_long_q16;   // long-window rate, 0 while not valid
+    uint32_t fb_long_span_ms;    // long-window anchor span (1 frame = 1 ms)
+    int32_t  fb_servo_q16;       // fill servo term
+    int32_t  fb_fill_err_q16;    // filtered fill error, Q16.16 buffers of 48 frames
+    uint32_t fb_updates;         // cumulative controller updates
+    uint32_t fb_merged;          // cumulative merged-SOF windows
+    uint32_t fb_rejected;        // cumulative implausible short-window samples
+    uint32_t fb_reanchors;       // cumulative long-window restarts
 } ClockDiagPacket;
 
 // Copy the latest 1 Hz snapshot.  Main-loop / control-transfer context.

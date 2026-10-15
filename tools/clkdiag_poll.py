@@ -64,6 +64,11 @@ def decode(buf):
     (d["in_which_long"], d["_rsv"]) = u("BB")
     (d["in_hz_long_mhz"], d["in_span_ms"]) = u("II")
     (d["loop_gapmax_us"],) = u("I")
+    if d["version"] >= 2:
+        (d["fb"], d["fb_min"], d["fb_max"], d["fb_iir"], d["fb_long"],
+         d["fb_span_ms"]) = u("IIIIII")
+        (d["fb_servo"], d["fb_ferr"]) = u("ii")
+        (d["fb_upd"], d["fb_merged"], d["fb_rej"], d["fb_reanch"]) = u("IIII")
     d["_raw_len"] = len(b)
     return d
 
@@ -102,6 +107,16 @@ def fmt_block(t, d):
              f"fifo={d['in_fifo_pct']}% hzL={d['in_hz_long_mhz']/1000:.3f} "
              f"use={'L' if d['in_which_long'] else 'S'} span={d['in_span_ms']}ms")
     L.append(f"CLKDIAG loop: gapmax={d['loop_gapmax_us']}us")
+    if d["version"] >= 2:
+        q = lambda v: v / 65536.0
+        # The packet carries no USB nominal rate; take the nearest standard rate.
+        nom = min((44.1, 48.0, 88.2, 96.0), key=lambda n: abs(n - q(d["fb_iir"])))
+        ppm = (lambda v: f"{(q(v) / nom - 1) * 1e6:+.1f}ppm") if d["fb_iir"] else (lambda v: "-")
+        L.append(f"CLKDIAG usbfb: fb={q(d['fb']):.6f}({ppm(d['fb'])})[{q(d['fb_min']):.6f}..{q(d['fb_max']):.6f}] "
+                 f"iir={q(d['fb_iir']):.6f} long={q(d['fb_long']):.6f}{'(' + ppm(d['fb_long']) + ')' if d['fb_long'] else ''} "
+                 f"span={d['fb_span_ms']}ms servo={q(d['fb_servo']):+.6f} "
+                 f"ferr={q(d['fb_ferr']) * 48:+.1f}fr upd={d['fb_upd']} merged={d['fb_merged']} "
+                 f"rej={d['fb_rej']} reanch={d['fb_reanch']}")
     return L
 
 def main():

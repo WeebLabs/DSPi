@@ -32,6 +32,7 @@
 #include "audio_pipeline.h"
 #include "audio_input.h"
 #include "usb_audio.h"
+#include "usb_feedback_controller.h"
 #include "pdm_generator.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
@@ -73,6 +74,11 @@ static uint32_t last_dump_us = 0;
 // Latest once-per-second snapshot, served read-only by REQ_GET_CLOCK_DIAG.
 static ClockDiagPacket g_snapshot;
 
+// tools/clkdiag_poll.py requests 256 bytes; a longer packet is silently truncated.
+_Static_assert(sizeof(ClockDiagPacket) <= 256, "ClockDiagPacket exceeds the host read length");
+
+extern usb_feedback_ctrl_t fb_ctrl;
+
 // ppm -> centi-ppm (ppm*100) with symmetric rounding.
 static inline int32_t ppm_to_cppm(float v) {
     return (int32_t)(v * 100.0f + (v >= 0.0f ? 0.5f : -0.5f));
@@ -102,6 +108,15 @@ static void fmt_hz(char *s, float v) {
     if (m < 0) m = -m;
     if (m >= 1000) { w += 1; m -= 1000; }
     snprintf(s, 20, "%ld.%03ld", w, m);
+}
+
+// Signed Q16.16 with four decimals, e.g. "-0.0039".
+static void fmt_q16(char *s, int32_t v) {
+    uint32_t a = (v < 0) ? (uint32_t)-(int64_t)v : (uint32_t)v;
+    uint32_t w = a >> 16;
+    uint32_t f = (uint32_t)((((uint64_t)(a & 0xFFFFu)) * 10000u + 32768u) >> 16);
+    if (f >= 10000u) { w += 1; f -= 10000u; }
+    snprintf(s, 16, "%s%lu.%04lu", (v < 0) ? "-" : "", (unsigned long)w, (unsigned long)f);
 }
 
 // sys_clk offset in ppm*100 vs the nominal clock plan, as an integer.
@@ -192,7 +207,7 @@ void clock_diag_poll(void) {
     char a[20], b[20], c[20], d[20];
 
     // Snapshot header (served by REQ_GET_CLOCK_DIAG).
-    g_snapshot.version   = 1;
+    g_snapshot.version   = 2;
 #if PICO_RP2350
     g_snapshot.platform  = PLATFORM_RP2350;
 #else
@@ -382,6 +397,37 @@ void clock_diag_poll(void) {
         g_snapshot._rsv          = 0;
         g_snapshot.in_hz_long_mhz = hz_to_mhz(sd.hz_long);
         g_snapshot.in_span_ms    = sd.span_ms;
+    }
+
+    // --- usbfb: USB feedback controller terms and window counters ---
+    {
+        fb_ctrl_diag_t fd;
+        fb_ctrl_get_diag(&fb_ctrl, &fd);
+        char fb[16], mn[16], mx[16], ri[16], rl[16], sv[16], fe[16];
+        fmt_q16(fb, (int32_t)fd.feedback_q16);
+        fmt_q16(mn, (int32_t)fd.fb_min_q16);
+        fmt_q16(mx, (int32_t)fd.fb_max_q16);
+        fmt_q16(ri, (int32_t)fd.rate_iir_q16);
+        fmt_q16(rl, (int32_t)fd.rate_long_q16);
+        fmt_q16(sv, fd.servo_q16);
+        fmt_q16(fe, fd.fill_error_q16);
+        printf("CLKDIAG usbfb: fb=%s[%s..%s] iir=%s long=%s span=%lums servo=%s ferr=%s upd=%lu merged=%lu rej=%lu reanch=%lu\n",
+               fb, mn, mx, ri, rl, (unsigned long)fd.long_span_frames, sv, fe,
+               (unsigned long)fd.updates, (unsigned long)fd.merged_windows,
+               (unsigned long)fd.rejected, (unsigned long)fd.long_reanchors);
+
+        g_snapshot.fb_q16           = fd.feedback_q16;
+        g_snapshot.fb_min_q16       = fd.fb_min_q16;
+        g_snapshot.fb_max_q16       = fd.fb_max_q16;
+        g_snapshot.fb_rate_iir_q16  = fd.rate_iir_q16;
+        g_snapshot.fb_rate_long_q16 = fd.rate_long_q16;
+        g_snapshot.fb_long_span_ms  = fd.long_span_frames;
+        g_snapshot.fb_servo_q16     = fd.servo_q16;
+        g_snapshot.fb_fill_err_q16  = fd.fill_error_q16;
+        g_snapshot.fb_updates       = fd.updates;
+        g_snapshot.fb_merged        = fd.merged_windows;
+        g_snapshot.fb_rejected      = fd.rejected;
+        g_snapshot.fb_reanchors     = fd.long_reanchors;
     }
 
     // --- loop: worst main-loop gap since last dump ---
