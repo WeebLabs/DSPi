@@ -23,7 +23,7 @@ void fb_ctrl_init(usb_feedback_ctrl_t *ctrl) {
     ctrl->rate_valid            = false;
     ctrl->stream_active         = false;
     ctrl->need_baseline         = false;
-    ctrl->sof_count             = 0;
+    ctrl->last_frame            = 0;
     ctrl->last_total_words      = 0;
 }
 
@@ -36,7 +36,6 @@ void fb_ctrl_reset(usb_feedback_ctrl_t *ctrl, uint32_t nominal_rate_q16) {
     ctrl->feedback_out_q16      = nominal_rate_q16;
     ctrl->stream_active         = true;
     ctrl->need_baseline         = true;
-    ctrl->sof_count             = 0;
 }
 
 void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl) {
@@ -44,7 +43,6 @@ void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl) {
     ctrl->rate_valid            = false;
     ctrl->fill_error_filtered   = 0;
     ctrl->holdoff_remaining     = 0;
-    ctrl->sof_count             = 0;
     ctrl->feedback_out_q16      = ctrl->nominal_rate_q16;
 }
 
@@ -54,37 +52,54 @@ void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl) {
 
 FB_TIME_CRITICAL
 void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
+                        uint32_t frame_count,
                         uint32_t current_total_words,
                         uint32_t rate_shift,
                         uint32_t consumer_fill_q16) {
     if (!ctrl->stream_active || !ctrl->rate_valid)
         return;
 
-    ctrl->sof_count++;
-    if ((ctrl->sof_count & 0x3) != 0)   // Every 4 SOFs (bRefresh=2)
-        return;
+    frame_count &= FB_FRAME_MASK;
 
-    // First measurement cycle after reset: capture DMA baseline only.
-    // last_total_words is stale — computing a delta would overflow the rate path.
+    // First call after reset: latch both anchors only. last_total_words is
+    // stale here, so a delta would overflow the rate path.
     if (ctrl->need_baseline) {
+        ctrl->last_frame = frame_count;
         ctrl->last_total_words = current_total_words;
         ctrl->need_baseline = false;
         return;
     }
 
-    // -----------------------------------------------------------------------
-    // Loop A: Rate measurement (IIR, α = 1/16, rounded)
-    // -----------------------------------------------------------------------
+    // Decimate on the USB frame number, not on callback count: a SOF IRQ held
+    // off past 1 ms merges two SOFs into one callback.
+    uint32_t elapsed = (frame_count - ctrl->last_frame) & FB_FRAME_MASK;
+    if (elapsed < FB_UPDATE_FRAMES)
+        return;
+
     uint32_t delta_words = current_total_words - ctrl->last_total_words;
+    ctrl->last_frame = frame_count;
     ctrl->last_total_words = current_total_words;
 
     if (delta_words == 0)
-        return;  // DMA stalled — skip this cycle
+        return;  // DMA stalled, skip this cycle
 
-    uint32_t rate_raw_q16 = delta_words << rate_shift;
-
-    int32_t rate_error = (int32_t)(rate_raw_q16 - ctrl->rate_estimate_q16);
-    ctrl->rate_estimate_q16 += (uint32_t)round_div_pow2_s32(rate_error, FB_IIR_SHIFT);
+    // -----------------------------------------------------------------------
+    // Loop A: Rate measurement (IIR, α = 1/16, rounded)
+    //
+    // Normalize by the true frame span. Do not reject one half of a late-anchor
+    // pair: its twin then goes uncancelled (see FB_RATE_SANE_SHIFT).
+    // -----------------------------------------------------------------------
+    if ((delta_words >> (30 - rate_shift)) == 0) {   // keeps the shift below in range
+        uint32_t rate_raw_q16 = (elapsed == FB_UPDATE_FRAMES)
+            ? delta_words << rate_shift
+            : ((delta_words << (rate_shift + 2)) + elapsed / 2) / elapsed;
+        int32_t raw_offset = (int32_t)(rate_raw_q16 - ctrl->nominal_rate_q16);
+        int32_t sane = (int32_t)(ctrl->nominal_rate_q16 >> FB_RATE_SANE_SHIFT);
+        if (raw_offset <= sane && raw_offset >= -sane) {
+            int32_t rate_error = (int32_t)(rate_raw_q16 - ctrl->rate_estimate_q16);
+            ctrl->rate_estimate_q16 += (uint32_t)round_div_pow2_s32(rate_error, FB_IIR_SHIFT);
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Loop B: Fill-level servo (proportional, direct measurement)

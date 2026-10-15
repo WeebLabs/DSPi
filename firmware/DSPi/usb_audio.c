@@ -1512,7 +1512,6 @@ static bool __not_in_flash_func(uac1_driver_xfer_cb)(uint8_t rhport, uint8_t ep_
 
 static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_count) {
     (void)rhport;
-    (void)frame_count;
 
     extern audio_spdif_instance_t *spdif_instance_ptrs[];
     extern volatile bool output_type_switch_in_progress;
@@ -1551,7 +1550,7 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
             : (uint32_t)spdif0_consumer_fill * 48u;
     }
     if ((int32_t)fill_frames < 0) fill_frames = 0;
-    fb_ctrl_sof_update(&fb_ctrl, current_total, rate_shift,
+    fb_ctrl_sof_update(&fb_ctrl, frame_count, current_total, rate_shift,
                        (fill_frames << 16) / 48u);
 
     if (active_input_source != INPUT_SOURCE_USB) {

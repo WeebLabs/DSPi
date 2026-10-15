@@ -45,6 +45,17 @@ static inline int32_t round_div_pow2_s32(int32_t x, uint32_t n) {
 // Holdoff: number of valid 4ms updates required before servo is armed
 #define FB_HOLDOFF_UPDATES         2
 
+// Update cadence in USB frames (bRefresh=2). rate_shift scales exactly this
+// span; a longer (merged-SOF) window is normalized by its true frame count.
+#define FB_UPDATE_FRAMES           4
+
+// USB SOF frame numbers are 11 bits and wrap every 2048 ms.
+#define FB_FRAME_MASK              0x7FFu
+
+// Rate-sample plausibility: ±nominal >> 1 (50%). A genuine anchor up to ~1 ms late
+// reaches 25%, so this leaves margin; rejecting one half of a pair breaks cancellation.
+#define FB_RATE_SANE_SHIFT         1
+
 // ---------------------------------------------------------------------------
 // Controller state
 // ---------------------------------------------------------------------------
@@ -66,9 +77,9 @@ typedef struct {
     bool     stream_active;         // Audio stream is currently active
     bool     need_baseline;         // First post-reset cycle: capture last_total_words only
 
-    // SOF decimation
-    uint32_t sof_count;             // Counts SOF events for 4-SOF decimation
-    uint32_t last_total_words;      // Previous DMA word total for delta
+    // Measurement window anchors, latched together in the same SOF call
+    uint32_t last_frame;            // USB frame number at the last anchor
+    uint32_t last_total_words;      // DMA word total at the last anchor
 } usb_feedback_ctrl_t;
 
 // ---------------------------------------------------------------------------
@@ -84,12 +95,15 @@ void fb_ctrl_reset(usb_feedback_ctrl_t *ctrl, uint32_t nominal_rate_q16);
 // Mark stream as deactivated (alt setting 0).
 void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl);
 
-// Called every SOF (1ms). Performs 4-SOF decimated measurement and update.
+// Called every SOF (1ms). Updates once per FB_UPDATE_FRAMES of USB frame
+// number and divides by the true span, so a merged (missed) SOF cannot skew it.
+// frame_count: the SOF's 11-bit USB frame number.
 // current_total_words: sub-buffer-precise DMA word count from slot 0.
 // rate_shift: 12 for SPDIF, 13 for I2S.
 // consumer_fill_q16: slot 0 fill in Q16.16 buffer units (frames * 65536
 // / 48); sample-granular, from the ring's coherent snapshot pair.
 void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
+                        uint32_t frame_count,
                         uint32_t current_total_words,
                         uint32_t rate_shift,
                         uint32_t consumer_fill_q16);
