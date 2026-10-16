@@ -220,7 +220,7 @@ void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
         ctrl->holdoff_remaining--;
     } else {
         // Fill error in Q16.16 buffer-counts. Positive = overfull.
-        int32_t fill_error_q16 = (int32_t)consumer_fill_q16 - (FB_FILL_TARGET << 16);
+        int32_t fill_error_q16 = (int32_t)consumer_fill_q16 - FB_FILL_TARGET_Q16;
 
         // IIR filter: same α=1/16 as rate path
         int32_t fe_delta = fill_error_q16 - ctrl->fill_error_filtered;

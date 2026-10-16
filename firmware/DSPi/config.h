@@ -82,9 +82,16 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define PDM_HOLD_TIMEOUT_US 100000u   // pdm_hold_hw: covers the fade-out at 44.1 kHz with margin
 
 // SPDIF Buffer Configuration
-// Slot ring fill scale in 48-frame buckets (16 = 768 frames): the unit of the
-// prefill thresholds, the clock servo target and REQ_GET_BUFFER_STATS.
+// Slot ring fill scale in 48-frame buckets (16 = 768 frames): the unit of
+// REQ_GET_BUFFER_STATS and of the clock servos' fill error and gains. The rings
+// themselves track fill to the frame; buckets survive for wire compatibility.
 #define SPDIF_CONSUMER_BUFFER_COUNT 16
+#define SLOT_FILL_FRAMES_PER_BUCKET 48u
+
+// Steady-state slot ring fill: the prefill threshold, both clock servos' target,
+// the underrun re-anchor point and the post-restart hold. Change it only here;
+// audio_pipeline.c static-asserts its limits.
+#define OUTPUT_RING_TARGET_FILL_FRAMES 384u
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
@@ -102,9 +109,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Sub alignment (in samples).  Known defect: PDM's real latency is not its
 // DMA ring size, so this offset is miscalibrated; see current_architecture.md
 // PDM "Known alignment defect" before changing either value.
-#define SPDIF_BUFFER_SAMPLES  384  // slot ring steady-state fill (OUTPUT_RING_TARGET_FILL_FRAMES)
 #define PDM_BUFFER_SAMPLES    (PDM_DMA_BUFFER_SIZE / 8)                           // 256
-#define SUB_ALIGN_SAMPLES     (SPDIF_BUFFER_SAMPLES - PDM_BUFFER_SAMPLES)         // 128
+#define SUB_ALIGN_SAMPLES     ((int)OUTPUT_RING_TARGET_FILL_FRAMES - PDM_BUFFER_SAMPLES)  // 128
 
 // ----------------------------------------------------------------------------
 // VENDOR INTERFACE CONFIGURATION (WinUSB / WCID)

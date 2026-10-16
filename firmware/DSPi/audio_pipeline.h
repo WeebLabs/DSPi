@@ -88,9 +88,9 @@ uint get_slot_consumer_fill(uint slot);
 // Sample-granular fill in buffer units (0..16) for the clock servo;
 // negative when no valid reading exists (type switch, slot not running).
 float get_slot_consumer_fill_frac(uint slot);
-// Steady-state slot ring fill (8 buckets of 48 frames): the underrun re-anchor
-// target, and the post-restart hold before the fade back up.
-#define OUTPUT_RING_TARGET_FILL_FRAMES (SPDIF_CONSUMER_BUFFER_COUNT / 2u * 48u)
+// True once the slot's ring holds OUTPUT_RING_TARGET_FILL_FRAMES (the prefill
+// threshold); false while no valid reading exists.
+bool slot_fill_at_target(uint slot);
 // Ring stale-audio protection (see audio_pipeline.c): main-loop idle pump and
 // a one-shot full-ring silence stamp.
 void output_rings_idle_pump(void);

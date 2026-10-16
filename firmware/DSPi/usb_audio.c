@@ -1542,16 +1542,16 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
         audio_i2s_instance_t *inst = i2s_instance_ptrs[0];
         fill_frames = (inst && inst->ring)
             ? inst->snap_produced_frames - inst->snap_consumed_frames
-            : (uint32_t)spdif0_consumer_fill * 48u;
+            : (uint32_t)spdif0_consumer_fill * SLOT_FILL_FRAMES_PER_BUCKET;
     } else {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
         fill_frames = (inst && inst->ring)
             ? inst->snap_produced_frames - inst->snap_consumed_frames
-            : (uint32_t)spdif0_consumer_fill * 48u;
+            : (uint32_t)spdif0_consumer_fill * SLOT_FILL_FRAMES_PER_BUCKET;
     }
     if ((int32_t)fill_frames < 0) fill_frames = 0;
     fb_ctrl_sof_update(&fb_ctrl, frame_count, current_total, rate_shift,
-                       (fill_frames << 16) / 48u);
+                       (fill_frames << 16) / SLOT_FILL_FRAMES_PER_BUCKET);
 
     if (active_input_source != INPUT_SOURCE_USB) {
         // In non-USB modes the host's stream is decorative.  Output DMA can

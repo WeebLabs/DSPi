@@ -119,7 +119,7 @@ _Static_assert(I2S_RX_DMA_BASE + 2 * I2S_RX_MAX_PAIRS <= SOFT_VCXO_DMA_PULSE,
 // cost (Core 1 EQ-worker handshake, pipeline setup) divided by a tiny frame
 // count reads as a large inflation.  Batching to 48 frames matches the USB
 // packet granularity, bringing I2S CPU in line with USB.  At 48 kHz this adds
-// ~1 ms of input latency; the output rings' 50% prefill absorbs the ripple.
+// ~1 ms of input latency; the output rings' target-fill prefill absorbs the ripple.
 #define I2S_INPUT_MIN_BLOCK 48u
 
 // Per-pair ring storage in the shared input-capture arena
@@ -739,7 +739,7 @@ uint32_t i2s_input_poll(void) {
 // This is only used during a SLAVE-role prefill.  In slave mode the input is
 // clocked by the I2S output clock master, so draining the outputs to prefill
 // (the SPDIF-style handshake) also stops the input's BCK/LRCLK and no input
-// samples arrive; the rings could never reach the 50% target and outputs would
+// samples arrive; the rings could never reach the fill target and outputs would
 // never re-enable.  Synthesizing silence fills the rings deterministically;
 // real audio resumes after enable_outputs_in_sync() restarts the clock master
 // and re-phases the input rings.  Master-role prefill uses real input audio via

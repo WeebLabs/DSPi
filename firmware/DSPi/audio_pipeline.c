@@ -284,7 +284,9 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
     return (uint8_t)n;
 }
 
-void __not_in_flash_func(process_input_block)(uint32_t sample_count) {
+// Never inline: a copy inlined into a flash caller (siggen_pump) would run the
+// whole pipeline from XIP, invisible to check_ram_placement.py.
+void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     uint32_t packet_start = time_us_32();
     // Must precede the Core 1 dispatch below: eq_worker_loop reads rta_view
     // after work_ready, and rta_packet_end() reads it back after work_done.
@@ -1512,7 +1514,7 @@ static void output_rings_write_block(uint32_t frames) {
 // Idle silence pump: with outputs enabled but no producer running (USB
 // pause, source gaps), keep the ring silent ahead of the reader so the
 // free-running DMA can never loop stale audio. The fill gate makes it a
-// no-op while streaming (fill holds near 8 buckets).
+// no-op while streaming (fill holds near the target).
 DSP_TIME_CRITICAL
 void output_rings_idle_pump(void) {
     if (output_type_switch_in_progress) return;
@@ -1672,10 +1674,19 @@ int32_t output_ring_fill_signed(uint slot) {
 }
 #endif
 
-// One "bucket" = 48 frames (the old consumer-buffer size); the vendor
-// stats wire format and every prefill threshold keep bucket units.
-#define SLOT_FILL_FRAMES_PER_BUCKET 48u
 #define SLOT_FILL_MAX_BUCKETS       SPDIF_CONSUMER_BUFFER_COUNT
+
+// After a write the fill sits near the target, and the next block can be a
+// whole AUDIO_BUFFER_SAMPLES away: the target must exceed one block, and one
+// block must still fit above it inside each ring's writable span.
+_Static_assert(OUTPUT_RING_TARGET_FILL_FRAMES > AUDIO_BUFFER_SAMPLES,
+               "ring target must exceed one input block");
+_Static_assert(OUTPUT_RING_TARGET_FILL_FRAMES + AUDIO_BUFFER_SAMPLES <=
+               PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD,
+               "ring target leaves no room for a block in the S/PDIF ring");
+_Static_assert(OUTPUT_RING_TARGET_FILL_FRAMES + AUDIO_BUFFER_SAMPLES <=
+               PICO_AUDIO_I2S_RING_FRAMES - PICO_AUDIO_I2S_ERASE_AHEAD,
+               "ring target leaves no room for a block in the I2S ring");
 
 // Live ring fill in frames for a slot; returns false when no valid reading
 // exists (type switch in progress, slot not set up).
@@ -1718,7 +1729,7 @@ void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, ui
 
 DSP_TIME_CRITICAL
 uint get_slot_consumer_fill(uint slot) {
-    // Bucket units (0..16) so every prefill threshold keeps its meaning.
+    // Bucket units (0..16): the legacy scale of REQ_GET_BUFFER_STATS.
     uint32_t fill;
     if (!slot_ring_fill(slot, &fill)) return 0;
     uint buckets = fill / SLOT_FILL_FRAMES_PER_BUCKET;
@@ -1729,6 +1740,11 @@ uint get_slot_consumer_fill(uint slot) {
 // Returns false when no valid reading exists.
 bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
     return slot_ring_fill(slot, frames);
+}
+
+bool slot_fill_at_target(uint slot) {
+    uint32_t fill;
+    return slot_ring_fill(slot, &fill) && fill >= OUTPUT_RING_TARGET_FILL_FRAMES;
 }
 
 // Fractional fill for the clock servo, in bucket units, from the ring's
@@ -1804,7 +1820,7 @@ static void update_buffer_watermarks(void) {
 // would call it and the outputs would drain to silence, so the main loop
 // calls this pump instead.  It feeds zero-input blocks, paced by the slot-0
 // consumer fill level (the same signal the USB feedback servo and the SPDIF
-// prefill logic use), topping up to half-full.  Every block goes through the
+// prefill logic use), topping up to the target fill.  Every block goes through the
 // full pipeline, so inter-slot alignment and the delay-line write index
 // advance exactly as they do for a real input source.
 void siggen_pump(void) {
@@ -1842,7 +1858,7 @@ void siggen_pump(void) {
     // Bounded top-up per call to keep the main loop responsive; the loop
     // spins fast enough to sustain any supported rate.
     for (int b = 0; b < 2; b++) {
-        if (get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2)
+        if (slot_fill_at_target(0))
             break;
         int n_in = active_input_channel_count();
         for (int k = 0; k < n_in; k++)

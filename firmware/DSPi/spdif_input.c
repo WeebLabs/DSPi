@@ -41,8 +41,6 @@
 // The divider math and PIO/MCK writes live in input_servo.c (shared with the
 // ADAT input's slave clock mode); this module owns lock gating, rate limiting,
 // and the library's rate measurement.
-// With output prefill at 50% (8 buffers), worst-case PIO quantization drift
-// (~156 ppm at 96kHz) takes ~19s to exhaust headroom, so gentle gains suffice.
 #define SERVO_UPDATE_INTERVAL 1000      // Main loop iterations between servo updates (~20ms)
 
 // Long-window rate measurement (mirrors the ADAT slave dual-anchor scheme in

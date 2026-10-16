@@ -263,7 +263,7 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
 // and set active_input_source = INPUT_SOURCE_I2S. This applies the selected
 // rate and MCK, starts the input, and deliberately does NOT enable outputs:
 // it leaves preset_loading set so the main-loop I2S block drains the outputs,
-// prefills the rings to 50%, and starts them in sync (mirroring the SPDIF
+// prefills the rings to the target fill, and starts them in sync (mirroring the SPDIF
 // lock-acquisition prefill, minus the lock wait).
 //
 // When the selected rate differs from the live pipeline rate, perform_rate_change
@@ -315,11 +315,11 @@ static void drain_and_disable_outputs(void);
 static void enable_outputs_in_sync(void);
 static uint32_t samples_for_duration_ms(uint32_t sample_rate_hz, uint32_t duration_ms);
 
-// SPDIF input prefill: outputs disabled while the slot rings fill to 50%
+// SPDIF input prefill: outputs disabled while the slot rings fill to the target
 static bool spdif_prefilling = false;
 
 // I2S input prefill: same handshake as SPDIF (drain outputs, fill the slot
-// rings to 50%, then enable in sync) but with no lock wait, since the I2S
+// rings to the target, then enable in sync) but with no lock wait, since the I2S
 // input is synchronous to our own clock domain and runs as soon as started.
 // Cleared by prepare_pipeline_reset() so every disruptive op restarts the
 // handshake cleanly. Driven by the main-loop I2S block.
@@ -1880,7 +1880,7 @@ void core0_init() {
         // path that sets the source directly before we get here.
         //
         // Bring up the input with the rate applied but outputs left muted;
-        // the main-loop I2S block prefills the rings to 50% then enables in
+        // the main-loop I2S block prefills the rings to the target then enables in
         // sync (same handshake as the runtime switch).
         prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
         i2s_input_bringup_prefill();
@@ -2042,9 +2042,9 @@ int main(void) {
                 spdif_prefilling = true;
             }
 
-            // Prefill: wait for consumer buffers to reach 50% before enabling outputs
+            // Prefill: wait for the slot 0 ring to reach the target fill before enabling outputs
             if (spdif_prefilling) {
-                if (get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                if (slot_fill_at_target(0)) {
                     enable_outputs_in_sync();
                     spdif_prefilling = false;
                     // Release the DAC hardware mute that prepare_pipeline_reset()
@@ -2100,7 +2100,7 @@ int main(void) {
             // The LOCKED gate matters (mirrors the I2S slave prefill): never
             // enable outputs against a receiver that lost sync mid-prefill.
             if (adat_prefilling && ad_state == ADAT_INPUT_LOCKED &&
-                get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                slot_fill_at_target(0)) {
                 enable_outputs_in_sync();
                 adat_prefilling = false;
                 // Release the DAC hardware mute now that clocks are running
@@ -2156,7 +2156,7 @@ int main(void) {
             // here is what actually re-establishes the inter-type offset.
             // Do not "optimize" it away.
             if (i2s_prefilling && sl_state == I2S_SLAVE_LOCKED &&
-                get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                slot_fill_at_target(0)) {
                 enable_outputs_in_sync();
                 i2s_prefilling = false;
                 // Release the DAC hardware mute now that clocks are running
@@ -2196,7 +2196,7 @@ int main(void) {
         }
         // Master clock mode: no lock handling and no clock servo (the input
         // is synchronous to our own clock domain), but it DOES use the same
-        // prefill handshake as SPDIF so outputs start against a 50% consumer
+        // prefill handshake as SPDIF so outputs start against the target consumer
         // fill instead of whatever low level the startup transient leaves.
         // Trigger is preset_loading (set by every disruptive op via
         // prepare_pipeline_reset); there is no lock to wait for, so prefill
@@ -2214,7 +2214,7 @@ int main(void) {
             }
 
             if (i2s_prefilling &&
-                get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                slot_fill_at_target(0)) {
                 enable_outputs_in_sync();
                 i2s_prefilling = false;
                 // Release the DAC hardware mute now that clocks are running
@@ -3576,7 +3576,7 @@ int main(void) {
                     // Apply rate + MCK and start the input, but do NOT enable
                     // outputs here.  The mute is already engaged (the
                     // prepare_pipeline_reset above), so the main-loop I2S block
-                    // drains the outputs, prefills the rings to 50%, and
+                    // drains the outputs, prefills the rings to the target, and
                     // starts them in sync.  This gives I2S the same startup
                     // fill margin as USB/SPDIF instead of whatever low level the
                     // transient leaves.
@@ -3685,7 +3685,7 @@ int main(void) {
         // restart after a BCK pin change in the input-master role.  Gated on
         // pipeline_reset_ready() like every other reset handler.  Outputs are
         // left muted after the restart; the main-loop I2S block above prefills
-        // the rings to 50% and enables them in sync, so no explicit
+        // the rings to the target and enables them in sync, so no explicit
         // complete_pipeline_reset() is needed here.
         if ((i2s_rx_pin_change_pending || i2s_input_restart_pending) &&
             pipeline_reset_ready()) {

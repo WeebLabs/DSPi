@@ -15,7 +15,7 @@
  *           than left to the integrator.
  *   Loop B: consumer-fill trim on the SAMPLE-GRANULAR fractional fill
  *           (get_slot_consumer_fill_frac), IIR-smoothed; a plain PI that
- *           converges the fill onto 8.0 of 16 buffers, with a second P
+ *           converges the fill onto SERVO_FILL_TARGET, with a second P
  *           slope beyond +-2 buffers for real displacements.
  * The total command is slew-limited per tick before actuation (see the
  * Loop B gain comment for the hardware findings behind the tuning).
@@ -54,6 +54,8 @@
 // noise, further shaped by the slew limiter. A second P slope engages
 // beyond +-2 buffers so real displacements recover faster; transients
 // bigger than that arrive via resets, which re-centre the fill anyway.
+#define SERVO_FILL_TARGET        ((float)OUTPUT_RING_TARGET_FILL_FRAMES / \
+                                  (float)SLOT_FILL_FRAMES_PER_BUCKET)   // buckets
 #define SERVO_FILL_ALPHA         0.125f  // fill IIR (~8 ticks, ~160 ms)
 #define SERVO_FILL_KP_PPM        2.0f    // ppm per buffer of smoothed error
 #define SERVO_FILL_KP2_PPM       4.0f    // added slope beyond +-2 buffers
@@ -62,7 +64,7 @@
 #define SERVO_SLEW_PPM_PER_TICK  0.5f    // ~25 ppm/s at the ~20 ms tick
 
 // Smoothed fill (buffer units), integrator and last slew-limited command.
-static float fill_smooth = 8.0f;
+static float fill_smooth = SERVO_FILL_TARGET;
 static float fill_integral_ppm = 0.0f;
 static float last_cmd_ppm = 0.0f;
 
@@ -104,7 +106,7 @@ void input_servo_apply(float actual_freq, int fill_slot) {
             return;
         }
         fill_smooth += SERVO_FILL_ALPHA * (fill - fill_smooth);
-        float fill_error = fill_smooth - 8.0f;
+        float fill_error = fill_smooth - SERVO_FILL_TARGET;
 #if DSPI_CLOCK_DIAG
         diag_fill_error = (int32_t)fill_error;
 #endif
@@ -149,7 +151,7 @@ void input_servo_apply(float actual_freq, int fill_slot) {
 }
 
 void input_servo_reset(void) {
-    fill_smooth = 8.0f;   // seed at target so the IIR has no start transient
+    fill_smooth = SERVO_FILL_TARGET;   // seed at target so the IIR has no start transient
     fill_integral_ppm = 0.0f;
     last_cmd_ppm = 0.0f;
     soft_vcxo_set_ppm(0.0f);
