@@ -404,29 +404,24 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
     return false;
 }
 
-// True if `pin` is the data pin of an I2S RX stereo pair other than
-// `exclude_pair`, active OR inactive.  is_pin_in_use() only reserves the
-// currently-active pairs (so the inactive placeholder pins never block other
-// functions in stereo mode); this is the complementary guard that keeps all
-// configured pair pins mutually distinct, so raising i2s_input_channels can
-// never bring two state machines up on the same GPIO.
-static bool i2s_rx_pair_pin_taken(uint8_t pin, uint8_t exclude_pair) {
-    for (int q = 0; q < I2S_RX_MAX_PAIRS; q++)
+// True if `pin` is the data pin of one of the first `n_pairs` I2S RX pairs other
+// than `exclude_pair`.  Inactive pairs' parked pins reserve nothing, so every
+// path that raises the active count must re-check with the new count.
+static bool i2s_rx_pair_pin_taken(uint8_t pin, uint8_t exclude_pair, uint8_t n_pairs) {
+    for (int q = 0; q < n_pairs && q < I2S_RX_MAX_PAIRS; q++)
         if (q != exclude_pair && i2s_rx_pin[q] == pin)
             return true;
     return false;
 }
 
-// PIN_CONFIG_* status for assigning `pin` to I2S RX stereo `pair`.  Unlike a bare
-// is_pin_in_use() check, the I2S BCK/LRCLK clocks are treated as ALWAYS claimed:
-// an I2S RX data pin coexists with the clocks whenever the input runs, so it must
-// avoid them even while I2S is currently inactive (otherwise the clash would only
-// surface on the switch INTO I2S).  Also rejects a pin already on another pair.
-static uint8_t check_i2s_rx_pin(uint8_t pin, uint8_t pair) {
+// PIN_CONFIG_* status for `pin` on I2S RX `pair` when `n_pairs` pairs are active.
+// The BCK/LRCLK clocks count as ALWAYS claimed, so a clash cannot first surface
+// on the switch INTO I2S.
+static uint8_t check_i2s_rx_pin(uint8_t pin, uint8_t pair, uint8_t n_pairs) {
     if (!is_valid_gpio_pin(pin))                              return PIN_CONFIG_INVALID_PIN;
     if (i2s_clock_pin_claimed(pin))                           return PIN_CONFIG_PIN_IN_USE;
     if (pin_used_by_fixed_peripheral(pin, 0xFF))             return PIN_CONFIG_PIN_IN_USE;
-    if (i2s_rx_pair_pin_taken(pin, pair))                    return PIN_CONFIG_PIN_IN_USE;
+    if (i2s_rx_pair_pin_taken(pin, pair, n_pairs))           return PIN_CONFIG_PIN_IN_USE;
     return PIN_CONFIG_SUCCESS;
 }
 
@@ -3999,9 +3994,11 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     status = PIN_CONFIG_INVALID_OUTPUT;   // no such stereo pair
                 } else if (new_pin == i2s_rx_pin[pair]) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
-                } else if ((status = check_i2s_rx_pin(new_pin, pair)) != PIN_CONFIG_SUCCESS) {
-                    // check_i2s_rx_pin set status (invalid GPIO, clock pin,
-                    // peripheral clash, or another pair's pin) — reject.
+                } else if ((status = check_i2s_rx_pin(new_pin, pair,
+                                                      (uint8_t)(i2s_input_channels / 2)))
+                           != PIN_CONFIG_SUCCESS) {
+                    // Invalid GPIO, clock pin, peripheral clash, or an active
+                    // pair's pin.  An inactive pair's parked pin does not block.
                 } else {
                     i2s_rx_pin[pair] = new_pin;
                     if (active_input_source == INPUT_SOURCE_I2S) {
@@ -4047,18 +4044,14 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 } else if (count / 2 > I2S_RX_MAX_PAIRS) {
                     status = PIN_CONFIG_INVALID_OUTPUT;     // more pairs than this part supports
                 } else {
-                    // When RAISING the count, every newly-activated pair's data
-                    // pin must pass the full I2S RX check (valid GPIO; not a
-                    // clock pin even though I2S may be inactive right now; no
-                    // peripheral or cross-pair clash).  Inactive pairs don't
-                    // reserve their pins, so a pin a pair was parked on may have
-                    // been taken since; reject rather than bring two SMs up on
-                    // one GPIO.  Lowering the count skips this (loop is empty).
+                    // Raising the count: each newly active pair's parked pin may
+                    // have been taken since, or may match another pair being
+                    // activated, so check it against the NEW pair count.
                     status = PIN_CONFIG_SUCCESS;
                     uint8_t old_pairs = (uint8_t)(i2s_input_channels / 2);
                     uint8_t new_pairs = (uint8_t)(count / 2);
                     for (uint8_t p = old_pairs; p < new_pairs && status == PIN_CONFIG_SUCCESS; p++)
-                        status = check_i2s_rx_pin(i2s_rx_pin[p], p);
+                        status = check_i2s_rx_pin(i2s_rx_pin[p], p, new_pairs);
                     if (status == PIN_CONFIG_SUCCESS && count != i2s_input_channels) {
                         i2s_input_channels = count;
                         if (active_input_source == INPUT_SOURCE_I2S) {
