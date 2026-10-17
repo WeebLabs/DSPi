@@ -6,12 +6,15 @@
 #   - Clock constants for 307.2 MHz sys_clk / 122.88 MHz PIO clock
 #   - Removed pio_clear_instruction_memory() (destroys shared PIO programs)
 #   - Pre-generated PIO files (no Python dependency)
+#   - Dedicated 44.1 kHz and 88.2 kHz decoder programs (cy 22 / 11)
 
 cmake_minimum_required(VERSION 3.12)
 if (NOT TARGET pico_spdif_rx)
     add_library(pico_spdif_rx INTERFACE)
 
+    pico_generate_pio_header(pico_spdif_rx ${CMAKE_CURRENT_LIST_DIR}/spdif_rx_44100.pio)
     pico_generate_pio_header(pico_spdif_rx ${CMAKE_CURRENT_LIST_DIR}/spdif_rx_48000.pio)
+    pico_generate_pio_header(pico_spdif_rx ${CMAKE_CURRENT_LIST_DIR}/spdif_rx_88200.pio)
     pico_generate_pio_header(pico_spdif_rx ${CMAKE_CURRENT_LIST_DIR}/spdif_rx_96000.pio)
     pico_generate_pio_header(pico_spdif_rx ${CMAKE_CURRENT_LIST_DIR}/spdif_rx_192000.pio)
     pico_generate_pio_header(pico_spdif_rx ${CMAKE_CURRENT_LIST_DIR}/spdif_rx_capture.pio)

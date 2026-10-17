@@ -14,7 +14,9 @@
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include "spdif_rx_capture.pio.h"
+#include "spdif_rx_44100.pio.h"
 #include "spdif_rx_48000.pio.h"
+#include "spdif_rx_88200.pio.h"
 #include "spdif_rx_96000.pio.h"
 #include "spdif_rx_192000.pio.h"
 #include "input_capture_arena.h"  // DSPi patch: FIFO storage is shared
@@ -36,7 +38,9 @@ static alarm_id_t alarm_id;
 
 typedef enum _spdif_rx_pio_program_id_t  {
     SPDIF_RX_PIO_CAPTURE = 0,
+    SPDIF_RX_PIO_DECODE_44100,
     SPDIF_RX_PIO_DECODE_48000,
+    SPDIF_RX_PIO_DECODE_88200,
     SPDIF_RX_PIO_DECODE_96000,
     SPDIF_RX_PIO_DECODE_192000,
 } spdif_rx_pio_program_id_t;
@@ -51,10 +55,15 @@ typedef struct _spdif_rx_pio_program_t {
 
 static spdif_rx_pio_program_t program_sets[] = {
     {SPDIF_RX_PIO_CAPTURE,           &spdif_rx_capture_program,    0, spdif_rx_capture_offset_entry_point,    spdif_rx_capture_program_get_default_config},
+    {SPDIF_RX_PIO_DECODE_44100,      &spdif_rx_44100_program,      0, spdif_rx_44100_offset_entry_point,      spdif_rx_44100_program_get_default_config},
     {SPDIF_RX_PIO_DECODE_48000,      &spdif_rx_48000_program,      0, spdif_rx_48000_offset_entry_point,      spdif_rx_48000_program_get_default_config},
+    {SPDIF_RX_PIO_DECODE_88200,      &spdif_rx_88200_program,      0, spdif_rx_88200_offset_entry_point,      spdif_rx_88200_program_get_default_config},
     {SPDIF_RX_PIO_DECODE_96000,      &spdif_rx_96000_program,      0, spdif_rx_96000_offset_entry_point,      spdif_rx_96000_program_get_default_config},
     {SPDIF_RX_PIO_DECODE_192000,     &spdif_rx_192000_program,     0, spdif_rx_192000_offset_entry_point,     spdif_rx_192000_program_get_default_config}
 };
+// The table is indexed by spdif_rx_pio_program_id_t; rows must stay in enum order.
+_Static_assert(sizeof(program_sets) / sizeof(program_sets[0]) == SPDIF_RX_PIO_DECODE_192000 + 1,
+               "program_sets must have one row per spdif_rx_pio_program_id_t");
 
 typedef enum _spdif_rx_samp_freq_id_t {
     SAMP_FREQ_ID_44100 = 0,
@@ -345,12 +354,19 @@ static uint32_t __time_critical_func(_dma_done_and_restart)(uint8_t dma_channel,
 static spdif_rx_pio_program_id_t _spdif_rx_get_decode_pio_promgam_id(spdif_rx_samp_freq_t samp_freq)
 {
     spdif_rx_pio_program_id_t pio_program_id;
+    // DSPi patch: 44.1 and 88.2 kHz get their own cycles-per-symbol; the
+    // capture stage already tells the families apart. 176.4 kHz still shares
+    // the 192 kHz program (neither rate is supported downstream).
     switch (samp_freq) {
-        case SAMP_FREQ_44100: // fallthrough
+        case SAMP_FREQ_44100:
+            pio_program_id = SPDIF_RX_PIO_DECODE_44100;
+            break;
         case SAMP_FREQ_48000:
             pio_program_id = SPDIF_RX_PIO_DECODE_48000;
             break;
-        case SAMP_FREQ_88200: // fallthrough
+        case SAMP_FREQ_88200:
+            pio_program_id = SPDIF_RX_PIO_DECODE_88200;
+            break;
         case SAMP_FREQ_96000:
             pio_program_id = SPDIF_RX_PIO_DECODE_96000;
             break;

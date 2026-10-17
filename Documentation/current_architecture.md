@@ -4581,13 +4581,14 @@ This matches the user's product-level decision; it differs from the industry-sta
 - **`bulk_params_apply` integration.** `WireInputConfig.spdif_rx_pin` is applied on bulk SET when `apply_pins == true`, mirroring how `output_pins[]` is applied. If the new pin differs from the current one and SPDIF input is active, the hot-swap fires.
 
 ### SPDIF RX Implementation
-*Last updated: 2026-07-20*
+*Last updated: 2026-10-17 (per-rate decoder programs for 44.1 and 88.2 kHz)*
 
 **Library**: Forked from `elehobica/pico_spdif_rx` v0.9.3 at `firmware/pico-extras/src/rp2_common/pico_spdif_rx/`.
 
 **DSPi library patches:**
 - PIO2 support for RP2350
 - Clock constants: 307.2 MHz sys_clk, 122.88 MHz PIO clock (divider 2.5 exact)
+- Dedicated 44.1 kHz and 88.2 kHz decoder programs (`spdif_rx_44100.pio`, `spdif_rx_88200.pio`), selected per detected rate instead of per rate pair (see "Clock and decoder programs")
 - Removed `pio_clear_instruction_memory()` (destroys shared PIO programs)
 - Removed `irq_set_enabled(DMA_IRQ_x, false)` (disables entire shared IRQ line)
 - Replaced `irq_has_shared_handler()` with private `irq_handler_registered` flag (prevents handler registration when other libraries share the IRQ line)
@@ -4600,7 +4601,27 @@ This matches the user's product-level decision; it differs from the industry-sta
 - RP2350: PIO2 SM0 (dedicated block, no conflicts)
 - RP2040: PIO1 SM2 (SM0=PDM occupies SM0 when active; SM1 was MCK pre-GPOUTn refactor and is now free — the patched `pio_clear_instruction_memory()` removal in the SPDIF RX library is still required because PDM and the I2S libraries share PIO program memory regardless of the MCK move)
 
-**Clock**: sys_clk 307.2 MHz → PIO clock 122.88 MHz (divider 2.5, exact). At 122.88 MHz: cy=20 (48kHz), cy=10 (96kHz), cy=5 (192kHz) — identical to original library values, zero error.
+**Clock and decoder programs**: sys_clk 307.2 MHz → PIO clock 122.88 MHz (divider 2.5, exact). The decoder re-synchronises on an edge, free-runs `cy` PIO cycles per symbol and latches at `lp` cycles into the next symbol, so `cy` must match the real symbol period or the latch points drift toward the following edge over the two- and three-symbol free runs. The upstream library shared one program per rate pair (44.1/48, 88.2/96, 176.4/192). Since 2026-10-17 each rate below 176.4 kHz has its own program, selected from the capture stage's detected rate (whose 6-symbol edge-interval windows separate 44.1 from 48 kHz without overlap); only one decoder program is resident at a time, so this costs no PIO instruction memory. 176.4 kHz still shares the 192 kHz program (neither is supported downstream).
+
+| Rate | Symbol (PIO cycles) | Program | Latch points (symbols) |
+|---|---|---|---|
+| 44.1 kHz | 21.77 | `spdif_rx_44100` cy 22, lp 10 | 1.47 / 2.48 / 3.49 |
+| 48 kHz | 20.00 | `spdif_rx_48000` cy 20, lp 10 | 1.50 / 2.50 / 3.50 |
+| 88.2 kHz | 10.88 | `spdif_rx_88200` cy 11, lp 5 | 1.47 / 2.48 / 3.49 |
+| 96 kHz | 10.00 | `spdif_rx_96000` cy 10, lp 5 | 1.50 / 2.50 / 3.50 |
+
+The 44.1 kHz program uses lp 10 rather than cy/2 because the `wait` delay `cy-1+lp` must fit the 5-bit delay field (31). Previously 44.1 kHz ran the 48 kHz program and its latches sat at 1.38, 2.30 and 3.22 symbols, the last 0.22 symbol before the next edge. `tools/spdif_pio_rx_sim.py` models the decoder cycle by cycle (2-cycle input synchroniser, 2.5 fractional PIO clock) against a BMC stream and sweeps pulse-width distortion and random jitter until a word decodes wrongly over 400 frames:
+
+| Rate | Program | Falling edge late | Falling edge early | Random jitter sigma |
+|---|---|---|---|---|
+| 44.1 kHz | shared 48 kHz (old) | 52.6 ns | 52.6 ns | 10.2 ns |
+| 44.1 kHz | dedicated (new) | 82.2 ns | 80.4 ns | 15.6 ns |
+| 48 kHz | dedicated | 71.6 ns | 81.4 ns | 12.9 ns |
+| 88.2 kHz | shared 96 kHz (old) | 24.7 ns | 24.7 ns | 4.7 ns |
+| 88.2 kHz | dedicated (new) | 37.2 ns | 35.3 ns | 6.5 ns |
+| 96 kHz | dedicated | 32.5 ns | 42.3 ns | 6.9 ns |
+
+Pulse-width distortion matters here because the decoder alternates rising- and falling-edge references, so an optical receiver's asymmetry shifts the latch points by its full amount. With the source off nominal by the 1 % decode-stability window the new 44.1 kHz program keeps 73 ns or more in both directions, and at the 3 % capture-window edge it keeps 60 ns, at least as much as the 48 kHz program at the same deviation. HW-untested; the simulation checks the program timing, not the pad or synchroniser behaviour.
 
 **DMA**: Channels 5+6 (RP2350) or 4+5 (RP2040) on DMA_IRQ_1, which it owns outright at the highest priority (no output uses a DMA IRQ). *Corrected 2026-10-11: this line previously said DMA_IRQ_0.*
 

@@ -81,9 +81,10 @@
 ;  as close as it can keep good latching position during 2+1 symbol periods.
 ;  ('wait' intruction can cancel the accumulated timing error for longer symbol periods)
 ;
-; cy: 20 clocks for a symbol cycle for both 44.1 KHz and 48 KHz (for reference, cy = 22.14 for 44.1 KHz, cy = 20.34 for 48 KHz)
-; cy: 10 clocks for a symbol cycle for both 88.2 KHz and 96 KHz (for reference, cy = 11.07 for 88.2 KHz, cy = 10.17 for 96 KHz)
-; cy:  5 clocks for a symbol cycle for both 176.4 KHz and 192 KHz (for reference, cy = 5.54 for 176.4 KHz, cy = 5.09 for 192 KHz)
+; DSPi: one program per rate family so cy tracks the real symbol period at the
+;  122.88 MHz PIO clock (44.1 kHz = 21.77 cycles, 88.2 kHz = 10.88). Sharing the
+;  48 kHz program with 44.1 kHz left the last free-running latch ~0.22 symbol
+;  before the next edge; see current_architecture.md "SPDIF RX Implementation".
 ; lp: symbol latch point (0 ~ cy-1)
 
 .define cy 5

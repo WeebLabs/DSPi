@@ -41,11 +41,9 @@ extern "C" {
   #endif
 #endif
 
-// DSPi: sys_clk 307.2 MHz, PIO clock 122.88 MHz (div = 2.5).
-// At 122.88 MHz the cy values match the original 125 MHz programs exactly:
-//   48kHz: cy = 122880000 / 6144000  = 20
-//   96kHz: cy = 122880000 / 12288000 = 10
-//  192kHz: cy = 122880000 / 24576000 =  5
+// DSPi: sys_clk 307.2 MHz, PIO clock 122.88 MHz (div = 2.5). Cycles per symbol
+// at that clock, one decoder program each: 44.1k 21.77 (cy 22), 48k 20 (cy 20),
+// 88.2k 10.88 (cy 11), 96k 10 (cy 10), 192k 5 (cy 5, also used for 176.4k).
 #ifndef SPDIF_RX_SYS_CLK_FREQ
 #define SPDIF_RX_SYS_CLK_FREQ (307200000)
 #endif
