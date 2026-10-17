@@ -34,7 +34,8 @@
 // terminal/feature unit + larger iso OUT max-packet.
 // 0x0202 → 0x0203 for the 4ch/6ch input alts + the unified channel model
 // (per-input EQ/metering, wire V16 / slot V21).
-#define USB_BCD_DEVICE  0x0203
+// 0x0203 → 0x0204 adds RP2350 alt 6 (4ch / 24-bit / 48 kHz).
+#define USB_BCD_DEVICE  0x0204
 
 // ----------------------------------------------------------------------------
 // ENDPOINT ADDRESSES
@@ -43,7 +44,7 @@
 #define AUDIO_OUT_ENDPOINT  0x01U
 #define AUDIO_IN_ENDPOINT   0x82U
 #if PICO_RP2350
-// RP2350 also serves an 8-channel/48 kHz/16-bit alt (3): 48 frames × 8 ch ×
+// RP2350 also serves an 8-channel/48 kHz/16-bit alt (5): 48 frames × 8 ch ×
 // 2 B = 768 B, + 1 jitter frame (16 B) = 784, rounded up to a 4-byte-aligned
 // 788.  This single value sizes the iso OUT EP for all alts (the EP buffer is
 // allocated once at the max), the receive scratch buffer, and the USB ring
@@ -165,8 +166,8 @@ extern const uint16_t usb_config_descriptor_len;
 
 // Alt-setting endpoint descriptor pointers — resolved at link time so the
 // UAC1 class driver can call usbd_edpt_iso_activate() without re-walking the
-// config on every SET_INTERFACE.  Indexed [alt-1]: [0] = alt 1 (16-bit),
-// [1] = alt 2 (24-bit), and on RP2350 [2] = alt 3 (8-channel 16-bit).
+// config on every SET_INTERFACE.  Indexed [alt-1]: alts 1/2 = stereo 16/24-bit;
+// RP2350 adds alts 3/4/5 = 4/6/8ch 16-bit and alt 6 = 4ch 24-bit.
 extern const uint8_t *const usb_audio_data_ep_desc[];
 extern const uint8_t *const usb_audio_fb_ep_desc[];
 

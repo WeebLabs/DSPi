@@ -37,9 +37,9 @@ extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
 extern volatile int32_t global_preamp_mul[NUM_INPUT_CHANNELS];
 extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
 
-// Active USB input channel count: 2 (stereo alts 1/2) or 8 (RP2350 alt 3).
-// The audio pipeline reads this to select the 8-channel matrix path and bypass
-// the stereo master chain.  Always 2 on RP2040.
+// Active USB input channel count: 2 (stereo alts 1/2) or 4/6/8
+// (RP2350 alts 3..6). Used by the input-agnostic audio pipeline to
+// select the number of active input channels. Always 2 on RP2040.
 extern volatile uint8_t usb_input_channels;
 
 // Host-selected rate for the USB playback endpoint.  This remains distinct

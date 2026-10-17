@@ -100,12 +100,12 @@ static const tusb_desc_device_t device_descriptor = {
 // 207  total
 //
 // The offsets above are the RP2040 (stereo-only) layout.  On RP2350 the
-// Feature Unit grows by 6 bytes (8 logical channels instead of 2) and three
-// multichannel AS alt blocks (alt 3 = 4ch, alt 4 = 6ch, alt 5 = 8ch; 52 bytes
-// each) are inserted before the vendor interface, so every offset from the
+// Feature Unit grows by 6 bytes (8 logical channels instead of 2) and four
+// multichannel AS alt blocks (alts 3/4/5 = 4/6/8ch 16-bit, alt 6 = 4ch 24-bit;
+// 52 bytes each) are inserted before the vendor interface, so every offset from the
 // Feature Unit onward shifts; the OFFSET_ALT*_* / CONFIG_TOTAL_LEN macros
 // compute the correct values per platform and the _Static_assert below verifies
-// the byte count.  RP2350 total = 369 (+162: FU +6, three alt blocks +156).
+// the byte count.  RP2350 total = 421 (+214: FU +6, four alt blocks +208).
 //
 // The vendor interface sits OUTSIDE the AC+AS IAD — it is its own USB
 // function.  TinyUSB's process_set_config() will call our driver's open()
@@ -114,8 +114,8 @@ static const tusb_desc_device_t device_descriptor = {
 // ----------------------------------------------------------------------------
 
 // ---- UAC1 input-channel configuration (platform-dependent) --------------
-// RP2350 advertises an 8-channel input alt (3) in addition to the stereo alts
-// (1/2); RP2040 is stereo-only.  The Input Terminal and Feature Unit declare
+// RP2350 advertises multichannel input alts (3..6) in addition to the stereo
+// alts (1/2); RP2040 is stereo-only.  The Input Terminal and Feature Unit declare
 // the channel SUPERSET so a host that keys its channel count off the terminal
 // exposes all formats (see Documentation/Features/usb_8ch_input_spec.md for
 // the host-compatibility note).  The Input Terminal descriptor itself is a
@@ -141,7 +141,7 @@ static const tusb_desc_device_t device_descriptor = {
 // Multichannel alt block (4/6/8 ch): format-type-I carries a single rate so it
 // is 11 bytes (N + 1×3).  Block = std(9)+general(7)+fmt(11)+OUT(9)+CS(7)+FB(9).
 #define AS_MULTICH_ALT_LEN  (9 + 7 + 11 + 9 + 7 + 9)
-#define NUM_MULTICH_ALTS    3   // alt3 = 4ch, alt4 = 6ch, alt5 = 8ch
+#define NUM_MULTICH_ALTS    4   // alts 3/4/5 = 4/6/8ch 16-bit, alt 6 = 4ch 24-bit
 #else
 #define AS_MULTICH_ALT_LEN  0
 #define NUM_MULTICH_ALTS    0
@@ -169,7 +169,7 @@ static const tusb_desc_device_t device_descriptor = {
 #endif
 
 // Per-alt EP descriptor offsets, computed so they self-adjust to UAC1_FU_LEN
-// and the optional alt3 block.  The _Static_assert on the array byte count
+// and the optional multichannel blocks.  The _Static_assert on the array byte count
 // (below) catches any arithmetic slip at compile time.
 #define OFFSET_AS_ALT1      (9 + 8 + 9 + 9 + 12 + UAC1_FU_LEN + 9 + 9)  // after AS alt0
 #define OFFSET_ALT1_DATA_EP (OFFSET_AS_ALT1 + 9 + 7 + 17)
@@ -178,7 +178,7 @@ static const tusb_desc_device_t device_descriptor = {
 #define OFFSET_ALT2_DATA_EP (OFFSET_AS_ALT2 + 9 + 7 + 17)
 #define OFFSET_ALT2_FB_EP   (OFFSET_ALT2_DATA_EP + 9 + 7)
 #if PICO_RP2350
-// Multichannel alts 3/4/5 (each AS_MULTICH_ALT_LEN; fmt is 11 bytes).
+// Multichannel alts 3..6 (each AS_MULTICH_ALT_LEN; fmt is 11 bytes).
 #define OFFSET_AS_ALT3      (OFFSET_AS_ALT2 + AS_STEREO_ALT_LEN)
 #define OFFSET_ALT3_DATA_EP (OFFSET_AS_ALT3 + 9 + 7 + 11)
 #define OFFSET_ALT3_FB_EP   (OFFSET_ALT3_DATA_EP + 9 + 7)
@@ -188,22 +188,24 @@ static const tusb_desc_device_t device_descriptor = {
 #define OFFSET_AS_ALT5      (OFFSET_AS_ALT4 + AS_MULTICH_ALT_LEN)
 #define OFFSET_ALT5_DATA_EP (OFFSET_AS_ALT5 + 9 + 7 + 11)
 #define OFFSET_ALT5_FB_EP   (OFFSET_ALT5_DATA_EP + 9 + 7)
+#define OFFSET_AS_ALT6      (OFFSET_AS_ALT5 + AS_MULTICH_ALT_LEN)
+#define OFFSET_ALT6_DATA_EP (OFFSET_AS_ALT6 + 9 + 7 + 11)
+#define OFFSET_ALT6_FB_EP   (OFFSET_ALT6_DATA_EP + 9 + 7)
 #endif
 
 // Sample rate little-endian expansion
 #define RATE_LE(r) ((r) & 0xFF), (((r) >> 8) & 0xFF), (((r) >> 16) & 0xFF)
 
-// One multichannel AS alt block (RP2350): N channels, 16-bit, single rate
-// 48 kHz.  Parameterized so alts 3/4/5 (4/6/8 ch) share one definition — no
-// copy-paste.  Same OUT/feedback EP addresses as the stereo alts (the EP buffer
-// is allocated once at AUDIO_EP_MAX_PKT).
-#define AS_MULTICH_ALT(alt_num, nch) \
+// One multichannel AS alt block (RP2350): N channels, 16- or 24-bit, single
+// rate 48 kHz.  Alts 3..6 share one definition and the same OUT/feedback EP
+// addresses as stereo (the EP buffer is allocated once at AUDIO_EP_MAX_PKT).
+#define AS_MULTICH_ALT(alt_num, nch, bits) \
     9, TUSB_DESC_INTERFACE, ITF_NUM_AUDIO_STREAMING, (alt_num), 0x02, \
         TUSB_CLASS_AUDIO, AUDIO_SUBCLASS_STREAMING, 0x00, 0x00, \
     7, TUSB_DESC_CS_INTERFACE, AUDIO_CS_AS_INTERFACE_AS_GENERAL, \
         UAC1_INPUT_TERMINAL_ID, 0x01, U16_TO_U8S_LE(0x0001), \
     11, TUSB_DESC_CS_INTERFACE, AUDIO_CS_AS_INTERFACE_FORMAT_TYPE, 0x01, \
-        (nch), 0x02, 16, 0x01, RATE_LE(48000), \
+        (nch), (bits) / 8, (bits), 0x01, RATE_LE(48000), \
     9, TUSB_DESC_ENDPOINT, AUDIO_OUT_ENDPOINT, 0x05, \
         U16_TO_U8S_LE(AUDIO_EP_MAX_PKT), 0x01, 0x00, AUDIO_IN_ENDPOINT, \
     7, TUSB_DESC_CS_ENDPOINT, AUDIO_CS_EP_SUBTYPE_GENERAL, 0x01, 0x00, U16_TO_U8S_LE(0x0000), \
@@ -423,15 +425,16 @@ const uint8_t usb_config_descriptor[] = {
 
 #if PICO_RP2350
     // ====================================================================
-    // Multichannel AS alts (RP2350 only): alt 3 = 4ch, alt 4 = 6ch, alt 5 = 8ch
-    // (all 48 kHz / 16-bit).  Same OUT/feedback EP addresses as alts 1/2 (the EP
-    // buffer is allocated once at AUDIO_EP_MAX_PKT); link to Input Terminal ID 1.
-    // Offsets computed by the OFFSET_ALT{3,4,5}_* macros above; emitted via the
-    // AS_MULTICH_ALT(alt, nch) macro to avoid copy-paste.
+    // Multichannel AS alts (RP2350 only): alts 3/4/5 = 4/6/8ch 16-bit,
+    // alt 6 = 4ch 24-bit (all 48 kHz).  Same OUT/feedback EP addresses as
+    // alts 1/2; allocated once at AUDIO_EP_MAX_PKT. Link to Input Terminal ID 1.
+    // Offsets computed by the OFFSET_ALT{3,4,5,6}_* macros above; emitted via the
+    // AS_MULTICH_ALT(alt, nch, bits) macro to avoid copy-paste.
     // ====================================================================
-    AS_MULTICH_ALT(3, 4),   // alt 3: 4-channel
-    AS_MULTICH_ALT(4, 6),   // alt 4: 6-channel
-    AS_MULTICH_ALT(5, 8),   // alt 5: 8-channel
+    AS_MULTICH_ALT(3, 4, 16),   // alt 3: 4-channel
+    AS_MULTICH_ALT(4, 6, 16),   // alt 4: 6-channel
+    AS_MULTICH_ALT(5, 8, 16),   // alt 5: 8-channel
+    AS_MULTICH_ALT(6, 4, 24),   // alt 6: 4-channel, packed 24-bit
 #endif // PICO_RP2350
 
     // --- 191: Vendor std itf 2 (class 0xFF, 1 EP) -----------------------
@@ -588,7 +591,7 @@ _Static_assert(sizeof(usb_config_descriptor) == CONFIG_TOTAL_LEN,
 const uint16_t usb_config_descriptor_len = CONFIG_TOTAL_LEN;
 
 // Per-alt EP descriptor pointers consumed by the UAC1 class driver, indexed
-// [alt-1].  RP2350 adds alt 3 (8-channel) at index [2].
+// [alt-1].  RP2350 adds multichannel alts 3..6 at indices [2..5].
 const uint8_t *const usb_audio_data_ep_desc[] = {
     &usb_config_descriptor[OFFSET_ALT1_DATA_EP],
     &usb_config_descriptor[OFFSET_ALT2_DATA_EP],
@@ -596,6 +599,7 @@ const uint8_t *const usb_audio_data_ep_desc[] = {
     &usb_config_descriptor[OFFSET_ALT3_DATA_EP],   // 4ch
     &usb_config_descriptor[OFFSET_ALT4_DATA_EP],   // 6ch
     &usb_config_descriptor[OFFSET_ALT5_DATA_EP],   // 8ch
+    &usb_config_descriptor[OFFSET_ALT6_DATA_EP],   // 4ch 24-bit
 #endif
 };
 const uint8_t *const usb_audio_fb_ep_desc[] = {
@@ -605,6 +609,7 @@ const uint8_t *const usb_audio_fb_ep_desc[] = {
     &usb_config_descriptor[OFFSET_ALT3_FB_EP],     // 4ch
     &usb_config_descriptor[OFFSET_ALT4_FB_EP],     // 6ch
     &usb_config_descriptor[OFFSET_ALT5_FB_EP],     // 8ch
+    &usb_config_descriptor[OFFSET_ALT6_FB_EP],     // 4ch 24-bit
 #endif
 };
 
