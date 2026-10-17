@@ -1,6 +1,6 @@
 # Multichannel USB Input — App Developer Integration Guide
 
-*Last updated: 2026-09-17*
+*Last updated: 2026-10-17*
 
 > **Updated for the unified channel model (firmware wire V16 / slot V21).** Three things
 > changed from the original 8-channel-only design and supersede older framing anywhere in this
