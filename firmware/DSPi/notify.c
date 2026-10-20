@@ -431,6 +431,19 @@ void notify_push_cs_aux(uint8_t slot, uint8_t state, uint16_t level_q8, ParamSou
     restore_interrupts(flags);
 }
 
+// src is the SET's dispatch source captured at stage time, since the apply
+// runs later on the main loop where the current source is UNKNOWN.
+void notify_push_rta_config(const void *cfg, ParamSource src) {
+    uint32_t flags = save_and_disable_interrupts();
+    NotifyRingEntry e = {
+        .event_id = NOTIFY_EVT_RTA_CONFIG,
+        .source   = (uint8_t)src,
+    };
+    memcpy(e.value, cfg, NOTIFY_RTA_CONFIG_LEN);
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
 void notify_push_bulk_invalidated(ParamSource src) {
     uint32_t flags = save_and_disable_interrupts();
 
@@ -664,6 +677,18 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             out_buf[7] = e.value[3];
             out_buf[8] = e.source;
             return 9;
+        }
+
+        case NOTIFY_EVT_RTA_CONFIG: {
+            // 17 bytes: applied RtaConfig (12), source.
+            if (max_len < 17) return 0;
+            out_buf[0] = NOTIFY_V2_VERSION;
+            out_buf[1] = NOTIFY_EVT_RTA_CONFIG;
+            out_buf[2] = 0;
+            out_buf[3] = seq;
+            memcpy(&out_buf[4], e.value, NOTIFY_RTA_CONFIG_LEN);
+            out_buf[16] = e.source;
+            return 17;
         }
 
         default:

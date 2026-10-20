@@ -372,6 +372,10 @@ Vendor commands 0x08 to 0x0F. All GETs are `bmRequestType` 0xC1, all SETs
 `REQ_RTA_GET_BANDS`, `GET_BINS` and `GET_BANDS_ALL` count as reads for the
 auto-off timer and auto-start the analyser. `GET_STATUS` does not.
 
+Every applied `REQ_RTA_SET_CONFIG` is announced with `NOTIFY_EVT_RTA_CONFIG`
+(0x0D), carrying the applied `RtaConfig` and the SET's source. See
+`notification_protocol_v2_spec.md` §3.9 and section 7 below.
+
 `REQ_RTA_GET_BANDS_ALL` is refused on UART and I2C the same way 0xA0 is; those
 clients read per channel with 0x0B, which fits their 132-byte GET limit. On
 USB it is built in `bulk_param_buf` under the bulk lock, acquired and released
@@ -539,7 +543,76 @@ bookkeeping, live-mask helper and bass streaming kernel are `DSP_TIME_CRITICAL`,
 on both cores during flash writes. The transform, the band sums, and all
 control paths stay in flash.
 
-## 7. Files
+## 7. Sharing between hosts
+
+The device has one analyser and one configuration, but several hosts can
+watch it at once: the USB host, any number of DSPi Link sessions through a
+hub, and a UART or I2C bridge. Every band read from any of them keeps the
+analyser running and any of them can push a configuration. The firmware does
+not arbitrate, because every host reaches it through the same dispatcher and
+it cannot tell sessions apart. It does three things that let hosts share
+without fighting.
+
+### 7.1 Announce every applied configuration
+
+`apply_config()` pushes `NOTIFY_EVT_RTA_CONFIG` (0x0D) once per applied SET,
+with the applied `RtaConfig` and the SET's dispatch source. The source is
+captured when the SET is staged, because the apply happens later on the main
+loop. On USB the event echoes back to the host that sent the SET and to any
+Link session through the hub, which attributes it to the session that wrote
+it. A host that sees a configuration it did not send knows another host has
+taken the analyser, and a host that sees its own echo knows its push landed
+without reading the configuration back.
+
+### 7.2 Auto-off and auto-start are the ownership model
+
+A host that stops watching simply stops reading. The analyser stops after
+`RTA_IDLE_TIMEOUT_MS` without a read from anyone, and the next read from
+anyone restarts it with the configuration still in place. `RTA_CTL_STOP` from
+one host while another is reading is therefore only a glitch: the next read
+restarts the engine, at the cost of one discarded frame and cleared averages.
+Hosts that can see other watchers (a DSPi Link hub) must not forward a STOP
+while another session is watching; see the DSPi Link spec, section 7.10. A
+host that cannot see other watchers may send STOP, since the firmware repairs
+it. `RTA_FLAG_MANUAL` disables this repair and is reserved for a single
+dedicated client; a shared host must not set it.
+
+### 7.3 Host rules
+
+These are the rules the DSPi Console follows; any other host that shares the
+analyser should follow the same ones.
+
+1. **Last chooser drives.** Whoever pushed the most recent configuration owns
+   the analyser. There is no reservation and no lock.
+2. **A host follows a configuration it did not push.** On an `RTA_CONFIG`
+   event (or a readback) whose tap, mask or FFT order differ from what the
+   host asked for, and whose origin is not the host itself, the host adopts
+   the device's configuration, shows the channels the device is analysing,
+   and stops re-pushing its own. It tells the user it is following and offers
+   to take control.
+3. **A user action takes control.** Choosing a channel, a tap or an option,
+   or pressing "take control", pushes the host's own configuration again. When
+   the tap matches, the host asks for the union of its own channels and the
+   channels the device is currently analysing, so the other host keeps its
+   picture. The device analyses every channel in the mask anyway and
+   `GET_BANDS_ALL` returns them all in one read.
+4. **A superset is success.** A readback or event counts as the host's
+   configuration applied when the tap and FFT order match and the device's
+   mask includes every channel the host asked for. The host adopts the
+   clamped `avg_ms` and `peak_decay_db_s` the device reports.
+5. **A refusal is still a refusal.** A configuration the device never applied
+   (no echo, readback never agrees) is reported as rejected after a bounded
+   number of pushes, as before. Following is only entered when the device
+   holds a valid configuration that someone else pushed.
+6. **`RESET_AVG` stays shared.** It is momentary and intentional, like
+   pressing reset on a shared meter, and it does not restart the frame.
+7. **Without the event**, on firmware that predates it, the host keeps reading
+   `REQ_RTA_GET_CONFIG` back. A readback that disagrees after an earlier one
+   agreed means another host changed the configuration and the host follows
+   it with an unknown origin. A readback that never agreed is the refusal
+   path of rule 5.
+
+## 8. Files
 
 | File | Content |
 |------|---------|
@@ -550,15 +623,17 @@ control paths stay in flash.
 | `scripts/gen_rta_bass.py` | SciPy bass coefficient generator |
 | `scripts/gen_rta_tables.py` | table generator, single source of truth for band layout |
 | `tools/rta_test/` | host harness: numpy oracle for the kernel, stubbed engine smoke test |
-| `tools/dspi_test/tests/rta.py` | device tests (section 8) |
+| `tools/dspi_test/tests/rta.py` | device tests (section 9) |
 
 Touch points in existing files: `config.h` (command codes), `audio_pipeline.c`
 and `pdm_generator.c` (tap calls inside the meter loops, packet begin/end),
 `main.c` (`rta_init()`, `rta_service()` in the main loop, `rta_restart()` at
-the existing reset sites), `vendor_commands.c` (handlers, `vendor_is_bulk_get`),
-`CMakeLists.txt`, `scripts/check_ram_placement.py` (hot symbols).
+the existing reset sites), `vendor_commands.c` (handlers, `vendor_is_bulk_get`,
+the SET's source passed to `rta_set_config()`), `notify.h`/`notify.c`
+(`NOTIFY_EVT_RTA_CONFIG`, `notify_push_rta_config()`), `CMakeLists.txt`,
+`scripts/check_ram_placement.py` (hot symbols).
 
-## 8. Device tests
+## 9. Device tests
 
 Using the signal generator on the output tap and USB playback on the input tap:
 
@@ -575,7 +650,7 @@ Using the signal generator on the output tap and USB playback on the input tap:
 - A chunked bin read validates seq head against tail and re-reads on mismatch.
 - An empty mask or an out-of-range order is rejected.
 
-## 9. Deferred
+## 10. Deferred
 
 - Transfer-function mode (input versus output, live measured response).
 - A third tap point between the matrix and the output EQ.

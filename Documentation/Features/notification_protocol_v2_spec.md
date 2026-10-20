@@ -70,7 +70,8 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x06 | reserved (coalesceable)      |              | Reserved for batched `PARAM_CHANGED` (see §10.5). |
 | 0x07 | `NOTIFY_EVT_SIGGEN_STATE`     | Discrete     | Test-signal generator start/stop/completion. See §3.8. |
 | 0x0C | `NOTIFY_EVT_CS_AUX`           | Discrete     | Aux output state or level changed. 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot (0-15), state (0/1), level_q8 (uint16 LE, 8.8 percent), src]`. `slot` is the Control Surfaces binding slot holding the aux component; `level_q8` reads 0 on a `CS_TYPE_AUX_OUT` slot. Pushed on every `REQ_SET_CS_AUX_STATE` (0x04) and `REQ_SET_CS_AUX_LEVEL` (0x06) that changes a value, whatever the origin. `src` identifies it: `GPIO` for a bound control, `HOST_SET` for USB, `UART` / `I2C` for those transports. See `control_surfaces_aux_spec.md`. |
-| 0x0D..0x7F | reserved (coalesceable) |              | |
+| 0x0D | `NOTIFY_EVT_RTA_CONFIG`       | Discrete     | The spectrum analyser applied a configuration. See §3.9. |
+| 0x0E..0x7F | reserved (coalesceable) |              | |
 | 0x80..0xFF | reserved (discrete)     |              | |
 
 > **Note on discrete IDs below 0x80.** The original design reserved `0x80..0xFF`
@@ -78,8 +79,8 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 > (0x07) events were assigned low IDs in practice. Hosts must classify by event ID,
 > not by range. `NOTIFY_EVT_ERROR` (formerly penciled in at 0x05) was never wired
 > up. The same applies to 0x08..0x0B (`ADAT_STATE`, `I2S_SLAVE_STATE`,
-> `CS_IR_LEARN`, `ADAT_INPUT_STATE`) and `CS_AUX` (0x0C), all discrete and all
-> declared in `notify.h`.
+> `CS_IR_LEARN`, `ADAT_INPUT_STATE`), `CS_AUX` (0x0C) and `RTA_CONFIG` (0x0D),
+> all discrete and all declared in `notify.h`.
 
 ### 3.4 PARAM_CHANGED Layout
 
@@ -196,6 +197,58 @@ stop/completion. The event is pushed from `siggen_service()` in the main loop, n
 from the audio render path. The generator's run state is transient (never
 persisted); hosts should not infer generator state across a reconnect without
 re-reading `REQ_SIGGEN_GET_STATUS`.
+
+### 3.9 RTA_CONFIG Layout (event 0x0D)
+
+The spectrum analyser (see `spectrum_analyser_spec.md`) has one configuration
+shared by every host. A host that pushes `REQ_RTA_SET_CONFIG` (0x08) stages it,
+and the main loop applies it on the next `rta_service()` pass. This event is
+pushed at that moment, once per applied configuration, whether or not the new
+configuration differs from the old one. Fixed 17-byte packet:
+
+```
+byte 0      0x02                 version
+byte 1      0x0D                 NOTIFY_EVT_RTA_CONFIG
+byte 2      0x00                 flags
+byte 3      seq
+bytes 4-15  RtaConfig            the 12-byte configuration as applied
+byte 16     src                  ParamSource of the SET that staged it (§3.7)
+```
+
+The `RtaConfig` bytes are exactly what `REQ_RTA_GET_CONFIG` (0x09) returns
+after the apply: `avg_ms` and `peak_decay_db_s` are the clamped values,
+`channel_mask` has been masked to the tap's channel count, and the reserved
+bytes are zero. A host therefore never needs to read the configuration back
+after receiving this event.
+
+`src` is the dispatch source of the SET that staged the configuration, so it
+is `HOST_SET` for USB and `UART` or `I2C` for the external control interfaces.
+The analyser does not emit this event for anything that is not a staged SET.
+A preset load, factory reset, sample-rate change or input-source switch
+restarts the frame (analyser spec §3.5) but leaves the configuration alone, and
+auto-off, auto-start and `REQ_RTA_CONTROL` (0x0E) never touch it.
+
+**Why it exists.** Several hosts can watch one device at once (the USB host,
+DSPi Link clients through a hub, a UART or I2C bridge). Each one used to read
+the configuration back every 500 ms and re-push its own whenever the readback
+differed, so two hosts watching different channels overwrote each other
+indefinitely and every overwrite discarded the frame in flight. With this
+event a host learns at once that another host changed the configuration, and
+from `src` (on USB) or the hub's session attribution (over DSPi Link) whether
+the change was its own echo. The host-side rules for following another host's
+configuration are in the analyser spec, section 7. A host must keep working
+when this event never arrives (older firmware), by falling back to the
+`REQ_RTA_GET_CONFIG` readback.
+
+**Attribution over DSPi Link.** A hub treats a packet whose `src` is
+`HOST_SET` or `BULK_SET` as host-sourced and attributes it to the session whose
+write it answers, exactly as for `PARAM_CHANGED`. The source byte for this
+event sits at offset 16.
+
+**Capability.** No caps flag announces the event. It is part of the firmware
+release that introduces it, and Console and firmware ship as a matched pair.
+A host may stop polling `REQ_RTA_GET_CONFIG` once it has received one
+`RTA_CONFIG` event on the current connection.
 
 ## 4. Firmware Architecture
 
@@ -525,6 +578,15 @@ Total: 16 bytes.
 02 03 00 5E  03 00 00 00
 ```
 Two packets, 8 bytes each: `PRESET_LOADED(3)` then `BULK_INVALIDATED(source=PRESET)`.
+
+**Analyser configured by the USB host (input tap, channels 0 and 1, 1024-point FFT, 300 ms averaging, 20 dB/s peak decay):**
+```
+02 0D 00 61  03 00 03 00  0A 00 2C 01  14 00 00 00  01
+^vr ^ev ^fl ^seq
+            ^RtaConfig: ver=3 tap=0 mask=0x0003 order=10 rsv avg=300 decay=20 flags=0 rsv
+                                                           ^src=HOST_SET
+```
+Total: 17 bytes.
 
 **EQ band change (ch=2, band=5, type=PK, 1kHz, Q=1.0, +3 dB):**
 ```

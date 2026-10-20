@@ -19,6 +19,7 @@
 #include "config.h"
 #include "rta_fft.h"
 #include "rta_bass.h"
+#include "notify.h"
 
 // ---------------------------------------------------------------------------
 // Protocol constants
@@ -133,8 +134,9 @@ _Static_assert(sizeof(RtaStatus) == 24, "RtaStatus wire size");
 // ---------------------------------------------------------------------------
 
 // Validate and stage a config.  False = STALL (bad version/length/tap/order,
-// or an empty mask at that tap).  Applied by rta_service().
-bool rta_set_config(const void *payload, uint16_t len);
+// or an empty mask at that tap).  Applied by rta_service(), which announces
+// it with NOTIFY_EVT_RTA_CONFIG tagged with src.
+bool rta_set_config(const void *payload, uint16_t len, ParamSource src);
 void rta_get_config(RtaConfig *out);
 void rta_get_caps(RtaCaps *out);
 // Band centre table chunk (wValue 1..): up to 32 uint16 Hz values; returns

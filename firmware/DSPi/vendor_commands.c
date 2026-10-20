@@ -1790,7 +1790,7 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
         case REQ_RTA_SET_CONFIG:
             // rta_set_config validates version, length, tap, order
             // and mask; STALL on reject so external transports see ERROR.
-            if (!rta_set_config(vendor_rx_buf, buffer->data_len)) {
+            if (!rta_set_config(vendor_rx_buf, buffer->data_len, _dispatch_src)) {
                 handled = false;
             }
             break;

@@ -320,7 +320,7 @@ The `REQ_GET_CLOCK_DIAG` (0x82) snapshot is a packed little-endian `ClockDiagPac
 **Persistence (compat-breaking).** Wire `WIRE_FORMAT_VERSION=16` (direct 8-input matrix/preamp + 17-channel EQ; no tail-append/version gates; 5864 B). Flash `SLOT_DATA_VERSION=21` (direct layout; the slot spans **2 flash sectors** on RP2350; 1 on RP2040). No migration — pre-version data loads factory defaults.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
+*Last updated: 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
@@ -353,7 +353,7 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 
 **Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `REQ_GET_ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
-**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), and `NOTIFY_EVT_CS_AUX` (0x0C). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `REQ_SET_CS_AUX_STATE` / `_LEVEL` handlers (see "Control Surfaces").
+**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), and `NOTIFY_EVT_RTA_CONFIG` (0x0D). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `REQ_SET_CS_AUX_STATE` / `_LEVEL` handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `REQ_RTA_SET_CONFIG` as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `_dispatch_src` into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser").
 
 **Drain:** each consumer drains its own tail via `notify_peek_next_for(consumer, ...)` / `notify_commit_pop_for(consumer)`. The USB consumer (`usb_notify_drain` in usb_audio.c) claims EP 0x83 via `usbd_edpt_claim`, formats the next packet into the stable TX buffer, and submits via `usbd_edpt_xfer`; on success `notify_commit_pop_for(USB)` advances the USB tail, and on xfer rejection the entry stays queued for the next tick. The UART consumer drains from `uart_ctrl_poll` (see "Multi-consumer ring").
 
@@ -5180,7 +5180,7 @@ datum is `siggen_raw_mask`, written by Core 0 between blocks.
 ---
 
 ## Spectrum Analyser (RTA / FFT)
-*Last updated: 2026-09-12 (shared elliptic b0 and RP2350 -O3 bass kernel; Blackman-Harris FFT window; sixth-order bass bands; continuous bass bank and V3 protocol; FFT ceiling lowered to 1024 points; 2026-09-07: single transform, bass stream and bass bank removed)*
+*Last updated: 2026-10-20 (applied configurations announced with NOTIFY_EVT_RTA_CONFIG); 2026-09-12 (shared elliptic b0 and RP2350 -O3 bass kernel; Blackman-Harris FFT window; sixth-order bass bands; continuous bass bank and V3 protocol; FFT ceiling lowered to 1024 points; 2026-09-07: single transform, bass stream and bass bank removed)*
 
 One FFT engine (`rta.c`, kernel in `rta_fft.c`, generated tables in
 `rta_tables.h` from `scripts/gen_rta_tables.py`) that can be pointed at any set
@@ -5283,6 +5283,18 @@ also restarts itself if the device rate changes under it. Any band or bin read
 is a keepalive and auto-starts the analyser; `REQ_RTA_GET_STATUS` is not.
 `RTA_FLAG_MANUAL` hands the run state to `REQ_RTA_CONTROL` entirely (no
 auto-start, no auto-off).
+
+**Configuration announcements (2026-10-20).** The analyser has one
+configuration shared by every host (USB, DSPi Link sessions through a hub, a
+UART or I2C bridge). `apply_config()` pushes `NOTIFY_EVT_RTA_CONFIG` (0x0D)
+once per applied SET, even when nothing changed, carrying the clamped and
+masked `RtaConfig` exactly as `REQ_RTA_GET_CONFIG` would return it. The source
+is captured at stage time (`rta_set_config(payload, len, src)` stores it in
+`cfg_next_src`) because the apply runs later on the main loop. Restarts from
+preset load, rate change, input switch or factory reset, auto-off, auto-start
+and `REQ_RTA_CONTROL` never emit it, since none of them changes the
+configuration. Hosts use the event to follow another host's configuration and
+to confirm their own push without polling; see analyser spec section 7.
 
 **RAM placement.** `rta_tap`, `rta_packet_begin`, `rta_packet_end`, `rta_bass_push` and the live-mask helper are
 `DSP_TIME_CRITICAL` (they run inside the meter loops on both cores, including

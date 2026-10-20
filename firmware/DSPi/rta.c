@@ -48,6 +48,7 @@ typedef struct {
 static struct {
     RtaConfig cfg;
     RtaConfig cfg_next;
+    uint8_t   cfg_next_src;        // ParamSource of the staging SET
     bool      cfg_pending;
     uint8_t   state;               // RTA_STATE_*
     uint8_t   phase;               // PH_*
@@ -354,14 +355,19 @@ static void apply_config(void) {
         clear_channel_state();
         if (was_running) arm(); else derive_layout();
     }
+    // Every applied SET is announced, even an identical one: a host uses the
+    // echo to confirm its push landed (spectrum_analyser_spec.md 7.1).
+    _Static_assert(sizeof(RtaConfig) == NOTIFY_RTA_CONFIG_LEN, "RTA_CONFIG payload");
+    notify_push_rta_config(&rta.cfg, (ParamSource)rta.cfg_next_src);
 }
 
-bool rta_set_config(const void *payload, uint16_t len) {
+bool rta_set_config(const void *payload, uint16_t len, ParamSource src) {
     if (len != sizeof(RtaConfig)) return false;
     RtaConfig c;
     memcpy(&c, payload, sizeof(c));
     if (!config_valid(&c)) return false;
     rta.cfg_next = c;
+    rta.cfg_next_src = (uint8_t)src;
     rta.cfg_pending = true;
     return true;
 }

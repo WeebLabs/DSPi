@@ -82,6 +82,12 @@
 // level_q8_LE(2), src]; level is 8.8 percent, 0 on a CS_TYPE_AUX_OUT slot.
 #define NOTIFY_EVT_CS_AUX            0x0C
 
+// v2 spectrum analyser applied a staged REQ_RTA_SET_CONFIG, changed or not.
+// Never pushed for frame restarts (preset, rate, input, auto-off/start).
+// Packet (17 bytes): [ver=2, evt=0x0D, flags=0, seq, RtaConfig as applied
+// (12), src]; src is the source of the SET that staged it.
+#define NOTIFY_EVT_RTA_CONFIG        0x0D
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -162,6 +168,11 @@ void notify_push_cs_ir_learn(uint8_t state, uint8_t protocol, uint32_t code);
 
 // Aux output change (NOTIFY_EVT_CS_AUX).  Safe from any dispatch context.
 void notify_push_cs_aux(uint8_t slot, uint8_t state, uint16_t level_q8, ParamSource src);
+
+// Analyser config applied (NOTIFY_EVT_RTA_CONFIG).  cfg is the 12-byte
+// RtaConfig as applied.  Safe from any dispatch context.
+#define NOTIFY_RTA_CONFIG_LEN        12
+void notify_push_rta_config(const void *cfg, ParamSource src);
 
 // ---------------------------------------------------------------------------
 // Consumers
