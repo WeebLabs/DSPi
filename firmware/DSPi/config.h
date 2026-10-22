@@ -435,6 +435,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 // because 0xE0-0xEF is full; see spdif_input.h for the packet.
 #define REQ_GET_SPDIF_BITSTREAM_STATUS 0xCF  // returns SpdifBitstreamStatus (12 B)
 
+// AC-3 decode bench (DSPI_AC3_BENCH builds only, RP2350).  wValue = passes
+// starts a run (0 = read only); returns Ac3BenchResult (44 B), or zero bytes
+// in builds without the bench.  See ac3_bench.h.
+#define REQ_AC3_BENCH               0x9F
+
 // Buffer statistics
 #define REQ_GET_BUFFER_STATS        0xB0
 #define REQ_RESET_BUFFER_STATS      0xB1

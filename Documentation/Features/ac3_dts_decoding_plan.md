@@ -1,6 +1,6 @@
 # DSPi AC-3 / DTS Bitstream Decoding Plan
 
-*Version 0.1, 2026-10-22. Planning document; nothing implemented. RP2350 only. Branch `ac3-dts-decode`.*
+*Version 0.2, 2026-10-22. Phase 0 shipped (commit 710c02b) and Phase 1 built and host-verified, hardware bench pending. RP2350 only. Branch `ac3-dts-decode`.*
 
 This document records the practicality assessment, the cost estimates and the phased plan for decoding AC-3 and DTS core bitstreams received on the S/PDIF input. It is a plan, not a protocol specification. Command byte layouts, notify packet formats and preset fields are decided in Phase 3 and will be written into a separate spec at that point.
 
@@ -111,6 +111,8 @@ At the 150 MHz fallback clock every figure doubles.
 - Standalone value. Ships independently of everything below.
 
 ### Phase 1. Decoder spike and bench (gate)
+
+**Status 2026-10-22.** Done except the hardware run. liba52 is ported under `firmware/DSPi/ac3/` (static state, const tables, generated IMDCT tables, static FFT scratch, `A52_HOT` placement macro) with the `ac3_decoder.c/.h` wrapper. `tools/ac3_test/run.sh` verifies against ffmpeg and `run_stock.sh` against the unmodified library: bit-exact on every vector. The `DSPI_AC3_BENCH` build (`build-rp2350-ac3bench`, and `-xip` for the flash-only variant) embeds eight 640 kbps frames and answers `REQ_AC3_BENCH` (0x9F); `tools/ac3_test/bench_poll.py` reads it. Decoder BSS measured 17.7 KB; the full hot set is 10.3 KB of RAM text, of which `a52_block` alone is 4.5 KB, so Phase 2 will likely pin only the mantissa and IMDCT kernels. The gate below is still open until the device numbers are in. See the architecture doc's "AC-3 Decoder Module".
 
 - Port liba52 into a static-state, const-table float module under `firmware/DSPi/`.
 - Host harness under `tools/` decodes reference AC-3 vectors (generated with FFmpeg's encoder from known multichannel test signals) and compares against FFmpeg's decoder.

@@ -16,6 +16,9 @@
 #include "audio_input.h"
 #include "spdif_input.h"
 #include "clock_diag.h"
+#if DSPI_AC3_BENCH
+#include "ac3_bench.h"
+#endif
 #include "i2s_input.h"
 #include "lg_sound_sync.h"
 #include "dac_hw_mute.h"
@@ -4102,6 +4105,19 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 SpdifBitstreamStatus bs;
                 spdif_input_get_bitstream_status(&bs);
                 vendor_send_response(&bs, sizeof(bs));
+                return true;
+            }
+
+            case REQ_AC3_BENCH: {
+#if DSPI_AC3_BENCH
+                // Static: outlives the EP0 transfer (same reason as CLOCK_DIAG).
+                static Ac3BenchResult bench;
+                if (req->wValue) ac3_bench_request(req->wValue);
+                ac3_bench_get(&bench);
+                vendor_send_response(&bench, sizeof(bench));
+#else
+                vendor_send_response(NULL, 0);
+#endif
                 return true;
             }
 

@@ -135,6 +135,41 @@ if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
 endif()
 
+# DSPI_AC3_BENCH (RP2350 bench only): compiles the ported liba52 AC-3 decoder
+# (ac3/) plus ac3_bench.c, which decodes an embedded frame set on request
+# (REQ_AC3_BENCH 0x9F) and reports timing and a host-checked checksum.
+# DSPI_AC3_RAM_HOT pins the decoder's hot paths in RAM (.time_critical);
+# OFF measures the XIP-only variant.  Release builds leave both OFF.
+option(DSPI_AC3_BENCH "Build the AC-3 decode bench (vendor 0x9F)" OFF)
+option(DSPI_AC3_RAM_HOT "RAM-place the AC-3 decoder hot paths" ON)
+set(DSPI_AC3_OPT "-O2" CACHE STRING "Optimisation level for the AC-3 decoder sources")
+if (DSPI_AC3_BENCH AND NOT PICO_PLATFORM STREQUAL "rp2040")
+    set(AC3_SOURCES ac3/parse.c ac3/bitstream.c ac3/bit_allocate.c ac3/downmix.c
+                    ac3/imdct.c ac3/crc.c ac3/ac3_decoder.c)
+    target_sources(DSPi PRIVATE ${AC3_SOURCES} ac3_bench.c ac3_bench.h)
+    # -ffp-contract=off keeps the device decode bit-exact with the host
+    # harness (checksum check), whatever the speed cost of the lost FMAs.
+    set_source_files_properties(${AC3_SOURCES} ac3_bench.c PROPERTIES
+        COMPILE_FLAGS "${DSPI_AC3_OPT} -ffp-contract=off")
+    target_compile_definitions(DSPi PRIVATE DSPI_AC3_BENCH=1)
+    if (DSPI_AC3_RAM_HOT)
+        target_compile_definitions(DSPi PRIVATE DSPI_AC3_RAM_HOT=1)
+    endif()
+    # The embedded frames come from the committed vector and its checksum.
+    set(AC3_BENCH_VECTOR ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/vectors/bench_51_640k.ac3)
+    set(AC3_BENCH_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ac3_bench_frames.h)
+    add_custom_command(
+        OUTPUT ${AC3_BENCH_HEADER}
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/gen_bench_frames.py
+                ${AC3_BENCH_VECTOR} ${AC3_BENCH_HEADER}
+        DEPENDS ${AC3_BENCH_VECTOR} ${AC3_BENCH_VECTOR}.sum
+                ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/gen_bench_frames.py
+        COMMENT "Embedding AC-3 bench frames"
+        VERBATIM)
+    target_sources(DSPi PRIVATE ${AC3_BENCH_HEADER})
+    target_include_directories(DSPi PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+endif()
+
 if (PICO_PLATFORM STREQUAL "rp2040")
     # RP2040: SPDIF RX on PIO1 SM2 (SM0=PDM; SM1 free since MCK moved to
     # CLK_GPOUT). I2S RX reuses the same SM when SPDIF RX is inactive.

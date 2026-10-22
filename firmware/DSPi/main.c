@@ -20,6 +20,9 @@
 #include "audio_input.h"
 #include "audio_pipeline.h"
 #include "spdif_input.h"
+#if DSPI_AC3_BENCH
+#include "ac3_bench.h"
+#endif
 #include "soft_vcxo.h"
 #include "clock_diag.h"
 #include "i2s_input.h"
@@ -2005,6 +2008,12 @@ int main(void) {
         // Spectrum analyser: apply staged config, one bounded transform
         // step, auto-off.  Immediate no-op while idle.
         rta_service();
+
+#if DSPI_AC3_BENCH
+        // Bench builds only: a requested run decodes the embedded frames
+        // here and blocks the loop for its duration.
+        ac3_bench_service();
+#endif
 
         // Drain USB audio ring — highest priority (only when USB is active input).
         // USB ISR pushes raw packets into the ring; we run the full DSP
