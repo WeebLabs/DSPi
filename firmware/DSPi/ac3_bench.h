@@ -13,7 +13,7 @@
 
 typedef struct __attribute__((packed)) {
     uint8_t  state;         // 0 idle, 1 requested, 2 done
-    uint8_t  ram_hot;       // 1 when the hot paths were RAM-placed
+    uint8_t  ram_hot;       // 0 XIP only, 1 kernels in RAM, 2 kernels + block parser
     uint8_t  frame_count;   // frames in the embedded set
     uint8_t  checksum_ok;   // 1 when the decode matched the host checksum
     uint32_t passes;        // passes over the set in the last run

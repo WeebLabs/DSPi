@@ -40,7 +40,7 @@ void ac3_bench_service(void) {
     memset(&result, 0, sizeof(result));
     result.state = 1;
 #if defined(DSPI_AC3_RAM_HOT)
-    result.ram_hot = 1;
+    result.ram_hot = DSPI_AC3_RAM_HOT;   // 1 = kernels, 2 = kernels + block parser
 #endif
     result.frame_count = AC3_BENCH_FRAME_COUNT;
     result.passes = passes;

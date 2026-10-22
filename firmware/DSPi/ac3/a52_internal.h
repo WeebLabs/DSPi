@@ -25,14 +25,22 @@
 
 #include <stdint.h>
 
-/* Hot-path placement.  The firmware defines DSPI_AC3_RAM_HOT to pin the
- * IMDCT, mantissa and bit-allocation paths in RAM (.time_critical); host
- * builds and the XIP-only bench variant leave it empty. */
+/* Hot-path placement.  DSPI_AC3_RAM_HOT >= 1 pins the kernels (bit reader,
+ * mantissa unpack, coupling, IMDCT) in RAM (.time_critical); >= 2 also pins
+ * the per-block parser and bit allocation (A52_HOT_BLOCK).  Host builds and
+ * the XIP-only bench variant leave both empty. */
 #ifndef A52_HOT
-#if defined(DSPI_AC3_RAM_HOT)
+#if defined(DSPI_AC3_RAM_HOT) && DSPI_AC3_RAM_HOT >= 1
 #define A52_HOT __attribute__((section(".time_critical.ac3")))
 #else
 #define A52_HOT
+#endif
+#endif
+#ifndef A52_HOT_BLOCK
+#if defined(DSPI_AC3_RAM_HOT) && DSPI_AC3_RAM_HOT >= 2
+#define A52_HOT_BLOCK __attribute__((section(".time_critical.ac3")))
+#else
+#define A52_HOT_BLOCK
 #endif
 #endif
 

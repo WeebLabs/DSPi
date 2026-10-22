@@ -203,7 +203,7 @@ void a52_dynrng (a52_state_t * state,
     }
 }
 
-A52_HOT
+A52_HOT_BLOCK
 static int parse_exponents (a52_state_t * state, int expstr, int ngrps,
 			    uint8_t exponent, uint8_t * dest)
 {
@@ -519,7 +519,7 @@ static void coeff_get_coupling (a52_state_t * state, int nfchans,
     }
 }
 
-A52_HOT
+A52_HOT_BLOCK
 int a52_block (a52_state_t * state)
 {
     static const uint8_t nfchans_tbl[] = {2, 1, 2, 3, 3, 4, 4, 5, 1, 1, 2};

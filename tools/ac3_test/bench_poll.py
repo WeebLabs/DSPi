@@ -56,7 +56,8 @@ def main():
     # Real-time budget: one frame per 1536 samples at 48 kHz = 32 ms.
     rt_pct = 100.0 * us_frame / (FRAME_SAMPLES / 48000.0 * 1e6)
     print("variant: %s, sys_clk %.1f MHz, %d frames x %d passes, errors %d"
-          % ("RAM-hot" if r["ram_hot"] else "XIP-only", mhz, r["frames"], r["passes"], r["errors"]))
+          % (("XIP-only", "kernels in RAM", "kernels + block parser in RAM")[min(r["ram_hot"], 2)],
+             mhz, r["frames"], r["passes"], r["errors"]))
     print("checksum: 0x%08x expected 0x%08x -> %s"
           % (r["checksum"], r["expected"], "OK" if r["checksum_ok"] else "MISMATCH"))
     print("per frame: mean %.0f us (min %d, max %d) = %.2f M cycles"

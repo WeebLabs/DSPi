@@ -121,7 +121,7 @@ do {						\
     mask -= floor;				\
 } while (0)
 
-A52_HOT
+A52_HOT_BLOCK
 void a52_bit_allocate (a52_state_t * state, ba_t * ba, int bndstart,
 		       int start, int end, int fastleak, int slowleak,
 		       expbap_t * expbap)

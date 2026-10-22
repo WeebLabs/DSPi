@@ -1,6 +1,6 @@
 # DSPi AC-3 / DTS Bitstream Decoding Plan
 
-*Version 0.2, 2026-10-22. Phase 0 shipped (commit 710c02b) and Phase 1 built and host-verified, hardware bench pending. RP2350 only. Branch `ac3-dts-decode`.*
+*Version 0.3, 2026-10-22. Phase 0 shipped (commit 710c02b); Phase 1 complete and its gate passed on hardware (10.9 % of one core at the chosen placement). RP2350 only. Branch `ac3-dts-decode`.*
 
 This document records the practicality assessment, the cost estimates and the phased plan for decoding AC-3 and DTS core bitstreams received on the S/PDIF input. It is a plan, not a protocol specification. Command byte layouts, notify packet formats and preset fields are decided in Phase 3 and will be written into a separate spec at that point.
 
@@ -89,7 +89,7 @@ One core at 307.2 MHz, derived from operation counts with the measured M33 FP oc
 | Transform / synthesis | ~14 M cycles/s (6 IMDCT-512 per block) | ~15-29 M cycles/s (32-band QMF, 512-tap prototype) |
 | Mantissa / Huffman / bit allocation | ~12 M cycles/s | ~10 M cycles/s |
 | Remainder (header, coupling, gain, copy) | ~3 M cycles/s | ~3 M cycles/s |
-| Total | ~29 M cycles/s, 7-12 % | ~40-50 M cycles/s, 12-20 % |
+| Total | ~29 M cycles/s, 7-12 % (measured 33 M cycles/s, 10.9 %, kernels in RAM) | ~40-50 M cycles/s, 12-20 % |
 | Budget to plan against | 15 % | 25 % |
 
 At the 150 MHz fallback clock every figure doubles.
@@ -112,12 +112,12 @@ At the 150 MHz fallback clock every figure doubles.
 
 ### Phase 1. Decoder spike and bench (gate)
 
-**Status 2026-10-22.** Done except the hardware run. liba52 is ported under `firmware/DSPi/ac3/` (static state, const tables, generated IMDCT tables, static FFT scratch, `A52_HOT` placement macro) with the `ac3_decoder.c/.h` wrapper. `tools/ac3_test/run.sh` verifies against ffmpeg and `run_stock.sh` against the unmodified library: bit-exact on every vector. The `DSPI_AC3_BENCH` build (`build-rp2350-ac3bench`, and `-xip` for the flash-only variant) embeds eight 640 kbps frames and answers `REQ_AC3_BENCH` (0x9F); `tools/ac3_test/bench_poll.py` reads it. Decoder BSS measured 17.7 KB; the full hot set is 10.3 KB of RAM text, of which `a52_block` alone is 4.5 KB, so Phase 2 will likely pin only the mantissa and IMDCT kernels. The gate below is still open until the device numbers are in. See the architecture doc's "AC-3 Decoder Module".
+**Status 2026-10-22.** Done except the hardware run. liba52 is ported under `firmware/DSPi/ac3/` (static state, const tables, generated IMDCT tables, static FFT scratch, `A52_HOT` placement macro) with the `ac3_decoder.c/.h` wrapper. `tools/ac3_test/run.sh` verifies against ffmpeg and `run_stock.sh` against the unmodified library: bit-exact on every vector. The `DSPI_AC3_BENCH` build (`build-rp2350-ac3bench`, and `-xip` for the flash-only variant) embeds eight 640 kbps frames and answers `REQ_AC3_BENCH` (0x9F); `tools/ac3_test/bench_poll.py` reads it. Decoder BSS measured 17.7 KB; the full hot set is 10.3 KB of RAM text, of which `a52_block` alone is 4.5 KB, so Phase 2 will likely pin only the mantissa and IMDCT kernels. The gate is passed. Measured on hardware at 307.2 MHz with 640 kbps 5.1 frames, bit-exact with the host: 12.0 % of one core from flash, 10.9 % with the kernels in RAM (4.1 KB of RAM text), 10.0 % with the block parser pinned too (10.3 KB), 9.5 % at `-O3` with everything pinned (18.4 KB); `-O3` with kernels only is slower (12.5 %). Phase 2 uses kernels only at `-O2`. The worst single frame was 5.8 ms against the 19 ms the just-in-time schedule leaves. Full table in the architecture doc's "AC-3 Decoder Module".
 
 - Port liba52 into a static-state, const-table float module under `firmware/DSPi/`.
 - Host harness under `tools/` decodes reference AC-3 vectors (generated with FFmpeg's encoder from known multichannel test signals) and compares against FFmpeg's decoder.
 - Device bench build decodes frames from a flash-resident array in a loop and meters cycles per frame with `time_us_32()`.
-- Exit criterion: measured cost inside the 15 % budget and state inside the RAM estimate. Otherwise the plan is revised here.
+- Exit criterion: measured cost inside the 15 % budget and state inside the RAM estimate. Otherwise the plan is revised here. **Met 2026-10-22:** 10.9 % and 17.7 KB.
 
 ### Phase 2. Integration
 

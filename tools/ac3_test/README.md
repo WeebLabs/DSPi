@@ -33,11 +33,11 @@ Requirements: ffmpeg, a C compiler, python3 (no numpy).
 Configure a bench build (RP2350 only):
 
 ```
-cmake -S firmware -B build-rp2350-ac3bench -DPICO_BOARD=pico2 -DPICO_PLATFORM=rp2350-arm-s -DCMAKE_BUILD_TYPE=Release -DDSPI_AC3_BENCH=ON -DDSPI_AC3_RAM_HOT=ON
+cmake -S firmware -B build-rp2350-ac3bench -DPICO_BOARD=pico2 -DPICO_PLATFORM=rp2350-arm-s -DCMAKE_BUILD_TYPE=Release -DDSPI_AC3_BENCH=ON -DDSPI_AC3_RAM_HOT=1
 cmake --build build-rp2350-ac3bench
 ```
 
-`DSPI_AC3_RAM_HOT=OFF` builds the XIP-only variant. `DSPI_AC3_OPT` sets the
+`DSPI_AC3_RAM_HOT` is 0 (XIP only), 1 (kernels in RAM, the default and the Phase 2 choice) or 2 (kernels and block parser in RAM). `DSPI_AC3_OPT` sets the
 decoder's optimisation level (default `-O2`). The build embeds
 `vectors/bench_51_640k.ac3` (eight 5.1 frames at 640 kbps, the worst-case
 bitrate) and the checksum from its `.sum` sidecar.
@@ -51,7 +51,7 @@ tools/ac3_test/bench_poll.py --passes 50
 The run blocks the main loop for its duration (about 0.5 s at 50 passes) and
 reports microseconds per frame, the header/block split, the share of one core
 that real-time decode would take at 48 kHz, and whether the device decode
-matched the host checksum. Needs pyusb, as `tools/dspi_poke` does.
+matched the host checksum. Needs pyusb, as `tools/dspi_poke` does. Measured 2026-10-22: 10.9 % of one core at 307.2 MHz with the kernels in RAM; see the architecture doc for the full table.
 
 ## Files
 
