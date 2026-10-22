@@ -2073,6 +2073,9 @@ int main(void) {
 
             // Adjust output PIO dividers to track SPDIF input clock
             spdif_input_update_clock_servo();
+
+            // Bitstream (IEC 61937) detection reporting
+            spdif_input_bitstream_service();
         }
 
 #if PICO_RP2350

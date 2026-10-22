@@ -431,6 +431,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_GET_ADAT_PIN            0xCD  // returns uint8_t
 #define REQ_GET_ADAT_STATUS         0xCE  // returns AdatStatus (8 B)
 
+// S/PDIF input IEC 61937 bitstream detection (both platforms).  Lives here
+// because 0xE0-0xEF is full; see spdif_input.h for the packet.
+#define REQ_GET_SPDIF_BITSTREAM_STATUS 0xCF  // returns SpdifBitstreamStatus (12 B)
+
 // Buffer statistics
 #define REQ_GET_BUFFER_STATS        0xB0
 #define REQ_RESET_BUFFER_STATS      0xB1

@@ -4098,6 +4098,13 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 return true;
             }
 
+            case REQ_GET_SPDIF_BITSTREAM_STATUS: {
+                SpdifBitstreamStatus bs;
+                spdif_input_get_bitstream_status(&bs);
+                vendor_send_response(&bs, sizeof(bs));
+                return true;
+            }
+
             case REQ_GET_CLOCK_DIAG: {
 #if DSPI_CLOCK_DIAG
                 // Static so it outlives the EP0 transfer.  A transport whose

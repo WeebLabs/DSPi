@@ -444,6 +444,21 @@ void notify_push_rta_config(const void *cfg, ParamSource src) {
     restore_interrupts(flags);
 }
 
+void notify_push_spdif_format(uint8_t format, uint8_t data_type,
+                              uint8_t muted, uint8_t bs_flags) {
+    uint32_t flags = save_and_disable_interrupts();
+    NotifyRingEntry e = {
+        .event_id = NOTIFY_EVT_SPDIF_FORMAT,
+        .source   = PARAM_SRC_INTERNAL,
+    };
+    e.value[0] = format;
+    e.value[1] = data_type;
+    e.value[2] = muted;
+    e.value[3] = bs_flags;
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
 void notify_push_bulk_invalidated(ParamSource src) {
     uint32_t flags = save_and_disable_interrupts();
 
@@ -689,6 +704,20 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             memcpy(&out_buf[4], e.value, NOTIFY_RTA_CONFIG_LEN);
             out_buf[16] = e.source;
             return 17;
+        }
+
+        case NOTIFY_EVT_SPDIF_FORMAT: {
+            // 8 bytes: format, data type, muted, bitstream flags.
+            if (max_len < 8) return 0;
+            out_buf[0] = NOTIFY_V2_VERSION;
+            out_buf[1] = NOTIFY_EVT_SPDIF_FORMAT;
+            out_buf[2] = 0;
+            out_buf[3] = seq;
+            out_buf[4] = e.value[0];
+            out_buf[5] = e.value[1];
+            out_buf[6] = e.value[2];
+            out_buf[7] = e.value[3];
+            return 8;
         }
 
         default:

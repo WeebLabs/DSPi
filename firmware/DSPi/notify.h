@@ -88,6 +88,12 @@
 // (12), src]; src is the source of the SET that staged it.
 #define NOTIFY_EVT_RTA_CONFIG        0x0D
 
+// v2 S/PDIF input format event: an IEC 61937 bitstream (AC-3, DTS, other)
+// appeared or cleared, or the channel-status non-audio bit changed the mute.
+// Packet (8 bytes): [ver=2, evt=0x0E, flags=0, seq, format, data_type,
+// muted, bs_flags]; fields as in SpdifBitstreamStatus (spdif_input.h).
+#define NOTIFY_EVT_SPDIF_FORMAT      0x0E
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -173,6 +179,11 @@ void notify_push_cs_aux(uint8_t slot, uint8_t state, uint16_t level_q8, ParamSou
 // RtaConfig as applied.  Safe from any dispatch context.
 #define NOTIFY_RTA_CONFIG_LEN        12
 void notify_push_rta_config(const void *cfg, ParamSource src);
+
+// S/PDIF input format / bitstream mute changed (NOTIFY_EVT_SPDIF_FORMAT).
+// Pushed from the main loop, never from the DMA IRQ.
+void notify_push_spdif_format(uint8_t format, uint8_t data_type,
+                              uint8_t muted, uint8_t bs_flags);
 
 // ---------------------------------------------------------------------------
 // Consumers

@@ -28,6 +28,11 @@
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "input_servo.h"
+// The detector's rare path is called from the RAM-pinned poll, so it must
+// live in RAM too (check_ram_placement.py check B).
+#define IEC61937_COLD_ATTR DSP_TIME_CRITICAL __attribute__((noinline))
+#include "iec61937.h"
+#include "notify.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -97,6 +102,42 @@ static uint32_t servo_long_span_ms = 0; // last long-window anchor span (ms)
 // FIFO fill before declaring ready to unmute
 static uint32_t lock_debounce_polls = 0;
 #define LOCK_DEBOUNCE_THRESHOLD  8  // ~8 polls ≈ a few ms at main loop rate
+
+// IEC 61937 bitstream detection.  bs_non_audio mirrors channel-status byte 0
+// bit 1; bs_muted is what the poll last applied; bs_reported_* is the last
+// state pushed as NOTIFY_EVT_SPDIF_FORMAT, so a change is pushed exactly once.
+static Iec61937Detector bs_det;
+static bool bs_non_audio = false;
+static bool bs_muted = false;
+static uint8_t bs_reported_format = IEC61937_FORMAT_PCM;
+static bool bs_reported_muted = false;
+
+static void bs_reset(void) {
+    iec61937_reset(&bs_det);
+    bs_non_audio = false;
+    bs_muted = false;
+}
+
+// Flash-resident on purpose: the poll is a RAM-pinned hot root and may not
+// call the library's channel-status copy or the notify push.  The poll
+// consumes bs_non_audio one iteration late, which is harmless.
+void spdif_input_bitstream_service(void) {
+    if (spdif_state == SPDIF_INPUT_LOCKED) {
+        uint8_t cs0;
+        spdif_rx_get_c_bits(&cs0, 1, 0);
+        bs_non_audio = (cs0 & 0x02u) != 0;
+    } else {
+        bs_non_audio = false;
+    }
+    uint8_t format = bs_muted ? bs_det.format : IEC61937_FORMAT_PCM;
+    if (bs_muted && format == IEC61937_FORMAT_PCM) format = IEC61937_FORMAT_OTHER;
+    if (format == bs_reported_format && bs_muted == bs_reported_muted) return;
+    bs_reported_format = format;
+    bs_reported_muted = bs_muted;
+    uint8_t flags = (bs_non_audio ? SPDIF_BS_FLAG_NON_AUDIO : 0) |
+                    (bs_det.pc_error ? SPDIF_BS_FLAG_PC_ERROR : 0);
+    notify_push_spdif_format(format, bs_det.data_type, bs_muted ? 1 : 0, flags);
+}
 
 // ============================================================================
 // RATE MAPPING
@@ -215,6 +256,7 @@ void spdif_input_start(void) {
     servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
     input_servo_reset();  // park the VCXO and zero the fill integrator
     lock_debounce_polls = 0;
+    bs_reset();
 
     printf("SPDIF RX: started on GPIO %u\n", spdif_active_data_pin);
 }
@@ -234,6 +276,10 @@ void spdif_input_stop(void) {
         spdif_state = SPDIF_INPUT_INACTIVE;
         spdif_rx_detected_rate = 0;
         input_arena_release(INPUT_ARENA_SPDIF);
+        // The main loop stops servicing this input once it is switched away,
+        // so clear any reported mute here.
+        bs_reset();
+        spdif_input_bitstream_service();
         printf("SPDIF RX: stopped\n");
     }
 }
@@ -276,6 +322,7 @@ uint32_t spdif_input_poll(void) {
         spdif_rx_detected_rate = 0;
         servo_skip_counter = 0;
         lock_debounce_polls = 0;
+        bs_reset();
         // Muting is handled by the main loop (sets preset_loading flag)
         return 0;
     }
@@ -308,6 +355,7 @@ uint32_t spdif_input_poll(void) {
         servo_skip_counter = 0;
         servo_meas_arm();
         lock_debounce_polls = 0;
+        bs_reset();
 
         // Rate change will be handled by main loop via spdif_input_check_rate_change()
         return 0;
@@ -357,6 +405,12 @@ uint32_t spdif_input_poll(void) {
     int32_t preamp_r = global_preamp_mul[1];
 #endif
 
+    // IEC 61937 burst or channel-status non-audio bit: zero-fill, because a
+    // bitstream played as PCM is full-scale noise on every output.  The mute
+    // is a mask on the raw word, not a branch, so -O3 cannot unswitch the
+    // loop into two copies of RAM text.
+    const uint32_t na_mask = bs_non_audio ? 0u : 0xFFFFFFFFu;
+
     uint32_t got = 0;
     uint32_t sample_idx = 0;
 
@@ -366,11 +420,22 @@ uint32_t spdif_input_poll(void) {
         if (n == 0) break;  // Underrun or wrap boundary
 
         for (uint32_t i = 0; i + 1 < n; i += 2) {
+            bool was_holding = bs_det.hold != 0;
+            iec61937_feed(&bs_det, buf[i]);
+            bool holding = iec61937_feed(&bs_det, buf[i + 1]);
+            uint32_t keep = holding ? 0u : na_mask;
+            // A preamble that straddles two frames leaves its Pa in the
+            // frame already converted; zero that one too.
+            if (__builtin_expect(holding && !was_holding, 0) && sample_idx > 0) {
+                buf_l[sample_idx - 1] = 0;
+                buf_r[sample_idx - 1] = 0;
+            }
+
             // Extract 24-bit signed audio from SPDIF word format:
             // bits[27:4] = 24-bit audio, bits[31:28] = VUCP
             // Shift left 4 to sign-extend into int32 full-scale
-            int32_t raw_l = (int32_t)((buf[i]     & 0x0FFFFFF0u) << 4);
-            int32_t raw_r = (int32_t)((buf[i + 1] & 0x0FFFFFF0u) << 4);
+            int32_t raw_l = (int32_t)(((buf[i]     & 0x0FFFFFF0u) << 4) & keep);
+            int32_t raw_r = (int32_t)(((buf[i + 1] & 0x0FFFFFF0u) << 4) & keep);
 
 #if PICO_RP2350
             // Float: int32 full-scale → [-1.0, 1.0] with preamp
@@ -393,6 +458,8 @@ uint32_t spdif_input_poll(void) {
     if (sample_idx > 0) {
         process_input_block(sample_idx);
     }
+
+    bs_muted = (bs_det.hold != 0) || bs_non_audio;
 
     return sample_idx;
 }
@@ -505,6 +572,18 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes) {
     } else {
         memset(out_24_bytes, 0, 24);
     }
+}
+
+void spdif_input_get_bitstream_status(SpdifBitstreamStatus *out) {
+    memset(out, 0, sizeof(*out));
+    out->format       = bs_reported_format;
+    out->data_type    = bs_det.data_type;
+    out->muted        = bs_muted ? 1 : 0;
+    out->flags        = (bs_non_audio ? SPDIF_BS_FLAG_NON_AUDIO : 0) |
+                        (bs_det.pc_error ? SPDIF_BS_FLAG_PC_ERROR : 0);
+    out->burst_length = bs_det.pd;
+    out->burst_period = bs_det.period;
+    out->burst_count  = bs_det.burst_count;
 }
 
 #if DSPI_CLOCK_DIAG

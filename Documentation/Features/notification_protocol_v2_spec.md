@@ -71,7 +71,8 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x07 | `NOTIFY_EVT_SIGGEN_STATE`     | Discrete     | Test-signal generator start/stop/completion. See §3.8. |
 | 0x0C | `NOTIFY_EVT_CS_AUX`           | Discrete     | Aux output state or level changed. 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot (0-15), state (0/1), level_q8 (uint16 LE, 8.8 percent), src]`. `slot` is the Control Surfaces binding slot holding the aux component; `level_q8` reads 0 on a `CS_TYPE_AUX_OUT` slot. Pushed on every `REQ_SET_CS_AUX_STATE` (0x04) and `REQ_SET_CS_AUX_LEVEL` (0x06) that changes a value, whatever the origin. `src` identifies it: `GPIO` for a bound control, `HOST_SET` for USB, `UART` / `I2C` for those transports. See `control_surfaces_aux_spec.md`. |
 | 0x0D | `NOTIFY_EVT_RTA_CONFIG`       | Discrete     | The spectrum analyser applied a configuration. See §3.9. |
-| 0x0E..0x7F | reserved (coalesceable) |              | |
+| 0x0E | `NOTIFY_EVT_SPDIF_FORMAT`     | Discrete     | An IEC 61937 bitstream appeared on or cleared from the S/PDIF input, or the non-audio mute changed. See §3.10. |
+| 0x0F..0x7F | reserved (coalesceable) |              | |
 | 0x80..0xFF | reserved (discrete)     |              | |
 
 > **Note on discrete IDs below 0x80.** The original design reserved `0x80..0xFF`
@@ -79,8 +80,8 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 > (0x07) events were assigned low IDs in practice. Hosts must classify by event ID,
 > not by range. `NOTIFY_EVT_ERROR` (formerly penciled in at 0x05) was never wired
 > up. The same applies to 0x08..0x0B (`ADAT_STATE`, `I2S_SLAVE_STATE`,
-> `CS_IR_LEARN`, `ADAT_INPUT_STATE`), `CS_AUX` (0x0C) and `RTA_CONFIG` (0x0D),
-> all discrete and all declared in `notify.h`.
+> `CS_IR_LEARN`, `ADAT_INPUT_STATE`), `CS_AUX` (0x0C), `RTA_CONFIG` (0x0D) and
+> `SPDIF_FORMAT` (0x0E), all discrete and all declared in `notify.h`.
 
 ### 3.4 PARAM_CHANGED Layout
 
@@ -227,6 +228,35 @@ The analyser does not emit this event for anything that is not a staged SET.
 A preset load, factory reset, sample-rate change or input-source switch
 restarts the frame (analyser spec §3.5) but leaves the configuration alone, and
 auto-off, auto-start and `REQ_RTA_CONTROL` (0x0E) never touch it.
+
+### 3.10 SPDIF_FORMAT Layout (event 0x0E)
+
+The S/PDIF input watches for IEC 61937 data bursts (AC-3, DTS and other
+non-PCM payloads) and for the channel-status non-audio bit, and zero-fills the
+input while either is present so a bitstream never plays as PCM noise. This
+event is pushed from the main loop whenever the reported format or the mute
+changes, including the clear when the stream returns to PCM, the receiver
+loses lock, or the input source switches away. Fixed 8-byte packet:
+
+```
+byte 0      0x02                 version
+byte 1      0x0E                 NOTIFY_EVT_SPDIF_FORMAT
+byte 2      0x00                 flags
+byte 3      seq
+byte 4      format               0 = PCM, 1 = AC-3, 2 = DTS, 3 = other bitstream
+byte 5      data_type            Pc bits 4:0 of the last burst, 0xFF = none
+byte 6      muted                1 while the input is zero-filled
+byte 7      bs_flags             bit 0 = non-audio channel-status bit,
+                                 bit 1 = last burst's Pc error flag
+```
+
+`format` is PCM whenever the input is not muted. Pause and null bursts keep
+the format of the data burst they follow, and a mute caused by the non-audio
+bit alone reports `other`. The same fields, plus the burst length, the measured
+burst period and a burst counter, are available on demand through
+`REQ_GET_SPDIF_BITSTREAM_STATUS` (0xCF). The mute releases 4096 carrier frames
+after the last preamble when the non-audio bit is clear, so a host sees one
+event per stream start and one per stream end, not one per burst.
 
 **Why it exists.** Several hosts can watch one device at once (the USB host,
 DSPi Link clients through a hub, a UART or I2C bridge). Each one used to read

@@ -96,6 +96,7 @@ add_executable(DSPi
     soft_vcxo.h
     spdif_input.c
     spdif_input.h
+    iec61937.h
     uart_control.c
     uart_control.h
     upmix.c

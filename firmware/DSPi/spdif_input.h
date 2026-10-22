@@ -61,6 +61,27 @@ void spdif_input_get_status(SpdifRxStatusPacket *out);
 // out must point to at least 24 bytes
 void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 
+// IEC 61937 bitstream status (REQ_GET_SPDIF_BITSTREAM_STATUS 0xCF, 12 bytes).
+// A detected burst or the channel-status non-audio bit zero-fills the input
+// so an AC-3 / DTS stream never plays as full-scale noise; see iec61937.h.
+#define SPDIF_BS_FLAG_NON_AUDIO   0x01   // channel status byte 0 bit 1 set
+#define SPDIF_BS_FLAG_PC_ERROR    0x02   // last burst's Pc error flag set
+typedef struct __attribute__((packed)) {
+    uint8_t  format;        // IEC61937_FORMAT_* (0 = PCM)
+    uint8_t  data_type;     // Pc bits 4:0 of the last burst, 0xFF = none
+    uint8_t  muted;         // 1 while the input is zero-filled
+    uint8_t  flags;         // SPDIF_BS_FLAG_*
+    uint16_t burst_length;  // Pd of the last burst (bits for AC-3, bytes for DTS)
+    uint16_t burst_period;  // frames between the last two preambles (0 = unknown)
+    uint32_t burst_count;   // preambles seen since the last lock
+} SpdifBitstreamStatus;     // 12 bytes
+
+void spdif_input_get_bitstream_status(SpdifBitstreamStatus *out);
+
+// Main-loop service after spdif_input_poll(): samples the non-audio bit and
+// pushes NOTIFY_EVT_SPDIF_FORMAT on change.  Flash-resident; see the .c.
+void spdif_input_bitstream_service(void);
+
 // Called by main loop when lock event fires and rate differs from current
 // Returns true if rate change was needed
 bool spdif_input_check_rate_change(void);
