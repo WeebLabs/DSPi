@@ -60,6 +60,7 @@ struct a52_state_s {
     uint8_t halfrate;		/* halfrate factor */
     uint8_t acmod;		/* coded channels */
     uint8_t lfeon;		/* coded lfe channel */
+    uint8_t dialnorm;		/* dialnorm of the first channel (DSPi: reported, not applied) */
     level_t clev;		/* centre channel mix level */
     level_t slev;		/* surround channels mix level */
 

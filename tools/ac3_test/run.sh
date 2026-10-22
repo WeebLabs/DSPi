@@ -65,6 +65,21 @@ got=$("$WORK/ac3_test" decode "$BV" | sed -E 's/.*checksum=(0x[0-9a-f]+).*/\1/')
 want=$(cut -d' ' -f1 "$BV.sum")
 if [ "$got" = "$want" ]; then echo "bench vector: $got matches sidecar"; else echo "bench vector: $got != sidecar $want"; status=1; fi
 
+# Stream layer (ac3_stream.c): deframer, ring and just-in-time scheduler
+# against the direct decode delayed by one burst period.
+cc -O2 -ffp-contract=off -Wall -Wno-unused-function -I"$AC3/.." -I"$AC3" \
+   -o "$WORK/stream_test" "$HERE/stream_test.c" "$AC3"/../ac3_stream.c \
+   "$AC3"/parse.c "$AC3"/bitstream.c "$AC3"/bit_allocate.c "$AC3"/downmix.c \
+   "$AC3"/imdct.c "$AC3"/crc.c "$AC3"/ac3_decoder.c -lm
+for v in v51_640k v51_448k v20_192k_44k1; do
+    echo "== stream $v"; "$WORK/stream_test" "$WORK/$v.ac3" | tail -1 || status=1
+done
+echo "== stream swapped payload"; "$WORK/stream_test" "$WORK/v51_640k.ac3" --swap | tail -1 || status=1
+echo "== stream 1-frame and 192-frame polls"
+"$WORK/stream_test" "$WORK/v51_448k.ac3" --chunk 1 | tail -1 || status=1
+"$WORK/stream_test" "$WORK/v51_640k.ac3" --chunk 192 | tail -1 || status=1
+echo "== stream 40-poll stall"; "$WORK/stream_test" "$WORK/v51_640k.ac3" --stall 40 | tail -1 || status=1
+
 echo "== host timing (for curiosity only; the device bench is authoritative)"
 "$WORK/ac3_test" bench "$WORK/v51_640k.ac3" 20
 exit $status

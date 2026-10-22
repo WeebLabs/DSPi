@@ -1,6 +1,6 @@
 # DSPi AC-3 / DTS Bitstream Decoding Plan
 
-*Version 0.3, 2026-10-22. Phase 0 shipped (commit 710c02b); Phase 1 complete and its gate passed on hardware (10.9 % of one core at the chosen placement). RP2350 only. Branch `ac3-dts-decode`.*
+*Version 0.4, 2026-10-22. Phases 0, 1 and 2 implemented on branch `ac3-dts-decode`; Phase 2 is host-verified and smoke-tested on hardware without an AC-3 source. RP2350 only.*
 
 This document records the practicality assessment, the cost estimates and the phased plan for decoding AC-3 and DTS core bitstreams received on the S/PDIF input. It is a plan, not a protocol specification. Command byte layouts, notify packet formats and preset fields are decided in Phase 3 and will be written into a separate spec at that point.
 
@@ -120,6 +120,8 @@ At the 150 MHz fallback clock every figure doubles.
 - Exit criterion: measured cost inside the 15 % budget and state inside the RAM estimate. Otherwise the plan is revised here. **Met 2026-10-22:** 10.9 % and 17.7 KB.
 
 ### Phase 2. Integration
+
+**Status 2026-10-22.** Implemented. `ac3_stream.c/.h` holds the deframer capture, the two frame slots and the 512-frame ring in the arena, and the just-in-time scheduler; the S/PDIF poll feeds and drains, the main-loop service decodes two-block slices and keeps the busy meter; `active_input_channel_count()` returns 6 while decoding. `tools/ac3_test/stream_test.c` proves the drained output bit-exact against the direct decode delayed by 1536 frames at every poll size, with swapped payload, and across a stall. Deliberately not done: no pipeline reset on PCM/AC-3 transitions (slot alignment is intrinsic, the Phase 0 mask already silences the carrier) and no DRC or dialnorm controls (Phase 3; DRC stays applied, dialnorm reported). Release build: BSS +17.8 KB, RAM text +4.7 KB, `DATA_BUDGET` raised to 104,448 B. Not yet heard on hardware: no AC-3 source on the bench. See the architecture doc's "AC-3 Decoding".
 
 - IEC 61937 deframer in the S/PDIF poll, writing complete frames into the double buffer in the arena.
 - Just-in-time block scheduling against the anchored delay, into the decoded ring.

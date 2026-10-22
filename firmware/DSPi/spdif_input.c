@@ -33,6 +33,9 @@
 #define IEC61937_COLD_ATTR DSP_TIME_CRITICAL __attribute__((noinline))
 #include "iec61937.h"
 #include "notify.h"
+#if PICO_RP2350
+#include "ac3_stream.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -108,19 +111,44 @@ static uint32_t lock_debounce_polls = 0;
 // state pushed as NOTIFY_EVT_SPDIF_FORMAT, so a change is pushed exactly once.
 static Iec61937Detector bs_det;
 static bool bs_non_audio = false;
-static bool bs_muted = false;
+static bool bs_muted = false;            // raw PCM masked (bitstream or non-audio bit)
 static uint8_t bs_reported_format = IEC61937_FORMAT_PCM;
 static bool bs_reported_muted = false;
+static bool bs_reported_decoding = false;
+
+#if PICO_RP2350
+// AC-3 decode: the decoder state is BSS, the frame buffers and the decoded
+// ring live in the arena's S/PDIF member (ac3_stream.h).  The heavy reset
+// (12 KB ring clear, decoder init) runs in the flash service, so the
+// RAM-resident poll only raises a flag.
+volatile bool spdif_decode_active = false;
+static Ac3Decoder ac3_dec;
+static Ac3Stream ac3_stream;
+static bool ac3_reset_pending = false;
+static uint32_t ac3_busy_us = 0;         // decode time in the current 1 s window
+static uint32_t ac3_window_start_us = 0;
+static uint8_t ac3_cpu_pct = 0;
+#endif
 
 static void bs_reset(void) {
     iec61937_reset(&bs_det);
     bs_non_audio = false;
     bs_muted = false;
+#if PICO_RP2350
+    spdif_decode_active = false;
+    ac3_reset_pending = true;
+#endif
 }
 
 // Flash-resident on purpose: the poll is a RAM-pinned hot root and may not
 // call the library's channel-status copy or the notify push.  The poll
 // consumes bs_non_audio one iteration late, which is harmless.
+static uint8_t bs_flags(void) {
+    return (bs_non_audio ? SPDIF_BS_FLAG_NON_AUDIO : 0) |
+           (bs_det.pc_error ? SPDIF_BS_FLAG_PC_ERROR : 0) |
+           (spdif_decode_active ? SPDIF_BS_FLAG_DECODING : 0);
+}
+
 void spdif_input_bitstream_service(void) {
     if (spdif_state == SPDIF_INPUT_LOCKED) {
         uint8_t cs0;
@@ -129,14 +157,45 @@ void spdif_input_bitstream_service(void) {
     } else {
         bs_non_audio = false;
     }
+
+#if PICO_RP2350
+    if (ac3_reset_pending) {
+        ac3_reset_pending = false;
+        ac3_stream_reset(&ac3_stream);
+        ac3_busy_us = 0;
+        ac3_cpu_pct = 0;
+        ac3_window_start_us = time_us_32();
+    }
+    // Decode while an AC-3 burst stream is live; once the hold lapses or the
+    // type changes the ring has already played out, so a reset is clean.
+    bool decoding = ac3_stream.active && bs_det.hold != 0 &&
+                    bs_det.format == IEC61937_FORMAT_AC3;
+    if (!decoding && ac3_stream.active) {
+        ac3_stream_reset(&ac3_stream);
+    }
+    spdif_decode_active = decoding;
+    if (decoding) {
+        uint32_t t0 = time_us_32();
+        ac3_stream_decode_due(&ac3_stream, 2);
+        ac3_busy_us += time_us_32() - t0;
+    }
+    uint32_t now = time_us_32();
+    if (now - ac3_window_start_us >= 1000000u) {
+        ac3_cpu_pct = (uint8_t)(ac3_busy_us / 10000u > 100u ? 100u : ac3_busy_us / 10000u);
+        ac3_busy_us = 0;
+        ac3_window_start_us = now;
+    }
+#endif
+
+    bool muted = bs_muted && !spdif_decode_active;
     uint8_t format = bs_muted ? bs_det.format : IEC61937_FORMAT_PCM;
     if (bs_muted && format == IEC61937_FORMAT_PCM) format = IEC61937_FORMAT_OTHER;
-    if (format == bs_reported_format && bs_muted == bs_reported_muted) return;
+    if (format == bs_reported_format && muted == bs_reported_muted &&
+        spdif_decode_active == bs_reported_decoding) return;
     bs_reported_format = format;
-    bs_reported_muted = bs_muted;
-    uint8_t flags = (bs_non_audio ? SPDIF_BS_FLAG_NON_AUDIO : 0) |
-                    (bs_det.pc_error ? SPDIF_BS_FLAG_PC_ERROR : 0);
-    notify_push_spdif_format(format, bs_det.data_type, bs_muted ? 1 : 0, flags);
+    bs_reported_muted = muted;
+    bs_reported_decoding = spdif_decode_active;
+    notify_push_spdif_format(format, bs_det.data_type, muted ? 1 : 0, bs_flags());
 }
 
 // ============================================================================
@@ -256,6 +315,10 @@ void spdif_input_start(void) {
     servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
     input_servo_reset();  // park the VCXO and zero the fill integrator
     lock_debounce_polls = 0;
+#if PICO_RP2350
+    ac3_stream_init(&ac3_stream, input_capture_arena.spdif.ac3_frames,
+                    input_capture_arena.spdif.ac3_ring, &ac3_dec);
+#endif
     bs_reset();
 
     printf("SPDIF RX: started on GPIO %u\n", spdif_active_data_pin);
@@ -413,6 +476,9 @@ uint32_t spdif_input_poll(void) {
 
     uint32_t got = 0;
     uint32_t sample_idx = 0;
+#if PICO_RP2350
+    const uint32_t pos_base = ac3_stream.pos;   // carrier frame index of sample 0
+#endif
 
     while (got < need) {
         uint32_t *buf;
@@ -421,8 +487,13 @@ uint32_t spdif_input_poll(void) {
 
         for (uint32_t i = 0; i + 1 < n; i += 2) {
             bool was_holding = bs_det.hold != 0;
+#if PICO_RP2350
+            ac3_stream_feed(&ac3_stream, &bs_det, buf[i], pos_base + sample_idx);
+            bool holding = ac3_stream_feed(&ac3_stream, &bs_det, buf[i + 1], pos_base + sample_idx);
+#else
             iec61937_feed(&bs_det, buf[i]);
             bool holding = iec61937_feed(&bs_det, buf[i + 1]);
+#endif
             uint32_t keep = holding ? 0u : na_mask;
             // A preamble that straddles two frames leaves its Pa in the
             // frame already converted; zero that one too.
@@ -454,6 +525,21 @@ uint32_t spdif_input_poll(void) {
         }
         got += n;
     }
+
+#if PICO_RP2350
+    // Decoded AC-3 replaces the masked carrier samples: L/R in buf_l/buf_r,
+    // C LFE Ls Rs in the extended rows, each with its own input preamp.
+    // The read position advances either way so burst anchors stay valid.
+    if (spdif_decode_active) {
+        float *const dst[AC3_CH_COUNT] = { buf_l, buf_r, buf_in_ext[0], buf_in_ext[1],
+                                           buf_in_ext[2], buf_in_ext[3] };
+        float gain[AC3_CH_COUNT];
+        for (int ch = 0; ch < AC3_CH_COUNT; ch++) gain[ch] = global_preamp_linear[ch];
+        ac3_stream_drain(&ac3_stream, sample_idx, dst, gain);
+    } else {
+        ac3_stream_skip(&ac3_stream, sample_idx);
+    }
+#endif
 
     if (sample_idx > 0) {
         process_input_block(sample_idx);
@@ -578,12 +664,17 @@ void spdif_input_get_bitstream_status(SpdifBitstreamStatus *out) {
     memset(out, 0, sizeof(*out));
     out->format       = bs_reported_format;
     out->data_type    = bs_det.data_type;
-    out->muted        = bs_muted ? 1 : 0;
-    out->flags        = (bs_non_audio ? SPDIF_BS_FLAG_NON_AUDIO : 0) |
-                        (bs_det.pc_error ? SPDIF_BS_FLAG_PC_ERROR : 0);
+    out->muted        = bs_reported_muted ? 1 : 0;
+    out->flags        = bs_flags();
     out->burst_length = bs_det.pd;
     out->burst_period = bs_det.period;
     out->burst_count  = bs_det.burst_count;
+#if PICO_RP2350
+    out->decode_cpu_pct = ac3_cpu_pct;
+    out->dialnorm       = ac3_dec.state.dialnorm;
+    out->acmod_flags    = (uint8_t)(ac3_dec.flags & (A52_CHANNEL_MASK | A52_LFE));
+    out->late_blocks    = (uint8_t)(ac3_stream.blocks_late > 255 ? 255 : ac3_stream.blocks_late);
+#endif
 }
 
 #if DSPI_CLOCK_DIAG

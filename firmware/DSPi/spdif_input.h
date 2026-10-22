@@ -66,17 +66,30 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 // so an AC-3 / DTS stream never plays as full-scale noise; see iec61937.h.
 #define SPDIF_BS_FLAG_NON_AUDIO   0x01   // channel status byte 0 bit 1 set
 #define SPDIF_BS_FLAG_PC_ERROR    0x02   // last burst's Pc error flag set
+#define SPDIF_BS_FLAG_DECODING    0x04   // AC-3 decode feeds inputs 0-5 (RP2350)
 typedef struct __attribute__((packed)) {
     uint8_t  format;        // IEC61937_FORMAT_* (0 = PCM)
     uint8_t  data_type;     // Pc bits 4:0 of the last burst, 0xFF = none
-    uint8_t  muted;         // 1 while the input is zero-filled
+    uint8_t  muted;         // 1 while the input is zero-filled (bitstream, not decoding)
     uint8_t  flags;         // SPDIF_BS_FLAG_*
     uint16_t burst_length;  // Pd of the last burst (bits for AC-3, bytes for DTS)
     uint16_t burst_period;  // frames between the last two preambles (0 = unknown)
     uint32_t burst_count;   // preambles seen since the last lock
-} SpdifBitstreamStatus;     // 12 bytes
+    uint8_t  decode_cpu_pct;// AC-3 decode busy time, percent of one core (1 s window)
+    uint8_t  dialnorm;      // AC-3 dialnorm field (0-31, means -dialnorm dB; 0 = -31)
+    uint8_t  acmod_flags;   // a52 output flags: channel mode | 0x10 when LFE present
+    uint8_t  late_blocks;   // AC-3 blocks decoded after their slot (saturating)
+} SpdifBitstreamStatus;     // 16 bytes
 
 void spdif_input_get_bitstream_status(SpdifBitstreamStatus *out);
+
+// True while decoded AC-3 feeds the pipeline (six active inputs).  Read from
+// the RAM-resident pipeline, so it is a plain variable, not a function.
+#if PICO_RP2350
+extern volatile bool spdif_decode_active;
+#else
+#define spdif_decode_active false
+#endif
 
 // Main-loop service after spdif_input_poll(): samples the non-audio bit and
 // pushes NOTIFY_EVT_SPDIF_FORMAT on change.  Flash-resident; see the .c.

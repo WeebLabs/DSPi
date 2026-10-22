@@ -247,14 +247,18 @@ byte 4      format               0 = PCM, 1 = AC-3, 2 = DTS, 3 = other bitstream
 byte 5      data_type            Pc bits 4:0 of the last burst, 0xFF = none
 byte 6      muted                1 while the input is zero-filled
 byte 7      bs_flags             bit 0 = non-audio channel-status bit,
-                                 bit 1 = last burst's Pc error flag
+                                 bit 1 = last burst's Pc error flag,
+                                 bit 2 = AC-3 decode active (RP2350)
 ```
 
-`format` is PCM whenever the input is not muted. Pause and null bursts keep
+`format` is PCM whenever no bitstream is present. Pause and null bursts keep
 the format of the data burst they follow, and a mute caused by the non-audio
-bit alone reports `other`. The same fields, plus the burst length, the measured
-burst period and a burst counter, are available on demand through
-`REQ_GET_SPDIF_BITSTREAM_STATUS` (0xCF). The mute releases 4096 carrier frames
+bit alone reports `other`. On RP2350 an AC-3 stream is decoded rather than
+muted: `muted` is then 0, `format` stays 1 and `bs_flags` bit 2 is set, and
+the event also fires when decoding starts or stops. The same fields, plus the
+burst length, the measured burst period, a burst counter and the AC-3 decode
+bytes, are available on demand through `REQ_GET_SPDIF_BITSTREAM_STATUS`
+(0xCF, 16 bytes). The mute releases 4096 carrier frames
 after the last preamble when the non-audio bit is clear, so a host sees one
 event per stream start and one per stream end, not one per burst.
 

@@ -279,7 +279,7 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
     else if (active_input_source == INPUT_SOURCE_ADAT)
         n = 8;                            // ADAT is always 8 channels
     else
-        n = NUM_STEREO_INPUTS;            // S/PDIF (and any future stereo source)
+        n = spdif_decode_active ? 6 : NUM_STEREO_INPUTS;   // S/PDIF: PCM pair or decoded AC-3
     if (n > NUM_INPUT_CHANNELS) n = NUM_INPUT_CHANNELS;
     return (uint8_t)n;
 }

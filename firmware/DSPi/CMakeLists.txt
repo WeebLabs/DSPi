@@ -135,37 +135,48 @@ if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
 endif()
 
-# DSPI_AC3_BENCH (RP2350 bench only): compiles the ported liba52 AC-3 decoder
-# (ac3/) plus ac3_bench.c, which decodes an embedded frame set on request
-# (REQ_AC3_BENCH 0x9F) and reports timing and a host-checked checksum.
-# DSPI_AC3_RAM_HOT pins the decoder's hot paths in RAM (.time_critical);
-# OFF measures the XIP-only variant.  Release builds leave both OFF.
-option(DSPI_AC3_BENCH "Build the AC-3 decode bench (vendor 0x9F)" OFF)
+# AC-3 decoding on the S/PDIF input (RP2350 only): the ported liba52 decoder
+# (ac3/) and the IEC 61937 stream layer (ac3_stream.c).  -ffp-contract=off
+# keeps the device decode bit-exact with the host harness (tools/ac3_test).
+# DSPI_AC3_RAM_HOT: 0 flash only, 1 kernels in RAM (measured choice, see the
+# architecture doc), 2 kernels plus the block parser.
+# DSPI_AC3_BENCH adds ac3_bench.c and REQ_AC3_BENCH (0x9F); release builds
+# leave it OFF.
 set(DSPI_AC3_RAM_HOT "1" CACHE STRING "AC-3 RAM placement: 0 none, 1 kernels, 2 kernels + block parser")
+# A build dir configured while this was a boolean still holds ON/OFF, which
+# the preprocessor would read as 0; map those to the levels they meant.
+if (DSPI_AC3_RAM_HOT STREQUAL "ON")
+    set(DSPI_AC3_RAM_HOT 1)
+elseif (DSPI_AC3_RAM_HOT STREQUAL "OFF")
+    set(DSPI_AC3_RAM_HOT 0)
+endif()
 set(DSPI_AC3_OPT "-O2" CACHE STRING "Optimisation level for the AC-3 decoder sources")
-if (DSPI_AC3_BENCH AND NOT PICO_PLATFORM STREQUAL "rp2040")
+option(DSPI_AC3_BENCH "Build the AC-3 decode bench (vendor 0x9F)" OFF)
+if (NOT PICO_PLATFORM STREQUAL "rp2040")
     set(AC3_SOURCES ac3/parse.c ac3/bitstream.c ac3/bit_allocate.c ac3/downmix.c
-                    ac3/imdct.c ac3/crc.c ac3/ac3_decoder.c)
-    target_sources(DSPi PRIVATE ${AC3_SOURCES} ac3_bench.c ac3_bench.h)
-    # -ffp-contract=off keeps the device decode bit-exact with the host
-    # harness (checksum check), whatever the speed cost of the lost FMAs.
-    set_source_files_properties(${AC3_SOURCES} ac3_bench.c PROPERTIES
+                    ac3/imdct.c ac3/crc.c ac3/ac3_decoder.c ac3_stream.c)
+    target_sources(DSPi PRIVATE ${AC3_SOURCES} ac3_stream.h ac3/ac3_decoder.h)
+    set_source_files_properties(${AC3_SOURCES} PROPERTIES
         COMPILE_FLAGS "${DSPI_AC3_OPT} -ffp-contract=off")
-    target_compile_definitions(DSPi PRIVATE DSPI_AC3_BENCH=1)
     target_compile_definitions(DSPi PRIVATE DSPI_AC3_RAM_HOT=${DSPI_AC3_RAM_HOT})
-    # The embedded frames come from the committed vector and its checksum.
-    set(AC3_BENCH_VECTOR ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/vectors/bench_51_640k.ac3)
-    set(AC3_BENCH_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ac3_bench_frames.h)
-    add_custom_command(
-        OUTPUT ${AC3_BENCH_HEADER}
-        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/gen_bench_frames.py
-                ${AC3_BENCH_VECTOR} ${AC3_BENCH_HEADER}
-        DEPENDS ${AC3_BENCH_VECTOR} ${AC3_BENCH_VECTOR}.sum
-                ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/gen_bench_frames.py
-        COMMENT "Embedding AC-3 bench frames"
-        VERBATIM)
-    target_sources(DSPi PRIVATE ${AC3_BENCH_HEADER})
-    target_include_directories(DSPi PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    if (DSPI_AC3_BENCH)
+        target_sources(DSPi PRIVATE ac3_bench.c ac3_bench.h)
+        set_source_files_properties(ac3_bench.c PROPERTIES COMPILE_FLAGS "${DSPI_AC3_OPT} -ffp-contract=off")
+        target_compile_definitions(DSPi PRIVATE DSPI_AC3_BENCH=1)
+        # The embedded frames come from the committed vector and its checksum.
+        set(AC3_BENCH_VECTOR ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/vectors/bench_51_640k.ac3)
+        set(AC3_BENCH_HEADER ${CMAKE_CURRENT_BINARY_DIR}/ac3_bench_frames.h)
+        add_custom_command(
+            OUTPUT ${AC3_BENCH_HEADER}
+            COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/gen_bench_frames.py
+                    ${AC3_BENCH_VECTOR} ${AC3_BENCH_HEADER}
+            DEPENDS ${AC3_BENCH_VECTOR} ${AC3_BENCH_VECTOR}.sum
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/ac3_test/gen_bench_frames.py
+            COMMENT "Embedding AC-3 bench frames"
+            VERBATIM)
+        target_sources(DSPi PRIVATE ${AC3_BENCH_HEADER})
+        target_include_directories(DSPi PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
 endif()
 
 if (PICO_PLATFORM STREQUAL "rp2040")

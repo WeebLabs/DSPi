@@ -27,6 +27,24 @@
 #define INPUT_ARENA_I2S_WORDS    1024u
 #endif
 #define INPUT_ARENA_SPDIF_WORDS  3072u
+#if PICO_RP2350
+// AC-3 decode (ac3_stream.h static-asserts these against its own sizes):
+// two frame buffers with the bit reader's 4-byte slack, and the decoded ring.
+#define INPUT_ARENA_AC3_FRAME_BYTES  3844u
+#define INPUT_ARENA_AC3_RING_FRAMES  512u
+#define INPUT_ARENA_AC3_CHANNELS     6u
+#endif
+
+// S/PDIF member: the receiver FIFO first (it carries the DMA alignment),
+// then, on RP2350, the AC-3 decoder's buffers, which only exist while the
+// S/PDIF receiver owns the arena.  32,264 B on RP2350, under the I2S member.
+typedef struct {
+    uint32_t fifo[INPUT_ARENA_SPDIF_WORDS];
+#if PICO_RP2350
+    uint8_t  ac3_frames[2][INPUT_ARENA_AC3_FRAME_BYTES] __attribute__((aligned(4)));
+    float    ac3_ring[INPUT_ARENA_AC3_RING_FRAMES][INPUT_ARENA_AC3_CHANNELS];
+#endif
+} InputArenaSpdif;
 
 // Alignment is the largest DMA write-wrap requirement of any member.  Each
 // I2S row is its own wrap region, so row bytes == arena alignment is what
@@ -36,7 +54,7 @@ typedef union {
     uint32_t adat_ring[INPUT_ARENA_ADAT_WORDS];
 #endif
     uint32_t i2s_ring[INPUT_ARENA_I2S_PAIRS][INPUT_ARENA_I2S_WORDS];
-    uint32_t spdif_fifo[INPUT_ARENA_SPDIF_WORDS];
+    InputArenaSpdif spdif;
 } __attribute__((aligned(INPUT_ARENA_ALIGN))) InputCaptureArena;
 
 extern InputCaptureArena input_capture_arena;

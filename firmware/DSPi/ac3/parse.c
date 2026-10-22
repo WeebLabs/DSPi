@@ -164,7 +164,9 @@ int a52_frame (a52_state_t * state, const uint8_t * buf, int * flags,
 
     chaninfo = !acmod;
     do {
-	bitstream_get (state, 5);	/* dialnorm */
+	int dialnorm = bitstream_get (state, 5);	/* dialnorm */
+	if (chaninfo == !acmod)
+	    state->dialnorm = dialnorm;
 	if (bitstream_get (state, 1))	/* compre */
 	    bitstream_get (state, 8);	/* compr */
 	if (bitstream_get (state, 1))	/* langcode */

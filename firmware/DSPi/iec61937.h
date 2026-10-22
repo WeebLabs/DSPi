@@ -81,7 +81,7 @@ static inline uint8_t iec61937_format_for(uint8_t data_type, uint8_t current) {
 // per-word feed stays a few instructions when inlined into a -O3 loop; the
 // including file may define IEC61937_COLD_ATTR to place it in RAM.
 #ifndef IEC61937_COLD_ATTR
-#define IEC61937_COLD_ATTR __attribute__((noinline))
+#define IEC61937_COLD_ATTR __attribute__((noinline, unused))
 #endif
 IEC61937_COLD_ATTR
 static void iec61937_event(Iec61937Detector *d, uint16_t w) {

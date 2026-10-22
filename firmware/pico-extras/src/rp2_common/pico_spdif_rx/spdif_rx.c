@@ -141,8 +141,8 @@ static void (*on_lost_stable_func)() = NULL;
 // the I2S/ADAT capture rings (only one input receiver runs at a time).  The
 // DMA here is chained ping-pong, not an address-wrap ring, so 4-byte alignment
 // is all it needs.
-#define fifo_buff (input_capture_arena.spdif_fifo)
-_Static_assert(sizeof(input_capture_arena.spdif_fifo) == SPDIF_RX_FIFO_SIZE * 4,
+#define fifo_buff (input_capture_arena.spdif.fifo)
+_Static_assert(sizeof(input_capture_arena.spdif.fifo) == SPDIF_RX_FIFO_SIZE * 4,
                "arena SPDIF member must match SPDIF_RX_FIFO_SIZE");
 static uint32_t buff_wr_pre_ptr = 0;
 static uint32_t buff_wr_done_ptr = 0;

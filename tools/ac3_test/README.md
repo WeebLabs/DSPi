@@ -56,6 +56,7 @@ matched the host checksum. Needs pyusb, as `tools/dspi_poke` does. Measured 2026
 ## Files
 
 - `ac3_test.c`: decode, table check and host timing.
+- `stream_test.c`: wraps an .ac3 file into an IEC 61937 carrier and runs the firmware stream layer (`firmware/DSPi/ac3_stream.c`) against the direct decode delayed by one burst period; options `--swap`, `--chunk N`, `--stall N`.
 - `compare.py`, `strip_channels.py`: float32 comparison helpers.
 - `gen_imdct_tables.py`: regenerates `firmware/DSPi/ac3/imdct_tables.h`.
 - `gen_bench_frames.py`: embeds the bench vector at build time.

@@ -30,7 +30,7 @@ RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
 # RAM-resident code+data budgets, set about 2.5 KB above the measured image.
 # Raise deliberately and record the measured numbers in current_architecture.md
 # "Memory Layout" (history of every raise is there).
-DATA_BUDGET = {"rp2040": 72704, "rp2350": 100352}
+DATA_BUDGET = {"rp2040": 72704, "rp2350": 104448}   # RP2350 raised 2026-10-22 for the AC-3 kernels (4 KB)
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {
