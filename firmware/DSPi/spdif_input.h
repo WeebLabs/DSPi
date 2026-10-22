@@ -61,7 +61,7 @@ void spdif_input_get_status(SpdifRxStatusPacket *out);
 // out must point to at least 24 bytes
 void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 
-// IEC 61937 bitstream status (REQ_GET_SPDIF_BITSTREAM_STATUS 0xCF, 12 bytes).
+// IEC 61937 bitstream status (REQ_GET_SPDIF_BITSTREAM_STATUS 0xCF, 16 bytes).
 // A detected burst or the channel-status non-audio bit zero-fills the input
 // so an AC-3 / DTS stream never plays as full-scale noise; see iec61937.h.
 #define SPDIF_BS_FLAG_NON_AUDIO   0x01   // channel status byte 0 bit 1 set

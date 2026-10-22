@@ -5,10 +5,12 @@
  * and the main-loop service do, and checks the output against a direct
  * decode delayed by exactly AC3_STREAM_DELAY frames.
  *
- * stream_test <in.ac3> [--swap] [--stall N] [--chunk N]
- *   --swap    byte-swap the payload words (sources that send 0x770B)
- *   --stall N skip the service for N polls once, mid-stream (late blocks)
- *   --chunk N frames per simulated poll (default 48)
+ * stream_test <in.ac3> [--swap] [--stall N] [--chunk N] [--corrupt N] [--pcerr N]
+ *   --swap      byte-swap the payload words (sources that send 0x770B)
+ *   --stall N   skip the service for N polls once, mid-stream (late blocks)
+ *   --chunk N   frames per simulated poll (default 48)
+ *   --corrupt N flip a payload word of frame N (CRC gate must silence it)
+ *   --pcerr N   set the Pc error flag on burst N (must be left silent)
  */
 
 #include <stdio.h>
@@ -64,7 +66,8 @@ static float *direct_decode(const uint8_t *buf, size_t len, int *nframes) {
 
 // Build the IEC 61937 carrier: one burst per frame, payload then zero
 // stuffing to the 1536-frame period.  Returns words (2 per carrier frame).
-static uint16_t *build_carrier(const uint8_t *buf, size_t len, int nframes, int swap, size_t *nwords) {
+static uint16_t *build_carrier(const uint8_t *buf, size_t len, int nframes, int swap,
+                               int corrupt, int pcerr, size_t *nwords) {
     // PCM-ish lead-in, the bursts, then two silent periods so the last
     // frame's playback window lies inside the carrier.
     size_t total = (size_t)(nframes + 2) * AC3_FRAME_SAMPLES * 2 + LEAD_WORDS;
@@ -78,9 +81,11 @@ static uint16_t *build_carrier(const uint8_t *buf, size_t len, int nframes, int 
         if (!fl) { pos++; continue; }
         size_t start = n;
         w[n++] = IEC61937_PA; w[n++] = IEC61937_PB;
-        w[n++] = IEC61937_TYPE_AC3; w[n++] = (uint16_t)(fl * 8);
+        w[n++] = (uint16_t)(IEC61937_TYPE_AC3 | (f == pcerr ? 0x80 : 0));
+        w[n++] = (uint16_t)(fl * 8);
         for (int i = 0; i < fl; i += 2) {
             uint16_t v = (uint16_t)((buf[pos + i] << 8) | buf[pos + i + 1]);
+            if (f == corrupt && i == 100) v ^= 0x5A5A;   // past the header, inside CRC1
             if (swap) v = (uint16_t)((v >> 8) | (v << 8));
             w[n++] = v;
         }
@@ -93,16 +98,19 @@ static uint16_t *build_carrier(const uint8_t *buf, size_t len, int nframes, int 
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "stream_test in.ac3 [--swap] [--stall N] [--chunk N]\n"); return 2; }
-    int swap = 0, stall = 0, chunk = 48;
+    if (argc < 2) { fprintf(stderr, "stream_test in.ac3 [--swap] [--stall N] [--chunk N] [--corrupt N] [--pcerr N]\n"); return 2; }
+    int swap = 0, stall = 0, chunk = 48, corrupt = -1, pcerr = -1;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--swap")) swap = 1;
         else if (!strcmp(argv[i], "--stall") && i + 1 < argc) stall = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--chunk") && i + 1 < argc) chunk = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--corrupt") && i + 1 < argc) corrupt = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--pcerr") && i + 1 < argc) pcerr = atoi(argv[++i]);
     }
+    int bad = corrupt >= 0 ? corrupt : pcerr;   // the one frame expected silent
     size_t len; uint8_t *buf = read_file(argv[1], &len);
     int nframes; float *ref = direct_decode(buf, len, &nframes);
-    size_t nwords; uint16_t *carrier = build_carrier(buf, len, nframes, swap, &nwords);
+    size_t nwords; uint16_t *carrier = build_carrier(buf, len, nframes, swap, corrupt, pcerr, &nwords);
     size_t carrier_frames = nwords / 2;
 
     static uint8_t frames[AC3_STREAM_SLOTS][AC3_STREAM_FRAME_BYTES];
@@ -143,9 +151,18 @@ int main(int argc, char **argv) {
     // samples legitimately differ.
     int long_stall = (size_t)stall * chunk > AC3_STREAM_LEAD;   // beyond what the lead absorbs
     size_t limit = long_stall ? (size_t)200 * chunk : carrier_frames;
+    // A rejected frame's playback window must be silent, and the decoder's
+    // dither desynchronises after it, so only the samples before it compare.
+    size_t bad_nonzero = 0;
     for (size_t t = lead + AC3_STREAM_DELAY; t < carrier_frames && t < limit; t++) {
         size_t r = t - lead - AC3_STREAM_DELAY;
         if (r >= (size_t)nframes * AC3_FRAME_SAMPLES) break;
+        if (bad >= 0 && r >= (size_t)bad * AC3_FRAME_SAMPLES) {
+            if (r < (size_t)(bad + 1) * AC3_FRAME_SAMPLES)
+                for (int ch = 0; ch < AC3_CH_COUNT; ch++)
+                    if (out[t * AC3_CH_COUNT + ch] != 0.0f) bad_nonzero++;
+            continue;
+        }
         for (int ch = 0; ch < AC3_CH_COUNT; ch++) {
             float a = out[t * AC3_CH_COUNT + ch], b = ref[r * AC3_CH_COUNT + ch];
             compared++;
@@ -161,7 +178,12 @@ int main(int argc, char **argv) {
            nframes, carrier_frames, poll, blocks, st.frames_decoded, st.frames_dropped,
            st.blocks_late, st.decode_errors);
     printf("compared=%zu mismatches=%zu maxdiff=%g pre_delay_nonzero=%zu\n", compared, mism, maxd, pre_nonzero);
-    if (!long_stall) {
+    if (bad >= 0) {
+        CHECK(mism == 0, "output before the rejected frame differs");
+        CHECK(bad_nonzero == 0, "rejected frame %d is not silent (%zu samples)", bad, bad_nonzero);
+        CHECK(st.decode_errors == 1, "expected one rejection, got %u", st.decode_errors);
+        CHECK(st.frames_decoded == (uint32_t)nframes - 1, "decoded %u of %d frames", st.frames_decoded, nframes);
+    } else if (!long_stall) {
         CHECK(mism == 0, "output differs from the delayed direct decode");
         CHECK(st.blocks_late == 0 && st.frames_dropped == 0 && st.decode_errors == 0, "scheduler counters");
         CHECK(st.frames_decoded == (uint32_t)nframes, "decoded %u of %d frames", st.frames_decoded, nframes);

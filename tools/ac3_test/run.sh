@@ -93,6 +93,9 @@ echo "== stream 1-frame and 192-frame polls"
 "$WORK/stream_test" "$WORK/v51_448k.ac3" --chunk 1 | tail -1 || status=1
 "$WORK/stream_test" "$WORK/v51_640k.ac3" --chunk 192 | tail -1 || status=1
 echo "== stream 40-poll stall"; "$WORK/stream_test" "$WORK/v51_640k.ac3" --stall 40 | tail -1 || status=1
+echo "== stream corrupted frame and Pc error flag (rejected, silent)"
+"$WORK/stream_test" "$WORK/v51_448k.ac3" --corrupt 5 | tail -1 || status=1
+"$WORK/stream_test" "$WORK/v51_448k.ac3" --pcerr 5 | tail -1 || status=1
 
 echo "== host timing (for curiosity only; the device bench is authoritative)"
 "$WORK/ac3_test" bench "$WORK/v51_640k.ac3" 20

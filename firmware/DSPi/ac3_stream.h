@@ -49,12 +49,13 @@ typedef struct {
     uint32_t frames_decoded;
     uint32_t frames_dropped;   // no free slot, or stale before decode
     uint32_t blocks_late;      // decoded after the drain had passed them
-    uint32_t decode_errors;    // frame or block the decoder rejected
+    uint32_t decode_errors;    // burst flagged bad, CRC failure, or decoder rejection
 } Ac3Stream;
 
 void ac3_stream_init(Ac3Stream *s, uint8_t (*frames)[AC3_STREAM_FRAME_BYTES],
                      float (*ring)[AC3_CH_COUNT], Ac3Decoder *dec);
-// Drop queued frames, zero the ring, restart positions and the decoder.
+// Drop queued frames, zero the ring and restart the decoder; the carrier
+// position carries on so a burst in flight still anchors correctly.
 void ac3_stream_reset(Ac3Stream *s);
 
 // Cold halves of the feed: a detector phase change (preamble, Pc, Pd) and

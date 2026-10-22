@@ -1233,6 +1233,11 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
+// The V22->V23 migration's CRC window ends at the AC-3 block, computed from
+// the live struct; pin it so a later insertion ahead of ac3 cannot move it.
+_Static_assert(offsetof(PresetDirectory, ac3) == 3147,
+               "V22 directory geometry is frozen; snapshot any struct that grew");
+
 #define DIR_VERSION_CURRENT  23
 
 // The directory occupies exactly one flash sector; growth past it would

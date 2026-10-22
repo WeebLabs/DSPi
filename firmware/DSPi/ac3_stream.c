@@ -31,11 +31,11 @@ void ac3_stream_reset(Ac3Stream *s) {
     s->cap_left = 0;
     s->cap_pos = 0;
     s->cap_slot = 0;
-    s->pending_anchor = 0;
     s->dec_slot = -1;
     s->next_block = 0;
     s->active = false;
-    s->pos = 0;
+    // pos and pending_anchor survive: a preamble straddling the reset must
+    // still anchor its frame in the coordinates the poll keeps feeding.
     ac3_decoder_init(s->dec);
 }
 
@@ -50,6 +50,8 @@ void ac3_stream_capture_event(Ac3Stream *s, const Iec61937Detector *d,
     if (!(phase_before == 2 && d->phase == 0)) return;
     // Pd just captured.  Only AC-3 bursts with a sane length are queued.
     if (d->data_type != IEC61937_TYPE_AC3) return;
+    // Pc bit 7 means the source knows the payload is bad: leave it silent.
+    if (d->pc_error) { s->decode_errors++; return; }
     uint32_t bytes = d->pd / 8u;
     if (bytes < AC3_HEADER_BYTES || bytes > AC3_MAX_FRAME_BYTES) return;
     int free_slot = -1;
@@ -115,7 +117,12 @@ int ac3_stream_decode_due(Ac3Stream *s, int max_blocks) {
         if ((int32_t)(s0 - (pos + AC3_STREAM_LEAD)) > 0) return 0;   // not due yet
         uint8_t *buf = s->frames[best];
         fix_byte_order(buf, sl->bytes);
-        if (ac3_decoder_frame_begin(s->dec, buf) || s->dec->frame_bytes > sl->bytes) {
+        // The sync check alone passes a frame mangled by a FIFO overrun, and
+        // liba52 would then unpack it as full-scale noise: insist on the CRCs.
+        int flags, sr, br;
+        int len = ac3_decoder_frame_info(buf, &flags, &sr, &br);
+        if (len == 0 || len > (int)sl->bytes || a52_crc(buf, len) ||
+            ac3_decoder_frame_begin(s->dec, buf)) {
             sl->ready = 0;
             s->decode_errors++;
             return 0;

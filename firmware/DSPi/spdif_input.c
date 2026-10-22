@@ -346,11 +346,12 @@ void spdif_input_stop(void) {
         input_servo_reset();   // park the VCXO; no longer tracking
         spdif_state = SPDIF_INPUT_INACTIVE;
         spdif_rx_detected_rate = 0;
-        input_arena_release(INPUT_ARENA_SPDIF);
         // The main loop stops servicing this input once it is switched away,
-        // so clear any reported mute here.
+        // so clear any reported mute here.  The stream reset this runs
+        // zeroes the ring inside the arena, so it precedes the release.
         bs_reset();
         spdif_input_bitstream_service();
+        input_arena_release(INPUT_ARENA_SPDIF);
         printf("SPDIF RX: stopped\n");
     }
 }
