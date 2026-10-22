@@ -5,6 +5,18 @@
 
 #include "ac3_decoder.h"
 #include <string.h>
+#include <math.h>
+
+// Dialnorm field -> gain that brings dialogue to -31 dBFS: 10^((n - 31) / 20),
+// with 0 meaning -31 dB (unity), as the AC-3 standard defines.
+static const float dialnorm_gain[32] = { 1.000000000e+00f, 3.162277660e-02f, 3.548133892e-02f, 3.981071706e-02f, 4.466835922e-02f, 5.011872336e-02f, 5.623413252e-02f, 6.309573445e-02f, 7.079457844e-02f, 7.943282347e-02f, 8.912509381e-02f, 1.000000000e-01f, 1.122018454e-01f, 1.258925412e-01f, 1.412537545e-01f, 1.584893192e-01f, 1.778279410e-01f, 1.995262315e-01f, 2.238721139e-01f, 2.511886432e-01f, 2.818382931e-01f, 3.162277660e-01f, 3.548133892e-01f, 3.981071706e-01f, 4.466835922e-01f, 5.011872336e-01f, 5.623413252e-01f, 6.309573445e-01f, 7.079457844e-01f, 7.943282347e-01f, 8.912509381e-01f, 1.000000000e+00f };
+
+// Half-strength dynamic range: half the gain change in dB is the square root
+// of the linear gain.  Called by a52_block() per dynrng word.
+static level_t drc_half(level_t range, void *data) {
+    (void)data;
+    return sqrtf(range);
+}
 
 // The decoder is asked for its widest layout; a52_frame() narrows it to
 // what the stream carries (a 2/0 stream comes back as A52_STEREO).
@@ -13,7 +25,8 @@
 void ac3_decoder_init(Ac3Decoder *d) {
     memset(d, 0, sizeof(*d));
     a52_init_static(&d->state, d->samples);
-    d->drc = true;
+    d->drc_mode = 1;
+    d->dialnorm_apply = false;
 }
 
 int ac3_decoder_frame_info(const uint8_t *hdr, int *flags,
@@ -29,9 +42,17 @@ int ac3_decoder_frame_begin(Ac3Decoder *d, const uint8_t *frame) {
     flags = AC3_REQUEST_FLAGS;
     level_t level = 1.0f;
     if (a52_frame(&d->state, frame, &flags, &level, 0.0f)) return -1;
-    // a52_frame() re-arms dynamic range every frame, so the opt-out must
-    // follow it every frame too.
-    if (!d->drc) a52_dynrng(&d->state, NULL, NULL);
+    // a52_frame() re-arms dynamic range every frame, so the mode must be
+    // re-applied every frame too.
+    if (d->drc_mode == 0)      a52_dynrng(&d->state, NULL, NULL);
+    else if (d->drc_mode == 2) a52_dynrng(&d->state, drc_half, NULL);
+    // Dialnorm scales the output level; dynrng starts from level each block
+    // that carries a dynrng word and otherwise keeps this value, so both get it.
+    if (d->dialnorm_apply) {
+        float g = dialnorm_gain[d->state.dialnorm & 31];
+        d->state.level *= g;
+        d->state.dynrng *= g;
+    }
     d->flags = flags;
     d->sample_rate = sample_rate;
     d->bit_rate = bit_rate;

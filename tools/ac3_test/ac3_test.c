@@ -39,12 +39,18 @@ static uint8_t *read_file(const char *path, size_t *len) {
 }
 
 // Decode every sync frame; returns frames decoded.  out may be NULL.
+int g_drc_mode = 1;
+int g_dialnorm = 0;
+
+static Ac3Decoder g_dec;   // the decoder every command uses; cmd_decode reports from it
+
 static int decode_stream(Ac3Decoder *d, const uint8_t *buf, size_t len, FILE *out,
                          uint32_t *checksum, int max_frames, int *errors) {
-    static Ac3Decoder dec_static;
     (void)d;
-    Ac3Decoder *dec = &dec_static;
+    Ac3Decoder *dec = &g_dec;
     ac3_decoder_init(dec);
+    dec->drc_mode = (uint8_t)g_drc_mode;
+    dec->dialnorm_apply = g_dialnorm != 0;
     size_t pos = 0;
     int frames = 0;
     uint32_t h = 2166136261u;
@@ -74,11 +80,12 @@ static int decode_stream(Ac3Decoder *d, const uint8_t *buf, size_t len, FILE *ou
 }
 
 static int cmd_decode(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "decode <in.ac3> [out.f32] [--no-drc] [--frames N]\n"); return 2; }
+    if (argc < 2) { fprintf(stderr, "decode <in.ac3> [out.f32] [--drc 0|1|2] [--dialnorm] [--frames N]\n"); return 2; }
     const char *outpath = NULL;
-    int no_drc = 0, max_frames = 0;
+    int max_frames = 0;
     for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--no-drc")) no_drc = 1;
+        if (!strcmp(argv[i], "--drc") && i + 1 < argc) g_drc_mode = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dialnorm")) g_dialnorm = 1;
         else if (!strcmp(argv[i], "--frames") && i + 1 < argc) max_frames = atoi(argv[++i]);
         else outpath = argv[i];
     }
@@ -87,23 +94,17 @@ static int cmd_decode(int argc, char **argv) {
     if (!buf) return 1;
     FILE *out = outpath ? fopen(outpath, "wb") : NULL;
     if (outpath && !out) { perror(outpath); return 1; }
-    static Ac3Decoder d;
-    ac3_decoder_init(&d);
-    d.drc = !no_drc;
     uint32_t sum; int errors;
-    // decode_stream re-inits; carry the drc choice through a global flag.
-    extern int g_no_drc; g_no_drc = no_drc;
-    int frames = decode_stream(&d, buf, len, out, &sum, max_frames, &errors);
+    int frames = decode_stream(&g_dec, buf, len, out, &sum, max_frames, &errors);
     if (out) fclose(out);
     int flags, sr, br;
     ac3_decoder_frame_info(buf, &flags, &sr, &br);
-    printf("frames=%d errors=%d sample_rate=%d bit_rate=%d mode=%d lfe=%d checksum=0x%08x\n",
-           frames, errors, sr, br, flags & A52_CHANNEL_MASK, (flags & A52_LFE) ? 1 : 0, sum);
+    printf("frames=%d errors=%d sample_rate=%d bit_rate=%d mode=%d lfe=%d dialnorm=%d checksum=0x%08x\n",
+           frames, errors, sr, br, flags & A52_CHANNEL_MASK, (flags & A52_LFE) ? 1 : 0,
+           g_dec.state.dialnorm, sum);
     free(buf);
     return errors ? 1 : 0;
 }
-
-int g_no_drc = 0;
 
 // Reference recomputation of the generated tables (liba52's a52_imdct_init).
 static double bessel_i0(double x) {

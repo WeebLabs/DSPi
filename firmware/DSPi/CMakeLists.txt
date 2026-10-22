@@ -97,6 +97,8 @@ add_executable(DSPi
     spdif_input.c
     spdif_input.h
     iec61937.h
+    ac3_config.c
+    ac3_config.h
     uart_control.c
     uart_control.h
     upmix.c

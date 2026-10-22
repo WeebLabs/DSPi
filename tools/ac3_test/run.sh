@@ -65,6 +65,20 @@ got=$("$WORK/ac3_test" decode "$BV" | sed -E 's/.*checksum=(0x[0-9a-f]+).*/\1/')
 want=$(cut -d' ' -f1 "$BV.sum")
 if [ "$got" = "$want" ]; then echo "bench vector: $got matches sidecar"; else echo "bench vector: $got != sidecar $want"; status=1; fi
 
+# Dialnorm: a stream coded at dialnorm -27 decoded with dialnorm applied must
+# equal the plain decode scaled by -4 dB (the AC-3 reference is -31).  DRC
+# modes cannot be checked this way: ffmpeg's encoder writes no dynrng words,
+# so off, full and half all decode identically here.
+ffmpeg -v error -y -f lavfi -i "$TONES51" -t 0.5 -c:a ac3 -b:a 448k -dialnorm -27 "$WORK/dn27.ac3"
+"$WORK/ac3_test" decode "$WORK/dn27.ac3" "$WORK/dn27_plain.f32" | tail -1
+"$WORK/ac3_test" decode "$WORK/dn27.ac3" "$WORK/dn27_applied.f32" --dialnorm | tail -1
+echo "== dialnorm -27 applied = plain -4 dB"
+python3 "$HERE/scale_check.py" "$WORK/dn27_plain.f32" "$WORK/dn27_applied.f32" -4 || status=1
+echo "== DRC modes identical on a stream without dynrng words"
+"$WORK/ac3_test" decode "$WORK/dn27.ac3" "$WORK/dn27_drc0.f32" --drc 0 >/dev/null
+"$WORK/ac3_test" decode "$WORK/dn27.ac3" "$WORK/dn27_drc2.f32" --drc 2 >/dev/null
+cmp -s "$WORK/dn27_plain.f32" "$WORK/dn27_drc0.f32" && cmp -s "$WORK/dn27_plain.f32" "$WORK/dn27_drc2.f32" && echo PASS || { echo FAIL; status=1; }
+
 # Stream layer (ac3_stream.c): deframer, ring and just-in-time scheduler
 # against the direct decode delayed by one burst period.
 cc -O2 -ffp-contract=off -Wall -Wno-unused-function -I"$AC3/.." -I"$AC3" \

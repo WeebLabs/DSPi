@@ -31,7 +31,7 @@
 #define WIRE_MAX_PIN_OUTPUTS      5   // RP2350 max (4 SPDIF + 1 PDM)
 #define WIRE_NAME_LEN            32   // Must match PRESET_NAME_LEN
 
-#define WIRE_FORMAT_VERSION      32   // V32: append output limiter section (108 bytes; per-output enable, link group, threshold, release; both platforms). V31: append tube preamp section (48 bytes; biased asymmetric waveshaper with sag and a damping-factor output stage, both platforms). V30: subharmonic synthesizer section grows 16 to 36 bytes (third band top_db, selectivity mode/depth/hold, sub ceiling, pair link); solo is runtime-only and stays off the wire. V29: append subharmonic synthesizer section (16 bytes; dbx-style octave divider, both platforms). V28: fourth selectable SPDIF input; input-config spdif_rx_pin_ext grows 2 to 3 entries, shifting the fields below it down one byte and consuming that section's last reserved byte (section size unchanged). V27: upmixer centre mode gains OFF (2), a surrounds-only setting that leaves L/R bit-exact; enum widening only, no struct or offset changes. V26: upmixer presence bell claims the upmix section reserved byte (int8, dB*2; struct sizes unchanged). V25: append upmixer section (44 bytes; RP2350 stereo upmixer, zeroed/ignored on RP2040). V24: ADAT input config (pin/enable/clock mode) claimed from the input-config reserved bytes (struct size unchanged). V23: append psybass section (24 bytes; psychoacoustic bass enhancement). V22: Linkwitz Transform target Q carried in the EQ WireBandParams reserved[2] bytes (uint16 LE, Q*512; zero for non-LT types; struct size unchanged). V21: I2S clock master/slave mode in the input-config section (claims one reserved byte; size unchanged). V20: crossfeed output_pair_mask replaces WireCrossfeedParams reserved byte; struct sizes unchanged. V19: loudness_output_mask replaces global reserved[2]; struct sizes unchanged. V18: leveller detector/apply channel masks (WireLevellerConfig grows 16 to 20 bytes). V17: append ADAT output config section (RP2350; zeroed/ignored on RP2040). V16: unified channel model (inputs are first-class channels with PEQ + metering; no "master"); matrix/preamp direct (8 inputs); compat-breaking, no migration.
+#define WIRE_FORMAT_VERSION      33   // V33: append AC-3 decode config section (8 bytes; enable, DRC mode and dialnorm mode stored PLUS ONE so an old host's zeros read as absent; both platforms). V32: append output limiter section (108 bytes; per-output enable, link group, threshold, release; both platforms). V31: append tube preamp section (48 bytes; biased asymmetric waveshaper with sag and a damping-factor output stage, both platforms). V30: subharmonic synthesizer section grows 16 to 36 bytes (third band top_db, selectivity mode/depth/hold, sub ceiling, pair link); solo is runtime-only and stays off the wire. V29: append subharmonic synthesizer section (16 bytes; dbx-style octave divider, both platforms). V28: fourth selectable SPDIF input; input-config spdif_rx_pin_ext grows 2 to 3 entries, shifting the fields below it down one byte and consuming that section's last reserved byte (section size unchanged). V27: upmixer centre mode gains OFF (2), a surrounds-only setting that leaves L/R bit-exact; enum widening only, no struct or offset changes. V26: upmixer presence bell claims the upmix section reserved byte (int8, dB*2; struct sizes unchanged). V25: append upmixer section (44 bytes; RP2350 stereo upmixer, zeroed/ignored on RP2040). V24: ADAT input config (pin/enable/clock mode) claimed from the input-config reserved bytes (struct size unchanged). V23: append psybass section (24 bytes; psychoacoustic bass enhancement). V22: Linkwitz Transform target Q carried in the EQ WireBandParams reserved[2] bytes (uint16 LE, Q*512; zero for non-LT types; struct size unchanged). V21: I2S clock master/slave mode in the input-config section (claims one reserved byte; size unchanged). V20: crossfeed output_pair_mask replaces WireCrossfeedParams reserved byte; struct sizes unchanged. V19: loudness_output_mask replaces global reserved[2]; struct sizes unchanged. V18: leveller detector/apply channel masks (WireLevellerConfig grows 16 to 20 bytes). V17: append ADAT output config section (RP2350; zeroed/ignored on RP2040). V16: unified channel model (inputs are first-class channels with PEQ + metering; no "master"); matrix/preamp direct (8 inputs); compat-breaking, no migration.
 #define WIRE_MAX_SPDIF_INSTANCES  4   // RP2350 max
 
 // Platform IDs
@@ -445,6 +445,15 @@ typedef struct __attribute__((packed)) {
     WireLimiterOutput outputs[WIRE_MAX_OUTPUT_CHANNELS];
 } WireLimiterParams;                 // 108 bytes
 
+// AC-3 decode config (V33+; see ac3_config.h).  Each field is stored PLUS
+// ONE (0 = absent, keep live) so a pre-V33 host pushing zeros changes nothing.
+typedef struct __attribute__((packed)) {
+    uint8_t enabled_p1;        // 1 off, 2 on
+    uint8_t drc_mode_p1;       // 1 off, 2 full, 3 half
+    uint8_t dialnorm_mode_p1;  // 1 ignore, 2 apply
+    uint8_t reserved[5];
+} WireAc3Params;                     // 8 bytes
+
 // ============================================================================
 // Complete Packet
 // ============================================================================
@@ -474,7 +483,8 @@ typedef struct __attribute__((packed)) {
     WireSubharmParams   subharm;         //   36  (V29+; 36 bytes at V30)
     WireTubeParams      tube;            //   48  (V31+)
     WireLimiterParams   limiter;         //  108  (V32+)
-} WireBulkParams;                        // Total: 6136 bytes (V32 appends the 108-byte limiter section)
+    WireAc3Params       ac3;             //    8  (V33+)
+} WireBulkParams;                        // Total: 6144 bytes (V33 appends the 8-byte AC-3 section)
 
 #define WIRE_BULK_PARAMS_SIZE  sizeof(WireBulkParams)
 

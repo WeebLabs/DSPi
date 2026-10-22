@@ -45,6 +45,7 @@
 #include "upmix.h"           // upmix_config + UPMIX_DEFAULT_* (RP2350 only)
 #include "tube.h"            // tube_config + TUBE_DEFAULT_*
 #include "limiter.h"         // limiter_config + limiter_config_defaults
+#include "ac3_config.h"      // ac3_config + defaults (slot V40, directory V23)
 #include "notify.h"
 #include "uart_control.h"    // uart_ctrl_owns_pin (io_pin_valid guard)
 #include "i2c_control.h"     // i2c_ctrl_owns_pin (io_pin_valid guard)
@@ -200,7 +201,10 @@
 //        release; 10 bytes x NUM_OUTPUT_CHANNELS).  Tail-append like V22..V38:
 //        older slots load with every limiter off at the defaults (apply is
 //        gated on version >= 39).
-#define SLOT_DATA_VERSION       39
+//   V40: AC-3 decode config appended (enabled, DRC mode, dialnorm mode; 3
+//        bytes).  Tail-append like V22..V39: older slots load with the
+//        defaults (apply is gated on version >= 40).
+#define SLOT_DATA_VERSION       40
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -645,6 +649,17 @@ typedef struct __attribute__((packed)) {
     FlashLimiterOutput out[FLASH_LIMITER_OUTPUTS];
 } FlashLimiterConfig;                        // 112 bytes
 #define FLASH_LIMITER_CONFIG_VERSION 1
+
+// V23 appends the device-global AC-3 decode config, the INDEPENDENT-mode store
+// for ac3_config (same scheme as the limiter block: version 0 = never saved,
+// dir_sanitize_ac3() seeds the defaults).
+typedef struct __attribute__((packed)) {
+    uint8_t  version;                        // 0 = never saved, 1 = current
+    uint8_t  enabled;
+    uint8_t  drc_mode;
+    uint8_t  dialnorm_mode;
+} FlashAc3Config;                            // 4 bytes
+#define FLASH_AC3_CONFIG_VERSION 1
 _Static_assert(NUM_OUTPUT_CHANNELS <= FLASH_LIMITER_OUTPUTS, "limiter directory records");
 
 typedef struct __attribute__((packed)) {
@@ -712,6 +727,10 @@ typedef struct __attribute__((packed)) {
     // V22 addition: output limiter settings for INDEPENDENT mode (see
     // apply_output_config_from_mode()).  version 0 = never saved.
     FlashLimiterConfig limiter;              // 112 bytes
+
+    // V23 addition: AC-3 decode config for INDEPENDENT mode.  version 0 =
+    // never saved.  Tail-append: a V22 directory migrates by prefix copy.
+    FlashAc3Config ac3;                      // 4 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1214,7 +1233,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  22
+#define DIR_VERSION_CURRENT  23
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1488,6 +1507,12 @@ typedef struct __attribute__((packed)) {
     uint8_t  limiter_link_group[NUM_OUTPUT_CHANNELS];
     float    limiter_threshold_db[NUM_OUTPUT_CHANNELS];
     float    limiter_release_ms[NUM_OUTPUT_CHANNELS];
+
+    // V40: AC-3 decode config (see ac3_config.h).  Gated on version >= 40 in
+    // apply_output_config_from_mode(); out-of-range values take the defaults.
+    uint8_t  ac3_enabled;
+    uint8_t  ac3_drc_mode;
+    uint8_t  ac3_dialnorm_mode;
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -1559,6 +1584,7 @@ static void dir_sanitize_cs_groups(void);                             // defined
 static void dir_sanitize_cs_macros(void);                             // defined below
 static void dir_sanitize_cs_display(void);                            // defined below
 static void dir_sanitize_limiter(void);                               // defined below
+static void dir_sanitize_ac3(void);                                   // defined below
 static void cs_config_from_v1(CsFlashConfig *dst, const CsFlashConfig_v1 *src);  // defined below
 static void cs_ir_from_v1(CsIrConfig *dst, const CsIrConfig_v1 *src);            // defined below
 // Forward declaration — defined alongside validate_slot() in the SLOT
@@ -1828,7 +1854,33 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
+        return true;
+    }
+
+    if (flash_dir->version == 22) {
+        // V22 -> V23 migration.  V23 only appends the AC-3 block, so the V22
+        // data block (everything up to it) copies across; the zeroed tail
+        // reads as "never saved" and dir_sanitize_ac3() seeds the defaults.
+        const uint8_t *v22_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v22_data_len = offsetof(PresetDirectory, ac3) - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v22_data_start, v22_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        memcpy(&dir_cache.startup_mode, v22_data_start, v22_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_ac3();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
         return true;
     }
 
@@ -1855,6 +1907,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1881,6 +1934,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1908,6 +1962,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1936,6 +1991,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1967,6 +2023,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2009,6 +2066,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2053,6 +2111,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2096,6 +2155,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2140,6 +2200,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2183,6 +2244,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2226,6 +2288,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2267,6 +2330,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2303,6 +2367,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v8->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v8->cs_config);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2346,6 +2411,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v7->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v7->cs_config);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2380,6 +2446,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v6->i2c_ctrl;
         dir_cache.cs_config.version  = CS_CONFIG_VERSION;
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2412,6 +2479,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2446,6 +2514,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();   // persist as V5
         return true;
@@ -2483,6 +2552,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.spdif_rx_pin = v3->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2518,6 +2588,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.spdif_rx_pin = v2->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2551,6 +2622,7 @@ static bool dir_load_cache(void) {
         io_config_defaults(&dir_cache.output_config);      // V4 device-global IO (v1 has no RX pin)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_ac3();
         dir_cache_valid = true;
         (void)dir_flush();  // persist as V4; if the flush fails, cache stays valid in RAM
         return true;
@@ -2800,6 +2872,24 @@ static void dir_sanitize_cs_display(void) {
 
 // Seed the limiter block when it was never saved (fresh or migrated
 // directory), and clamp a stored one so corrupt flash cannot reach the audio path.
+// Seed the AC-3 block when it was never saved, else clamp it.
+static void dir_sanitize_ac3(void) {
+    FlashAc3Config *c = &dir_cache.ac3;
+    Ac3Config cfg;
+    if (c->version != FLASH_AC3_CONFIG_VERSION) {
+        ac3_config_defaults(&cfg);
+    } else {
+        cfg.enabled = c->enabled;
+        cfg.drc_mode = c->drc_mode;
+        cfg.dialnorm_mode = c->dialnorm_mode;
+        ac3_config_sanitize(&cfg);
+    }
+    c->version = FLASH_AC3_CONFIG_VERSION;
+    c->enabled = cfg.enabled;
+    c->drc_mode = cfg.drc_mode;
+    c->dialnorm_mode = cfg.dialnorm_mode;
+}
+
 static void dir_sanitize_limiter(void) {
     FlashLimiterConfig *c = &dir_cache.limiter;
     if (c->version != FLASH_LIMITER_CONFIG_VERSION) {
@@ -2868,6 +2958,7 @@ static void dir_ensure(void) {
     io_config_defaults(&dir_cache.output_config);  // V4 device-global IO defaults
     ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 control interfaces
     dir_sanitize_limiter();                        // V22 limiter defaults
+    dir_sanitize_ac3();
     dir_cache_valid = true;
     // Don't flush yet — will be flushed on first preset save
 }
@@ -3429,6 +3520,25 @@ static void limiter_from_dir(void) {
     }
 }
 
+static void ac3_from_slot(const PresetSlot *slot) {
+    Ac3Config c = { slot->ac3_enabled, slot->ac3_drc_mode, slot->ac3_dialnorm_mode };
+    ac3_config_sanitize(&c);
+    ac3_config = c;
+}
+
+static void ac3_from_dir(void) {
+    Ac3Config c = { dir_cache.ac3.enabled, dir_cache.ac3.drc_mode, dir_cache.ac3.dialnorm_mode };
+    ac3_config_sanitize(&c);
+    ac3_config = c;
+}
+
+static void ac3_to_dir(void) {
+    dir_cache.ac3.version = FLASH_AC3_CONFIG_VERSION;
+    dir_cache.ac3.enabled = ac3_config.enabled;
+    dir_cache.ac3.drc_mode = ac3_config.drc_mode;
+    dir_cache.ac3.dialnorm_mode = ac3_config.dialnorm_mode;
+}
+
 static void limiter_to_dir(void) {
     memset(&dir_cache.limiter, 0, sizeof(dir_cache.limiter));
     dir_cache.limiter.version = FLASH_LIMITER_CONFIG_VERSION;
@@ -3469,10 +3579,14 @@ static void apply_output_config_from_mode(const PresetSlot *slot_or_null, bool i
         if (slot_or_null && slot_or_null->version >= 39) limiter_from_slot(slot_or_null);
         else                                             limiter_config_defaults();
         limiter_update_pending = true;
+        // Slots before V40 carry no AC-3 config: the defaults.
+        if (slot_or_null && slot_or_null->version >= 40) ac3_from_slot(slot_or_null);
+        else                                             ac3_config_defaults(&ac3_config);
     } else if (is_boot) {
         io_config_apply(&dir_cache.output_config);
         limiter_from_dir();
         limiter_update_pending = true;
+        ac3_from_dir();
     }
     // INDEPENDENT + runtime: intentionally a no-op (live IO and limiter survive).
 }
@@ -3631,6 +3745,11 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
         slot->limiter_threshold_db[k] = limiter_config[k].threshold_db;
         slot->limiter_release_ms[k]   = limiter_config[k].release_ms;
     }
+
+    // AC-3 decode config (V40; both platforms round-trip it).
+    slot->ac3_enabled       = ac3_config.enabled;
+    slot->ac3_drc_mode      = ac3_config.drc_mode;
+    slot->ac3_dialnorm_mode = ac3_config.dialnorm_mode;
 
     // ADAT input (V32): raw pin (0xFF unset) + enable + clock mode (both
     // platforms; RP2040 stores its default state for round-trips).
@@ -4223,6 +4342,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V38 \
     (offsetof(PresetSlot, limiter_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V39 \
+    (offsetof(PresetSlot, ac3_enabled) - offsetof(PresetSlot, filter_recipes))
+#define SLOT_DATA_SIZE_V40 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
@@ -4238,7 +4359,9 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // older/unknown versions are invalidated and the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 39
+        case SLOT_DATA_VERSION:   // 40
+            return SLOT_DATA_SIZE_V40;
+        case 39:
             return SLOT_DATA_SIZE_V39;
         case 38:
             return SLOT_DATA_SIZE_V38;
@@ -4681,6 +4804,7 @@ uint8_t preset_save_output_config(void) {
     io_config_from_live(&dir_cache.output_config);
     dir_cache.spdif_rx_pin = dir_cache.output_config.spdif_rx_pin;
     limiter_to_dir();
+    ac3_to_dir();
     if (dir_flush() != 0) return PRESET_ERR_FLASH_WRITE;
     return PRESET_OK;
 }

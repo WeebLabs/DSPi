@@ -23,6 +23,7 @@
 #include "upmix.h"     // upmix_config / upmix_update_pending (RP2350; header body #if-guarded)
 #include "tube.h"      // tube_config / tube_update_pending
 #include "limiter.h"   // limiter_config / limiter_update_pending
+#include "ac3_config.h"
 #include "notify.h"
 #include "uart_control.h"
 #include "i2c_control.h"
@@ -61,8 +62,10 @@ _Static_assert(offsetof(WireBulkParams, tube) == 5980,
 _Static_assert(sizeof(WireLimiterParams) == 108, "V32 limiter section must be 108 bytes");
 _Static_assert(offsetof(WireBulkParams, limiter) == 6028,
                "V32 limiter section must sit at wire offset 6028");
-_Static_assert(sizeof(WireBulkParams) == 6136,
-               "V32 wire total must be 6136 bytes");
+_Static_assert(sizeof(WireAc3Params) == 8, "V33 AC-3 section must be 8 bytes");
+_Static_assert(offsetof(WireBulkParams, ac3) == 6136,
+               "V33 AC-3 section must sit at wire offset 6136");
+_Static_assert(sizeof(WireBulkParams) == 6144, "V33 wire total must be 6144 bytes");
 _Static_assert(NUM_OUTPUT_CHANNELS <= WIRE_MAX_OUTPUT_CHANNELS, "limiter wire records");
 #if PICO_RP2350
 _Static_assert(sizeof(WireUpmixParams) == sizeof(UpmixConfigPacket),
@@ -364,6 +367,11 @@ void bulk_params_collect(WireBulkParams *out) {
     out->tube.mix_pct      = tube_config.mix_pct;
     out->tube.trim_db      = tube_config.trim_db;
     out->tube.reserved_f   = 0.0f;
+
+    // AC-3 decode config (V33+), each field PLUS ONE.
+    out->ac3.enabled_p1       = (uint8_t)(ac3_config.enabled + 1);
+    out->ac3.drc_mode_p1      = (uint8_t)(ac3_config.drc_mode + 1);
+    out->ac3.dialnorm_mode_p1 = (uint8_t)(ac3_config.dialnorm_mode + 1);
 
     // Output limiter (V32+).  One record per output; the rest stay zeroed.
     for (int k = 0; k < NUM_OUTPUT_CHANNELS; k++) {
@@ -1009,6 +1017,17 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             limiter_config[k].release_ms   = w->release_ms;
         }
         limiter_update_pending = true;
+    }
+
+    // AC-3 decode config (V33+).  Follows output_config_mode like the limiter;
+    // 0 = absent keeps the live value, out-of-range values take the defaults.
+    if (apply_pins) {
+        Ac3Config c = ac3_config;
+        if (in->ac3.enabled_p1)       c.enabled       = (uint8_t)(in->ac3.enabled_p1 - 1);
+        if (in->ac3.drc_mode_p1)      c.drc_mode      = (uint8_t)(in->ac3.drc_mode_p1 - 1);
+        if (in->ac3.dialnorm_mode_p1) c.dialnorm_mode = (uint8_t)(in->ac3.dialnorm_mode_p1 - 1);
+        ac3_config_sanitize(&c);
+        ac3_config = c;
     }
 
     // Stereo upmixer (V25+).  RP2350 only; RP2040 ignores the section.  Config

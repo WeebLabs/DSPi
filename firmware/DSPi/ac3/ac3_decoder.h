@@ -35,7 +35,9 @@ typedef struct {
     int   sample_rate;
     int   bit_rate;
     int   frame_bytes;
-    bool  drc;            // apply the stream's dynamic-range words (default on)
+    uint8_t drc_mode;     // 0 off, 1 as sent (default), 2 half the gain change in dB
+    bool  dialnorm_apply; // scale by 10^((dialnorm - 31) / 20); default off here,
+                          // the firmware sets it from ac3_config every frame
 } Ac3Decoder;
 
 void ac3_decoder_init(Ac3Decoder *d);

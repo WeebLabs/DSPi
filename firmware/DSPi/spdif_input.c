@@ -35,6 +35,7 @@
 #include "notify.h"
 #if PICO_RP2350
 #include "ac3_stream.h"
+#include "ac3_config.h"
 #endif
 
 #include <stdio.h>
@@ -125,6 +126,7 @@ volatile bool spdif_decode_active = false;
 static Ac3Decoder ac3_dec;
 static Ac3Stream ac3_stream;
 static bool ac3_reset_pending = false;
+static bool ac3_was_decoding = false;
 static uint32_t ac3_busy_us = 0;         // decode time in the current 1 s window
 static uint32_t ac3_window_start_us = 0;
 static uint8_t ac3_cpu_pct = 0;
@@ -166,13 +168,19 @@ void spdif_input_bitstream_service(void) {
         ac3_cpu_pct = 0;
         ac3_window_start_us = time_us_32();
     }
-    // Decode while an AC-3 burst stream is live; once the hold lapses or the
-    // type changes the ring has already played out, so a reset is clean.
-    bool decoding = ac3_stream.active && bs_det.hold != 0 &&
+    // Decode while enabled and an AC-3 burst stream is live.  Reset when
+    // decoding stops (the ring has played out: the hold outlasts the last
+    // frame) or when a stream ends while decoding is disabled, so stale
+    // slots never meet a fresh stream's anchors.
+    ac3_dec.drc_mode = ac3_config.drc_mode;
+    ac3_dec.dialnorm_apply = (ac3_config.dialnorm_mode == AC3_DIALNORM_APPLY);
+    bool decoding = ac3_config.enabled && ac3_stream.active && bs_det.hold != 0 &&
                     bs_det.format == IEC61937_FORMAT_AC3;
-    if (!decoding && ac3_stream.active) {
+    if ((ac3_was_decoding && !decoding) ||
+        (!decoding && ac3_stream.active && bs_det.hold == 0)) {
         ac3_stream_reset(&ac3_stream);
     }
+    ac3_was_decoding = decoding;
     spdif_decode_active = decoding;
     if (decoding) {
         uint32_t t0 = time_us_32();

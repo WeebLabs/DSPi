@@ -1,6 +1,6 @@
 # DSPi AC-3 / DTS Bitstream Decoding Plan
 
-*Version 0.4, 2026-10-22. Phases 0, 1 and 2 implemented on branch `ac3-dts-decode`; Phase 2 is host-verified and smoke-tested on hardware without an AC-3 source. RP2350 only.*
+*Version 0.5, 2026-10-22. Phases 0 to 3 implemented on branch `ac3-dts-decode`; host-verified and smoke-tested on hardware without an AC-3 source. RP2350 only. Protocol in `ac3_decoding_spec.md`.*
 
 This document records the practicality assessment, the cost estimates and the phased plan for decoding AC-3 and DTS core bitstreams received on the S/PDIF input. It is a plan, not a protocol specification. Command byte layouts, notify packet formats and preset fields are decided in Phase 3 and will be written into a separate spec at that point.
 
@@ -132,6 +132,8 @@ At the 150 MHz fallback clock every figure doubles.
 - Verification by `DSPI_LOOPBACK` capture for the fixed delay and inter-channel alignment, plus the host harness for sample accuracy.
 
 ### Phase 3. Control surface
+
+**Status 2026-10-22.** Implemented except the Console: `REQ_AC3_CONFIG` (0x02) sets and reads enable, DRC mode (off, full, half) and dialnorm mode (ignore, apply); wire V33 appends an 8-byte plus-one section; preset slot V40 and directory V23 persist it per `output_config_mode` like the limiter; `NOTIFY_EVT_SPDIF_FORMAT` and the 16-byte 0xCF status cover reporting. The ESP32 front panel is unaffected (new command, no changed scalar GET). Host-checked: dialnorm -27 applied equals the plain decode at -4 dB. The protocol spec is `ac3_decoding_spec.md`. Console support is the remaining item and lives in its own repository.
 
 - Vendor commands for decoder enable, DRC mode and dialnorm handling.
 - Status GET with format, channel mode, sample rate, bitrate and error counters.

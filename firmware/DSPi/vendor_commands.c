@@ -16,6 +16,7 @@
 #include "audio_input.h"
 #include "spdif_input.h"
 #include "clock_diag.h"
+#include "ac3_config.h"
 #if DSPI_AC3_BENCH
 #include "ac3_bench.h"
 #endif
@@ -1081,6 +1082,22 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
                 memcpy(&val, vendor_rx_buf, 4);
                 (void)limiter_set_param((uint8_t)(vendor_last_wValue >> 8),
                                         (uint8_t)(vendor_last_wValue & 0xFF), val);
+            }
+            break;
+
+        case REQ_AC3_CONFIG:
+            // {enabled, drc_mode, dialnorm_mode, reserved}; bad values take
+            // the defaults.  Immediate; persisted on preset save like the
+            // limiter.  Notifies each wire field (stored PLUS ONE).
+            if (buffer->data_len >= 3) {
+                Ac3Config c = { vendor_rx_buf[0], vendor_rx_buf[1], vendor_rx_buf[2] };
+                ac3_config_sanitize(&c);
+                ac3_config = c;
+                uint8_t enc[3] = { (uint8_t)(c.enabled + 1), (uint8_t)(c.drc_mode + 1),
+                                   (uint8_t)(c.dialnorm_mode + 1) };
+                notify_param_write(offsetof(WireBulkParams, ac3.enabled_p1), 1, &enc[0]);
+                notify_param_write(offsetof(WireBulkParams, ac3.drc_mode_p1), 1, &enc[1]);
+                notify_param_write(offsetof(WireBulkParams, ac3.dialnorm_mode_p1), 1, &enc[2]);
             }
             break;
 
@@ -4105,6 +4122,15 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 SpdifBitstreamStatus bs;
                 spdif_input_get_bitstream_status(&bs);
                 vendor_send_response(&bs, sizeof(bs));
+                return true;
+            }
+
+            case REQ_AC3_CONFIG: {
+                resp_buf[0] = ac3_config.enabled;
+                resp_buf[1] = ac3_config.drc_mode;
+                resp_buf[2] = ac3_config.dialnorm_mode;
+                resp_buf[3] = 0;
+                vendor_send_response(resp_buf, 4);
                 return true;
             }
 

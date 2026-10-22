@@ -139,7 +139,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding
 // slot holding the aux component.  0x01 is MS_VENDOR_CODE above, intercepted
 // in tud_vendor_control_xfer_cb before the application dispatcher sees it;
-// 0x00, 0x02 and 0x03 stay unallocated.
+// 0x00 and 0x03 stay unallocated; 0x02 is the AC-3 decode config (below).
 #define REQ_SET_CS_AUX_STATE        0x04  // wValue = slot, 1 byte 0/1; immediate, runtime
                                           // only; STALL unless the slot is an aux output
 #define REQ_GET_CS_AUX_STATE        0x05  // wValue = slot: 1 byte (STALL if not an aux);
@@ -434,6 +434,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 // S/PDIF input IEC 61937 bitstream detection (both platforms).  Lives here
 // because 0xE0-0xEF is full; see spdif_input.h for the packet.
 #define REQ_GET_SPDIF_BITSTREAM_STATUS 0xCF  // returns SpdifBitstreamStatus (12 B)
+
+// AC-3 decode config (both platforms; RP2040 only round-trips it).  SET: 4-byte
+// payload {enabled, drc_mode, dialnorm_mode, 0}; GET: the same 4 bytes.  See
+// ac3_config.h and Documentation/Features/ac3_decoding_spec.md.
+#define REQ_AC3_CONFIG              0x02
 
 // AC-3 decode bench (DSPI_AC3_BENCH builds only, RP2350).  wValue = passes
 // starts a run (0 = read only); returns Ac3BenchResult (44 B), or zero bytes
