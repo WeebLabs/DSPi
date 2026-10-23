@@ -6,6 +6,7 @@
 #include "dsp_cascade.h"
 #include "dcp_inline.h"
 #include "crossover.h"
+#include "output_latency.h"   // output_ring_target_frames (sub alignment)
 
 static inline bool is_filter_flat(const EqParamPacket *p) {
     if (p->type == FILTER_FLAT) return true;
@@ -380,14 +381,16 @@ void dsp_update_delay_samples(float sample_rate) {
         // Get delay_ms from the corresponding EQ channel (CH_OUT_1 + out)
         float delay_ms = channel_delays_ms[CH_OUT_1 + out];
 
-        // PDM sub needs alignment compensation (last delay channel)
+        // PDM sub needs alignment compensation (last delay channel); negative
+        // when the target is under the PDM buffer (see config.h PDM_BUFFER_SAMPLES).
         if (out == NUM_DELAY_CHANNELS - 1) {
-            float align_ms = (float)SUB_ALIGN_SAMPLES / sample_rate * 1000.0f;
+            int align = (int)output_ring_target_frames - PDM_BUFFER_SAMPLES;
+            float align_ms = (float)align / sample_rate * 1000.0f;
             delay_ms += align_ms;
         }
 
         // Cap at MAX-1: a delay of exactly MAX_DELAY_SAMPLES reads the slot just
-        // written, i.e. zero delay.  Sub hits the cap 128 samples early (see doc).
+        // written, i.e. zero delay.  Sub hits the cap early by its alignment (see doc).
         int32_t samples = (int32_t)(delay_ms * sample_rate / 1000.0f);
         if (samples > MAX_DELAY_SAMPLES - 1) samples = MAX_DELAY_SAMPLES - 1;
         if (samples < 0) samples = 0;

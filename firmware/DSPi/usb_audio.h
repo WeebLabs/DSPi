@@ -164,6 +164,8 @@ extern uint8_t flash_set_startup_slot;
 
 extern volatile bool flash_set_output_config_mode_pending;
 extern uint8_t flash_set_output_config_mode_val;
+extern volatile bool flash_set_output_latency_pending;
+extern uint8_t flash_set_output_latency_id;
 extern volatile bool flash_save_output_config_pending;
 
 extern volatile bool flash_set_master_volume_mode_pending;

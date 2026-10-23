@@ -44,6 +44,11 @@ void spdif_input_stop(void);
 // Returns number of stereo samples processed (0 if no data).
 uint32_t spdif_input_poll(void);
 
+// Drop the input received but not yet delivered (whole stereo pairs). Prefill
+// start only: nothing has been rendered since the outputs stopped, so the
+// stream simply starts later; see current_architecture.md "Output Latency".
+void spdif_input_discard_queued(void);
+
 // Clock servo: trim the soft VCXO to track the SPDIF input clock.
 // Called from main loop after spdif_input_poll().
 void spdif_input_update_clock_servo(void);

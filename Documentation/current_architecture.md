@@ -97,6 +97,9 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `soft_vcxo.h` | Soft VCXO API (`soft_vcxo_init` / `soft_vcxo_set_ppm` / `soft_vcxo_current_ppm`) |
 | `input_servo.c` | Shared clock servo for externally clocked inputs: ppm feed-forward + deadbanded P + centering integrator, actuates the soft VCXO |
 | `input_servo.h` | Input servo API (`input_servo_apply` / `input_servo_reset`) |
+| `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
+| `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
+| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop section profiler: `LOOP_PROF(n)` marks, worst time per section via `REQ_GET_STATUS` 64+n |
 | `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
 | `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
@@ -813,9 +816,9 @@ Circular buffer: `delay_lines[ch][(write_idx - delay_samples) & MAX_DELAY_MASK]`
 
 `dsp_update_delay_samples()` caps every channel at `MAX_DELAY_SAMPLES - 1`. A delay of exactly `MAX_DELAY_SAMPLES` would read back the sample written in the same step, which is zero delay. Before 2026-10-10 the cap was `MAX_DELAY_SAMPLES`, so any over-range request (which the vendor handlers accept unbounded) silently played undelayed. The cap is applied in samples at recompute time, so a stored millisecond value that fits at 48 kHz is capped, not rejected, after a switch to 96 kHz. GET returns the stored, uncapped value.
 
-PDM sub gets automatic alignment compensation: +SUB_ALIGN_SAMPLES (128 samples = 2.67ms), added before the cap.
+PDM sub gets automatic alignment compensation: the ring fill target minus `PDM_BUFFER_SAMPLES` (256), added before the cap. It follows the selectable output latency (see "Output Latency"): +128 samples at 8 ms and 48 kHz, but negative below 256 frames (for example -64 at the 4 ms default at 48 kHz), which shortens the sub's delay. *Updated 2026-10-23*
 
-**Known limitation (temporary, until PDM becomes an assignable slot type without hardcoded alignment):** because the sub's 128-sample offset is added before the cap, the sub reaches the cap 128 samples of user delay earlier than the other outputs. With a user delay within 128 samples of the ring size, the sub plays up to 128 samples (2.7 ms at 48 kHz) earlier than other outputs set to the same delay. Below that band all outputs align exactly. A sub-aware cap (`MAX_DELAY_SAMPLES - 1 - SUB_ALIGN_SAMPLES` applied to the user delay, offset added after) was considered and deferred to the PDM overhaul, which removes the offset entirely. The Console delay sliders (42 ms RP2040, 85 ms RP2350) also exceed the ring and should be bounded by a firmware-reported maximum.
+**Known limitation (temporary, until PDM becomes an assignable slot type without hardcoded alignment):** because a positive sub offset is added before the cap, the sub reaches the cap that many samples of user delay earlier than the other outputs (128 at an 8 ms target at 48 kHz). With a user delay within that band of the ring size, the sub plays up to the offset (2.7 ms at 48 kHz) earlier than other outputs set to the same delay. Below that band all outputs align exactly. A sub-aware cap (`MAX_DELAY_SAMPLES - 1 - SUB_ALIGN_SAMPLES` applied to the user delay, offset added after) was considered and deferred to the PDM overhaul, which removes the offset entirely. The Console delay sliders (42 ms RP2040, 85 ms RP2350) also exceed the ring and should be bounded by a firmware-reported maximum.
 
 ---
 
@@ -1014,31 +1017,106 @@ typedef struct audio_spdif_instance {
 ```
 
 ### Buffer Configuration
-*Last updated: 2026-10-22 (ring writers accept reader-ahead writes; per-slot drop deadlock). Previously 2026-10-16 (ring fill target unified into one constant). Previously 2026-10-12 (producer pools removed: per-slot staging, direct ring writes). Previously 2026-10-11 (dedicated S/PDIF silence stamper; consumed-count reader: whole-lap selector moved to a slow path). Previously 2026-07-23 (PDM/slot recovery made block-size exact)*
+*Last updated: 2026-10-23 (rings halved to 512 frames, erase-ahead 64, runtime fill target; see "Output Latency"). Previously 2026-10-22 (ring writers accept reader-ahead writes; per-slot drop deadlock). Previously 2026-10-16 (ring fill target unified into one constant). Previously 2026-10-12 (producer pools removed: per-slot staging, direct ring writes). Previously 2026-10-11 (dedicated S/PDIF silence stamper; consumed-count reader: whole-lap selector moved to a slow path). Previously 2026-07-23 (PDM/slot recovery made block-size exact)*
 
 The consumer buffer pool is gone. Each slot now drains a single **encoded ring** filled by the writer and read by a free-running DMA with **zero output IRQs**:
 
-- One static 16 KB ring per slot (`slot_ring_store[NUM_SPDIF_INSTANCES][PICO_AUDIO_SPDIF_RING_BYTES]` in usb_audio.c), caller-owned and passed via `config.ring_base`. The same store backs the slot's S/PDIF and I2S instances across output-type switches. `PICO_AUDIO_SPDIF_RING_FRAMES = 1024` frames (21.3 ms at 48 kHz), 2 channels × 8 bytes per frame; I2S uses the identical geometry (`_Static_assert`ed equal).
+- One static 8 KB ring per slot (`slot_ring_store[NUM_SPDIF_INSTANCES][PICO_AUDIO_SPDIF_RING_BYTES]` in usb_audio.c), caller-owned and passed via `config.ring_base`. The same store backs the slot's S/PDIF and I2S instances across output-type switches. `PICO_AUDIO_SPDIF_RING_FRAMES = 512` frames (10.7 ms at 48 kHz, 1024 before 2026-10-23), 2 channels × 8 bytes per frame; I2S uses the identical geometry (`_Static_assert`ed equal).
 - **Staging and direct writes** (2026-10-12). The pipeline renders each slot's block into a static per-slot staging buffer, `slot_stage[NUM_SPDIF_INSTANCES][AUDIO_BUFFER_SAMPLES * 2]` in audio_pipeline.c (interleaved S24, 1.5 KB per slot). Core 0 writes pair 0 and, in the single-core variants, every pair. The Core 1 EQ worker writes its pairs through `core1_eq_work.spdif_out[]`, which always points at staging. Once `output_rings_pre_give()` admits the block, `output_rings_write_block()` copies staging into every set-up slot ring in slot order with `audio_spdif_ring_write_s32()` or `audio_i2s_ring_write_s32()`, chosen by `output_types[]`. The copy covers set-up rings that are not yet enabled, because a ring may be prefilling before its synchronized start. A refused block is never copied. The S/PDIF writer stamps the IEC preamble and channel status per frame from the absolute frame index. There is no `pico_audio` producer pool, connection or heap allocation anywhere in the output path, and neither output library links `pico_audio`.
 - **Rate.** `audio_spdif_setup()` and `audio_i2s_setup()` take the rate in Hz and program the nominal divider themselves; the firmware passes `output_rate_hz` (usb_audio.c), which only `perform_rate_change()` writes. Nothing retunes lazily: `perform_rate_change()` reprograms every set-up slot (`apply_nominal_output_rate()` and `audio_i2s_update_all_frequencies()`) and then restarts the outputs in sync.
-- Erase-ahead silence margin: the writer keeps `PICO_AUDIO_SPDIF_ERASE_AHEAD` = 192 frames (one IEC block) of valid silence stamped ahead of real audio, so a stalled producer plays silence rather than a loop of stale ring content.
+- Erase-ahead silence margin: the writer keeps `PICO_AUDIO_SPDIF_ERASE_AHEAD` = 64 frames (192 before 2026-10-23) of valid silence stamped ahead of real audio, so a stalled producer plays silence rather than a loop of stale ring content. The margin only has to last until the main loop's `output_rings_idle_pump()` extends the silence to a full ring. The pump runs only once a reader has passed its writer (a stalled producer; gated on the signed fill below zero since 2026-10-23, previously below 240 frames and then half the target, which put the gate inside the fill sawtooth at small targets), so the margin covers one main-loop pass: 1.3 ms at 48 kHz and 0.67 ms at 96 kHz against a measured worst pass of about 0.45 ms. Every frame of it is subtracted from the writable span, so it bounds the latency ceiling (see "Output Latency"). It still divides the 192-frame IEC block.
 - On both platforms, `stamp_silence_frame()` writes zero-PCM S/PDIF words directly, retaining the phase-dependent Z/X and Y preambles, live channel-status bit, and matching parity. The writer's erase-ahead pass, underrun skip, and silence pump (including reset and flash-stall protection) use it instead of the general sample encoder. It is byte-identical to `stamp_frame(..., 0, 0)`, requires no lookup table or new storage, and is forced inline into the RAM-resident callers. Ring positions, frame counts, silence margin, and group alignment behavior are unchanged. Since 2026-10-11 the writer, skip and pump go through `stamp_audio_run()` / `stamp_silence_run()`, which pick the word format once per run from the instance's `pio_bmc` flag: `stamp_frame_bmc()` / `stamp_silence_frame_bmc()` write the PIO-encoder control and data words, the original stampers write the NRZI words, and both carry a running IEC phase.
 - Free-running DMA: **ENDLESS** transfer count with hardware read-address wrap on RP2350 (power-of-two ring, no reload channel); on RP2040 a data + reload channel pair (`dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + slot`, base 6) rewrites the read address at the ring end. No DMA completes, so there is no output DMA IRQ on either platform.
-- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. The DMA address supplies the exact position modulo the 1,024-frame ring; for calls separated by more than one lap, elapsed microseconds and the configured sample rate select the nearest whole-lap count, so the ~45 ms flash blackout cannot disappear from recovery accounting. Time is only the lap selector; the hardware pointer remains the sample-granular remainder. Since 2026-10-11 the selector is a slow path: a read less than half a ring after the previous one cannot have missed a lap (the rounded lap count is provably zero there, checked exhaustively for every rate and in-ring delta), so the reader decides that with one 64-bit multiply and compare and runs the 64-bit divide only after a genuinely late read. On the hot path that is about 13 reads per block saved. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter returns that snapshot difference (cumulative-count differencing). A separate `recovery_prewrite_fill_frames` snapshot captures fill immediately **before** each successful write (`UINT32_MAX` until the first write after reset). The separation is load-bearing: the servo wants post-write fill, while underrun recovery must exclude the final real block that PDM consumes before inserting zeros. The USB feedback loop consumes the same unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). `REQ_GET_BUFFER_STATS` keeps byte compatibility via a 48-frames-per-bucket mapping (`SLOT_FILL_FRAMES_PER_BUCKET`; a ring fill of N frames maps to N/48 legacy "buffers"). The bucket is only a unit. Both clock servos read the frame-exact snapshot fill and express it as a fractional bucket count, and their gains are per bucket.
+- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. The DMA address supplies the exact position modulo the 512-frame ring; for calls separated by more than one lap, elapsed microseconds and the configured sample rate select the nearest whole-lap count, so the ~45 ms flash blackout cannot disappear from recovery accounting. Time is only the lap selector; the hardware pointer remains the sample-granular remainder. Since 2026-10-11 the selector is a slow path: a read less than half a ring after the previous one cannot have missed a lap (the rounded lap count is provably zero there, checked exhaustively for every rate and in-ring delta), so the reader decides that with one 64-bit multiply and compare and runs the 64-bit divide only after a genuinely late read. On the hot path that is about 13 reads per block saved. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter returns that snapshot difference (cumulative-count differencing). A separate `recovery_prewrite_fill_frames` snapshot captures fill immediately **before** each successful write (`UINT32_MAX` until the first write after reset). The separation is load-bearing: the servo wants post-write fill, while underrun recovery must exclude the final real block that PDM consumes before inserting zeros. The USB feedback loop consumes the same unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). `REQ_GET_BUFFER_STATS` keeps byte compatibility via a 48-frames-per-bucket mapping (`SLOT_FILL_FRAMES_PER_BUCKET`; a ring fill of N frames maps to N/48 legacy "buffers"). The bucket is only a unit. Both clock servos read the frame-exact snapshot fill and express it as a fractional bucket count, and their gains are per bucket.
 
-**Fill target (2026-10-16).** The steady-state ring fill is one constant, `OUTPUT_RING_TARGET_FILL_FRAMES` in `config.h` (384 frames: 8 ms at 48 kHz, 4 ms at 96 kHz). Everything that depends on it derives from it:
-- the USB feedback servo's target (`FB_FILL_TARGET_Q16`)
-- the S/PDIF, ADAT and I2S-slave input servo's target (`SERVO_FILL_TARGET`)
-- the prefill threshold of every input handshake and of the test-signal pump (`slot_fill_at_target()`, a frame compare)
-- the underrun re-anchor point and the post-restart dwell
-- the PDM `SUB_ALIGN_SAMPLES` offset
-
-`audio_pipeline.c` static-asserts that the target exceeds one input block (`AUDIO_BUFFER_SAMPLES`, 192 frames, since the fill can fall a whole block below target between writes) and that target plus one block fits in the writable span of both ring types (1024 minus the 192-frame erase-ahead, so 832 frames). Every slot shares the same write index, so changing the target shifts all ring outputs by the same amount. In practice the floor is higher than the assert. The target must also cover the worst main-loop gap (about 0.6 ms measured under USB playback) and the servos' excursions. The Console colour bands (green 25-75%) assume a centred target. Changing the value is otherwise a one-line edit.
+**Fill target.** Since 2026-10-23 the steady-state ring fill is a runtime value, `output_ring_target_frames`, derived from the selectable output latency. Its derivation, users and limits are in "Output Latency" below. Before that it was the constant `OUTPUT_RING_TARGET_FILL_FRAMES` (384 frames).
 - **Underrun recovery** is a group re-anchor: `output_rings_pre_give()` (audio_pipeline.c) selects the worst enabled slot and applies one identical `*_ring_skip()` to every enabled slot, so inter-slot sample alignment is preserved exactly. Its skip is `deficit + recovery_prewrite_fill_frames`, with no bucket rounding. Algebraically this is the missing-source interval after the final successfully written block; it therefore equals the number of zeros PDM inserts after draining that same real block, preserving PDM-to-slot content alignment for arbitrary block sizes. A valid zero pre-write fill remains distinguishable from the reset sentinel. The starvation counters (`audio_spdif_get_dma_starvations_instance()` / I2S mirror) return frames of silence exposed to the wire, not silence-buffer DMA starts.
-- **Atomic re-anchor** (2026-10-11): `*_ring_reset()` and the ring arm set the software read anchor and reprogram the DMA read address inside one interrupt-disabled section. The USB SOF ISR reads slot 0's consumed position, and landing between those two writes would count the stale address as a full ring lap: slot 0's accounting would sit 1024 frames ahead of its physically aligned DMA, and admission and the underrun skip would fight over the phantom deficit until the next reset.
+- **First anchor after a reset** (2026-10-23): a ring with no content since its reset (`recovery_prewrite_fill_frames == UINT32_MAX`) is anchored by its first real block, with the skip chosen so the post-write fill (what the servos regulate) lands on the target: `deficit + target - frames`. The idle pump (`output_rings_pre_give(0)`) no longer re-anchors such a ring unless the deficit passes 2^24 frames (about 5.8 minutes at 48 kHz, inside the signed fill range); its silence pump keeps the reader on fresh framed silence meanwhile, and ADAT's keepalive covers the dry spell as before. Previously the idle pump anchored first, at the full target with no block in hand, so the first block landed the fill anywhere up to a block above target and the slow USB fill servo took 10 to 20 s to bleed it off. Measured on RP2350 with USB at 48 kHz over 8 changes each: the largest overshoot after a change fell from 45-84 frames to 4-35. The anchor is one identical skip on every enabled slot, so alignment is unaffected.
+- **Atomic re-anchor** (2026-10-11): `*_ring_reset()` and the ring arm set the software read anchor and reprogram the DMA read address inside one interrupt-disabled section. The USB SOF ISR reads slot 0's consumed position, and landing between those two writes would count the stale address as a full ring lap: slot 0's accounting would sit a full ring ahead of its physically aligned DMA, and admission and the underrun skip would fight over the phantom deficit until the next reset.
 - **Group admission** (same function): a block is admitted only if every enabled slot ring can take all of it, and while Core 1 drains PDM's push queue, that queue must fit it too. A refused block reaches no output (slots, PDM, ADAT, loopback). PDM's queue is an admission input only while `pdm_queue_is_draining()` holds (PDM mode, enabled, not held, hardware running). An undrained queue fills up and would otherwise refuse every block for every output, for example while a PDM pin move holds Core 1's hardware. *Last updated: 2026-10-11*
 - **Reader-ahead writes** (2026-10-22): the ring writers (`audio_spdif_ring_write_s32()` / `audio_i2s_ring_write_s32()`) treat a reader that has overtaken the writer as zero fill and write the block. Admission runs before the block's DSP, so a reader can overtake its writer in the few hundred microseconds before the write. The I2S reader runs about three frames ahead of the S/PDIF readers (deeper FIFO prefetch), so on a low-margin resume it is the first to cross. The writers used to compute fill unsigned, read "reader ahead" as "ring full" and drop the block for that slot alone. Every peer's `wr_frames` advanced and that slot's did not, so the slots split by one block per event. Once the split exceeded the writable headroom, admission refused every block forever while identical skips kept firing (the S/PDIF slots read 100% fill and the I2S slot read empty). Audio stayed silent until a full pipeline reset. Reproduced on a mixed S/PDIF + I2S layout by stopping USB packets for ~70 ms with the alt setting unchanged, as a host pause does. The pre-write recovery snapshot is clamped to 0 in this case: the frames the reader already passed are lost to that slot whatever the skip, so the PDM-to-slot offset can move by those few frames, and only during an underrun that is already audible. Every enabled slot must keep an identical `wr_frames`. Any per-slot write reject breaks that and deadlocks the group.
 Since 2026-07-23 each per-slot record also carries `fill_centi_pct` (uint16, formerly the two pad bytes): sample-granular fill in 0.01% units of the same 16-bucket scale (5000 = 50.00%; values above 10000 are legal, the ring holds more than the legacy capacity). Older firmware reports 0 in this field; the coarse bucket fields are unchanged, so existing Console builds keep working.
+
+### Output Latency
+*Last updated: 2026-10-23 (option table and low-latency option; module `output_latency.c`; two input delivery points per main-loop pass)*
+
+The output latency setting is how full the slot rings are kept. Every slot shares one write index and one target, so the setting moves every ring output by the same amount and never moves one against another. The host picks it from a fixed table of options (`output_latency.c`), set and read with `REQ_OUTPUT_LATENCY` (0x03). The choice is stored device-globally (directory V23, never in a preset; a factory reset keeps it). The default is 4 ms.
+
+**Options.** Each entry is a stable ID (the wire and flash value; 0 is never valid), flags, the ring fill target and the input batch the option needs:
+
+| ID | Option | Target | Input batch | Sources |
+|---|---|---|---|---|
+| 1 | Low latency, 0.67 ms | 0.667 ms (29 / 32 / 64 frames at 44.1 / 48 / 96 kHz) | 0.333 ms (15 / 16 / 32 frames) | S/PDIF, I2S, ADAT (`OUTPUT_LATENCY_FLAG_STREAM_ONLY`) |
+| 2 | Low latency, 1 ms | 1 ms (44 / 48 / 96 frames) | 0.333 ms | S/PDIF, I2S, ADAT |
+| 3 | 2 ms | 2 ms | 1 ms | all |
+| 4 | 3 ms | 3 ms | 1 ms | all |
+| 5 | 4 ms (default) | 4 ms | 1 ms | all |
+| 6 | 6 ms | 6 ms | 1 ms | all |
+| 7 | 8 ms | 8 ms | 1 ms | all |
+
+The two low-latency options share the 0.33 ms batch and differ only in margin: about 16 frames before scheduling jitter at 0.67 ms against 32 at 1 ms (see "Main-loop budget" below).
+
+**Why low latency is stream-only.** USB delivers one packet per millisecond, so the ring must ride out a whole packet interval between arrivals, and a target under one packet runs dry every packet. Splitting packets into smaller pipeline calls does not help, because they all land together when the packet arrives. Sample-stream inputs arrive continuously, so their batch, and with it the target, can shrink. `output_latency_resolve()` runs a stream-only request on USB as the first table entry without the flag (2 ms) and keeps the request stored, so switching back to a stream input restores it.
+
+**Live state.** `output_latency_apply(fs, source)` resolves the stored request for the active source and publishes three values together, which every user reads:
+- `output_ring_target_frames`, the ring fill target: the option's latency in frames, clamped to the ring ceiling.
+- `input_batch_frames`, the batch: the fewest frames a stream input hands `process_input_block()` per call (each call has a fixed cost; see `Documentation/Features/low_latency_overhead_plan.md`). The S/PDIF, I2S and ADAT readers all use it. Before 2026-10-23 S/PDIF batched by time (1 ms) but I2S and ADAT batched a fixed 48 frames, which is 0.5 ms at 96 kHz; standard options now batch all three at 1 ms, so a 96 kHz I2S input delivers twice the frames per call (less CPU, 0.5 ms more input-side wait).
+- `output_ring_block_cap`, the most frames any producer may deliver per call: one batch plus one frame. A USB packet can carry one frame over nominal, and the stream readers use the same slack to catch up after a late poll. Every reader caps at it, and so do the I2S slave prefill and the test-signal pump.
+
+It runs at boot (default, then the stored option after `preset_boot_load()`), in `perform_rate_change()` before the filter recompute, in the input-source switch right after the source flips (before the new source's restart or prefill), and when a SET applies. Each of those runs inside a pipeline reset bracket or before audio starts, so the restart that follows re-anchors every ring at the new target together.
+
+**Ceiling.** One block must still fit above the target inside the writable span (ring minus erase-ahead), or group admission refuses blocks in steady state. The ceiling is therefore `512 - 64 - block_cap` frames. With the standard 1 ms batch:
+
+| Rate | Block cap | Ceiling | Default 4 ms |
+|---|---|---|---|
+| 44.1 kHz | 46 | 402 frames (9.1 ms; 8 ms fits) | 176 frames |
+| 48 kHz | 49 | 399 frames (8.3 ms; 8 ms fits) | 192 frames |
+| 96 kHz | 97 | 351 frames (3.66 ms) | 351 frames (clamped) |
+
+A device at 96 kHz runs the 4, 6 and 8 ms options at the ceiling and returns to them when the rate drops. `output_latency.c` static-asserts that the low-latency and 2 ms targets each exceed one block at 44.1 kHz, that 2 ms fits the ring at 96 kHz, and that the option table reply fits one EP0 packet.
+
+**Protocol.** OUT: a 1-byte option ID. An unknown ID is ignored over USB (the data stage is acknowledged before any handler runs, as for every SET) and reported as `CTRL_STATUS_ERROR` over UART/I2C. Re-sending the stored option is a no-op. IN, wValue 0: the 12-byte `OutputLatencyStatus` (requested and effective ID, effective microseconds at the current rate, target frames, batch frames, pending flag, option count). IN, wValue 1: the option table as 8-byte `OutputLatencyOptionWire` entries (ID, flags with `OUTPUT_LATENCY_WIRE_AVAILABLE` set when the option runs as itself on the active source, nominal latency and batch, and what selecting it gives now). Other wValues STALL. A host builds its menu from the table, so a firmware can change the options without a host release.
+
+**Users of the target.** The USB feedback servo (passed into `fb_ctrl_sof_update()` per SOF), the input servo (`servo_fill_target()`, read live; its smoother reseeds when the target changes, since the rings re-anchor at the new one), the prefill handshakes (`prefill_complete()`) and the test-signal pump (`slot_fill_at_target()`), the underrun re-anchor fallback, the post-restart dwell and the PDM sub offset (`dsp_update_delay_samples()`).
+
+**Applying a change.** The SET handler only records the request (`flash_set_output_latency_pending`). The flag, which the GET reports as `pending`, stays set until the restart below has completed, and a newer request that arrives meanwhile keeps it set for the next pass. The main loop runs it inside the standard flash bracket: `prepare_flash_write_operation()`, the directory write, `output_latency_request()` and `output_latency_apply()`, the sub-delay recompute, then `complete_flash_write_operation_full()`. That completion is the full synchronized restart (or, for S/PDIF input, the lock handshake's drain and prefill), so slot alignment is preserved by construction. The cost is one short mute per change. The servos are never used to move the fill: they work in ppm and would take minutes, and nothing per-slot is touched.
+
+**Ring health readouts.** `REQ_GET_STATUS` wValue 26 returns underrun recoveries (group re-anchors outside mute windows), 27 returns blocks refused by group admission, and 28 returns the lowest enabled-slot fill seen just before a write, in frames, since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` when there has been no write). Index 29 returns the worst gap between input deliveries in microseconds since the same reset (`input_delivery_mark()`, called by every `pipeline_service_producer()`): how long a stream input can go unread, which is what bounds the usable margin at small targets. Until the second delivery point (below) this was the worst main-loop pass. Indices 26 and 27 are cumulative.
+
+**Measured, first pass (2026-10-23, RP2350, `tools/latency_bench`, before the option table).** Every setting from 2 to 8 ms in 0.5 ms steps was run for 30 s from the moment the change applied, on USB at 48 kHz, I2S input (clock master) at 44.1, 48 and 96 kHz, and the test-signal pump, under the stock configuration (core 0 about 10 %) and a 4-way active profile (core 0 / core 1 about 32 / 22 % at 48 kHz, 66 / 46 % at 96 kHz). Across all 130 points there were no underrun recoveries, no refused blocks and no USB ring overruns. The fill spread between playing slots never exceeded 1.1 frames, including across 20 rapid 2 ms / 8 ms switches. The lowest pre-write fill sat 50 to 70 frames below the target on USB (one packet plus scheduling jitter), so the margin at 2 ms is about 32 frames (0.67 ms) on the stock configuration and 27 frames (0.56 ms) under the 4-way load. The rate-follow check (8 ms at 48 kHz, clamped to 351 frames at 96 kHz, back to 384) and persistence across a reboot both held.
+
+**Prefill landing (2026-10-23).** Sources that start through a prefill handshake (S/PDIF, ADAT, I2S in either role) used to enable the outputs at the first block that took the ring to the target. They landed up to a block high, plus whatever input queued during the last poll. The input servo pulled S/PDIF, ADAT and I2S slave back over minutes, and I2S in clock-master mode, which has no servo, stayed high until the next restart (measured +55 frames, 0.6 ms, at 96 kHz under the 4-way load). The handshakes now land on the target:
+- At prefill start each source discards what it has already queued (`spdif_input_discard_queued()`, `i2s_input_discard_queued()` on every pair alike, `adat_input_discard_queued()` in whole frames). Nothing has been rendered since the outputs stopped, so the stream simply starts later and there is no content jump.
+- Every stream reader takes its per-call limits from `producer_block_bounds()` (audio_pipeline.c): at least the option's batch, at most one block. While the slots are stopped for a prefill both limits shrink to what still brings slot 0 to the target, so the final top-up lands exactly on it and happens as soon as that many frames have arrived. The I2S slave-role path, which synthesizes silence because its input has no clock while the outputs are stopped, goes through the same limit.
+- The handshake's existing `slot_fill_at_target(0)` check then starts the outputs on the next main-loop pass, with the ring exactly at the target. Only input that arrives within that pass lands on top.
+
+A first attempt counted the queued input toward the target instead, starting the outputs with the ring as low as target minus one block and relying on the queue being delivered within that slack. On S/PDIF it dipped about 100 frames below the target right after every start and underran at 2 ms and below, so it was replaced by the bounds above.
+
+**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into fourteen sections (`LOOP_PROF_SECTIONS`), read through `REQ_GET_STATUS` 64+. Measured on RP2350 with S/PDIF input:
+- The quiet pass is about 70 to 80 µs. Every section carries a floor of about 53 µs from interrupts landing inside it (the S/PDIF receiver's block check every 4 ms), so any pass can grow by that much.
+- Three tasks ran far longer and were reworked. The spectrum analyser's FINISH ran 530 µs in one call (now 64-bin steps; see "Spectrum Analyser"). The loudness table rebuild ran 540 µs on every reference or intensity change (now `loudness_recompute_begin()` / `loudness_recompute_step()`, 8 volume steps per pass into the inactive table, swapped when complete). The idle pump gated at half the target, inside the fill sawtooth at small targets, and spent about 55 µs per pass stamping silence while streaming (now gated on a reader that has passed its writer).
+- After those, single host actions add 20 to 170 µs over the quiet pass (vendor request handling, deferred applies, the first block they affect), with a Control Surfaces binding add or revert the largest at up to about 350 µs.
+
+**Two delivery points per pass (2026-10-23).** The first real-use soak (below) traced its one 0.67 ms underrun to a Control Surfaces revert. The revert itself took about 300 µs, but the input gap was that plus the rest of the pass, 470 µs. Shortening one task at a time would not end, because any two moderate tasks in one pass add up. The input service is therefore split three ways in `main.c`, and delivery runs twice per pass:
+- `input_service_handshakes()` runs the lock, prefill and signal-loss handshakes of the active source, once per pass.
+- `pipeline_service_producer(true)` delivers whatever the active source (or the test-signal generator) has ready. It runs after the handshakes and again at the end of the pass, after the deferred operations. The reset spins call it with `lock_gated` false, so a fade completes on whatever still arrives; the main loop gates a clock-slave I2S input on LOCKED, as before.
+- `input_service_servos()` runs the clock servos once per pass, because each rate-limits by call count.
+
+The worst input gap is now the longer of the two half-passes rather than their sum. A Control Surfaces revert, the longest single deferred task, measures about 290 µs of gap (it was 300 to 400 µs of pass). Roughly half of a revert is first-run flash cache misses (a cold revert takes 170 to 190 µs, an immediate second one about 95 µs), since that code is XIP-resident and rarely run. The revert and the stored-config load also no longer rebuild the button gesture groups once per slot (`cs_apply_binding_slot()` plus one `cs_bindings_changed()`; see Control Surfaces "Deferred SET, Apply/Save/Revert").
+
+**Real-use soaks (2026-10-23, RP2350, `tools/latency_bench/soak.py`).** Each run lasts 15 minutes with the same action seed. The analyser is read every 50 ms while 448 random host actions run (parameter edits, feature toggles, bulk reads, analyser reconfiguration, generator bursts, Control Surfaces binds and reverts). Results with two delivery points (one delivery point in brackets):
+
+| Source, option | Underruns | Refused blocks | Worst gap max / p99 | Lowest pre-write fill (min / median) |
+|---|---|---|---|---|
+| S/PDIF, 0.67 ms | 0 (1) | 0 | 408 / 273 µs (491 / 334) | 0 / 10 frames (2 / 14) |
+| S/PDIF, 1 ms | 0 (0) | 0 | 408 / 299 µs (482 / 364) | 17 / 26 frames (10 / 26) |
+| USB, 2 ms | 178 in two bursts (0) | 0 | 530 / 279 µs (598 / 334) | 33 / 41 frames (34 / 41) |
+
+The 0.67 ms option no longer underran, but its lowest pre-write fill touched zero during a Control Surfaces revert, so it remains a thin-margin option. The 1 ms option kept at least 17 frames throughout.
+
+The USB bursts (88 and 90 recoveries, one second each, ten seconds apart) are not stalls. The delivery gap stayed normal and the pre-write fill never fell below 34 frames, so for about 90 ms the arriving packets carried too few frames. A 20-minute repeat on a `DSPI_CLOCK_DIAG` build, with the packet count, the host player's underflow flags and the feedback range logged each second, was clean (feedback 6 to 18 ppm, no host underflows). The cause, host or device, is OPEN. An earlier 69-recovery USB window, seen before the two-point change, looks like the same event.
+
+**Low-latency option: what it depends on.** The margin is the target minus one batch minus scheduling jitter: 32 - 16 frames before jitter at 48 kHz, against 96 - 48 at 2 ms. Jitter does not shrink with the batch (USB control requests, the I2C display, the spectrum analyser and flash brackets all run on the same main loop), so heavy configurations are the risk. The CPU cost is the fixed per-call cost three times as often; `Documentation/Features/low_latency_overhead_plan.md` measures it and describes the overhead reductions (on the unmerged `bench/input-batch` work) that would recover most of it. The USB feedback servo's fixed ±1 bucket inner zone (48 frames, `FB_FILL_KNEE_Q16`) would be larger than the whole target, which is a further reason USB never runs this option. The PDM sub offset (target minus 256) clamps the sub's delay at zero below 256 frames; see PDM "Known alignment defect".
 
 ### IEC 60958-1 Block Phase
 *Last updated: 2026-07-23*
@@ -1082,11 +1160,11 @@ Byte 3 is updated dynamically in `update_pio_frequency()` when sample rate chang
 Output S/PDIF and I2S generate **no DMA IRQs** at all: the rings are drained by free-running DMA (ENDLESS on RP2350, data+reload pair on RP2040). Since 2026-10-11 the libraries carry no IRQ plumbing either: the `dma_irq` config and instance fields, the shared enable refcount, the no-op `*_set_starvation_monitoring()` calls, the output IRQ priority setup and the type-switch IRQ mask are gone. S/PDIF RX is the only DMA IRQ user. It owns `DMA_IRQ_1` outright: `pico_spdif_rx` enables the line at start and disables it in teardown (the upstream behaviour, restored now that nothing shares the line), and `spdif_input_init()` sets it to the highest priority so the capture IRQ preempts the receiver's own decode-timeout alarm.
 
 ### Output Ring Stall Bracket
-*Last updated: 2026-10-10*
+*Last updated: 2026-10-23 (lap times for the 512-frame ring)*
 
-A slot ring is 1024 frames, so it laps every 21.3 ms at 48 kHz and every 10.7 ms at 96 kHz. While the producer runs, the writer keeps an erase-ahead margin of silence in front of the reader, and the main loop's `output_rings_idle_pump()` keeps the ring silent when no producer runs. Neither happens while the main loop is stalled. If the reader laps during a stall, it replays whatever the ring held one lap earlier. Even when that content is silence, its S/PDIF framing is wrong: every frame carries its IEC 60958 block position from its absolute frame number (`frames mod 192`), and 1024 is not a multiple of 192, so replayed frames sit 64 frames out of block step on every lap. Receivers that check preamble spacing can unlock.
+A slot ring is 512 frames, so it laps every 10.7 ms at 48 kHz and every 5.3 ms at 96 kHz (1024 frames before 2026-10-23). While the producer runs, the writer keeps an erase-ahead margin of silence in front of the reader, and the main loop's `output_rings_idle_pump()` keeps the ring silent when no producer runs. Neither happens while the main loop is stalled. If the reader laps during a stall, it replays whatever the ring held one lap earlier. Even when that content is silence, its S/PDIF framing is wrong: every frame carries its IEC 60958 block position from its absolute frame number (`frames mod 192`), and 512 is not a multiple of 192, so replayed frames sit 128 frames out of block step on every lap. Receivers that check preamble spacing can unlock.
 
-The stall bracket (`output_rings_stall_begin()` / `output_rings_stall_end()`, `audio_pipeline.c`) closes that gap. `output_rings_stall_init()` claims a spare hardware timer alarm at boot and installs `output_rings_stall_irq` as its handler. While a bracket is open, the alarm fires every 1 ms (`OUTPUT_RINGS_STALL_PERIOD_US`) and runs `output_rings_stamp_silence_ahead()`, which stamps correctly framed silence from the write position up to one full ring ahead of every enabled slot's reader. It never touches unplayed audio, so pending frames play exactly once and are followed by silence with continuous block framing. On RP2350 the same tick runs `adat_output_keepalive()`. The 1 ms period is set by ADAT: its 96-frame cushion lasts 2 ms at 48 kHz, while a slot ring lap is 10.7 ms even at 96 kHz.
+The stall bracket (`output_rings_stall_begin()` / `output_rings_stall_end()`, `audio_pipeline.c`) closes that gap. `output_rings_stall_init()` claims a spare hardware timer alarm at boot and installs `output_rings_stall_irq` as its handler. While a bracket is open, the alarm fires every 1 ms (`OUTPUT_RINGS_STALL_PERIOD_US`) and runs `output_rings_stamp_silence_ahead()`, which stamps correctly framed silence from the write position up to one full ring ahead of every enabled slot's reader. It never touches unplayed audio, so pending frames play exactly once and are followed by silence with continuous block framing. On RP2350 the same tick runs `adat_output_keepalive()`. The 1 ms period is set by ADAT: its 96-frame cushion lasts 2 ms at 48 kHz, while a slot ring lap is 5.3 ms even at 96 kHz.
 
 Rules for using it:
 
@@ -1152,10 +1230,10 @@ Core 0 pushes Q28 samples; Core 1 pops, runs sigma-delta, writes DMA buffer. `__
 
 **Known alignment defect (found 2026-10-11 by code reading, open, not measured).** Two properties of the PDM path make its offset to the slots both wrong and non-deterministic. This predates the output rings.
 
-- **Calibration.** `SUB_ALIGN_SAMPLES` (128) delays the sub by `OUTPUT_RING_TARGET_FILL_FRAMES - PDM_BUFFER_SAMPLES` = 384 - 256, which assumes PDM latency equals its whole 256-sample DMA ring. Core 1 actually consumes the push queue eagerly and writes each sample about 32 samples (`TARGET_LEAD`) plus up to one block ahead of the reader. Slots play a sample about 384 frames after it is written, while PDM plays it after about 32 + 128 samples of delay line. By this reading the sub plays roughly 200 samples (about 4 ms at 48 kHz) ahead of the mains.
-- **Ratchet.** When a block arrives late and the lead falls below `TARGET_LEAD`, Core 1 inserts zero samples. They shift PDM permanently later against the slots, which absorb the same jitter in their 384-frame fill without shifting. A lead above half the ring (a burst) is treated as an underrun and re-seats the lead, shifting PDM earlier. The offset therefore wanders with producer jitter until the next reset.
+- **Calibration.** The sub offset is the ring fill target minus `PDM_BUFFER_SAMPLES` (256), which assumes PDM latency equals its whole 256-sample DMA ring. Core 1 actually consumes the push queue eagerly and writes each sample about 32 samples (`TARGET_LEAD`) plus up to one block ahead of the reader. At an 8 ms target slots play a sample about 384 frames after it is written, while PDM plays it after about 32 + 128 samples of delay line, so the sub plays roughly 200 samples (about 4 ms at 48 kHz) ahead of the mains. Below a 256-frame target the offset clamps the sub's delay at zero, so the error shrinks to about the target minus 32 to 80 samples (about 2.3 ms at the 4 ms default). *Updated 2026-10-23 for the selectable target.*
+- **Ratchet.** When a block arrives late and the lead falls below `TARGET_LEAD`, Core 1 inserts zero samples. They shift PDM permanently later against the slots, which absorb the same jitter in their ring fill without shifting. A lead above half the ring (a burst) is treated as an underrun and re-seats the lead, shifting PDM earlier. The offset therefore wanders with producer jitter until the next reset.
 
-Every reset re-establishes the same starting point. The slots re-anchor to 384 frames of fill at the first block, and PDM sits at `TARGET_LEAD`, both after a pipeline reset and after `pdm_flash_silence()`'s forced re-anchor. The underrun skip's `deficit + recovery_prewrite_fill_frames` term preserves whatever offset exists. The fix is to give PDM the slots' accounting (a paced, slot-sized cushion and group-skip participation instead of eager consumption and local zero insertion), which belongs with the planned move of PDM to an assignable slot type.
+Every reset re-establishes the same starting point. The slots re-anchor to the fill target at the first block, and PDM sits at `TARGET_LEAD`, both after a pipeline reset and after `pdm_flash_silence()`'s forced re-anchor. The underrun skip's `deficit + recovery_prewrite_fill_frames` term preserves whatever offset exists. The fix is to give PDM the slots' accounting (a paced, slot-sized cushion and group-skip participation instead of eager consumption and local zero insertion), which belongs with the planned move of PDM to an assignable slot type.
 
 ### Input Limiting
 *Last updated: 2026-10-23*
@@ -1760,7 +1838,7 @@ USB Input → Per-Ch Preamp → Per-Input EQ + Metering → Volume Leveller (act
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-07-09 (per-output processing + output mask)*
+*Last updated: 2026-10-23 (table rebuild sliced: `loudness_recompute_begin()` / `loudness_recompute_step()` build 8 of the 61 volume steps per main-loop pass into the inactive table and swap when complete; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-07-09 (per-output processing + output mask)*
 
 ### Purpose
 
@@ -1896,10 +1974,10 @@ Last 12 sectors (48 KB) of flash:
 | 1-10 | -44 KB to -8 KB | `0x44535033` ("DSP3") | Preset Slots 0-9 (full DSP state) |
 | 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
 
-### Preset Directory Fields (Version 22)
-*Last updated: 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
+### Preset Directory Fields (Version 23)
+*Last updated: 2026-10-23 (V23 appends the 4-byte output latency block). Previously 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
 
-`DIR_VERSION_CURRENT` = 22. V4 renamed the former `include_pins` byte to
+`DIR_VERSION_CURRENT` = 23. V4 renamed the former `include_pins` byte to
 `output_config_mode` (same offset, 1:1 value mapping) and appended the
 device-global `FlashOutputConfig` block. V5 grew that block by 3 bytes for the
 I2S multichannel input pins (`i2s_rx_pin_ext[3]`). V6 appends the device-level
@@ -2000,6 +2078,17 @@ now accepts the flag. See
 `Documentation/Features/control_surfaces_display_spec.md`, and
 `Documentation/Features/control_surfaces_aux_spec.md`.
 
+**V23** (2026-10-23) appends `FlashOutputLatencyConfig output_latency` (4 bytes:
+version, option ID, 2 reserved) directly after `limiter`, taking
+`sizeof(PresetDirectory)` to 3151 bytes. V22 migrates by a whole-block copy of
+its 3147 bytes (`PRESET_DIRECTORY_V22_SIZE`), and every older path already
+zero-fills the cache, so `dir_sanitize_output_latency()` (run beside
+`dir_sanitize_limiter()` on every path) seeds the default option (4 ms) when
+the block is unset or holds an unknown option ID. A V23 directory read by older
+firmware has no migration and is treated as missing (defaults, rewritten on the
+next save), so downgrading loses directory settings. The other unmerged V23
+users (`overclock`, `ac3-dts-decode`) must renumber when they land.
+
 **V22** appends `FlashLimiterConfig limiter` (112 bytes) directly after
 `cs_display`, taking `sizeof(PresetDirectory)` to 3147 bytes. It is the
 independent-mode store for the output limiter settings (see "Output Limiter").
@@ -2033,6 +2122,7 @@ layout ends.
 | cs_groups | Control Surfaces target groups (V18+, 324-byte `CsGroupConfig`: version + 8x 40-byte `CsGroup`; all-zero = no groups; board-level, survives factory reset) |
 | cs_macros | Control Surfaces macros (V18+, 1060-byte `CsMacroConfig`: version + 8x 132-byte `CsMacro`, each 32-byte name + step count + 8x 12-byte `CsMacroStep`; all-zero = no macros; board-level, survives factory reset) |
 | cs_display | Control Surfaces display config and pages (V19+, 80-byte `CsDisplayFlash`: version + 12-byte `CsDisplayCfg` + 16x 4-byte `CsDisplayPage`; all-zero = display idle, no pages; board-level, survives factory reset) |
+| output_latency | Output latency (V23+, 4-byte `FlashOutputLatencyConfig`: version (0 = never saved) + option ID (`OutputLatencyId`, 0 = unset) + 2 reserved; device-global, survives factory reset; see "Output Latency") |
 | limiter | Output limiter settings for independent mode (V22+, 112-byte `FlashLimiterConfig`: version byte (0 = never saved) + 3 reserved + 9x 12-byte records of enabled, link group, threshold, release; RP2040 uses the first 5). Written by `REQ_SAVE_OUTPUT_CONFIG`, applied at boot in independent mode only |
 
 Auxiliary outputs have no directory field of their own. Since caps v18 they
@@ -2095,7 +2185,7 @@ The machine drives the envelope through a second, independent countdown (`pipeli
 - `pipeline_reset_ready()`, the non-blocking pre-gate the deferred handlers already poll, fades first and asserts the DAC hardware mute only afterwards. An analog mute engaged at full level would truncate the very ramp it exists to cover, and the step reappeared when the pin deasserted.
 - `prepare_pipeline_reset()` spins on the same machine while servicing the active producer (`pipeline_settle_to_silence()`), so callers that do not pre-gate (boot, rate changes driven by an input's lock machinery, source switches, the flash bracket) still fade. It exits on the first test when the caller already settled, and immediately when no producer is running — in that case the envelope is latched at zero (`pipeline_latch_mute_silence()`) because no packet will ever arrive to advance it. `process_type_switches()` runs the settle *before* it masks the USB IRQ, since the fade needs the ring to keep refilling. The whole settle is bounded by `PIPELINE_FADE_CAP_US` (200 ms) for a producer that stalls after being declared live.
 
-**Fade back up.** `complete_pipeline_reset()` Phase 3.5 holds the envelope at zero for `OUTPUT_RING_TARGET_FILL_FRAMES` samples (384, the rings' steady-state fill, which the first admitted block re-anchors to) plus any configured `dac_hw_mute_release_ms()` after the synchronized restart, then the normal 8 ms ramp runs. Without the dwell the ramp could complete while the analog mute is still asserted (a step when it releases). *Updated 2026-10-10: this was a fixed 24 ms sized for consumer-pool refill.* It is a floor, never a shortening: the SPDIF/I2S/ADAT prefill handshakes clear the counter when they enable outputs and fade up through the audio they prefilled instead. `prepare_pipeline_reset()` floors its own mute counter at `PIPELINE_OP_MUTE_FLOOR_MS` (24 ms) so a 5 ms `PRESET_MUTE_SAMPLES` cannot expire mid-operation and start fading up into the disruptive window. A zero-length packet no longer snaps the envelope to its target — it renders nothing, so it must not skip the ramp.
+**Fade back up.** `complete_pipeline_reset()` Phase 3.5 holds the envelope at zero for `output_ring_target_frames` samples (the rings' steady-state fill, which the first admitted block re-anchors to; runtime since 2026-10-23) plus any configured `dac_hw_mute_release_ms()` after the synchronized restart, then the normal 8 ms ramp runs. Without the dwell the ramp could complete while the analog mute is still asserted (a step when it releases). *Updated 2026-10-10: this was a fixed 24 ms sized for consumer-pool refill.* It is a floor, never a shortening: the SPDIF/I2S/ADAT prefill handshakes clear the counter when they enable outputs and fade up through the audio they prefilled instead. `prepare_pipeline_reset()` floors its own mute counter at `PIPELINE_OP_MUTE_FLOOR_MS` (24 ms) so a 5 ms `PRESET_MUTE_SAMPLES` cannot expire mid-operation and start fading up into the disruptive window. A zero-length packet no longer snaps the envelope to its target. It renders nothing, so it must not skip the ramp.
 
 Alignment is unaffected: the settle only adds ordinary shared-pipeline packets (every slot, PDM, delay index and DSP state advances by the same sample count), the envelope is one gain shared by both cores, and the teardown/synchronized-restart sequence is unchanged.
 
@@ -2340,7 +2430,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-10-23 (DSP Processing table: sample full scale and metering rows). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2359,7 +2449,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | RAM code+rodata+data (.data) | 67,984 B of the 72,704 B budget (2026-10-12) | 95,800 B of the 100,352 B budget (2026-10-12) |
 | Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 42,772 B (2026-10-12) | 77,144 B (2026-10-12) |
 | Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
-| Output slot rings | 2 × 16 KB `.slot_rings` at the top of RAM | 4 × 16 KB `.slot_rings` at the top of RAM |
+| Output slot rings | 2 × 8 KB `.slot_rings` at the top of RAM (512 frames) | 4 × 8 KB `.slot_rings` at the top of RAM (512 frames) |
+| Output latency (ring fill target) | Option table: low latency 0.67 ms (stream inputs), 2/3/4/6/8 ms, default 4 ms; identical on both | Same; 4-8 ms clamp to 3.66 ms at 96 kHz on both |
 | Custom XIP linker script | `memmap_dspi_rp2040_xip.ld` (+divider/int64/bit-ops IN_RAM defines) | `memmap_dspi_rp2350_xip.ld` |
 
 ### DSP Processing
@@ -2484,6 +2575,17 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 ---
 
 ## Memory Layout
+
+> **Output rings halved (2026-10-23).** `PICO_AUDIO_SPDIF_RING_FRAMES` /
+> `PICO_AUDIO_I2S_RING_FRAMES` go from 1024 to 512 frames and the erase-ahead
+> from 192 to 64 frames, so each slot ring is 8 KB and `SLOT_RINGS_BYTES` halves
+> to 16 KB (RP2040) / 32 KB (RP2350). The ADAT TX ring follows the slot ring's
+> writable span (96 + 448 = 544-frame lead bound) and drops from 960 to 576
+> frames (30 KB to 18 KB). Saving: 16 KB on RP2040, 44 KB on RP2350. Measured:
+> `.data` 69,128 B / 97,232 B, `.bss` 112,936 B / 271,076 B plus `.slot_rings`
+> 16 KB / 32 KB, free heap before runtime allocation 59,096 B / 122,140 B
+> (RP2040 / RP2350). See "Output Latency" for why the ring size bounds the
+> latency ceiling.
 
 > **Producer pools removed (2026-10-12).** The `pico_audio` producer pools are
 > gone, and nothing allocates from the heap at runtime any more (no `malloc` is
@@ -2796,10 +2898,10 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Channel names (7 × 32) | ~224 B |
 | Leveller state + lookahead (2 rings × 240 × 4, plus limiter caps) | ~2.0 KB (2,004 B) |
 | Per-channel preamp + master volume | ~48 B |
-| Output slot rings (`.slot_rings`, 2 × 16 KB at the top of RAM, shared SPDIF/I2S, no padding) | 32 KB |
+| Output slot rings (`.slot_rings`, 2 × 8 KB at the top of RAM, shared SPDIF/I2S, no padding; 2026-10-23) | 16 KB |
 | Input capture arena (SPDIF RX FIFO / I2S RX ring union, 4 KB aligned) | 12 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~110 KB** `.bss` (measured 112,876 B on 2026-10-12) plus the 32 KB `.slot_rings` section |
+| **Total BSS** | **~110 KB** `.bss` (measured 112,936 B on 2026-10-23) plus the 16 KB `.slot_rings` section |
 | RAM code+rodata+data (.data section, hot set only) | 67,984 B as of 2026-10-12, within the 72,704 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
 | Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 42,772 B (2026-10-12) |
@@ -2824,12 +2926,12 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Per-channel preamp (8 ch) + master volume | ~120 B |
 | Matrix mixer (8 × 9 crosspoints + outputs) | ~1.3 KB |
 | Loudness tables + per-output state (2 × 61 × 2 coeffs + 9 × 16 B) | ~3 KB |
-| Output slot rings (`.slot_rings`, 4 × 16 KB at the top of RAM, shared SPDIF/I2S, no padding) | 64 KB |
+| Output slot rings (`.slot_rings`, 4 × 8 KB at the top of RAM, shared SPDIF/I2S, no padding; 2026-10-23) | 32 KB |
 | Input capture arena (SPDIF RX FIFO / I2S RX rings / ADAT RX ring union, 8 KB aligned) | 32 KB |
-| ADAT TX ring (`adat_ring`, 960 × 32 B) | 30 KB |
+| ADAT TX ring (`adat_ring`, 576 × 32 B; 2026-10-23) | 18 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
-| **Total BSS** | **~277 KB** `.bss` (measured 283,304 B on 2026-10-12) plus the 64 KB `.slot_rings` section |
+| **Total BSS** | **~265 KB** `.bss` (measured 271,076 B on 2026-10-23) plus the 32 KB `.slot_rings` section |
 | RAM code+rodata+data (.data section, hot set only) | 95,800 B as of 2026-10-12, within the 100,352 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
 | Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 77,144 B (2026-10-12) |
@@ -2855,7 +2957,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | USB packet | 44-49 samples (~1 ms at 48 kHz) |
 | S/PDIF IEC block | 192 samples (IEC 60958-1 standard) |
 | S/PDIF DMA transfer | Free-running (whole ring; no fixed transfer quantum) |
-| S/PDIF slot ring | 1024 frames per slot (21.3 ms at 48 kHz); target fill `OUTPUT_RING_TARGET_FILL_FRAMES` (384, 50% of the 768-frame stats scale) |
+| S/PDIF slot ring | 512 frames per slot (10.7 ms at 48 kHz); target fill `output_ring_target_frames`, set by the output latency (192 at the 4 ms default; 25% of the 768-frame stats scale) |
 | Output slot staging | 192 frames per slot (one block), copied into the slot ring on admission |
 | PDM DMA ring | 2048 words |
 | PDM sample ring | 256 entries (Core 0 → Core 1) |
@@ -2864,9 +2966,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 
 | Path | Latency |
 |------|---------|
-| USB → S/PDIF | ~8 ms mean at 48 kHz (the 384-frame ring target fill) |
+| USB → S/PDIF | The output latency setting (default 4 ms) plus about half a 1 ms block; see "Output Latency" |
 | S/PDIF latency jitter | ±1 ms (±1 buffer of 48 samples) |
-| S/PDIF → PDM alignment | +2.67 ms (+128 samples) |
+| S/PDIF → PDM alignment | Ring target minus 256 samples (+2.67 ms at 8 ms; clamps the sub's delay below 256 frames); see PDM "Known alignment defect" |
 | Total end-to-end | ~10-15 ms |
 
 ### CPU Utilization
@@ -3440,6 +3542,7 @@ value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
 is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
+*Last updated: 2026-10-23 (bulk applies rebuild derived state once)*
 
 `REQ_SET_CS_BINDING` requires the full 24-byte payload; a short payload records
 `CS_STATUS_INVALID_VALUE` and is dropped. It otherwise validates only the slot
@@ -3461,6 +3564,15 @@ the directory cache (`control_surfaces_revert`: clears every slot through the
 normal release/claim path, then re-runs the boot loader `cs_load_stored`,
 which also reloads the stored names) with no flash write. A reboot is an
 implicit revert.
+
+The per-slot work and the state derived from the whole binding set are split.
+`cs_apply_binding_slot()` releases, validates, claims and seeds one slot, and
+`cs_bindings_changed()` recounts the any-active flag and rebuilds the button
+gesture groups, which only the tick reads. `control_surfaces_apply_binding()`
+is the two together. The revert's teardown and `cs_load_stored()` run the
+per-slot half for every slot and the derived half once, so a reload costs one
+group rebuild instead of one per slot. The revert clears the groups before the
+reload, so gesture state restarts as at boot, as it did before.
 
 `control_surfaces_init()` runs last in `core0_init()` (after
 all pin claims and `notify_init`); a stored binding whose pins now collide is
@@ -3948,7 +4060,7 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+*Last updated: 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -3964,7 +4076,9 @@ lands on a hot path and the audio path is untouched.
 
 | Command | Code | Direction | Description |
 |---------|------|-----------|-------------|
-| REQ_SET_CS_AUX_STATE | 0x04 | OUT | Set an auxiliary output on/off (wValue = binding slot 0-15, 1 byte, non-zero = on). Immediate, runtime only, no flash, no dirty flag; pushes `NOTIFY_EVT_CS_AUX` on a change. Rejected with `CS_STATUS_INVALID_AUX` unless the slot is an aux output that is up, or `CS_STATUS_INVALID_VALUE` on a short payload (USB acknowledges the OUT stage; read `REQ_GET_CS_STATUS`). Auxiliary output *configuration* is an ordinary binding (`REQ_SET_CS_BINDING`), not a command of its own; 0x02 and 0x03 are unallocated |
+| REQ_OUTPUT_LATENCY | 0x03 | OUT | Select the output latency option: 1-byte `OutputLatencyId` (1 = 0.67 ms and 2 = 1 ms low latency, 3/4/5/6/7 = 2/3/4/6/8 ms). Deferred to the main loop: directory write plus a full synchronized output restart (one short mute). Re-sending the stored option is a no-op; an unknown ID is ignored over USB and returns ERROR over UART/I2C. See "Output Latency" |
+| REQ_OUTPUT_LATENCY | 0x03 | IN | Same opcode, IN direction. wValue 0: 12-byte `OutputLatencyStatus` (requested and effective ID, effective us at the current rate, target frames, batch frames, pending, option count). wValue 1: the option table, `option_count` x 8-byte `OutputLatencyOptionWire` (ID, flags incl. available-now bit 0x80, nominal latency and batch us, effective us now). Other wValues STALL |
+| REQ_SET_CS_AUX_STATE | 0x04 | OUT | Set an auxiliary output on/off (wValue = binding slot 0-15, 1 byte, non-zero = on). Immediate, runtime only, no flash, no dirty flag; pushes `NOTIFY_EVT_CS_AUX` on a change. Rejected with `CS_STATUS_INVALID_AUX` unless the slot is an aux output that is up, or `CS_STATUS_INVALID_VALUE` on a short payload (USB acknowledges the OUT stage; read `REQ_GET_CS_STATUS`). Auxiliary output *configuration* is an ordinary binding (`REQ_SET_CS_BINDING`), not a command of its own; 0x02 is unallocated |
 | REQ_GET_CS_AUX_STATE | 0x05 | IN | Get an auxiliary output's state (wValue = binding slot: 1 byte; wValue = 0xFFFF: 48 bytes, state[16] then sixteen little-endian 8.8 percent levels, zero on slots that are not up aux outputs) |
 | REQ_SET_CS_AUX_LEVEL | 0x06 | OUT | Set an auxiliary output's level (wValue = binding slot, 2 bytes little-endian 8.8 percent, clamped to 100 % = 25600). Immediate, runtime only; pushes `NOTIFY_EVT_CS_AUX` on a change. Rejected with `CS_STATUS_INVALID_AUX` unless the slot is an up `CS_TYPE_AUX_PWM` |
 | REQ_GET_CS_AUX_LEVEL | 0x07 | IN | Get an auxiliary output's level (wValue = binding slot; 2 bytes little-endian 8.8 percent, 0 on a `CS_TYPE_AUX_OUT` slot) |
@@ -4045,7 +4159,7 @@ lands on a hot path and the audio path is untouched.
 | REQ_UPMIX_SET_PARAM | 0x4C | OUT | Set one upmixer field: `wValue` = `UPMIX_PARAM_*` (0..13; 13 = presence dB), payload = 4-byte LE float (mode/enable rounded to int; RP2350 only, RP2040 STALLs) |
 | REQ_UPMIX_GET_PARAM | 0x4D | IN | Get one upmixer field (`wValue` = `UPMIX_PARAM_*`, returns 4-byte float; RP2040 returns 0.0). Unknown param STALLs |
 | REQ_UPMIX_GET_STATUS | 0x4E | IN | Get 16-byte `UpmixStatus` (active, parked_reason, corr_q14, balance_q14, center/ls/rs gains; RP2040 returns 16 zero bytes). 0x4F reserved |
-| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering) |
+| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset; on `DSPI_LOOP_PROF` bench builds 64+n = worst time in main-loop section n since its last read (`loop_prof.h`) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
 | REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config and output limiter settings to the directory's device-global blocks (independent mode; was the deprecated REQ_LOAD_PARAMS) |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
@@ -4340,7 +4454,7 @@ Full specification: `Documentation/Features/i2s_output_spec.md`
 ---
 
 ## ADAT Bulk Output
-*Last updated: 2026-10-11 (output rings: synchronous skip mirror, keep-alive, measured resync anchor, 960-frame ring; lead bound `ADAT_MAX_LEAD_FRAMES` on the resync and skip mirror). Previously, 2026-07-13 (LUT-driven NRZI encoder; single float->S24 conversion point shared with the slots)*
+*Last updated: 2026-10-23 (576-frame ring for the 512-frame slot rings). Previously 2026-10-11 (output rings: synchronous skip mirror, keep-alive, measured resync anchor, 960-frame ring; lead bound `ADAT_MAX_LEAD_FRAMES` on the resync and skip mirror). Previously, 2026-07-13 (LUT-driven NRZI encoder; single float->S24 conversion point shared with the slots)*
 
 RP2350 only. Streams all 8 main output channels (post-matrix, post per-output
 EQ/gain/delay/mute, the same finalized samples the SPDIF/I2S slots receive) as
@@ -4359,7 +4473,7 @@ see "Clock Servo"), and because ADAT TX derives from `sys_clk` like the SPDIF/I2
 slots it stays rate-locked to them with zero long-term drift by construction, no
 per-clock coordination needed. Frames (256 bits: `[1][10x0][1][u3..u0]` then 8 x 6 x `[1][nibble]`, user
 bits 0) are encoded on Core 0 in `process_input_block()` after the slot gives
-and written into a 960-frame (30 KB BSS) ring drained by DMA CH13, with CH14 as
+and written into a 576-frame (18 KB BSS) ring drained by DMA CH13, with CH14 as
 an IRQ-less control channel that rewrites the read address at the ring end.
 
 Encoding is LUT-driven. Each PCM byte stuffs to a fixed 10-bit token
@@ -4400,7 +4514,7 @@ Silence frames carry an even number of ones (2 in the header, 48 forced stuffing
 
 **Resync anchor.** `adat_output_resync()` fills the whole ring with silence, then with interrupts off measures slot 0's signed fill, sets the write pointer to 96 + fill frames ahead of the DMA start (or to 96 with the difference recorded as excess when slot 0 is in deficit; or clamped to `ADAT_MAX_LEAD_FRAMES` with `slip_count` incremented if slot 0 reports more fill than admission allows, so a broken reading can never index past the ring), arms the DMA and starts the SM. ADAT sits on PIO1 and cannot join the slots' synchronized start, so the anchor is exact to within one frame of slot 0's sub-frame position. It runs after every synchronized output restart (`complete_pipeline_reset` Phase 6, `enable_outputs_in_sync`), at boot, and for a local resync. Before 2026-10-11 the resync always seeded exactly 96 frames and ignored the slots' fill, so the ADAT-to-slot offset varied with how far slot 0 had played or been prefilled at that moment.
 
-**Ring size.** The ring must hold the cushion plus a full slot ring: 96 + (1024 - 192) = 928 frames (`ADAT_MAX_LEAD_FRAMES`), so `ADAT_RING_FRAMES` is 960 (static-asserted, along with the assumption that the I2S slot fill cap is no larger than the S/PDIF one). The pool-era 896 frames only covered the 768-frame blocking-give cap.
+**Ring size.** The ring must hold the cushion plus a full slot ring: 96 + (512 - 64) = 544 frames (`ADAT_MAX_LEAD_FRAMES`), so `ADAT_RING_FRAMES` is 576 (960 for the 1024-frame rings before 2026-10-23) (static-asserted, along with the assumption that the I2S slot fill cap is no larger than the S/PDIF one). The pool-era 896 frames only covered the 768-frame blocking-give cap.
 
 **Config/state machine:** vendor commands 0xCA-0xCE (see reference table)
 record intent and set `adat_output_config_dirty`; the main loop applies it
@@ -4702,7 +4816,7 @@ All programs: in_base = data pin, IN shift left, autopush 32, RX FIFO joined, 24
 
 **Slave resync invariant.** `complete_pipeline_reset()` and `enable_outputs_in_sync()` rewind the I2S TX clock master to its PIO entry point, resetting LRCLK phase. A running slave-role input SM would misframe permanently, so both functions end with `i2s_input_resync()`: a no-op unless the input is RUNNING in the slave role, otherwise disable SM, drain the RX FIFO into the ring, re-anchor the read pointer at the DMA write address, restart the SM at its sync preamble. This makes the invariant structural; no call site needs to remember it.
 
-**Startup prefill (ring target fill).** I2S input uses the same prefill handshake as SPDIF so outputs start against an output ring at `OUTPUT_RING_TARGET_FILL_FRAMES` instead of whatever low fill (~18%) the startup transient leaves; the extra margin absorbs main-loop scheduling jitter (a delayed `i2s_input_poll()` under load would otherwise risk an underrun). The handshake lives in the main-loop I2S block and is gated on `preset_loading` (set by every disruptive op via `prepare_pipeline_reset`, which also clears the `i2s_prefilling` flag so the handshake restarts cleanly): once the DAC-mute hold has elapsed it calls `drain_and_disable_outputs()`, clears `preset_loading`, sets `i2s_prefilling`; then on each later iteration, when `get_slot_consumer_fill(0)` reaches 50% it calls `enable_outputs_in_sync()` and releases the DAC mute. Unlike SPDIF there is no lock to wait for, so the bring-up helper `i2s_input_bringup_prefill()` (used by the input-source switch and boot) applies the rate and MCK, starts the input, and deliberately does NOT enable outputs; it leaves that to the main-loop block. When the selected rate differs from the live rate, `perform_rate_change()` still runs its full reset (so SPDIF TX dividers reprogram via instance teardown/restart), briefly enabling outputs that emit muted silence before the block re-drains and prefills.
+**Startup prefill (ring target fill).** I2S input uses the same prefill handshake as SPDIF so outputs start against an output ring at the fill target (`output_ring_target_frames`) instead of whatever low fill (~18%) the startup transient leaves; the extra margin absorbs main-loop scheduling jitter (a delayed `i2s_input_poll()` under load would otherwise risk an underrun). The handshake lives in the main-loop I2S block and is gated on `preset_loading` (set by every disruptive op via `prepare_pipeline_reset`, which also clears the `i2s_prefilling` flag so the handshake restarts cleanly): once the DAC-mute hold has elapsed it calls `drain_and_disable_outputs()`, clears `preset_loading`, sets `i2s_prefilling`; then on each later iteration, when `get_slot_consumer_fill(0)` reaches 50% it calls `enable_outputs_in_sync()` and releases the DAC mute. Unlike SPDIF there is no lock to wait for, so the bring-up helper `i2s_input_bringup_prefill()` (used by the input-source switch and boot) applies the rate and MCK, starts the input, and deliberately does NOT enable outputs; it leaves that to the main-loop block. When the selected rate differs from the live rate, `perform_rate_change()` still runs its full reset (so SPDIF TX dividers reprogram via instance teardown/restart), briefly enabling outputs that emit muted silence before the block re-drains and prefills.
 
 How the pools get filled depends on the input's clock role, because the prefill drain stops ALL outputs:
 
@@ -5187,7 +5301,8 @@ sweep timing is exact. Sweeps and walked continuous signals additionally get
 per-cycle attack/release windows, and per-cycle synth state resets so repeated
 sweeps are bit-identical (needed for coherent averaging in room correction).
 
-**Pump.** When the generator is running and no source is streaming, the main loop
+**Pump.** When the generator is running and no source is streaming, each input
+delivery point (`pipeline_service_producer()` in `main.c`, twice per main-loop pass)
 calls `siggen_pump()` (`audio_pipeline.c`), feeding zero-input blocks through the
 full pipeline paced by the slot-0 consumer fill level (top-up to the ring target fill). It
 stands down while a source streams, an input-source change or output-type switch is
@@ -5196,7 +5311,8 @@ seamlessly takes over pacing.
 
 **Lifecycle.** Transient only: off at boot, never persisted; `siggen_stop_immediate
 (SIGGEN_STOP_PRESET)` hard-stops it on preset load and factory reset. `main.c`
-calls `siggen_service()` + `siggen_pump()` each main-loop iteration;
+calls `siggen_service()` once per main-loop pass and `siggen_pump()` at each input
+delivery point (2026-10-23);
 `siggen_service()` applies staged configs after a fade-out (SET/START while
 running restarts) and pushes the deferred `NOTIFY_EVT_SIGGEN_STATE` (0x07)
 start/stop/completion notification. Vendor commands `0xA4..0xA8` cover
@@ -5210,7 +5326,7 @@ datum is `siggen_raw_mask`, written by Core 0 between blocks.
 ---
 
 ## Spectrum Analyser (RTA / FFT)
-*Last updated: 2026-10-20 (applied configurations announced with NOTIFY_EVT_RTA_CONFIG); 2026-09-12 (shared elliptic b0 and RP2350 -O3 bass kernel; Blackman-Harris FFT window; sixth-order bass bands; continuous bass bank and V3 protocol; FFT ceiling lowered to 1024 points; 2026-09-07: single transform, bass stream and bass bank removed)*
+*Last updated: 2026-10-23 (FINISH sliced into 64-bin steps and PUBLISH split out, for main-loop latency); 2026-10-20 (applied configurations announced with NOTIFY_EVT_RTA_CONFIG); 2026-09-12 (shared elliptic b0 and RP2350 -O3 bass kernel; Blackman-Harris FFT window; sixth-order bass bands; continuous bass bank and V3 protocol; FFT ceiling lowered to 1024 points; 2026-09-07: single transform, bass stream and bass bank removed)*
 
 One FFT engine (`rta.c`, kernel in `rta_fft.c`, generated tables in
 `rta_tables.h` from `scripts/gen_rta_tables.py`) that can be pointed at any set
@@ -5242,8 +5358,21 @@ pre-empts `process_input_block()`.
 
 **Frame machine.** `FILL` (taps copy) to `FFT` (one bounded kernel step per
 `rta_service()` call: prescale, radix-4 stages, permutation, real split) to
-`FINISH` (frequency-domain Blackman-Harris, bin powers, band sums, level bytes, publish)
-and then the next live channel. `rta_service()` sits next to `siggen_service()`
+`FINISH` (frequency-domain Blackman-Harris, bin powers, band sums, level bytes;
+`RTA_FINISH_BINS_PER_STEP` = 64 bins per call through `rta_fft_finish_step()`) to
+`PUBLISH` (band EMA/peaks, bin frame header, advance) and then the next live channel.
+Before 2026-10-23 FINISH and publish ran as one call of about 530 µs on RP2350,
+which was the longest main-loop pass in the firmware (600 µs worst pass with the
+analyser running against 70 µs without) and halved the low-latency option's
+margin. Sliced, the worst pass with the analyser running is about 210 µs. The
+remaining cost is mostly the order-independent PUBLISH step (about 175 µs worst
+pass at orders 8 and 9) plus the order-10 butterfly stages. The FINISH steps
+write the bin levels into a staging buffer (`bin_stage`, 512 bytes) and PUBLISH
+copies it into the bin frame together with the header and tail. Vendor reads
+are served on the same main loop, so a read never sees a half-written frame.
+Writing the frame in place across the steps, as first done, left its tail
+invalid for eight passes per frame and failed `rta_bin_frame_seq_consistency`
+under a heavy configuration. *Updated 2026-10-23.* `rta_service()` sits next to `siggen_service()`
 in the main loop. Per-channel refresh interval = (fill + transform) x live
 channel count; at 1024 points and 48 kHz that is 21 ms per channel, 171 ms
 with eight channels live. If the channel being filled stops being live (USB

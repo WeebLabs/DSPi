@@ -19,6 +19,8 @@
 #include "config.h"
 #include "audio_input.h"
 #include "audio_pipeline.h"
+#include "output_latency.h"
+#include "loop_prof.h"   // DSPI_LOOP_PROF section marks (empty otherwise)
 #include "spdif_input.h"
 #include "soft_vcxo.h"
 #include "clock_diag.h"
@@ -177,6 +179,9 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
 
     // Slots set up from here on (type switches) start at the new rate.
     output_rate_hz = new_freq;
+    // The latency target and input batch are in frames, so they follow the
+    // rate; before the filter recompute below, which derives the sub alignment.
+    output_latency_apply(new_freq, active_input_source);
 
     // Keep the global rate coherent for device-initiated changes (SPDIF
     // lock, I2S rate select). The USB host path already wrote it; for the
@@ -1012,10 +1017,12 @@ static void limiter_engage_service(void) {
     pipeline_hold_soft_mute(samples_for_duration_ms(fs, PIPELINE_FADE_REQUEST_MS));
 }
 
-// One service pass over whatever is producing blocks.  Used by the blocking
-// spin in prepare_pipeline_reset(); the non-blocking gate relies on the main
-// loop's own calls instead.
-static void pipeline_service_producer(void) {
+// One delivery pass over the active producer.  The main loop sets lock_gated so a
+// clock-slave I2S input delivers only while LOCKED (pre-lock it would run at a
+// foreign rate and drain the prefill's mute counter).  The reset spins clear it,
+// so a fade completes on whatever still arrives.
+static void pipeline_service_producer(bool lock_gated) {
+    input_delivery_mark();
     if (active_input_source == INPUT_SOURCE_USB) {
         usb_audio_drain_ring();
     } else if (input_source_is_spdif(active_input_source)) {
@@ -1025,7 +1032,9 @@ static void pipeline_service_producer(void) {
         adat_input_poll();
 #endif
     } else if (active_input_source == INPUT_SOURCE_I2S) {
-        i2s_input_poll();
+        if (!lock_gated || i2s_clock_mode != I2S_CLOCK_MODE_SLAVE ||
+            i2s_slave_get_state() == I2S_SLAVE_LOCKED)
+            i2s_input_poll();
     }
     // Generator audio has to fade out like any other source, and the pump is
     // the only block source when no input is streaming.  No-op when idle.
@@ -1084,7 +1093,7 @@ static bool pipeline_fade_to_silence_poll(void) {
 // PIPELINE_FADE_CAP_US.
 static void pipeline_settle_to_silence(void) {
     while (!pipeline_fade_to_silence_poll()) {
-        pipeline_service_producer();
+        pipeline_service_producer(false);
         tight_loop_contents();
     }
 }
@@ -1382,7 +1391,7 @@ static void complete_pipeline_reset(void) {
     // prefill-handshake signal.
     {
         uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
-        uint32_t dwell = OUTPUT_RING_TARGET_FILL_FRAMES +
+        uint32_t dwell = output_ring_target_frames +
             samples_for_duration_ms(fs, (uint32_t)dac_hw_mute_release_ms());
         if (preset_loading) {
             if (preset_mute_counter < dwell) preset_mute_counter = dwell;
@@ -1527,18 +1536,7 @@ static bool i2s_suspended_for_flash = false;
 static void prepare_flash_write_operation(void) {
     // Drain the current input source once before the mute engages so the
     // envelope starts from the freshest possible state.
-    if (active_input_source == INPUT_SOURCE_USB) {
-        usb_audio_drain_ring();
-    } else if (input_source_is_spdif(active_input_source)) {
-        spdif_input_poll();
-    } else if (active_input_source == INPUT_SOURCE_I2S) {
-        i2s_input_poll();
-    }
-#if PICO_RP2350
-    else if (active_input_source == INPUT_SOURCE_ADAT) {
-        adat_input_poll();
-    }
-#endif
+    pipeline_service_producer(false);
 
     prepare_pipeline_reset(samples_for_duration_ms(audio_state.freq,
                                                    FLASH_WRITE_PREMUTE_MS));
@@ -1552,7 +1550,7 @@ static void prepare_flash_write_operation(void) {
         uint64_t start_us = time_us_64();
         while ((time_us_64() - start_us) < FLASH_WRITE_FADE_SETTLE_US
                || !dac_hw_mute_hold_elapsed()) {
-            pipeline_service_producer();
+            pipeline_service_producer(false);
             tight_loop_contents();
         }
     }
@@ -1725,6 +1723,10 @@ void core0_init() {
     // and seed the timing baselines.  No-op when DSPI_CLOCK_DIAG is 0.
     clock_diag_init();
 
+    // Live latency state for the default option until the stored one loads
+    // (after preset_boot_load below); nothing streams before then.
+    output_latency_apply(48000u, INPUT_SOURCE_USB);
+
     // [CRITICAL FIX]
     // Initialize USB/SPDIF *BEFORE* PDM.
     // SPDIF requires DMA Channel 0 (hardcoded in config).
@@ -1746,6 +1748,8 @@ void core0_init() {
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
+    output_latency_request(preset_get_output_latency());
+    output_latency_apply(48000u, active_input_source);
 
     {
         uint32_t flags = save_and_disable_interrupts();
@@ -1934,6 +1938,227 @@ void core0_init() {
     rta_init();
 }
 
+// Lock, prefill and signal-loss handshakes of the active input. Once per main
+// loop pass, ahead of the delivery poll (pipeline_service_producer).
+static void input_service_handshakes(void) {
+    // In non-USB modes, defensively flush so any packet pushed by the ISR
+    // in the brief window straddling an active_input_source change can't
+    // sit stale until the next USB→x switch.
+    if (active_input_source != INPUT_SOURCE_USB) {
+        usb_audio_flush_ring();
+    }
+
+    if (input_source_is_spdif(active_input_source)) {
+        SpdifInputState rx_state = spdif_input_get_state();
+
+        // Handle lock acquisition: drain outputs, prefill, then start.
+        // Gated on dac_hw_mute_hold_elapsed() so the DAC hardware-mute
+        // hold armed by prepare_pipeline_reset() (on the USB->SPDIF
+        // switch, boot-into-SPDIF, or re-lock) completes BEFORE
+        // drain_and_disable_outputs() stops the output clocks.  In the
+        // normal case lock takes far longer than hold_ms so this is
+        // already satisfied; the guard only adds a few non-blocking
+        // poll iterations on an instant re-lock.  Returns true with
+        // zero latency when the feature is disabled.
+        if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling
+                && dac_hw_mute_hold_elapsed()) {
+            spdif_input_check_rate_change();
+            // Disable outputs and drain consumer buffers so they can
+            // be prefilled with real audio before playback begins.
+            drain_and_disable_outputs();
+            preset_loading = false;
+            preset_mute_counter = 0;
+            spdif_prefilling = true;
+            spdif_input_discard_queued();   // prefill starts from live input
+        }
+
+        // Prefill: wait for the slot 0 ring to reach the target fill before enabling outputs
+        if (spdif_prefilling) {
+            if (slot_fill_at_target(0)) {
+                enable_outputs_in_sync();
+                spdif_prefilling = false;
+                // Release the DAC hardware mute that prepare_pipeline_reset()
+                // asserted on the USB→SPDIF switch (or boot-into-SPDIF, or
+                // re-lock after lock loss).  The SPDIF lock-acquisition flow
+                // intentionally skips complete_pipeline_reset() so output stays
+                // muted until lock + prefill complete; without this release the
+                // XSMT pin would stay asserted indefinitely and the DAC's analog
+                // stage would never un-mute.  Order matches complete_pipeline_reset()
+                // Phase 4: clocks running (enable_outputs_in_sync above) BEFORE
+                // mute release begins, so either immediate deassert or the
+                // delayed release_ms deadline happens with valid BCK/LRCLK.
+                dac_hw_mute_release();
+            }
+        }
+
+        // Handle lock loss: mute output immediately
+        if (rx_state == SPDIF_INPUT_RELOCKING && !preset_loading && !spdif_prefilling) {
+            prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+            spdif_prefilling = false;
+            pipeline_reset_cpu_metering();
+        }
+    }
+
+#if PICO_RP2350
+    // ADAT input.  Both clock modes run the SPDIF-style
+    // lock-gated flow: frame sync must be found and verified before audio
+    // flows, and outputs prefill against real input audio.  Master mode
+    // simply has no rate detection or servo behind the same states.
+    else if (active_input_source == INPUT_SOURCE_ADAT) {
+        AdatInputState ad_state = adat_input_get_state();
+
+        // Lock acquired: drain outputs, prefill, then start (same gating
+        // as the SPDIF block; see its comment for the DAC-mute hold).
+        // In slave mode a detected-rate mismatch defers a rate change
+        // instead; prefill re-triggers once the pipeline rate matches.
+        if (ad_state == ADAT_INPUT_LOCKED && preset_loading && !adat_prefilling
+                && dac_hw_mute_hold_elapsed()) {
+            if (!adat_input_check_rate_change()) {
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                adat_prefilling = true;
+                adat_input_discard_queued();   // prefill starts from live input
+            }
+        }
+
+        // The LOCKED gate matters (mirrors the I2S slave prefill): never
+        // enable outputs against a receiver that lost sync mid-prefill.
+        if (adat_prefilling && ad_state == ADAT_INPUT_LOCKED &&
+            slot_fill_at_target(0)) {
+            enable_outputs_in_sync();
+            adat_prefilling = false;
+            // Release the DAC hardware mute now that clocks are running
+            // (Phase 4 ordering, same as the SPDIF prefill path).
+            dac_hw_mute_release();
+        }
+
+        // Sync or signal loss: mute. No receiver restart is needed
+        // (unlike the I2S slave's stalled wait-driven SMs): the RX PIO
+        // free-runs and the poll re-acquires frame sync in software.
+        if (ad_state == ADAT_INPUT_RELOCKING && !preset_loading) {
+            prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+            pipeline_reset_cpu_metering();
+        }
+    }
+#endif
+
+    else if (active_input_source == INPUT_SOURCE_I2S &&
+             i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
+        // Clock-slave mode: SPDIF-style lock-gated flow.  The external
+        // master owns BCK/LRCLK, so outputs stay muted/drained until the
+        // measured external rate locks; the input keeps producing during
+        // the prefill (its clocks never stop), so the rings fill with
+        // real audio like the SPDIF path.
+        i2s_slave_poll();
+        I2sSlaveState sl_state = i2s_slave_get_state();
+
+        if (sl_state == I2S_SLAVE_LOCKED && preset_loading && !i2s_prefilling
+                && dac_hw_mute_hold_elapsed()) {
+            if (!i2s_slave_check_rate_change()) {
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                i2s_prefilling = true;
+                i2s_input_discard_queued();   // prefill starts from live input
+            }
+            // else: the deferred rate change restarts the input; prefill
+            // re-triggers when it re-locks at the new pipeline rate.
+        }
+
+        // The LOCKED gate matters: if clocks drop mid-prefill the fill
+        // must not re-enable outputs against a possibly misframed RX;
+        // the RELOCKING restart below re-frames everything first.  This
+        // enable is a deliberate second start after the one inside any
+        // preceding complete_pipeline_reset(): the reset's start may
+        // have been ungated (clocks absent), so the gated re-enable
+        // here is what actually re-establishes the inter-type offset.
+        // Do not "optimize" it away.
+        if (i2s_prefilling && sl_state == I2S_SLAVE_LOCKED &&
+            slot_fill_at_target(0)) {
+            enable_outputs_in_sync();
+            i2s_prefilling = false;
+            // Release the DAC hardware mute now that clocks are running
+            // (Phase 4 ordering, same as the SPDIF prefill path).
+            dac_hw_mute_release();
+        }
+
+        // Clock loss or external rate change: mute (if not already
+        // muted), then ALWAYS restart the receiver so its SMs (possibly
+        // stalled mid-word) re-frame on the returning clocks; the
+        // prefill's enable_outputs_in_sync() re-frames the external-clock
+        // TX SMs the same way.  The restart must not be skipped while
+        // preset_loading is set (startup mute hold, armed rate change):
+        // RELOCKING could otherwise re-acquire straight to LOCKED with a
+        // misframed receiver.  Covers loss during an in-flight prefill
+        // too (prepare_pipeline_reset clears i2s_prefilling).  One-shot:
+        // the restart re-arms measurement into ACQUIRING.
+        if (sl_state == I2S_SLAVE_RELOCKING) {
+            if (!preset_loading) {
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                pipeline_reset_cpu_metering();
+            }
+            i2s_input_stop();
+            i2s_input_start(i2s_input_should_be_master());
+        }
+    }
+    // Master clock mode: no lock handling and no clock servo (the input
+    // is synchronous to our own clock domain), but it DOES use the same
+    // prefill handshake as SPDIF so outputs start against the target consumer
+    // fill instead of whatever low level the startup transient leaves.
+    // Trigger is preset_loading (set by every disruptive op via
+    // prepare_pipeline_reset); there is no lock to wait for, so prefill
+    // begins as soon as the DAC-mute hold has elapsed.
+    else if (active_input_source == INPUT_SOURCE_I2S) {
+        bool i2s_master = i2s_input_is_clock_master();
+
+        if (preset_loading && !i2s_prefilling && dac_hw_mute_hold_elapsed()) {
+            // Disable outputs and reset their rings so they can be
+            // prefilled before playback begins.
+            drain_and_disable_outputs();
+            preset_loading = false;
+            preset_mute_counter = 0;
+            i2s_prefilling = true;
+            i2s_input_discard_queued();   // prefill starts from live input
+        }
+
+        if (i2s_prefilling &&
+            slot_fill_at_target(0)) {
+            enable_outputs_in_sync();
+            i2s_prefilling = false;
+            // Release the DAC hardware mute now that clocks are running
+            // (Phase 4 ordering, same as the SPDIF prefill path).
+            dac_hw_mute_release();
+        } else if (i2s_prefilling && !i2s_master) {
+            // Slave role: the drain above stopped the I2S output clock
+            // master that supplies the input's BCK/LRCLK, so the input
+            // produces no samples and i2s_input_poll() cannot fill the
+            // rings. Synthesize a silent block instead; real audio resumes
+            // after enable_outputs_in_sync() restarts the clock master and
+            // re-phases the input ring (i2s_input_resync). Master role
+            // self-clocks and fills with real audio via the delivery poll.
+            i2s_input_prefill_silence(output_ring_block_cap);
+        }
+    }
+}
+
+// Clock servo of the active input. Each servo rate-limits by call count, so
+// this runs exactly once per pass, unlike the delivery poll.
+static void input_service_servos(void) {
+    if (input_source_is_spdif(active_input_source)) {
+        spdif_input_update_clock_servo();
+    }
+#if PICO_RP2350
+    else if (active_input_source == INPUT_SOURCE_ADAT) {
+        adat_input_update_clock_servo();   // slave mode + LOCKED only
+    }
+#endif
+    else if (active_input_source == INPUT_SOURCE_I2S &&
+             i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
+        i2s_slave_update_clock_servo();
+    }
+}
+
 int main(void) {
     // Initial LED on to show we're alive
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
@@ -1951,6 +2176,7 @@ int main(void) {
     while (1) {
         // Update watchdog
         watchdog_update();
+        LOOP_PROF(0);
 
         // Bench diagnostics: cheap per-iteration sampling (fc0 service, loop
         // gap, min consumer fill, PWM-pacer movement).  No-op when the flag
@@ -1962,17 +2188,20 @@ int main(void) {
         // iteration.  Audio RX and feedback tx happen from USB IRQ via our
         // UAC1 class driver callbacks, so tud_task() is not latency-critical
         // for the audio stream itself.
+        LOOP_PROF(1);
         tud_task();
 
         // Fire any queued device→host notifications to EP 0x83.  Emit is
         // deferred from update_master_volume() to here so we never call
         // usbd_edpt_xfer from within a control-transfer DATA stage.
+        LOOP_PROF(2);
         usb_notify_tick();
 
         // External control transports: parse any complete UART/I2C frames
         // and dispatch them through the shared vendor-command surface.
         // Both are cheap no-ops while disabled and never block; heavy work
         // (bulk apply, flash) stays on the existing deferred paths below.
+        LOOP_PROF(3);
         uart_ctrl_poll();
         i2c_ctrl_poll();
 
@@ -1989,251 +2218,31 @@ int main(void) {
         // Control Surfaces poll: debounce buttons/switches, decode encoders,
         // read pots, drive LEDs.  Internally throttled to 1 kHz; immediate
         // no-op while no binding is active.
+        LOOP_PROF(4);
         control_surfaces_tick();
 
         // Test-signal generator: apply staged configs and emit deferred
-        // notifications, then drive the pipeline with generator blocks when
-        // no input source is streaming.  Both are immediate no-ops while the
-        // generator is idle.
+        // notifications.  Its blocks are pumped at the delivery points
+        // (pipeline_service_producer).  Immediate no-op while idle.
+        LOOP_PROF(5);
         siggen_service();
-        siggen_pump();
 
         // Keep enabled output rings silent ahead of the reader when no
         // producer is running (no-op while streaming).
+        LOOP_PROF(12);
         output_rings_idle_pump();
 
         // Spectrum analyser: apply staged config, one bounded transform
         // step, auto-off.  Immediate no-op while idle.
+        LOOP_PROF(6);
         rta_service();
 
-        // Drain USB audio ring — highest priority (only when USB is active input).
-        // USB ISR pushes raw packets into the ring; we run the full DSP
-        // pipeline here in main-loop context instead of USB IRQ context.
-        // In non-USB modes, defensively flush so any packet pushed by the ISR
-        // in the brief window straddling an active_input_source change can't
-        // sit stale until the next USB→x switch.
-        if (active_input_source == INPUT_SOURCE_USB) {
-            usb_audio_drain_ring();
-        } else {
-            usb_audio_flush_ring();
-        }
+        LOOP_PROF(7);
+        input_service_handshakes();
+        pipeline_service_producer(true);
+        input_service_servos();
 
-        // Poll SPDIF input when active
-        if (input_source_is_spdif(active_input_source)) {
-            SpdifInputState rx_state = spdif_input_get_state();
-
-            // Handle lock acquisition: drain outputs, prefill, then start.
-            // Gated on dac_hw_mute_hold_elapsed() so the DAC hardware-mute
-            // hold armed by prepare_pipeline_reset() (on the USB->SPDIF
-            // switch, boot-into-SPDIF, or re-lock) completes BEFORE
-            // drain_and_disable_outputs() stops the output clocks.  In the
-            // normal case lock takes far longer than hold_ms so this is
-            // already satisfied; the guard only adds a few non-blocking
-            // poll iterations on an instant re-lock.  Returns true with
-            // zero latency when the feature is disabled.
-            if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling
-                    && dac_hw_mute_hold_elapsed()) {
-                spdif_input_check_rate_change();
-                // Disable outputs and drain consumer buffers so they can
-                // be prefilled with real audio before playback begins.
-                drain_and_disable_outputs();
-                preset_loading = false;
-                preset_mute_counter = 0;
-                spdif_prefilling = true;
-            }
-
-            // Prefill: wait for the slot 0 ring to reach the target fill before enabling outputs
-            if (spdif_prefilling) {
-                if (slot_fill_at_target(0)) {
-                    enable_outputs_in_sync();
-                    spdif_prefilling = false;
-                    // Release the DAC hardware mute that prepare_pipeline_reset()
-                    // asserted on the USB→SPDIF switch (or boot-into-SPDIF, or
-                    // re-lock after lock loss).  The SPDIF lock-acquisition flow
-                    // intentionally skips complete_pipeline_reset() so output stays
-                    // muted until lock + prefill complete; without this release the
-                    // XSMT pin would stay asserted indefinitely and the DAC's analog
-                    // stage would never un-mute.  Order matches complete_pipeline_reset()
-                    // Phase 4: clocks running (enable_outputs_in_sync above) BEFORE
-                    // mute release begins, so either immediate deassert or the
-                    // delayed release_ms deadline happens with valid BCK/LRCLK.
-                    dac_hw_mute_release();
-                }
-            }
-
-            // Handle lock loss: mute output immediately
-            if (rx_state == SPDIF_INPUT_RELOCKING && !preset_loading && !spdif_prefilling) {
-                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
-                spdif_prefilling = false;
-                pipeline_reset_cpu_metering();
-            }
-
-            // Read FIFO audio and feed DSP pipeline
-            spdif_input_poll();
-
-            // Adjust output PIO dividers to track SPDIF input clock
-            spdif_input_update_clock_servo();
-        }
-
-#if PICO_RP2350
-        // Poll ADAT input when active.  Both clock modes run the SPDIF-style
-        // lock-gated flow: frame sync must be found and verified before audio
-        // flows, and outputs prefill against real input audio.  Master mode
-        // simply has no rate detection or servo behind the same states.
-        else if (active_input_source == INPUT_SOURCE_ADAT) {
-            AdatInputState ad_state = adat_input_get_state();
-
-            // Lock acquired: drain outputs, prefill, then start (same gating
-            // as the SPDIF block; see its comment for the DAC-mute hold).
-            // In slave mode a detected-rate mismatch defers a rate change
-            // instead; prefill re-triggers once the pipeline rate matches.
-            if (ad_state == ADAT_INPUT_LOCKED && preset_loading && !adat_prefilling
-                    && dac_hw_mute_hold_elapsed()) {
-                if (!adat_input_check_rate_change()) {
-                    drain_and_disable_outputs();
-                    preset_loading = false;
-                    preset_mute_counter = 0;
-                    adat_prefilling = true;
-                }
-            }
-
-            // The LOCKED gate matters (mirrors the I2S slave prefill): never
-            // enable outputs against a receiver that lost sync mid-prefill.
-            if (adat_prefilling && ad_state == ADAT_INPUT_LOCKED &&
-                slot_fill_at_target(0)) {
-                enable_outputs_in_sync();
-                adat_prefilling = false;
-                // Release the DAC hardware mute now that clocks are running
-                // (Phase 4 ordering, same as the SPDIF prefill path).
-                dac_hw_mute_release();
-            }
-
-            // Sync or signal loss: mute. No receiver restart is needed
-            // (unlike the I2S slave's stalled wait-driven SMs): the RX PIO
-            // free-runs and the poll re-acquires frame sync in software.
-            if (ad_state == ADAT_INPUT_RELOCKING && !preset_loading) {
-                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
-                pipeline_reset_cpu_metering();
-            }
-
-            // Rate machine + sync search + decode + pipeline feed
-            adat_input_poll();
-
-            // Slave mode + LOCKED only; cheap no-op otherwise
-            adat_input_update_clock_servo();
-        }
-#endif
-
-        // Poll I2S input when active.
-        else if (active_input_source == INPUT_SOURCE_I2S &&
-                 i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
-            // Clock-slave mode: SPDIF-style lock-gated flow.  The external
-            // master owns BCK/LRCLK, so outputs stay muted/drained until the
-            // measured external rate locks; the input keeps producing during
-            // the prefill (its clocks never stop), so the rings fill with
-            // real audio like the SPDIF path.
-            i2s_slave_poll();
-            I2sSlaveState sl_state = i2s_slave_get_state();
-
-            if (sl_state == I2S_SLAVE_LOCKED && preset_loading && !i2s_prefilling
-                    && dac_hw_mute_hold_elapsed()) {
-                if (!i2s_slave_check_rate_change()) {
-                    drain_and_disable_outputs();
-                    preset_loading = false;
-                    preset_mute_counter = 0;
-                    i2s_prefilling = true;
-                }
-                // else: the deferred rate change restarts the input; prefill
-                // re-triggers when it re-locks at the new pipeline rate.
-            }
-
-            // The LOCKED gate matters: if clocks drop mid-prefill the fill
-            // must not re-enable outputs against a possibly misframed RX;
-            // the RELOCKING restart below re-frames everything first.  This
-            // enable is a deliberate second start after the one inside any
-            // preceding complete_pipeline_reset(): the reset's start may
-            // have been ungated (clocks absent), so the gated re-enable
-            // here is what actually re-establishes the inter-type offset.
-            // Do not "optimize" it away.
-            if (i2s_prefilling && sl_state == I2S_SLAVE_LOCKED &&
-                slot_fill_at_target(0)) {
-                enable_outputs_in_sync();
-                i2s_prefilling = false;
-                // Release the DAC hardware mute now that clocks are running
-                // (Phase 4 ordering, same as the SPDIF prefill path).
-                dac_hw_mute_release();
-            }
-
-            // Clock loss or external rate change: mute (if not already
-            // muted), then ALWAYS restart the receiver so its SMs (possibly
-            // stalled mid-word) re-frame on the returning clocks; the
-            // prefill's enable_outputs_in_sync() re-frames the external-clock
-            // TX SMs the same way.  The restart must not be skipped while
-            // preset_loading is set (startup mute hold, armed rate change):
-            // RELOCKING could otherwise re-acquire straight to LOCKED with a
-            // misframed receiver.  Covers loss during an in-flight prefill
-            // too (prepare_pipeline_reset clears i2s_prefilling).  One-shot:
-            // the restart re-arms measurement into ACQUIRING.
-            if (sl_state == I2S_SLAVE_RELOCKING) {
-                if (!preset_loading) {
-                    prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
-                    pipeline_reset_cpu_metering();
-                }
-                i2s_input_stop();
-                i2s_input_start(i2s_input_should_be_master());
-            }
-
-            // Process audio only when LOCKED (mirrors the SPDIF poll's lock
-            // gate): pre-lock the measured rate may not match the pipeline
-            // rate, and producing would also drain the soft-mute counter
-            // before the prefill drain runs.  The RX DMA ring free-runs and
-            // self-wraps meanwhile; the prefill starts from freshly drained
-            // rings, so nothing stale is played.
-            if (sl_state == I2S_SLAVE_LOCKED) {
-                i2s_input_poll();
-            }
-            i2s_slave_update_clock_servo();
-        }
-        // Master clock mode: no lock handling and no clock servo (the input
-        // is synchronous to our own clock domain), but it DOES use the same
-        // prefill handshake as SPDIF so outputs start against the target consumer
-        // fill instead of whatever low level the startup transient leaves.
-        // Trigger is preset_loading (set by every disruptive op via
-        // prepare_pipeline_reset); there is no lock to wait for, so prefill
-        // begins as soon as the DAC-mute hold has elapsed.
-        else if (active_input_source == INPUT_SOURCE_I2S) {
-            bool i2s_master = i2s_input_is_clock_master();
-
-            if (preset_loading && !i2s_prefilling && dac_hw_mute_hold_elapsed()) {
-                // Disable outputs and reset their rings so they can be
-                // prefilled before playback begins.
-                drain_and_disable_outputs();
-                preset_loading = false;
-                preset_mute_counter = 0;
-                i2s_prefilling = true;
-            }
-
-            if (i2s_prefilling &&
-                slot_fill_at_target(0)) {
-                enable_outputs_in_sync();
-                i2s_prefilling = false;
-                // Release the DAC hardware mute now that clocks are running
-                // (Phase 4 ordering, same as the SPDIF prefill path).
-                dac_hw_mute_release();
-            } else if (i2s_prefilling && !i2s_master) {
-                // Slave role: the drain above stopped the I2S output clock
-                // master that supplies the input's BCK/LRCLK, so the input
-                // produces no samples and i2s_input_poll() cannot fill the
-                // rings. Synthesize a silent block instead; real audio resumes
-                // after enable_outputs_in_sync() restarts the clock master and
-                // re-phases the input ring (i2s_input_resync). Master role
-                // self-clocks and fills with real audio via the poll below.
-                i2s_input_prefill_silence(192);
-            }
-
-            i2s_input_poll();
-        }
-
+        LOOP_PROF(8);
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,
         // preventing the USB ISR from overwriting payload mid-read.
@@ -2279,6 +2288,22 @@ int main(void) {
                     printf("preset_set_startup failed: mode=%u slot=%u err=%u\n",
                            (unsigned)mode, (unsigned)slot, (unsigned)status);
                 }
+            }
+
+            // Latency: the full completion restarts every output at the new
+            // target together, so slot alignment is untouched by the change.
+            // Pending stays set until then, so a host can tell when it landed.
+            if (flash_set_output_latency_pending) {
+                uint8_t id = flash_set_output_latency_id;
+                prepare_flash_write_operation();
+                preset_set_output_latency(id);
+                output_latency_request(id);
+                output_latency_apply(audio_state.freq, active_input_source);
+                dsp_update_delay_samples((float)audio_state.freq);   // sub alignment
+                complete_flash_write_operation_full();
+                uint32_t f = save_and_disable_interrupts();
+                if (flash_set_output_latency_id == id) flash_set_output_latency_pending = false;
+                restore_interrupts(f);
             }
 
             extern volatile bool flash_set_output_config_mode_pending;
@@ -2586,6 +2611,7 @@ int main(void) {
             }
         }
 
+        LOOP_PROF(9);
         // Handle EQ / crossover band parameter updates from USB.  The
         // pending_packet's `band` field is the wire band index (already
         // normalized at the vendor handler boundary — see
@@ -2681,6 +2707,7 @@ int main(void) {
             restore_interrupts(flags);
         }
 
+        LOOP_PROF(10);
         // Handle sample rate changes.  Gated on the non-blocking DAC
         // hardware-mute hold; perform_rate_change()'s own
         // prepare_pipeline_reset() then engages the soft mute + Core 1 fence
@@ -2700,7 +2727,9 @@ int main(void) {
         // Handle loudness table recomputation
         if (loudness_recompute_pending) {
             loudness_recompute_pending = false;
-            loudness_recompute_table(loudness_ref_spl, loudness_intensity_pct, (float)audio_state.freq);
+            loudness_recompute_begin(loudness_ref_spl, loudness_intensity_pct, (float)audio_state.freq);
+        }
+        if (loudness_recompute_step()) {
             // Re-key the active coefficient pointer at the current
             // vol_index.  effective_vol_index is set in lock-step with
             // vol_mul by apply_vol_index_to_audio(), so this picks up
@@ -2779,6 +2808,7 @@ int main(void) {
             leveller_bypassed = !leveller_config.enabled;
         }
 
+        LOOP_PROF(11);
         // Handle USB stream restart (alt 0 -> alt > 0): re-lock all active output
         // pipelines so consumer fill/phase starts aligned after host re-prime.
         {
@@ -3533,6 +3563,12 @@ int main(void) {
                 active_input_source = new_source;
                 rta_restart();
 
+                // The option in force depends on the source (low latency needs a
+                // stream input); re-derive it before the new source's restart or
+                // prefill, which re-anchors every ring at the result.
+                output_latency_apply(audio_state.freq, new_source);
+                dsp_update_delay_samples((float)audio_state.freq);
+
                 // Drop any pending rate change armed for the OLD source (e.g.
                 // a USB SET_CUR that landed after this iteration's rate-change
                 // handler already ran, or a detector arm that raced the
@@ -3571,7 +3607,7 @@ int main(void) {
                 if (input_source_is_spdif(new_source)) {
                     spdif_input_start();
                     // Don't complete_pipeline_reset yet — output stays muted
-                    // until SPDIF lock is acquired (handled in polling block below)
+                    // until SPDIF lock is acquired (input_service_handshakes)
                 } else if (new_source == INPUT_SOURCE_I2S) {
                     // Apply rate + MCK and start the input, but do NOT enable
                     // outputs here.  The mute is already engaged (the
@@ -3656,7 +3692,7 @@ int main(void) {
                 spdif_input_stop();
                 spdif_prefilling = false;
                 // Restart on the new pin; outputs stay muted until lock
-                // is acquired (handled by the SPDIF polling block above).
+                // is acquired (input_service_handshakes).
                 prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
                 spdif_input_start();
             }
@@ -3684,7 +3720,7 @@ int main(void) {
         // Handle deferred I2S RX restarts: data-pin hot-swap and full
         // restart after a BCK pin change in the input-master role.  Gated on
         // pipeline_reset_ready() like every other reset handler.  Outputs are
-        // left muted after the restart; the main-loop I2S block above prefills
+        // left muted after the restart; input_service_handshakes() prefills
         // the rings to the target and enables them in sync, so no explicit
         // complete_pipeline_reset() is needed here.
         if ((i2s_rx_pin_change_pending || i2s_input_restart_pending) &&
@@ -3698,6 +3734,12 @@ int main(void) {
                 i2s_input_start(i2s_input_should_be_master());
             }
         }
+
+        // Second delivery point, so a long deferred operation above and a long
+        // housekeeping step at the top of the next pass never add up into one
+        // input gap (current_architecture.md "Two delivery points per pass").
+        LOOP_PROF(13);
+        pipeline_service_producer(true);
 
         // Bench diagnostics: once-per-second CLKDIAG console dump (internally
         // throttled).  No-op when DSPI_CLOCK_DIAG is 0.

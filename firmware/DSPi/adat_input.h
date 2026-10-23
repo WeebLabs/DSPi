@@ -70,6 +70,11 @@ void adat_input_stop(void);
 // Returns frames delivered to process_input_block().
 uint32_t adat_input_poll(void);
 
+// Drop the input received but not yet delivered (whole frames, phase kept).
+// Prefill start only: nothing has been rendered since the outputs stopped, so
+// the stream simply starts later; see current_architecture.md "Output Latency".
+void adat_input_discard_queued(void);
+
 // Servo outputs to the recovered wire rate (slave mode + LOCKED only; cheap
 // no-op otherwise). Call every main-loop iteration; rate-limits internally.
 void adat_input_update_clock_servo(void);

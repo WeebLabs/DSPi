@@ -72,6 +72,8 @@ add_executable(DSPi
     main.c
     notify.c
     notify.h
+    output_latency.c
+    output_latency.h
     pdm_generator.c
     pdm_generator.h
     psybass.c
@@ -132,6 +134,14 @@ endif()
 option(DSPI_CLOCK_DIAG "Build the clock/audio-path diagnostics (vendor GET 0x82)" OFF)
 if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
+endif()
+
+# DSPI_LOOP_PROF (bench instrumentation): worst time per main-loop section,
+# read through REQ_GET_STATUS 64+ (loop_prof.h). Release builds leave it OFF.
+option(DSPI_LOOP_PROF "Build the main-loop section profiler (REQ_GET_STATUS 64+)" OFF)
+if (DSPI_LOOP_PROF)
+    target_sources(DSPi PRIVATE loop_prof.c loop_prof.h)
+    target_compile_definitions(DSPi PRIVATE DSPI_LOOP_PROF=1)
 endif()
 
 if (PICO_PLATFORM STREQUAL "rp2040")

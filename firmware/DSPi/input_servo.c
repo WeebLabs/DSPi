@@ -15,7 +15,7 @@
  *           than left to the integrator.
  *   Loop B: consumer-fill trim on the SAMPLE-GRANULAR fractional fill
  *           (get_slot_consumer_fill_frac), IIR-smoothed; a plain PI that
- *           converges the fill onto SERVO_FILL_TARGET, with a second P
+ *           converges the fill onto the latency target, with a second P
  *           slope beyond +-2 buffers for real displacements.
  * The total command is slew-limited per tick before actuation (see the
  * Loop B gain comment for the hardware findings behind the tuning).
@@ -29,6 +29,7 @@
 #include "soft_vcxo.h"
 #include "config.h"
 #include "audio_pipeline.h"
+#include "output_latency.h"
 #include "usb_audio.h"
 
 #include "audio_clock_div.h"
@@ -54,8 +55,6 @@
 // noise, further shaped by the slew limiter. A second P slope engages
 // beyond +-2 buffers so real displacements recover faster; transients
 // bigger than that arrive via resets, which re-centre the fill anyway.
-#define SERVO_FILL_TARGET        ((float)OUTPUT_RING_TARGET_FILL_FRAMES / \
-                                  (float)SLOT_FILL_FRAMES_PER_BUCKET)   // buckets
 #define SERVO_FILL_ALPHA         0.125f  // fill IIR (~8 ticks, ~160 ms)
 #define SERVO_FILL_KP_PPM        2.0f    // ppm per buffer of smoothed error
 #define SERVO_FILL_KP2_PPM       4.0f    // added slope beyond +-2 buffers
@@ -63,8 +62,16 @@
 #define SERVO_FILL_ICLAMP_PPM    3.0f    // bounds the static residual held
 #define SERVO_SLEW_PPM_PER_TICK  0.5f    // ~25 ppm/s at the ~20 ms tick
 
-// Smoothed fill (buffer units), integrator and last slew-limited command.
-static float fill_smooth = SERVO_FILL_TARGET;
+// Fill target in buffer units, read live from the latency option.
+static inline float servo_fill_target(void) {
+    return (float)output_ring_target_frames * (1.0f / (float)SLOT_FILL_FRAMES_PER_BUCKET);
+}
+
+// Smoothed fill (buffer units), integrator and last slew-limited command. The
+// smoother is seeded at the target it was last seeded for: a target change
+// re-anchors the rings there, so it reseeds rather than slewing toward it.
+static float fill_smooth = 0.0f;
+static uint32_t fill_smooth_target_frames = 0;
 static float fill_integral_ppm = 0.0f;
 static float last_cmd_ppm = 0.0f;
 
@@ -105,8 +112,12 @@ void input_servo_apply(float actual_freq, int fill_slot) {
             soft_vcxo_set_ppm(last_cmd_ppm);
             return;
         }
+        if (fill_smooth_target_frames != output_ring_target_frames) {
+            fill_smooth_target_frames = output_ring_target_frames;
+            fill_smooth = servo_fill_target();
+        }
         fill_smooth += SERVO_FILL_ALPHA * (fill - fill_smooth);
-        float fill_error = fill_smooth - SERVO_FILL_TARGET;
+        float fill_error = fill_smooth - servo_fill_target();
 #if DSPI_CLOCK_DIAG
         diag_fill_error = (int32_t)fill_error;
 #endif
@@ -151,7 +162,8 @@ void input_servo_apply(float actual_freq, int fill_slot) {
 }
 
 void input_servo_reset(void) {
-    fill_smooth = SERVO_FILL_TARGET;   // seed at target so the IIR has no start transient
+    fill_smooth_target_frames = output_ring_target_frames;
+    fill_smooth = servo_fill_target();   // seed at target so the IIR has no start transient
     fill_integral_ppm = 0.0f;
     last_cmd_ppm = 0.0f;
     soft_vcxo_set_ppm(0.0f);

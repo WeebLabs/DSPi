@@ -48,13 +48,13 @@ extern "C" {
  * \ingroup audio_spdif
  */
 // Ring geometry: one encoded ring per slot.
-// Power of 2 (hardware read-address wrap on RP2350); 1024 frames = 21.3 ms
+// Power of 2 (hardware read-address wrap on RP2350); 512 frames = 10.7 ms
 // at 48 kHz. The writer keeps ERASE_AHEAD frames of valid silence stamped
 // ahead of real audio so a stalled producer plays silence, never a loop of
-// stale ring content.
-#define PICO_AUDIO_SPDIF_RING_FRAMES     1024u
+// stale ring content. Both values bound the selectable output latency.
+#define PICO_AUDIO_SPDIF_RING_FRAMES     512u
 #define PICO_AUDIO_SPDIF_RING_BYTES      (PICO_AUDIO_SPDIF_RING_FRAMES * 2u * 8u)
-#define PICO_AUDIO_SPDIF_ERASE_AHEAD     192u   // one IEC block of silence margin
+#define PICO_AUDIO_SPDIF_ERASE_AHEAD     64u    // the idle pump extends it to a full ring
 
 typedef struct audio_spdif_instance {
     // Hardware config (set in setup, immutable after)

@@ -110,18 +110,6 @@ _Static_assert(I2S_RX_DMA_BASE + 2 * I2S_RX_MAX_PAIRS <= SOFT_VCXO_DMA_PULSE,
 #endif
 #define I2S_RX_RING_BYTES   (I2S_RX_RING_WORDS * 4u)
 
-// Minimum stereo frames to accumulate before feeding the pipeline.
-//
-// The DMA ring's write address advances per word, so the main loop (which
-// polls far faster than samples arrive) would otherwise call
-// process_input_block() with only a handful of frames each time.  The CPU
-// meter is budget-based (busy_us / (frames / Fs)), so the fixed per-block
-// cost (Core 1 EQ-worker handshake, pipeline setup) divided by a tiny frame
-// count reads as a large inflation.  Batching to 48 frames matches the USB
-// packet granularity, bringing I2S CPU in line with USB.  At 48 kHz this adds
-// ~1 ms of input latency; the output rings' target-fill prefill absorbs the ripple.
-#define I2S_INPUT_MIN_BLOCK 48u
-
 // Per-pair ring storage in the shared input-capture arena
 // (input_capture_arena.h).  Each row is aligned to its own byte size so the DMA
 // write-address wrap (channel_config_set_ring) stays within the pair's ring;
@@ -652,6 +640,23 @@ void i2s_input_resync(void) {
 // MAIN-LOOP POLL
 // ============================================================================
 
+static uint32_t i2s_input_queued_frames(void) {
+    if (i2s_state != I2S_INPUT_RUNNING) return 0;
+    uint32_t frames = UINT32_MAX;   // same per-pair minimum as the poll
+    for (uint8_t p = 0; p < i2s_n_pairs; p++) {
+        uint32_t avail = (pair_write_word(&i2s_pairs[p]) - i2s_pairs[p].rd_word) %
+                         I2S_RX_RING_WORDS;
+        if (avail / 2u < frames) frames = avail / 2u;
+    }
+    return frames == UINT32_MAX ? 0 : frames;
+}
+
+void i2s_input_discard_queued(void) {
+    uint32_t words = 2u * i2s_input_queued_frames();
+    for (uint8_t p = 0; p < i2s_n_pairs; p++)
+        i2s_pairs[p].rd_word = (i2s_pairs[p].rd_word + words) % I2S_RX_RING_WORDS;
+}
+
 DSP_TIME_CRITICAL
 uint32_t i2s_input_poll(void) {
     if (i2s_state != I2S_INPUT_RUNNING) return 0;
@@ -667,9 +672,11 @@ uint32_t i2s_input_poll(void) {
         uint32_t f = avail / 2u;
         if (f < frames) frames = f;
     }
-    // Batch: wait for a pipeline-sized block (see I2S_INPUT_MIN_BLOCK).  The
-    // input is continuous, so the minimum always climbs to the threshold.
-    if (frames < I2S_INPUT_MIN_BLOCK) return 0;
+    // Batch per the latency option (each call has a fixed cost), at most one
+    // block per call; see producer_block_bounds().
+    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+    if (max_frames == 0 || frames < min_frames) return 0;
+    if (frames > max_frames) frames = max_frames;
 
     // Deinterleave each pair into its two pipeline input channels (2p, 2p+1).
     // Inputs 0/1 are the shared stereo bus (buf_l/buf_r); 2.. are buf_in_ext.
@@ -745,8 +752,9 @@ uint32_t i2s_input_poll(void) {
 // and re-phases the input rings.  Master-role prefill uses real input audio via
 // i2s_input_poll() and never calls this.
 void i2s_input_prefill_silence(uint32_t frames) {
+    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+    if (frames > max_frames) frames = max_frames;
     if (frames == 0) return;
-    if (frames > 192u) frames = 192u;   // buf capacity
 
     // Zero every active input channel so the matrix sees silence on all of
     // them (stale buf_in_ext content must not leak through in multichannel).

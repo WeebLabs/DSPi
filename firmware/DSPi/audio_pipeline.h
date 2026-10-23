@@ -88,9 +88,25 @@ uint get_slot_consumer_fill(uint slot);
 // Sample-granular fill in buffer units (0..16) for the clock servo;
 // negative when no valid reading exists (type switch, slot not running).
 float get_slot_consumer_fill_frac(uint slot);
-// True once the slot's ring holds OUTPUT_RING_TARGET_FILL_FRAMES (the prefill
+// True once the slot's ring holds output_ring_target_frames (the prefill
 // threshold); false while no valid reading exists.
 bool slot_fill_at_target(uint slot);
+// Delivery bounds for one stream-input call: returns the most frames it may
+// deliver and sets *min_frames to the fewest worth a call (the latency option's
+// batch). While the slots are stopped for a prefill both shrink to what brings
+// slot 0 to the target, so the outputs start on it; 0 means wait for the start.
+uint32_t producer_block_bounds(uint32_t *min_frames);
+
+// Ring health (REQ_GET_STATUS 27/28): blocks refused by group admission
+// (cumulative), and the lowest enabled-slot fill seen just before a write, in
+// frames (UINT32_MAX = none since reset_buffer_watermarks()).
+extern volatile uint32_t output_ring_drops;
+extern volatile uint32_t output_ring_min_prewrite;
+// Worst gap between input deliveries since reset_buffer_watermarks(), in
+// microseconds (REQ_GET_STATUS 29): how long a stream input can go unread, which
+// bounds the usable latency margin. Marked by each pipeline_service_producer().
+extern volatile uint32_t input_delivery_worst_gap_us;
+void input_delivery_mark(void);
 // Ring stale-audio protection (see audio_pipeline.c): main-loop idle pump and
 // a one-shot full-ring silence stamp.
 void output_rings_idle_pump(void);

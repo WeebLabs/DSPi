@@ -1,7 +1,7 @@
 # Spectrum Analyser (RTA / FFT) Specification
 
 *Status: implemented, hardware-untested*
-*Last updated: 2026-09-12 (shared elliptic b0; Blackman-Harris FFT window; sixth-order bass bands; protocol V3, continuous 10–200 Hz bass bank plus FFT up to 1024 points)*
+*Last updated: 2026-10-23 (FINISH sliced into steps; bins staged and published in one step). Previously 2026-09-12 (shared elliptic b0; Blackman-Harris FFT window; sixth-order bass bands; protocol V3, continuous 10–200 Hz bass bank plus FFT up to 1024 points)*
 
 ## 1. Overview
 
@@ -186,9 +186,12 @@ advance: next channel in the selected set, wr = 0, back to FILL
   prescale, one butterfly stage, the permutation, or the real-split pass. No
   unit exceeds roughly 250 µs on RP2040 at the largest size, so the main loop's
   USB and transport duties never stall.
-- **FINISH.** One call applies the window, sums bin powers into bands, writes
-  the bin levels, publishes, and advances the rotation. This is the longest
-  single step and is charged to `last_frame_us` so the bench can see it.
+- **FINISH.** Applies the window, sums bin powers into bands and writes the bin
+  levels into a staging buffer, 64 bins per call (`rta_fft_finish_step()`, about 64 µs on RP2350), so
+  the per-bin pass never holds the main loop at once. *Updated 2026-10-23: this
+  was one call of about 530 µs.*
+- **PUBLISH.** One call updates the band EMA and peaks, copies the staged bins
+  into the bin frame, stamps its header and tail, and advances the rotation. Every step is charged to `last_frame_us`.
 
 Because the transform runs in place, capture is off while it runs. The gap is
 the transform time, a fraction of a millisecond on RP2350 and a couple of
@@ -306,6 +309,14 @@ bool rta_fft_step(rta_sample_t *buf, uint8_t order, uint8_t *stage);
 void rta_fft_finish(const rta_sample_t *buf, uint8_t order,
                     const RtaBandTable *table, float *band_power,
                     uint8_t *bins);
+
+// The same pass, resumable: begin, then step up to max_bins at a time until
+// it returns true (band_power is written on that call).  rta_fft_finish() is
+// begin plus one unbounded step, which the host harness uses.
+void rta_fft_finish_begin(RtaFinishCursor *c);
+bool rta_fft_finish_step(RtaFinishCursor *c, const rta_sample_t *buf, uint8_t order,
+                         const RtaBandTable *table, float *band_power,
+                         uint8_t *bins, uint16_t max_bins);
 ```
 
 `rta_sample_t` is `float` on RP2350 and `int16_t` on RP2040. The RP2040 kernel
@@ -385,8 +396,9 @@ at the same three sites as 0xA0 through `vendor_is_bulk_get()`.
 offset into the bin frame. The frame is `16 + n_bins + 1` bytes: the header
 carries the sequence number, and the same number sits in the final byte, so a
 host that reads several chunks validates that both match and re-reads if the
-frame turned over in between. The engine clears the tail to 0xFF before it
-writes and sets it last; sequence numbers skip 0xFF. The layout is fixed for
+frame turned over in between. The engine writes the bins, header and tail
+together in one main-loop step, and the tail reads 0xFF until the first frame;
+sequence numbers skip 0xFF. The layout is fixed for
 the life of a config. No lock is taken. The bin frame is never larger than
 529 bytes.
 

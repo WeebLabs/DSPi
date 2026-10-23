@@ -20,6 +20,8 @@
 #include "lg_sound_sync.h"
 #include "dac_hw_mute.h"
 #include "audio_pipeline.h"
+#include "output_latency.h"
+#include "loop_prof.h"
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "crossover.h"
@@ -1336,6 +1338,23 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             break;
         }
 
+        case REQ_OUTPUT_LATENCY: {
+            // Payload: 1-byte option ID.  An unknown one is ignored (USB) or
+            // reported as ERROR (UART/I2C).  Deferred to the main loop, which owns
+            // the flash write and the output restart; re-sending the stored
+            // option is a no-op (no mute).
+            if (buffer->data_len < 1 || !output_latency_find(vendor_rx_buf[0])) {
+                handled = false;
+                break;
+            }
+            uint8_t id = vendor_rx_buf[0];
+            if (id == output_latency_requested() && !flash_set_output_latency_pending) break;
+            flash_set_output_latency_id = id;
+            __dmb();
+            flash_set_output_latency_pending = true;
+            break;
+        }
+
         case REQ_SET_OUTPUT_CONFIG_MODE: {
             // Set physical IO/output-config persistence mode (0 = independent,
             // 1 = with-preset).  Deferred to main loop — flash write in dir_flush().
@@ -1931,6 +1950,10 @@ static inline void usb_start_tiny_control_in_transfer(uint32_t val, uint16_t len
 // VENDOR GET DISPATCH
 // ----------------------------------------------------------------------------
 
+static inline uint16_t frames_to_us(uint32_t frames, uint32_t fs) {
+    return (uint16_t)(((uint64_t)frames * 1000000u + fs / 2u) / fs);
+}
+
 static bool vendor_handle_get(tusb_control_request_t const *req) {
     // Shim to let legacy case bodies reference `setup->...`.
     tusb_control_request_t const *setup = req;
@@ -2223,6 +2246,41 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 return true;
             }
 
+            case REQ_OUTPUT_LATENCY: {
+                uint32_t fs = audio_state.freq ? audio_state.freq : 48000u;
+                if (setup->wValue == OUTPUT_LATENCY_GET_STATUS) {
+                    OutputLatencyStatus st = {0};
+                    st.requested_id  = output_latency_requested();
+                    st.effective_id  = output_latency_effective();
+                    st.effective_us  = frames_to_us(output_ring_target_frames, fs);
+                    st.target_frames = (uint16_t)output_ring_target_frames;
+                    st.batch_frames  = (uint16_t)input_batch_frames;
+                    st.pending       = flash_set_output_latency_pending ? 1 : 0;
+                    st.option_count  = output_latency_option_count;
+                    memcpy(resp_buf, &st, sizeof(st));
+                    vendor_send_response(resp_buf, sizeof(st));
+                    return true;
+                }
+                if (setup->wValue == OUTPUT_LATENCY_GET_OPTIONS) {
+                    OutputLatencyOptionWire *w = (OutputLatencyOptionWire *)resp_buf;
+                    for (uint8_t i = 0; i < output_latency_option_count; i++) {
+                        const OutputLatencyOption *o = &output_latency_options[i];
+                        const OutputLatencyOption *run = output_latency_resolve(o->id, active_input_source);
+                        OutputLatencyOptionWire e = {
+                            .id = o->id,
+                            .flags = (uint8_t)(o->flags | (run == o ? OUTPUT_LATENCY_WIRE_AVAILABLE : 0)),
+                            .latency_us = o->latency_us,
+                            .batch_us = o->batch_us,
+                            .effective_us = frames_to_us(output_latency_target_frames(run, fs), fs),
+                        };
+                        memcpy(&w[i], &e, sizeof(e));
+                    }
+                    vendor_send_response(resp_buf, output_latency_option_count * sizeof(*w));
+                    return true;
+                }
+                return false;
+            }
+
             // Tube Preamp GET commands
             case REQ_LIMITER: {
                 uint8_t index = (uint8_t)(setup->wValue & 0xFF);
@@ -2369,6 +2427,16 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     case 21: resp = audio_spdif_get_dma_starvations_instance(3); break;  // SPDIF instance 3
                     case 22: resp = usb_audio_ring_overrun_count(); break;  // USB audio ring overruns
                     case 23: resp = active_input_channel_count(); break;  // live active input count (source-aware: USB/I2S/SPDIF)
+                    case 26: { extern volatile int overruns; resp = (uint32_t)overruns; break; }  // output ring underrun recoveries
+                    case 27: resp = output_ring_drops; break;         // blocks refused by ring admission
+                    case 28: resp = output_ring_min_prewrite; break;  // lowest pre-write ring fill, frames
+                    case 29: resp = input_delivery_worst_gap_us; break;  // worst input delivery gap, us
+#ifdef DSPI_LOOP_PROF
+                    default:
+                        if (setup->wValue >= LOOP_PROF_STATUS_BASE)
+                            resp = loop_prof_take((uint8_t)(setup->wValue - LOOP_PROF_STATUS_BASE));
+                        break;
+#endif
 #ifdef DSPI_LOOPBACK
                     // Capture-glitch counters; absent from release builds, so
                     // 24/25 STALL there and the host treats them as optional.

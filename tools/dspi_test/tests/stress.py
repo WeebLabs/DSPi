@@ -19,6 +19,7 @@ import struct
 
 from ..device import OP, OPCODE_NAME, Stall, Disconnected
 from ..framework import test
+from ..actions import live_param_actions
 
 # Opcodes that must never be fuzzed: actions / SET-via-wValue / flash / bootloader.
 _FUZZ_GET_DENY = {
@@ -40,36 +41,10 @@ def _iters(profile, default):
 def stress_random_valid_sets(dev, profile, chk):
     """A storm of random valid SETs across the live parameter surface; device stays coherent."""
     rng = random.Random(0xD597)
-    ni, no, nc, nb = (profile.num_input_channels, profile.num_output_channels,
-                      profile.num_channels, profile.band_ceiling)
     lg = dev.get_u8(OP.GET_LG_SOUND_SYNC_ENABLE)
     iters = _iters(profile, 60)
 
-    def eq_set():
-        ch, band = rng.randrange(nc), rng.randrange(nb)
-        dev.set(OP.SET_EQ_PARAM, struct.pack("<BBBBfff", ch, band, rng.randrange(8), 0,
-                                             rng.uniform(20, 18000), rng.uniform(0.2, 10), rng.uniform(-15, 15)))
-
-    def matrix_set():
-        dev.set(OP.SET_MATRIX_ROUTE, struct.pack("<BBBBf", rng.randrange(ni), rng.randrange(no),
-                                                 rng.randrange(2), rng.randrange(2), rng.uniform(-40, 12)))
-
-    actions = [
-        lambda: dev.set_f32(OP.SET_MASTER_VOLUME, rng.uniform(-60, 0)),
-        lambda: dev.set_f32(OP.SET_USER_VOLUME, rng.uniform(-60, 0)),
-        lambda: dev.set_f32(OP.SET_PREAMP_CH, rng.uniform(-20, 20), wvalue=rng.randrange(ni)),
-        lambda: dev.set_f32(OP.SET_LOUDNESS_REF, rng.uniform(40, 100)),
-        lambda: dev.set_f32(OP.SET_LOUDNESS_INTENSITY, rng.uniform(0, 200)),
-        lambda: dev.set_f32(OP.SET_CROSSFEED_FREQ, rng.uniform(500, 2000)),
-        lambda: dev.set_f32(OP.SET_CROSSFEED_FEED, rng.uniform(0, 15)),
-        lambda: dev.set_f32(OP.SET_LEVELLER_AMOUNT, rng.uniform(0, 100)),
-        lambda: dev.set_f32(OP.SET_LEVELLER_MAX_GAIN, rng.uniform(0, 35)),
-        lambda: dev.set_f32(OP.SET_LEVELLER_GATE, rng.uniform(-96, 0)),
-        lambda: dev.set_u8(OP.SET_LEVELLER_SPEED, rng.randrange(3)),
-        lambda: dev.set_f32(OP.SET_OUTPUT_GAIN, rng.uniform(-30, 12), wvalue=rng.randrange(no)),
-        lambda: dev.set_f32(OP.SET_OUTPUT_DELAY, rng.uniform(0, 40), wvalue=rng.randrange(no)),
-        eq_set, matrix_set,
-    ]
+    actions = [fn for _, fn in live_param_actions(dev, profile, rng)]
     try:
         dev.set_u8(OP.SET_LG_SOUND_SYNC_ENABLE, 0)
         for i in range(iters):

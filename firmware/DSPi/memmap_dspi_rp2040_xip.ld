@@ -290,7 +290,7 @@ SECTIONS
     /* Output slot rings (usb_audio.c slot_ring_store) at the top of RAM: DMA ring
        wrap needs ring-size alignment, which costs no padding here. NOLOAD and not
        zeroed by crt0; every slot setup stamps its whole ring. */
-    SLOT_RINGS_BYTES = 0x8000;
+    SLOT_RINGS_BYTES = 0x4000;
     .slot_rings (ORIGIN(RAM) + LENGTH(RAM) - SLOT_RINGS_BYTES) (NOLOAD) :
     {
         KEEP(*(.slot_rings))

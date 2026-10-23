@@ -58,7 +58,9 @@ static void packet(bool tone) {
     assert(memcmp(buf,original,sizeof(buf))==0);
     rta_packet_end(48);
     now += 1000;
-    rta_service();
+    // The firmware main loop makes many passes per 1 ms packet; four is a
+    // conservative model of that for the sliced transform.
+    for (int pass=0; pass<4; ++pass) rta_service();
 }
 int main(void) {
     (void)current_upmix_coeffs;

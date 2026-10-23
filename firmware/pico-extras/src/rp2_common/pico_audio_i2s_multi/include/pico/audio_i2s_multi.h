@@ -88,12 +88,12 @@ typedef struct audio_i2s_instance {
     volatile uint32_t recovery_prewrite_fill_frames;
 } audio_i2s_instance_t;
 
-// Ring geometry: shares the slot's 16 KB store with the S/PDIF instance
+// Ring geometry: shares the slot's 8 KB store with the S/PDIF instance
 // (frames are 8 bytes here vs 16, so I2S uses the first half). Identical
 // frame capacity keeps fill/latency semantics uniform across output types.
-#define PICO_AUDIO_I2S_RING_FRAMES  1024u
+#define PICO_AUDIO_I2S_RING_FRAMES  512u
 #define PICO_AUDIO_I2S_RING_BYTES   (PICO_AUDIO_I2S_RING_FRAMES * 2u * 4u)
-#define PICO_AUDIO_I2S_ERASE_AHEAD  192u
+#define PICO_AUDIO_I2S_ERASE_AHEAD  64u
 
 // ---------------------------------------------------------------------------
 // Configuration structure

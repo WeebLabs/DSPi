@@ -104,6 +104,11 @@ float preset_get_saved_master_volume(void);
 void preset_set_dac_hw_mute(const DacHwMuteConfig *cfg);
 void preset_get_dac_hw_mute(DacHwMuteConfig *out);
 
+// Output latency option (OutputLatencyId; device-global, directory-stored, V23+).
+// The setter writes flash: main loop only, inside a flash write bracket.
+void preset_set_output_latency(uint8_t id);
+uint8_t preset_get_output_latency(void);
+
 // External control-interface config (UART/I2C, board-level, directory-stored,
 // V6+).  Setter is synchronous and main-loop only; a NULL pointer leaves that
 // interface's stored config unchanged.  Getter copies out; either may be NULL.

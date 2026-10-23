@@ -91,10 +91,8 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define SPDIF_CONSUMER_BUFFER_COUNT 16
 #define SLOT_FILL_FRAMES_PER_BUCKET 48u
 
-// Steady-state slot ring fill: the prefill threshold, both clock servos' target,
-// the underrun re-anchor point and the post-restart hold. Change it only here;
-// audio_pipeline.c static-asserts its limits.
-#define OUTPUT_RING_TARGET_FILL_FRAMES 384u
+// Pipeline block buffers. The steady-state ring fill and the block size producers
+// deliver come from the selected output latency option (output_latency.h).
 #define AUDIO_BUFFER_SAMPLES  192
 
 // DELAY CONFIGURATION
@@ -109,11 +107,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 #endif
 #define MAX_DELAY_MASK    (MAX_DELAY_SAMPLES - 1)
 
-// Sub alignment (in samples).  Known defect: PDM's real latency is not its
-// DMA ring size, so this offset is miscalibrated; see current_architecture.md
-// PDM "Known alignment defect" before changing either value.
+// Sub alignment: the PDM sub is delayed by the ring fill target minus this.
+// Known defect: PDM's real latency is not its DMA ring size, so the offset is
+// miscalibrated; see current_architecture.md PDM "Known alignment defect".
 #define PDM_BUFFER_SAMPLES    (PDM_DMA_BUFFER_SIZE / 8)                           // 256
-#define SUB_ALIGN_SAMPLES     ((int)OUTPUT_RING_TARGET_FILL_FRAMES - PDM_BUFFER_SAMPLES)  // 128
 
 // ----------------------------------------------------------------------------
 // VENDOR INTERFACE CONFIGURATION (WinUSB / WCID)
@@ -142,7 +139,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding
 // slot holding the aux component.  0x01 is MS_VENDOR_CODE above, intercepted
 // in tud_vendor_control_xfer_cb before the application dispatcher sees it;
-// 0x00, 0x02 and 0x03 stay unallocated.
+// 0x00 and 0x02 stay unallocated; 0x03 is REQ_OUTPUT_LATENCY.
 #define REQ_SET_CS_AUX_STATE        0x04  // wValue = slot, 1 byte 0/1; immediate, runtime
                                           // only; STALL unless the slot is an aux output
 #define REQ_GET_CS_AUX_STATE        0x05  // wValue = slot: 1 byte (STALL if not an aux);
@@ -244,6 +241,13 @@ extern volatile uint32_t nominal_feedback_10_14;
 // wValue = (output << 8) | index; SET payload and GET reply are float32 LE,
 // except the read-only GET blocks LIMITER_GET_METER / LIMITER_GET_STATUS.
 #define REQ_LIMITER                 0x81
+
+// Output latency option (output_latency.h).  One opcode: OUT sets a 1-byte
+// option ID (unknown IDs are ignored); IN with wValue 0 gets OutputLatencyStatus,
+// wValue 1 the option table as OutputLatencyOptionWire entries, others STALL.
+#define REQ_OUTPUT_LATENCY          0x03
+#define OUTPUT_LATENCY_GET_STATUS   0
+#define OUTPUT_LATENCY_GET_OPTIONS  1
 
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
@@ -1171,6 +1175,28 @@ typedef struct __attribute__((packed)) {
     SpdifBufferStats spdif[4];   // Per-instance (unused zeroed)
     PdmBufferStats pdm;
 } BufferStatsPacket;             // 4 + 32 + 8 = 44 bytes
+
+// REQ_OUTPUT_LATENCY replies.  The effective option and its target depend on
+// the active source and rate; the requested ID is what both re-derive from.
+typedef struct __attribute__((packed)) {
+    uint8_t  requested_id;       // stored OutputLatencyId
+    uint8_t  effective_id;       // option in force (a stream-only request on USB differs)
+    uint16_t effective_us;       // ring fill target at the current rate, ceiling applied
+    uint16_t target_frames;      // live slot ring fill target
+    uint16_t batch_frames;       // stream-input batch at the current rate
+    uint8_t  pending;            // 1 until a SET has fully applied
+    uint8_t  option_count;       // entries in the OUTPUT_LATENCY_GET_OPTIONS reply
+    uint16_t reserved;
+} OutputLatencyStatus;           // 12 bytes
+
+typedef struct __attribute__((packed)) {
+    uint8_t  id;                 // OutputLatencyId
+    uint8_t  flags;              // OUTPUT_LATENCY_FLAG_* | OUTPUT_LATENCY_WIRE_AVAILABLE
+    uint16_t latency_us;         // nominal ring fill target
+    uint16_t batch_us;           // nominal stream-input batch
+    uint16_t effective_us;       // what selecting it gives now (source and rate applied)
+} OutputLatencyOptionWire;       // 8 bytes
+#define OUTPUT_LATENCY_WIRE_AVAILABLE  0x80u   // runs as itself on the active source
 
 extern uint8_t channel_band_counts[NUM_CHANNELS];
 extern volatile SystemStatusPacket global_status;

@@ -34,6 +34,7 @@
 
 #include "usb_audio.h"
 #include "audio_pipeline.h"
+#include "output_latency.h"
 #include "adat_output.h"
 #include "usb_descriptors.h"
 #include "dsp_pipeline.h"
@@ -143,6 +144,11 @@ uint8_t flash_set_startup_slot = 0;
 volatile bool flash_set_output_config_mode_pending = false;
 uint8_t flash_set_output_config_mode_val = 0;
 volatile bool flash_save_output_config_pending = false;
+
+// Deferred output latency change: flash write plus a synchronized restart of
+// every output at the new ring fill target (main loop).
+volatile bool flash_set_output_latency_pending = false;
+uint8_t flash_set_output_latency_id = OUTPUT_LATENCY_DEFAULT;
 
 // Deferred master_volume_mode directory update (flash write must happen on main loop)
 volatile bool flash_set_master_volume_mode_pending = false;
@@ -1583,7 +1589,8 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
     }
     if ((int32_t)fill_frames < 0) fill_frames = 0;
     fb_ctrl_sof_update(&fb_ctrl, frame_count, current_total, rate_shift,
-                       (fill_frames << 16) / SLOT_FILL_FRAMES_PER_BUCKET);
+                       (fill_frames << 16) / SLOT_FILL_FRAMES_PER_BUCKET,
+                       (output_ring_target_frames << 16) / SLOT_FILL_FRAMES_PER_BUCKET);
 
     if (active_input_source != INPUT_SOURCE_USB) {
         // In non-USB modes the host's stream is decorative.  Output DMA can

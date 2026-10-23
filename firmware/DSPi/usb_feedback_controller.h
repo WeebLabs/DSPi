@@ -12,7 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "config.h"   // ring fill target and bucket size only
+#include "config.h"   // bucket size only
 
 // ---------------------------------------------------------------------------
 // Q16.16 helpers
@@ -31,11 +31,9 @@ static inline int32_t round_div_pow2_s32(int32_t x, uint32_t n) {
 // Constants
 // ---------------------------------------------------------------------------
 
-// Fill servo: direct consumer buffer fill (0-16 buffers of 48 frames).
-// Inner slope 1/256 sample/frame per buffer keeps packet and processing jitter out
-// of the feedback; past the knee the slope rises to 1/16 so real displacements clear fast.
-#define FB_FILL_TARGET_Q16         ((int32_t)((OUTPUT_RING_TARGET_FILL_FRAMES << 16) / \
-                                               SLOT_FILL_FRAMES_PER_BUCKET))
+// Fill servo: direct consumer buffer fill in buffers of 48 frames, against the
+// caller's target. Inner slope 1/256 sample/frame per buffer keeps packet and processing
+// jitter out of the feedback; past the knee the slope rises to 1/16 so real displacements clear fast.
 #define FB_FILL_KP_Q16             256     // inner slope
 #define FB_FILL_KP2_Q16            3840    // added slope beyond the knee (total 4096)
 #define FB_FILL_KNEE_Q16           (1 << 16)   // ±1 buffer
@@ -134,11 +132,13 @@ void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl);
 // rate_shift: 12 for SPDIF, 13 for I2S.
 // consumer_fill_q16: slot 0 fill in Q16.16 buckets (frames * 65536 /
 // SLOT_FILL_FRAMES_PER_BUCKET); sample-granular, from the ring's snapshot pair.
+// fill_target_q16: the ring fill target in the same units.
 void fb_ctrl_sof_update(usb_feedback_ctrl_t *ctrl,
                         uint32_t frame_count,
                         uint32_t current_total_words,
                         uint32_t rate_shift,
-                        uint32_t consumer_fill_q16);
+                        uint32_t consumer_fill_q16,
+                        uint32_t fill_target_q16);
 
 // Get the current feedback value as 10.14 fixed-point for the USB endpoint.
 // Returns 0 if the controller has never been reset (caller should use nominal).

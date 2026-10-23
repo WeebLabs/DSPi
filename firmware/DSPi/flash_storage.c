@@ -51,6 +51,7 @@
 #include "bulk_params.h"     // WireBulkParams offsets for user_mute notify
 #include "dac_hw_mute.h"     // hold query for flash_mute_hold_samples floor
 #include "audio_pipeline.h"  // output-ring stall bracket around the flash window
+#include "output_latency.h"  // option IDs for the V23 latency block sanitize
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -626,6 +627,10 @@ typedef struct __attribute__((packed)) {
 // INDEPENDENT-mode store beside output_config.  V19/V21 migrate by a whole-block
 // prefix copy and V20 by its pre-cs_aux prefix; the zeroed block then reads as
 // "never saved" and dir_sanitize_limiter() seeds the defaults.
+//
+// V23 appends the device-global output latency block (FlashOutputLatencyConfig)
+// after the limiter.  V22 migrates by a whole-block prefix copy; the zeroed
+// block reads as "never saved" and dir_sanitize_output_latency() seeds it.
 
 // Device-global output limiter settings, used when output_config_mode is
 // INDEPENDENT.  Fixed at the RP2350 output count so the layout is the same on
@@ -646,6 +651,15 @@ typedef struct __attribute__((packed)) {
 } FlashLimiterConfig;                        // 112 bytes
 #define FLASH_LIMITER_CONFIG_VERSION 1
 _Static_assert(NUM_OUTPUT_CHANNELS <= FLASH_LIMITER_OUTPUTS, "limiter directory records");
+
+// Output latency option, device-global and never carried by a preset.  Stored
+// as requested; the source and rate decide what runs (output_latency_resolve).
+typedef struct __attribute__((packed)) {
+    uint8_t  version;                        // 0 = never saved (default), 1 = current
+    uint8_t  option_id;                      // OutputLatencyId; 0 / unknown = default
+    uint8_t  reserved[2];
+} FlashOutputLatencyConfig;                  // 4 bytes
+#define FLASH_OUTPUT_LATENCY_CONFIG_VERSION 1
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;                          // DIR_MAGIC
@@ -712,6 +726,9 @@ typedef struct __attribute__((packed)) {
     // V22 addition: output limiter settings for INDEPENDENT mode (see
     // apply_output_config_from_mode()).  version 0 = never saved.
     FlashLimiterConfig limiter;              // 112 bytes
+
+    // V23 addition: output latency (device-global).  version 0 = never saved.
+    FlashOutputLatencyConfig output_latency; // 4 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1206,6 +1223,14 @@ _Static_assert(sizeof(FlashLimiterConfig) == 112, "V22 limiter block geometry is
 _Static_assert(sizeof(PresetDirectory_v19) == 3035,
                "V19 directory geometry is frozen; snapshot any struct that grew");
 
+// V23 only appends, so a V22 directory migrates by copying its whole data
+// block; the latency block must directly follow the V22 layout, whose on-flash
+// geometry (V19 plus the 112-byte limiter block) is pinned here.
+#define PRESET_DIRECTORY_V22_SIZE (3035 + 112)
+_Static_assert(offsetof(PresetDirectory, output_latency) == PRESET_DIRECTORY_V22_SIZE,
+               "V23 output latency block must directly follow the V22 layout");
+_Static_assert(sizeof(FlashOutputLatencyConfig) == 4, "V23 output latency block geometry is frozen");
+
 // V20 only differs by the trailing aux table, so the V20->V21 migration is a
 // prefix copy that stops at cs_aux; everything ahead of it must match V21.
 _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirectory, cs_display),
@@ -1214,7 +1239,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  22
+#define DIR_VERSION_CURRENT  23
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1559,6 +1584,7 @@ static void dir_sanitize_cs_groups(void);                             // defined
 static void dir_sanitize_cs_macros(void);                             // defined below
 static void dir_sanitize_cs_display(void);                            // defined below
 static void dir_sanitize_limiter(void);                               // defined below
+static void dir_sanitize_output_latency(void);                        // defined below
 static void cs_config_from_v1(CsFlashConfig *dst, const CsFlashConfig_v1 *src);  // defined below
 static void cs_ir_from_v1(CsIrConfig *dst, const CsIrConfig_v1 *src);            // defined below
 // Forward declaration — defined alongside validate_slot() in the SLOT
@@ -1828,12 +1854,40 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         return true;
     }
 
+    if (flash_dir->version == 22) {
+        // V22 -> V23 migration.  V23 only appends the output latency block, so
+        // the whole V22 data block copies across; the zeroed block then reads
+        // as "never saved" and dir_sanitize_output_latency() seeds the default.
+        const uint8_t *v22_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v22_data_len = PRESET_DIRECTORY_V22_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v22_data_start, v22_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        // Header excluded: dir_flush() restamps magic/version/crc, and copying
+        // the old one would leave the cache reading V22 until it does.
+        memcpy(&dir_cache.startup_mode, v22_data_start, v22_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
+        return true;
+    }
+
     if (flash_dir->version == 20) {
-        // V20 -> V22 migration.  V21 dropped the trailing aux output table, so
+        // V20 -> V23 migration.  V21 dropped the trailing aux output table, so
         // copy the V20 data block up to it and discard the rest; any aux output
         // configured on a V20 build is gone and must be rebuilt as a binding.
         const PresetDirectory_v20 *v20 = (const PresetDirectory_v20 *)flash_dir;
@@ -1855,14 +1909,15 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
     }
 
     if (flash_dir->version == 19 || flash_dir->version == 21) {
-        // V19 / V21 -> V22 migration.  V21 is byte-identical to V19 and V22
-        // only appends the limiter block, so the whole data block copies across.
+        // V19 / V21 -> V23 migration.  V21 is byte-identical to V19 and V22/V23
+        // only append (limiter, latency), so the whole data block copies across.
         const PresetDirectory_v19 *v19 = (const PresetDirectory_v19 *)flash_dir;
         const uint8_t *v19_data_start = (const uint8_t *)&v19->startup_mode;
         size_t v19_data_len = sizeof(PresetDirectory_v19) - offsetof(PresetDirectory_v19, startup_mode);
@@ -1881,6 +1936,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1908,6 +1964,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1936,6 +1993,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -1967,6 +2025,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2009,6 +2068,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2053,6 +2113,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2096,6 +2157,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2140,6 +2202,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2183,6 +2246,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2226,6 +2290,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2267,6 +2332,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_macros();
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2303,6 +2369,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v8->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v8->cs_config);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2346,6 +2413,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v7->i2c_ctrl;
         cs_config_from_v1(&dir_cache.cs_config, &v7->cs_config);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2380,6 +2448,7 @@ static bool dir_load_cache(void) {
         dir_cache.i2c_ctrl           = v6->i2c_ctrl;
         dir_cache.cs_config.version  = CS_CONFIG_VERSION;
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2412,6 +2481,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist at the current version
         return true;
@@ -2446,6 +2516,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.adat_input_pin = 0xFF;   // V15 field: unset (not zero-fill 0)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();   // persist as V5
         return true;
@@ -2483,6 +2554,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.spdif_rx_pin = v3->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2518,6 +2590,7 @@ static bool dir_load_cache(void) {
         dir_cache.output_config.spdif_rx_pin = v2->spdif_rx_pin;  // keep device RX pin
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();
         return true;
@@ -2551,6 +2624,7 @@ static bool dir_load_cache(void) {
         io_config_defaults(&dir_cache.output_config);      // V4 device-global IO (v1 has no RX pin)
         ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 blocks
         dir_sanitize_limiter();   // V22 block: defaults when never saved
+        dir_sanitize_output_latency();
         dir_cache_valid = true;
         (void)dir_flush();  // persist as V4; if the flush fails, cache stays valid in RAM
         return true;
@@ -2826,6 +2900,19 @@ static void dir_sanitize_limiter(void) {
     }
 }
 
+// Seed the output latency block when it was never saved (fresh or migrated
+// directory) or holds an unknown option.
+static void dir_sanitize_output_latency(void) {
+    FlashOutputLatencyConfig *c = &dir_cache.output_latency;
+    if (c->version != FLASH_OUTPUT_LATENCY_CONFIG_VERSION || !output_latency_find(c->option_id)) {
+        memset(c, 0, sizeof(*c));
+        c->version = FLASH_OUTPUT_LATENCY_CONFIG_VERSION;
+        c->option_id = OUTPUT_LATENCY_DEFAULT;
+        return;
+    }
+    c->reserved[0] = c->reserved[1] = 0;
+}
+
 // Write the RAM-cached directory back to flash.
 // Recomputes the CRC before writing.
 static int dir_flush(void) {
@@ -2868,6 +2955,7 @@ static void dir_ensure(void) {
     io_config_defaults(&dir_cache.output_config);  // V4 device-global IO defaults
     ctrl_iface_defaults(&dir_cache.uart_ctrl, &dir_cache.i2c_ctrl);  // V6 control interfaces
     dir_sanitize_limiter();                        // V22 limiter defaults
+    dir_sanitize_output_latency();
     dir_cache_valid = true;
     // Don't flush yet — will be flushed on first preset save
 }
@@ -4558,6 +4646,19 @@ void preset_get_dac_hw_mute(DacHwMuteConfig *out) {
     if (!out) return;
     dir_ensure();
     memcpy(out, &dir_cache.dac_hw_mute, sizeof(*out));
+}
+
+void preset_set_output_latency(uint8_t id) {
+    dir_ensure();
+    dir_cache.output_latency.version = FLASH_OUTPUT_LATENCY_CONFIG_VERSION;
+    dir_cache.output_latency.option_id = id;
+    dir_sanitize_output_latency();
+    (void)dir_flush();
+}
+
+uint8_t preset_get_output_latency(void) {
+    dir_ensure();
+    return dir_cache.output_latency.option_id;
 }
 
 // Control-interface (UART/I2C) persistence.  Mirrors preset_set_dac_hw_mute:

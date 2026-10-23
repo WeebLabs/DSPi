@@ -7,6 +7,7 @@ Output pin                     0x7C/0x7D
 Output type (SPDIF/I2S)        0xC0/0xC1
 I2S BCK pin                    0xC2/0xC3
 MCK enable/pin/multiplier      0xC4-0xC9
+Output latency option          0x03
 
 Every test here that mutates hardware (enables, pins, types, MCK) captures the
 prior state and restores it in a finally block — pin/type moves run a muted
@@ -14,6 +15,7 @@ pipeline reset, so leaving them perturbed would violate the slot-alignment
 constraint for later tests.
 """
 
+import struct
 import time
 
 from ..device import OP, Stall
@@ -319,3 +321,80 @@ def mck_pin_validation(dev, profile, chk):
         dev.get_u8(OP.SET_MCK_PIN, wvalue=orig)
         if en0:
             dev.get_u8(OP.SET_MCK_ENABLE, wvalue=1)
+
+
+
+# Output latency option IDs (firmware/DSPi/output_latency.h).
+LAT_LOW, LAT_2MS, LAT_4MS = 1, 3, 5
+LAT_STREAM_ONLY, LAT_AVAILABLE = 0x01, 0x80
+
+
+def _latency(dev):
+    req, eff, eff_us, frames, batch, pending, count, _ = struct.unpack(
+        "<BBHHHBBH", dev.get(OP.OUTPUT_LATENCY, 12, wvalue=0))
+    return dict(requested=req, effective=eff, effective_us=eff_us, target_frames=frames,
+                batch_frames=batch, pending=pending, count=count)
+
+
+def _latency_options(dev, count):
+    raw = dev.get(OP.OUTPUT_LATENCY, 8 * count, wvalue=1)
+    return [dict(zip(("id", "flags", "latency_us", "batch_us", "effective_us"),
+                     struct.unpack_from("<BBHHH", raw, 8 * i))) for i in range(count)]
+
+
+def _set_latency(dev, opt_id, timeout_s=8.0):
+    """SET is applied by the main loop inside a flash bracket; poll until it lands."""
+    dev.set(OP.OUTPUT_LATENCY, bytes([opt_id]))
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        time.sleep(0.1)
+        try:
+            st = _latency(dev)
+        except Exception:  # noqa: BLE001  (busy during the flash window)
+            continue
+        if not st["pending"]:
+            return st
+    return _latency(dev)
+
+
+@test("outputs")
+def output_latency_get(dev, profile, chk):
+    """0x03 IN: status and option table are consistent with each other and the rate."""
+    st = _latency(dev)
+    rate = dev.get_u32(OP.GET_STATUS, wvalue=15)
+    opts = _latency_options(dev, st["count"])
+    ids = [o["id"] for o in opts]
+    chk.eq(len(set(ids)), len(ids), "option IDs unique")
+    chk.ok(st["requested"] in ids and st["effective"] in ids, "requested and effective are listed")
+    chk.ok(0 not in ids, "0 is never an option ID")
+    chk.ok(abs(st["target_frames"] - st["effective_us"] * rate / 1e6) <= 1.0,
+           f"target {st['target_frames']} frames matches {st['effective_us']} us at {rate} Hz")
+    eff = next(o for o in opts if o["id"] == st["effective"])
+    chk.eq(eff["effective_us"], st["effective_us"], "table effective_us matches status for the option in force")
+    chk.ok(st["batch_frames"] < st["target_frames"], "input batch below the target")
+    if dev.get_u8(OP.GET_INPUT_SOURCE) == 0:   # USB: stream-only options fall back
+        for o in opts:
+            if o["flags"] & LAT_STREAM_ONLY:
+                chk.ok(not o["flags"] & LAT_AVAILABLE, f"option {o['id']} unavailable on USB")
+
+
+@test("outputs", mutating=True, flash=3)
+def output_latency_roundtrip(dev, profile, chk):
+    """0x03 OUT applies options, falls back on USB, and ignores unknown IDs (flash)."""
+    orig = _latency(dev)["requested"]
+    try:
+        st = _set_latency(dev, LAT_2MS)
+        chk.eq((st["requested"], st["effective"]), (LAT_2MS, LAT_2MS), "2 ms applied")
+        if dev.get_u8(OP.GET_INPUT_SOURCE) == 0:
+            st = _set_latency(dev, LAT_LOW)
+            chk.eq((st["requested"], st["effective"]), (LAT_LOW, LAT_2MS),
+                   "low latency on USB stores the request and runs 2 ms")
+        # USB acknowledges every SET data stage; a rejected ID leaves no trace.
+        before = _latency(dev)
+        for bad in (0x00, 0x63):
+            dev.set(OP.OUTPUT_LATENCY, bytes([bad]))
+            time.sleep(0.2)
+            chk.eq(_latency(dev), before, f"ID 0x{bad:02X} ignored")
+        chk.stalls(lambda: dev.get(OP.OUTPUT_LATENCY, 12, wvalue=2), "unknown GET index STALLs")
+    finally:
+        _set_latency(dev, orig)

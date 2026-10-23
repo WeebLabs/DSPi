@@ -31,7 +31,12 @@ rta_sample_t  rta_buf[RTA_MAX_POINTS];
 // Engine state (Core 0 only)
 // ---------------------------------------------------------------------------
 
-enum { PH_FILL = 0, PH_FFT = 1, PH_FINISH = 2 };
+enum { PH_FILL = 0, PH_FFT = 1, PH_FINISH = 2, PH_PUBLISH = 3 };
+
+// Bins per finish step: about 64 us on RP2350. The main loop also feeds the
+// stream inputs, so no step may hold it long; see current_architecture.md
+// "Output Latency".
+#define RTA_FINISH_BINS_PER_STEP 64u
 
 typedef struct {
     float    ema[RTA_MAX_BANDS - RTA_BASS_BANDS]; // FFT-band power EMA; bass owns its EMA
@@ -55,6 +60,8 @@ static struct {
     uint8_t   ch;                  // channel being captured / transformed
     uint8_t   order;
     uint8_t   stage;               // rta_fft_step cursor
+    RtaFinishCursor finish;        // rta_fft_finish_step cursor
+    float     power[RTA_MAX_BANDS]; // band powers of the frame in flight
     uint16_t  n;                   // 1 << order
     uint16_t  wr;                  // capture write index
     uint32_t  frame_busy_us;       // transform time of the frame in flight
@@ -69,8 +76,10 @@ static struct {
     uint16_t bass_mask;
     uint32_t bass_busy_acc_us;
     uint16_t bass_busy_us_per_s;
-    // Bin frame: header | bins[n/2] | seq tail.
+    // Bin frame: header | bins[n/2] | seq tail.  The finish steps fill
+    // bin_stage and the publish copies it in, so readers never see it mid-write.
     uint8_t   bin_frame[RTA_BIN_FRAME_MAX];
+    uint8_t   bin_stage[RTA_MAX_POINTS / 2];
     uint16_t  bin_len;             // fixed per config
     uint8_t   bin_seq;
     // Statistics, one-second windows.
@@ -242,9 +251,9 @@ static void publish(const float *power) {
     c->seen = true;
     c->seq++;
 
-    // Bin frame header: bins were written in place by rta_fft_finish before
-    // this call; the tail was cleared first so a reader spanning the write
-    // sees a mismatch and re-reads.
+    // Bins, header and tail change together in this call; a chunked reader
+    // spanning two publishes sees head and tail disagree and re-reads.
+    memcpy(rta.bin_frame + sizeof(RtaBinFrameHeader), rta.bin_stage, rta.n / 2);
     RtaBinFrameHeader *h = (RtaBinFrameHeader *)rta.bin_frame;
     h->version = RTA_CFG_VERSION;
     h->channel = rta.ch;
@@ -280,25 +289,25 @@ static bool step(void) {
     if (rta.phase == PH_FILL) return false;
     uint32_t t0 = time_us_32();
     if (rta.phase == PH_FFT) {
-        if (rta_fft_step(rta_buf, rta.order, &rta.stage)) rta.phase = PH_FINISH;
-        uint32_t dt = time_us_32() - t0;
-        rta.frame_busy_us += dt;
-        rta.busy_acc_us += dt;
+        if (rta_fft_step(rta_buf, rta.order, &rta.stage)) {
+            rta_fft_finish_begin(&rta.finish);
+            rta.phase = PH_FINISH;
+        }
+    } else if (rta.phase == PH_FINISH) {
+        if (rta_fft_finish_step(&rta.finish, rta_buf, rta.order, rta.table, rta.power,
+                                rta.bin_stage, RTA_FINISH_BINS_PER_STEP))
+            rta.phase = PH_PUBLISH;
+    } else {
+        // Charge the publish to the frame before it reads the total.
+        rta.frame_busy_us += time_us_32() - t0;
+        publish(rta.power);
+        advance();
+        rta.busy_acc_us += time_us_32() - t0;
         return true;
     }
-
-    float power[RTA_MAX_BANDS];
-    // Invalidate the tail before touching any bins (spec section 5.1).
-    rta.bin_frame[rta.bin_len - 1] = 0xFF;
-    rta_fft_finish(rta_buf, rta.order, rta.table, power,
-                   rta.bin_frame + sizeof(RtaBinFrameHeader));
-    // Charge the finish to the frame before publish reads it.
     uint32_t dt = time_us_32() - t0;
     rta.frame_busy_us += dt;
     rta.busy_acc_us += dt;
-
-    publish(power);
-    advance();
     return true;
 }
 

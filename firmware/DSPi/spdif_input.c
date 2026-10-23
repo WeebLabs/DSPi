@@ -263,6 +263,17 @@ bool spdif_input_check_rate_change(void) {
 // MAIN-LOOP POLL (called every iteration when SPDIF is active input)
 // ============================================================================
 
+void spdif_input_discard_queued(void) {
+    if (spdif_state != SPDIF_INPUT_LOCKED) return;
+    uint32_t left = spdif_rx_get_fifo_count_live() & ~1u;
+    uint32_t *buf;
+    while (left) {   // at most two reads: the FIFO wraps once
+        uint32_t n = spdif_rx_read_fifo_live(&buf, left);
+        if (n == 0) break;
+        left -= n;
+    }
+}
+
 DSP_TIME_CRITICAL
 uint32_t spdif_input_poll(void) {
     if (spdif_state == SPDIF_INPUT_INACTIVE)
@@ -332,17 +343,13 @@ uint32_t spdif_input_poll(void) {
     // granular delivery moves the fill smoothly like the ADAT DMA ring does.
     uint32_t fifo_count = spdif_rx_get_fifo_count_live();
 
-    // Batch into ~1 ms granules (the pipeline's native USB-packet cadence).
-    // process_input_block() has a fixed per-call cost (ring admission, gain
-    // ramp and filter setup, metering): sliver-sized calls measured 54% CPU0
-    // at 48 kHz on hardware, against 9% batched.
-    uint32_t min_subframes = (audio_state.freq / 1000) * 2;
-    if (min_subframes < 2) min_subframes = 2;
-    if (fifo_count < min_subframes)
+    // Batch per the latency option (process_input_block() has a fixed per-call
+    // cost: sliver-sized calls measured 54% CPU0 at 48 kHz, against 9% at 1 ms),
+    // and at most one block per call; see producer_block_bounds().
+    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+    if (max_frames == 0 || fifo_count < min_frames * 2u)
         return 0;
-
-    // Read up to 192 stereo samples per poll (matching buf_l/buf_r size)
-    uint32_t max_subframes = 192 * 2;  // 192 stereo samples = 384 subframes
+    uint32_t max_subframes = max_frames * 2u;
     uint32_t need = fifo_count;
     if (need > max_subframes) need = max_subframes;
     need &= ~1u;  // Round down to stereo pairs

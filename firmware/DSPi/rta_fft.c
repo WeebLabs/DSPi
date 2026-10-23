@@ -19,7 +19,6 @@
 typedef float    rta_acc_t;     // butterfly accumulator
 typedef float    rta_tw_t;      // twiddle element
 typedef float    rta_binpow_t;  // one bin's power
-typedef float    rta_bandacc_t; // band power accumulator
 
 #define RTA_Q4(x)     ((x) * 0.25f)
 #define RTA_Q2(x)     ((x) * 0.5f)
@@ -44,7 +43,6 @@ static inline rta_binpow_t rta_bin_power(rta_acc_t wr, rta_acc_t wi) {
 typedef int32_t  rta_acc_t;
 typedef int16_t  rta_tw_t;
 typedef uint32_t rta_binpow_t;
-typedef uint64_t rta_bandacc_t;
 
 // Round half up: the plain arithmetic shift would bias every stage downwards.
 #define RTA_Q4(x)     (((x) + 2) >> 2)
@@ -364,42 +362,60 @@ static inline void rta_bin_at(const rta_sample_t *buf, int32_t i, int32_t n_bins
     *im = sign * (rta_acc_t)buf[2 * i + 1];
 }
 
-void rta_fft_finish(const rta_sample_t *buf, uint8_t order,
-                    const RtaBandTable *table, float *band_power, uint8_t *bins) {
-    if (order < RTA_ORDER_MIN || order > RTA_ORDER_MAX) return;
+void rta_fft_finish_begin(RtaFinishCursor *c) {
+    memset(c, 0, sizeof(*c));
+}
+
+bool rta_fft_finish_step(RtaFinishCursor *c, const rta_sample_t *buf, uint8_t order,
+                         const RtaBandTable *table, float *band_power, uint8_t *bins,
+                         uint16_t max_bins) {
+    if (order < RTA_ORDER_MIN || order > RTA_ORDER_MAX) return true;
     const uint16_t n_bins = (uint16_t)(1u << (order - 1));
 
     uint8_t n_bands = 0;
-    rta_bandacc_t acc[RTA_MAX_BANDS] = { 0 };
-    if (band_power) {
-        // No table: bands read the floor rather than stack garbage.
-        memset(band_power, 0, RTA_MAX_BANDS * sizeof(float));
-        if (table) {
-            n_bands = table->n_bands;
-            if (n_bands > RTA_MAX_BANDS) n_bands = RTA_MAX_BANDS;
-        }
+    if (band_power && table) {
+        n_bands = table->n_bands;
+        if (n_bands > RTA_MAX_BANDS) n_bands = RTA_MAX_BANDS;
     }
-    if (!bins && !n_bands) return;
 
-    uint8_t b0 = 0;
+    uint32_t end = (uint32_t)c->next_bin + max_bins;
+    if (end > n_bins || (!bins && !n_bands)) end = n_bins;
 
-    for (uint16_t k = 0; k < n_bins; k++) {
-        rta_acc_t re[7], im[7];
-        for (int32_t j = 0; j < 7; j++) {
-            rta_bin_at(buf, (int32_t)k + j - 3, n_bins, &re[j], &im[j]);
-        }
-        const rta_binpow_t p = rta_bin_power(rta_window(re), rta_window(im));
-        if (bins) bins[k] = rta_bin_level(p);
+    if (bins || n_bands) {
+        uint8_t b0 = c->band;
+        for (uint16_t k = c->next_bin; k < end; k++) {
+            rta_acc_t re[7], im[7];
+            for (int32_t j = 0; j < 7; j++) {
+                rta_bin_at(buf, (int32_t)k + j - 3, n_bins, &re[j], &im[j]);
+            }
+            const rta_binpow_t p = rta_bin_power(rta_window(re), rta_window(im));
+            if (bins) bins[k] = rta_bin_level(p);
 
-        if (n_bands) {
-            while (b0 < n_bands && table->hi[b0] < k) b0++;
-            for (uint8_t b = b0; b < n_bands && table->lo[b] <= k; b++) {
-                if (k <= table->hi[b]) acc[b] += p;
+            if (n_bands) {
+                while (b0 < n_bands && table->hi[b0] < k) b0++;
+                for (uint8_t b = b0; b < n_bands && table->lo[b] <= k; b++) {
+                    if (k <= table->hi[b]) c->acc[b] += p;
+                }
             }
         }
+        c->band = b0;
     }
+    c->next_bin = (uint16_t)end;
+    if (end < n_bins) return false;
 
-    for (uint8_t b = 0; b < n_bands; b++) {
-        band_power[b] = (float)acc[b] * RTA_BAND_SCALE;
+    // No table: bands read the floor rather than stack garbage.
+    if (band_power) {
+        memset(band_power, 0, RTA_MAX_BANDS * sizeof(float));
+        for (uint8_t b = 0; b < n_bands; b++) {
+            band_power[b] = (float)c->acc[b] * RTA_BAND_SCALE;
+        }
     }
+    return true;
+}
+
+void rta_fft_finish(const rta_sample_t *buf, uint8_t order,
+                    const RtaBandTable *table, float *band_power, uint8_t *bins) {
+    RtaFinishCursor c;
+    rta_fft_finish_begin(&c);
+    (void)rta_fft_finish_step(&c, buf, order, table, band_power, bins, UINT16_MAX);
 }

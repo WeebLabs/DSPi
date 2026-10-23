@@ -29,6 +29,7 @@
 #include "adat_output.h"
 #include "output_s24.h"
 #include "loopback.h"   // DSPI_LOOPBACK slot-0 capture tap (self-guarded; empty otherwise)
+#include "output_latency.h"
 #include "pico/audio_spdif.h"
 #include "pico/audio_i2s_multi.h"
 #include "hardware/timer.h"
@@ -300,6 +301,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // outputs acquire a permanent content offset. Space only grows between
     // here and the writes, so early admission stays valid.
     bool rings_admit = output_rings_pre_give(sample_count);
+    if (!rings_admit && sample_count) output_ring_drops++;
 
     // Watermark tracking is diagnostic-only; run at lower cadence to keep
     // the packet callback lean under heavy DSP/output load.
@@ -1431,7 +1433,12 @@ static bool output_rings_pre_give(uint32_t frames) {
             ref_fill = prewrite_fill;
         }
     }
-    if (max_deficit != 0) {
+    // No successful content since reset (or corrupt snapshot): there is no
+    // established PDM/content mapping to preserve. The idle pump (frames == 0)
+    // then leaves the anchor to the first real block, which can place it
+    // exactly, unless the deficit nears the signed fill range.
+    bool fresh = (ref_fill == UINT32_MAX || ref_fill > PICO_AUDIO_SPDIF_RING_FRAMES);
+    if (max_deficit != 0 && !(frames == 0 && fresh && max_deficit < (1u << 24))) {
         // Sample-exact PDM/slot recovery. PDM plays the final successful
         // block as real audio before it starts inserting zeros. Each ring
         // writer therefore snapshots its fill BEFORE that block; deficit +
@@ -1439,11 +1446,10 @@ static bool output_rings_pre_give(uint32_t frames) {
         // servo's post-write snapshot here would include the final real block
         // and shift PDM against every slot by that block's frame count.
         // No bucket rounding: recovery is exact for every input block size.
-        if (ref_fill == UINT32_MAX ||
-            ref_fill > PICO_AUDIO_SPDIF_RING_FRAMES) {
-            // No successful content since reset (or corrupt snapshot): there
-            // is no established PDM/content mapping to preserve.
-            ref_fill = OUTPUT_RING_TARGET_FILL_FRAMES;
+        if (fresh) {
+            // Land the post-write fill (what the servos regulate) on the target.
+            uint32_t t = output_ring_target_frames;
+            ref_fill = t > frames ? t - frames : 0;
         }
         uint32_t skip = max_deficit + ref_fill;
         for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
@@ -1501,21 +1507,30 @@ static bool output_rings_pre_give(uint32_t frames) {
 // or not (a ring may be prefilling before its synchronized start).
 DSP_TIME_CRITICAL
 static void output_rings_write_block(uint32_t frames) {
+    uint32_t low = output_ring_min_prewrite;
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
-            if (inst && inst->ring) audio_i2s_ring_write_s32(inst, slot_stage[i], frames);
+            if (!inst || !inst->ring) continue;
+            audio_i2s_ring_write_s32(inst, slot_stage[i], frames);
+            if (inst->enabled && inst->recovery_prewrite_fill_frames < low)
+                low = inst->recovery_prewrite_fill_frames;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (inst && inst->ring) audio_spdif_ring_write_s32(inst, slot_stage[i], frames);
+            if (!inst || !inst->ring) continue;
+            audio_spdif_ring_write_s32(inst, slot_stage[i], frames);
+            if (inst->enabled && inst->recovery_prewrite_fill_frames < low)
+                low = inst->recovery_prewrite_fill_frames;
         }
     }
+    output_ring_min_prewrite = low;
 }
 
 // Idle silence pump: with outputs enabled but no producer running (USB
 // pause, source gaps), keep the ring silent ahead of the reader so the
-// free-running DMA can never loop stale audio. The fill gate makes it a
-// no-op while streaming (fill holds near the target).
+// free-running DMA can never loop stale audio. It runs once a reader has passed
+// its writer (the producer stalled); the erase-ahead covers the main-loop pass
+// until then. Any higher gate sits inside the fill sawtooth at small targets.
 DSP_TIME_CRITICAL
 void output_rings_idle_pump(void) {
     if (output_type_switch_in_progress) return;
@@ -1529,12 +1544,12 @@ void output_rings_idle_pump(void) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (inst && inst->ring && inst->enabled &&
-                (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_frames(inst)) < 240)
+                (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_frames(inst)) < 0)
                 audio_i2s_ring_silence_pump(inst, 192u);
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
             if (inst && inst->ring && inst->enabled &&
-                (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_frames(inst)) < 240)
+                (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_frames(inst)) < 0)
                 audio_spdif_ring_silence_pump(inst, 192u);
         }
     }
@@ -1677,17 +1692,17 @@ int32_t output_ring_fill_signed(uint slot) {
 
 #define SLOT_FILL_MAX_BUCKETS       SPDIF_CONSUMER_BUFFER_COUNT
 
-// After a write the fill sits near the target, and the next block can be a
-// whole AUDIO_BUFFER_SAMPLES away: the target must exceed one block, and one
-// block must still fit above it inside each ring's writable span.
-_Static_assert(OUTPUT_RING_TARGET_FILL_FRAMES > AUDIO_BUFFER_SAMPLES,
-               "ring target must exceed one input block");
-_Static_assert(OUTPUT_RING_TARGET_FILL_FRAMES + AUDIO_BUFFER_SAMPLES <=
-               PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD,
-               "ring target leaves no room for a block in the S/PDIF ring");
-_Static_assert(OUTPUT_RING_TARGET_FILL_FRAMES + AUDIO_BUFFER_SAMPLES <=
-               PICO_AUDIO_I2S_RING_FRAMES - PICO_AUDIO_I2S_ERASE_AHEAD,
-               "ring target leaves no room for a block in the I2S ring");
+volatile uint32_t output_ring_drops = 0;
+volatile uint32_t output_ring_min_prewrite = UINT32_MAX;
+volatile uint32_t input_delivery_worst_gap_us = 0;
+static uint32_t input_delivery_last_us = 0;
+
+void input_delivery_mark(void) {
+    uint32_t now = time_us_32();
+    if (input_delivery_last_us && now - input_delivery_last_us > input_delivery_worst_gap_us)
+        input_delivery_worst_gap_us = now - input_delivery_last_us;
+    input_delivery_last_us = now;
+}
 
 // Live ring fill in frames for a slot; returns false when no valid reading
 // exists (type switch in progress, slot not set up).
@@ -1745,7 +1760,27 @@ bool get_slot_consumer_fill_frames(uint slot, uint32_t *frames) {
 
 bool slot_fill_at_target(uint slot) {
     uint32_t fill;
-    return slot_ring_fill(slot, &fill) && fill >= OUTPUT_RING_TARGET_FILL_FRAMES;
+    return slot_ring_fill(slot, &fill) && fill >= output_ring_target_frames;
+}
+
+DSP_TIME_CRITICAL
+uint32_t producer_block_bounds(uint32_t *min_frames) {
+    uint32_t max = output_ring_block_cap;
+    bool running;
+    if (output_types[0] == OUTPUT_TYPE_I2S) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[0];
+        running = !inst || inst->enabled;
+    } else {
+        audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
+        running = !inst || inst->enabled;
+    }
+    uint32_t fill;
+    if (!running && slot_ring_fill(0, &fill)) {
+        uint32_t room = fill < output_ring_target_frames ? output_ring_target_frames - fill : 0;
+        if (room < max) max = room;
+    }
+    *min_frames = input_batch_frames < max ? input_batch_frames : max;
+    return max;
 }
 
 // Fractional fill for the clock servo, in bucket units, from the ring's
@@ -1779,6 +1814,9 @@ static inline void update_slot0_fill_fast(void) {
 }
 
 void reset_buffer_watermarks(void) {
+    output_ring_min_prewrite = UINT32_MAX;
+    input_delivery_worst_gap_us = 0;
+    input_delivery_last_us = 0;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         spdif_consumer_min_fill_pct[i] = 100;
         spdif_consumer_max_fill_pct[i] = 0;
@@ -1857,13 +1895,15 @@ void siggen_pump(void) {
     if (streaming) return;
 
     // Bounded top-up per call to keep the main loop responsive; the loop
-    // spins fast enough to sustain any supported rate.
+    // spins fast enough to sustain any supported rate.  Blocks stay within
+    // the producer cap, or the fill overshoots the target by a whole block.
+    const uint32_t n = output_ring_block_cap;
     for (int b = 0; b < 2; b++) {
         if (slot_fill_at_target(0))
             break;
         int n_in = active_input_channel_count();
         for (int k = 0; k < n_in; k++)
-            memset(input_bufs[k], 0, AUDIO_BUFFER_SAMPLES * sizeof(input_bufs[0][0]));
-        process_input_block(AUDIO_BUFFER_SAMPLES);
+            memset(input_bufs[k], 0, n * sizeof(input_bufs[0][0]));
+        process_input_block(n);
     }
 }

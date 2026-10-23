@@ -57,6 +57,11 @@ void i2s_input_resync(void);
 // Returns number of stereo frames processed.
 uint32_t i2s_input_poll(void);
 
+// Drop the input received but not yet delivered, on every pair alike. Prefill
+// start only: nothing has been rendered since the outputs stopped, so the
+// stream simply starts later; see current_architecture.md "Output Latency".
+void i2s_input_discard_queued(void);
+
 // Push one silent block through the pipeline to prefill the output slot
 // rings. Used only during a slave-role prefill, where the input is clocked by
 // an I2S output and so cannot supply samples while the outputs are drained.

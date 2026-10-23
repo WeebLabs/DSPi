@@ -2364,7 +2364,17 @@ static void cs_revalidate_aux_dependents(uint8_t slot) {
     cs_macro_recount_status();
 }
 
-uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *nb) {
+// Derived state of the whole binding set (any-active flag, button gesture
+// groups), read only by the tick: run once after any number of slot applies.
+static void cs_bindings_changed(void) {
+    cs_recount_active();
+    cs_rebuild_groups();
+}
+
+// Per-slot half of control_surfaces_apply_binding().  Bulk callers (revert,
+// stored load) run it for every slot and finish with one cs_bindings_changed(),
+// so a reload costs one group rebuild rather than one per slot.
+static uint8_t cs_apply_binding_slot(uint8_t slot, const CsBinding *nb) {
     if (slot >= CS_MAX_BINDINGS || !nb) return CS_STATUS_INVALID_SLOT;
 
     // Release this slot first so the new pins can reuse them; restore the
@@ -2395,8 +2405,6 @@ uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *nb) {
                 cs_claim_pins(slot);
                 cs_seed_runtime(slot);
             }
-            cs_recount_active();
-            cs_rebuild_groups();
             return st;
         }
     }
@@ -2413,9 +2421,13 @@ uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *nb) {
     // of every control pointing at it.
     if (old.type != nb->type && (cs_type_is_aux(old.type) || cs_type_is_aux(nb->type)))
         cs_revalidate_aux_dependents(slot);
-    cs_recount_active();
-    cs_rebuild_groups();
     return PIN_CONFIG_SUCCESS;
+}
+
+uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *nb) {
+    uint8_t st = cs_apply_binding_slot(slot, nb);
+    cs_bindings_changed();
+    return st;
 }
 
 // Bring up every stored binding and IR command from the directory cache.
@@ -2437,7 +2449,7 @@ static void __attribute__((noinline)) cs_load_stored_bindings(bool aux_pass) {
         const CsBinding *b = &stored.bindings[slot];
         if (b->type == CS_TYPE_NONE) continue;
         if (cs_type_is_aux(b->type) != aux_pass) continue;
-        uint8_t st = control_surfaces_apply_binding(slot, b);
+        uint8_t st = cs_apply_binding_slot(slot, b);
         if (st != PIN_CONFIG_SUCCESS) {
             s_cfg.bindings[slot] = *b;
             s_slot_status[slot] = st;
@@ -2500,6 +2512,7 @@ static void cs_load_stored(void) {
     // Macro steps on aux nouns were counted invalid before the aux slots
     // existed; a failed aux apply never triggers the dependents recount.
     cs_macro_recount_status();
+    cs_bindings_changed();
 }
 
 // Shared group/macro/display state reset for init and revert: sequencer
@@ -2549,9 +2562,11 @@ void control_surfaces_revert(void) {
     CsBinding none;
     memset(&none, 0, sizeof(none));
     for (uint8_t slot = 0; slot < CS_MAX_BINDINGS; slot++) {
-        (void)control_surfaces_apply_binding(slot, &none);
+        (void)cs_apply_binding_slot(slot, &none);
         s_slot_status[slot] = PIN_CONFIG_SUCCESS;
     }
+    // Gesture state restarts as at boot; cs_load_stored() rebuilds the groups.
+    for (int i = 0; i < CS_MAX_BINDINGS; i++) s_btn[i].pin = CS_GPIO_UNUSED;
     memset(&s_ir, 0, sizeof(s_ir));
     s_ir.version = CS_IR_CONFIG_VERSION;
     memset(s_ir_op, 0, sizeof(s_ir_op));

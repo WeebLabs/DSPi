@@ -231,6 +231,12 @@ B2_LITERAL_WHITELIST = {
     "__vectors",
 }
 
+# Check B2: numeric constants that only happen to fall in the flash window, keyed
+# by (function, value).  A ring geometry change moves the value and fails safe.
+B2_CONSTANT_WHITELIST = {
+    ("audio_i2s_ring_consumed_words", 0x1E847FFF): "I2S half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
+}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -518,7 +524,9 @@ def check_elf(elf, baseline):
         for (waddr, val) in f["words"]:
             if in_flash(val):
                 wname = nearest_symbol(sorted_addrs, val)
-                if wname in B2_LITERAL_WHITELIST:
+                if (f["name"], val) in B2_CONSTANT_WHITELIST:
+                    lines.append("  INFO  %s @0x%08x -> .word 0x%08x (constant: %s)" % (f["name"], waddr, val, B2_CONSTANT_WHITELIST[(f["name"], val)]))
+                elif wname in B2_LITERAL_WHITELIST:
                     lines.append("  INFO  %s @0x%08x -> .word 0x%08x (%s; init-time only, whitelisted)" % (f["name"], waddr, val, wname))
                 else:
                     lines.append("  FAIL  %s @0x%08x -> .word 0x%08x (FLASH pointer, near %s)" % (f["name"], waddr, val, wname))

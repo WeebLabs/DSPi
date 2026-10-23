@@ -170,52 +170,79 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
 // Table Recomputation (called from main loop, not time-critical)
 // ----------------------------------------------------------------------------
 
-void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_rate) {
-    if (sample_rate < 1.0f) sample_rate = 48000.0f;
-
-    // Clamp ref_spl to valid range
-    if (ref_spl < LOUDNESS_REF_SPL_MIN) ref_spl = LOUDNESS_REF_SPL_MIN;
-    if (ref_spl > LOUDNESS_REF_SPL_MAX) ref_spl = LOUDNESS_REF_SPL_MAX;
-
-    // Write into the INACTIVE buffer
-    uint8_t write_buf = 1 - active_buf;
-
+// One volume step's two shelves.
+static void compute_vol_step(int vol_idx, float ref_spl, float intensity_pct, float sample_rate,
+                             LoudnessCoeffs out[LOUDNESS_BIQUAD_COUNT]) {
     // Low shelf: fc=200 Hz, Q=0.707
     // High shelf: fc=6000 Hz, Q=0.707
     static const float shelf_freq[2] = { 200.0f, 6000.0f };
     static const float shelf_Q = 0.707f;
 
-    for (int vol_idx = 0; vol_idx < LOUDNESS_VOL_STEPS; vol_idx++) {
-        // Volume in dB: index 0 = -60 dB (silent), index 60 = 0 dB
-        float vol_db = (float)(vol_idx - 60);
+    // Volume in dB: index 0 = -60 dB (silent), index 60 = 0 dB
+    float vol_db = (float)(vol_idx - 60);
 
-        // Effective phon = ref_spl + vol_db, clamped to [20, ref_spl]
-        float effective_phon = ref_spl + vol_db;
-        if (effective_phon < 20.0f) effective_phon = 20.0f;
-        if (effective_phon > ref_spl) effective_phon = ref_spl;
+    // Effective phon = ref_spl + vol_db, clamped to [20, ref_spl]
+    float effective_phon = ref_spl + vol_db;
+    if (effective_phon < 20.0f) effective_phon = 20.0f;
+    if (effective_phon > ref_spl) effective_phon = ref_spl;
 
-        // Low shelf gain from ISO 226 at 50 Hz
-        float low_gain_db = loudness_compensation_db(
-            ISO_50_TF, ISO_50_AF, ISO_50_LU,
-            ref_spl, effective_phon, intensity_pct);
+    // Low shelf gain from ISO 226 at 50 Hz
+    float low_gain_db = loudness_compensation_db(
+        ISO_50_TF, ISO_50_AF, ISO_50_LU,
+        ref_spl, effective_phon, intensity_pct);
 
-        // High shelf gain from ISO 226 at 10 kHz
-        float high_gain_db = loudness_compensation_db(
-            ISO_10K_TF, ISO_10K_AF, ISO_10K_LU,
-            ref_spl, effective_phon, intensity_pct);
+    // High shelf gain from ISO 226 at 10 kHz
+    float high_gain_db = loudness_compensation_db(
+        ISO_10K_TF, ISO_10K_AF, ISO_10K_LU,
+        ref_spl, effective_phon, intensity_pct);
 
-        // Compute low shelf biquad coefficients
-        compute_shelf_coeffs(shelf_freq[0], shelf_Q, low_gain_db,
-                           0, sample_rate,
-                           &loudness_tables[write_buf][vol_idx][0]);
+    compute_shelf_coeffs(shelf_freq[0], shelf_Q, low_gain_db, 0, sample_rate, &out[0]);
+    compute_shelf_coeffs(shelf_freq[1], shelf_Q, high_gain_db, 1, sample_rate, &out[1]);
+}
 
-        // Compute high shelf biquad coefficients
-        compute_shelf_coeffs(shelf_freq[1], shelf_Q, high_gain_db,
-                           1, sample_rate,
-                           &loudness_tables[write_buf][vol_idx][1]);
-    }
+// Volume steps per loudness_recompute_step() call: about 90 us on RP2350, so a
+// recompute never holds the main loop (current_architecture.md "Output Latency").
+#define LOUDNESS_STEPS_PER_CALL 8
+
+// Build in progress into the inactive buffer; the active one stays live until
+// the swap, and a new begin simply restarts the build.
+static struct {
+    bool    busy;
+    uint8_t next;
+    uint8_t write_buf;
+    float   ref_spl, intensity_pct, sample_rate;
+} build;
+
+void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_rate) {
+    if (sample_rate < 1.0f) sample_rate = 48000.0f;
+    if (ref_spl < LOUDNESS_REF_SPL_MIN) ref_spl = LOUDNESS_REF_SPL_MIN;
+    if (ref_spl > LOUDNESS_REF_SPL_MAX) ref_spl = LOUDNESS_REF_SPL_MAX;
+    build.busy = true;
+    build.next = 0;
+    build.write_buf = (uint8_t)(1 - active_buf);
+    build.ref_spl = ref_spl;
+    build.intensity_pct = intensity_pct;
+    build.sample_rate = sample_rate;
+}
+
+bool loudness_recompute_step(void) {
+    if (!build.busy) return false;
+    int end = build.next + LOUDNESS_STEPS_PER_CALL;
+    if (end > LOUDNESS_VOL_STEPS) end = LOUDNESS_VOL_STEPS;
+    for (int vol_idx = build.next; vol_idx < end; vol_idx++)
+        compute_vol_step(vol_idx, build.ref_spl, build.intensity_pct, build.sample_rate,
+                         loudness_tables[build.write_buf][vol_idx]);
+    build.next = (uint8_t)end;
+    if (end < LOUDNESS_VOL_STEPS) return false;
 
     // Atomic swap: update active table pointer
-    active_buf = write_buf;
+    active_buf = build.write_buf;
     loudness_active_table = loudness_tables[active_buf];
+    build.busy = false;
+    return true;
+}
+
+void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_rate) {
+    loudness_recompute_begin(ref_spl, intensity_pct, sample_rate);
+    while (!loudness_recompute_step()) {}
 }

@@ -49,7 +49,7 @@
 #define ADAT_DMA_DATA_CH        13     // 13/14 are unused in every config:
 #define ADAT_DMA_CTRL_CH        14     // outputs 0-3, PDM 4, input 5-12
 #define ADAT_FRAME_WORDS        8      // 256 bits
-#define ADAT_RING_FRAMES        960    // 30 KB; must exceed cushion + slot ring fill cap
+#define ADAT_RING_FRAMES        576    // 18 KB; must exceed cushion + slot ring fill cap
 #define ADAT_ALIGN_LEAD_FRAMES  96     // constant ADAT-vs-slot lead; underrun cushion
 #define ADAT_SYNC_HEADER        0x8010u // [1][10x0][1][0000]; user bits always 0
 // Largest lead the slot admission cap can produce; any larger value means

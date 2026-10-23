@@ -69,9 +69,6 @@ _Static_assert((ADAT_RX_RING_WORDS & ADAT_RX_RING_MASK) == 0,
 _Static_assert(ADAT_RX_RING_WORDS % ADAT_RX_FRAME_WORDS == 0,
                "ring must hold whole frames so laps preserve frame phase");
 
-// Batching: same rationale as I2S_INPUT_MIN_BLOCK (i2s_input.c); ~1 ms at 48k.
-#define ADAT_INPUT_MIN_BLOCK    48u
-
 // Sync/verify tuning
 #define ADAT_SYNC_VERIFY_FRAMES 8u     // consecutive good headers before LOCKED
 #define ADAT_HDR_FAIL_LIMIT     2u     // consecutive bad headers = lock loss
@@ -558,6 +555,16 @@ void adat_input_stop(void) {
     printf("ADAT RX: stopped\n");
 }
 
+static uint32_t adat_input_queued_frames(void) {
+    if (!adat_rx_running || adat_rx_state != ADAT_INPUT_LOCKED) return 0;
+    uint32_t avail = (adat_rx_write_index() - rd_word) & ADAT_RX_RING_MASK;
+    return avail ? (avail - 1u) / ADAT_RX_FRAME_WORDS : 0;   // as the poll counts them
+}
+
+void adat_input_discard_queued(void) {
+    rd_word = (rd_word + adat_input_queued_frames() * ADAT_RX_FRAME_WORDS) & ADAT_RX_RING_MASK;
+}
+
 DSP_TIME_CRITICAL
 uint32_t adat_input_poll(void) {
     if (!adat_rx_running) return 0;
@@ -631,8 +638,11 @@ uint32_t adat_input_poll(void) {
 
     // Whole frames fully in the ring; -1 covers the k-shift spill word.
     uint32_t frames = avail ? (avail - 1u) / ADAT_RX_FRAME_WORDS : 0;
-    if (frames < ADAT_INPUT_MIN_BLOCK) return 0;   // batch (see MIN_BLOCK)
-    if (frames > 192u) frames = 192u;              // pipeline block capacity
+    // Batch per the latency option, at most one block per call; see
+    // producer_block_bounds().
+    uint32_t min_frames, max_frames = producer_block_bounds(&min_frames);
+    if (max_frames == 0 || frames < min_frames) return 0;
+    if (frames > max_frames) frames = max_frames;
 
     float *dst[8] = { buf_l, buf_r,
                       buf_in_ext[0], buf_in_ext[1], buf_in_ext[2],
