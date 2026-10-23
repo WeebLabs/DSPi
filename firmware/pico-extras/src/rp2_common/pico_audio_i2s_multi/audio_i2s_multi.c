@@ -246,14 +246,15 @@ I2S_TIME_CRITICAL
 void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
                               const int32_t *lr, uint32_t frames) {
     uint32_t consumed = audio_i2s_ring_consumed_frames(inst);
-    uint32_t fill = inst->wr_frames - consumed;
+    // Reader ahead of the writer is a deficit, not a full ring (see the
+    // S/PDIF twin): rejecting it would split this slot's wr from its peers'.
+    int32_t signed_fill = (int32_t)(inst->wr_frames - consumed);
+    uint32_t fill = (signed_fill > 0) ? (uint32_t)signed_fill : 0u;
 
     // All-or-nothing: a partial write would advance this slot's wr by a
-    // different amount than its peers' (live DMA positions differ by FIFO
-    // prefetch and read timing), permanently skewing alignment. The DSPi
-    // give path admits a block only when EVERY enabled slot has space, so
-    // this fallback is unreachable in normal operation. Unsigned compare
-    // also covers reader-overtook-writer (re-anchored by the give path).
+    // different amount than its peers', permanently skewing alignment. The
+    // DSPi give path admits a block only when EVERY enabled slot has space,
+    // and space only grows afterwards, so this reject is unreachable there.
     uint32_t writable = (fill < I2S_WRITABLE_FRAMES) ? (I2S_WRITABLE_FRAMES - fill) : 0;
     if (frames > writable) {
         inst->drop_frames += frames;
@@ -288,6 +289,7 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
     // Recovery needs the fill before THIS block, not the post-write servo
     // snapshot below. The just-written frames remain real audio ahead of
     // PDM's first inserted zero and must not be counted as recovery silence.
+    // Clamped at 0 like the S/PDIF twin.
     inst->recovery_prewrite_fill_frames = fill;
 
     inst->snap_produced_frames = w;

@@ -351,14 +351,16 @@ SPDIF_TIME_CRITICAL
 void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
                                 const int32_t *lr, uint32_t frames) {
     uint32_t consumed = audio_spdif_ring_consumed_frames(inst);
-    uint32_t fill = inst->wr_frames - consumed;
+    // Reader ahead of the writer is a deficit, not a full ring: it can
+    // overtake between the give path's admission and this write, and a
+    // reject then would advance every peer's wr but not this slot's.
+    int32_t signed_fill = (int32_t)(inst->wr_frames - consumed);
+    uint32_t fill = (signed_fill > 0) ? (uint32_t)signed_fill : 0u;
 
     // All-or-nothing: a partial write would advance this slot's wr by a
-    // different amount than its peers' (live DMA positions differ by FIFO
-    // prefetch and read timing), permanently skewing alignment. The DSPi
-    // give path admits a block only when EVERY enabled slot has space, so
-    // this fallback is unreachable in normal operation. Unsigned compare
-    // also covers reader-overtook-writer (re-anchored by the give path).
+    // different amount than its peers', permanently skewing alignment. The
+    // DSPi give path admits a block only when EVERY enabled slot has space,
+    // and space only grows afterwards, so this reject is unreachable there.
     uint32_t writable = (fill < WRITABLE_FRAMES) ? (WRITABLE_FRAMES - fill) : 0;
     if (frames > writable) {
         inst->drop_frames += frames;
@@ -389,7 +391,8 @@ void audio_spdif_ring_write_s32(audio_spdif_instance_t *inst,
     // Recovery needs the fill before THIS block, not the post-write servo
     // snapshot below. If the producer stalls, these `frames` remain real
     // audio ahead of PDM's first inserted zero; counting them as silence
-    // would move the slot timeline by one block.
+    // would move the slot timeline by one block. Clamped at 0: frames the
+    // reader already passed are lost to this slot whatever the skip.
     inst->recovery_prewrite_fill_frames = fill;
 
     // Latch the coherent produced/consumed pair (constant production phase;
