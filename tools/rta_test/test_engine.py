@@ -46,7 +46,7 @@ static void packet(bool tone) {
 #if PICO_RP2350
         buf[i] = x;
 #else
-        buf[i] = x*268435456.;
+        buf[i] = x*536870912.;
 #endif
     }
     rta_pipe_t original[48]; memcpy(original,buf,sizeof(buf));

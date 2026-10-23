@@ -49,10 +49,8 @@ void RTA_RAM_FUNC rta_bass_push(const RtaBassCoeffs *c, RtaBassChannel *s,
         if (f < -4.0f) f = -4.0f;
         input = (int32_t)(f * (float)(1u << (27 - c->cic_shift)));
 #else
-        int32_t sample = samples[i];
-        if (sample > 1073741824) sample = 1073741824;
-        if (sample < -1073741824) sample = -1073741824;
-        input = sample >> (1 + c->cic_shift);
+        /* Samples reach 0 dBFS at 2^29, so int32 range is the float +/-4. */
+        input = samples[i] >> (2 + c->cic_shift);
 #endif
         uint32_t v = (uint32_t)input;
         for (int j = 0; j < 3; j++) { s->integrator[j] += v; v = s->integrator[j]; }

@@ -197,19 +197,17 @@ static inline void psybass_process_output_block(const PsybassCoeffs * __restrict
         lp_s1 = fast_mul_q28(c->lp_b1, x) - fast_mul_q28(c->lp_a1, low) + lp_s2;
         lp_s2 = fast_mul_q28(c->lp_b2, x) - fast_mul_q28(c->lp_a2, low);
 
-        // NLD: even harmonics from rectification, odd from the cubic clipper.
-        // Clamp the low band to +/-1.0 BEFORE the drive multiply: drive can be
-        // up to 7.94 and fast_mul_q28 wraps past +/-8.0, so drive*low with an
-        // over-full-scale low band would wrap sign.  Since drive >= 1.0 the
-        // result is identical to clamping only the product.  The second clamp
-        // bounds d so d^3 stays in range; 1.5d - 0.5d^3 peaks at exactly 1.0.
+        // NLD: even harmonics from rectification, odd from the cubic clipper,
+        // which runs at 0 dBFS = 1.0 (samples arrive at 2^29): halve in, double out.
+        // Clamp before the drive multiply (drive up to 7.94, fast_mul_q28 wraps
+        // past +/-8.0); the second clamp keeps d^3 in range.
         int32_t even = low < 0 ? -low : low;
-        int32_t dl = low;
+        int32_t dl = low >> 1;
         if (dl > one) dl = one; else if (dl < -one) dl = -one;
         int32_t d = fast_mul_q28(c->drive, dl);
         if (d > one) d = one; else if (d < -one) d = -one;
         int32_t d3 = fast_mul_q28(fast_mul_q28(d, d), d);
-        int32_t odd = d + (d >> 1) - (d3 >> 1);
+        int32_t odd = (d + (d >> 1) - (d3 >> 1)) * 2;
         int32_t h = fast_mul_q28(c->even_w, even) + fast_mul_q28(c->odd_w, odd);
 
         // Harmonic shaping: TDF2 highpass at cutoff

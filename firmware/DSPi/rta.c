@@ -557,7 +557,7 @@ void DSP_TIME_CRITICAL rta_tap(uint8_t tap, uint8_t row, const rta_pipe_t *buf, 
     for (uint32_t i = 0; i < take; i++) dst[i] = buf[i];
 #else
     for (uint32_t i = 0; i < take; i++) {
-        int32_t s = buf[i] >> 13;               // Q28 -> Q15
+        int32_t s = buf[i] >> 14;               // full scale 2^29 -> Q15
         if (s > 32767) s = 32767; else if (s < -32768) s = -32768;
         dst[i] = (int16_t)s;
     }

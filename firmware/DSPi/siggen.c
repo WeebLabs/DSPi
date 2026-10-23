@@ -153,7 +153,7 @@ static float   amp;            // peak level, linear
 static float   amp_tone;       // per-tone level (multitone)
 static float   amp_pair[2];    // tone-pair levels
 #else
-static int32_t amp;            // peak level, Q28
+static int32_t amp;            // peak level, full scale SAMPLE_FULL_SCALE_Q28
 static int32_t amp_tone;
 static int32_t amp_pair[2];
 #endif
@@ -1113,13 +1113,13 @@ static void start_engine(void) {
         amp_pair[1] = lin / (1.0f + r);
     }
 #else
-    amp = (int32_t)(lin * 268435456.0f);            // Q28
+    amp = (int32_t)(lin * (float)SAMPLE_FULL_SCALE_Q28);
     amp_tone = mt_count ? amp / mt_count : amp;
     {
         float r = (cfg.signal_type == SIGGEN_TONE_PAIR && cfg.p3 > 0.01f)
                   ? cfg.p3 : 1.0f;
-        amp_pair[0] = (int32_t)(lin * r / (1.0f + r) * 268435456.0f);
-        amp_pair[1] = (int32_t)(lin / (1.0f + r) * 268435456.0f);
+        amp_pair[0] = (int32_t)(lin * r / (1.0f + r) * (float)SAMPLE_FULL_SCALE_Q28);
+        amp_pair[1] = (int32_t)(lin / (1.0f + r) * (float)SAMPLE_FULL_SCALE_Q28);
     }
 #endif
 

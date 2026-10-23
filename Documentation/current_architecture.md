@@ -1158,8 +1158,9 @@ Core 0 pushes Q28 samples; Core 1 pops, runs sigma-delta, writes DMA buffer. `__
 Every reset re-establishes the same starting point. The slots re-anchor to 384 frames of fill at the first block, and PDM sits at `TARGET_LEAD`, both after a pipeline reset and after `pdm_flash_silence()`'s forced re-anchor. The underrun skip's `deficit + recovery_prewrite_fill_frames` term preserves whatever offset exists. The fix is to give PDM the slots' accounting (a paced, slot-sized cushion and group-skip participation instead of eager consumption and local zero insertion), which belongs with the planned move of PDM to an assignable slot type.
 
 ### Input Limiting
+*Last updated: 2026-10-23*
 
-Hard clip at ±90% modulation (PDM_CLIP_THRESH = 29500) to prevent sigma-delta instability.
+Both platforms hand the modulator samples with 0 dBFS at 2^29. The modulator clamps at 0 dBFS, then scales full scale onto `PDM_FULL_SCALE` = 29500 (about 90% modulation), the stable ceiling of the sigma-delta loop. The modulator therefore clamps only what the sub clip flag already reports. Before 2026-10-23 the RP2350 put 0 dBFS at 50% modulation and the RP2040 clamped from -0.9 dBFS. The new mapping moved the RP2350 sub up 5.1 dB and the RP2040 sub down 0.9 dB.
 
 ### Soft Start
 
@@ -2339,7 +2340,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-10-23 (DSP Processing table: sample full scale and metering rows). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2366,6 +2367,8 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
 | Data type | Q28 fixed-point | IEEE 754 float |
+| Sample full scale | 2^29 (Q28 value 2.0) | 1.0 |
+| Peak meter / clip threshold | `peak_to_meter_q28()` (`>> 14`, clamped to 32767); `CLIP_THRESH_Q28` = 2^29 + 0.1% | `fminf(1, pk) * 32767`; `CLIP_THRESH_F` = 1.001 |
 | Accumulator | int32/int64 | float (single-precision) |
 | Filter architecture | TDF2 biquad only | Hybrid SVF/biquad (SVF below Fs/7.5, TDF2 above) |
 | Biquad impl | Block-based assembly (`dsp_process_rp2040.S`) | C, per-type SVF specialization |
@@ -2881,10 +2884,34 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 
 ---
 
+## RP2040 Sample Scale
+*Last updated: 2026-10-23*
+
+RP2040 pipeline samples are int32 with 0 dBFS at 2^29 (`SAMPLE_FULL_SCALE_Q28` in `config.h`, Q28 value 2.0). Filter coefficients and gains are Q28 with 1.0 = 2^28. A Q28 multiply leaves a sample's scale unchanged, so the "Q28" name describes the arithmetic, not where full scale sits. Input conversion shifts 16-bit samples left by 14 and 24-bit samples left by 6, and the output conversion shifts right by 6, so a flat pass-through is bit-exact. The RP2350 float path puts 0 dBFS at 1.0.
+
+Any RP2040 code that compares a sample-derived level with an absolute dBFS value, or generates samples at one, must use this scale. Kernels written with 0 dBFS = 1.0 Q28 convert at their boundary.
+
+| Code | Handling |
+|------|----------|
+| Peak meters, clip flags | `peak_to_meter_q28()` (`>> 14`, clamped to 32767); `CLIP_THRESH_Q28` = 2^29 + 0.1% |
+| Spectrum analyser | FFT tap `>> 14` to Q15; bass bank input `>> (2 + cic_shift)` |
+| Signal generator | Amplitude is `lin * SAMPLE_FULL_SCALE_Q28` |
+| PDM sub | Both platforms hand the modulator 2^29 full scale; 0 dBFS maps onto `PDM_FULL_SCALE` (see "PDM Subsystem", Input Limiting) |
+| Volume leveller | Limiter peaks (`lim_abs`) and detector squares (`det_sq`) are halved into 1.0-based units; the detector clamps at +6 dBFS |
+| Subharmonic synth | The sub path runs 1.0-based: `sh_from_pipe()` halves its input and `sh_to_pipe()` doubles the sub; dry + sub sums saturate (`sh_add_sat()`) |
+| Tube preamp | Kernel input halved, output doubled with saturation |
+| Psychoacoustic bass | Odd-path clipper input halved, output doubled |
+| Output limiter | Uses 2^29 directly (`LM_FS_RAW`) |
+| 24-bit output conversion | `q28_to_s24()` rounds like `(x + 32) >> 6` but cannot wrap: a sample saturated at `INT32_MAX` (+12 dBFS) clips to +full scale |
+
+Until 2026-10-23 every row except the output limiter assumed 2^28, so each was 6 dB off on RP2040. The meters read hot, clip flags tripped at -6 dBFS and the signal generator played 6 dB low. The leveller, subharm ceiling, tube drive and psybass clip point all acted 6 dB away from their set levels. The RP2350 was the reference and is unchanged, except for the PDM sub.
+
 ## Channel Metering
-*Last updated: 2026-03-01*
+*Last updated: 2026-10-23*
 
 Full peak metering for all input and output channels. Peak values are `uint16_t` in Q15 format (0–32767 maps to 0.0–1.0 full scale). Per-channel clip detection via sticky `clip_flags` bitmask.
+
+**RP2040 sample scale.** RP2040 samples reach 0 dBFS at 2^29, so every RP2040 peak site goes through `peak_to_meter_q28()` and both platforms report the same meter scale. See "RP2040 Sample Scale".
 
 ### Peak Array Layout (`global_status.peaks[NUM_CHANNELS]`)
 
@@ -2914,9 +2941,9 @@ In single-core mode, Core 0 meters all outputs including PDM.
 **Thread safety:** No race — Core 1 writes its channel peaks before `work_done`; Core 0 writes its channel peaks after `work_done`. The `__dmb()` + handshake guarantees memory visibility. Each core only OR's its own non-overlapping channel bits in `clip_flags`, so no torn-write risk.
 
 ### Clip Detection (OVER Indicator)
-*Last updated: 2026-03-01*
+*Last updated: 2026-10-23*
 
-`global_status.clip_flags` is a `uint16_t` bitmask — one bit per channel (bit position = channel index). A bit is **set** when the block peak exceeds the clip threshold (`CLIP_THRESH_F` = 1.001f on RP2350, `CLIP_THRESH_Q28` = (1<<28)+268 on RP2040). The threshold includes ~+0.01 dB headroom above unity to avoid false positives from float precision noise when 0 dBFS signals pass through biquad filters. Bits are **sticky**: once set, they remain set until explicitly cleared by the host via `REQ_CLEAR_CLIPS` (0x83). The firmware never autonomously clears clip flags.
+`global_status.clip_flags` is a `uint16_t` bitmask — one bit per channel (bit position = channel index). A bit is **set** when the block peak exceeds the clip threshold (`CLIP_THRESH_F` = 1.001f on RP2350, `CLIP_THRESH_Q28` = (1<<29) + (1<<29)/1000 on RP2040, the same 0.1% margin over the RP2040's 2^29 full scale). The threshold includes ~+0.01 dB headroom above unity to avoid false positives from float precision noise when 0 dBFS signals pass through biquad filters. Bits are **sticky**: once set, they remain set until explicitly cleared by the host via `REQ_CLEAR_CLIPS` (0x83). The firmware never autonomously clears clip flags.
 
 This matches the industry-standard sticky OVER indicator pattern (IEC 60268-18). Since DSPi is a DSP processor (not an ADC), any sample exceeding the threshold in `buf_out` is a genuine clip event — single-sample detection is correct.
 

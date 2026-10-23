@@ -462,7 +462,8 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
     const int32_t wet_lim = c->wet_lim;
 
     for (uint32_t i = 0; i < n; i++) {
-        int32_t x = buf[i];
+        // Kernel levels are 0 dBFS = 1.0 Q28; pipeline samples reach 0 dBFS at 2^29.
+        int32_t x = buf[i] >> 1;
         int32_t x4 = clamp_lim(x, four);
 
         // Drive product in the /2^ts domain stays under 7.5.  Pre-clamping t
@@ -505,7 +506,8 @@ void tube_process_output_block(const TubeCoeffs * __restrict c,
 
         // Mix budget: 4 dry_w + wet_w wet_lim <= 7.5 (see wet_lim)
         y = clamp_lim(y, wet_lim);
-        buf[i] = fast_mul_q28(c->dry_w, x4) + fast_mul_q28(c->wet_w, y);
+        int32_t r = fast_mul_q28(c->dry_w, x4) + fast_mul_q28(c->wet_w, y);
+        buf[i] = r > (INT32_MAX >> 1) ? INT32_MAX : (r < (INT32_MIN >> 1) ? INT32_MIN : r * 2);
     }
 
     st->env = env; st->dc_x1 = dc_x1; st->dc_y1 = dc_y1;

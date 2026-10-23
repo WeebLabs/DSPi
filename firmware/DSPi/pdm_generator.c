@@ -458,10 +458,12 @@ static void __not_in_flash_func(pdm_processing_loop)() {
             }
         } else {
             // Normal operation (including audio fade-in)
-            // Input Hard Limiter
+            // Hard-limit at 0 dBFS (2^29), then map full scale onto the
+            // stable modulation ceiling. Clamp first: the product needs it.
             int32_t pcm_val = (sample_value >> 14);
-            if (pcm_val > PDM_CLIP_THRESH) pcm_val = PDM_CLIP_THRESH;
-            if (pcm_val < -PDM_CLIP_THRESH) pcm_val = -PDM_CLIP_THRESH;
+            if (pcm_val > 32768) pcm_val = 32768;
+            if (pcm_val < -32768) pcm_val = -32768;
+            pcm_val = (pcm_val * PDM_FULL_SCALE) >> 15;
 
             // Audio fade-in
             if (fade_in_pos < PDM_FADE_IN_SAMPLES) {
@@ -904,7 +906,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 int32_t a = abs(buf_out[out][i]);
                 if (a > peak) peak = a;
             }
-            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(peak >> 13);
+            global_status.peaks[CH_OUT_1 + out] = peak_to_meter_q28(peak);
             if (peak > CLIP_THRESH_Q28) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
             rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
         }
@@ -919,8 +921,8 @@ static void __not_in_flash_func(eq_worker_loop)() {
                 memset(out_ptr, 0, sample_count * 8);
             } else {
                 for (uint32_t i = 0; i < sample_count; i++) {
-                    out_ptr[i*2]   = clip_s24((buf_out[left_out][i] + (1 << 5)) >> 6);
-                    out_ptr[i*2+1] = clip_s24((buf_out[right_out][i] + (1 << 5)) >> 6);
+                    out_ptr[i*2]   = q28_to_s24(buf_out[left_out][i]);
+                    out_ptr[i*2+1] = q28_to_s24(buf_out[right_out][i]);
                 }
             }
         }

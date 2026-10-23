@@ -57,7 +57,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 // from float precision noise when 0 dBFS signals pass through biquad filters.
 // +0.01 dB headroom: catches audible clipping, ignores float rounding artifacts.
 #define CLIP_THRESH_F   1.001f              // RP2350 float path
-#define CLIP_THRESH_Q28 ((1 << 28) + 268)   // RP2040 Q28 path (~0.001 in Q28)
+// RP2040 samples reach full scale at 2^29 (Q28 value 2.0), not 1 << 28.
+// See "RP2040 Sample Scale" in current_architecture.md.
+#define SAMPLE_FULL_SCALE_Q28 (1 << 29)
+#define CLIP_THRESH_Q28 (SAMPLE_FULL_SCALE_Q28 + SAMPLE_FULL_SCALE_Q28 / 1000)
 
 #define FILTER_SHIFT 28
 
@@ -67,7 +70,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define PDM_DMA_RING_BITS 13      // log2(2048 * 4 bytes) = 13
 #define PDM_PIO pio1
 #define PDM_SM 0
-#define PDM_CLIP_THRESH 29500  // ~90% modulation (was 26214 / 80%)
+#define PDM_FULL_SCALE 29500   // 0 dBFS lands here: ~90% modulation, the stable ceiling
 
 // PDM Sigma-Delta Tuning
 // Dither mask: controls TPDF amplitude. Start small (0x1FF), increase if idle tones persist
@@ -1200,6 +1203,16 @@ static inline int32_t clip_s24(int32_t x) {
     if (x > 0x7FFFFF) return 0x7FFFFF;
     if (x < -0x800000) return -0x800000;
     return x;
+}
+
+// Same rounding as (x + 32) >> 6, without wrapping when x is near INT32_MAX.
+static inline int32_t q28_to_s24(int32_t x) {
+    return clip_s24((x >> 6) + ((x >> 5) & 1));
+}
+
+// Block peak to the 0..32767 meter scale RP2350 reports.
+static inline uint16_t peak_to_meter_q28(int32_t pk) {
+    return ((uint32_t)pk >= (uint32_t)SAMPLE_FULL_SCALE_Q28) ? 32767 : (uint16_t)(pk >> 14);
 }
 
 // Q15 fixed-point multiply using 16-bit partial products.

@@ -128,6 +128,9 @@ static inline sh_num_t sh_mul(sh_num_t a, sh_num_t b) { return a * b; }
 static inline sh_num_t sh_twice(sh_num_t v)           { return 2.0f * v; }
 static inline sh_num_t sh_half(sh_num_t v)            { return 0.5f * v; }
 static inline sh_num_t sh_quarter(sh_num_t v)         { return 0.25f * v; }
+static inline sh_num_t sh_from_pipe(sh_num_t v)       { return v; }
+static inline sh_num_t sh_to_pipe(sh_num_t v)         { return v; }
+static inline sh_num_t sh_add_sat(sh_num_t a, sh_num_t b) { return a + b; }
 static inline sh_num_t sh_abs(sh_num_t v)             { return fabsf(v); }
 static inline sh_num_t sh_band_limit(sh_num_t v)      { return v; }
 static inline sh_num_t sh_input_limit(sh_num_t v)     { return v; }
@@ -143,6 +146,15 @@ static inline sh_num_t sh_mul(sh_num_t a, sh_num_t b) { return fast_mul_q28(a, b
 static inline sh_num_t sh_twice(sh_num_t v)           { return v * 2; }
 static inline sh_num_t sh_half(sh_num_t v)            { return v >> 1; }
 static inline sh_num_t sh_quarter(sh_num_t v)         { return v >> 2; }
+// The sub path runs with 0 dBFS = 1.0 Q28; pipeline samples reach it at 2^29.
+static inline sh_num_t sh_from_pipe(sh_num_t v)       { return v >> 1; }
+static inline sh_num_t sh_to_pipe(sh_num_t v)         { return v * 2; }
+// Dry + sub can pass the int32 limit on a hot input; saturate instead of wrapping.
+static inline sh_num_t sh_add_sat(sh_num_t a, sh_num_t b) {
+    int32_t s = (int32_t)((uint32_t)a + (uint32_t)b);
+    if (((a ^ s) & (b ^ s)) < 0) s = a < 0 ? INT32_MIN : INT32_MAX;
+    return s;
+}
 static inline sh_num_t sh_abs(sh_num_t v)             { return v < 0 ? -v : v; }
 // Clamp a band signal to +/-1.0 before the divider.  fast_mul_q28 wraps past
 // +/-8.0, so the divider input must be bounded for the +6 dB band level and

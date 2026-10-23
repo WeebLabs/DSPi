@@ -25,7 +25,7 @@ unsigned state_size(void) { return sizeof(state[0]); }
 '''
 
 def native(x, flt):
-    return np.asarray(x, dtype=np.float32) if flt else np.asarray(np.clip(x,-7.9,7.9)*2**28,dtype=np.int32)
+    return np.asarray(x, dtype=np.float32) if flt else np.asarray(np.clip(x,-3.99,3.99)*2**29,dtype=np.int32)
 
 def db(p):
     return 10*np.log10(np.maximum(p,1e-30))
@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as t:
                 # phase, IIR decimation, bandpass and envelope phase.
                 shift=3*int(np.log2(d));scale=2**(27-shift)
                 xn=native(x,flt)
-                xq=np.trunc(xn.astype(float)*scale)/scale if flt else (xn>>(1+shift)).astype(float)/scale
+                xq=np.trunc(xn.astype(float)*scale)/scale if flt else (xn>>(2+shift)).astype(float)/scale
                 for _ in range(3): xq=signal.lfilter(np.ones(d)/d,[1],xq)
                 low=signal.sosfilt(sos,xq[d-1::d])[7::8]
                 sections,env,comp=q

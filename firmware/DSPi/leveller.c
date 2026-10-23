@@ -454,8 +454,17 @@ void leveller_process_block(LevellerState *state,
 // RP2040 has exactly 2 input channels, so the masked loops stay 2-wide.
 // ---------------------------------------------------------------------------
 
+// Peak in Q28 full-scale units (samples reach 0 dBFS at 2^29, LIM_CEIL is 1.0-based).
 static inline __attribute__((always_inline)) uint32_t lim_abs(int32_t v) {
-    return v < 0 ? 0u - (uint32_t)v : (uint32_t)v;
+    return (v < 0 ? 0u - (uint32_t)v : (uint32_t)v) >> 1;
+}
+
+// Detector square in 1.0 = 0 dBFS units; the clamp at +6 dBFS keeps it in int32.
+static inline __attribute__((always_inline)) int32_t det_sq(int32_t v) {
+    int32_t h = v >> 1;
+    if (h > SAMPLE_FULL_SCALE_Q28) h = SAMPLE_FULL_SCALE_Q28;
+    if (h < -SAMPLE_FULL_SCALE_Q28) h = -SAMPLE_FULL_SCALE_Q28;
+    return fast_mul_q28(h, h);
 }
 
 // Q28 twin of the RP2350 lim_cap_of.  Its float divide runs once per block,
@@ -568,8 +577,7 @@ void leveller_process_block(LevellerState *state,
     // mask re-enable starts fresh instead of pumping from a stale level.
     if (det_l) {
         for (uint32_t i = 0; i < count; i++) {
-            int32_t sl = buf_l[i];
-            int32_t sq = fast_mul_q28(sl, sl);
+            int32_t sq = det_sq(buf_l[i]);
             env_l = fast_mul_q28(a_rms_q28, env_l) + fast_mul_q28(one_minus_a_q28, sq);
         }
         state->env_sq[0] = env_l;
@@ -579,8 +587,7 @@ void leveller_process_block(LevellerState *state,
     }
     if (det_r) {
         for (uint32_t i = 0; i < count; i++) {
-            int32_t sr = buf_r[i];
-            int32_t sq = fast_mul_q28(sr, sr);
+            int32_t sq = det_sq(buf_r[i]);
             env_r = fast_mul_q28(a_rms_q28, env_r) + fast_mul_q28(one_minus_a_q28, sq);
         }
         state->env_sq[1] = env_r;

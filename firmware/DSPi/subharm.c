@@ -336,7 +336,7 @@ void subharm_process_block(const SubharmCoeffs * __restrict c,
     const uint8_t decim = c->decim;
 
     for (uint32_t i = 0; i < n; i++) {
-        sh_num_t x = sh_input_limit(pair ? (sh_half(buf[i]) + sh_half(buf_b[i])) : buf[i]);
+        sh_num_t x = sh_input_limit(sh_from_pipe(pair ? (sh_half(buf[i]) + sh_half(buf_b[i])) : buf[i]));
         sh_num_t v1;
 
         // Full-rate anti-alias lowpass (also the top of band 2), then one
@@ -350,22 +350,23 @@ void subharm_process_block(const SubharmCoeffs * __restrict c,
         if (++phase >= decim) phase = 0;
         cur += step;
 
+        sh_num_t out = sh_to_pipe(cur);
         if (solo) {
-            buf[i] = cur;
-            if (pair) buf_b[i] = cur;
+            buf[i] = out;
+            if (pair) buf_b[i] = out;
             continue;
         }
-        sh_num_t acc = buf[i] + cur;
+        sh_num_t acc = sh_add_sat(buf[i], out);
         if (bell) {
             (void)sh_svf(&c->bell, &be1, &be2, acc, &v1);
-            acc += sh_mul(c->bell_m1, v1);
+            acc = sh_add_sat(acc, sh_mul(c->bell_m1, v1));
         }
         buf[i] = acc;
         if (pair) {
-            sh_num_t accb = buf_b[i] + cur;
+            sh_num_t accb = sh_add_sat(buf_b[i], out);
             if (bell) {
                 (void)sh_svf(&c->bell, &bb1, &bb2, accb, &v1);
-                accb += sh_mul(c->bell_m1, v1);
+                accb = sh_add_sat(accb, sh_mul(c->bell_m1, v1));
             }
             buf_b[i] = accb;
         }
