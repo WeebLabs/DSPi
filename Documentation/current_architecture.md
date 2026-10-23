@@ -767,7 +767,7 @@ RP2040 is unaffected: its band-major assembly kernels (`dsp_process_rp2040.S`) a
 **RP2040:** Completely unaffected. All SVF code is inside `#if PICO_RP2350` blocks.
 
 ### Per-Band Bypass
-*Last updated: 2026-05-04*
+*Last updated: 2026-10-23 (defaults clear the bypass byte). Previously, 2026-05-04*
 
 Each EQ band has a user-controllable bypass flag in `EqParamPacket.bypass` (config.h). When set to exactly `1` it forces `Biquad.bypass = true` inside `dsp_compute_coefficients()`, which causes the audio inner loops in `dsp_pipeline.c`, `dsp_process_rp2040.S`, `audio_pipeline.c`, and `pdm_generator.c` to skip the band entirely (`if (bq->bypass) continue;`). User bypass and the existing auto-bypass for `FILTER_FLAT` / zero-gain peaking/shelf filters share the same `Biquad.bypass` flag — `channel_bypassed[ch]` (true when *every* band on the channel is bypassed) automatically benefits, allowing the audio path to skip the entire channel.
 
@@ -780,6 +780,8 @@ Each EQ band has a user-controllable bypass flag in `EqParamPacket.bypass` (conf
 **Factory-default channel/band fix (2026-05-04):** `dsp_init_default_filters()` now writes `.channel = ch` and `.band = b` into every `filter_recipes` slot. Previously these fields stayed at BSS-zero, which caused `REQ_SET_BAND_BYPASS` to silently misroute writes to slot (0,0) since the handler copies the recipe (carrying the stale `.channel`/`.band`) into `pending_packet`, and the main-loop apply does `filter_recipes[p.channel][p.band] = p`. Symptom: bypass toggle didn't take effect on factory-defaulted bands until `REQ_SET_EQ_PARAM` rewrote the recipe with correct channel/band. `apply_slot_to_live()` (`flash_storage.c`) also normalizes `.channel` / `.band` after the recipe `memcpy` so old presets saved before the fix don't carry the bug into live state.
 
 **Factory defaults are now flat (2026-05-04):** `dsp_init_default_filters()` no longer installs the 80 Hz highpass on output channels nor the 80 Hz lowpass on the PDM sub. Every band starts as `FILTER_FLAT` with `freq = 1000`, `Q = 0.707`, `gain_db = 0`, `bypass = 0`. Crossover/sub configuration is now an explicit user choice via the host, not a baked-in default that the user has to discover and override.
+
+**Defaults clear the bypass byte (2026-10-23):** until v1.1.6-beta5, `dsp_init_default_filters()` wrote every PEQ recipe field except `bypass`, so the `bypass = 0` above held only while the BSS zero survived. A band bypassed earlier in the session stayed bypassed through factory reset, an empty-slot load or delete, and a boot with no preset. Bulk GET then reported it bypassed, the Console's preserve-bypass policy kept it bypassed through later edits, and a preset save persisted it. The initializer now writes `bypass = 0` explicitly, matching `xover_init_default_filters()`.
 
 **Vendor commands:**
 - `REQ_SET_EQ_PARAM` (0x42): host can set the byte directly inside the `EqParamPacket` payload.

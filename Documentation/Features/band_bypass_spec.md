@@ -124,7 +124,7 @@ Per-band bypass is **automatically saved and restored** with the active preset. 
 
 ### 4.1 Factory reset
 
-Factory reset re-initializes `filter_recipes` from `dsp_init_default_filters()`, which initializes the entire `filter_recipes` array via field assignment (type/freq/Q/gain). It does **not** explicitly write `bypass`, but the array starts in BSS (zeroed at boot) and factory reset re-runs the same initializer, so `bypass` stays `0` (active). If you maintain a host-side "preset" cache, reset your cached `bypass[]` to all-zeros on a factory-reset notification.
+Factory reset re-initializes `filter_recipes` from `dsp_init_default_filters()`, which writes every field of every band, `bypass = 0` included. Every path that falls back to defaults goes through it: factory reset, loading or deleting an empty active slot, and booting with no saved preset. All bands therefore come back active. Firmware up to and including v1.1.6-beta5 did not write `bypass` here, so a band bypassed earlier in the session stayed bypassed after any of those resets. If you maintain a host-side "preset" cache, reset your cached `bypass[]` to all-zeros on a factory-reset notification.
 
 ---
 

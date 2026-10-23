@@ -357,6 +357,7 @@ void dsp_init_default_filters() {
 #endif
             filter_recipes[ch][b].channel = ch;
             filter_recipes[ch][b].band = b;
+            filter_recipes[ch][b].bypass = 0;
             filter_recipes[ch][b].type = FILTER_FLAT;
             filter_recipes[ch][b].freq = 1000.0f;
             filter_recipes[ch][b].Q = 0.707f;
