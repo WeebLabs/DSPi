@@ -125,6 +125,7 @@ static usb_audio_ring_t __not_in_flash("audio_ring") audio_ring;
 // local) so it can be reset to 0 on stream lifecycle transitions in
 // as_set_alternate() and usb_audio_flush_ring().
 static volatile uint32_t audio_ring_last_push_us = 0;
+volatile uint32_t usb_audio_worst_packet_gap_us = 0;
 
 // Deferred fire-and-forget flash SET commands.
 // Separate pending flags per command type prevent cross-command clobbering.
@@ -1511,6 +1512,7 @@ static bool __not_in_flash_func(uac1_driver_xfer_cb)(uint8_t rhport, uint8_t ep_
                 if (gap > 2000 && gap < 50000) {
                     spdif_underruns++;
                 }
+                if (gap > usb_audio_worst_packet_gap_us) usb_audio_worst_packet_gap_us = gap;
             }
             audio_ring_last_push_us = now;
 

@@ -1400,6 +1400,11 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
 // BUFFER STATISTICS HELPERS
 // ----------------------------------------------------------------------------
 
+// A dry episode runs from the first recovery to the next block that finds no
+// ring dry, and is judged when it ends (see output_rings_pre_give()).
+enum { RINGS_DRY_NONE, RINGS_DRY_OWED, RINGS_DRY_EXCUSED };
+static uint8_t output_rings_dry = RINGS_DRY_NONE;
+
 // Pre-give gate, once per block: (1) underrun recovery, deficit measured
 // against the worst enabled slot, one identical skip everywhere; then
 // (2) group admission, true only when EVERY enabled slot can accept the
@@ -1438,7 +1443,8 @@ static bool output_rings_pre_give(uint32_t frames) {
     // then leaves the anchor to the first real block, which can place it
     // exactly, unless the deficit nears the signed fill range.
     bool fresh = (ref_fill == UINT32_MAX || ref_fill > PICO_AUDIO_SPDIF_RING_FRAMES);
-    if (max_deficit != 0 && !(frames == 0 && fresh && max_deficit < (1u << 24))) {
+    bool recover = max_deficit != 0 && !(frames == 0 && fresh && max_deficit < (1u << 24));
+    if (recover) {
         // Sample-exact PDM/slot recovery. PDM plays the final successful
         // block as real audio before it starts inserting zeros. Each ring
         // writer therefore snapshots its fill BEFORE that block; deficit +
@@ -1466,9 +1472,19 @@ static bool output_rings_pre_give(uint32_t frames) {
 #if PICO_RP2350
         adat_output_on_slot_skip(skip);
 #endif
-        extern volatile int overruns;
+        // An episode is an underrun only if a producer owed audio throughout.
+        // Any part in a mute window or a closed USB stream excuses it: a host
+        // stops sending a few ms before it selects alt 0.
         extern volatile bool preset_loading;
-        if (!preset_loading) overruns++;
+        bool owed = !preset_loading &&
+            (active_input_source != INPUT_SOURCE_USB || usb_audio_alt_set != 0 || siggen_running);
+        if (!owed) output_rings_dry = RINGS_DRY_EXCUSED;
+        else if (output_rings_dry == RINGS_DRY_NONE) output_rings_dry = RINGS_DRY_OWED;
+    } else if (max_deficit == 0 && frames > 0) {
+        // One count per episode, however many passes the idle pump re-anchored.
+        extern volatile int overruns;
+        if (output_rings_dry == RINGS_DRY_OWED) overruns++;
+        output_rings_dry = RINGS_DRY_NONE;
     }
 
     // Group admission. PDM first: while Core 1 drains its push queue, the
@@ -1817,6 +1833,7 @@ void reset_buffer_watermarks(void) {
     output_ring_min_prewrite = UINT32_MAX;
     input_delivery_worst_gap_us = 0;
     input_delivery_last_us = 0;
+    usb_audio_worst_packet_gap_us = 0;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         spdif_consumer_min_fill_pct[i] = 100;
         spdif_consumer_max_fill_pct[i] = 0;

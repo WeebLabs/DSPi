@@ -2431,6 +2431,7 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     case 27: resp = output_ring_drops; break;         // blocks refused by ring admission
                     case 28: resp = output_ring_min_prewrite; break;  // lowest pre-write ring fill, frames
                     case 29: resp = input_delivery_worst_gap_us; break;  // worst input delivery gap, us
+                    case 30: resp = usb_audio_worst_packet_gap_us; break;  // worst USB packet gap, us
 #ifdef DSPI_LOOP_PROF
                     default:
                         if (setup->wValue >= LOOP_PROF_STATUS_BASE)

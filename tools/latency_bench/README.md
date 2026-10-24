@@ -75,11 +75,12 @@ like a busy DSPi Console session, which steady-state windows cannot reproduce:
   target a mute noun);
 - once a second it reads underruns, refused blocks, USB ring overruns, the
   lowest pre-write fill and the worst input delivery gap (`REQ_GET_STATUS`
-  26-29), USB packet gaps of 2 to 50 ms and the packet count (8, 10), and the
-  host player's underflow flags. On a `DSPI_CLOCK_DIAG` build it also records
+  26-29), USB packet gaps of 2 to 50 ms, the packet count and the worst packet
+  gap of any length (8, 10, 30), and the host player's underflow flags. On a `DSPI_CLOCK_DIAG` build it also records
   the USB feedback range for the second (`REQ_GET_CLOCK_DIAG`).
 
-Any second with an underrun, refused block, host underflow or a gap over 300 us is logged with
+Any second with an underrun, refused block, host underflow, a delivery gap over
+300 us or a USB packet gap over 5 ms is logged with
 the actions of the preceding 2.5 s, so a stall points at its cause. The run
 refuses to start over an unsaved Control Surfaces preview, holds the user mute,
 and restores the parameters, analyser config, latency and source at the end.

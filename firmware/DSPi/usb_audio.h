@@ -42,6 +42,11 @@ extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
 // select the number of active input channels. Always 2 on RP2040.
 extern volatile uint8_t usb_input_channels;
 
+// Longest gap between audio-carrying host packets since reset_buffer_watermarks(),
+// in microseconds (REQ_GET_STATUS 30), unlike wValue 8 not capped at 50 ms:
+// a host that stops sending without closing the stream shows here.
+extern volatile uint32_t usb_audio_worst_packet_gap_us;
+
 // Host-selected rate for the USB playback endpoint.  This remains distinct
 // from audio_state.freq while another input source owns the live pipeline.
 uint32_t usb_audio_get_selected_rate(void);

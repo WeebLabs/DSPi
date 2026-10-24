@@ -33,6 +33,7 @@ CS_NOUN_OUTPUT_GAIN, CS_NOUN_LOUDNESS = 17, 3   # never a mute noun: a pressed p
 CS_ACT_ADJUST, CS_ACT_TOGGLE = 0, 4
 CS_STATUS_OK = 0
 SLOW_PASS_US = 300          # worst-pass windows above this are logged as events
+HOST_STALL_US = 5000        # a USB packet gap this long is the host's, not the device's
 RTA_READ_S = 0.05           # Console's band polling cadence
 # DSPI_LOOP_PROF builds (firmware/DSPi/loop_prof.h); normal builds read 0.
 LOOP_SECTIONS = ["head", "usb+vendor", "notify", "uart/lg/dac", "control_surfaces", "siggen_service",
@@ -234,6 +235,7 @@ def run(args):
                 fb = feedback_window(dev)
                 uf = player.underflows if player else 0
                 worst, minpre = status_u32(dev, 29), status_u32(dev, 28)
+                host_gap = status_u32(dev, 30)
                 dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
                 d = [a - b for a, b in zip(c, c_prev)] + [uf - uf_prev]
                 c_prev, uf_prev = c, uf
@@ -243,9 +245,10 @@ def run(args):
                 row = dict(t=t, underruns=d[0], drops=d[1], usb_ring_overruns=d[2], usb_packet_gaps=d[3],
                            usb_packets=d[4], host_underflows=d[5],
                            fb_min_q16=fb[0] if fb else None, fb_max_q16=fb[1] if fb else None,
-                           worst_pass_us=worst, min_prewrite=None if minpre == 0xFFFFFFFF else minpre)
+                           worst_pass_us=worst, worst_usb_packet_gap_us=host_gap,
+                           min_prewrite=None if minpre == 0xFFFFFFFF else minpre)
                 rows.append(row)
-                if d[0] or d[1] or d[2] or d[5] or worst > SLOW_PASS_US:
+                if d[0] or d[1] or d[2] or d[5] or worst > SLOW_PASS_US or host_gap > HOST_STALL_US:
                     ev = dict(row, preceding=[n for _, n in soak.recent])
                     events.append(ev)
                     print(json.dumps(ev), flush=True)
