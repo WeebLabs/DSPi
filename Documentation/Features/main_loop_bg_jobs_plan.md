@@ -1,6 +1,6 @@
 # Main-Loop Background Jobs: Plan
 
-*Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 to 3 implemented 2026-10-24 (see the status sections at the end); Phase 4 not started.*
+*Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 to 4 implemented 2026-10-24 (see the status sections at the end); RP2040 measurements outstanding.*
 
 ## TL;DR
 
@@ -202,3 +202,34 @@ Found and fixed during Phase 3:
 | USB, 2 ms | 0 | 0 (Phase 1: 1) | 515 / 500 us (1000) | 34 / 39 frames |
 
 Worst step per job: analyser 155 / 304 / 319 us, loudness rebuild 120 / 247 / 299 us, revert 152 / 232 / 230 us, each inside budget plus margin (186 / 353 / 410 us). The 0.67 ms option now passes the same real-use soak as the others. Still to do: Phase 4 (vendor handlers and the deferred block) and the RP2040 measurements.
+
+## Phase 4 status (2026-10-24)
+
+**What the measurements showed.** The Phase 3 soaks' whole-run profiler, read on the USB soak where the S/PDIF receiver's ~55 us interrupt does not inflate every figure, ranks the work that is not yet a job:
+
+| Item | Worst | How often |
+|---|---|---|
+| `REQ_GET_ALL_PARAMS` (bulk collect, 1.9 KB of field copies) | 185 us (107 cold, about 80 warm on a quiet board) | on demand |
+| `REQ_RTA_GET_BANDS` | 116 us, only when a read auto-starts the analyser (`arm()` designs the bass bank); a normal read copies 82 bytes | rare |
+| `REQ_SIGGEN_CONTROL` | 107 us | rare |
+| Deferred block, `flash_sets` | about 170 us, a Control Surfaces binding add (cold) | per bind |
+| Control Surfaces tick | 127 to 154 us with pots bound and moving | while a control moves |
+| `coeff_updates` | 93 to 112 us | per filter edit |
+
+The action profile at 0.67 ms puts every action but one within about 40 us of the quiet pass; only the bulk read stands out (+86 us). No deferred-block burst appeared: its largest item is a single binding add.
+
+**What was changed, and why not more.** Each item above is a single bounded piece of work that fits under the 333 us gap limit on its own. The hazard was that two of them could share one segment between deliveries: host commands and the Control Surfaces tick sat in the same segment (a bulk read on top of a turning knob could reach about 370 us), and the background step shared its segment with the deferred block. So the fix is structural rather than per handler: `pipeline_service_producer(true)` now runs after host commands and after the background step as well (four delivery points per pass), and the worst gap is the longest single segment. Making the bulk collect a job was considered and not done: the UART and I2C transports would cope (both retry `CTRL_DISPATCH_BUSY`), but USB would need the control data stage answered later from outside the request callback, a change to the most fragile path in the firmware for a rare read that already fits on its own. If a future option tightens the limit below about 250 us, that is the item to revisit, and RAM placement alone would not be enough (about 80 us warm).
+
+### RP2350 results (`bench_results/bg_phase4`)
+
+Quiet pass (action profile baseline) 127 us, against 130 us with two delivery points, so the extra deliveries cost nothing measurable. 15-minute soaks, all three passing every check with no overruns:
+
+| Soak | Worst gap, Phase 3 / Phase 4 | p99, Phase 3 / Phase 4 | Limit | Lowest fill (median) |
+|---|---|---|---|---|
+| S/PDIF, 0.67 ms | 254 / 266 us | 221 / 209 us | 333 us | 5 frames (10) |
+| S/PDIF, 1 ms | 393 / 376 us | 388 / 373 us | 666 us | 15 frames (20) |
+| USB, 2 ms | 515 / 325 us | 500 / 323 us | 1000 us | 34 frames (39) |
+
+The largest gain is on USB, where a 300 us background step no longer shares a segment with block processing. At 0.67 ms the median and p99 fell; the maximum moved by 12 us, within run-to-run spread.
+
+`latency_bench` (stock configuration, every source and option, with the extra checks): 42 of 42 points pass, the slot-alignment proxy reads at least 99.6 % of samples within one frame on every point, and the rate-follow, source-fallback and rapid-switch checks pass. `control_surfaces` QA group: 3 of 3.

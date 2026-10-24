@@ -16,17 +16,19 @@
     X(LP_USB_VENDOR,    "usb+vendor")        \
     X(LP_NOTIFY,        "notify")            \
     X(LP_TRANSPORTS,    "uart/lg/dac")       \
+    X(LP_DELIVERY_HOST, "delivery_host")     \
     X(LP_CS_TICK,       "control_surfaces")  \
     X(LP_SIGGEN,        "siggen_service")    \
     X(LP_IDLE_PUMP,     "idle_pump")         \
     X(LP_RTA,           "rta")               \
     X(LP_INPUT,         "audio_inputs+dsp")  \
     X(LP_BG_JOBS,       "bg_jobs")           \
+    X(LP_DELIVERY_BG,   "delivery_bg")       \
     X(LP_FLASH_SETS,    "flash_sets")        \
     X(LP_EQ_UPDATES,    "eq_updates")        \
     X(LP_COEFF_UPDATES, "coeff_updates")     \
     X(LP_DEFERRED_OPS,  "deferred_ops")      \
-    X(LP_DELIVERY_2,    "delivery_2")
+    X(LP_DELIVERY_END,  "delivery_end")
 
 // Background steps accounted against the step budget (bg_job.h).
 #define BG_JOB_LIST(X)                       \

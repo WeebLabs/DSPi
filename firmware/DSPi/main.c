@@ -2216,6 +2216,13 @@ int main(void) {
         // branches when no deadline is in flight (the steady state).
         dac_hw_mute_tick();
 
+        // Stream input is delivered between every segment that can run long
+        // (host commands, housekeeping, a background step, deferred work), so
+        // two of them never add up into one input gap (current_architecture.md
+        // "Delivery points").
+        LOOP_PROF(LP_DELIVERY_HOST);
+        pipeline_service_producer(true);
+
         // Control Surfaces poll: debounce buttons/switches, decode encoders,
         // read pots, drive LEDs.  Internally throttled to 1 kHz; immediate
         // no-op while no binding is active.
@@ -2244,9 +2251,11 @@ int main(void) {
         input_service_servos();
 
         // One budgeted step of long background work (analyser transform,
-        // loudness rebuild) between the two deliveries; see bg_job.h.
+        // loudness rebuild, Control Surfaces revert); see bg_job.h.
         LOOP_PROF(LP_BG_JOBS);
         bg_run_one();
+        LOOP_PROF(LP_DELIVERY_BG);
+        pipeline_service_producer(true);
 
         LOOP_PROF(LP_FLASH_SETS);
         // Handle deferred flash SET commands (fire-and-forget, no result).
@@ -3742,10 +3751,7 @@ int main(void) {
             }
         }
 
-        // Second delivery point, so a long deferred operation above and a long
-        // housekeeping step at the top of the next pass never add up into one
-        // input gap (current_architecture.md "Two delivery points per pass").
-        LOOP_PROF(LP_DELIVERY_2);
+        LOOP_PROF(LP_DELIVERY_END);
         pipeline_service_producer(true);
 
         // Bench diagnostics: once-per-second CLKDIAG console dump (internally
