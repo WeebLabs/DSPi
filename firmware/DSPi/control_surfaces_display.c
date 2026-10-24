@@ -1171,6 +1171,7 @@ static uint8_t disp_validate_page(const CsDisplayPage *p) {
 }
 
 uint8_t control_surfaces_apply_display_cfg(const CsDisplayCfg *c) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (!c) return CS_STATUS_INVALID_VALUE;
     if (c->mode > CS_DMODE_CYCLE_ALL) return CS_STATUS_INVALID_VALUE;
     if (c->home_page >= CS_MAX_DISPLAY_PAGES) return CS_STATUS_INVALID_PAGE;
@@ -1193,6 +1194,7 @@ uint8_t control_surfaces_apply_display_cfg(const CsDisplayCfg *c) {
 }
 
 uint8_t control_surfaces_apply_display_page(uint8_t idx, const CsDisplayPage *p) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (idx >= CS_MAX_DISPLAY_PAGES || !p) return CS_STATUS_INVALID_PAGE;
     uint8_t st = disp_validate_page(p);
     if (st != PIN_CONFIG_SUCCESS) return st;

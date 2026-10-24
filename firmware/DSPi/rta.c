@@ -328,7 +328,7 @@ static bool transform_step(void *ctx, uint32_t deadline_us) {
             rta.phase = PH_PUBLISH;
         }
         uint32_t dt = time_us_32() - c0;
-        rta.chunk_est_us[slot] = (uint16_t)(dt > 0xFFFFu ? 0xFFFFu : dt);
+        rta.chunk_est_us[slot] = (uint16_t)(dt >= BG_UNIT_UNMEASURED ? BG_UNIT_UNMEASURED - 1u : dt);
         worked = true;
     }
     uint32_t now = time_us_32();
@@ -655,6 +655,7 @@ void rta_init(void) {
     rta.cfg.avg_ms = 250;
     rta.cfg.peak_decay_db_s = 20;
     rta.stat_window_us = time_us_32();
+    for (unsigned i = 0; i <= RTA_CHUNK_EST_FINISH; i++) rta.chunk_est_us[i] = BG_UNIT_UNMEASURED;
     derive_layout();
     stop_engine();
     bg_job_register(&transform_job);

@@ -38,6 +38,10 @@ static inline bool bg_out_of_time(uint32_t deadline_us, uint32_t unit_us) {
     return (int32_t)(time_us_32() + unit_us - deadline_us) >= 0;
 }
 
+// Estimate for a kind of unit not yet measured (its first run is often cold
+// XIP code): assumed not to fit, so it always starts a step of its own.
+#define BG_UNIT_UNMEASURED  0xFFFFu
+
 // One step of the next active job, round-robin. Call between audio deliveries.
 void bg_run_one(void);
 

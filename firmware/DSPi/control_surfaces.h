@@ -695,8 +695,8 @@ typedef struct __attribute__((packed)) {
                                         // same PWM slice+channel
 #define CS_STATUS_EVENT_IN_USE    0x1A  // another button binding already has
                                         // this GPIO+event pair
-#define CS_STATUS_BUSY            0x1B  // a previous binding SET is still
-                                        // queued for apply; retry shortly
+#define CS_STATUS_BUSY            0x1B  // a previous SET is still queued for
+                                        // apply, or a revert is running; retry
 #define CS_STATUS_FLASH_ERROR     0x1C  // directory persist failed (REQ_CS_SAVE)
 #define CS_STATUS_IR_IN_USE       0x1D  // another slot already holds the IR
                                         // component (one receiver per device)
@@ -819,14 +819,19 @@ bool     control_surfaces_set_aux_level(uint8_t slot, uint16_t level_q8);  // cl
 // and level into the boot fields of every CS_AUX_X_BOOT_SAVED slot.
 void control_surfaces_aux_prepare_save(void);
 
-// Re-apply the persisted config (bindings + IR commands + slot names) from
-// the directory cache, discarding the live preview.  Per-slot failures land
-// in slot_status exactly as at boot.  Main-loop only (releases and reclaims
-// GPIOs).
-void control_surfaces_revert(void);
+// Start re-applying the persisted config from the directory cache, discarding
+// the live preview, as a background job (bg_job.h). Per-slot failures land in
+// slot_status exactly as at boot; on completion the dirty flag clears and
+// cs_last_status reads SUCCESS. Main-loop only (releases and reclaims GPIOs).
+void control_surfaces_revert_begin(void);
+
+// True while a revert runs. Every apply, aux write, macro fire and IR learn
+// then returns CS_STATUS_BUSY (or false), and binding, IR and aux reads answer
+// with the state the revert lands on (current_architecture.md, Control Surfaces).
+bool control_surfaces_busy(void);
 
 // Preview dirty flag: set when a live apply diverges from flash, cleared by
-// save / revert (main.c owns the transitions around the flash write).
+// save (main.c, around the flash write) and by a revert's completion.
 bool control_surfaces_dirty(void);
 void control_surfaces_set_dirty(bool dirty);
 

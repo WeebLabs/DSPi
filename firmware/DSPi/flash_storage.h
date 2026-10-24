@@ -115,18 +115,18 @@ uint8_t preset_get_output_latency(void);
 void preset_set_ctrl_iface(const UartCtrlConfig *uart, const I2cCtrlConfig *i2c);
 void preset_get_ctrl_iface(UartCtrlConfig *uart_out, I2cCtrlConfig *i2c_out);
 
-// Control Surfaces bindings (board-level, directory-stored, V7+).  Getter
-// copies out of the RAM cache; bindings persist only through
-// preset_set_cs_all below (the REQ_CS_SAVE path).
-void preset_get_cs_config(CsFlashConfig *out);
+// Control Surfaces bindings (board-level, directory-stored, V7+), read in
+// place from the RAM cache: valid until the next directory write, main loop
+// only.  Bindings persist only through preset_set_cs_all below (REQ_CS_SAVE).
+const CsFlashConfig *preset_stored_cs_config(void);
 
-// Control Surfaces IR command table (board-level, directory-stored, V11+).
-// Getter copies out of the RAM cache.  preset_set_cs_all persists bindings,
+// Control Surfaces IR command table (board-level, directory-stored, V11+),
+// read in place like the bindings.  preset_set_cs_all persists bindings,
 // IR commands, slot names, groups, macros, the display blob and the aux output
 // table together in one directory-sector write (the REQ_CS_SAVE path);
 // synchronous and main-loop only, caller has validated all seven.  Returns
 // PRESET_OK or PRESET_ERR_*.
-void preset_get_cs_ir_config(CsIrConfig *out);
+const CsIrConfig *preset_stored_cs_ir_config(void);
 
 // Control Surfaces target groups and macros (board-level, directory-stored,
 // V18+).  Getters copy out of the RAM cache; both persist only through

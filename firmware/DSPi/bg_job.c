@@ -16,18 +16,31 @@ volatile uint32_t bg_over_budget_count = 0;
 static BgJob *jobs[BG_JOB_COUNT];
 static uint8_t next_job;
 
+#ifdef DSPI_LOOP_PROF
+volatile uint16_t bg_test_pace = 1;
+#endif
+
 void bg_job_register(BgJob *job) {
     if ((unsigned)job->id < BG_JOB_COUNT) jobs[job->id] = job;
 }
 
 void bg_run_one(void) {
+#ifdef DSPI_LOOP_PROF
+    static uint16_t skipped;
+    if (bg_test_pace > 1 && ++skipped < bg_test_pace) return;
+    skipped = 0;
+#endif
     for (uint8_t k = 0; k < BG_JOB_COUNT; k++) {
         uint8_t i = (uint8_t)((next_job + k) % BG_JOB_COUNT);
         BgJob *job = jobs[i];
         if (!job || !job->active) continue;
         next_job = (uint8_t)((i + 1) % BG_JOB_COUNT);
         uint32_t t0 = time_us_32();
-        if (job->step(job->ctx, t0 + bg_step_budget_us())) job->active = false;
+        uint32_t deadline = t0 + bg_step_budget_us();
+#ifdef DSPI_LOOP_PROF
+        if (bg_test_pace > 1) deadline = t0;   // one unit per step
+#endif
+        if (job->step(job->ctx, deadline)) job->active = false;
         bg_step_account(job->id, time_us_32() - t0);
         return;
     }

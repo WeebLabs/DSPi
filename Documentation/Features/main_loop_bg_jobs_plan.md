@@ -1,6 +1,6 @@
 # Main-Loop Background Jobs: Plan
 
-*Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 and 2 implemented 2026-10-24 (see the status sections at the end); Phases 3 and 4 not started.*
+*Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 to 3 implemented 2026-10-24 (see the status sections at the end); Phase 4 not started.*
 
 ## TL;DR
 
@@ -178,3 +178,27 @@ Found and fixed during Phase 2:
 | USB, 2 ms | 0 | 1 (Phase 1: 1) | 531 / 495 us (1000) | 31 / 41 frames |
 
 Every remaining overrun, every gap over the limit and the one zero-fill second are Control Surfaces reverts (seconds 280, 439 and 529 of the seed), which is Phase 3. The analyser holds 44 to 45 frames per second at every option, unchanged. At 1 ms and 2 ms the p99 gap rose (Phase 1: 240 / 278 us) because the budget lets a step run longer; it stays well inside the limit, which is what the budget is derived from.
+
+## Phase 3 status (2026-10-24)
+
+Implemented, uncommitted:
+- The Control Surfaces reload is one sequence of units (`cs_reload_unit()`, phases `CS_RL_*`), run straight through at boot and as a background job by `control_surfaces_revert_begin()`. The old one-call `control_surfaces_revert()` and `cs_load_stored()` are gone. The stored bindings and IR table are read in place (`preset_stored_cs_config()`, `preset_stored_cs_ir_config()`, replacing the copy-out getters).
+- `control_surfaces_busy()`: every public apply, aux write, macro fire and IR learn returns `CS_STATUS_BUSY` (or false) while the job runs, and `main.c` holds its whole CS deferred block, so queued requests run afterwards in order.
+- Reads during the job: bindings and IR commands from the stored image, aux state and level projected; groups, macros, display tables and names change within one unit and stay live. This narrows section 4's "groups, macros, names and display pages from the directory copy": making those reset and reload atomic avoided both the extra accessors and the display seeding mismatch (pages seed on attach when the stored table is empty).
+- `tools/dspi_test` group `control_surfaces`, and a bench pacing knob (`REQ_GET_STATUS` 512+n on `DSPI_LOOP_PROF` builds) so the torn-read test can land reads mid-revert.
+
+Found and fixed during Phase 3:
+- **Unmeasured units.** The first revert after boot runs cold code; estimates start at `BG_UNIT_UNMEASURED`, so a kind of unit not yet seen always starts its own step.
+- **Estimates per binding type.** One estimate per phase let a costly slot (a display attach is about 120 us cold) follow a cheap empty slot (about 1 us) past the deadline; estimates are now per phase and binding type.
+
+### RP2350 results (`bench_results/bg_phase3`)
+
+`control_surfaces` QA group: 3 of 3 pass; 196 binding reads landed mid-revert across 20 paced reverts, all equal to the stored image. Full suite on the release build: the 10 known failures plus `rta_bin_frame_seq_consistency`, which fails on the current host path, not the firmware (USB control transfers are 3 ms each behind the bench KVM's hub since 2026-10-24 03:16, so a 9-transfer bin read cannot finish inside one 22 ms frame; the same read took 5 to 9 ms before). 15-minute soaks, all three passing every check:
+
+| Soak | Underruns | Over-budget steps | Worst gap max / p99 (limit) | Lowest fill (min / median) |
+|---|---|---|---|---|
+| S/PDIF, 0.67 ms | 0 | 0 (Phase 1: 1036) | 254 / 221 us (333) | 5 / 11 frames |
+| S/PDIF, 1 ms | 0 | 0 (Phase 1: 3) | 393 / 388 us (666) | 14 / 19 frames |
+| USB, 2 ms | 0 | 0 (Phase 1: 1) | 515 / 500 us (1000) | 34 / 39 frames |
+
+Worst step per job: analyser 155 / 304 / 319 us, loudness rebuild 120 / 247 / 299 us, revert 152 / 232 / 230 us, each inside budget plus margin (186 / 353 / 410 us). The 0.67 ms option now passes the same real-use soak as the others. Still to do: Phase 4 (vendor handlers and the deferred block) and the RP2040 measurements.

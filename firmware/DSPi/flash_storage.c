@@ -4681,19 +4681,17 @@ void preset_get_ctrl_iface(UartCtrlConfig *uart_out, I2cCtrlConfig *i2c_out) {
 
 // Control Surfaces persistence.  The getter reads the RAM cache; writes go
 // through preset_set_cs_all below (bindings persist only via REQ_CS_SAVE).
-void preset_get_cs_config(CsFlashConfig *out) {
-    if (!out) return;
+const CsFlashConfig *preset_stored_cs_config(void) {
     dir_ensure();
-    memcpy(out, &dir_cache.cs_config, sizeof(*out));
+    return &dir_cache.cs_config;
 }
 
 // Control Surfaces IR command table (V11).  Getter reads the RAM cache;
 // preset_set_cs_all persists every Control Surfaces blob together in one
 // directory-sector write (the REQ_CS_SAVE path).  Caller has validated them.
-void preset_get_cs_ir_config(CsIrConfig *out) {
-    if (!out) return;
+const CsIrConfig *preset_stored_cs_ir_config(void) {
     dir_ensure();
-    memcpy(out, &dir_cache.cs_ir, sizeof(*out));
+    return &dir_cache.cs_ir;
 }
 
 // Control Surfaces group and macro tables (V18).  Getters read the RAM cache;

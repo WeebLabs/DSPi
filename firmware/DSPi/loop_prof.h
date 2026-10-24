@@ -44,12 +44,16 @@ typedef enum { BG_JOB_LIST(LOOP_PROF_ENUM_ENTRY) BG_JOB_COUNT } BgJobId;
 #define LOOP_PROF_STATUS_BASE    64    // + LoopProfSection
 #define LOOP_PROF_JOB_BASE       96    // + BgJobId
 #define LOOP_PROF_OPCODE_BASE   256    // + vendor bRequest
+// Bench pacing, not a read: wValue 512 + n (n >= 1) makes each background step
+// do one unit, on one pass in n, so a host can observe a job mid-flight.
+#define LOOP_PROF_BG_PACE_BASE  512
 
 #ifdef DSPI_LOOP_PROF
 void loop_prof_mark(uint8_t section);
 void loop_prof_job(uint8_t job, uint32_t us);
 void loop_prof_opcode(uint8_t opcode, uint32_t us);
 uint32_t loop_prof_take(uint16_t status_index);
+extern volatile uint16_t bg_test_pace;   // bg_job.c; 1 = normal pacing
 #define LOOP_PROF(id) loop_prof_mark(id)
 #else
 #define LOOP_PROF(id) ((void)0)

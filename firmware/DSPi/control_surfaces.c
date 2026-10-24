@@ -1310,12 +1310,15 @@ static uint16_t cs_aux_duty(const CsBinding *b, uint8_t on, uint16_t level_q8) {
 
 // The value an aux slot comes up with: a carried live value when one is
 // stashed for this slot and type, else the stored boot fields.
-static void cs_aux_initial(uint8_t slot, uint8_t *on, uint16_t *level) {
-    const CsBinding *b = &s_cfg.bindings[slot];
-    const CsAuxCarry *c = &s_aux_carry[slot];
+static void cs_aux_initial_from(const CsBinding *b, const CsAuxCarry *c,
+                                uint8_t *on, uint16_t *level) {
     if (c->type == b->type) { *on = c->on; *level = c->level; return; }
     *on = (b->extras & CS_AUX_X_BOOT_ON) ? 1 : 0;
     *level = (b->type == CS_TYPE_AUX_PWM) ? (uint16_t)b->value : 0;
+}
+
+static void cs_aux_initial(uint8_t slot, uint8_t *on, uint16_t *level) {
+    cs_aux_initial_from(&s_cfg.bindings[slot], &s_aux_carry[slot], on, level);
 }
 
 // Aux outputs: the pin follows the live on/off flag through the same TON/TOF
@@ -1896,6 +1899,7 @@ static void cs_ir_release_momentary(uint8_t sub) {
 }
 
 uint8_t control_surfaces_apply_ir_cmd(uint8_t sub, const IrCommand *c) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (sub >= CS_MAX_IR_COMMANDS || !c) return CS_STATUS_INVALID_SLOT;
     if (c->protocol == CS_IR_PROTO_NONE) {
         // Clearing a sub-slot: the record must be all-zero (strict, like
@@ -2096,6 +2100,7 @@ static void cs_macro_recount_status(void) {
 uint8_t cs_macro_running_index(void) { return s_macro_run; }
 
 uint8_t control_surfaces_macro_fire(uint8_t idx) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (idx >= CS_MAX_MACROS) return CS_STATUS_INVALID_MACRO;
     // Cancel-at-step-boundary: anything already dispatched stands, the old
     // macro's undelivered work is dropped with its op contexts.
@@ -2248,6 +2253,7 @@ static void cs_revalidate_grouped_slot(uint8_t slot) {
 }
 
 uint8_t control_surfaces_apply_group(uint8_t idx, const CsGroup *g) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (idx >= CS_MAX_GROUPS || !g) return CS_STATUS_INVALID_SLOT;
     uint8_t st = cs_validate_group(g);
     if (st != PIN_CONFIG_SUCCESS) return st;   // stored group kept intact
@@ -2284,6 +2290,7 @@ uint8_t control_surfaces_apply_group(uint8_t idx, const CsGroup *g) {
 }
 
 uint8_t control_surfaces_apply_macro_header(uint8_t idx, const CsMacroHeaderWire *h) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (idx >= CS_MAX_MACROS || !h) return CS_STATUS_INVALID_MACRO;
     if (h->step_count > CS_MAX_MACRO_STEPS) return CS_STATUS_INVALID_MACRO;
     for (int i = 0; i < (int)sizeof(h->reserved); i++)
@@ -2300,6 +2307,7 @@ uint8_t control_surfaces_apply_macro_header(uint8_t idx, const CsMacroHeaderWire
 
 uint8_t control_surfaces_apply_macro_step(uint8_t idx, uint8_t step,
                                           const CsMacroStep *s) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (idx >= CS_MAX_MACROS) return CS_STATUS_INVALID_MACRO;
     if (step >= CS_MAX_MACRO_STEPS || !s) return CS_STATUS_INVALID_STEP;
     uint8_t st = cs_validate_macro_step(s);
@@ -2426,48 +2434,37 @@ static uint8_t cs_apply_binding_slot(uint8_t slot, const CsBinding *nb) {
 }
 
 uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *nb) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     uint8_t st = cs_apply_binding_slot(slot, nb);
     cs_bindings_changed();
     return st;
 }
 
-// Bring up every stored binding and IR command from the directory cache.
-// Shared by boot init and REQ_CS_REVERT; the caller has already cleared or
-// released the live state.  A stored entry that no longer validates is kept
-// visible (inactive) so the config survives round-trips; the failure is
-// reported in slot_status / ir_cmd_status.
-// The 388-byte CsFlashConfig and 260-byte CsIrConfig snapshots are kept in
-// separate noinline frames: merged, they would sit on the 2 KB main stack at
-// once, above whatever depth the apply path below them needs.
-// Called twice: aux_pass brings up only the aux output slots, the second
-// call everything else, so bindings AND display pages that target an aux
+// Reload one stored binding from the directory cache (read in place). A stored
+// entry that no longer validates is kept visible (inactive) so the config
+// survives round-trips; the failure is reported in slot_status. aux_pass loads
+// only the aux output slots, so bindings AND display pages that target an aux
 // slot validate against its type whatever the slot order.
-static void __attribute__((noinline)) cs_load_stored_bindings(bool aux_pass) {
-    CsFlashConfig stored;
-    preset_get_cs_config(&stored);
-    if (stored.version > CS_CONFIG_VERSION) return;   // future format stays idle
-    for (uint8_t slot = 0; slot < CS_MAX_BINDINGS; slot++) {
-        const CsBinding *b = &stored.bindings[slot];
-        if (b->type == CS_TYPE_NONE) continue;
-        if (cs_type_is_aux(b->type) != aux_pass) continue;
-        uint8_t st = cs_apply_binding_slot(slot, b);
-        if (st != PIN_CONFIG_SUCCESS) {
-            s_cfg.bindings[slot] = *b;
-            s_slot_status[slot] = st;
-        }
+static void cs_load_stored_slot(uint8_t slot, bool aux_pass) {
+    const CsFlashConfig *stored = preset_stored_cs_config();
+    if (stored->version > CS_CONFIG_VERSION) return;   // future format stays idle
+    const CsBinding *b = &stored->bindings[slot];
+    if (b->type == CS_TYPE_NONE || cs_type_is_aux(b->type) != aux_pass) return;
+    uint8_t st = cs_apply_binding_slot(slot, b);
+    if (st != PIN_CONFIG_SUCCESS) {
+        s_cfg.bindings[slot] = *b;
+        s_slot_status[slot] = st;
     }
 }
 
-static void __attribute__((noinline)) cs_load_stored_ir(void) {
-    CsIrConfig ir;
-    preset_get_cs_ir_config(&ir);
-    if (ir.version > CS_IR_CONFIG_VERSION) return;
+static void cs_load_stored_ir(void) {
+    const CsIrConfig *ir = preset_stored_cs_ir_config();
+    if (ir->version > CS_IR_CONFIG_VERSION) return;
     for (uint8_t sub = 0; sub < CS_MAX_IR_COMMANDS; sub++) {
-        const IrCommand *c = &ir.cmds[sub];
+        const IrCommand *c = &ir->cmds[sub];
         if (c->protocol == CS_IR_PROTO_NONE) continue;
-        uint8_t st = cs_validate_ir_cmd(c);
         s_ir.cmds[sub] = *c;
-        s_ir_cmd_status[sub] = st;
+        s_ir_cmd_status[sub] = cs_validate_ir_cmd(c);
     }
 }
 
@@ -2499,25 +2496,8 @@ static void cs_load_stored_groups_macros(void) {
     cs_macro_recount_status();
 }
 
-static void cs_load_stored(void) {
-    cs_load_stored_groups_macros();
-    // Aux slots first (pages and controls validate against them), then the
-    // display pages, which must precede the display binding's attach
-    // (seeding only fires on an empty table), then everything else.
-    cs_load_stored_bindings(true);
-    cs_display_load_stored();
-    cs_load_stored_bindings(false);
-    cs_load_stored_ir();
-    for (uint8_t slot = 0; slot < CS_MAX_BINDINGS; slot++)
-        preset_get_cs_name(slot, s_names[slot]);
-    // Macro steps on aux nouns were counted invalid before the aux slots
-    // existed; a failed aux apply never triggers the dependents recount.
-    cs_macro_recount_status();
-    cs_bindings_changed();
-}
-
-// Shared group/macro/display state reset for init and revert: sequencer
-// idle, group contexts cleared, live tables zeroed for the reload.
+// Group/macro state reset for the reload: sequencer idle, group contexts
+// cleared, live tables zeroed.
 static void cs_reset_groups_macros(void) {
     memset(&s_groups, 0, sizeof(s_groups));
     s_groups.version = CS_GROUP_CONFIG_VERSION;
@@ -2529,55 +2509,146 @@ static void cs_reset_groups_macros(void) {
     memset(s_ir_gop, 0, sizeof(s_ir_gop));
     memset(s_ir_pv_key, 0, sizeof(s_ir_pv_key));
     control_surfaces_macro_cancel();
-    cs_display_reset();
 }
+
+// The reload from the directory cache, one unit at a time: boot runs it from
+// CS_RL_RESET straight through, REQ_CS_REVERT from CS_RL_STASH as a background
+// job (bg_job.h). While the job runs, binding and IR reads answer from the
+// stored image; every other host-readable table changes within one unit.
+enum {
+    CS_RL_STASH,       // live aux values, handed back to slots that reload as the same type
+    CS_RL_TEARDOWN,    // per slot: release pins, PWM slices, the IR receiver
+    CS_RL_RESET,       // buttons and IR table cleared; groups and macros reset and reloaded
+    CS_RL_AUX_SLOTS,   // per slot: stored aux outputs
+    CS_RL_DISPLAY,     // display tables reset and reloaded, before the display binding attaches
+    CS_RL_SLOTS,       // per slot: every other stored binding
+    CS_RL_IR,          // stored IR commands
+    CS_RL_FINISH,      // names, macro recount, derived binding state
+    CS_RL_DONE
+};
+
+// A per-slot unit costs what its binding type costs (an empty slot about 1 us,
+// a display attach about 120 us cold), so estimates are kept per phase and type.
+static struct {
+    uint8_t  phase;
+    uint8_t  slot;                                // per-slot phases
+    uint16_t est_us[CS_RL_DONE][CS_TYPE_COUNT];   // last unit time, the next unit's estimate
+} s_rl;
+
+// One unit of the reload; true once the reload is complete.
+static bool cs_reload_unit(void) {
+    static const CsBinding none;
+    if (s_rl.slot >= CS_MAX_BINDINGS) s_rl.slot = 0;   // per-slot phases index by it
+    const uint8_t s = s_rl.slot;
+    switch (s_rl.phase) {
+    case CS_RL_STASH:
+        for (uint8_t i = 0; i < CS_MAX_BINDINGS; i++) {
+            const CsBinding *b = &s_cfg.bindings[i];
+            if (s_rt[i].active && cs_type_is_aux(b->type))
+                s_aux_carry[i] = (CsAuxCarry){ b->type, s_rt[i].aux_on, s_rt[i].aux_level };
+        }
+        break;
+    case CS_RL_TEARDOWN:
+        (void)cs_apply_binding_slot(s, &none);
+        s_slot_status[s] = PIN_CONFIG_SUCCESS;
+        break;
+    case CS_RL_RESET:
+        // Gesture state restarts as at boot; the finish rebuilds the groups.
+        for (int i = 0; i < CS_MAX_BINDINGS; i++) s_btn[i].pin = CS_GPIO_UNUSED;
+        memset(&s_ir, 0, sizeof(s_ir));
+        s_ir.version = CS_IR_CONFIG_VERSION;
+        memset(s_ir_op, 0, sizeof(s_ir_op));
+        memset(s_ir_cmd_status, 0, sizeof(s_ir_cmd_status));
+        cs_reset_groups_macros();
+        cs_load_stored_groups_macros();
+        break;
+    case CS_RL_AUX_SLOTS:
+        cs_load_stored_slot(s, true);
+        break;
+    case CS_RL_DISPLAY:
+        cs_display_reset();
+        cs_display_load_stored();
+        break;
+    case CS_RL_SLOTS:
+        cs_load_stored_slot(s, false);
+        break;
+    case CS_RL_IR:
+        cs_load_stored_ir();
+        break;
+    case CS_RL_FINISH:
+        for (uint8_t i = 0; i < CS_MAX_BINDINGS; i++)
+            preset_get_cs_name(i, s_names[i]);
+        // Macro steps on aux nouns were counted invalid before the aux slots
+        // existed; a failed aux apply never triggers the dependents recount.
+        cs_macro_recount_status();
+        cs_bindings_changed();
+        break;
+    default:
+        return true;
+    }
+    bool per_slot = s_rl.phase == CS_RL_TEARDOWN || s_rl.phase == CS_RL_AUX_SLOTS ||
+                    s_rl.phase == CS_RL_SLOTS;
+    if (per_slot && ++s_rl.slot < CS_MAX_BINDINGS) return false;
+    s_rl.slot = 0;
+    return ++s_rl.phase == CS_RL_DONE;
+}
+
+// Estimate slot of the next unit: the binding it tears down or loads.
+static uint16_t *cs_reload_estimate(void) {
+    uint8_t type = CS_TYPE_NONE;
+    if (s_rl.phase == CS_RL_TEARDOWN) {
+        type = s_cfg.bindings[s_rl.slot].type;
+    } else if (s_rl.phase == CS_RL_AUX_SLOTS || s_rl.phase == CS_RL_SLOTS) {
+        const CsFlashConfig *stored = preset_stored_cs_config();
+        if (stored->version <= CS_CONFIG_VERSION) type = stored->bindings[s_rl.slot].type;
+    }
+    if (type >= CS_TYPE_COUNT) type = CS_TYPE_NONE;
+    return &s_rl.est_us[s_rl.phase < CS_RL_DONE ? s_rl.phase : 0][type];
+}
+
+static bool cs_revert_step(void *ctx, uint32_t deadline_us) {
+    (void)ctx;
+    for (;;) {
+        uint16_t *est = cs_reload_estimate();
+        uint32_t t0 = time_us_32();
+        bool done = cs_reload_unit();
+        uint32_t dt = time_us_32() - t0;
+        *est = (uint16_t)(dt >= BG_UNIT_UNMEASURED ? BG_UNIT_UNMEASURED - 1u : dt);
+        if (done) break;
+        if (bg_out_of_time(deadline_us, *cs_reload_estimate())) return false;
+    }
+    memset(s_aux_carry, 0, sizeof(s_aux_carry));   // drop stashes no slot reclaimed
+    s_dirty = false;
+    cs_last_status = PIN_CONFIG_SUCCESS;
+    cs_last_slot = 0xFF;
+    return true;
+}
+
+static BgJob s_revert_job = { BG_JOB_CS_REVERT, cs_revert_step, NULL, false };
 
 void control_surfaces_init(void) {
     memset(&s_cfg, 0, sizeof(s_cfg));
     memset(s_rt, 0, sizeof(s_rt));
     memset(s_slot_status, 0, sizeof(s_slot_status));
-    for (int i = 0; i < CS_MAX_BINDINGS; i++) s_btn[i].pin = CS_GPIO_UNUSED;
     s_cfg.version = CS_CONFIG_VERSION;
-    memset(&s_ir, 0, sizeof(s_ir));
-    s_ir.version = CS_IR_CONFIG_VERSION;
-    memset(s_ir_op, 0, sizeof(s_ir_op));
-    memset(s_ir_cmd_status, 0, sizeof(s_ir_cmd_status));
     s_ir_slot = 0xFF;
     s_ir_hold = false;
-    cs_reset_groups_macros();
     memset(s_aux_carry, 0, sizeof(s_aux_carry));
-    cs_load_stored();
+    for (int i = 0; i < CS_RL_DONE; i++)
+        for (int t = 0; t < CS_TYPE_COUNT; t++) s_rl.est_us[i][t] = BG_UNIT_UNMEASURED;
+    bg_job_register(&s_revert_job);
+    s_rl.phase = CS_RL_RESET;
+    s_rl.slot = 0;
+    while (!cs_reload_unit()) {}
 }
 
-void control_surfaces_revert(void) {
-    uint32_t t0 = time_us_32();
-    // Live aux values survive a revert: stash them, and cs_seed_runtime
-    // hands each back to the slot that reloads with the same type.
-    for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
-        const CsBinding *b = &s_cfg.bindings[s];
-        if (s_rt[s].active && cs_type_is_aux(b->type))
-            s_aux_carry[s] = (CsAuxCarry){ b->type, s_rt[s].aux_on,
-                                           s_rt[s].aux_level };
-    }
-    // Tear down every live binding through the normal path so pins, the PWM
-    // slices and the IR receiver release cleanly, then reload from flash.
-    CsBinding none;
-    memset(&none, 0, sizeof(none));
-    for (uint8_t slot = 0; slot < CS_MAX_BINDINGS; slot++) {
-        (void)cs_apply_binding_slot(slot, &none);
-        s_slot_status[slot] = PIN_CONFIG_SUCCESS;
-    }
-    // Gesture state restarts as at boot; cs_load_stored() rebuilds the groups.
-    for (int i = 0; i < CS_MAX_BINDINGS; i++) s_btn[i].pin = CS_GPIO_UNUSED;
-    memset(&s_ir, 0, sizeof(s_ir));
-    s_ir.version = CS_IR_CONFIG_VERSION;
-    memset(s_ir_op, 0, sizeof(s_ir_op));
-    memset(s_ir_cmd_status, 0, sizeof(s_ir_cmd_status));
-    cs_reset_groups_macros();
-    cs_load_stored();
-    memset(s_aux_carry, 0, sizeof(s_aux_carry));   // drop stashes no slot reclaimed
-    bg_step_account(BG_JOB_CS_REVERT, time_us_32() - t0);
+void control_surfaces_revert_begin(void) {
+    s_rl.phase = CS_RL_STASH;
+    s_rl.slot = 0;
+    bg_job_start(&s_revert_job);
 }
+
+bool control_surfaces_busy(void) { return bg_job_active(&s_revert_job); }
 
 void control_surfaces_tick(void) {
     // A macro fired by the host (REQ_CS_MACRO_FIRE) must run with zero
@@ -2738,18 +2809,37 @@ const char *control_surfaces_get_name(uint8_t slot) {
 }
 
 uint8_t control_surfaces_apply_name(uint8_t slot, const char *name) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (slot >= CS_MAX_BINDINGS) return CS_STATUS_INVALID_SLOT;
     memset(s_names[slot], 0, CS_NAME_LEN);
     strncpy(s_names[slot], name, CS_NAME_LEN - 1);
     return PIN_CONFIG_SUCCESS;
 }
 
+// A revert converges on the stored image (for any image this firmware saved),
+// so while it runs the binding and IR reads answer from it instead of from
+// tables that are part way through a teardown and reload.
+static const CsBinding *cs_reverted_binding(uint8_t slot) {
+    static const CsBinding none;
+    const CsFlashConfig *stored = preset_stored_cs_config();
+    return stored->version > CS_CONFIG_VERSION ? &none : &stored->bindings[slot];
+}
+
 const CsBinding *control_surfaces_get_binding(uint8_t slot) {
-    return (slot < CS_MAX_BINDINGS) ? &s_cfg.bindings[slot] : NULL;
+    if (slot >= CS_MAX_BINDINGS) return NULL;
+    return control_surfaces_busy() ? cs_reverted_binding(slot) : &s_cfg.bindings[slot];
 }
 
 const IrCommand *control_surfaces_get_ir_cmd(uint8_t sub) {
-    return (sub < CS_MAX_IR_COMMANDS) ? &s_ir.cmds[sub] : NULL;
+    if (sub >= CS_MAX_IR_COMMANDS) return NULL;
+    if (control_surfaces_busy()) {
+        static const IrCommand none;
+        const CsIrConfig *stored = preset_stored_cs_ir_config();
+        const IrCommand *c = &stored->cmds[sub];
+        return (stored->version > CS_IR_CONFIG_VERSION || c->protocol == CS_IR_PROTO_NONE)
+             ? &none : c;
+    }
+    return &s_ir.cmds[sub];
 }
 
 const CsGroupConfig *control_surfaces_group_config(void) { return &s_groups; }
@@ -2795,24 +2885,52 @@ static inline bool cs_aux_live(uint8_t slot) {
     return control_surfaces_slot_is_aux(slot) && s_rt[slot].active;
 }
 
-bool control_surfaces_aux_up(uint8_t slot) { return cs_aux_live(slot); }
+// During a revert an aux slot may be down between its teardown and reload, so
+// reads answer with what it comes back with: the live value while the slot is
+// still up as the same type, else the stash or its stored boot fields.
+static bool cs_aux_projected(uint8_t slot, uint8_t *on, uint16_t *level) {
+    const CsBinding *b = cs_reverted_binding(slot);
+    if (!cs_type_is_aux(b->type)) return false;
+    if (cs_aux_live(slot) && s_cfg.bindings[slot].type == b->type) {
+        *on = s_rt[slot].aux_on;
+        *level = s_rt[slot].aux_level;
+    } else {
+        cs_aux_initial_from(b, &s_aux_carry[slot], on, level);
+    }
+    if (b->type != CS_TYPE_AUX_PWM) *level = 0;
+    return true;
+}
+
+bool control_surfaces_aux_up(uint8_t slot) {
+    uint8_t on; uint16_t lv;
+    if (slot < CS_MAX_BINDINGS && control_surfaces_busy()) return cs_aux_projected(slot, &on, &lv);
+    return cs_aux_live(slot);
+}
 
 uint8_t control_surfaces_aux_state(uint8_t slot) {
+    uint8_t on; uint16_t lv;
+    if (slot < CS_MAX_BINDINGS && control_surfaces_busy())
+        return cs_aux_projected(slot, &on, &lv) ? on : 0;
     return cs_aux_live(slot) ? s_rt[slot].aux_on : 0;
 }
 
 uint16_t control_surfaces_aux_level(uint8_t slot) {
+    uint8_t on; uint16_t lv;
+    if (slot < CS_MAX_BINDINGS && control_surfaces_busy())
+        return cs_aux_projected(slot, &on, &lv) ? lv : 0;
     return (cs_aux_live(slot) && s_cfg.bindings[slot].type == CS_TYPE_AUX_PWM)
          ? s_rt[slot].aux_level : 0;
 }
 
 bool control_surfaces_set_aux_state(uint8_t slot, uint8_t state) {
+    if (control_surfaces_busy()) return false;
     if (!cs_aux_live(slot)) return false;
     s_rt[slot].aux_on = state ? 1 : 0;
     return true;
 }
 
 bool control_surfaces_set_aux_level(uint8_t slot, uint16_t level_q8) {
+    if (control_surfaces_busy()) return false;
     if (!cs_aux_live(slot) || s_cfg.bindings[slot].type != CS_TYPE_AUX_PWM) return false;
     uint16_t max = (uint16_t)cs_noun_table[CS_NOUN_AUX_LEVEL].max_q;
     s_rt[slot].aux_level = (level_q8 > max) ? max : level_q8;
@@ -2855,6 +2973,7 @@ bool control_surfaces_dirty(void) { return s_dirty; }
 void control_surfaces_set_dirty(bool dirty) { s_dirty = dirty; }
 
 uint8_t control_surfaces_ir_learn_control(uint8_t op) {
+    if (control_surfaces_busy()) return CS_STATUS_BUSY;
     if (op == 1) {
         if (s_ir_slot == 0xFF) return CS_STATUS_NO_IR;
         cs_ir_learn_arm();

@@ -2392,195 +2392,196 @@ int main(void) {
                 }
             }
 
-            // Control Surfaces binding SET (deferred).  Live-only preview:
-            // apply does the GPIO/ADC claims but no flash; a successful apply
-            // just marks the live config dirty.  REQ_CS_SAVE persists the
-            // whole config later; REQ_CS_REVERT discards the preview.
-            if (cs_set_binding_pending) {
-                CsBinding b;
-                uint8_t slot;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&b, (const void *)&cs_set_binding_val, sizeof(b));
-                slot = cs_set_binding_slot;
-                cs_set_binding_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_binding(slot, &b);
-                cs_last_status = status;
-                cs_last_slot = slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+            // Control Surfaces deferred requests wait, still pending, while a
+            // revert job reloads the stored config (control_surfaces_busy()).
+            if (!control_surfaces_busy()) {
+                // Control Surfaces binding SET (deferred).  Live-only preview:
+                // apply does the GPIO/ADC claims but no flash; a successful apply
+                // just marks the live config dirty.  REQ_CS_SAVE persists the
+                // whole config later; REQ_CS_REVERT discards the preview.
+                if (cs_set_binding_pending) {
+                    CsBinding b;
+                    uint8_t slot;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&b, (const void *)&cs_set_binding_val, sizeof(b));
+                    slot = cs_set_binding_slot;
+                    cs_set_binding_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_binding(slot, &b);
+                    cs_last_status = status;
+                    cs_last_slot = slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces slot-name SET (deferred).  Live-only preview
-            // like the binding SET: update the live name table, mark dirty,
-            // no flash.  Slot range was validated at the vendor handler.
-            if (cs_set_name_pending) {
-                char name[CS_NAME_LEN];
-                uint8_t slot;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(name, cs_set_name_val, sizeof(name));
-                slot = cs_set_name_slot;
-                cs_set_name_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_name(slot, name);
-                cs_last_status = status;
-                cs_last_slot = slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces slot-name SET (deferred).  Live-only preview
+                // like the binding SET: update the live name table, mark dirty,
+                // no flash.  Slot range was validated at the vendor handler.
+                if (cs_set_name_pending) {
+                    char name[CS_NAME_LEN];
+                    uint8_t slot;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(name, cs_set_name_val, sizeof(name));
+                    slot = cs_set_name_slot;
+                    cs_set_name_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_name(slot, name);
+                    cs_last_status = status;
+                    cs_last_slot = slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces IR-command SET (deferred).  Live-only preview
-            // like the binding SET: apply the command, mark dirty on success,
-            // no flash.  Sub-slot is reported as 0x80 | slot in cs_last_slot.
-            if (cs_set_ir_cmd_pending) {
-                IrCommand c;
-                uint8_t slot;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&c, (const void *)&cs_set_ir_cmd_val, sizeof(c));
-                slot = cs_set_ir_cmd_slot;
-                cs_set_ir_cmd_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_ir_cmd(slot, &c);
-                cs_last_status = status;
-                cs_last_slot = 0x80 | slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces IR-command SET (deferred).  Live-only preview
+                // like the binding SET: apply the command, mark dirty on success,
+                // no flash.  Sub-slot is reported as 0x80 | slot in cs_last_slot.
+                if (cs_set_ir_cmd_pending) {
+                    IrCommand c;
+                    uint8_t slot;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&c, (const void *)&cs_set_ir_cmd_val, sizeof(c));
+                    slot = cs_set_ir_cmd_slot;
+                    cs_set_ir_cmd_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_ir_cmd(slot, &c);
+                    cs_last_status = status;
+                    cs_last_slot = 0x80 | slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces group SET (deferred).  Live-only preview like
-            // the binding SET; the apply re-validates dependent bindings and
-            // may take some down.  Groups report as 0x40 | idx.
-            if (cs_set_group_pending) {
-                CsGroup g;
-                uint8_t slot;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&g, (const void *)&cs_set_group_val, sizeof(g));
-                slot = cs_set_group_slot;
-                cs_set_group_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_group(slot, &g);
-                cs_last_status = status;
-                cs_last_slot = 0x40 | slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces group SET (deferred).  Live-only preview like
+                // the binding SET; the apply re-validates dependent bindings and
+                // may take some down.  Groups report as 0x40 | idx.
+                if (cs_set_group_pending) {
+                    CsGroup g;
+                    uint8_t slot;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&g, (const void *)&cs_set_group_val, sizeof(g));
+                    slot = cs_set_group_slot;
+                    cs_set_group_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_group(slot, &g);
+                    cs_last_status = status;
+                    cs_last_slot = 0x40 | slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces macro header SET (deferred).  Name and step
-            // count only; the steps come through their own handoff below.
-            // Macros report as 0x60 | idx.
-            if (cs_set_macro_hdr_pending) {
-                CsMacroHeaderWire h;
-                uint8_t slot;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&h, (const void *)&cs_set_macro_hdr_val, sizeof(h));
-                slot = cs_set_macro_hdr_slot;
-                cs_set_macro_hdr_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_macro_header(slot, &h);
-                cs_last_status = status;
-                cs_last_slot = 0x60 | slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces macro header SET (deferred).  Name and step
+                // count only; the steps come through their own handoff below.
+                // Macros report as 0x60 | idx.
+                if (cs_set_macro_hdr_pending) {
+                    CsMacroHeaderWire h;
+                    uint8_t slot;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&h, (const void *)&cs_set_macro_hdr_val, sizeof(h));
+                    slot = cs_set_macro_hdr_slot;
+                    cs_set_macro_hdr_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_macro_header(slot, &h);
+                    cs_last_status = status;
+                    cs_last_slot = 0x60 | slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces macro step SET (deferred).  Macro and step
-            // indices were both range-checked at the vendor handler; the
-            // sequencer re-validates the record at fire time anyway.
-            if (cs_set_macro_step_pending) {
-                CsMacroStep s;
-                uint8_t slot, step;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&s, (const void *)&cs_set_macro_step_val, sizeof(s));
-                slot = cs_set_macro_step_slot;
-                step = cs_set_macro_step_idx;
-                cs_set_macro_step_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_macro_step(slot, step, &s);
-                cs_last_status = status;
-                cs_last_slot = 0x60 | slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces macro step SET (deferred).  Macro and step
+                // indices were both range-checked at the vendor handler; the
+                // sequencer re-validates the record at fire time anyway.
+                if (cs_set_macro_step_pending) {
+                    CsMacroStep s;
+                    uint8_t slot, step;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&s, (const void *)&cs_set_macro_step_val, sizeof(s));
+                    slot = cs_set_macro_step_slot;
+                    step = cs_set_macro_step_idx;
+                    cs_set_macro_step_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_macro_step(slot, step, &s);
+                    cs_last_status = status;
+                    cs_last_slot = 0x60 | slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces display config SET (deferred).  The apply talks
-            // to the I2C display and repaints, so it must not run in the USB
-            // control path.  Device-global: reports as a bare 0x50.
-            if (cs_set_disp_cfg_pending) {
-                CsDisplayCfg c;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&c, (const void *)&cs_set_disp_cfg_val, sizeof(c));
-                cs_set_disp_cfg_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_display_cfg(&c);
-                cs_last_status = status;
-                cs_last_slot = 0x50;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces display config SET (deferred).  The apply talks
+                // to the I2C display and repaints, so it must not run in the USB
+                // control path.  Device-global: reports as a bare 0x50.
+                if (cs_set_disp_cfg_pending) {
+                    CsDisplayCfg c;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&c, (const void *)&cs_set_disp_cfg_val, sizeof(c));
+                    cs_set_disp_cfg_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_display_cfg(&c);
+                    cs_last_status = status;
+                    cs_last_slot = 0x50;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces display page SET (deferred).  The page index was
-            // range-checked at the vendor handler.  Pages report as 0x50 | page.
-            if (cs_set_disp_page_pending) {
-                CsDisplayPage p;
-                uint8_t slot;
-                uint32_t f = save_and_disable_interrupts();
-                memcpy(&p, (const void *)&cs_set_disp_page_val, sizeof(p));
-                slot = cs_set_disp_page_slot;
-                cs_set_disp_page_pending = false;
-                restore_interrupts(f);
-                uint8_t status = control_surfaces_apply_display_page(slot, &p);
-                cs_last_status = status;
-                cs_last_slot = 0x50 | slot;
-                if (status == PIN_CONFIG_SUCCESS) {
-                    control_surfaces_set_dirty(true);
+                // Control Surfaces display page SET (deferred).  The page index was
+                // range-checked at the vendor handler.  Pages report as 0x50 | page.
+                if (cs_set_disp_page_pending) {
+                    CsDisplayPage p;
+                    uint8_t slot;
+                    uint32_t f = save_and_disable_interrupts();
+                    memcpy(&p, (const void *)&cs_set_disp_page_val, sizeof(p));
+                    slot = cs_set_disp_page_slot;
+                    cs_set_disp_page_pending = false;
+                    restore_interrupts(f);
+                    uint8_t status = control_surfaces_apply_display_page(slot, &p);
+                    cs_last_status = status;
+                    cs_last_slot = 0x50 | slot;
+                    if (status == PIN_CONFIG_SUCCESS) {
+                        control_surfaces_set_dirty(true);
+                    }
                 }
-            }
 
-            // Control Surfaces SAVE (deferred).  Persist the whole live config
-            // (bindings + IR commands + slot names + groups + macros + display
-            // config and pages) in one directory flash write, then clear the
-            // dirty preview flag on success.
-            if (cs_save_pending) {
-                uint32_t f = save_and_disable_interrupts();
-                cs_save_pending = false;
-                restore_interrupts(f);
-                // SAVED-mode aux slots fold their live values into their
-                // binding's boot fields now, before the cfg is copied out.
-                control_surfaces_aux_prepare_save();
-                prepare_flash_write_operation();
-                uint8_t rc = preset_set_cs_all(control_surfaces_config(),
-                                               control_surfaces_ir_config(),
-                                               control_surfaces_names(),
-                                               control_surfaces_group_config(),
-                                               control_surfaces_macro_config(),
-                                               control_surfaces_display_flash());
-                complete_flash_write_operation_full();
-                cs_last_status = (rc == PRESET_OK) ? PIN_CONFIG_SUCCESS
-                                                   : CS_STATUS_FLASH_ERROR;
-                cs_last_slot = 0xFF;
-                if (rc == PRESET_OK) {
-                    control_surfaces_set_dirty(false);
+                // Control Surfaces SAVE (deferred).  Persist the whole live config
+                // (bindings + IR commands + slot names + groups + macros + display
+                // config and pages) in one directory flash write, then clear the
+                // dirty preview flag on success.
+                if (cs_save_pending) {
+                    uint32_t f = save_and_disable_interrupts();
+                    cs_save_pending = false;
+                    restore_interrupts(f);
+                    // SAVED-mode aux slots fold their live values into their
+                    // binding's boot fields now, before the cfg is copied out.
+                    control_surfaces_aux_prepare_save();
+                    prepare_flash_write_operation();
+                    uint8_t rc = preset_set_cs_all(control_surfaces_config(),
+                                                   control_surfaces_ir_config(),
+                                                   control_surfaces_names(),
+                                                   control_surfaces_group_config(),
+                                                   control_surfaces_macro_config(),
+                                                   control_surfaces_display_flash());
+                    complete_flash_write_operation_full();
+                    cs_last_status = (rc == PRESET_OK) ? PIN_CONFIG_SUCCESS
+                                                       : CS_STATUS_FLASH_ERROR;
+                    cs_last_slot = 0xFF;
+                    if (rc == PRESET_OK) {
+                        control_surfaces_set_dirty(false);
+                    }
                 }
-            }
 
-            // Control Surfaces REVERT (deferred).  Re-apply the stored config
-            // from the directory RAM cache (GPIO reclaims, no flash) and drop
-            // the dirty preview flag.
-            if (cs_revert_pending) {
-                uint32_t f = save_and_disable_interrupts();
-                cs_revert_pending = false;
-                restore_interrupts(f);
-                control_surfaces_revert();
-                control_surfaces_set_dirty(false);
-                cs_last_status = PIN_CONFIG_SUCCESS;
-                cs_last_slot = 0xFF;
+                // Control Surfaces REVERT (deferred).  Starts the background job
+                // that re-applies the stored config (GPIO reclaims, no flash); its
+                // completion clears the dirty flag and posts SUCCESS.
+                if (cs_revert_pending) {
+                    uint32_t f = save_and_disable_interrupts();
+                    cs_revert_pending = false;
+                    restore_interrupts(f);
+                    control_surfaces_revert_begin();
+                }
             }
 
             // DAC hardware mute config update (deferred from USB ISR).

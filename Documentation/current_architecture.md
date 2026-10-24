@@ -1115,13 +1115,14 @@ The worst input gap is now the longer of the two half-passes rather than their s
 | 1 ms | 32 frames, 667 us | 243 us |
 | 2 ms and above | 48 frames or more, 1000 us or more | 300 us (cap) |
 
-Because steps spend to a deadline rather than doing a fixed amount, the same code adapts to RP2040, RP2350 and the system clock. A step checks before each unit whether it still fits (`bg_out_of_time(deadline, estimate)`), so it ends on time rather than one unit late; an interrupt landing in a unit is what the 60 us margin covers. The estimate is the last time the same kind of unit took: the analyser keeps one per FFT stage and one for the finish, because chunk costs differ by stage (8 to 34 us on RP2350 at order 10), and the loudness rebuild uses its last volume step, since those cost the same. Units have to stay small; a single large indivisible unit defeats the deadline. The first Phase 2 run showed this: the FFT permutation was one 140 to 150 us unit, and steps that reached it late ran to 440 us (15,000 to 30,000 overruns per soak) until it became resumable.
+Because steps spend to a deadline rather than doing a fixed amount, the same code adapts to RP2040, RP2350 and the system clock. A step checks before each unit whether it still fits (`bg_out_of_time(deadline, estimate)`), so it ends on time rather than one unit late; an interrupt landing in a unit is what the 60 us margin covers. The estimate is the last time the same kind of unit took: the analyser keeps one per FFT stage and one for the finish, because chunk costs differ by stage (8 to 34 us on RP2350 at order 10), and the loudness rebuild uses its last volume step, since those cost the same. A kind of unit not yet measured carries the estimate `BG_UNIT_UNMEASURED` and so always starts a step of its own: its first run is often cold XIP code, and before this rule the first Control Surfaces revert after boot overran its budget by a few microseconds in every soak. Units have to stay small; a single large indivisible unit defeats the deadline. The first Phase 2 run showed this: the FFT permutation was one 140 to 150 us unit, and steps that reached it late ran to 440 us (15,000 to 30,000 overruns per soak) until it became resumable.
 
 Jobs today:
 - **Analyser transform** (`transform_job`, `rta.c`). `rta_packet_end()` starts it when a frame fills; it runs the FFT in 16-unit chunks (`RtaFftCursor`: prescale samples, butterflies within a stage, permutation cycle starts with the placed-slot bitmap kept in the cursor, split bin pairs), the finish in 16-bin chunks, and finishes when the frame is published. On RP2350 at order 10 a chunk costs 8 to 34 us. The publish (about 60 us, indivisible) only ever starts a step. `stop_engine()` cancels it.
+- **Control Surfaces revert** (`control_surfaces.c`). `control_surfaces_revert_begin()` starts it; it runs the reload one slot or table at a time, and the module refuses or defers every write and answers reads with the reverted state while it runs (Control Surfaces "Deferred SET, Apply/Save/Revert").
 - **Loudness rebuild** (`loudness.c`). `loudness_recompute_begin()` starts or restarts it; it builds volume steps into the inactive table until the deadline, swaps when complete, and `loudness_recompute_take_done()` tells the main loop to re-key. Boot keeps the blocking `loudness_recompute_table()`, which runs before any job.
 
-`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (96+job). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. `control_surfaces_revert()` is not a job yet (Phase 3) and accounts itself as one block, so it counts as an overrun at the low-latency options. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
+`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (96+job). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
 
 **Real-use soaks (2026-10-23, RP2350, `tools/latency_bench/soak.py`).** Each run lasts 15 minutes with the same action seed. The analyser is read every 50 ms while 448 random host actions run (parameter edits, feature toggles, bulk reads, analyser reconfiguration, generator bursts, Control Surfaces binds and reverts). Results with two delivery points (one delivery point in brackets):
 
@@ -3561,7 +3562,7 @@ value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
 is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
-*Last updated: 2026-10-23 (bulk applies rebuild derived state once)*
+*Last updated: 2026-10-24 (revert is a background job with a busy gate and stored-image reads). Previously 2026-10-23 (bulk applies rebuild derived state once)*
 
 `REQ_SET_CS_BINDING` requires the full 24-byte payload; a short payload records
 `CS_STATUS_INVALID_VALUE` and is dropped. It otherwise validates only the slot
@@ -3579,19 +3580,56 @@ deferred via `cs_save_pending`) persists the bindings, the IR table, and the
 slot names together in one directory write (`preset_set_cs_all`) inside the
 usual `prepare_flash_write_operation` brackets and clears dirty;
 `REQ_CS_REVERT` (0x9E, `cs_revert_pending`) re-applies the stored config from
-the directory cache (`control_surfaces_revert`: clears every slot through the
-normal release/claim path, then re-runs the boot loader `cs_load_stored`,
-which also reloads the stored names) with no flash write. A reboot is an
-implicit revert.
+the directory cache with no flash write. A reboot is an implicit revert.
+
+**Revert as a background job (2026-10-24).** The reload is one sequence of
+small units (`cs_reload_unit()`, phases `CS_RL_*`): stash live aux values,
+tear down each slot through the normal release path, reset buttons and the IR
+table and reset-and-reload groups and macros, load each stored aux slot,
+reset-and-reload the display tables, load each other stored slot, load the IR
+commands, then names, macro recount and `cs_bindings_changed()` once. Boot runs
+it from the reset phase straight through; `control_surfaces_revert_begin()`
+runs all of it as a background job (Output Latency "Step budget and background
+jobs"), each unit estimated from the last unit of the same phase and binding
+type (an empty slot costs about 1 us, a display attach about 120 us cold, so
+one estimate per phase let a costly slot follow a cheap one past the deadline). Its completion
+drops unclaimed aux stashes, clears the dirty flag and posts `cs_last_status`
+SUCCESS, so hosts keep polling PENDING exactly as before. The stored image is
+read in place (`preset_stored_cs_config()`, `preset_stored_cs_ir_config()`), so
+the reload no longer copies the 388 and 260-byte blobs onto the stack.
+
+While the job runs, `control_surfaces_busy()` is true and the module guarantees
+that nothing interleaves with it or sees it half done:
+- **Writes wait or report BUSY.** `main.c` skips its whole Control Surfaces
+  deferred block, so queued binding, name, IR, group, macro, display, save and
+  revert requests stay pending and run afterwards in order (a SET sent just
+  after a revert is applied after it, where the one-call revert used to run
+  after it and discard it). Every public apply, aux write, macro fire and IR
+  learn returns `CS_STATUS_BUSY` (or false), whatever path reaches it.
+- **Reads answer with the result.** A revert converges on the stored image for
+  any image this firmware saved, so `REQ_GET_CS_BINDING` and the IR command
+  reads answer from it, and aux state and level reads answer with the value the
+  slot comes back with (live while still up as the same type, else the stash
+  or its stored boot fields). Groups, macros, display tables and names each
+  change within one unit, so their reads stay live. No CS GET newly fails, which
+  matters to clients that check exact readbacks.
+- **The tick keeps running.** Torn-down slots are inactive, the button groups
+  are rebuilt only at the finish, and a macro fired by a control mid-revert is
+  refused.
+
+`tools/dspi_test` group `control_surfaces` checks it: a revert lands on the
+stored bindings with dirty cleared, a SET sent during a revert is applied after
+it, and binding reads polled across 20 reverts all equal the stored image. A
+revert lasts about a millisecond, shorter than one host read, so on a
+`DSPI_LOOP_PROF` build the test slows background jobs to one unit per 50 passes
+(`REQ_GET_STATUS` 512+n) to land reads mid-revert (159 of them on 2026-10-24).
 
 The per-slot work and the state derived from the whole binding set are split.
 `cs_apply_binding_slot()` releases, validates, claims and seeds one slot, and
 `cs_bindings_changed()` recounts the any-active flag and rebuilds the button
 gesture groups, which only the tick reads. `control_surfaces_apply_binding()`
-is the two together. The revert's teardown and `cs_load_stored()` run the
-per-slot half for every slot and the derived half once, so a reload costs one
-group rebuild instead of one per slot. The revert clears the groups before the
-reload, so gesture state restarts as at boot, as it did before.
+is the two together; the reload runs the per-slot half per unit and the
+derived half once, and gesture state restarts as at boot.
 
 `control_surfaces_init()` runs last in `core0_init()` (after
 all pin claims and `notify_init`); a stored binding whose pins now collide is
@@ -4178,7 +4216,7 @@ lands on a hot path and the audio path is untouched.
 | REQ_UPMIX_SET_PARAM | 0x4C | OUT | Set one upmixer field: `wValue` = `UPMIX_PARAM_*` (0..13; 13 = presence dB), payload = 4-byte LE float (mode/enable rounded to int; RP2350 only, RP2040 STALLs) |
 | REQ_UPMIX_GET_PARAM | 0x4D | IN | Get one upmixer field (`wValue` = `UPMIX_PARAM_*`, returns 4-byte float; RP2040 returns 0.0). Unknown param STALLs |
 | REQ_UPMIX_GET_STATUS | 0x4E | IN | Get 16-byte `UpmixStatus` (active, parked_reason, corr_q14, balance_q14, center/ls/rs gains; RP2040 returns 16 zero bytes). 0x4F reserved |
-| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 31 = background steps over budget since boot; 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24); on `DSPI_LOOP_PROF` bench builds 64+n = worst time in main-loop section n, 96+n = worst step of background job n, 256+op = worst vendor handler time for opcode op, each since its last read (`loop_prof.h`) |
+| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 31 = background steps over budget since boot; 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24); on `DSPI_LOOP_PROF` bench builds 64+n = worst time in main-loop section n, 96+n = worst step of background job n, 256+op = worst vendor handler time for opcode op, each since its last read, and 512+n sets bench pacing (each background step does one unit, on one pass in n; returns n) (`loop_prof.h`) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
 | REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config and output limiter settings to the directory's device-global blocks (independent mode; was the deprecated REQ_LOAD_PARAMS) |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |

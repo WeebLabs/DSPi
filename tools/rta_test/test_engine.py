@@ -37,6 +37,7 @@ static void __dmb(void) {}
 // Minimal bg_job.h: one job, and a deadline that never passes, so a step runs
 // until the frame reaches its publish (chunking is covered by test_rta.py).
 enum { BG_JOB_RTA_STEP };
+#define BG_UNIT_UNMEASURED 0xFFFFu
 typedef bool (*BgStepFn)(void *ctx, uint32_t deadline_us);
 typedef struct { int id; BgStepFn step; void *ctx; volatile bool active; } BgJob;
 static BgJob *bg_registered;

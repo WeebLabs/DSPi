@@ -1565,6 +1565,12 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
                 handled = false;
                 break;
             }
+            if (control_surfaces_busy()) {
+                cs_last_status = CS_STATUS_BUSY;
+                cs_last_slot = slot;
+                handled = false;
+                break;
+            }
             uint8_t  before_st = control_surfaces_aux_state(slot);
             uint16_t before_lv = control_surfaces_aux_level(slot);
             bool ok;
@@ -2462,7 +2468,14 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     case 31: resp = bg_over_budget_count; break;  // background steps over budget
 #ifdef DSPI_LOOP_PROF
                     default:
-                        resp = loop_prof_take(setup->wValue);
+                        if (setup->wValue >= LOOP_PROF_BG_PACE_BASE &&
+                            setup->wValue < LOOP_PROF_BG_PACE_BASE + 0x100u) {
+                            uint16_t n = (uint16_t)(setup->wValue - LOOP_PROF_BG_PACE_BASE);
+                            bg_test_pace = n ? n : 1;
+                            resp = bg_test_pace;
+                        } else {
+                            resp = loop_prof_take(setup->wValue);
+                        }
                         break;
 #endif
 #ifdef DSPI_LOOPBACK
