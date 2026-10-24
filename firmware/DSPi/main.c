@@ -21,6 +21,7 @@
 #include "audio_pipeline.h"
 #include "output_latency.h"
 #include "loop_prof.h"   // DSPI_LOOP_PROF section marks (empty otherwise)
+#include "bg_job.h"
 #include "spdif_input.h"
 #include "soft_vcxo.h"
 #include "clock_diag.h"
@@ -2232,8 +2233,8 @@ int main(void) {
         LOOP_PROF(LP_IDLE_PUMP);
         output_rings_idle_pump();
 
-        // Spectrum analyser: apply staged config, one bounded transform
-        // step, auto-off.  Immediate no-op while idle.
+        // Spectrum analyser: apply staged config, liveness, auto-off. Its
+        // transform runs as a background job.  Immediate no-op while idle.
         LOOP_PROF(LP_RTA);
         rta_service();
 
@@ -2241,6 +2242,11 @@ int main(void) {
         input_service_handshakes();
         pipeline_service_producer(true);
         input_service_servos();
+
+        // One budgeted step of long background work (analyser transform,
+        // loudness rebuild) between the two deliveries; see bg_job.h.
+        LOOP_PROF(LP_BG_JOBS);
+        bg_run_one();
 
         LOOP_PROF(LP_FLASH_SETS);
         // Handle deferred flash SET commands (fire-and-forget, no result).
@@ -2729,7 +2735,7 @@ int main(void) {
             loudness_recompute_pending = false;
             loudness_recompute_begin(loudness_ref_spl, loudness_intensity_pct, (float)audio_state.freq);
         }
-        if (loudness_recompute_step()) {
+        if (loudness_recompute_take_done()) {
             // Re-key the active coefficient pointer at the current
             // vol_index.  effective_vol_index is set in lock-step with
             // vol_mul by apply_vol_index_to_audio(), so this picks up

@@ -1,6 +1,6 @@
 # Main-Loop Background Jobs: Plan
 
-*Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phase 1 implemented 2026-10-24 (see "Phase 1 status" at the end); Phases 2 to 4 not started.*
+*Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 and 2 implemented 2026-10-24 (see the status sections at the end); Phases 3 and 4 not started.*
 
 ## TL;DR
 
@@ -153,3 +153,28 @@ Worst step per job: analyser 208 us, loudness rebuild 155 to 173 us, Control Sur
 - **Quiet pass**: the baseline action profile measures a worst gap of about 121 us with nothing happening (about 110 us of it is processing one 16-frame block), not the 75 us `BG_PASS_FLOOR_US` assumes. With the measured value the formula gives (333 - 121 - 60) / 2 = 76 us at 0.67 ms rather than 99 us. Settle the constant once the RP2040 numbers are in.
 - **Vendor handlers** (Phase 4 candidates): `REQ_GET_ALL_PARAMS` 181 us, `REQ_SIGGEN_CONTROL` 107 to 145 us, `REQ_RTA_GET_BANDS` 115 us (polled every 50 ms by Console, so it is the most frequent large cost). Every other opcode stays under 85 us.
 - **Coefficient updates**: a loudness reference or intensity change spends up to 194 us in the coefficient-update section, separate from the table rebuild. Measure it as its own item in Phase 4.
+
+## Phase 2 status (2026-10-24)
+
+Implemented, uncommitted:
+- `bg_job.c/.h`: `BgJob`, `bg_job_register()`, inline `bg_job_start()` / `bg_job_cancel()` (the audio path starts the analyser job without a call), `bg_run_one()` round-robin after the first delivery (profiler section `bg_jobs`), and `bg_out_of_time(deadline, estimate)`.
+- Loudness rebuild as a job: builds volume steps until the deadline, `loudness_recompute_take_done()` replaces the step's return value for the re-key, `LOUDNESS_STEPS_PER_CALL` deleted, boot build unchanged.
+- Analyser transform as a job, started by `rta_packet_end()`, cancelled by `stop_engine()`; `rta_service()` keeps config, liveness and auto-off. `RtaFftCursor` makes every FFT stage resumable (prescale samples, butterflies, permutation cycle starts with the placed-slot bitmap in the cursor, split bin pairs); `test_rta.py` proves 7-unit chunks bit-identical to whole stages.
+
+Found and fixed during Phase 2:
+- **The permutation was one 140 to 150 us unit.** With steps spending to a 300 us deadline, every frame ended one step at about 440 us (15,000 to 30,000 overruns per soak). Resumable between cycles, a 16-start chunk costs about 32 us.
+- **Checking the deadline after a unit lets a step end one unit late**, which with an interrupt crossed the margin. Steps now check before each unit with an estimate: the analyser keeps the last chunk cost per FFT stage and for the finish (costs differ 8 to 34 us by stage); the loudness rebuild uses its last step.
+- **One interrupt margin was too tight for the counter.** Under the soak's interrupt load a step absorbs two landings about once in 10 s (up to 79 us over budget, gaps still under 222 us). The counter margin is now `BG_OVERRUN_MARGIN_US` (110 us); the budget still sets aside one landing (`BG_IRQ_FLOOR_US`, 60 us).
+- **`BG_PASS_FLOOR_US` is the measured 120 us**, not the drafted 75 us, so budgets are 76 / 243 / 300 us at 0.67 ms / 1 ms / 2 ms and above.
+
+### RP2350 results (`bench_results/bg_phase2`)
+
+`latency_bench` on the first Phase 2 build: 42 of 42 points pass on the stock configuration and 42 of 42 under the 4-way profile, rate-follow and rapid-switch checks pass (the later fixes change only when analyser work runs, which the bench does not exercise). 15-minute soaks on the final build:
+
+| Soak | Underruns | Over-budget steps | Worst gap max / p99 (limit) | Lowest fill (min / median) |
+|---|---|---|---|---|
+| S/PDIF, 0.67 ms | 0 | 3 (Phase 1: 1036) | 480 / 219 us (333) | 0 / 10 frames |
+| S/PDIF, 1 ms | 0 | 3 (Phase 1: 3) | 416 / 381 us (666) | 16 / 18 frames |
+| USB, 2 ms | 0 | 1 (Phase 1: 1) | 531 / 495 us (1000) | 31 / 41 frames |
+
+Every remaining overrun, every gap over the limit and the one zero-fill second are Control Surfaces reverts (seconds 280, 439 and 529 of the seed), which is Phase 3. The analyser holds 44 to 45 frames per second at every option, unchanged. At 1 ms and 2 ms the p99 gap rose (Phase 1: 240 / 278 us) because the budget lets a step run longer; it stays well inside the limit, which is what the budget is derived from.

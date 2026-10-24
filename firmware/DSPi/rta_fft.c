@@ -168,16 +168,17 @@ static inline uint8_t rta_bin_level(rta_binpow_t p) {
 // Two real samples share one complex slot, so the packed value reaches sqrt(2)
 // full scale and any later rotation would clip int16.  Scaling by 1/sqrt(2)
 // here keeps every stage inside the format; rta_split puts the factor back.
-static void rta_prescale(rta_sample_t *buf, uint16_t n) {
-    for (uint16_t i = 0; i < n; i++) {
+static void rta_prescale(rta_sample_t *buf, uint16_t i0, uint16_t i1) {
+    for (uint16_t i = i0; i < i1; i++) {
         buf[i] = rta_st(RTA_ISQRT2((rta_acc_t)buf[i]));
     }
 }
 
-static void rta_stage_r2(rta_sample_t *c, uint16_t m) {
+// Butterflies j0..j1-1 of the stage (m / 2 in all).
+static void rta_stage_r2(rta_sample_t *c, uint16_t m, uint16_t j0, uint16_t j1) {
     const uint16_t half = (uint16_t)(m >> 1);
     const uint16_t tstride = (uint16_t)(RTA_TW_N / m);
-    for (uint16_t j = 0; j < half; j++) {
+    for (uint16_t j = j0; j < j1; j++) {
         const uint16_t i0 = (uint16_t)(j << 1);
         const uint16_t i1 = (uint16_t)((j + half) << 1);
         const rta_acc_t x0r = c[i0], x0i = c[i0 + 1];
@@ -194,44 +195,46 @@ static void rta_stage_r2(rta_sample_t *c, uint16_t m) {
     }
 }
 
-static void rta_stage_r4(rta_sample_t *c, uint16_t m, uint16_t L) {
+// Butterflies q0..q1-1 of the stage (m / 4 in all), q = block * (L / 4) + j.
+static void rta_stage_r4(rta_sample_t *c, uint16_t L, uint16_t q0, uint16_t q1) {
     const uint16_t quarter = (uint16_t)(L >> 2);
     const uint16_t tstride = (uint16_t)(RTA_TW_N / L);
     const uint16_t step = (uint16_t)(quarter << 1);
-    for (uint16_t base = 0; base < m; base = (uint16_t)(base + L)) {
-        for (uint16_t j = 0; j < quarter; j++) {
-            const uint16_t i0 = (uint16_t)((base + j) << 1);
-            const uint16_t i1 = (uint16_t)(i0 + step);
-            const uint16_t i2 = (uint16_t)(i1 + step);
-            const uint16_t i3 = (uint16_t)(i2 + step);
-            const rta_acc_t x0r = c[i0], x0i = c[i0 + 1];
-            const rta_acc_t x1r = c[i1], x1i = c[i1 + 1];
-            const rta_acc_t x2r = c[i2], x2i = c[i2 + 1];
-            const rta_acc_t x3r = c[i3], x3i = c[i3 + 1];
-            const rta_acc_t t0r = x0r + x2r, t0i = x0i + x2i;
-            const rta_acc_t t1r = x0r - x2r, t1i = x0i - x2i;
-            const rta_acc_t t2r = x1r + x3r, t2i = x1i + x3i;
-            const rta_acc_t t3r = x1r - x3r, t3i = x1i - x3i;
+    uint16_t base = (uint16_t)((q0 / quarter) * L);
+    uint16_t j = (uint16_t)(q0 % quarter);
+    for (uint16_t q = q0; q < q1; q++) {
+        const uint16_t i0 = (uint16_t)((base + j) << 1);
+        const uint16_t i1 = (uint16_t)(i0 + step);
+        const uint16_t i2 = (uint16_t)(i1 + step);
+        const uint16_t i3 = (uint16_t)(i2 + step);
+        const rta_acc_t x0r = c[i0], x0i = c[i0 + 1];
+        const rta_acc_t x1r = c[i1], x1i = c[i1 + 1];
+        const rta_acc_t x2r = c[i2], x2i = c[i2 + 1];
+        const rta_acc_t x3r = c[i3], x3i = c[i3 + 1];
+        const rta_acc_t t0r = x0r + x2r, t0i = x0i + x2i;
+        const rta_acc_t t1r = x0r - x2r, t1i = x0i - x2i;
+        const rta_acc_t t2r = x1r + x3r, t2i = x1i + x3i;
+        const rta_acc_t t3r = x1r - x3r, t3i = x1i - x3i;
 
-            // u1 = t1 - i*t3 and u3 = t1 + i*t3 for the e^-jw transform.
-            const rta_acc_t u0r = RTA_Q4(t0r + t2r), u0i = RTA_Q4(t0i + t2i);
-            const rta_acc_t u1r = RTA_Q4(t1r + t3i), u1i = RTA_Q4(t1i - t3r);
-            const rta_acc_t u2r = RTA_Q4(t0r - t2r), u2i = RTA_Q4(t0i - t2i);
-            const rta_acc_t u3r = RTA_Q4(t1r - t3i), u3i = RTA_Q4(t1i + t3r);
+        // u1 = t1 - i*t3 and u3 = t1 + i*t3 for the e^-jw transform.
+        const rta_acc_t u0r = RTA_Q4(t0r + t2r), u0i = RTA_Q4(t0i + t2i);
+        const rta_acc_t u1r = RTA_Q4(t1r + t3i), u1i = RTA_Q4(t1i - t3r);
+        const rta_acc_t u2r = RTA_Q4(t0r - t2r), u2i = RTA_Q4(t0i - t2i);
+        const rta_acc_t u3r = RTA_Q4(t1r - t3i), u3i = RTA_Q4(t1i + t3r);
 
-            c[i0] = rta_st(u0r);
-            c[i0 + 1] = rta_st(u0i);
-            if (j == 0) {
-                c[i1] = rta_st(u1r); c[i1 + 1] = rta_st(u1i);
-                c[i2] = rta_st(u2r); c[i2 + 1] = rta_st(u2i);
-                c[i3] = rta_st(u3r); c[i3 + 1] = rta_st(u3i);
-            } else {
-                const uint32_t t = (uint32_t)j * tstride;
-                rta_twmul(u1r, u1i, &rta_tw[2u * t], &c[i1], &c[i1 + 1]);
-                rta_twmul(u2r, u2i, &rta_tw[4u * t], &c[i2], &c[i2 + 1]);
-                rta_twmul(u3r, u3i, &rta_tw[6u * t], &c[i3], &c[i3 + 1]);
-            }
+        c[i0] = rta_st(u0r);
+        c[i0 + 1] = rta_st(u0i);
+        if (j == 0) {
+            c[i1] = rta_st(u1r); c[i1 + 1] = rta_st(u1i);
+            c[i2] = rta_st(u2r); c[i2 + 1] = rta_st(u2i);
+            c[i3] = rta_st(u3r); c[i3 + 1] = rta_st(u3i);
+        } else {
+            const uint32_t t = (uint32_t)j * tstride;
+            rta_twmul(u1r, u1i, &rta_tw[2u * t], &c[i1], &c[i1 + 1]);
+            rta_twmul(u2r, u2i, &rta_tw[4u * t], &c[i2], &c[i2 + 1]);
+            rta_twmul(u3r, u3i, &rta_tw[6u * t], &c[i3], &c[i3 + 1]);
         }
+        if (++j == quarter) { j = 0; base = (uint16_t)(base + L); }
     }
 }
 
@@ -252,9 +255,10 @@ static uint16_t rta_perm_index(uint16_t p, uint8_t mlog) {
     return (mlog & 1u) ? (uint16_t)((r << 1) | q) : r;
 }
 
-static void rta_permute(rta_sample_t *c, uint16_t m, uint8_t mlog) {
-    uint32_t seen[RTA_MAX_POINTS / 2 / 32] = { 0 };
-    for (uint16_t p = 0; p < m; p++) {
+// Cycle-following permutation, resumable between cycles: units are start
+// positions p0..p1-1, and seen (cleared before the first) marks placed slots.
+static void rta_permute(rta_sample_t *c, uint8_t mlog, uint32_t *seen, uint16_t p0, uint16_t p1) {
+    for (uint16_t p = p0; p < p1; p++) {
         if (seen[p >> 5] & (1u << (p & 31u))) continue;
         seen[p >> 5] |= 1u << (p & 31u);
         rta_sample_t tr = c[2 * p], ti = c[2 * p + 1];
@@ -274,17 +278,20 @@ static void rta_permute(rta_sample_t *c, uint16_t m, uint8_t mlog) {
 // Real split: X[k] = S - i*W*D, X[m-k] = conj(S + i*W*D), where S and D are the
 // half sum and half difference of Z[k] and conj(Z[m-k]).  The 1/sqrt(2) that
 // rta_prescale took out comes back here, completing the 1/n scaling.
-static void rta_split(rta_sample_t *c, uint8_t order) {
+// Units k0..k1-1 of the pass (m / 2 + 1 in all): unit 0 is slot 0, unit k
+// pairs bins k and m - k.
+static void rta_split(rta_sample_t *c, uint8_t order, uint16_t k0, uint16_t k1) {
     const uint16_t m = (uint16_t)(1u << (order - 1));
     const uint16_t sp_stride = (uint16_t)(1u << (RTA_ORDER_MAX - order));
 
-    {   // X[0] and the Nyquist bin are both real and share slot 0.
+    if (k0 == 0) {   // X[0] and the Nyquist bin are both real and share slot 0.
         const rta_acc_t zr = c[0], zi = c[1];
         c[0] = rta_st(RTA_ISQRT2(zr + zi));
         c[1] = rta_st(RTA_ISQRT2(zr - zi));
+        k0 = 1;
     }
 
-    for (uint16_t k = 1; k <= (m >> 1); k++) {
+    for (uint16_t k = k0; k < k1; k++) {
         const uint16_t kk = (uint16_t)(m - k);
         const rta_acc_t ar = c[2 * k], ai = c[2 * k + 1];
         const rta_acc_t br = c[2 * kk], bi = -(rta_acc_t)c[2 * kk + 1];
@@ -310,39 +317,45 @@ static void rta_split(rta_sample_t *c, uint8_t order) {
     }
 }
 
-bool rta_fft_step(rta_sample_t *buf, uint8_t order, uint8_t *stage) {
-    if (order < RTA_ORDER_MIN || order > RTA_ORDER_MAX) { *stage = 0; return true; }
+bool rta_fft_step(rta_sample_t *buf, uint8_t order, RtaFftCursor *c, uint16_t max_units) {
+    if (order < RTA_ORDER_MIN || order > RTA_ORDER_MAX) { c->stage = 0; c->pos = 0; return true; }
+    if (max_units == 0) max_units = 1;
 
     const uint8_t mlog = (uint8_t)(order - 1);
     const uint16_t m = (uint16_t)(1u << mlog);
     const uint8_t has_r2 = (uint8_t)(mlog & 1u);
     const uint8_t n_bfly = (uint8_t)(has_r2 + (mlog >> 1));
-    const uint8_t s0 = *stage;
+    // Stage 0 prescales, 1..n_bfly are butterfly stages, then the permutation
+    // and the real split.
+    const uint8_t s = c->stage;
+    uint16_t total;
+    if (s == 0)                       total = (uint16_t)(1u << order);
+    else if (s <= n_bfly)             total = (has_r2 && s == 1) ? (uint16_t)(m >> 1) : (uint16_t)(m >> 2);
+    else if (s == n_bfly + 1)         total = m;
+    else                              total = (uint16_t)((m >> 1) + 1);
 
-    // Step 0 is the prescale on its own, so no single call carries a full
-    // buffer pass plus a butterfly stage.
-    if (s0 == 0) {
-        rta_prescale(buf, (uint16_t)(1u << order));
-        *stage = 1;
-        return false;
-    }
-    const uint8_t s = (uint8_t)(s0 - 1);
-
-    if (s < n_bfly) {
-        if (has_r2 && s == 0) {
-            rta_stage_r2(buf, m);
+    const uint16_t from = c->pos;
+    const uint16_t to = (uint32_t)from + max_units < total ? (uint16_t)(from + max_units) : total;
+    if (s == 0) {
+        rta_prescale(buf, from, to);
+    } else if (s <= n_bfly) {
+        if (has_r2 && s == 1) {
+            rta_stage_r2(buf, m, from, to);
         } else {
-            const uint8_t k = (uint8_t)(s - has_r2);
-            rta_stage_r4(buf, m, (uint16_t)((m >> has_r2) >> (2 * k)));
+            const uint8_t k = (uint8_t)(s - 1 - has_r2);
+            rta_stage_r4(buf, (uint16_t)((m >> has_r2) >> (2 * k)), from, to);
         }
-    } else if (s == n_bfly) {
-        rta_permute(buf, m, mlog);
+    } else if (s == n_bfly + 1) {
+        if (from == 0) memset(c->seen, 0, sizeof(c->seen));
+        rta_permute(buf, mlog, c->seen, from, to);
     } else {
-        rta_split(buf, order);
-        *stage = 0;
-        return true;
+        rta_split(buf, order, from, to);
     }
-    *stage = (uint8_t)(s0 + 1);
+
+    if (to < total) { c->pos = to; return false; }
+    c->pos = 0;
+    if (s == n_bfly + 2) { c->stage = 0; return true; }
+    c->stage = (uint8_t)(s + 1);
     return false;
 }
 

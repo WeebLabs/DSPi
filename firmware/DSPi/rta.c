@@ -34,10 +34,15 @@ rta_sample_t  rta_buf[RTA_MAX_POINTS];
 
 enum { PH_FILL = 0, PH_FFT = 1, PH_FINISH = 2, PH_PUBLISH = 3 };
 
-// Bins per finish step: about 64 us on RP2350. The main loop also feeds the
-// stream inputs, so no step may hold it long; see current_architecture.md
-// "Output Latency".
-#define RTA_FINISH_BINS_PER_STEP 64u
+// Work between deadline checks in the transform job: FFT units (one butterfly
+// is about 1 us on RP2350) and finish bins (about 1 us each). A step overruns
+// its deadline by at most one chunk (current_architecture.md "Step budget").
+#define RTA_FFT_UNITS_PER_CHUNK     16u
+#define RTA_FINISH_BINS_PER_CHUNK   16u
+// Chunk cost estimates: one per FFT stage (at most 8 at order 10), then the finish.
+#define RTA_CHUNK_EST_FINISH        8u
+_Static_assert(((RTA_ORDER_MAX - 1) & 1) + ((RTA_ORDER_MAX - 1) >> 1) + 3 <= RTA_CHUNK_EST_FINISH,
+               "an FFT stage has no chunk estimate slot");
 
 typedef struct {
     float    ema[RTA_MAX_BANDS - RTA_BASS_BANDS]; // FFT-band power EMA; bass owns its EMA
@@ -60,7 +65,8 @@ static struct {
     uint8_t   phase;               // PH_*
     uint8_t   ch;                  // channel being captured / transformed
     uint8_t   order;
-    uint8_t   stage;               // rta_fft_step cursor
+    RtaFftCursor fft;              // rta_fft_step cursor
+    uint16_t  chunk_est_us[RTA_CHUNK_EST_FINISH + 1];   // last chunk time per stage
     RtaFinishCursor finish;        // rta_fft_finish_step cursor
     float     power[RTA_MAX_BANDS]; // band powers of the frame in flight
     uint16_t  n;                   // 1 << order
@@ -148,10 +154,13 @@ static void clear_channel_state(void) {
     rta.bass_mask = 0;
 }
 
+static BgJob transform_job;
+
 static void start_fill(uint8_t ch) {
     rta.ch = ch;
     rta.wr = 0;
-    rta.stage = 0;
+    rta.fft.stage = 0;   // the permutation clears its own bitmap
+    rta.fft.pos = 0;
     rta.frame_busy_us = 0;
     __dmb();
     rta.phase = PH_FILL;
@@ -185,6 +194,7 @@ static void arm(void) {
 }
 
 static void stop_engine(void) {
+    bg_job_cancel(&transform_job);
     rta.state = RTA_STATE_IDLE;
     rta.live_mask = 0;
     rta_view.tap = RTA_TAP_NONE;
@@ -285,35 +295,49 @@ static void advance(void) {
     start_fill(nx);
 }
 
-// One bounded unit of work.  Returns true if it did anything.
-static bool step(void) {
-    if (rta.phase == PH_FILL) return false;
-    uint32_t t0 = time_us_32();
-    if (rta.phase == PH_FFT) {
-        if (rta_fft_step(rta_buf, rta.order, &rta.stage)) {
-            rta_fft_finish_begin(&rta.finish);
-            rta.phase = PH_FINISH;
+// Transform job (bg_job.h), started by rta_packet_end() when a frame fills and
+// finished once that frame is published. The publish is indivisible, so it
+// only ever starts a step and never lands on top of one nearly out of time.
+static bool transform_step(void *ctx, uint32_t deadline_us) {
+    (void)ctx;
+    uint32_t t0 = time_us_32(), t_frame = t0;
+    bool worked = false, published = false;
+    while (rta.state != RTA_STATE_IDLE && rta.phase != PH_FILL) {
+        if (rta.phase == PH_PUBLISH) {
+            if (worked) break;
+            // Charge the transform to the frame before publish reads the total.
+            uint32_t now = time_us_32();
+            rta.frame_busy_us += now - t_frame;
+            publish(rta.power);
+            advance();
+            published = true;
+            break;
         }
-    } else if (rta.phase == PH_FINISH) {
-        if (rta_fft_finish_step(&rta.finish, rta_buf, rta.order, rta.table, rta.power,
-                                rta.bin_stage, RTA_FINISH_BINS_PER_STEP))
+        // Chunk costs differ by stage, so each stage's last chunk predicts its next.
+        uint8_t slot = rta.phase == PH_FFT ? rta.fft.stage : RTA_CHUNK_EST_FINISH;
+        if (slot > RTA_CHUNK_EST_FINISH) slot = RTA_CHUNK_EST_FINISH;
+        if (worked && bg_out_of_time(deadline_us, rta.chunk_est_us[slot])) break;
+        uint32_t c0 = time_us_32();
+        if (rta.phase == PH_FFT) {
+            if (rta_fft_step(rta_buf, rta.order, &rta.fft, RTA_FFT_UNITS_PER_CHUNK)) {
+                rta_fft_finish_begin(&rta.finish);
+                rta.phase = PH_FINISH;
+            }
+        } else if (rta_fft_finish_step(&rta.finish, rta_buf, rta.order, rta.table, rta.power,
+                                       rta.bin_stage, RTA_FINISH_BINS_PER_CHUNK)) {
             rta.phase = PH_PUBLISH;
-    } else {
-        // Charge the publish to the frame before it reads the total.
-        rta.frame_busy_us += time_us_32() - t0;
-        publish(rta.power);
-        advance();
-        uint32_t dt = time_us_32() - t0;
-        rta.busy_acc_us += dt;
-        bg_step_account(BG_JOB_RTA_STEP, dt);
-        return true;
+        }
+        uint32_t dt = time_us_32() - c0;
+        rta.chunk_est_us[slot] = (uint16_t)(dt > 0xFFFFu ? 0xFFFFu : dt);
+        worked = true;
     }
-    uint32_t dt = time_us_32() - t0;
-    rta.frame_busy_us += dt;
-    rta.busy_acc_us += dt;
-    bg_step_account(BG_JOB_RTA_STEP, dt);
-    return true;
+    uint32_t now = time_us_32();
+    if (!published) rta.frame_busy_us += now - t_frame;
+    rta.busy_acc_us += now - t0;
+    return published || rta.state == RTA_STATE_IDLE || rta.phase == PH_FILL;
 }
+
+static BgJob transform_job = { BG_JOB_RTA_STEP, transform_step, NULL, false };
 
 static void tick_stats(uint32_t now) {
     uint32_t elapsed = now - rta.stat_window_us;
@@ -550,7 +574,12 @@ void __not_in_flash_func(rta_packet_end)(uint32_t sample_count) {
     // row that was not tapped this packet leaves the count at 0.
     if (v->tap != RTA_TAP_NONE && v->produced) {
         rta.wr = (uint16_t)(rta.wr + v->produced);
-        if (rta.wr >= rta.n) { rta.stage = 0; rta.phase = PH_FFT; }
+        if (rta.wr >= rta.n) {
+            rta.fft.stage = 0;
+            rta.fft.pos = 0;
+            rta.phase = PH_FFT;
+            bg_job_start(&transform_job);
+        }
     }
     v->take = 0;
     v->tap = RTA_TAP_NONE;
@@ -604,8 +633,6 @@ void rta_service(void) {
         return;
     }
     check_fill_liveness();
-    if (rta.state == RTA_STATE_IDLE) return;
-    step();
 }
 
 void rta_restart(void) {
@@ -630,4 +657,5 @@ void rta_init(void) {
     rta.stat_window_us = time_us_32();
     derive_layout();
     stop_engine();
+    bg_job_register(&transform_job);
 }

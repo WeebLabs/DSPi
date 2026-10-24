@@ -21,6 +21,7 @@
     X(LP_IDLE_PUMP,     "idle_pump")         \
     X(LP_RTA,           "rta")               \
     X(LP_INPUT,         "audio_inputs+dsp")  \
+    X(LP_BG_JOBS,       "bg_jobs")           \
     X(LP_FLASH_SETS,    "flash_sets")        \
     X(LP_EQ_UPDATES,    "eq_updates")        \
     X(LP_COEFF_UPDATES, "coeff_updates")     \

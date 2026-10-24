@@ -191,7 +191,8 @@ void rta_packet_end(uint32_t sample_count);
 // so the call sites do not each carry the Q28 conversion loop.
 void rta_tap(uint8_t tap, uint8_t row, const rta_pipe_t *buf, uint32_t n);
 
-// Main loop: apply staged config, run one bounded transform step, auto-off.
+// Main loop: apply staged config, fill liveness, auto-off. The transform of a
+// filled frame runs as a background job (bg_job.h), started by rta_packet_end().
 void rta_service(void);
 
 // Discard the frame in flight and restart capture.  Rate change, input

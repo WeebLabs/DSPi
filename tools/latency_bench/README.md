@@ -19,8 +19,8 @@ full-scale noise, and mute is a gain stage that leaves ring timing unchanged.
 
 ## What it measures
 
-For each latency (2.0 to 8.0 ms in 0.5 ms steps by default), the window starts
-the moment the change applies, so the post-reset transient counts:
+For each latency option (all seven by default, `--options` to narrow), the window
+starts the moment the change applies, so the post-reset transient counts:
 
 - underrun recoveries and blocks refused by ring admission (`REQ_GET_STATUS` 26 and 27)
 - the lowest fill seen just before any write (28), which is the real margin

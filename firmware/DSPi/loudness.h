@@ -118,9 +118,9 @@ extern LoudnessCoeffs (*loudness_active_table)[LOUDNESS_BIQUAD_COUNT];
 // Recompute the entire loudness table for current parameters
 // Called from main loop on: boot, ref SPL change, intensity change, sample rate change
 void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_rate);
-// The same build, sliced for the main loop: begin, then step every pass; step
-// returns true on the pass that makes the new table active (re-key there).
+// The same build as a background job (bg_job.h): begin starts or restarts it,
+// and take_done returns true once after the new table becomes active (re-key there).
 void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_rate);
-bool loudness_recompute_step(void);
+bool loudness_recompute_take_done(void);
 
 #endif // LOUDNESS_H

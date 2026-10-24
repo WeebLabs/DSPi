@@ -67,10 +67,16 @@ def build(name, flt):
     return lib
 
 
+class FftCursor(ctypes.Structure):
+    """RtaFftCursor (firmware/DSPi/rta_fft.h), RTA_MAX_POINTS = 1024."""
+    _fields_ = [("stage", ctypes.c_uint8), ("pos", ctypes.c_uint16),
+                ("seen", ctypes.c_uint32 * (1024 // 64))]
+
+
 def load(path):
     lib = ctypes.CDLL(path)
     lib.rta_fft_step.argtypes = [ctypes.c_void_p, ctypes.c_uint8,
-                                 ctypes.POINTER(ctypes.c_uint8)]
+                                 ctypes.POINTER(FftCursor), ctypes.c_uint16]
     lib.rta_fft_step.restype = ctypes.c_bool
     lib.rta_fft_finish.argtypes = [ctypes.c_void_p, ctypes.c_uint8,
                                    ctypes.POINTER(BandTable), ctypes.c_void_p,
@@ -110,16 +116,25 @@ def run_frame(lib, fmt, x, order, table=None):
     """
     n = 1 << order
     buf = to_native(x[:n], fmt)
-    stage = ctypes.c_uint8(0)
+    cur = FftCursor(0, 0)
     steps = 1
     while not lib.rta_fft_step(buf.ctypes.data_as(ctypes.c_void_p), order,
-                               ctypes.byref(stage)):
+                               ctypes.byref(cur), 0xFFFF):
         steps += 1
         assert steps < 16, "rta_fft_step did not finish"
     mlog = order - 1
-    # prescale + butterfly stages + permute + split
+    # Whole stages: prescale + butterfly stages + permute + split
     assert steps == (mlog & 1) + (mlog >> 1) + 3, (order, steps)
-    assert stage.value == 0, "stage not reset for the next frame"
+    assert (cur.stage, cur.pos) == (0, 0), "cursor not reset for the next frame"
+    # Resumed in small chunks the transform must be bit-identical.
+    chunked = to_native(x[:n], fmt)
+    cur = FftCursor(0, 0)
+    calls = 1
+    while not lib.rta_fft_step(chunked.ctypes.data_as(ctypes.c_void_p), order,
+                               ctypes.byref(cur), 7):
+        calls += 1
+        assert calls < 4 * n, "chunked rta_fft_step did not finish"
+    assert np.array_equal(buf, chunked), ("chunked transform differs", order)
     bins = np.zeros(n // 2, dtype=np.uint8)
     if table is None:
         bp = None

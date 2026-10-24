@@ -1,17 +1,37 @@
 /*
- * bg_job.c; main-loop step budget. See bg_job.h and
- * Documentation/current_architecture.md "Step budget".
+ * bg_job.c; background job runner and step budget. See bg_job.h.
  */
 #include "bg_job.h"
 #include "output_latency.h"
 #include "usb_audio.h"   // audio_state
 
-// A quiet pass (housekeeping plus one delivery) costs about this much.
-#define BG_PASS_FLOOR_US     75u
+// A quiet pass (housekeeping plus one delivery) costs about this much (RP2350,
+// measured 2026-10-24; current_architecture.md "Step budget").
+#define BG_PASS_FLOOR_US    120u
 #define BG_BUDGET_MIN_US     50u
 #define BG_BUDGET_MAX_US    300u
 
 volatile uint32_t bg_over_budget_count = 0;
+
+static BgJob *jobs[BG_JOB_COUNT];
+static uint8_t next_job;
+
+void bg_job_register(BgJob *job) {
+    if ((unsigned)job->id < BG_JOB_COUNT) jobs[job->id] = job;
+}
+
+void bg_run_one(void) {
+    for (uint8_t k = 0; k < BG_JOB_COUNT; k++) {
+        uint8_t i = (uint8_t)((next_job + k) % BG_JOB_COUNT);
+        BgJob *job = jobs[i];
+        if (!job || !job->active) continue;
+        next_job = (uint8_t)((i + 1) % BG_JOB_COUNT);
+        uint32_t t0 = time_us_32();
+        if (job->step(job->ctx, t0 + bg_step_budget_us())) job->active = false;
+        bg_step_account(job->id, time_us_32() - t0);
+        return;
+    }
+}
 
 uint32_t bg_step_budget_us(void) {
     uint32_t fs = audio_state.freq ? (uint32_t)audio_state.freq : 48000u;
@@ -27,7 +47,7 @@ uint32_t bg_step_budget_us(void) {
 }
 
 void bg_step_account(BgJobId job, uint32_t elapsed_us) {
-    if (elapsed_us > bg_step_budget_us() + BG_IRQ_FLOOR_US) bg_over_budget_count++;
+    if (elapsed_us > bg_step_budget_us() + BG_OVERRUN_MARGIN_US) bg_over_budget_count++;
 #ifdef DSPI_LOOP_PROF
     loop_prof_job((uint8_t)job, elapsed_us);
 #else

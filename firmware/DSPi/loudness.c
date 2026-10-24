@@ -2,7 +2,6 @@
 #include <string.h>
 #include "loudness.h"
 #include "bg_job.h"
-#include "hardware/timer.h"
 
 // Double-buffered loudness coefficient tables
 LoudnessCoeffs loudness_tables[2][LOUDNESS_VOL_STEPS][LOUDNESS_BIQUAD_COUNT];
@@ -202,24 +201,19 @@ static void compute_vol_step(int vol_idx, float ref_spl, float intensity_pct, fl
     compute_shelf_coeffs(shelf_freq[1], shelf_Q, high_gain_db, 1, sample_rate, &out[1]);
 }
 
-// Volume steps per loudness_recompute_step() call: about 90 us on RP2350, so a
-// recompute never holds the main loop (current_architecture.md "Output Latency").
-#define LOUDNESS_STEPS_PER_CALL 8
-
 // Build in progress into the inactive buffer; the active one stays live until
 // the swap, and a new begin simply restarts the build.
 static struct {
-    bool    busy;
     uint8_t next;
     uint8_t write_buf;
+    bool    done;          // swapped since the last loudness_recompute_take_done()
     float   ref_spl, intensity_pct, sample_rate;
 } build;
 
-void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_rate) {
+static void build_begin(float ref_spl, float intensity_pct, float sample_rate) {
     if (sample_rate < 1.0f) sample_rate = 48000.0f;
     if (ref_spl < LOUDNESS_REF_SPL_MIN) ref_spl = LOUDNESS_REF_SPL_MIN;
     if (ref_spl > LOUDNESS_REF_SPL_MAX) ref_spl = LOUDNESS_REF_SPL_MAX;
-    build.busy = true;
     build.next = 0;
     build.write_buf = (uint8_t)(1 - active_buf);
     build.ref_spl = ref_spl;
@@ -227,32 +221,45 @@ void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_r
     build.sample_rate = sample_rate;
 }
 
-static bool recompute_advance(void) {
-    int end = build.next + LOUDNESS_STEPS_PER_CALL;
-    if (end > LOUDNESS_VOL_STEPS) end = LOUDNESS_VOL_STEPS;
-    for (int vol_idx = build.next; vol_idx < end; vol_idx++)
-        compute_vol_step(vol_idx, build.ref_spl, build.intensity_pct, build.sample_rate,
-                         loudness_tables[build.write_buf][vol_idx]);
-    build.next = (uint8_t)end;
-    if (end < LOUDNESS_VOL_STEPS) return false;
-
-    // Atomic swap: update active table pointer
+// One volume step; true once the table is complete and swapped in.
+static bool build_one(void) {
+    compute_vol_step(build.next, build.ref_spl, build.intensity_pct, build.sample_rate,
+                     loudness_tables[build.write_buf][build.next]);
+    if (++build.next < LOUDNESS_VOL_STEPS) return false;
     active_buf = build.write_buf;
     loudness_active_table = loudness_tables[active_buf];
-    build.busy = false;
     return true;
 }
 
-bool loudness_recompute_step(void) {
-    if (!build.busy) return false;
-    uint32_t t0 = time_us_32();
-    bool done = recompute_advance();
-    bg_step_account(BG_JOB_LOUDNESS, time_us_32() - t0);
-    return done;
+// Volume steps all cost the same, so the last one predicts the next.
+static bool build_job_step(void *ctx, uint32_t deadline_us) {
+    (void)ctx;
+    uint32_t prev = time_us_32();
+    while (!build_one()) {
+        uint32_t now = time_us_32(), unit_us = now - prev;
+        prev = now;
+        if (bg_out_of_time(deadline_us, unit_us)) return false;
+    }
+    build.done = true;
+    return true;
 }
 
-// Boot only: one blocking build, not a main-loop step, so it is not accounted.
+static BgJob build_job = { BG_JOB_LOUDNESS, build_job_step, NULL, false };
+
+void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_rate) {
+    build_begin(ref_spl, intensity_pct, sample_rate);
+    bg_job_register(&build_job);
+    bg_job_start(&build_job);
+}
+
+bool loudness_recompute_take_done(void) {
+    if (!build.done) return false;
+    build.done = false;
+    return true;
+}
+
+// Boot only: one blocking build before the main loop runs any job.
 void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_rate) {
-    loudness_recompute_begin(ref_spl, intensity_pct, sample_rate);
-    while (!recompute_advance()) {}
+    build_begin(ref_spl, intensity_pct, sample_rate);
+    while (!build_one()) {}
 }

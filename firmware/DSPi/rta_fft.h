@@ -74,11 +74,19 @@ uint16_t rta_band_centre_hz(uint8_t b);
 // Scaling: the fixed-point kernel halves every stage so the result carries a
 // 1/n factor; the float kernel applies the same 1/n so both formats agree.
 //
-// *stage must be 0 before the first call.  Each call performs one bounded
-// unit of work (no more than ~250 us on RP2040 at order 10) and returns true
-// when the transform, including the real-split pass, is complete.
+// The cursor must be zeroed before the first call.  Each call does at most
+// max_units units of the current stage and returns true when the transform,
+// including the real-split pass, is complete.  A unit is one sample of the
+// prescale, one butterfly, one permutation cycle start, or one bin pair of the
+// split.  Results do not depend on max_units.
 // ---------------------------------------------------------------------------
-bool rta_fft_step(rta_sample_t *buf, uint8_t order, uint8_t *stage);
+typedef struct {
+    uint8_t  stage;
+    uint16_t pos;                          // units of the current stage already done
+    uint32_t seen[RTA_MAX_POINTS / 64];    // permutation: slots already placed
+} RtaFftCursor;
+
+bool rta_fft_step(rta_sample_t *buf, uint8_t order, RtaFftCursor *c, uint16_t max_units);
 
 // ---------------------------------------------------------------------------
 // Post-transform: frequency-domain Blackman-Harris, bin power, band sums, level bytes.

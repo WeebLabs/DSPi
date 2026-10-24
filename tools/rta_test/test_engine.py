@@ -34,8 +34,20 @@ static uint8_t active_input_channel_count(void) { return 2; }
 static uint32_t now;
 static uint32_t time_us_32(void) { return now; }
 static void __dmb(void) {}
+// Minimal bg_job.h: one job, and a deadline that never passes, so a step runs
+// until the frame reaches its publish (chunking is covered by test_rta.py).
 enum { BG_JOB_RTA_STEP };
-static void bg_step_account(int job, uint32_t us) { (void)job; (void)us; }
+typedef bool (*BgStepFn)(void *ctx, uint32_t deadline_us);
+typedef struct { int id; BgStepFn step; void *ctx; volatile bool active; } BgJob;
+static BgJob *bg_registered;
+static void bg_job_register(BgJob *j) { bg_registered = j; }
+static void bg_job_start(BgJob *j) { j->active = true; }
+static void bg_job_cancel(BgJob *j) { j->active = false; }
+static bool bg_out_of_time(uint32_t d, uint32_t u) { (void)d; (void)u; return false; }
+static void bg_run_one(void) {
+    BgJob *j = bg_registered;
+    if (j && j->active && j->step(j->ctx, 0)) j->active = false;
+}
 #include "rta.c"
 static int evt_count; static RtaConfig evt_cfg; static ParamSource evt_src;
 void notify_push_rta_config(const void *c, ParamSource src) {
@@ -62,8 +74,8 @@ static void packet(bool tone) {
     rta_packet_end(48);
     now += 1000;
     // The firmware main loop makes many passes per 1 ms packet; four is a
-    // conservative model of that for the sliced transform.
-    for (int pass=0; pass<4; ++pass) rta_service();
+    // conservative model of that for the transform job.
+    for (int pass=0; pass<4; ++pass) { rta_service(); bg_run_one(); }
 }
 int main(void) {
     (void)current_upmix_coeffs;

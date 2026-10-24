@@ -100,7 +100,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
 | `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
 | `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and vendor handlers by opcode, each a worst time read through `REQ_GET_STATUS` (64+section, 96+job, 256+opcode). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
-| `bg_job.c` / `bg_job.h` | Step budget for long main-loop work (`bg_step_budget_us()`) and the over-budget counter, `REQ_GET_STATUS` 31; see Output Latency "Step budget" |
+| `bg_job.c` / `bg_job.h` | Background jobs: long main-loop work run in budgeted steps between deliveries (`bg_run_one()`), the step budget and the over-budget counter (`REQ_GET_STATUS` 31); see Output Latency "Step budget and background jobs" |
 | `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
 | `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
@@ -1097,7 +1097,7 @@ A first attempt counted the queued input toward the target instead, starting the
 
 **Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into fourteen named sections (`LOOP_PROF_SECTION_LIST` in `loop_prof.h`), read through `REQ_GET_STATUS` 64+. Measured on RP2350 with S/PDIF input:
 - The quiet pass is about 70 to 80 µs. Every section carries a floor of about 53 µs from interrupts landing inside it (the S/PDIF receiver's block check every 4 ms), so any pass can grow by that much.
-- Three tasks ran far longer and were reworked. The spectrum analyser's FINISH ran 530 µs in one call (now 64-bin steps; see "Spectrum Analyser"). The loudness table rebuild ran 540 µs on every reference or intensity change (now `loudness_recompute_begin()` / `loudness_recompute_step()`, 8 volume steps per pass into the inactive table, swapped when complete). The idle pump gated at half the target, inside the fill sawtooth at small targets, and spent about 55 µs per pass stamping silence while streaming (now gated on a reader that has passed its writer).
+- Three tasks ran far longer and were reworked. The spectrum analyser's FINISH ran 530 µs in one call (now 64-bin steps; see "Spectrum Analyser"). The loudness table rebuild ran 540 µs on every reference or intensity change (now a background job that builds into the inactive table and swaps when complete; see "Step budget and background jobs"). The idle pump gated at half the target, inside the fill sawtooth at small targets, and spent about 55 µs per pass stamping silence while streaming (now gated on a reader that has passed its writer).
 - After those, single host actions add 20 to 170 µs over the quiet pass (vendor request handling, deferred applies, the first block they affect), with a Control Surfaces binding add or revert the largest at up to about 350 µs.
 
 **Two delivery points per pass (2026-10-23).** The first real-use soak (below) traced its one 0.67 ms underrun to a Control Surfaces revert. The revert itself took about 300 µs, but the input gap was that plus the rest of the pass, 470 µs. Shortening one task at a time would not end, because any two moderate tasks in one pass add up. The input service is therefore split three ways in `main.c`, and delivery runs twice per pass:
@@ -1107,15 +1107,21 @@ A first attempt counted the queued input toward the target instead, starting the
 
 The worst input gap is now the longer of the two half-passes rather than their sum. A Control Surfaces revert, the longest single deferred task, measures about 290 µs of gap (it was 300 to 400 µs of pass). Roughly half of a revert is first-run flash cache misses (a cold revert takes 170 to 190 µs, an immediate second one about 95 µs), since that code is XIP-resident and rarely run. The revert and the stored-config load also no longer rebuild the button gesture groups once per slot (`cs_apply_binding_slot()` plus one `cs_bindings_changed()`; see Control Surfaces "Deferred SET, Apply/Save/Revert").
 
-**Step budget (2026-10-24).** Phase 1 of `Documentation/Features/main_loop_bg_jobs_plan.md`. Long main-loop work runs in steps, and `bg_step_budget_us()` (`bg_job.c`) says how long one step may run at the live option and rate: half of what one delivery gap can absorb, after a quiet pass (`BG_PASS_FLOOR_US`, 75 us) and an interrupt landing (`BG_IRQ_FLOOR_US`, 60 us), clamped to 50 to 300 us.
+**Step budget and background jobs (2026-10-24).** `Documentation/Features/main_loop_bg_jobs_plan.md`, Phases 1 and 2. Long main-loop work runs as a job (`bg_job.h`): a step function that works until a deadline (always at least one unit, so it advances) and reports when the job is finished. `bg_run_one()` runs one step of the next active job, round-robin, straight after the first delivery of each pass, with the deadline `now + bg_step_budget_us()`. The budget is half of what one delivery gap can absorb after a quiet pass (`BG_PASS_FLOOR_US`, 120 us, measured on RP2350) and an interrupt landing (`BG_IRQ_FLOOR_US`, 60 us), clamped to 50 to 300 us:
 
 | Option (48 kHz) | Target minus batch | Step budget |
 |---|---|---|
-| 0.67 ms | 16 frames, 333 us | 99 us |
-| 1 ms | 32 frames, 667 us | 266 us |
+| 0.67 ms | 16 frames, 333 us | 76 us |
+| 1 ms | 32 frames, 667 us | 243 us |
 | 2 ms and above | 48 frames or more, 1000 us or more | 300 us (cap) |
 
-`bg_step_account(job, us)` records one step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when the step ran longer than its budget plus `BG_IRQ_FLOOR_US`, and on `DSPI_LOOP_PROF` builds keeps the job's worst step (96+job). Until the step runner (Phase 2) exists, the three sliced tasks account themselves: the analyser `step()`, `loudness_recompute_step()` (not the blocking boot build) and `control_surfaces_revert()`, which is still one block and so counts as an overrun at the low-latency options. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` now fails a run that moves it.
+Because steps spend to a deadline rather than doing a fixed amount, the same code adapts to RP2040, RP2350 and the system clock. A step checks before each unit whether it still fits (`bg_out_of_time(deadline, estimate)`), so it ends on time rather than one unit late; an interrupt landing in a unit is what the 60 us margin covers. The estimate is the last time the same kind of unit took: the analyser keeps one per FFT stage and one for the finish, because chunk costs differ by stage (8 to 34 us on RP2350 at order 10), and the loudness rebuild uses its last volume step, since those cost the same. Units have to stay small; a single large indivisible unit defeats the deadline. The first Phase 2 run showed this: the FFT permutation was one 140 to 150 us unit, and steps that reached it late ran to 440 us (15,000 to 30,000 overruns per soak) until it became resumable.
+
+Jobs today:
+- **Analyser transform** (`transform_job`, `rta.c`). `rta_packet_end()` starts it when a frame fills; it runs the FFT in 16-unit chunks (`RtaFftCursor`: prescale samples, butterflies within a stage, permutation cycle starts with the placed-slot bitmap kept in the cursor, split bin pairs), the finish in 16-bin chunks, and finishes when the frame is published. On RP2350 at order 10 a chunk costs 8 to 34 us. The publish (about 60 us, indivisible) only ever starts a step. `stop_engine()` cancels it.
+- **Loudness rebuild** (`loudness.c`). `loudness_recompute_begin()` starts or restarts it; it builds volume steps into the inactive table until the deadline, swaps when complete, and `loudness_recompute_take_done()` tells the main loop to re-key. Boot keeps the blocking `loudness_recompute_table()`, which runs before any job.
+
+`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (96+job). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. `control_surfaces_revert()` is not a job yet (Phase 3) and accounts itself as one block, so it counts as an overrun at the low-latency options. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
 
 **Real-use soaks (2026-10-23, RP2350, `tools/latency_bench/soak.py`).** Each run lasts 15 minutes with the same action seed. The analyser is read every 50 ms while 448 random host actions run (parameter edits, feature toggles, bulk reads, analyser reconfiguration, generator bursts, Control Surfaces binds and reverts). Results with two delivery points (one delivery point in brackets):
 
@@ -1851,7 +1857,7 @@ USB Input → Per-Ch Preamp → Per-Input EQ + Metering → Volume Leveller (act
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-10-23 (table rebuild sliced: `loudness_recompute_begin()` / `loudness_recompute_step()` build 8 of the 61 volume steps per main-loop pass into the inactive table and swap when complete; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-07-09 (per-output processing + output mask)*
+*Last updated: 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
 
 ### Purpose
 
@@ -5369,17 +5375,21 @@ pipeline entry (USB ring drain, S/PDIF, I2S, and ADAT polls, siggen pump) and
 every vendor handler runs from the main loop, so `rta_service()` never
 pre-empts `process_input_block()`.
 
-**Frame machine.** `FILL` (taps copy) to `FFT` (one bounded kernel step per
-`rta_service()` call: prescale, radix-4 stages, permutation, real split) to
-`FINISH` (frequency-domain Blackman-Harris, bin powers, band sums, level bytes;
-`RTA_FINISH_BINS_PER_STEP` = 64 bins per call through `rta_fft_finish_step()`) to
-`PUBLISH` (band EMA/peaks, bin frame header, advance) and then the next live channel.
+**Frame machine.** `FILL` (taps copy) to `FFT` (prescale, radix-2/4 stages,
+permutation, real split, resumable through `RtaFftCursor`) to `FINISH`
+(frequency-domain Blackman-Harris, bin powers, band sums, level bytes, resumable
+through `rta_fft_finish_step()`) to `PUBLISH` (band EMA/peaks, bin frame header,
+advance) and then the next live channel. Since 2026-10-24 FFT, FINISH and PUBLISH
+run as the analyser's background job (Output Latency "Step budget and background
+jobs"), in chunks of `RTA_FFT_UNITS_PER_CHUNK` units and `RTA_FINISH_BINS_PER_CHUNK`
+bins until each step's deadline; `rta_service()` keeps config apply, fill
+liveness and auto-off.
 Before 2026-10-23 FINISH and publish ran as one call of about 530 µs on RP2350,
 which was the longest main-loop pass in the firmware (600 µs worst pass with the
 analyser running against 70 µs without) and halved the low-latency option's
-margin. Sliced, the worst pass with the analyser running is about 210 µs. The
-remaining cost is mostly the order-independent PUBLISH step (about 175 µs worst
-pass at orders 8 and 9) plus the order-10 butterfly stages. The FINISH steps
+margin. Sliced at 64 bins and one butterfly stage per call it was about 210 µs,
+mostly an order-10 radix-4 stage (about 140 µs) or the PUBLISH; the job model
+splits stages by butterfly and keeps PUBLISH at the start of a step. The FINISH steps
 write the bin levels into a staging buffer (`bin_stage`, 512 bytes) and PUBLISH
 copies it into the bin frame together with the header and tail. Vendor reads
 are served on the same main loop, so a read never sees a half-written frame.
