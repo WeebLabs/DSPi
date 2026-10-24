@@ -13,6 +13,7 @@
 #include "rta.h"
 #include "audio_pipeline.h"
 #include "usb_audio.h"
+#include "bg_job.h"
 #if PICO_RP2350
 #include "upmix.h"
 #endif
@@ -302,12 +303,15 @@ static bool step(void) {
         rta.frame_busy_us += time_us_32() - t0;
         publish(rta.power);
         advance();
-        rta.busy_acc_us += time_us_32() - t0;
+        uint32_t dt = time_us_32() - t0;
+        rta.busy_acc_us += dt;
+        bg_step_account(BG_JOB_RTA_STEP, dt);
         return true;
     }
     uint32_t dt = time_us_32() - t0;
     rta.frame_busy_us += dt;
     rta.busy_acc_us += dt;
+    bg_step_account(BG_JOB_RTA_STEP, dt);
     return true;
 }
 

@@ -99,7 +99,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `input_servo.h` | Input servo API (`input_servo_apply` / `input_servo_reset`) |
 | `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
 | `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
-| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop section profiler: `LOOP_PROF(n)` marks, worst time per section via `REQ_GET_STATUS` 64+n |
+| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and vendor handlers by opcode, each a worst time read through `REQ_GET_STATUS` (64+section, 96+job, 256+opcode). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
+| `bg_job.c` / `bg_job.h` | Step budget for long main-loop work (`bg_step_budget_us()`) and the over-budget counter, `REQ_GET_STATUS` 31; see Output Latency "Step budget" |
 | `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
 | `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
@@ -1094,7 +1095,7 @@ A device at 96 kHz runs the 4, 6 and 8 ms options at the ceiling and returns to 
 
 A first attempt counted the queued input toward the target instead, starting the outputs with the ring as low as target minus one block and relying on the queue being delivered within that slack. On S/PDIF it dipped about 100 frames below the target right after every start and underran at 2 ms and below, so it was replaced by the bounds above.
 
-**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into fourteen sections (`LOOP_PROF_SECTIONS`), read through `REQ_GET_STATUS` 64+. Measured on RP2350 with S/PDIF input:
+**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into fourteen named sections (`LOOP_PROF_SECTION_LIST` in `loop_prof.h`), read through `REQ_GET_STATUS` 64+. Measured on RP2350 with S/PDIF input:
 - The quiet pass is about 70 to 80 µs. Every section carries a floor of about 53 µs from interrupts landing inside it (the S/PDIF receiver's block check every 4 ms), so any pass can grow by that much.
 - Three tasks ran far longer and were reworked. The spectrum analyser's FINISH ran 530 µs in one call (now 64-bin steps; see "Spectrum Analyser"). The loudness table rebuild ran 540 µs on every reference or intensity change (now `loudness_recompute_begin()` / `loudness_recompute_step()`, 8 volume steps per pass into the inactive table, swapped when complete). The idle pump gated at half the target, inside the fill sawtooth at small targets, and spent about 55 µs per pass stamping silence while streaming (now gated on a reader that has passed its writer).
 - After those, single host actions add 20 to 170 µs over the quiet pass (vendor request handling, deferred applies, the first block they affect), with a Control Surfaces binding add or revert the largest at up to about 350 µs.
@@ -1105,6 +1106,16 @@ A first attempt counted the queued input toward the target instead, starting the
 - `input_service_servos()` runs the clock servos once per pass, because each rate-limits by call count.
 
 The worst input gap is now the longer of the two half-passes rather than their sum. A Control Surfaces revert, the longest single deferred task, measures about 290 µs of gap (it was 300 to 400 µs of pass). Roughly half of a revert is first-run flash cache misses (a cold revert takes 170 to 190 µs, an immediate second one about 95 µs), since that code is XIP-resident and rarely run. The revert and the stored-config load also no longer rebuild the button gesture groups once per slot (`cs_apply_binding_slot()` plus one `cs_bindings_changed()`; see Control Surfaces "Deferred SET, Apply/Save/Revert").
+
+**Step budget (2026-10-24).** Phase 1 of `Documentation/Features/main_loop_bg_jobs_plan.md`. Long main-loop work runs in steps, and `bg_step_budget_us()` (`bg_job.c`) says how long one step may run at the live option and rate: half of what one delivery gap can absorb, after a quiet pass (`BG_PASS_FLOOR_US`, 75 us) and an interrupt landing (`BG_IRQ_FLOOR_US`, 60 us), clamped to 50 to 300 us.
+
+| Option (48 kHz) | Target minus batch | Step budget |
+|---|---|---|
+| 0.67 ms | 16 frames, 333 us | 99 us |
+| 1 ms | 32 frames, 667 us | 266 us |
+| 2 ms and above | 48 frames or more, 1000 us or more | 300 us (cap) |
+
+`bg_step_account(job, us)` records one step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when the step ran longer than its budget plus `BG_IRQ_FLOOR_US`, and on `DSPI_LOOP_PROF` builds keeps the job's worst step (96+job). Until the step runner (Phase 2) exists, the three sliced tasks account themselves: the analyser `step()`, `loudness_recompute_step()` (not the blocking boot build) and `control_surfaces_revert()`, which is still one block and so counts as an overrun at the low-latency options. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` now fails a run that moves it.
 
 **Real-use soaks (2026-10-23, RP2350, `tools/latency_bench/soak.py`).** Each run lasts 15 minutes with the same action seed. The analyser is read every 50 ms while 448 random host actions run (parameter edits, feature toggles, bulk reads, analyser reconfiguration, generator bursts, Control Surfaces binds and reverts). Results with two delivery points (one delivery point in brackets):
 
@@ -4161,7 +4172,7 @@ lands on a hot path and the audio path is untouched.
 | REQ_UPMIX_SET_PARAM | 0x4C | OUT | Set one upmixer field: `wValue` = `UPMIX_PARAM_*` (0..13; 13 = presence dB), payload = 4-byte LE float (mode/enable rounded to int; RP2350 only, RP2040 STALLs) |
 | REQ_UPMIX_GET_PARAM | 0x4D | IN | Get one upmixer field (`wValue` = `UPMIX_PARAM_*`, returns 4-byte float; RP2040 returns 0.0). Unknown param STALLs |
 | REQ_UPMIX_GET_STATUS | 0x4E | IN | Get 16-byte `UpmixStatus` (active, parked_reason, corr_q14, balance_q14, center/ls/rs gains; RP2040 returns 16 zero bytes). 0x4F reserved |
-| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24); on `DSPI_LOOP_PROF` bench builds 64+n = worst time in main-loop section n since its last read (`loop_prof.h`) |
+| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 31 = background steps over budget since boot; 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24); on `DSPI_LOOP_PROF` bench builds 64+n = worst time in main-loop section n, 96+n = worst step of background job n, 256+op = worst vendor handler time for opcode op, each since its last read (`loop_prof.h`) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
 | REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config and output limiter settings to the directory's device-global blocks (independent mode; was the deprecated REQ_LOAD_PARAMS) |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |

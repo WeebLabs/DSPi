@@ -45,6 +45,7 @@
 #include "notify.h"
 #include "i2c_control.h"
 #include "usb_audio.h"
+#include "bg_job.h"
 
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
@@ -2549,6 +2550,7 @@ void control_surfaces_init(void) {
 }
 
 void control_surfaces_revert(void) {
+    uint32_t t0 = time_us_32();
     // Live aux values survive a revert: stash them, and cs_seed_runtime
     // hands each back to the slot that reloads with the same type.
     for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
@@ -2574,6 +2576,7 @@ void control_surfaces_revert(void) {
     cs_reset_groups_macros();
     cs_load_stored();
     memset(s_aux_carry, 0, sizeof(s_aux_carry));   // drop stashes no slot reclaimed
+    bg_step_account(BG_JOB_CS_REVERT, time_us_32() - t0);
 }
 
 void control_surfaces_tick(void) {

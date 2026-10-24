@@ -1,6 +1,8 @@
 #include <math.h>
 #include <string.h>
 #include "loudness.h"
+#include "bg_job.h"
+#include "hardware/timer.h"
 
 // Double-buffered loudness coefficient tables
 LoudnessCoeffs loudness_tables[2][LOUDNESS_VOL_STEPS][LOUDNESS_BIQUAD_COUNT];
@@ -225,8 +227,7 @@ void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_r
     build.sample_rate = sample_rate;
 }
 
-bool loudness_recompute_step(void) {
-    if (!build.busy) return false;
+static bool recompute_advance(void) {
     int end = build.next + LOUDNESS_STEPS_PER_CALL;
     if (end > LOUDNESS_VOL_STEPS) end = LOUDNESS_VOL_STEPS;
     for (int vol_idx = build.next; vol_idx < end; vol_idx++)
@@ -242,7 +243,16 @@ bool loudness_recompute_step(void) {
     return true;
 }
 
+bool loudness_recompute_step(void) {
+    if (!build.busy) return false;
+    uint32_t t0 = time_us_32();
+    bool done = recompute_advance();
+    bg_step_account(BG_JOB_LOUDNESS, time_us_32() - t0);
+    return done;
+}
+
+// Boot only: one blocking build, not a main-loop step, so it is not accounted.
 void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_rate) {
     loudness_recompute_begin(ref_spl, intensity_pct, sample_rate);
-    while (!loudness_recompute_step()) {}
+    while (!recompute_advance()) {}
 }

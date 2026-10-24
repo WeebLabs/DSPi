@@ -24,6 +24,7 @@ from tools.dspi_test import lifecycle  # noqa: E402
 from tools.dspi_test.actions import live_param_actions  # noqa: E402
 from tools.batch_bench.batch_bench import Player  # noqa: E402
 from tools.clkdiag_poll import decode as clkdiag_decode  # noqa: E402
+from tools.latency_bench import loop_prof  # noqa: E402
 from tools.latency_bench.latency_bench import (  # noqa: E402
     SRC_USB, SRC_SPDIF, SRC_I2S, latency_status, set_latency, set_source, status_u32, wait_rate)
 
@@ -35,10 +36,6 @@ CS_STATUS_OK = 0
 SLOW_PASS_US = 300          # worst-pass windows above this are logged as events
 HOST_STALL_US = 5000        # a USB packet gap this long is the host's, not the device's
 RTA_READ_S = 0.05           # Console's band polling cadence
-# DSPI_LOOP_PROF builds (firmware/DSPi/loop_prof.h); normal builds read 0.
-LOOP_SECTIONS = ["head", "usb+vendor", "notify", "uart/lg/dac", "control_surfaces", "siggen_service",
-                 "rta", "audio_inputs+dsp", "flash_sets", "eq_updates", "coeff_updates", "deferred_ops",
-                 "idle_pump", "delivery_2"]
 
 
 def feedback_window(dev):
@@ -50,10 +47,6 @@ def feedback_window(dev):
         return None
     d = clkdiag_decode(buf) if buf else {}
     return (d["fb_min"], d["fb_max"]) if "fb_min" in d else None
-
-
-def take_sections(dev):
-    return [status_u32(dev, 64 + i) for i in range(len(LOOP_SECTIONS))]
 
 
 def binding(kind, noun, action, gpio, target=0):
@@ -163,23 +156,28 @@ def profile_actions(dev, soak, reps, out):
     actions = {k: v for k, v in dict(soak.actions).items() if k != "rta_reconfigure"}
     actions["baseline"] = lambda: None
     for name, fn in actions.items():
-        passes, sect = [], [0] * len(LOOP_SECTIONS)
+        passes, sect, jobs, ops = [], {}, {}, {}
         for _ in range(reps):
             time.sleep(0.6)
             dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
-            take_sections(dev)
+            loop_prof.take_sections(dev)
+            loop_prof.take_jobs(dev)
+            loop_prof.take_opcodes(dev)
             try:
                 fn()
             except Stall:
                 pass
             time.sleep(1.0)
             passes.append(status_u32(dev, 29))
-            sect = [max(a, b) for a, b in zip(sect, take_sections(dev))]
-        top = sorted(zip(sect, LOOP_SECTIONS), reverse=True)[:3]
+            loop_prof.merge_worst(sect, loop_prof.take_sections(dev))
+            loop_prof.merge_worst(jobs, loop_prof.take_jobs(dev))
+            loop_prof.merge_worst(ops, loop_prof.take_opcodes(dev))
         res[name] = dict(worst_us=max(passes), median_us=sorted(passes)[len(passes) // 2],
-                         sections=dict(zip(LOOP_SECTIONS, sect)))
+                         sections=sect, jobs=jobs, opcodes=ops)
+        top = sorted(((v, k) for k, v in sect.items()), reverse=True)[:3]
+        top_ops = sorted(((v, k) for k, v in ops.items()), reverse=True)[:2]
         print(f"{name:20s} worst {res[name]['worst_us']:5d} us  median {res[name]['median_us']:5d} us  "
-              f"top sections {top}", flush=True)
+              f"top sections {top}  top opcodes {top_ops}", flush=True)
     soak.cleanup()
     (out / "action_profile.json").write_text(json.dumps(res, indent=1))
 
@@ -214,8 +212,13 @@ def run(args):
         if args.profile_actions:
             profile_actions(dev, soak, args.profile_actions, out)
             return
-        # Underruns, drops, USB ring overruns, USB packet gaps of 2-50 ms, packets.
-        counters = (26, 27, 22, 8, 10)
+        # Underruns, drops, USB ring overruns, USB packet gaps of 2-50 ms, packets,
+        # background steps over budget.
+        counters = (26, 27, 22, 8, 10, 31)
+        fs = status_u32(dev, 15) or 48000
+        gap_limit_us = (st["target_frames"] - st["batch_frames"]) * 1_000_000 // fs
+        for take in (loop_prof.take_sections, loop_prof.take_jobs, loop_prof.take_opcodes):
+            take(dev)                          # the run's profiler worsts start from zero
         c_prev = [status_u32(dev, w) for w in counters]
         uf_prev = player.underflows if player else 0
         dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
@@ -243,17 +246,21 @@ def run(args):
                 while soak.recent and soak.recent[0][0] < now - 2.5:
                     soak.recent.popleft()
                 row = dict(t=t, underruns=d[0], drops=d[1], usb_ring_overruns=d[2], usb_packet_gaps=d[3],
-                           usb_packets=d[4], host_underflows=d[5],
+                           usb_packets=d[4], over_budget_steps=d[5], host_underflows=d[6],
                            fb_min_q16=fb[0] if fb else None, fb_max_q16=fb[1] if fb else None,
                            worst_pass_us=worst, worst_usb_packet_gap_us=host_gap,
                            min_prewrite=None if minpre == 0xFFFFFFFF else minpre)
                 rows.append(row)
-                if d[0] or d[1] or d[2] or d[5] or worst > SLOW_PASS_US or host_gap > HOST_STALL_US:
+                if (d[0] or d[1] or d[2] or d[5] or d[6] or worst > SLOW_PASS_US
+                        or host_gap > HOST_STALL_US):
                     ev = dict(row, preceding=[n for _, n in soak.recent])
                     events.append(ev)
                     print(json.dumps(ev), flush=True)
                 next_sec += 1
             time.sleep(0.003)
+        # Whole-run worsts; profiler builds only, release builds read 0.
+        prof_worst = dict(sections=loop_prof.take_sections(dev), jobs=loop_prof.take_jobs(dev),
+                          opcodes=loop_prof.take_opcodes(dev))
     finally:
         soak.cleanup()
         if player:
@@ -270,17 +277,30 @@ def run(args):
         return
     ws = [r["worst_pass_us"] for r in rows]
     mp = [r["min_prewrite"] for r in rows if r["min_prewrite"] is not None]
+    # A second the host stopped sending is the host's; its underruns are reported, not failed.
+    host = [r for r in rows if r["worst_usb_packet_gap_us"] > HOST_STALL_US]
+    own = [r for r in rows if r["worst_usb_packet_gap_us"] <= HOST_STALL_US]
+    checks = dict(no_underruns=sum(r["underruns"] for r in own) == 0,
+                  no_drops=sum(r["drops"] for r in rows) == 0,
+                  no_over_budget_steps=sum(r["over_budget_steps"] for r in rows) == 0,
+                  delivery_gap_under_limit=all(r["worst_pass_us"] < gap_limit_us for r in own),
+                  prewrite_never_zero=(min(mp) > 0) if mp else True)
     summary = dict(source=args.source, option=args.option, minutes=args.minutes, seed=args.seed,
                    target_frames=st["target_frames"], batch_frames=st["batch_frames"],
                    underruns=sum(r["underruns"] for r in rows), drops=sum(r["drops"] for r in rows),
                    usb_ring_overruns=sum(r["usb_ring_overruns"] for r in rows),
                    seconds_with_underrun=sum(1 for r in rows if r["underruns"]),
+                   over_budget_steps=sum(r["over_budget_steps"] for r in rows),
+                   host_stall_seconds=len(host), host_stall_underruns=sum(r["underruns"] for r in host),
+                   gap_limit_us=gap_limit_us,
                    worst_pass_max_us=max(ws), worst_pass_p99_us=sorted(ws)[int(len(ws) * 0.99)],
                    min_prewrite=min(mp) if mp else None, actions=dict(counts),
-                   events=len(events), restore_bulk_diffs=len(diffs))
+                   events=len(events), restore_bulk_diffs=len(diffs),
+                   checks=checks, passed=all(checks.values()), profiler=prof_worst)
     name = f"soak_{args.source}_opt{args.option}"
     (out / f"{name}.json").write_text(json.dumps(dict(summary=summary, events=events, rows=rows), indent=1))
     print(json.dumps(summary, indent=1), flush=True)
+    return summary["passed"]
 
 
 def main():
@@ -292,7 +312,9 @@ def main():
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--profile-actions", type=int, default=0, metavar="REPS",
                     help="instead of soaking, time each action alone REPS times")
-    run(ap.parse_args())
+    # Exit status 1 when a soak fails its checks, so scripted runs stop on it.
+    if run(ap.parse_args()) is False:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

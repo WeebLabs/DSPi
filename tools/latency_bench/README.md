@@ -76,7 +76,8 @@ like a busy DSPi Console session, which steady-state windows cannot reproduce:
 - once a second it reads underruns, refused blocks, USB ring overruns, the
   lowest pre-write fill and the worst input delivery gap (`REQ_GET_STATUS`
   26-29), USB packet gaps of 2 to 50 ms, the packet count and the worst packet
-  gap of any length (8, 10, 30), and the host player's underflow flags. On a `DSPI_CLOCK_DIAG` build it also records
+  gap of any length (8, 10, 30), background steps over budget (31), and the
+  host player's underflow flags. On a `DSPI_CLOCK_DIAG` build it also records
   the USB feedback range for the second (`REQ_GET_CLOCK_DIAG`).
 
 Any second with an underrun, refused block, host underflow, a delivery gap over
@@ -85,10 +86,23 @@ the actions of the preceding 2.5 s, so a stall points at its cause. The run
 refuses to start over an unsaved Control Surfaces preview, holds the user mute,
 and restores the parameters, analyser config, latency and source at the end.
 
+The summary ends with a verdict, and the script exits with status 1 when any
+check fails:
+
+- no underruns, except in seconds the host stopped sending (a USB packet gap
+  over 5 ms), which are reported separately as host stalls;
+- no refused blocks, and no background step over budget;
+- every second's worst delivery gap under the option's target minus its batch;
+- the lowest pre-write fill never zero.
+
+On a `DSPI_LOOP_PROF` build the summary also holds the whole run's worst
+main-loop sections, background steps and vendor handlers by opcode.
+
 ```bash
 python3 tools/latency_bench/soak.py --out bench_results/latency_options/soak --source spdif --option 1 --minutes 15
 ```
 
 `--profile-actions N` instead times every action alone N times with the analyser
 held stopped, giving the main-loop cost of each host operation. On a
-`DSPI_LOOP_PROF` build it also reports the costliest main-loop sections.
+`DSPI_LOOP_PROF` build it also reports the costliest sections, steps and opcodes.
+Section and job names come from `firmware/DSPi/loop_prof.h` (`loop_prof.py`).

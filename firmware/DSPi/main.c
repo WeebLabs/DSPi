@@ -2176,7 +2176,7 @@ int main(void) {
     while (1) {
         // Update watchdog
         watchdog_update();
-        LOOP_PROF(0);
+        LOOP_PROF(LP_HEAD);
 
         // Bench diagnostics: cheap per-iteration sampling (fc0 service, loop
         // gap, min consumer fill, PWM-pacer movement).  No-op when the flag
@@ -2188,20 +2188,20 @@ int main(void) {
         // iteration.  Audio RX and feedback tx happen from USB IRQ via our
         // UAC1 class driver callbacks, so tud_task() is not latency-critical
         // for the audio stream itself.
-        LOOP_PROF(1);
+        LOOP_PROF(LP_USB_VENDOR);
         tud_task();
 
         // Fire any queued device→host notifications to EP 0x83.  Emit is
         // deferred from update_master_volume() to here so we never call
         // usbd_edpt_xfer from within a control-transfer DATA stage.
-        LOOP_PROF(2);
+        LOOP_PROF(LP_NOTIFY);
         usb_notify_tick();
 
         // External control transports: parse any complete UART/I2C frames
         // and dispatch them through the shared vendor-command surface.
         // Both are cheap no-ops while disabled and never block; heavy work
         // (bulk apply, flash) stays on the existing deferred paths below.
-        LOOP_PROF(3);
+        LOOP_PROF(LP_TRANSPORTS);
         uart_ctrl_poll();
         i2c_ctrl_poll();
 
@@ -2218,31 +2218,31 @@ int main(void) {
         // Control Surfaces poll: debounce buttons/switches, decode encoders,
         // read pots, drive LEDs.  Internally throttled to 1 kHz; immediate
         // no-op while no binding is active.
-        LOOP_PROF(4);
+        LOOP_PROF(LP_CS_TICK);
         control_surfaces_tick();
 
         // Test-signal generator: apply staged configs and emit deferred
         // notifications.  Its blocks are pumped at the delivery points
         // (pipeline_service_producer).  Immediate no-op while idle.
-        LOOP_PROF(5);
+        LOOP_PROF(LP_SIGGEN);
         siggen_service();
 
         // Keep enabled output rings silent ahead of the reader when no
         // producer is running (no-op while streaming).
-        LOOP_PROF(12);
+        LOOP_PROF(LP_IDLE_PUMP);
         output_rings_idle_pump();
 
         // Spectrum analyser: apply staged config, one bounded transform
         // step, auto-off.  Immediate no-op while idle.
-        LOOP_PROF(6);
+        LOOP_PROF(LP_RTA);
         rta_service();
 
-        LOOP_PROF(7);
+        LOOP_PROF(LP_INPUT);
         input_service_handshakes();
         pipeline_service_producer(true);
         input_service_servos();
 
-        LOOP_PROF(8);
+        LOOP_PROF(LP_FLASH_SETS);
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,
         // preventing the USB ISR from overwriting payload mid-read.
@@ -2611,7 +2611,7 @@ int main(void) {
             }
         }
 
-        LOOP_PROF(9);
+        LOOP_PROF(LP_EQ_UPDATES);
         // Handle EQ / crossover band parameter updates from USB.  The
         // pending_packet's `band` field is the wire band index (already
         // normalized at the vendor handler boundary — see
@@ -2707,7 +2707,7 @@ int main(void) {
             restore_interrupts(flags);
         }
 
-        LOOP_PROF(10);
+        LOOP_PROF(LP_COEFF_UPDATES);
         // Handle sample rate changes.  Gated on the non-blocking DAC
         // hardware-mute hold; perform_rate_change()'s own
         // prepare_pipeline_reset() then engages the soft mute + Core 1 fence
@@ -2808,7 +2808,7 @@ int main(void) {
             leveller_bypassed = !leveller_config.enabled;
         }
 
-        LOOP_PROF(11);
+        LOOP_PROF(LP_DEFERRED_OPS);
         // Handle USB stream restart (alt 0 -> alt > 0): re-lock all active output
         // pipelines so consumer fill/phase starts aligned after host re-prime.
         {
@@ -3738,7 +3738,7 @@ int main(void) {
         // Second delivery point, so a long deferred operation above and a long
         // housekeeping step at the top of the next pass never add up into one
         // input gap (current_architecture.md "Two delivery points per pass").
-        LOOP_PROF(13);
+        LOOP_PROF(LP_DELIVERY_2);
         pipeline_service_producer(true);
 
         // Bench diagnostics: once-per-second CLKDIAG console dump (internally

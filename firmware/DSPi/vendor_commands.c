@@ -22,6 +22,7 @@
 #include "audio_pipeline.h"
 #include "output_latency.h"
 #include "loop_prof.h"
+#include "bg_job.h"
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "crossover.h"
@@ -216,6 +217,32 @@ static void vendor_send_response(const void *data, uint16_t len);
 // Forward declarations: SET data-stage and GET dispatch.
 static bool vendor_handle_set_data(tusb_control_request_t const *req);
 static bool vendor_handle_get(tusb_control_request_t const *req);
+static bool vendor_handle_set_body(tusb_control_request_t const *req);
+static bool vendor_handle_get_body(tusb_control_request_t const *req);
+
+// Every transport reaches the command bodies through these two, so on
+// DSPI_LOOP_PROF builds they record each opcode's worst handler time.
+static bool vendor_handle_set_data(tusb_control_request_t const *req) {
+#ifdef DSPI_LOOP_PROF
+    uint32_t t0 = time_us_32();
+    bool ok = vendor_handle_set_body(req);
+    loop_prof_opcode(req->bRequest, time_us_32() - t0);
+    return ok;
+#else
+    return vendor_handle_set_body(req);
+#endif
+}
+
+static bool vendor_handle_get(tusb_control_request_t const *req) {
+#ifdef DSPI_LOOP_PROF
+    uint32_t t0 = time_us_32();
+    bool ok = vendor_handle_get_body(req);
+    loop_prof_opcode(req->bRequest, time_us_32() - t0);
+    return ok;
+#else
+    return vendor_handle_get_body(req);
+#endif
+}
 
 // Shim type preserved from the pico-extras era so the SET handler case
 // bodies (which still read `buffer->data_len` and `buffer->data`) compile
@@ -532,7 +559,7 @@ uint8_t ctrl_iface_check_pin(uint8_t pin) {
 // Returns false for a bRequest with no SET case so external transports can
 // report ERROR instead of a false OK.  The USB path ignores the result (an
 // unknown SET is ACKed, preserving long-standing host-visible behavior).
-static bool vendor_handle_set_data(tusb_control_request_t const *req) {
+static bool vendor_handle_set_body(tusb_control_request_t const *req) {
     (void)req;
     bool handled = true;
     // Shim for legacy handler bodies below.  The real payload was delivered
@@ -1954,7 +1981,7 @@ static inline uint16_t frames_to_us(uint32_t frames, uint32_t fs) {
     return (uint16_t)(((uint64_t)frames * 1000000u + fs / 2u) / fs);
 }
 
-static bool vendor_handle_get(tusb_control_request_t const *req) {
+static bool vendor_handle_get_body(tusb_control_request_t const *req) {
     // Shim to let legacy case bodies reference `setup->...`.
     tusb_control_request_t const *setup = req;
     (void)setup;
@@ -2427,15 +2454,15 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                     case 21: resp = audio_spdif_get_dma_starvations_instance(3); break;  // SPDIF instance 3
                     case 22: resp = usb_audio_ring_overrun_count(); break;  // USB audio ring overruns
                     case 23: resp = active_input_channel_count(); break;  // live active input count (source-aware: USB/I2S/SPDIF)
-                    case 26: { extern volatile int overruns; resp = (uint32_t)overruns; break; }  // output ring underrun recoveries
+                    case 26: { extern volatile int overruns; resp = (uint32_t)overruns; break; }  // output ring underrun episodes
                     case 27: resp = output_ring_drops; break;         // blocks refused by ring admission
                     case 28: resp = output_ring_min_prewrite; break;  // lowest pre-write ring fill, frames
                     case 29: resp = input_delivery_worst_gap_us; break;  // worst input delivery gap, us
                     case 30: resp = usb_audio_worst_packet_gap_us; break;  // worst USB packet gap, us
+                    case 31: resp = bg_over_budget_count; break;  // background steps over budget
 #ifdef DSPI_LOOP_PROF
                     default:
-                        if (setup->wValue >= LOOP_PROF_STATUS_BASE)
-                            resp = loop_prof_take((uint8_t)(setup->wValue - LOOP_PROF_STATUS_BASE));
+                        resp = loop_prof_take(setup->wValue);
                         break;
 #endif
 #ifdef DSPI_LOOPBACK

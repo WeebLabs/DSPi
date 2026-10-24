@@ -31,6 +31,8 @@ add_executable(DSPi
     audio_clock_div.h
     audio_pipeline.c
     audio_pipeline.h
+    bg_job.c
+    bg_job.h
     bulk_params.c
     bulk_params.h
     config.h

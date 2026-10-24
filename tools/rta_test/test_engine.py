@@ -15,6 +15,7 @@ HARNESS = r'''
 #define AUDIO_PIPELINE_H
 #define USB_AUDIO_H
 #define UPMIX_H
+#define BG_JOB_H
 #define DSP_TIME_CRITICAL
 #define __not_in_flash_func(x) x
 #if PICO_RP2350
@@ -33,6 +34,8 @@ static uint8_t active_input_channel_count(void) { return 2; }
 static uint32_t now;
 static uint32_t time_us_32(void) { return now; }
 static void __dmb(void) {}
+enum { BG_JOB_RTA_STEP };
+static void bg_step_account(int job, uint32_t us) { (void)job; (void)us; }
 #include "rta.c"
 static int evt_count; static RtaConfig evt_cfg; static ParamSource evt_src;
 void notify_push_rta_config(const void *c, ParamSource src) {
