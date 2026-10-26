@@ -30,9 +30,14 @@ def _binding(kind, noun, action, gpio, target=0):
 
 
 def _status(dev):
-    s = dev.get(OP.GET_CS_STATUS, 41)
+    s = bytes(dev.get(OP.GET_CS_STATUS, 41))
     return {"last_status": s[0], "last_slot": s[1], "slots": s[2], "dirty": s[3],
-            "active": struct.unpack_from("<H", s, 4)[0]}
+            "active": struct.unpack_from("<H", s, 4)[0], "raw": s}
+
+
+def _per_slot(st):
+    """The status bytes a revert must not tear: everything past last_status/last_slot/dirty."""
+    return st["raw"][2:3] + st["raw"][4:]
 
 
 def _set_pace(dev, n):
@@ -104,24 +109,28 @@ def cs_revert_reads_never_torn(dev, profile, chk):
     st = _clean_start(dev)
     slots, stored = _free_slots(dev, st, 3)
     paced = False
-    reads_pending = mismatches = 0
+    reads_pending = mismatches = status_torn = 0
     try:
         for rep in range(20):
             _preview_pots(dev, chk, slots)
+            before = _per_slot(_status(dev))
             paced = _set_pace(dev, BG_PACE)
             dev.get(OP.CS_REVERT, 1)
             # Read the previewed slots first: they change most across the revert.
             order = slots + [i for i in range(st["slots"]) if i not in slots]
             for i in order:
-                pending = _status(dev)["last_status"] == CS_STATUS_PENDING
+                now = _status(dev)
+                pending = now["last_status"] == CS_STATUS_PENDING
                 b = bytes(dev.get(OP.GET_CS_BINDING, 24, wvalue=i))
                 reads_pending += pending
                 mismatches += b != stored[i]
+                status_torn += pending and _per_slot(now) != before
             _set_pace(dev, 1)
             chk.ok(_wait_settled(dev) is not None, f"revert {rep + 1} completes")
     finally:
         _set_pace(dev, 1)
     chk.eq(mismatches, 0, "every binding read across 20 reverts equals the stored image")
+    chk.eq(status_torn, 0, "status read mid-revert equals the snapshot taken before it")
     if paced:
         chk.ok(reads_pending > 0, "reads landed mid-revert (paced)")
         chk.note(f"{reads_pending} reads landed mid-revert across 20 paced reverts")
@@ -137,10 +146,24 @@ def cs_set_during_revert_waits(dev, profile, chk):
     slots, stored = _free_slots(dev, st, 2)
     _preview_pots(dev, chk, slots[:1])
     late = _binding(CS_TYPE_POT, CS_NOUN_OUTPUT_GAIN, CS_ACT_ADJUST, POT_PINS[1])
-    dev.get(OP.CS_REVERT, 1)
-    dev.set(OP.SET_CS_BINDING, late, wvalue=slots[1])
-    done = _wait_settled(dev)
+    try:
+        paced = _set_pace(dev, BG_PACE)
+        dev.get(OP.CS_REVERT, 1)
+        mid = _status(dev)
+        dev.set(OP.SET_CS_BINDING, late, wvalue=slots[1])
+        _set_pace(dev, 1)
+        done = _wait_settled(dev)
+    finally:
+        _set_pace(dev, 1)
+    if paced:
+        chk.ok(mid["last_status"] == CS_STATUS_PENDING and mid["last_slot"] == 0xFF,
+               "the SET was sent while the revert was still running")
+    else:
+        chk.note("release build: the revert may finish before the SET arrives")
     chk.ok(done is not None, "revert and the late SET both complete")
+    if done:
+        chk.eq(done["last_status"], 0, "the late SET reports SUCCESS")
+        chk.eq(done["last_slot"], slots[1], "the final result belongs to the late SET, not the revert")
     now = _bindings(dev, st["slots"])
     chk.eq(now[slots[0]], stored[slots[0]], "the earlier preview is reverted")
     chk.eq(now[slots[1]], late, "the SET sent during the revert is applied after it")

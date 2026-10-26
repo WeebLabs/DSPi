@@ -24,6 +24,15 @@ void bg_job_register(BgJob *job) {
     if ((unsigned)job->id < BG_JOB_COUNT) jobs[job->id] = job;
 }
 
+static void bg_step_account(BgJobId job, uint32_t elapsed_us) {
+    if (elapsed_us > bg_step_budget_us() + BG_OVERRUN_MARGIN_US) bg_over_budget_count++;
+#ifdef DSPI_LOOP_PROF
+    loop_prof_job((uint8_t)job, elapsed_us);
+#else
+    (void)job;
+#endif
+}
+
 void bg_run_one(void) {
 #ifdef DSPI_LOOP_PROF
     static uint16_t skipped;
@@ -59,11 +68,3 @@ uint32_t bg_step_budget_us(void) {
     return budget;
 }
 
-void bg_step_account(BgJobId job, uint32_t elapsed_us) {
-    if (elapsed_us > bg_step_budget_us() + BG_OVERRUN_MARGIN_US) bg_over_budget_count++;
-#ifdef DSPI_LOOP_PROF
-    loop_prof_job((uint8_t)job, elapsed_us);
-#else
-    (void)job;
-#endif
-}

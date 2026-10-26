@@ -73,6 +73,16 @@ class FftCursor(ctypes.Structure):
                 ("seen", ctypes.c_uint32 * (1024 // 64))]
 
 
+def finish_cursor(fmt):
+    """RtaFinishCursor (firmware/DSPi/rta_fft.h); acc is float or uint64 per format."""
+    acc = ctypes.c_float if FORMATS[fmt]["flt"] else ctypes.c_uint64
+
+    class FinishCursor(ctypes.Structure):
+        _fields_ = [("next_bin", ctypes.c_uint16), ("band", ctypes.c_uint8),
+                    ("acc", acc * MAX_BANDS)]
+    return FinishCursor()
+
+
 def load(path):
     lib = ctypes.CDLL(path)
     lib.rta_fft_step.argtypes = [ctypes.c_void_p, ctypes.c_uint8,
@@ -82,6 +92,12 @@ def load(path):
                                    ctypes.POINTER(BandTable), ctypes.c_void_p,
                                    ctypes.c_void_p]
     lib.rta_fft_finish.restype = None
+    lib.rta_fft_finish_begin.argtypes = [ctypes.c_void_p]
+    lib.rta_fft_finish_begin.restype = None
+    lib.rta_fft_finish_step.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint8,
+                                        ctypes.POINTER(BandTable), ctypes.c_void_p,
+                                        ctypes.c_void_p, ctypes.c_uint16]
+    lib.rta_fft_finish_step.restype = ctypes.c_bool
     lib.rta_level_from_power.argtypes = [ctypes.c_float]
     lib.rta_level_from_power.restype = ctypes.c_uint8
     lib.rta_band_table.argtypes = [ctypes.c_uint32, ctypes.c_uint8]
@@ -146,6 +162,22 @@ def run_frame(lib, fmt, x, order, table=None):
         tbl_ptr = table
     lib.rta_fft_finish(buf.ctypes.data_as(ctypes.c_void_p), order, tbl_ptr,
                        bp_ptr, bins.ctypes.data_as(ctypes.c_void_p))
+    # Resumed in 5-bin chunks the finish must match too: band carry and partial sums.
+    cbins = np.zeros_like(bins)
+    cbp = None if bp is None else np.full(MAX_BANDS, -1.0, dtype=np.float32)
+    cbp_ptr = None if cbp is None else cbp.ctypes.data_as(ctypes.c_void_p)
+    fc = finish_cursor(fmt)
+    lib.rta_fft_finish_begin(ctypes.byref(fc))
+    calls = 1
+    while not lib.rta_fft_finish_step(ctypes.byref(fc), buf.ctypes.data_as(ctypes.c_void_p),
+                                      order, tbl_ptr, cbp_ptr,
+                                      cbins.ctypes.data_as(ctypes.c_void_p), 5):
+        calls += 1
+        assert calls <= n // 2, "chunked rta_fft_finish_step did not finish"
+    assert calls >= (n // 2) // 5, ("finish chunks ignored max_bins", order, calls)
+    assert np.array_equal(bins, cbins), ("chunked finish bins differ", order)
+    if bp is not None:
+        assert np.array_equal(bp, cbp), ("chunked finish band powers differ", order)
     return bp, bins
 
 

@@ -2321,12 +2321,22 @@ uint8_t control_surfaces_apply_macro_step(uint8_t idx, uint8_t step,
 // Public API
 // ---------------------------------------------------------------------------
 
+static const CsBinding *cs_reverted_binding(uint8_t slot);
+
 bool control_surfaces_owns_pin(uint8_t pin) {
     for (int s = 0; s < CS_MAX_BINDINGS; s++) {
         if (!s_rt[s].active) continue;
         const CsBinding *b = &s_cfg.bindings[s];
         for (int i = 0; i < cs_pin_count(b->type); i++)
             if (b->gpio[i] == pin) return true;
+    }
+    // Mid-revert, a pin the stored config is about to reclaim is not free.
+    if (control_surfaces_busy()) {
+        for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+            const CsBinding *b = cs_reverted_binding(s);
+            for (int i = 0; i < cs_pin_count(b->type); i++)
+                if (b->gpio[i] == pin) return true;
+        }
     }
     return false;
 }
@@ -2606,6 +2616,13 @@ static uint16_t *cs_reload_estimate(void) {
     return &s_rl.est_us[s_rl.phase < CS_RL_DONE ? s_rl.phase : 0][type];
 }
 
+static bool cs_requests_queued(void) {
+    return cs_set_binding_pending || cs_set_name_pending || cs_set_ir_cmd_pending ||
+           cs_set_group_pending || cs_set_macro_hdr_pending || cs_set_macro_step_pending ||
+           cs_set_disp_cfg_pending || cs_set_disp_page_pending || cs_save_pending ||
+           cs_revert_pending;
+}
+
 static bool cs_revert_step(void *ctx, uint32_t deadline_us) {
     (void)ctx;
     for (;;) {
@@ -2619,12 +2636,17 @@ static bool cs_revert_step(void *ctx, uint32_t deadline_us) {
     }
     memset(s_aux_carry, 0, sizeof(s_aux_carry));   // drop stashes no slot reclaimed
     s_dirty = false;
-    cs_last_status = PIN_CONFIG_SUCCESS;
-    cs_last_slot = 0xFF;
+    // The result is the revert's only while nothing newer claimed it: a request
+    // accepted mid-revert reported its own PENDING and still has to run.
+    if (cs_last_status == CS_STATUS_PENDING && cs_last_slot == 0xFF && !cs_requests_queued()) {
+        cs_last_status = PIN_CONFIG_SUCCESS;
+        cs_last_slot = 0xFF;
+    }
     return true;
 }
 
 static BgJob s_revert_job = { BG_JOB_CS_REVERT, cs_revert_step, NULL, false };
+static CsStatusPacket s_rv_status;   // status packet as the running revert found it
 
 void control_surfaces_init(void) {
     memset(&s_cfg, 0, sizeof(s_cfg));
@@ -2643,6 +2665,7 @@ void control_surfaces_init(void) {
 }
 
 void control_surfaces_revert_begin(void) {
+    control_surfaces_get_status(&s_rv_status);
     s_rl.phase = CS_RL_STASH;
     s_rl.slot = 0;
     bg_job_start(&s_revert_job);
@@ -2952,6 +2975,15 @@ void control_surfaces_aux_prepare_save(void) {
 
 void control_surfaces_get_status(CsStatusPacket *out) {
     if (!out) return;
+    if (control_surfaces_busy()) {
+        // Mid-revert the per-slot fields are torn; report them as the revert
+        // found them until it completes, with the live result fields.
+        *out = s_rv_status;
+        out->last_status = cs_last_status;
+        out->last_slot = cs_last_slot;
+        out->dirty = s_dirty ? 1 : 0;
+        return;
+    }
     out->last_status = cs_last_status;
     out->last_slot = cs_last_slot;
     out->max_bindings = CS_MAX_BINDINGS;

@@ -55,12 +55,8 @@ void bg_run_one(void);
 // Longest one step may run at the live latency option and rate, in us.
 uint32_t bg_step_budget_us(void);
 
-// Record one step's duration: counts an overrun (all builds) and, on
-// DSPI_LOOP_PROF builds, the job's worst step. bg_run_one() calls it; work
-// that is not yet a job (the Control Surfaces revert) calls it directly.
-void bg_step_account(BgJobId job, uint32_t elapsed_us);
-
-// Steps over budget + BG_OVERRUN_MARGIN_US since boot (REQ_GET_STATUS 31).
+// Steps over budget + BG_OVERRUN_MARGIN_US since boot (REQ_GET_STATUS 31);
+// on DSPI_LOOP_PROF builds each job's worst step is kept too.
 extern volatile uint32_t bg_over_budget_count;
 
 #endif // BG_JOB_H

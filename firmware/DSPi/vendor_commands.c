@@ -1565,9 +1565,9 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
                 handled = false;
                 break;
             }
+            // A revert in progress refuses without touching cs_last_status,
+            // which keeps reporting the revert's PENDING.
             if (control_surfaces_busy()) {
-                cs_last_status = CS_STATUS_BUSY;
-                cs_last_slot = slot;
                 handled = false;
                 break;
             }
@@ -2479,8 +2479,8 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                         break;
 #endif
 #ifdef DSPI_LOOPBACK
-                    // Capture-glitch counters; absent from release builds, so
-                    // 24/25 STALL there and the host treats them as optional.
+                    // Capture-glitch counters; absent from release builds, where
+                    // 24/25 read 0 (no case) and the host treats them as optional.
                     case 24: resp = loopback_get_overflow_count(); break;
                     case 25: resp = loopback_get_underrun_count(); break;
 #endif
@@ -3042,6 +3042,7 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 }
                 if (setup->wValue == 1 || setup->wValue == 0) {
                     uint8_t rc = control_surfaces_ir_learn_control(setup->wValue == 1 ? 1 : 0);
+                    if (rc == CS_STATUS_BUSY) return false;   // revert running; status untouched
                     if (rc == CS_STATUS_NO_IR) {
                         // No live IR component to learn on; stall and report.
                         cs_last_status = CS_STATUS_NO_IR;
@@ -3200,6 +3201,7 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 }
                 if (setup->wValue < CS_MAX_MACROS) {
                     uint8_t rc = control_surfaces_macro_fire((uint8_t)setup->wValue);
+                    if (rc == CS_STATUS_BUSY) return false;   // revert running; status untouched
                     if (rc != PIN_CONFIG_SUCCESS) {
                         // Stall and leave the reason for REQ_GET_CS_STATUS.
                         cs_last_status = rc;

@@ -74,11 +74,10 @@ uint16_t rta_band_centre_hz(uint8_t b);
 // Scaling: the fixed-point kernel halves every stage so the result carries a
 // 1/n factor; the float kernel applies the same 1/n so both formats agree.
 //
-// The cursor must be zeroed before the first call.  Each call does at most
-// max_units units of the current stage and returns true when the transform,
-// including the real-split pass, is complete.  A unit is one sample of the
-// prescale, one butterfly, one permutation cycle start, or one bin pair of the
-// split.  Results do not depend on max_units.
+// Zero the cursor before the first call. Each call does at most max_units units
+// of the current stage (a prescale sample, a butterfly, a permutation cycle
+// start or a split bin pair) and returns true once the whole transform is done.
+// Results do not depend on max_units.
 // ---------------------------------------------------------------------------
 typedef struct {
     uint8_t  stage;

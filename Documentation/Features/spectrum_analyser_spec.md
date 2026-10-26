@@ -172,7 +172,7 @@ never hard-code it.
 
 ```
 IDLE  --start-->  FILL  --buffer full (audio callback)-->  FFT
-FFT  --main loop, one step per call-->  FINISH  -->  publish  -->  advance
+FFT  --background job, chunks to a deadline-->  FINISH  -->  publish  -->  advance
 advance: next channel in the selected set, wr = 0, back to FILL
 ```
 
@@ -181,15 +181,16 @@ advance: next channel in the selected set, wr = 0, back to FILL
   copied. On RP2350 the samples are copied as float. On RP2040 the Q28 samples
   are converted to saturated Q15 (`>> 13`). When the buffer fills mid-block
   the tail of that block is dropped.
-- **FFT.** `rta_service()` runs from the main loop next to `siggen_service()`.
-  Each call performs one bounded unit of the transform and returns: the
-  prescale, one butterfly stage, the permutation, or the real-split pass. No
-  unit exceeds roughly 250 µs on RP2040 at the largest size, so the main loop's
-  USB and transport duties never stall.
+- **FFT.** A filled frame starts the analyser's background job (firmware
+  `bg_job.h`), which runs the transform in chunks of 16 units until each step's
+  deadline: prescale samples, butterflies within a stage, permutation cycle
+  starts, or split bin pairs (`RtaFftCursor`). `rta_service()` keeps config
+  apply, fill liveness and auto-off. *Updated 2026-10-24: this was one whole
+  stage per `rta_service()` call.*
 - **FINISH.** Applies the window, sums bin powers into bands and writes the bin
-  levels into a staging buffer, 64 bins per call (`rta_fft_finish_step()`, about 64 µs on RP2350), so
-  the per-bin pass never holds the main loop at once. *Updated 2026-10-23: this
-  was one call of about 530 µs.*
+  levels into a staging buffer, 16 bins per chunk (`rta_fft_finish_step()`,
+  about 1 µs per bin on RP2350), so the per-bin pass never holds the main loop
+  at once. *Updated 2026-10-23: this was one call of about 530 µs.*
 - **PUBLISH.** One call updates the band EMA and peaks, copies the staged bins
   into the bin frame, stamps its header and tail, and advances the rotation. Every step is charged to `last_frame_us`.
 

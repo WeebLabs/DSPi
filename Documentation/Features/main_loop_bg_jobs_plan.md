@@ -233,3 +233,29 @@ Quiet pass (action profile baseline) 127 us, against 130 us with two delivery po
 The largest gain is on USB, where a 300 us background step no longer shares a segment with block processing. At 0.67 ms the median and p99 fell; the maximum moved by 12 us, within run-to-run spread.
 
 `latency_bench` (stock configuration, every source and option, with the extra checks): 42 of 42 points pass, the slot-alignment proxy reads at least 99.6 % of samples within one frame on every point, and the rate-follow, source-fallback and rapid-switch checks pass. `control_surfaces` QA group: 3 of 3.
+
+## Audit fixes (2026-10-26)
+
+An Opus audit of Phases 1 to 4 found nothing critical and confirmed slot alignment is untouched. Seven findings were fixed:
+
+- **Revert result ownership.** A finished revert posts SUCCESS only while it still owns the result: status PENDING, slot 0xFF, and no Control Surfaces request queued behind it. A SET that arrives mid-revert now keeps its own result instead of having it overwritten.
+- **BUSY replies.** The aux SET, macro fire and IR learn handlers return a stall when Control Surfaces is busy instead of writing a status the revert would then clobber, so the IR learn request is no longer acknowledged and silently dropped.
+- **Idle pump at every delivery point.** `deliver_stream_input()` in `main.c` pairs `pipeline_service_producer(true)` with `output_rings_idle_pump()`, so the erase-ahead only has to cover one segment. The separate `idle_pump` profiler section is gone.
+- **Status and pins during a revert.** `control_surfaces_get_status()` answers from a snapshot taken when the revert began, with live result and dirty fields, and `control_surfaces_owns_pin()` also counts the stored bindings' pins, so no pin looks free halfway through a reload.
+- **S/PDIF lock debounce** is 2 ms of time (`LOCK_DEBOUNCE_US`) instead of a count of polls, which shrank as the loop gained delivery points.
+- **Stale comments and docs** were corrected, and `bg_step_account()` became private to `bg_job.c`.
+- **Weak tests.** `test_rta.py` now runs the finish in 5-bin chunks and requires bit-identical bins and band powers. `cs_set_during_revert_waits` paces the revert so the SET really lands mid-revert and checks the final result belongs to the SET. `cs_revert_reads_never_torn` also checks the status packet read mid-revert against one read just before the revert.
+
+### RP2350 results (`bench_results/audit_fixes`)
+
+Host tests (`test_rta.py`, `test_engine.py`, `test_bass.py`) pass. `control_surfaces` QA group: 3 of 3 on both the profiling and the release build. All four builds compile cleanly and the RAM placement check reports 0 FAIL.
+
+Action profile at 0.67 ms: quiet pass 75 us (Phase 4: 127 us), so running the idle pump at all four delivery points costs nothing measurable. Worst actions: bulk read 195 us, Control Surfaces bind or revert 150 us, loudness changes 130 us.
+
+The S/PDIF 0.67 ms soak ran its 15 minutes and was stopped before writing its own summary, so the figures below are the device's counters read at the stop. The 1 ms and USB 2 ms soaks were not rerun this round.
+
+| Soak | Underruns | Refused blocks | Over-budget steps | Worst gap (limit) | Lowest fill |
+|---|---|---|---|---|---|
+| S/PDIF, 0.67 ms | 0 | 0 | 0 | 213 us (333) | 12 frames |
+
+Worst step per job over the run: analyser 156 us, loudness rebuild 111 us, revert 95 us.

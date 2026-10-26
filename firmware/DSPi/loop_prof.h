@@ -19,7 +19,6 @@
     X(LP_DELIVERY_HOST, "delivery_host")     \
     X(LP_CS_TICK,       "control_surfaces")  \
     X(LP_SIGGEN,        "siggen_service")    \
-    X(LP_IDLE_PUMP,     "idle_pump")         \
     X(LP_RTA,           "rta")               \
     X(LP_INPUT,         "audio_inputs+dsp")  \
     X(LP_BG_JOBS,       "bg_jobs")           \

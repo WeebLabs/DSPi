@@ -93,10 +93,11 @@ static float    servo_hz_smooth = 0.0f; // IIR-smoothed bridge estimate
 static uint32_t servo_long_span_ms = 0; // last long-window anchor span (ms)
 #endif
 
-// Debounce: after lock, wait this many main-loop polls with sufficient
-// FIFO fill before declaring ready to unmute
-static uint32_t lock_debounce_polls = 0;
-#define LOCK_DEBOUNCE_THRESHOLD  8  // ~8 polls ≈ a few ms at main loop rate
+// After lock, let the FIFO build before reading it. Timed rather than counted
+// in polls: the poll runs at every main-loop delivery point.
+#define LOCK_DEBOUNCE_US  2000u
+static uint32_t lock_time_us = 0;
+static bool     lock_debounced = false;
 
 // ============================================================================
 // RATE MAPPING
@@ -214,7 +215,7 @@ void spdif_input_start(void) {
     servo_skip_counter = 0;
     servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
     input_servo_reset();  // park the VCXO and zero the fill integrator
-    lock_debounce_polls = 0;
+    lock_debounced = false;
 
     printf("SPDIF RX: started on GPIO %u\n", spdif_active_data_pin);
 }
@@ -286,7 +287,7 @@ uint32_t spdif_input_poll(void) {
         spdif_state = SPDIF_INPUT_RELOCKING;
         spdif_rx_detected_rate = 0;
         servo_skip_counter = 0;
-        lock_debounce_polls = 0;
+        lock_debounced = false;
         // Muting is handled by the main loop (sets preset_loading flag)
         return 0;
     }
@@ -318,7 +319,8 @@ uint32_t spdif_input_poll(void) {
         spdif_state = SPDIF_INPUT_LOCKED;
         servo_skip_counter = 0;
         servo_meas_arm();
-        lock_debounce_polls = 0;
+        lock_time_us = time_us_32();
+        lock_debounced = false;
 
         // Rate change will be handled by main loop via spdif_input_check_rate_change()
         return 0;
@@ -328,10 +330,9 @@ uint32_t spdif_input_poll(void) {
     if (spdif_state != SPDIF_INPUT_LOCKED)
         return 0;
 
-    // Lock debounce: wait for FIFO to build up before processing
-    if (lock_debounce_polls < LOCK_DEBOUNCE_THRESHOLD) {
-        lock_debounce_polls++;
-        return 0;
+    if (!lock_debounced) {
+        if (time_us_32() - lock_time_us < LOCK_DEBOUNCE_US) return 0;
+        lock_debounced = true;
     }
 
     // --- Read FIFO and feed pipeline ---

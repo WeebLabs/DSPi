@@ -1544,9 +1544,9 @@ static void output_rings_write_block(uint32_t frames) {
 
 // Idle silence pump: with outputs enabled but no producer running (USB
 // pause, source gaps), keep the ring silent ahead of the reader so the
-// free-running DMA can never loop stale audio. It runs once a reader has passed
-// its writer (the producer stalled); the erase-ahead covers the main-loop pass
-// until then. Any higher gate sits inside the fill sawtooth at small targets.
+// free-running DMA can never loop stale audio. It acts once a reader has passed
+// its writer (the producer stalled); it runs at every main-loop delivery point,
+// so the erase-ahead covers one segment. A higher gate sits inside the fill sawtooth.
 DSP_TIME_CRITICAL
 void output_rings_idle_pump(void) {
     if (output_type_switch_in_progress) return;

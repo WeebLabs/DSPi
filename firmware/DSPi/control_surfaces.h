@@ -825,9 +825,9 @@ void control_surfaces_aux_prepare_save(void);
 // cs_last_status reads SUCCESS. Main-loop only (releases and reclaims GPIOs).
 void control_surfaces_revert_begin(void);
 
-// True while a revert runs. Every apply, aux write, macro fire and IR learn
-// then returns CS_STATUS_BUSY (or false), and binding, IR and aux reads answer
-// with the state the revert lands on (current_architecture.md, Control Surfaces).
+// True while a revert runs: applies, aux writes, macro fire and IR learn refuse
+// (CS_STATUS_BUSY or false); reads answer with the reverted or pre-revert state,
+// never a torn one (current_architecture.md, Control Surfaces).
 bool control_surfaces_busy(void);
 
 // Preview dirty flag: set when a live apply diverges from flash, cleared by
