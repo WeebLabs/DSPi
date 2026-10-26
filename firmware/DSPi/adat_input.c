@@ -80,7 +80,6 @@ _Static_assert(ADAT_RX_RING_WORDS % ADAT_RX_FRAME_WORDS == 0,
 #define ADAT_RX_CLOCK_TIMEOUT_US 5000u     // safety net only; see rate machine
 #define ADAT_RX_LONG_HALF_US    8000000ull // long-window anchor rotation
 #define ADAT_RX_POLL_GAP_US     4000u      // stall guard (under ring fill time)
-#define ADAT_RX_SERVO_INTERVAL  1000       // main-loop iterations (~20 ms)
 
 // ============================================================================
 // STATE
@@ -130,7 +129,7 @@ static uint64_t long_us[2];
 static uint64_t long_words[2];
 static bool     long_valid;
 static float    meas_hz_long;
-static uint32_t adat_rx_servo_skip;
+static uint32_t adat_rx_servo_last_us;   // servo tick gate (INPUT_SERVO_TICK_US)
 
 // Slave acquisition probes one exact decoder timing at a time. The DMA word
 // rate is not trustworthy while the decoder cell is wrong: the emitted stream
@@ -507,7 +506,7 @@ void adat_input_start(void) {
     adat_rx_lock_count = adat_rx_loss_count = adat_rx_slip_count = 0;
     adat_rx_header_err = 0;
     hdr_fail_run = 0;
-    adat_rx_servo_skip = 0;
+    adat_rx_servo_last_us = time_us_32();
     uint64_t now = time_us_64();
     meas_last_poll_us = now;
     uint32_t widx = adat_rx_write_index();
@@ -690,8 +689,7 @@ void adat_input_update_clock_servo(void) {
     // deferred rate change): slewing every output clock to the wire rate
     // early would be muted and slot-aligned, but pointless churn.
     if (adat_rx_detected_rate != audio_state.freq) return;
-    if (++adat_rx_servo_skip < ADAT_RX_SERVO_INTERVAL) return;
-    adat_rx_servo_skip = 0;
+    if (!input_servo_tick_due(&adat_rx_servo_last_us)) return;
 
     float actual = long_valid ? meas_hz_long : meas_hz_smooth;
     input_servo_apply(actual, 0);

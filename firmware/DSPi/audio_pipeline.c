@@ -1542,11 +1542,10 @@ static void output_rings_write_block(uint32_t frames) {
     output_ring_min_prewrite = low;
 }
 
-// Idle silence pump: with outputs enabled but no producer running (USB
-// pause, source gaps), keep the ring silent ahead of the reader so the
-// free-running DMA can never loop stale audio. It acts once a reader has passed
-// its writer (the producer stalled); it runs at every main-loop delivery point,
-// so the erase-ahead covers one segment. A higher gate sits inside the fill sawtooth.
+// Idle silence pump: with no producer running (USB pause, source gaps), keep each
+// ring silent ahead of its reader so the DMA never loops stale audio. Acts only once
+// a reader has passed its writer (a higher gate sits inside the fill sawtooth). Runs
+// after every main.c pipeline_service_producer() call, blocking spins included.
 DSP_TIME_CRITICAL
 void output_rings_idle_pump(void) {
     if (output_type_switch_in_progress) return;
@@ -1596,7 +1595,7 @@ void output_rings_stamp_silence_ahead(void) {
 // main loop cannot run its idle pump, so a stalled ring never replays stale or
 // mis-framed content (current_architecture.md "Output Ring Stall Bracket").
 
-// Inside one slot ring lap at 96 kHz (10.7 ms) and half the ADAT cushion
+// Inside one slot ring lap at 96 kHz (5.3 ms) and half the ADAT cushion
 // (96 frames, 2 ms at 48 kHz), which the ADAT keep-alive must top up in time.
 #define OUTPUT_RINGS_STALL_PERIOD_US 1000u
 

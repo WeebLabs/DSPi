@@ -39,9 +39,8 @@
 
 // Clock servo: rate-based + proportional fill trim (mirrors USB feedback controller).
 // The divider math and PIO/MCK writes live in input_servo.c (shared with the
-// ADAT input's slave clock mode); this module owns lock gating, rate limiting,
-// and the library's rate measurement.
-#define SERVO_UPDATE_INTERVAL 1000      // Main loop iterations between servo updates (~20ms)
+// ADAT input's slave clock mode); this module owns lock gating, rate limiting
+// (INPUT_SERVO_TICK_US), and the library's rate measurement.
 
 // Long-window rate measurement (mirrors the ADAT slave dual-anchor scheme in
 // adat_input.c). The library's samp_freq_actual is an 8-block moving average
@@ -83,7 +82,7 @@ static uint8_t spdif_lock_count = 0;
 static uint8_t spdif_loss_count = 0;
 
 // Clock servo state
-static uint32_t servo_skip_counter = 0;
+static uint32_t servo_tick_last_us = 0;
 static uint64_t servo_long_us[2];       // dual-anchor timestamps
 static uint32_t servo_long_blocks[2];   // dual-anchor decoded-block counts
 static bool     servo_long_valid = false;
@@ -212,7 +211,7 @@ void spdif_input_start(void) {
     spdif_rx_stable_flag = false;
     spdif_rx_lost_flag = false;
     spdif_rx_detected_rate = 0;
-    servo_skip_counter = 0;
+    servo_tick_last_us = time_us_32();
     servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
     input_servo_reset();  // park the VCXO and zero the fill integrator
     lock_debounced = false;
@@ -286,7 +285,7 @@ uint32_t spdif_input_poll(void) {
         if (spdif_loss_count < 255) spdif_loss_count++;
         spdif_state = SPDIF_INPUT_RELOCKING;
         spdif_rx_detected_rate = 0;
-        servo_skip_counter = 0;
+        servo_tick_last_us = time_us_32();
         lock_debounced = false;
         // Muting is handled by the main loop (sets preset_loading flag)
         return 0;
@@ -317,7 +316,7 @@ uint32_t spdif_input_poll(void) {
 
         // Prepare for locked state
         spdif_state = SPDIF_INPUT_LOCKED;
-        servo_skip_counter = 0;
+        servo_tick_last_us = time_us_32();
         servo_meas_arm();
         lock_time_us = time_us_32();
         lock_debounced = false;
@@ -428,8 +427,7 @@ void spdif_input_update_clock_servo(void) {
     if (spdif_rx_lost_flag) return;
 
     // Rate-limit: crystal drift is slow (ppm), no need to run every iteration.
-    if (++servo_skip_counter < SERVO_UPDATE_INTERVAL) return;
-    servo_skip_counter = 0;
+    if (!input_servo_tick_due(&servo_tick_last_us)) return;
 
     // Bridge estimate: IIR-smoothed library measurement, only used until the
     // long window is valid (see the SERVO_LONG_* comment for why the raw

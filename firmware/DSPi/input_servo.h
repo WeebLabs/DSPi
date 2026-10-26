@@ -10,7 +10,23 @@
 #ifndef INPUT_SERVO_H
 #define INPUT_SERVO_H
 
+#include <stdbool.h>
 #include <stdint.h>
+#include "hardware/timer.h"
+
+// Servo tick period: the old 1000-pass tick at the measured ~75 us quiet pass, so
+// the per-tick gains in input_servo.c run no faster than they were bench-verified.
+// See current_architecture.md "Clock Servo".
+#define INPUT_SERVO_TICK_US  75000u
+
+// True once a tick period has elapsed since *last_us, which it then restarts.
+// Unsigned elapsed time stays wrap-safe across any gap (at most one tick late).
+static __force_inline bool input_servo_tick_due(uint32_t *last_us) {
+    uint32_t now = time_us_32();
+    if ((uint32_t)(now - *last_us) < INPUT_SERVO_TICK_US) return false;
+    *last_us = now;
+    return true;
+}
 
 // Track the measured input rate: ppm feed-forward plus a fill trim from
 // the given output slot's ring fill (fill_slot < 0 = rate term only).

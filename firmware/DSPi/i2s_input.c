@@ -795,7 +795,6 @@ void i2s_input_prefill_silence(uint32_t frames) {
 #define I2S_SLAVE_CLOCK_TIMEOUT_US  5000u      // no words this long = clocks gone
 #define I2S_SLAVE_LOCK_WINDOWS      2          // agreeing windows needed to lock
 #define I2S_SLAVE_LONG_HALF_US      8000000ull // long-window anchor rotation
-#define I2S_SLAVE_SERVO_INTERVAL    1000       // main-loop iterations (~20 ms)
 
 static volatile I2sSlaveState i2s_slave_state = I2S_SLAVE_INACTIVE;
 static uint8_t  i2s_slave_lock_count = 0;      // cumulative since boot
@@ -823,7 +822,7 @@ static bool     long_valid;
 static float    meas_hz_long;
 
 // Servo
-static uint32_t i2s_slave_servo_skip = 0;
+static uint32_t i2s_slave_servo_last_us = 0;   // tick gate (INPUT_SERVO_TICK_US)
 
 // Poll-gap watchdog: a main-loop stall longer than the ring-fill time can
 // wrap the DMA write pointer a whole ring between polls, silently losing
@@ -850,7 +849,7 @@ static void i2s_slave_arm(void) {
     lock_candidate = 0;
     lock_agree = 0;
     long_valid = false;
-    i2s_slave_servo_skip = 0;
+    i2s_slave_servo_last_us = time_us_32();
     input_servo_reset();
     i2s_slave_state = I2S_SLAVE_ACQUIRING;
     notify_push_i2s_slave_state(I2S_SLAVE_ACQUIRING, 0);
@@ -1054,8 +1053,7 @@ void i2s_slave_update_clock_servo(void) {
     if (i2s_slave_detected_rate == 0 ||
         i2s_slave_detected_rate != audio_state.freq) return;
 
-    if (++i2s_slave_servo_skip < I2S_SLAVE_SERVO_INTERVAL) return;
-    i2s_slave_servo_skip = 0;
+    if (!input_servo_tick_due(&i2s_slave_servo_last_us)) return;
 
     float actual = long_valid ? meas_hz_long : meas_hz_smooth;
 

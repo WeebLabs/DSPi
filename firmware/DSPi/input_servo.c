@@ -49,18 +49,18 @@
 // Plant: 1 ppm of rate trim slews the fill by Fs*1e-6 samples/s, i.e.
 // ~0.001 buffer/s per ppm at 48 kHz. KP sets the correction bandwidth
 // (2 ppm/buffer -> ~0.002 rad/s); KI holds the static residual and its
-// zero sits below that crossover for damping (0.0025 ppm/s per buffer).
+// zero sits below that crossover for damping (~7e-4 ppm/s per buffer).
 // The genuine ~1-buffer production/consumption ripple is smoothed by the
 // IIR to ~+-0.2 buffer, so KP contributes well under 0.5 ppm of command
 // noise, further shaped by the slew limiter. A second P slope engages
 // beyond +-2 buffers so real displacements recover faster; transients
 // bigger than that arrive via resets, which re-centre the fill anyway.
-#define SERVO_FILL_ALPHA         0.125f  // fill IIR (~8 ticks, ~160 ms)
+#define SERVO_FILL_ALPHA         0.125f  // fill IIR (~8 ticks, ~600 ms)
 #define SERVO_FILL_KP_PPM        2.0f    // ppm per buffer of smoothed error
 #define SERVO_FILL_KP2_PPM       4.0f    // added slope beyond +-2 buffers
 #define SERVO_FILL_KI_PPM        5.0e-5f // ppm per tick per buffer
 #define SERVO_FILL_ICLAMP_PPM    3.0f    // bounds the static residual held
-#define SERVO_SLEW_PPM_PER_TICK  0.5f    // ~25 ppm/s at the ~20 ms tick
+#define SERVO_SLEW_PPM_PER_TICK  0.5f    // ~6.7 ppm/s at INPUT_SERVO_TICK_US
 
 // Fill target in buffer units, read live from the latency option.
 static inline float servo_fill_target(void) {

@@ -1040,6 +1040,9 @@ static void pipeline_service_producer(bool lock_gated) {
     // Generator audio has to fade out like any other source, and the pump is
     // the only block source when no input is streaming.  No-op when idle.
     siggen_pump();
+    // Every caller pumps, the blocking spins included: a producer that stalls in
+    // one would otherwise replay the previous ring lap once fill + erase-ahead drain.
+    output_rings_idle_pump();
 }
 
 static bool pipeline_fade_to_silence_poll(void) {
@@ -1939,12 +1942,9 @@ void core0_init() {
     rta_init();
 }
 
-// A main-loop delivery point: hand over ready input, then keep any ring whose
-// producer stalled silent ahead of its reader (a no-op while streaming), so the
-// erase-ahead margin only has to cover one segment of the pass.
+// A main-loop delivery point (current_architecture.md "Delivery points").
 static void deliver_stream_input(void) {
     pipeline_service_producer(true);
-    output_rings_idle_pump();
 }
 
 // Lock, prefill and signal-loss handshakes of the active input. Once per main
@@ -2119,8 +2119,8 @@ static void input_service_handshakes(void) {
     }
 }
 
-// Clock servo of the active input. Each servo rate-limits by call count, so
-// this runs exactly once per pass, unlike the delivery poll.
+// Clock servo of the active input, once per pass. Each servo gates its own tick
+// on time (INPUT_SERVO_TICK_US).
 static void input_service_servos(void) {
     if (input_source_is_spdif(active_input_source)) {
         spdif_input_update_clock_servo();
