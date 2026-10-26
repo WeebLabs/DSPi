@@ -267,6 +267,8 @@ const CsNounDesc cs_noun_table[CS_NOUN_COUNT] = {
                                   CS_TARGET_OUTPUT_CH, NUM_OUTPUT_CHANNELS, 0 },
     [CS_NOUN_PRESET_RELOAD]   = { CS_KIND_BOOL, 0, CS_ACT_BIT(CS_ACT_TRIGGER), 0, 0,
                                   CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_PRESET_SAVE]     = { CS_KIND_BOOL, 0, CS_ACT_BIT(CS_ACT_TRIGGER), 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
     [CS_NOUN_LOUDNESS_SPL]    = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
                                   Q8(LOUDNESS_REF_SPL_MIN), Q8(LOUDNESS_REF_SPL_MAX),
                                   CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
@@ -506,6 +508,7 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
         case CS_NOUN_SUBHARM_SOLO:      return subharm_config.solo ? 1.0f : 0.0f;
         case CS_NOUN_OUTPUT_DELAY:      return matrix_mixer.outputs[target].delay_ms;
         case CS_NOUN_PRESET_RELOAD:     return 0.0f;
+        case CS_NOUN_PRESET_SAVE:       return 0.0f;
         // Both read live: the SET handler stores the value immediately and
         // only the table rebuild is deferred to the main loop.
         case CS_NOUN_LOUDNESS_SPL:       return loudness_ref_spl;
@@ -671,6 +674,12 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             // takes.  Device-global state (master volume in independent
             // mode, output config, CS bindings) is untouched.
             r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_LOAD,
+                                    (uint16_t)preset_get_active(), 0, 1, &rd, &rl);
+            break;
+        case CS_NOUN_PRESET_SAVE:
+            // Same deferred save a host issues; device-global state (output
+            // config in independent mode, CS bindings) keeps its own save path.
+            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_SAVE,
                                     (uint16_t)preset_get_active(), 0, 1, &rd, &rl);
             break;
         case CS_NOUN_PRESET:

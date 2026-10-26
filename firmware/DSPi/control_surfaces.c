@@ -141,7 +141,7 @@ CsMacroStep      cs_set_macro_step_val;
 // ---------------------------------------------------------------------------
 
 static const CsCapsHeader s_caps = {
-    .caps_version = 20,
+    .caps_version = 21,
     .max_bindings = CS_MAX_BINDINGS,
     .type_count   = CS_TYPE_COUNT,
     .noun_count   = CS_NOUN_COUNT,
@@ -2150,7 +2150,8 @@ static void cs_tick_macro(void) {
         // Drain the step's BUSY-pending and deferred work before the next
         // step's delay starts, so the delay counts from a landed preset load.
         if (s_macro_op.pending || s_macro_gop.pend_mask) return;
-        if (cs_state_replace_pending()) return;
+        // A queued save snapshots live state when it lands; later steps wait.
+        if (cs_state_replace_pending() || preset_save_pending) return;
         cs_macro_advance((uint8_t)(s_macro_step + 1));
         return;
     }

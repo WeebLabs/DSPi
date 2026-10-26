@@ -1,6 +1,6 @@
 # Control Surfaces (User-Wired Physical Controls and Indicators)
 
-*Firmware capability format version: 20*
+*Firmware capability format version: 21*
 *Config (flash) version: 2; IR config version: 2*
 *Directory version: 22*
 
@@ -89,6 +89,10 @@ four writable nouns dispatch through `REQ_LIMITER` with the output and parameter
 index packed into wValue and a float32 payload. A host must learn unit 6 before
 it can label or encode `LIMITER_RELEASE`. The authority for the effect itself
 is `output_limiter_spec.md`.
+
+Caps v21 appends noun 79, `PRESET_SAVE` (sections 4.3 and 5), a `TRIGGER` that
+saves the live state to the active preset slot. No structure or stored-config
+changes; `noun_count` reads 80.
 
 Writing style note: this doc avoids em-dashes per project convention.
 
@@ -250,7 +254,7 @@ giving smooth, jitter-free knob behavior without flooding the dispatcher.
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
 | 0 | 1 | `type` | `CsType` (0-10); `0` = slot cleared |
-| 1 | 1 | `noun` | `CsNoun` (0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20; read `noun_count`) |
+| 1 | 1 | `noun` | `CsNoun` (0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20, 0-79 at caps v21; read `noun_count`) |
 | 2 | 1 | `action` | `CsAction` (0-11) |
 | 3 | 1 | `flags` | `CS_FLAG_*` bitfield (see 2.2.1); unknown bits are rejected with `CS_STATUS_INVALID_VALUE` |
 | 4 | 1 | `gpio[0]` | primary GPIO |
@@ -307,7 +311,7 @@ the firmware stores and what `REQ_GET_ALL_PARAMS` does **not** contain.
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
-| 0 | 1 | `caps_version` | capability format version (19) |
+| 0 | 1 | `caps_version` | capability format version (21) |
 | 1 | 1 | `max_bindings` | `CS_MAX_BINDINGS` (16) |
 | 2 | 1 | `type_count` | `CS_TYPE_COUNT` (11); the type table has this many entries, indexed by `CsType` |
 | 3 | 1 | `noun_count` | `CS_NOUN_COUNT` (74) |
@@ -334,7 +338,7 @@ reads `max_bindings`. See `control_surfaces_aux_spec.md`.
 
 ### 2.5 `CsNounDesc` (12 bytes)
 
-Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18, 0-73 at caps v19 and 0-78 at caps v20).
+Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20 and 0-79 at caps v21).
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -774,6 +778,7 @@ Action-mask groups used below:
 | `LIMITER_RELEASE` | 76 | CONT | MS_LOG | 10..1000 ms | OUTPUT_CH | CONT-RW |
 | `LIMITER_LINK` | 77 | ENUM | - | 5 (0 = unlinked, 1..4 = link group) | OUTPUT_CH | ENUM-RW |
 | `LIMITER_GR` | 78 | CONT | DB | 0..30 dB, read-only | OUTPUT_CH | CONT-RO |
+| `PRESET_SAVE` | 79 | BOOL | - | - | - | `TRIGGER` (`0x0080`) |
 
 The *effective* legal action set for a (type, noun) pair is the bitwise AND of
 its two masks. Example: an encoder (`STEP` only) on `USER_MUTE` (bool, no
@@ -877,6 +882,7 @@ target and dispatches it.
 | `LIMITER_RELEASE` | `REQ_LIMITER` (wValue = `(target << 8) \| 2`, float32 LE) | Release 10..1000 ms, log stepping (`CS_UNIT_MS_LOG`); ganged across the link group. |
 | `LIMITER_LINK` | `REQ_LIMITER` (wValue = `(target << 8) \| 3`, float32 LE) | Link group 0..4, 0 = unlinked. Joining a group adopts the group's enable, threshold and release. INC+WRAP cycles. Sent as an integer-valued float. |
 | `LIMITER_GR` | (read-only) | Gain reduction the output applied during the latest audio packet, in dB (0 = none), clamped to 30. Drives `IND_ABOVE` (a "limiting" LED) and `IND_LEVEL` (a PWM gain-reduction meter). |
+| `PRESET_SAVE` | `REQ_PRESET_SAVE` (`0x90`, GET, wValue = active slot) | `TRIGGER` saves the live state to the currently active preset slot via the deferred pipeline-safe path a host save takes. Device-global state (output config in independent mode, CS bindings) is not saved; those keep `REQ_SAVE_OUTPUT_CONFIG` and `REQ_CS_SAVE`. |
 
 ### 5.1 Enum stepping detail
 

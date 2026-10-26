@@ -594,7 +594,7 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
     [CS_NOUN_TUBE_TYPE] = "Tube Type",     [CS_NOUN_TUBE_MIX] = "Tube Mix",
     [CS_NOUN_LIMITER] = "Limiter",         [CS_NOUN_LIMITER_THRESHOLD] = "Lim Thr",
     [CS_NOUN_LIMITER_RELEASE] = "Lim Rel", [CS_NOUN_LIMITER_LINK] = "Lim Link",
-    [CS_NOUN_LIMITER_GR] = "Lim GR",
+    [CS_NOUN_LIMITER_GR] = "Lim GR",       [CS_NOUN_PRESET_SAVE] = "Save",
 };
 
 static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",

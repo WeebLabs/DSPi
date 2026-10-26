@@ -2452,7 +2452,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2464,7 +2464,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | DCP | N/A | Double-precision coprocessor |
 | VREG | 1.20V (for OC) | 1.10V |
 | UART + I2C external control | Yes (identical) | Yes (identical) |
-| Control Surfaces nouns (caps v20) | 79 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 79, all usable |
+| Control Surfaces nouns (caps v21) | 80 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 80, all usable |
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
@@ -3225,7 +3225,7 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-09-28 (caps v20: output limiter nouns 74-78 and unit `CS_UNIT_MS_LOG`; 2026-09-18 caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19; 2026-07-22: PWM LED and aux PWM binds reject the soft-VCXO reserved slice)*
+*Last updated: 2026-10-26 (caps v21: `PRESET_SAVE` trigger noun 79; 2026-09-28 caps v20: output limiter nouns 74-78 and unit `CS_UNIT_MS_LOG`; 2026-09-18 caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19; 2026-07-22: PWM LED and aux PWM binds reject the soft-VCXO reserved slice)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, an
@@ -3446,6 +3446,18 @@ are "Limiter", "Lim Thr", "Lim Rel", "Lim Link" and "Lim GR", with link groups
 shown as "Off" and "1".."4". A host that does not know unit 6 must learn it
 before it can label or encode the release noun. Link-group ganging stays in
 `limiter_set_param()`, so a bound control behaves exactly like a host SET.
+
+**Caps v21** (2026-10-26) appends one noun, `CS_NOUN_PRESET_SAVE` (79), with no
+structure or stored-config changes. `noun_count` goes to 80. It is a `TRIGGER`
+that saves the live state to the active preset slot through the same deferred
+`REQ_PRESET_SAVE` (`0x90`) path a host save takes, so the flash write is
+bracketed by the full pipeline reset and slot alignment is preserved. It is the
+counterpart of `PRESET_RELOAD`. Device-global state keeps its own save paths:
+output config in independent mode needs `REQ_SAVE_OUTPUT_CONFIG`, and CS
+bindings need `REQ_CS_SAVE`. The display label is "Save". Only `CS_ACT_TRIGGER`
+is legal, so button auto-repeat (INC/DEC only) cannot spam flash writes.
+A macro step after a save waits for `preset_save_pending` to clear, so later
+steps cannot leak into the snapshot.
 
 ### File layout
 

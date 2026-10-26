@@ -248,6 +248,8 @@ typedef enum {
     CS_NOUN_LIMITER_RELEASE = 76, // continuous ms 10..1000 (CS_UNIT_MS_LOG)
     CS_NOUN_LIMITER_LINK   = 77, // enum 0..LIMITER_LINK_GROUP_MAX (0 = unlinked)
     CS_NOUN_LIMITER_GR     = 78, // continuous dB 0..30, read-only (gain reduction)
+    // --- caps v21 additions ---
+    CS_NOUN_PRESET_SAVE    = 79, // trigger (save live state to the active preset)
     CS_NOUN_COUNT
 } CsNoun;
 
@@ -635,7 +637,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (20); see the file
+    uint8_t  caps_version; // capability format version (21); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)
