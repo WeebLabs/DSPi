@@ -349,7 +349,7 @@ static bool pin_used_by_fixed_peripheral(uint8_t pin, uint8_t exclude_output) {
     if (i2s_mck_enabled && pin == i2s_mck_pin) return true;   // MCK (if enabled)
 #if PICO_RP2350
     // ADAT data pin: claimed only while ADAT is config-enabled (mirrors MCK).
-    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
+    if (bulk_output_owns_pin(pin)) return true;
     // ADAT input pin: claimed only while the input is enabled (mirrors above).
     // Direction-agnostic; the TX-pin-sharing exception lives at the ADAT-input
     // validation sites, not here.
@@ -479,6 +479,29 @@ bool adat_pin_acceptable(uint8_t pin) {
     if (!is_valid_gpio_pin(pin)) return false;
     if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
     return !is_pin_in_use(pin, 0xFF);
+}
+
+// PIN_CONFIG_* status for the pins the given bulk format would claim, against
+// everything currently owned except the bulk output's own claim.  ADAT: one
+// data pin (`data`).  TDM8: DATA, DATA + 1 (FSYNC) and
+// BCLK, all distinct.
+static uint8_t bulk_pins_status(uint8_t format, uint8_t data, uint8_t bclk) {
+    uint8_t pins[3];
+    int n = 0;
+    pins[n++] = data;
+    if (format == BULK_FORMAT_TDM8) {
+        pins[n++] = (uint8_t)(data + 1);
+        pins[n++] = bclk;
+    }
+    for (int i = 0; i < n; i++) {
+        if (!is_valid_gpio_pin(pins[i])) return PIN_CONFIG_INVALID_PIN;
+        for (int j = 0; j < i; j++)
+            if (pins[i] == pins[j]) return PIN_CONFIG_PIN_IN_USE;
+        // The bulk output's own current claim never blocks re-routing it.
+        if (!bulk_output_owns_pin(pins[i]) && is_pin_in_use(pins[i], 0xFF))
+            return PIN_CONFIG_PIN_IN_USE;
+    }
+    return PIN_CONFIG_SUCCESS;
 }
 
 // True if `pin` is acceptable as the ADAT input (RX) GPIO for the bulk/preset
@@ -2949,17 +2972,15 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 } else if (value == (adat_output_config_enabled() ? 1 : 0)) {
                     status = PIN_CONFIG_SUCCESS;  // No-op: already in this state
                 } else if (value != 0) {
-                    // Enabling from disabled: validate the configured ADAT pin.
-                    // ADAT is not yet config-enabled, so it never blocks itself.
+                    // Enabling from disabled: validate the pins of the selected
+                    // format.  The bulk output is not yet config-enabled, so
+                    // it never blocks itself.
                     uint8_t pin = adat_output_pin();
-                    if (!is_valid_gpio_pin(pin)) {
-                        status = PIN_CONFIG_INVALID_PIN;
-                    } else if (is_pin_in_use(pin, 0xFF)) {
-                        status = PIN_CONFIG_PIN_IN_USE;
-                    } else {
+                    status = bulk_pins_status(bulk_output_format(),
+                                              bulk_output_format() ? tdm_output_data_pin() : pin,
+                                              tdm_output_bclk_pin());
+                    if (status == PIN_CONFIG_SUCCESS)
                         adat_output_set_config(true, pin);
-                        status = PIN_CONFIG_SUCCESS;
-                    }
                 } else {
                     // Disabling: always allowed.
                     adat_output_set_config(false, adat_output_pin());
@@ -3026,6 +3047,74 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 resp_buf[0] = 0;
 #endif
                 vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_SET_BULK_FORMAT: {
+#if !PICO_RP2350
+                resp_buf[0] = PIN_CONFIG_INVALID_OUTPUT;
+#else
+                uint8_t value = setup->wValue & 0xFF;
+                uint8_t status = PIN_CONFIG_SUCCESS;
+                if (value > BULK_FORMAT_TDM8) {
+                    status = PIN_CONFIG_INVALID_PARAM;
+                } else if (value != bulk_output_format()) {
+                    if (adat_output_config_enabled())
+                        status = bulk_pins_status(value,
+                                     value ? tdm_output_data_pin() : adat_output_pin(),
+                                     tdm_output_bclk_pin());
+                    if (status == PIN_CONFIG_SUCCESS)
+                        bulk_output_set_format(value);
+                }
+                resp_buf[0] = status;
+#endif
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_BULK_FORMAT: {
+#if PICO_RP2350
+                resp_buf[0] = bulk_output_format();
+#else
+                resp_buf[0] = 0;
+#endif
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_SET_TDM_PINS: {
+#if !PICO_RP2350
+                resp_buf[0] = PIN_CONFIG_INVALID_OUTPUT;
+#else
+                uint8_t data = setup->wValue & 0xFF;
+                uint8_t bclk = (setup->wValue >> 8) & 0xFF;
+                if (data == PIN_RESET_TO_DEFAULT) data = PICO_TDM_DATA_PIN;
+                if (bclk == PIN_RESET_TO_DEFAULT) bclk = PICO_TDM_BCLK_PIN;
+                uint8_t status;
+                if (data == tdm_output_data_pin() && bclk == tdm_output_bclk_pin()) {
+                    status = PIN_CONFIG_SUCCESS;  // No-op
+                } else {
+                    // Applying while enabled re-routes under mute via the
+                    // deferred apply.
+                    status = bulk_pins_status(BULK_FORMAT_TDM8, data, bclk);
+                    if (status == PIN_CONFIG_SUCCESS)
+                        tdm_output_set_pins(data, bclk);
+                }
+                resp_buf[0] = status;
+#endif
+                vendor_send_response(resp_buf, 1);
+                return true;
+            }
+
+            case REQ_GET_TDM_PINS: {
+#if PICO_RP2350
+                resp_buf[0] = tdm_output_data_pin();
+                resp_buf[1] = tdm_output_bclk_pin();
+#else
+                resp_buf[0] = 0;
+                resp_buf[1] = 0;
+#endif
+                vendor_send_response(resp_buf, 2);
                 return true;
             }
 

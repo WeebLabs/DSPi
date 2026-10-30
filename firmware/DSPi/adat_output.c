@@ -1,5 +1,11 @@
 // ----------------------------------------------------------------------------
-// ADAT lightpipe bulk output (RP2350 only)
+// ADAT lightpipe / TDM8 bulk output (RP2350 only)
+//
+// This module drives one of two wire formats for the 8 post-gain outputs,
+// selected at runtime with bulk_output_set_format().  They are mutually
+// exclusive and share the PIO SM, the DMA channel pair, the ring storage and
+// the alignment/underrun machinery; only frame encoding and pin routing differ.
+// The TDM8 format is described after the ADAT notes below.
 //
 // One 256-bit ADAT frame per sample carries all 8 post-gain output channels:
 //   [1][10x0][1][u3..u0]  then 8 x ( 6 x [1][nibble] ), nibbles MSB-first,
@@ -32,6 +38,18 @@
 // and the constant ADAT-to-slot offset survives host underruns.  While the
 // host stream is stopped (starvation counting disabled) the cushion is
 // simply kept topped up with silence.
+//
+// TDM8 (TAD5242 / TI "TDM" bus mode, Fs <= 48 kHz): FSYNC is a one-BCLK pulse
+// that coincides with the MSB of slot 0 (no I2S-style 1-bit delay); 8 slots of
+// 32 bits (24-bit sample MSB-first, 8 zero pad bits), 256 BCLK per frame.  The
+// DAC samples DIN/FSYNC on the falling BCLK edge, so the PIO changes both on
+// the rising edge.  Three GPIOs: DATA = pin, FSYNC = pin + 1 (both driven by
+// one `out pins, 2`), BCLK = its own pin (side-set).  The program is two
+// instructions (BCLK high + out, BCLK low) for 2 PIO cycles per BCLK, so the
+// PIO clock is 512*Fs and every BCLK costs 2 bits of ring data: bit0 = DATA,
+// bit1 = FSYNC.  A frame is therefore 16 words (64 B).  Daisy-chained
+// TAD5242s (MD0 = TDM) each consume the last two slots and forward the rest
+// on MD6, so one DATA line feeds four devices (outputs 1-2 at the far end).
 // ----------------------------------------------------------------------------
 
 #include "adat_output.h"
@@ -57,7 +75,8 @@
 #define ADAT_DMA_DATA_CH        13     // 13/14 are unused in every config:
 #define ADAT_DMA_CTRL_CH        14     // outputs 0-3, PDM 4, input 5-12
 #define ADAT_FRAME_WORDS        8      // 256 bits
-#define ADAT_RING_FRAMES        896    // 28 KB; > cushion + blocking-give cap (96 + 768)
+#define TDM_FRAME_WORDS         16     // 256 BCLK x 2 bits (DATA, FSYNC)
+#define ADAT_RING_FRAMES        896    // > cushion + blocking-give cap (96 + 768)
 #define ADAT_ALIGN_LEAD_FRAMES  96     // constant ADAT-vs-slot lead; underrun cushion
 #define ADAT_SYNC_HEADER        0x8010u // [1][10x0][1][0000]; user bits always 0
 
@@ -68,7 +87,8 @@ static const struct pio_program adat_pio_program = {
     .instructions = adat_pio_instr, .length = 1, .origin = -1,
 };
 
-static uint32_t adat_ring[ADAT_RING_FRAMES * ADAT_FRAME_WORDS];
+// Sized for the larger TDM frame (57 KB); ADAT uses the first half.
+static uint32_t adat_ring[ADAT_RING_FRAMES * TDM_FRAME_WORDS];
 // Read by the control DMA channel to re-point the data channel at wrap.
 static uint32_t adat_ring_base_holder;
 
@@ -77,6 +97,22 @@ static uint32_t adat_ring_base_holder;
 static uint32_t adat_silence_nrzi[2][ADAT_FRAME_WORDS];
 static uint32_t adat_silence_exit[2];
 static uint32_t adat_line_level;   // line level after the last ring write
+
+// TDM8: out pins,2 side 1 / mov y,y side 0 (1 side-set bit, 4-bit delay field).
+static const uint16_t tdm_pio_instr[] = { 0x7002, 0xA042 };
+static const struct pio_program tdm_pio_program = {
+    .instructions = tdm_pio_instr, .length = 2, .origin = -1,
+};
+static uint     tdm_pio_offset;
+static uint16_t tdm_spread_lut[256];     // byte -> 8 BCLK pairs, DATA in bit 0 of each
+static uint32_t tdm_silence[TDM_FRAME_WORDS];
+
+static volatile uint8_t bulk_cfg_format;   // BULK_FORMAT_*
+static volatile uint8_t tdm_cfg_bclk = PICO_TDM_BCLK_PIN;
+static uint8_t  bulk_hw_format;            // format the routed pins belong to
+static uint8_t  tdm_hw_bclk = 0xFF;
+static uint32_t bulk_frame_words = ADAT_FRAME_WORDS;   // words per ring frame
+static uint32_t bulk_frame_shift = 5;                  // log2(bytes per frame)
 
 static uint32_t adat_wr_frame;
 // Mutated only from Core 0 main-loop context (resync/stop paths).  The DSP
@@ -95,6 +131,7 @@ static bool     adat_need_local_resync;
 
 static volatile uint8_t adat_cfg_enabled;
 static volatile uint8_t adat_cfg_pin = PICO_ADAT_PIN;
+static volatile uint8_t tdm_cfg_pin  = PICO_TDM_DATA_PIN;   // FSYNC = +1
 volatile bool adat_output_config_dirty;
 
 // Servo-supplied divider (0 = none); same 16.8 value the SPDIF TX SMs run.
@@ -152,6 +189,19 @@ static inline uint32_t adat_encode_frame(uint32_t *w, const int32_t s24[8],
     return m & 1u;
 }
 
+// One TDM8 frame: 8 slots x (24-bit sample, 8 zero bits) = 16 words, two words
+// per slot, 16 BCLK (32 bits) each, first BCLK in the lowest bit pair.  FSYNC
+// (bit 1 of the first pair) marks the MSB of slot 0.
+static inline void tdm_encode_frame(uint32_t *w, const int32_t s24[8]) {
+    for (int ch = 0; ch < 8; ch++) {
+        uint32_t s = (uint32_t)s24[ch];
+        w[2 * ch]     = (uint32_t)tdm_spread_lut[(s >> 16) & 0xFFu]
+                      | ((uint32_t)tdm_spread_lut[(s >> 8) & 0xFFu] << 16);
+        w[2 * ch + 1] = tdm_spread_lut[s & 0xFFu];
+    }
+    w[0] |= 2u;
+}
+
 // ---------------------------------------------------------------------------
 // Ring bookkeeping
 // ---------------------------------------------------------------------------
@@ -161,7 +211,7 @@ static inline uint32_t adat_rd_frame(void) {
                               - (uintptr_t)adat_ring);
     // At the wrap instant read_addr can equal ring end for one control-channel
     // transfer; the modulo folds it to 0.
-    return (off >> 5) % ADAT_RING_FRAMES;   // 32 bytes per frame
+    return (off >> bulk_frame_shift) % ADAT_RING_FRAMES;
 }
 
 static inline uint32_t adat_lead_frames(void) {
@@ -171,10 +221,16 @@ static inline uint32_t adat_lead_frames(void) {
 static void adat_write_silence(uint32_t frames) {
     uint32_t wf = adat_wr_frame;
     uint32_t lvl = adat_line_level;
+    const bool tdm = (bulk_hw_format == BULK_FORMAT_TDM8);
     for (uint32_t i = 0; i < frames; i++) {
-        memcpy(&adat_ring[wf * ADAT_FRAME_WORDS], adat_silence_nrzi[lvl],
-               ADAT_FRAME_WORDS * sizeof(uint32_t));
-        lvl = adat_silence_exit[lvl];
+        if (tdm) {
+            memcpy(&adat_ring[wf * TDM_FRAME_WORDS], tdm_silence,
+                   sizeof(tdm_silence));
+        } else {
+            memcpy(&adat_ring[wf * ADAT_FRAME_WORDS], adat_silence_nrzi[lvl],
+                   ADAT_FRAME_WORDS * sizeof(uint32_t));
+            lvl = adat_silence_exit[lvl];
+        }
         if (++wf == ADAT_RING_FRAMES) wf = 0;
     }
     adat_line_level = lvl;
@@ -198,6 +254,8 @@ static void adat_update_divider(void) {
     // value from a previous rate can never be applied.
     uint32_t div = adat_nom_div;
     uint32_t servo = adat_servo_div;
+    // The servo value is for a 256*Fs PIO clock; TDM8 runs 512*Fs.
+    if (bulk_hw_format == BULK_FORMAT_TDM8) servo >>= 1;
     if (servo && servo > div - div / 128 && servo < div + div / 128)
         div = servo;
     pio_sm_set_clkdiv_int_frac(ADAT_PIO, ADAT_SM,
@@ -208,6 +266,7 @@ static void adat_hw_init_once(void) {
     if (adat_hw_init_done) return;
     pio_sm_claim(ADAT_PIO, ADAT_SM);
     adat_pio_offset = pio_add_program(ADAT_PIO, &adat_pio_program);
+    tdm_pio_offset  = pio_add_program(ADAT_PIO, &tdm_pio_program);
     dma_channel_claim(ADAT_DMA_DATA_CH);
     dma_channel_claim(ADAT_DMA_CTRL_CH);
     adat_ring_base_holder = (uint32_t)(uintptr_t)adat_ring;
@@ -216,12 +275,24 @@ static void adat_hw_init_once(void) {
 
 static void adat_sm_configure(void) {
     pio_sm_config c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c, adat_pio_offset, adat_pio_offset);
-    sm_config_set_out_pins(&c, adat_hw_pin, 1);
-    sm_config_set_set_pins(&c, adat_hw_pin, 1);      // lets stop force the pin low
-    sm_config_set_out_shift(&c, false, true, 32);    // shift left: MSB first
+    uint offset;
+    if (bulk_hw_format == BULK_FORMAT_TDM8) {
+        offset = tdm_pio_offset;
+        sm_config_set_wrap(&c, offset, offset + 1);
+        sm_config_set_out_pins(&c, adat_hw_pin, 2);      // DATA, FSYNC = DATA + 1
+        sm_config_set_set_pins(&c, adat_hw_pin, 2);
+        sm_config_set_sideset(&c, 1, false, false);
+        sm_config_set_sideset_pins(&c, tdm_hw_bclk);
+        sm_config_set_out_shift(&c, true, true, 32);     // shift right: first BCLK = low bits
+    } else {
+        offset = adat_pio_offset;
+        sm_config_set_wrap(&c, offset, offset);
+        sm_config_set_out_pins(&c, adat_hw_pin, 1);
+        sm_config_set_set_pins(&c, adat_hw_pin, 1);      // lets stop force the pin low
+        sm_config_set_out_shift(&c, false, true, 32);    // shift left: MSB first
+    }
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
-    pio_sm_init(ADAT_PIO, ADAT_SM, adat_pio_offset, &c);
+    pio_sm_init(ADAT_PIO, ADAT_SM, offset, &c);
     adat_update_divider();                            // pio_sm_init resets the divider
 }
 
@@ -238,18 +309,31 @@ static void adat_stop_hw(void) {
     pio_sm_clear_fifos(ADAT_PIO, ADAT_SM);
     // Force only OUR pin low via the SM's SET mapping; pio_sm_set_pins()
     // would transiently drive every GPIO muxed to this PIO block (PDM).
-    if (adat_hw_pin != 0xFF)
+    if (adat_hw_pin != 0xFF) {
         pio_sm_exec(ADAT_PIO, ADAT_SM, pio_encode_set(pio_pins, 0));
+        if (bulk_hw_format == BULK_FORMAT_TDM8)   // BCLK low (side-set 0)
+            pio_sm_exec(ADAT_PIO, ADAT_SM,
+                        pio_encode_nop() | pio_encode_sideset(1, 0));
+    }
     adat_running = false;
+}
+
+static void bulk_release_gpio(uint8_t pin) {
+    // Only release if still ours: another peripheral may have re-claimed the
+    // pin between a deferred disable and this service (its mux is not PIO1).
+    if (gpio_get_function(pin) == GPIO_FUNC_PIO1) {
+        gpio_set_function(pin, GPIO_FUNC_NULL);
+        gpio_set_dir(pin, GPIO_IN);
+    }
 }
 
 static void adat_release_pin(void) {
     if (adat_hw_pin == 0xFF) return;
-    // Only release if still ours: another peripheral may have re-claimed the
-    // pin between a deferred disable and this service (its mux is not PIO1).
-    if (gpio_get_function(adat_hw_pin) == GPIO_FUNC_PIO1) {
-        gpio_set_function(adat_hw_pin, GPIO_FUNC_NULL);
-        gpio_set_dir(adat_hw_pin, GPIO_IN);
+    bulk_release_gpio(adat_hw_pin);
+    if (bulk_hw_format == BULK_FORMAT_TDM8) {
+        bulk_release_gpio((uint8_t)(adat_hw_pin + 1));
+        bulk_release_gpio(tdm_hw_bclk);
+        tdm_hw_bclk = 0xFF;
     }
     adat_hw_pin = 0xFF;
 }
@@ -274,7 +358,7 @@ static void adat_arm_dma(void) {
     channel_config_set_chain_to(&dc, ADAT_DMA_CTRL_CH);
     channel_config_set_high_priority(&dc, true);
     dma_channel_configure(ADAT_DMA_DATA_CH, &dc, &ADAT_PIO->txf[ADAT_SM],
-                          adat_ring, ADAT_RING_FRAMES * ADAT_FRAME_WORDS, true);
+                          adat_ring, ADAT_RING_FRAMES * bulk_frame_words, true);
 }
 
 static inline uint32_t adat_slot0_starvations(void) {
@@ -286,12 +370,14 @@ static inline uint32_t adat_slot0_starvations(void) {
 static void adat_notify_if_changed(void) {
     // Whole tuple, so enable/pin changes made while rate-suspended (active
     // unchanged) still produce an event.
-    uint32_t state = ((uint32_t)adat_cfg_pin << 16)
+    uint32_t state = ((uint32_t)bulk_cfg_format << 24)
+                   | ((uint32_t)(bulk_cfg_format ? tdm_cfg_pin : adat_cfg_pin) << 16)
                    | ((uint32_t)adat_cfg_enabled << 8)
                    | (adat_running ? 1u : 0u);
     if (state == adat_last_notified_state) return;
     adat_last_notified_state = state;
-    notify_push_adat_state(adat_cfg_enabled, adat_running ? 1 : 0, adat_cfg_pin);
+    notify_push_adat_state(adat_cfg_enabled, adat_running ? 1 : 0,
+                           bulk_cfg_format ? tdm_cfg_pin : adat_cfg_pin);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +406,17 @@ void adat_output_init(void) {
         adat_hdr_nrzi[lvl] = (uint16_t)t;
         adat_hdr_exit[lvl] = l;
     }
+    // TDM8: spread each byte MSB-first onto the DATA bit of 8 BCLK pairs.
+    for (uint32_t b = 0; b < 256; b++) {
+        uint32_t t = 0;
+        for (int k = 0; k < 8; k++)
+            t |= ((b >> (7 - k)) & 1u) << (2 * k);
+        tdm_spread_lut[b] = (uint16_t)t;
+    }
+    {
+        const int32_t zero[8] = {0};
+        tdm_encode_frame(tdm_silence, zero);
+    }
     // Silence frames per entry level, via the same encoder as live audio.
     const int32_t zero[8] = {0};
     for (uint32_t lvl = 0; lvl < 2; lvl++)
@@ -334,6 +431,33 @@ void adat_output_set_config(bool enabled, uint8_t pin) {
     adat_output_config_dirty = true;
 }
 
+void bulk_output_set_format(uint8_t format) {
+    format = (format == BULK_FORMAT_TDM8) ? BULK_FORMAT_TDM8 : BULK_FORMAT_ADAT;
+    if (bulk_cfg_format == format) return;
+    bulk_cfg_format = format;
+    adat_output_config_dirty = true;
+}
+
+uint8_t bulk_output_format(void) { return bulk_cfg_format; }
+
+void tdm_output_set_pins(uint8_t data_pin, uint8_t bclk_pin) {
+    if (tdm_cfg_pin == data_pin && tdm_cfg_bclk == bclk_pin) return;
+    tdm_cfg_pin = data_pin;
+    tdm_cfg_bclk = bclk_pin;
+    adat_output_config_dirty = true;
+}
+
+uint8_t tdm_output_data_pin(void) { return tdm_cfg_pin; }
+uint8_t tdm_output_bclk_pin(void) { return tdm_cfg_bclk; }
+
+bool bulk_output_owns_pin(uint8_t pin) {
+    if (!adat_cfg_enabled) return false;
+    if (bulk_cfg_format == BULK_FORMAT_TDM8)
+        return pin == tdm_cfg_pin || pin == (uint8_t)(tdm_cfg_pin + 1)
+            || pin == tdm_cfg_bclk;
+    return pin == adat_cfg_pin;
+}
+
 bool    adat_output_config_enabled(void) { return adat_cfg_enabled != 0; }
 uint8_t adat_output_pin(void)            { return adat_cfg_pin; }
 
@@ -345,7 +469,7 @@ bool    adat_output_is_active(void)      { return adat_running; }
 void adat_output_get_status(AdatStatus *out) {
     out->enabled      = adat_cfg_enabled;
     out->active       = adat_running ? 1 : 0;
-    out->pin          = adat_cfg_pin;
+    out->pin          = bulk_cfg_format ? tdm_cfg_pin : adat_cfg_pin;
     out->rate_ok      = adat_rate_ok ? 1 : 0;
     out->resync_count = adat_resync_count;
     out->slip_count   = adat_slip_count;
@@ -388,18 +512,35 @@ void adat_output_resync(void) {
     }
 
     adat_hw_init_once();
-    if (adat_hw_pin != adat_cfg_pin) {
-        adat_release_pin();
-        adat_hw_pin = adat_cfg_pin;
-        pio_gpio_init(ADAT_PIO, adat_hw_pin);
-        pio_sm_set_consecutive_pindirs(ADAT_PIO, ADAT_SM, adat_hw_pin, 1, true);
+    const uint8_t fmt  = bulk_cfg_format;
+    const uint8_t data = (fmt == BULK_FORMAT_TDM8) ? tdm_cfg_pin : adat_cfg_pin;
+    const uint8_t bclk = tdm_cfg_bclk;
+    if (adat_hw_pin != data || bulk_hw_format != fmt ||
+        (fmt == BULK_FORMAT_TDM8 && tdm_hw_bclk != bclk)) {
+        adat_release_pin();   // releases the pins of the OLD format
+        bulk_hw_format = fmt;
+        adat_hw_pin = data;
+        pio_gpio_init(ADAT_PIO, data);
+        if (fmt == BULK_FORMAT_TDM8) {
+            tdm_hw_bclk = bclk;
+            pio_gpio_init(ADAT_PIO, (uint)data + 1);
+            pio_gpio_init(ADAT_PIO, bclk);
+            pio_sm_set_consecutive_pindirs(ADAT_PIO, ADAT_SM, data, 2, true);
+            pio_sm_set_consecutive_pindirs(ADAT_PIO, ADAT_SM, bclk, 1, true);
+        } else {
+            pio_sm_set_consecutive_pindirs(ADAT_PIO, ADAT_SM, data, 1, true);
+        }
     }
+    bulk_frame_words = (fmt == BULK_FORMAT_TDM8) ? TDM_FRAME_WORDS : ADAT_FRAME_WORDS;
+    bulk_frame_shift = (fmt == BULK_FORMAT_TDM8) ? 6 : 5;
     // Pick up the active input servo's current divider (0 when no servo is
     // locked; at most one of the two can be nonzero since input sources are
     // exclusive); adat_update_divider() sanity-bounds it against nominal.
     {
         uint32_t sys = clock_get_hz(clk_sys);
-        adat_nom_div = sys / adat_cur_freq + (sys % adat_cur_freq != 0);
+        // PIO clock: 256*Fs for ADAT, 512*Fs for TDM8 (two cycles per BCLK).
+        uint32_t fs = adat_cur_freq * (fmt == BULK_FORMAT_TDM8 ? 2u : 1u);
+        adat_nom_div = sys / fs + (sys % fs != 0);
     }
     adat_servo_div = spdif_input_current_tx_divider();
     if (adat_servo_div == 0) adat_servo_div = i2s_slave_current_tx_divider();
@@ -408,6 +549,9 @@ void adat_output_resync(void) {
 
     // Line starts low: force the pin and seed the NRZI encoder to match.
     pio_sm_exec(ADAT_PIO, ADAT_SM, pio_encode_set(pio_pins, 0));
+    if (fmt == BULK_FORMAT_TDM8)
+        pio_sm_exec(ADAT_PIO, ADAT_SM,
+                    pio_encode_nop() | pio_encode_sideset(1, 0));
     adat_line_level = 0;
 
     // Alignment cushion: the constant ADAT-vs-slot lead, re-established at
@@ -482,10 +626,14 @@ void adat_output_push_block(const out_s24_t (*bufs)[192], uint32_t sample_count)
 
     uint32_t wf = adat_wr_frame;
     uint32_t lvl = adat_line_level;
+    const bool tdm = (bulk_hw_format == BULK_FORMAT_TDM8);
     for (uint32_t i = 0; i < sample_count; i++) {
         int32_t s[8];
         for (int ch = 0; ch < 8; ch++) s[ch] = bufs[ch][i];
-        lvl = adat_encode_frame(&adat_ring[wf * ADAT_FRAME_WORDS], s, lvl);
+        if (tdm)
+            tdm_encode_frame(&adat_ring[wf * TDM_FRAME_WORDS], s);
+        else
+            lvl = adat_encode_frame(&adat_ring[wf * ADAT_FRAME_WORDS], s, lvl);
         if (++wf == ADAT_RING_FRAMES) wf = 0;
     }
     adat_line_level = lvl;

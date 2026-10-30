@@ -49,6 +49,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 // 11 = DAC mute, 13 = MCK, 14-19 = I2S/UART/I2C).
 #if PICO_RP2350
 #define PICO_ADAT_PIN          12
+// TDM8 bulk output (shares the ADAT output engine): DATA, FSYNC = DATA + 1,
+// BCLK.  GPIO 20-22 carry no other default function.
+#define PICO_TDM_DATA_PIN      20
+#define PICO_TDM_BCLK_PIN      22
 #endif
 
 // Legacy aliases
@@ -325,6 +329,15 @@ extern volatile uint32_t nominal_feedback_10_14;
                                           // PIN_RESET_TO_DEFAULT restores PICO_ADAT_PIN
 #define REQ_GET_ADAT_PIN            0xCD  // returns uint8_t
 #define REQ_GET_ADAT_STATUS         0xCE  // returns AdatStatus (8 B)
+
+// TDM8 format select for the same bulk output (RP2350 only; ADAT_ENABLE turns
+// whichever format is selected on/off).  TDM8 uses DATA (pin), FSYNC (pin + 1)
+// and BCLK; runs only at 44.1/48 kHz like ADAT.
+#define REQ_SET_BULK_FORMAT         0xCF  // wValue = 0 ADAT / 1 TDM8, returns status byte
+#define REQ_GET_BULK_FORMAT         0x80  // returns uint8_t
+#define REQ_SET_TDM_PINS            0x81  // wValue = (BCLK<<8)|DATA; DATA 0xFF and/or
+                                          // BCLK 0xFF restore the default; returns status byte
+#define REQ_GET_TDM_PINS            0x82  // returns {DATA, BCLK}
 
 // Buffer statistics
 #define REQ_GET_BUFFER_STATS        0xB0
