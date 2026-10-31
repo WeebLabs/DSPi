@@ -52,6 +52,7 @@
 #include "dac_hw_mute.h"     // hold query for flash_mute_hold_samples floor
 #include "audio_pipeline.h"  // output-ring stall bracket around the flash window
 #include "output_latency.h"  // option IDs for the V23 latency block sanitize
+#include "input_source_names.h"
 
 #include "hardware/flash.h"
 #include "hardware/sync.h"
@@ -631,6 +632,9 @@ typedef struct __attribute__((packed)) {
 // V23 appends the device-global output latency block (FlashOutputLatencyConfig)
 // after the limiter.  V22 migrates by a whole-block prefix copy; the zeroed
 // block reads as "never saved" and dir_sanitize_output_latency() seeds it.
+//
+// V24 appends the device-global input source names after the latency block.
+// V23 migrates by a whole-block prefix copy; a zeroed entry means unnamed.
 
 // Device-global output limiter settings, used when output_config_mode is
 // INDEPENDENT.  Fixed at the RP2350 output count so the layout is the same on
@@ -729,6 +733,10 @@ typedef struct __attribute__((packed)) {
 
     // V23 addition: output latency (device-global).  version 0 = never saved.
     FlashOutputLatencyConfig output_latency; // 4 bytes
+
+    // V24 addition: user names per InputSource (device-global).  All-zero
+    // entry = unnamed; hosts and the display supply the built-in label.
+    char input_source_names[INPUT_SOURCE_NAME_SLOTS][INPUT_SOURCE_NAME_LEN];  // 256 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1231,6 +1239,13 @@ _Static_assert(offsetof(PresetDirectory, output_latency) == PRESET_DIRECTORY_V22
                "V23 output latency block must directly follow the V22 layout");
 _Static_assert(sizeof(FlashOutputLatencyConfig) == 4, "V23 output latency block geometry is frozen");
 
+// V24 only appends, so a V23 directory migrates by copying its whole data block.
+#define PRESET_DIRECTORY_V23_SIZE (PRESET_DIRECTORY_V22_SIZE + 4)
+_Static_assert(offsetof(PresetDirectory, input_source_names) == PRESET_DIRECTORY_V23_SIZE,
+               "V24 input source name block must directly follow the V23 layout");
+_Static_assert(sizeof(((PresetDirectory *)0)->input_source_names) == 256,
+               "V24 input source name block geometry is frozen");
+
 // V20 only differs by the trailing aux table, so the V20->V21 migration is a
 // prefix copy that stops at cs_aux; everything ahead of it must match V21.
 _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirectory, cs_display),
@@ -1239,7 +1254,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  23
+#define DIR_VERSION_CURRENT  24
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1259,7 +1274,7 @@ typedef struct __attribute__((packed)) {
     uint8_t bypass;
     uint8_t padding[3];
     float delays_ms[NUM_CHANNELS];
-    // Legacy per-channel gain/mute (V2)
+    // Retired legacy per-channel gain/mute (V2): written as zero, ignored on load.
     float channel_gain_db[3];
     uint8_t channel_mute[3];
     uint8_t padding2;
@@ -1535,9 +1550,6 @@ extern volatile float master_volume_linear;
 extern volatile int32_t master_volume_q15;
 // Defined in usb_audio.c — clamps, emits v1/v2 host notifications.
 extern void update_master_volume(float db);
-extern volatile float channel_gain_db[3];
-extern volatile int32_t channel_gain_mul[3];
-extern volatile bool channel_mute[3];
 extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
@@ -1585,6 +1597,7 @@ static void dir_sanitize_cs_macros(void);                             // defined
 static void dir_sanitize_cs_display(void);                            // defined below
 static void dir_sanitize_limiter(void);                               // defined below
 static void dir_sanitize_output_latency(void);                        // defined below
+static void dir_sanitize_input_source_names(void);                    // defined below
 static void cs_config_from_v1(CsFlashConfig *dst, const CsFlashConfig_v1 *src);  // defined below
 static void cs_ir_from_v1(CsIrConfig *dst, const CsIrConfig_v1 *src);            // defined below
 // Forward declaration — defined alongside validate_slot() in the SLOT
@@ -1855,14 +1868,41 @@ static bool dir_load_cache(void) {
         dir_sanitize_cs_display();
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
+        dir_sanitize_input_source_names();
         dir_cache_valid = true;
         return true;
     }
 
+    if (flash_dir->version == 23) {
+        // V23 -> V24 migration.  V24 only appends the input source names, so
+        // the whole V23 data block copies across and every source reads as
+        // unnamed.
+        const uint8_t *v23_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v23_data_len = PRESET_DIRECTORY_V23_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v23_data_start, v23_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        // Header excluded: dir_flush() restamps magic/version/crc.
+        memcpy(&dir_cache.startup_mode, v23_data_start, v23_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
+        return true;
+    }
+
     if (flash_dir->version == 22) {
-        // V22 -> V23 migration.  V23 only appends the output latency block, so
-        // the whole V22 data block copies across; the zeroed block then reads
-        // as "never saved" and dir_sanitize_output_latency() seeds the default.
+        // V22 -> V24 migration.  V23/V24 only append the output latency block
+        // and the input source names, so the whole V22 data block copies
+        // across; dir_sanitize_output_latency() seeds the zeroed latency block.
         const uint8_t *v22_data_start = (const uint8_t *)&flash_dir->startup_mode;
         size_t v22_data_len = PRESET_DIRECTORY_V22_SIZE - offsetof(PresetDirectory, startup_mode);
         if (crc32(v22_data_start, v22_data_len) != flash_dir->crc32) {
@@ -1887,7 +1927,7 @@ static bool dir_load_cache(void) {
     }
 
     if (flash_dir->version == 20) {
-        // V20 -> V23 migration.  V21 dropped the trailing aux output table, so
+        // V20 -> V24 migration.  V21 dropped the trailing aux output table, so
         // copy the V20 data block up to it and discard the rest; any aux output
         // configured on a V20 build is gone and must be rebuilt as a binding.
         const PresetDirectory_v20 *v20 = (const PresetDirectory_v20 *)flash_dir;
@@ -1916,8 +1956,9 @@ static bool dir_load_cache(void) {
     }
 
     if (flash_dir->version == 19 || flash_dir->version == 21) {
-        // V19 / V21 -> V23 migration.  V21 is byte-identical to V19 and V22/V23
-        // only append (limiter, latency), so the whole data block copies across.
+        // V19 / V21 -> V24 migration.  V21 is byte-identical to V19 and V22-V24
+        // only append (limiter, latency, source names), so the whole data block
+        // copies across.
         const PresetDirectory_v19 *v19 = (const PresetDirectory_v19 *)flash_dir;
         const uint8_t *v19_data_start = (const uint8_t *)&v19->startup_mode;
         size_t v19_data_len = sizeof(PresetDirectory_v19) - offsetof(PresetDirectory_v19, startup_mode);
@@ -2913,6 +2954,12 @@ static void dir_sanitize_output_latency(void) {
     c->reserved[0] = c->reserved[1] = 0;
 }
 
+// Corruption guard: no entry may reach a reader unterminated.
+static void dir_sanitize_input_source_names(void) {
+    for (int s = 0; s < INPUT_SOURCE_NAME_SLOTS; s++)
+        dir_cache.input_source_names[s][INPUT_SOURCE_NAME_LEN - 1] = '\0';
+}
+
 // Write the RAM-cached directory back to flash.
 // Recomputes the CRC before writing.
 static int dir_flush(void) {
@@ -3589,11 +3636,6 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // Delays
     memcpy(slot->delays_ms, (void *)channel_delays_ms, sizeof(slot->delays_ms));
 
-    // Legacy per-channel gain/mute
-    memcpy(slot->channel_gain_db, (void *)channel_gain_db, sizeof(slot->channel_gain_db));
-    for (int i = 0; i < 3; i++)
-        slot->channel_mute[i] = channel_mute[i] ? 1 : 0;
-
     // Loudness
     slot->loudness_enabled = loudness_enabled ? 1 : 0;
     slot->loudness_output_mask = loudness_output_mask;
@@ -3935,14 +3977,6 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 
     // Delays
     memcpy((void *)channel_delays_ms, slot->delays_ms, sizeof(channel_delays_ms));
-
-    // Legacy per-channel gain/mute
-    for (int i = 0; i < 3; i++) {
-        channel_gain_db[i] = slot->channel_gain_db[i];
-        float g = db_to_linear(slot->channel_gain_db[i]);
-        channel_gain_mul[i] = (int32_t)(g * 32768.0f);
-        channel_mute[i] = (slot->channel_mute[i] != 0);
-    }
 
     // Loudness
     loudness_enabled = (slot->loudness_enabled != 0);
@@ -4661,6 +4695,23 @@ uint8_t preset_get_output_latency(void) {
     return dir_cache.output_latency.option_id;
 }
 
+const char *preset_stored_input_source_name(uint8_t src) {
+    if (src >= INPUT_SOURCE_NAME_SLOTS) return NULL;
+    dir_ensure();
+    return dir_cache.input_source_names[src];
+}
+
+uint8_t preset_set_input_source_names(uint8_t mask,
+                                      const char names[][INPUT_SOURCE_NAME_LEN]) {
+    dir_ensure();
+    for (int s = 0; s < INPUT_SOURCE_NAME_SLOTS; s++) {
+        if (!(mask & (1u << s))) continue;
+        memcpy(dir_cache.input_source_names[s], names[s], INPUT_SOURCE_NAME_LEN);
+        dir_cache.input_source_names[s][INPUT_SOURCE_NAME_LEN - 1] = '\0';
+    }
+    return dir_flush() == 0 ? PRESET_OK : PRESET_ERR_FLASH_WRITE;
+}
+
 // Control-interface (UART/I2C) persistence.  Mirrors preset_set_dac_hw_mute:
 // synchronous, main-loop only, writes the directory sector once.  A NULL
 // pointer leaves that interface's stored config unchanged.  Callers must have
@@ -4933,13 +4984,6 @@ static void apply_factory_defaults(void) {
 
     // Bypass
     bypass_master_eq = false;
-
-    // Per-channel gain and mute
-    for (int i = 0; i < 3; i++) {
-        channel_gain_db[i] = 0.0f;
-        channel_gain_mul[i] = 32768;
-        channel_mute[i] = false;
-    }
 
     // Loudness
     loudness_enabled = false;

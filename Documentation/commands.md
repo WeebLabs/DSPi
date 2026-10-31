@@ -332,17 +332,17 @@ vendor mute (distinct from the UAC1 mute key).
 | 0x46 | `SET_BYPASS` | W | 0 | payload **1 byte** (0/1) |
 | 0x47 | `GET_BYPASS` | R | 0 | resp **1 byte** (0/1) |
 
-### 5.5 Legacy per-channel gain/mute (master path, channels 0..2)
+### 5.5 Input source names
 
 | ID | Name | Dir | wValue | Payload / Response |
 |----|------|-----|--------|--------------------|
-| 0x54 | `SET_CHANNEL_GAIN` | W | ch (0..2) | payload f32 dB |
-| 0x55 | `GET_CHANNEL_GAIN` | R | ch (0..2) | resp f32 dB |
-| 0x56 | `SET_CHANNEL_MUTE` | W | ch (0..2) | payload **1 byte** (0/1) |
-| 0x57 | `GET_CHANNEL_MUTE` | R | ch (0..2) | resp **1 byte** (0/1) |
+| 0x54 | `SET_INPUT_SOURCE_NAME` | W | source ID (0..6) | payload 1-32 bytes; a leading NUL clears; bytes past 31 dropped |
+| 0x55 | `GET_INPUT_SOURCE_NAME` | R | source ID (0..6) | resp **32 bytes**, NUL-terminated; all zeros = unnamed |
 
-These are the legacy 3-channel gain/mute controls. For per-output control prefer
-the matrix mixer commands (Section 8).
+Names are device-global and persist in the preset directory. 0x56/0x57 are
+unassigned. Until 2026-10-31 0x54-0x57 carried a legacy 3-channel gain/mute
+that no audio path read; firmware from before then answers 0x55 with 4 bytes.
+See `Features/input_source_names_spec.md`.
 
 ---
 
@@ -893,7 +893,7 @@ Every settable parameter has a matching read. Use this to verify a write landed
 | 0xDA SET_USER_VOLUME | 0xDB GET_USER_VOLUME |
 | 0xDC SET_USER_MUTE | 0xDD GET_USER_MUTE |
 | 0x46 SET_BYPASS | 0x47 GET_BYPASS |
-| 0x54 / 0x56 SET_CHANNEL_GAIN/MUTE | 0x55 / 0x57 GET_CHANNEL_GAIN/MUTE |
+| 0x54 SET_INPUT_SOURCE_NAME | 0x55 GET_INPUT_SOURCE_NAME (staged name reads back at once) |
 | 0x48 SET_DELAY | 0x49 GET_DELAY |
 | 0x58/0x5A/0x5C loudness | 0x59/0x5B/0x5D |
 | 0xFA SET_LOUDNESS_MASK | 0xFB GET_LOUDNESS_MASK |
@@ -986,10 +986,8 @@ with no OUT data, issued as an IN transfer (returns a status/echo byte).
 | 0x51 | SAVE_PARAMS | W-as-R | legacy: `save_params_pending` -> `flash_save_params()` (flash bracket; not gated) |
 | 0x52 | SAVE_OUTPUT_CONFIG | W-as-R | `flash_save_output_config_pending` -> `preset_save_output_config()` (flash; not gated) |
 | 0x53 | FACTORY_RESET | W-as-R | `factory_reset_pending` -> `flash_factory_reset()` + `dsp_recalculate_all_filters()` + delay/Core1/type resets (gated) |
-| 0x54 | SET_CHANNEL_GAIN | W | legacy (ch<3): writes `channel_gain_db/_mul/_linear[ch]` |
-| 0x55 | GET_CHANNEL_GAIN | R | returns `channel_gain_db[ch]` |
-| 0x56 | SET_CHANNEL_MUTE | W | writes `channel_mute[ch]` (ch<3) |
-| 0x57 | GET_CHANNEL_MUTE | R | returns `channel_mute[ch]` |
+| 0x54 | SET_INPUT_SOURCE_NAME | W | `input_source_name_stage()` -> `input_source_names_apply_pending()` -> `preset_set_input_source_names()` (flash bracket; one write for every staged source) |
+| 0x55 | GET_INPUT_SOURCE_NAME | R | returns the staged name if pending, else `dir_cache.input_source_names[src]` |
 | 0x58 | SET_LOUDNESS | W | writes `loudness_enabled`; reselects `current_loudness_coeffs` immediately |
 | 0x59 | GET_LOUDNESS | R | returns `loudness_enabled` |
 | 0x5A | SET_LOUDNESS_REF | W | clamps `loudness_ref_spl`; `loudness_recompute_pending` -> `loudness_recompute_table()` |

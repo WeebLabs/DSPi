@@ -20,6 +20,7 @@
 #include "audio_input.h"
 #include "audio_pipeline.h"
 #include "output_latency.h"
+#include "input_source_names.h"
 #include "loop_prof.h"   // DSPI_LOOP_PROF section marks (empty otherwise)
 #include "bg_job.h"
 #include "spdif_input.h"
@@ -2275,6 +2276,12 @@ int main(void) {
                     printf("preset_set_startup failed: mode=%u slot=%u err=%u\n",
                            (unsigned)mode, (unsigned)slot, (unsigned)status);
                 }
+            }
+
+            if (input_source_names_pending()) {
+                prepare_flash_write_operation();
+                input_source_names_apply_pending();
+                complete_flash_write_operation_full();
             }
 
             // Latency: the full completion restarts every output at the new

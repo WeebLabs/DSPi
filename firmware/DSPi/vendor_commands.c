@@ -44,6 +44,7 @@
 #include "upmix.h"
 #include "adat_output.h"
 #include "adat_input.h"
+#include "input_source_names.h"
 #include "loopback.h"   // DSPI_LOOPBACK glitch counters (self-guarded; empty otherwise)
 #include "usb_descriptors.h"
 #include "tusb.h"
@@ -738,33 +739,15 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             }
             break;
 
-        case REQ_SET_CHANNEL_GAIN: {
-            uint8_t ch = vendor_last_wValue & 0xFF;
-            if (ch < 3 && buffer->data_len >= 4) {
-                float db;
-                memcpy(&db, vendor_rx_buf, 4);
-                channel_gain_db[ch] = db;
-                float linear = powf(10.0f, db / 20.0f);
-                channel_gain_mul[ch] = (int32_t)(linear * 32768.0f);
-                channel_gain_linear[ch] = linear;
-                notify_param_write(
-                    (uint16_t)(offsetof(WireBulkParams, legacy.gain_db) + ch * sizeof(float)),
-                    sizeof(float), &db);
+        case REQ_SET_INPUT_SOURCE_NAME:
+            // Persisted on the main loop; an invalid source is a no-op.  The
+            // high-byte check matches the GET, which STALLs on it.
+            if (buffer->data_len > 0 && vendor_last_wValue <= 0xFF) {
+                (void)input_source_name_stage((uint8_t)vendor_last_wValue,
+                                              vendor_rx_buf, buffer->data_len,
+                                              _dispatch_src);
             }
             break;
-        }
-
-        case REQ_SET_CHANNEL_MUTE: {
-            uint8_t ch = vendor_last_wValue & 0xFF;
-            if (ch < 3 && buffer->data_len >= 1) {
-                channel_mute[ch] = (vendor_rx_buf[0] != 0);
-                uint8_t v = channel_mute[ch] ? 1 : 0;
-                notify_param_write(
-                    (uint16_t)(offsetof(WireBulkParams, legacy.mute) + ch),
-                    1, &v);
-            }
-            break;
-        }
 
         case REQ_SET_LOUDNESS:
             if (buffer->data_len >= 1) {
@@ -2072,24 +2055,12 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 return true;
             }
 
-            case REQ_GET_CHANNEL_GAIN: {
-                uint8_t ch = (uint8_t)setup->wValue;
-                if (ch < 3) {
-                    memcpy(resp_buf, (void*)&channel_gain_db[ch], 4);
-                    vendor_send_response(resp_buf, 4);
-                    return true;
-                }
-                return false;
-            }
-
-            case REQ_GET_CHANNEL_MUTE: {
-                uint8_t ch = (uint8_t)setup->wValue;
-                if (ch < 3) {
-                    resp_buf[0] = channel_mute[ch] ? 1 : 0;
-                    vendor_send_response(resp_buf, 1);
-                    return true;
-                }
-                return false;
+            case REQ_GET_INPUT_SOURCE_NAME: {
+                if (setup->wValue > 0xFF ||
+                    !input_source_name_get((uint8_t)setup->wValue, (char *)resp_buf))
+                    return false;
+                vendor_send_response(resp_buf, INPUT_SOURCE_NAME_LEN);
+                return true;
             }
 
             case REQ_GET_LOUDNESS: {

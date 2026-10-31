@@ -6,6 +6,7 @@
 #include "config.h"
 #include "dac_hw_mute.h"        // DacHwMuteConfig (stored in PresetDirectory)
 #include "control_surfaces.h"   // CsFlashConfig (stored in PresetDirectory)
+#include "input_source_names.h" // INPUT_SOURCE_NAME_LEN (stored in PresetDirectory)
 
 // Legacy result codes (used by flash_save_params and the preset/boot API)
 #define FLASH_OK            0
@@ -108,6 +109,14 @@ void preset_get_dac_hw_mute(DacHwMuteConfig *out);
 // The setter writes flash: main loop only, inside a flash write bracket.
 void preset_set_output_latency(uint8_t id);
 uint8_t preset_get_output_latency(void);
+
+// Input source names (device-global, directory-stored, V24+).  The getter
+// points into the RAM cache (valid until the next directory write; NULL for an
+// index past the table).  The setter writes the entries in mask and flushes
+// once: main loop only, inside a flash write bracket.
+const char *preset_stored_input_source_name(uint8_t src);
+uint8_t preset_set_input_source_names(uint8_t mask,
+                                      const char names[][INPUT_SOURCE_NAME_LEN]);
 
 // External control-interface config (UART/I2C, board-level, directory-stored,
 // V6+).  Setter is synchronous and main-loop only; a NULL pointer leaves that

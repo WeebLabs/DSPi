@@ -88,6 +88,14 @@
 // (12), src]; src is the source of the SET that staged it.
 #define NOTIFY_EVT_RTA_CONFIG        0x0D
 
+// 0x0E is held by the ac3-dts-decode branch (SPDIF_FORMAT).
+
+// v2 input source name stored (REQ_SET_INPUT_SOURCE_NAME); name is all zeros
+// when cleared.  src is the SET's dispatch source.
+// Packet (40 bytes): [ver=2, evt=0x0F, flags=0, seq, source_id, src, 0, 0,
+// name(32)]
+#define NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -173,6 +181,11 @@ void notify_push_cs_aux(uint8_t slot, uint8_t state, uint16_t level_q8, ParamSou
 // RtaConfig as applied.  Safe from any dispatch context.
 #define NOTIFY_RTA_CONFIG_LEN        12
 void notify_push_rta_config(const void *cfg, ParamSource src);
+
+// Input source name stored (NOTIFY_EVT_INPUT_SOURCE_NAME).  name is the
+// 32-byte stored entry.  Safe from any dispatch context.
+#define NOTIFY_INPUT_SOURCE_NAME_LEN 32
+void notify_push_input_source_name(uint8_t source_id, const char *name, ParamSource src);
 
 // ---------------------------------------------------------------------------
 // Consumers

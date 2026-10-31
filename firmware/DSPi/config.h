@@ -282,10 +282,10 @@ extern volatile uint32_t nominal_feedback_10_14;
 // SPDIF input.  Hosts use the deferred, SPDIF-safe REQ_PRESET_LOAD (0x91) instead.
 #define REQ_SAVE_OUTPUT_CONFIG  0x52
 #define REQ_FACTORY_RESET   0x53
-#define REQ_SET_CHANNEL_GAIN 0x54
-#define REQ_GET_CHANNEL_GAIN 0x55
-#define REQ_SET_CHANNEL_MUTE 0x56
-#define REQ_GET_CHANNEL_MUTE 0x57
+// Device-global input source names; see Documentation/Features/input_source_names_spec.md.
+#define REQ_SET_INPUT_SOURCE_NAME   0x54  // wValue = source ID, payload = 1-32 byte name (leading NUL clears)
+#define REQ_GET_INPUT_SOURCE_NAME   0x55  // wValue = source ID, returns 32-byte NUL-terminated name (zeros = unnamed)
+// 0x56-0x57 unassigned (were the retired legacy channel mute pair)
 #define REQ_SET_LOUDNESS            0x58
 #define REQ_GET_LOUDNESS            0x59
 #define REQ_SET_LOUDNESS_REF        0x5A

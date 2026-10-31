@@ -65,6 +65,8 @@ add_executable(DSPi
     i2s_input.h
     input_servo.c
     input_servo.h
+    input_source_names.c
+    input_source_names.h
     leveller.c
     leveller.h
     lg_sound_sync.c

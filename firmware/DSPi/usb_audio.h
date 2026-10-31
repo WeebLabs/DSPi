@@ -25,12 +25,6 @@ typedef struct {
 extern volatile AudioState audio_state;
 extern volatile bool bypass_master_eq;
 
-// Per-channel gain and mute (output channels only: L, R, Sub)
-extern volatile float channel_gain_db[3];
-extern volatile int32_t channel_gain_mul[3];
-extern volatile float channel_gain_linear[3];
-extern volatile bool channel_mute[3];
-
 // Per-input-channel preamp gain (indexed by input channel: 0=USB L, 1=USB R,
 // 2..7 = extra channels in RP2350 8-channel USB mode)
 extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];

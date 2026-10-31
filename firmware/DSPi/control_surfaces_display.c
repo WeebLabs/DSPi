@@ -657,6 +657,7 @@ _Static_assert(DISP_N(s_surround_mode_label) == UPMIX_SURROUND_ADAPTIVE + 1,
 #define DISP_TAB(t)  do { tab = (t); count = (int)(sizeof(t) / sizeof((t)[0])); } while (0)
 
 // Display name for an enum noun's value; NULL falls back to a number.
+// A user-named input source shows its stored name over the built-in label.
 // large selects the abbreviated names sized for the 12-column LARGE font.
 static const char *disp_enum_label(uint8_t noun, int v, bool large) {
     const char *const *tab = NULL;
@@ -676,6 +677,10 @@ static const char *disp_enum_label(uint8_t noun, int v, bool large) {
             else       DISP_TAB(s_filter_type_label);
             break;
         default: break;
+    }
+    if (noun == CS_NOUN_INPUT_SOURCE && v >= 0) {
+        const char *custom = preset_stored_input_source_name((uint8_t)v);
+        if (custom && custom[0]) return custom;
     }
     return (tab && v >= 0 && v < count) ? tab[v] : NULL;
 }

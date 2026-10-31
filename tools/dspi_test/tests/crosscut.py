@@ -31,7 +31,7 @@ def contract_oversized_set_stalls(dev, profile, chk):
 def unknown_opcode_stalls(dev, profile, chk):
     """Opcodes with no handler hit the switch default and STALL (GET) — never silently 'work'."""
     used = set(OPCODE_NAME.keys())
-    candidates = [0x40, 0x41, 0x68, 0x6F, 0x84, 0x8F, 0xA5, 0xCB, 0xCF, 0xDF, 0xE9, 0xEE]
+    candidates = [0x40, 0x41, 0x56, 0x57, 0x68, 0x6F, 0x84, 0x8F, 0xA5, 0xCB, 0xCF, 0xDF, 0xE9, 0xEE]
     tested = 0
     for op in candidates:
         if op in used:
@@ -54,10 +54,8 @@ def index_ceiling_stalls(dev, profile, chk):
                     lambda: dev.get(OP.GET_EQ_PARAM, 4, wvalue=((nb - 1) << 3))),
         ("delay channel", lambda: dev.get(OP.GET_DELAY, 4, wvalue=nc),
                           lambda: dev.get(OP.GET_DELAY, 4, wvalue=nc - 1)),
-        ("legacy gain", lambda: dev.get(OP.GET_CHANNEL_GAIN, 4, wvalue=3),
-                        lambda: dev.get(OP.GET_CHANNEL_GAIN, 4, wvalue=2)),
-        ("legacy mute", lambda: dev.get(OP.GET_CHANNEL_MUTE, 1, wvalue=3),
-                        lambda: dev.get(OP.GET_CHANNEL_MUTE, 1, wvalue=2)),
+        ("input source name", lambda: dev.get(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=7),
+                              lambda: dev.get(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=6)),
         ("preamp ch", lambda: dev.get(OP.GET_PREAMP_CH, 4, wvalue=ni),
                       lambda: dev.get(OP.GET_PREAMP_CH, 4, wvalue=ni - 1)),
         ("output enable", lambda: dev.get(OP.GET_OUTPUT_ENABLE, 1, wvalue=no),

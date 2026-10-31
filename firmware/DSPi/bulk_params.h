@@ -82,9 +82,10 @@ typedef struct __attribute__((packed)) {
 // ============================================================================
 // Section 4: Legacy Channel Gain/Mute (16 bytes)
 // ============================================================================
+// Retired: always sent as zero (0 dB, unmuted) and ignored on SET.
 typedef struct __attribute__((packed)) {
-    float    gain_db[3];             // Per-channel gain
-    uint8_t  mute[3];               // Per-channel mute (0/1)
+    float    gain_db[3];
+    uint8_t  mute[3];
     uint8_t  reserved;
 } WireLegacyChannels;                // 16 bytes
 

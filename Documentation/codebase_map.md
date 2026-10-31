@@ -605,8 +605,7 @@ All `REQ_*` are `#define`d in `config.h` and dispatched from `vendor_commands.c`
 | `REQ_SAVE_MASTER_VOLUME` / `_GET_SAVED` | 0xD6 / 0xD7 | `:1130` / `:1505` | Persist/read independent value |
 | `REQ_SET_USER_VOLUME` / `_GET` | 0xDA / 0xDB | `:329` / `:904` | Vendor-channel user volume |
 | `REQ_SET_USER_MUTE` / `_GET` | 0xDC / 0xDD | `:342` / `:915` | Vendor-channel mute |
-| `REQ_SET_CHANNEL_GAIN` / `_GET` | 0x54 / 0x55 | `:378` / `:941` | Legacy channel gain |
-| `REQ_SET_CHANNEL_MUTE` / `_GET` | 0x56 / 0x57 | `:394` / `:951` | Legacy channel mute |
+| `REQ_SET_INPUT_SOURCE_NAME` / `_GET` | 0x54 / 0x55 | | Input source names (device-global) |
 
 **Loudness**
 

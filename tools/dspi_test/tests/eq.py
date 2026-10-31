@@ -1,12 +1,10 @@
 """
-EQ / preamp / bypass / delay / legacy gain & mute group.
+EQ / preamp / bypass / delay group.
 
 EQ band          0x42/0x43
 Legacy preamp    0x44/0x45
 Master EQ bypass 0x46/0x47
 Per-channel delay 0x48/0x49
-Legacy gain      0x54/0x55
-Legacy mute      0x56/0x57
 Per-channel preamp 0xD0/0xD1
 Per-band bypass  0xD8/0xD9
 """
@@ -185,21 +183,3 @@ def per_channel_delay(dev, profile, chk):
     chk.approx(dev.get_f32(OP.GET_DELAY, wvalue=2), 1000.0, 1e-2, "large value stored raw")
     chk.stalls(lambda: dev.get_f32(OP.GET_DELAY, wvalue=profile.num_channels), "ch==count STALL")
     chk.no_stall(lambda: dev.set_f32(OP.SET_DELAY, 1.0, wvalue=profile.num_channels), "bad-ch SET no STALL")
-
-
-@test("eq", mutating=True)
-def legacy_channel_gain(dev, profile, chk):
-    """0x54/0x55 legacy 3-channel gain: round-trip ch0-2 (finite only); ch3 GET STALLs."""
-    for ch in range(3):
-        dev.set_f32(OP.SET_CHANNEL_GAIN, -3.0 - ch, wvalue=ch)
-        chk.approx(dev.get_f32(OP.GET_CHANNEL_GAIN, wvalue=ch), -3.0 - ch, 1e-3, f"gain ch{ch}")
-    chk.stalls(lambda: dev.get_f32(OP.GET_CHANNEL_GAIN, wvalue=3), "gain ch3 STALL")
-    chk.no_stall(lambda: dev.set_f32(OP.SET_CHANNEL_GAIN, 0.0, wvalue=3), "gain bad-ch SET no STALL")
-
-
-@test("eq", mutating=True)
-def legacy_channel_mute(dev, profile, chk):
-    """0x56/0x57 legacy 3-channel mute: != 0 coercion; ch3 GET STALLs."""
-    for ch in range(3):
-        bool_roundtrip(dev, chk, OP.SET_CHANNEL_MUTE, OP.GET_CHANNEL_MUTE, wvalue=ch, label=f"mute ch{ch}")
-    chk.stalls(lambda: dev.get_u8(OP.GET_CHANNEL_MUTE, wvalue=3), "mute ch3 STALL")

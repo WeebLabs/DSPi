@@ -232,12 +232,6 @@ volatile bool notify_master_vol_host_initiated = false;
 // Defined in the UAC1 CLASS DRIVER section below.
 static void usb_notify_drain(uint8_t rhport);
 
-// Per-channel gain and mute (legacy 3-channel interface for flash compatibility)
-volatile float channel_gain_db[3] = {0.0f, 0.0f, 0.0f};
-volatile int32_t channel_gain_mul[3] = {32768, 32768, 32768};  // Unity = 2^15
-volatile float channel_gain_linear[3] = {1.0f, 1.0f, 1.0f};
-volatile bool channel_mute[3] = {false, false, false};
-
 // Matrix Mixer State
 MatrixMixer matrix_mixer = {0};
 

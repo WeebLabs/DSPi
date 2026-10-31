@@ -8,6 +8,7 @@ I2S input rate      0xED/0xEE (uint32 Hz set / {current,selected} 8B get)
 I2S RX data pin     0xF1/0xF2
 LG Sound Sync       0xE6/0xE7 / status 0xE8 (16B)
 DAC hardware mute   0xEA/0xEB (config 16B) / 0xEC test pulse
+Source names        0x54/0x55 (32B, device-global)
 """
 
 import struct
@@ -351,4 +352,53 @@ def dac_hw_mute_config_roundtrip(dev, profile, chk):
         chk.eq(struct.unpack_from("<H", got, 6)[0], 3, "release_ms echoed")
     finally:
         dev.set(OP.SET_DAC_HW_MUTE_CONFIG, bytes(before))
+        dev.wait_ready()
+
+
+def _source_name(dev, src):
+    return dev.get_ready(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=src)
+
+
+@test("inputs", mutating=True, flash=8)
+def input_source_name_roundtrip(dev, profile, chk):
+    """0x54/0x55 source names: round-trip, 31-char truncation, NUL clears, bad ID STALLs, survive preset load."""
+    touched = (INPUT_USB, INPUT_SPDIF, INPUT_SOURCE_MAX)
+    orig = {src: _source_name(dev, src) for src in touched}
+    for src, raw in orig.items():
+        chk.eq(len(raw), 32, f"source {src} GET is 32 bytes")
+    try:
+        for src in touched:
+            dev.set(OP.SET_INPUT_SOURCE_NAME, b"QA Src %d" % src, wvalue=src)
+        for src in touched:
+            chk.eq(_source_name(dev, src).split(b"\x00", 1)[0], b"QA Src %d" % src,
+                   f"source {src} name round-trip")
+
+        dev.set(OP.SET_INPUT_SOURCE_NAME, b"A" * 32, wvalue=INPUT_USB)
+        chk.eq(_source_name(dev, INPUT_USB), b"A" * 31 + b"\x00", "32-byte payload keeps 31 + NUL")
+        dev.set(OP.SET_INPUT_SOURCE_NAME, b"\x00junk", wvalue=INPUT_USB)
+        chk.eq(_source_name(dev, INPUT_USB), bytes(32), "leading NUL clears to all zeros")
+
+        chk.stalls(lambda: dev.get(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=INPUT_INVALID),
+                   "GET past INPUT_SOURCE_MAX STALL")
+        chk.stalls(lambda: dev.get(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=0x100),
+                   "GET with a high wValue byte STALL")
+        chk.no_stall(lambda: dev.set(OP.SET_INPUT_SOURCE_NAME, b"x", wvalue=INPUT_INVALID),
+                     "SET bad ID no STALL")
+        # The high byte must not alias source 0 (USB, cleared just above).
+        dev.set(OP.SET_INPUT_SOURCE_NAME, b"alias", wvalue=0x100)
+        chk.eq(_source_name(dev, INPUT_USB), bytes(32), "SET with a high wValue byte is ignored")
+
+        directory = dev.get(OP.PRESET_GET_DIR, 7)
+        occupied = directory[0] | (directory[1] << 8)
+        active = dev.get_u8(OP.PRESET_GET_ACTIVE)
+        if occupied & (1 << active):
+            dev.get(OP.PRESET_LOAD, 1, wvalue=active)
+            dev.wait_ready()
+            chk.eq(_source_name(dev, INPUT_SPDIF).split(b"\x00", 1)[0], b"QA Src %d" % INPUT_SPDIF,
+                   "name survives a preset load")
+        else:
+            chk.note("active preset slot empty; skipping the preset-load check")
+    finally:
+        for src, raw in orig.items():
+            dev.set(OP.SET_INPUT_SOURCE_NAME, raw.split(b"\x00", 1)[0] or b"\x00", wvalue=src)
         dev.wait_ready()

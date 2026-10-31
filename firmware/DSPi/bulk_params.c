@@ -77,10 +77,6 @@ extern volatile float master_volume_db;
 extern volatile float master_volume_linear;
 extern volatile int32_t master_volume_q15;
 extern volatile bool user_mute;
-extern volatile float channel_gain_db[3];
-extern volatile int32_t channel_gain_mul[3];
-extern volatile float channel_gain_linear[3];
-extern volatile bool channel_mute[3];
 extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
@@ -144,12 +140,6 @@ void bulk_params_collect(WireBulkParams *out) {
     out->crossfeed.output_pair_mask = crossfeed_config.output_pair_mask;
     out->crossfeed.custom_fc = crossfeed_config.custom_fc;
     out->crossfeed.custom_feed_db = crossfeed_config.custom_feed_db;
-
-    // Legacy channels
-    for (int i = 0; i < 3; i++) {
-        out->legacy.gain_db[i] = channel_gain_db[i];
-        out->legacy.mute[i] = channel_mute[i] ? 1 : 0;
-    }
 
     // Delays
     for (int i = 0; i < NUM_CHANNELS; i++) {
@@ -440,15 +430,6 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     crossfeed_config.custom_fc = in->crossfeed.custom_fc;
     crossfeed_config.custom_feed_db = in->crossfeed.custom_feed_db;
     crossfeed_update_pending = true;
-
-    // Legacy channels
-    for (int i = 0; i < 3; i++) {
-        channel_gain_db[i] = in->legacy.gain_db[i];
-        float g = db_to_linear(in->legacy.gain_db[i]);
-        channel_gain_mul[i] = (int32_t)(g * 32768.0f);
-        channel_gain_linear[i] = g;
-        channel_mute[i] = (in->legacy.mute[i] != 0);
-    }
 
     // Delays
     for (int i = 0; i < NUM_CHANNELS; i++) {
