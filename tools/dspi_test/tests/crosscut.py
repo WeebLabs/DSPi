@@ -31,7 +31,8 @@ def contract_oversized_set_stalls(dev, profile, chk):
 def unknown_opcode_stalls(dev, profile, chk):
     """Opcodes with no handler hit the switch default and STALL (GET) — never silently 'work'."""
     used = set(OPCODE_NAME.keys())
-    candidates = [0x40, 0x41, 0x56, 0x57, 0x68, 0x6F, 0x84, 0x8F, 0xA5, 0xCB, 0xCF, 0xDF, 0xE9, 0xEE]
+    # Unassigned on this branch; the filter below skips any a later branch claims.
+    candidates = [0x00, 0x01, 0x02, 0x40, 0x41, 0x4F, 0x6F, 0x9F, 0xAF, 0xCF]
     tested = 0
     for op in candidates:
         if op in used:
