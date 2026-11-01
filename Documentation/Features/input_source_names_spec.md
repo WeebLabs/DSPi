@@ -83,8 +83,9 @@ On a display page for `CS_NOUN_INPUT_SOURCE`, the value line shows the custom na
 
 - Probe support once per connection (section 2) and read the name of every valid source.
 - `inputSourceTitle()` returns the custom name when it is set and the built-in label otherwise. The source picker, the Control Surfaces value text and the unsaved-changes list all go through it. The notification log keeps raw built-in labels on purpose.
-- The Inputs settings page gets a "Source Names" section with one text field per source the device can select. Clearing a field restores the built-in label. A field keeps only printable ASCII up to 31 characters as you type. It commits on Return, focus loss or the page closing, and only when the text changed.
-- Right-clicking the source picker in the main window sidebar opens a context menu with "Rename ..." for the selected source, plus "Use Built-in Name" when it has a custom name. Rename opens a small sheet with the same filtering as the settings field.
+- The Inputs settings page ends with a "Source Names" section. Each source the device can select gets a row with its built-in label, where it physically comes in (for example "Receiver on GPIO 11") and a name field. A field keeps only printable ASCII up to 31 characters as you type. Clearing it, or its clear button, restores the built-in label.
+- Typing only edits a draft. Edited names join the Settings unsaved-changes bar, which writes each changed name on Save and drops the drafts on Revert. They also count toward the pending-changes warning on a device switch. An orange dot marks a row whose name is not saved yet.
+- Right-clicking the source picker in the main window sidebar opens a context menu with "Rename ..." for the selected source, plus "Use Built-in Name" when it has a custom name. Rename opens a small sheet with the same filtering as the settings field. Confirming the sheet writes at once and replaces any unsaved Settings draft for that source.
 - Handle `NOTIFY_EVT_INPUT_SOURCE_NAME` by updating the cached name for that source.
 
 ## 9. Test coverage
