@@ -1,12 +1,12 @@
 # Input Source Names
 
-*Last updated: 2026-10-31*
+*Last updated: 2026-11-01*
 *Status: implemented, HW-untested*
 *Platforms: RP2040 + RP2350*
 
 Users can give each input source (USB, S/PDIF 1-4, I2S, ADAT) a name of their own, such as "Turntable" or "TV". The device stores one name per source. Every host reads the same names, and the front panel display shows them.
 
-This feature names input *sources*. It is separate from channel names (`REQ_SET_CHANNEL_NAME` 0x9B), which label individual input and output channels and travel with presets.
+This feature names input *sources*. It is separate from channel names (`REQ_SET_CHANNEL_NAME` 0x9B), which label individual input and output channels and travel with presets. The board's own name (`device_name_spec.md`) shares this feature's staging table and main-loop write.
 
 ---
 
@@ -20,7 +20,7 @@ This feature names input *sources*. It is separate from channel names (`REQ_SET_
 
 ## 2. Vendor commands
 
-The two commands reuse opcodes 0x54/0x55. They previously carried a legacy three-channel gain and mute that no audio path read (see section 6). Opcodes 0x56 and 0x57 are now unassigned.
+The two commands reuse opcodes 0x54/0x55. They previously carried a legacy three-channel gain and mute that no audio path read (see section 6). Opcodes 0x56 and 0x57 now carry the board name.
 
 | Opcode | Name | Dir | wValue | Payload / response |
 |---|---|---|---|---|
@@ -47,7 +47,7 @@ char input_source_names[INPUT_SOURCE_NAME_SLOTS][INPUT_SOURCE_NAME_LEN];  // 8 x
 - **Sanitize on load.** The current-version load forces a NUL into the last byte of each entry, so a corrupt sector can never hand an unterminated string to a GET or the display.
 - **Sector budget.** The directory grows from 3151 to 3407 bytes, inside the single 4096-byte sector.
 - **Downgrade.** Older firmware has no V24 migration and treats a V24 directory as missing. Flashing a pre-V24 build after this one therefore resets every directory-stored setting (startup preset, Control Surfaces, control interfaces, independent IO config and the rest), not only the names. The V23 bump had the same property.
-- **Branch collision.** The `overclock` and `ac3-dts-decode` branches each also claim directory version 23 for their own blocks. Whichever of them merges after this one has to renumber its version and stack its block after this one.
+- **Branch collision.** The `overclock` and `ac3-dts-decode` branches each also claim directory version 23 for their own blocks. Whichever of them merges next has to renumber its version and stack its block after V25 (the board name, `device_name_spec.md`).
 
 ## 4. Apply timing
 

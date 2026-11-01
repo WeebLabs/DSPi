@@ -96,6 +96,11 @@
 // name(32)]
 #define NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F
 
+// v2 board name stored (REQ_SET_DEVICE_NAME); same layout as 0x0F with
+// byte 4 zero.  Packet (40 bytes): [ver=2, evt=0x10, flags=0, seq, 0, src,
+// 0, 0, name(32)]
+#define NOTIFY_EVT_DEVICE_NAME       0x10
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -186,6 +191,10 @@ void notify_push_rta_config(const void *cfg, ParamSource src);
 // 32-byte stored entry.  Safe from any dispatch context.
 #define NOTIFY_INPUT_SOURCE_NAME_LEN 32
 void notify_push_input_source_name(uint8_t source_id, const char *name, ParamSource src);
+
+// Board name stored (NOTIFY_EVT_DEVICE_NAME).  name is the 32-byte stored
+// entry.  Safe from any dispatch context.
+void notify_push_device_name(const char *name, ParamSource src);
 
 // ---------------------------------------------------------------------------
 // Consumers

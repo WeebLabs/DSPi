@@ -973,6 +973,12 @@ static void disp_render(void) {
     CsDisplayPage it;
     char label[DISP_MAX_COLS + 1] = "DSPi";
     char value[DISP_MAX_COLS + 1] = "";
+    // With no page current the label line names the board.
+    const char *board = preset_stored_device_name();
+    if (board[0]) {
+        strncpy(label, board, m->cols);
+        label[m->cols] = '\0';
+    }
     char bar[DISP_MAX_COLS + 1] = "";
     bool large = false, bar_on = false;
     float norm = 0.0f;

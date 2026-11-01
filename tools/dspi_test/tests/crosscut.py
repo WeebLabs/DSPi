@@ -56,6 +56,8 @@ def index_ceiling_stalls(dev, profile, chk):
                           lambda: dev.get(OP.GET_DELAY, 4, wvalue=nc - 1)),
         ("input source name", lambda: dev.get(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=7),
                               lambda: dev.get(OP.GET_INPUT_SOURCE_NAME, 32, wvalue=6)),
+        ("device name", lambda: dev.get(OP.GET_DEVICE_NAME, 32, wvalue=1),
+                        lambda: dev.get(OP.GET_DEVICE_NAME, 32, wvalue=0)),
         ("preamp ch", lambda: dev.get(OP.GET_PREAMP_CH, 4, wvalue=ni),
                       lambda: dev.get(OP.GET_PREAMP_CH, 4, wvalue=ni - 1)),
         ("output enable", lambda: dev.get(OP.GET_OUTPUT_ENABLE, 1, wvalue=no),

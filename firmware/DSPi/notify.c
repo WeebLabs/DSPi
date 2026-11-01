@@ -458,6 +458,18 @@ void notify_push_input_source_name(uint8_t source_id, const char *name, ParamSou
     restore_interrupts(flags);
 }
 
+void notify_push_device_name(const char *name, ParamSource src) {
+    uint32_t flags = save_and_disable_interrupts();
+    NotifyRingEntry e = {
+        .event_id = NOTIFY_EVT_DEVICE_NAME,
+        .source   = (uint8_t)src,
+    };
+    e.value[0] = 0;
+    memcpy(&e.value[1], name, NOTIFY_INPUT_SOURCE_NAME_LEN);
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
 void notify_push_bulk_invalidated(ParamSource src) {
     uint32_t flags = save_and_disable_interrupts();
 
@@ -705,11 +717,13 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             return 17;
         }
 
-        case NOTIFY_EVT_INPUT_SOURCE_NAME: {
-            // 40 bytes: source id, source tag, pad, pad, stored name (32).
+        case NOTIFY_EVT_INPUT_SOURCE_NAME:
+        case NOTIFY_EVT_DEVICE_NAME: {
+            // 40 bytes: source id (0 for the board), source tag, pad, pad,
+            // stored name (32).
             if (max_len < 8 + NOTIFY_INPUT_SOURCE_NAME_LEN) return 0;
             out_buf[0] = NOTIFY_V2_VERSION;
-            out_buf[1] = NOTIFY_EVT_INPUT_SOURCE_NAME;
+            out_buf[1] = e.event_id;
             out_buf[2] = 0;
             out_buf[3] = seq;
             out_buf[4] = e.value[0];

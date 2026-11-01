@@ -57,7 +57,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
+*Last updated: 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -97,7 +97,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `soft_vcxo.h` | Soft VCXO API (`soft_vcxo_init` / `soft_vcxo_set_ppm` / `soft_vcxo_current_ppm`) |
 | `input_servo.c` | Shared clock servo for externally clocked inputs: ppm feed-forward + deadbanded P + centering integrator, actuates the soft VCXO |
 | `input_servo.h` | Input servo API (`input_servo_apply` / `input_servo_reset`) |
-| `input_source_names.c` | User names per input source: per-source staging from vendor dispatch, one coalesced directory write on the main loop, `NOTIFY_EVT_INPUT_SOURCE_NAME` |
+| `input_source_names.c` | User names per input source and for the board: per-entry staging from vendor dispatch, one coalesced directory write on the main loop, `NOTIFY_EVT_INPUT_SOURCE_NAME` / `NOTIFY_EVT_DEVICE_NAME` |
 | `input_source_names.h` | Input source name API and table geometry (`INPUT_SOURCE_NAME_LEN` 32, `INPUT_SOURCE_NAME_SLOTS` 8) |
 | `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
 | `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
@@ -326,7 +326,7 @@ The `REQ_GET_CLOCK_DIAG` (0x82) snapshot is a packed little-endian `ClockDiagPac
 **Persistence (compat-breaking).** Wire `WIRE_FORMAT_VERSION=16` (direct 8-input matrix/preamp + 17-channel EQ; no tail-append/version gates; 5864 B). Flash `SLOT_DATA_VERSION=21` (direct layout; the slot spans **2 flash sectors** on RP2350; 1 on RP2040). No migration — pre-version data loads factory defaults.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
+*Last updated: 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
@@ -359,7 +359,7 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 
 **Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `REQ_GET_ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
-**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), `NOTIFY_EVT_RTA_CONFIG` (0x0D), and `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F; 0x0E is held by the `ac3-dts-decode` branch). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `REQ_SET_CS_AUX_STATE` / `_LEVEL` handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `REQ_RTA_SET_CONFIG` as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `_dispatch_src` into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser"). INPUT_SOURCE_NAME announces each stored source name as a 40-byte packet `[ver=2, 0x0F, flags=0, seq, source_id, src, 0, 0, name(32)]`, pushed after the directory write that stores it, with `src` captured at SET time the same way *(2026-10-31; see "Input Source Names")*.
+**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), `NOTIFY_EVT_RTA_CONFIG` (0x0D), `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F; 0x0E is held by the `ac3-dts-decode` branch), and `NOTIFY_EVT_DEVICE_NAME` (0x10). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `REQ_SET_CS_AUX_STATE` / `_LEVEL` handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `REQ_RTA_SET_CONFIG` as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `_dispatch_src` into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser"). INPUT_SOURCE_NAME announces each stored source name as a 40-byte packet `[ver=2, 0x0F, flags=0, seq, source_id, src, 0, 0, name(32)]`, pushed after the directory write that stores it, with `src` captured at SET time the same way *(2026-10-31; see "Input Source Names")*. DEVICE_NAME announces the stored board name in the same 40-byte layout with byte 4 zero, `[ver=2, 0x10, flags=0, seq, 0, src, 0, 0, name(32)]`, from the same write *(2026-11-01; see "Device Name")*.
 
 **Drain:** each consumer drains its own tail via `notify_peek_next_for(consumer, ...)` / `notify_commit_pop_for(consumer)`. The USB consumer (`usb_notify_drain` in usb_audio.c) claims EP 0x83 via `usbd_edpt_claim`, formats the next packet into the stable TX buffer, and submits via `usbd_edpt_xfer`; on success `notify_commit_pop_for(USB)` advances the USB tail, and on xfer rejection the entry stays queued for the next tick. The UART consumer drains from `uart_ctrl_poll` (see "Multi-consumer ring").
 
@@ -1998,10 +1998,10 @@ Last 12 sectors (48 KB) of flash:
 | 1-10 | -44 KB to -8 KB | `0x44535033` ("DSP3") | Preset Slots 0-9 (full DSP state) |
 | 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
 
-### Preset Directory Fields (Version 24)
-*Last updated: 2026-10-31 (V24 appends the 256-byte input source name table). Previously 2026-10-23 (V23 appends the 4-byte output latency block). Previously 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
+### Preset Directory Fields (Version 25)
+*Last updated: 2026-11-01 (V25 appends the 32-byte board name). Previously 2026-10-31 (V24 appends the 256-byte input source name table). Previously 2026-10-23 (V23 appends the 4-byte output latency block). Previously 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
 
-`DIR_VERSION_CURRENT` = 24. V4 renamed the former `include_pins` byte to
+`DIR_VERSION_CURRENT` = 25. V4 renamed the former `include_pins` byte to
 `output_config_mode` (same offset, 1:1 value mapping) and appended the
 device-global `FlashOutputConfig` block. V5 grew that block by 3 bytes for the
 I2S multichannel input pins (`i2s_rx_pin_ext[3]`). V6 appends the device-level
@@ -2102,6 +2102,14 @@ now accepts the flag. See
 `Documentation/Features/control_surfaces_display_spec.md`, and
 `Documentation/Features/control_surfaces_aux_spec.md`.
 
+**V25** (2026-11-01) appends `char device_name[32]` directly after
+`input_source_names`, taking `sizeof(PresetDirectory)` to 3439 bytes. V24
+migrates by a whole-block copy of its 3407 bytes (`PRESET_DIRECTORY_V24_SIZE`),
+leaving the board unnamed. The name was not folded into V24 because a unit
+that ran the first V24 build holds the shorter image, and the current-version
+loader CRCs `sizeof(PresetDirectory)` bytes, so a grown V24 would fail the CRC
+and drop the whole directory. See "Device Name".
+
 **V24** (2026-10-31) appends `char input_source_names[8][32]` (256 bytes) directly
 after `output_latency`, taking `sizeof(PresetDirectory)` to 3407 bytes. V23
 migrates by a whole-block copy of its 3151 bytes (`PRESET_DIRECTORY_V23_SIZE`),
@@ -2157,6 +2165,7 @@ layout ends.
 | cs_macros | Control Surfaces macros (V18+, 1060-byte `CsMacroConfig`: version + 8x 132-byte `CsMacro`, each 32-byte name + step count + 8x 12-byte `CsMacroStep`; all-zero = no macros; board-level, survives factory reset) |
 | cs_display | Control Surfaces display config and pages (V19+, 80-byte `CsDisplayFlash`: version + 12-byte `CsDisplayCfg` + 16x 4-byte `CsDisplayPage`; all-zero = display idle, no pages; board-level, survives factory reset) |
 | input_source_names[8][32] | User names per `InputSource` ID (V24+): 32-byte NUL-terminated, all-zero = unnamed (the host or display supplies the built-in label); entry 7 is spare; device-global, survives preset load and factory reset |
+| device_name[32] | The board's user name (V25+): 32-byte NUL-terminated, all-zero = unnamed (each host supplies its own fallback); device-global, survives preset load and factory reset |
 | output_latency | Output latency (V23+, 4-byte `FlashOutputLatencyConfig`: version (0 = never saved) + option ID (`OutputLatencyId`, 0 = unset) + 2 reserved; device-global, survives factory reset; see "Output Latency") |
 | limiter | Output limiter settings for independent mode (V22+, 112-byte `FlashLimiterConfig`: version byte (0 = never saved) + 3 reserved + 9x 12-byte records of enabled, link group, threshold, release; RP2040 uses the first 5). Written by `REQ_SAVE_OUTPUT_CONFIG`, applied at boot in independent mode only |
 
@@ -2610,6 +2619,11 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 ---
 
 ## Memory Layout
+
+> **Device name (2026-11-01).** The board name adds 67 bytes of BSS on both
+> platforms. The shared staging table gains a ninth 32-byte entry plus its
+> tag and generation bytes, the pending mask widens to 16 bits, and
+> `dir_cache` grows by 32 bytes to 3439 (directory V25).
 
 > **Input source names (2026-10-31).** `input_source_names.c` adds 273 bytes
 > of BSS on both platforms: eight 32-byte staging buffers plus a tag, a
@@ -4160,7 +4174,7 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Command Reference
-*Last updated: 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+*Last updated: 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -4265,7 +4279,8 @@ lands on a hot path and the audio path is untouched.
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
 | REQ_SET_INPUT_SOURCE_NAME | 0x54 | OUT | Set the user name for input source `wValue` (1-32 bytes, a leading NUL clears it, bytes past 31 dropped; an invalid source, including any wValue above 0xFF, is a no-op). Persisted on the main loop (2026-10-31; was the retired legacy channel gain SET) |
 | REQ_GET_INPUT_SOURCE_NAME | 0x55 | IN | Get the 32-byte name for input source `wValue` (all zeros = unnamed; a staged, unwritten name reads back at once). Invalid source (including any wValue above 0xFF) STALLs. Older firmware answers with 4 bytes, which is the host's support probe (2026-10-31) |
-| (unassigned) | 0x56-0x57 | | Freed 2026-10-31 (were the retired legacy channel mute pair) |
+| REQ_SET_DEVICE_NAME | 0x56 | OUT | Set the board's user name (wValue 0; 1-32 bytes, a leading NUL clears it, bytes past 31 dropped; a non-zero wValue is a no-op). Persisted on the main loop with any staged source names (2026-11-01; was the retired legacy channel mute SET) |
+| REQ_GET_DEVICE_NAME | 0x57 | IN | Get the 32-byte board name (all zeros = unnamed; a staged name reads back at once). A non-zero wValue STALLs. Hosts probe this on its own: older firmware STALLs it or answers 1 byte (2026-11-01) |
 | REQ_SET_LOUDNESS | 0x58 | OUT | Enable/disable loudness |
 | REQ_GET_LOUDNESS | 0x59 | IN | Get loudness state |
 | REQ_SET_LOUDNESS_REF | 0x5A | OUT | Set loudness reference SPL |
@@ -5016,6 +5031,26 @@ whose state no audio path read. Those variables are deleted, while the
 `WireBulkParams.legacy` section and the matching `PresetSlot` fields keep their
 frozen layout, always written as zero (0 dB, unmuted) and ignored on apply.
 Full design: `Documentation/Features/input_source_names_spec.md`.
+
+### Device Name
+*Last updated: 2026-11-01*
+
+The board carries its own user name (for example "Living room") in the preset
+directory (V25, `device_name[32]`), so it keeps the name on any DSPi Link hub
+or computer. Like the source names it is device-global and survives preset
+load and factory reset. `REQ_SET_DEVICE_NAME` (0x56) stages the name as a
+ninth entry of the source-name staging table in `input_source_names.c`, so
+the same main-loop pass writes it, together with any staged source names, in
+one `dir_flush()` inside the usual flash bracket. All outputs restart
+together, so slot alignment holds. `REQ_GET_DEVICE_NAME` (0x57) reads the
+staged name while one is pending. After the write the firmware pushes
+`NOTIFY_EVT_DEVICE_NAME` (0x10). With no display page current, the front
+panel's label line shows the board name in place of "DSPi".
+
+DSPi Link hubs read 0x57 with the device identity and treat the board's name
+as authoritative; their own stored names are a fallback for older firmware
+and are adopted onto an unnamed board once. Full design:
+`Documentation/Features/device_name_spec.md`.
 
 ### I2S Clock-Slave Input Mode
 *Last updated: 2026-07-11 (clock-pin mode added: UNIFIED shares one BCK/LRCLK pair, SPLIT gives slave clocking its own `i2s_bck_pin_slave` pair; `i2s_effective_bck_pin()` resolves the active pair)*

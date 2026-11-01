@@ -635,6 +635,8 @@ typedef struct __attribute__((packed)) {
 //
 // V24 appends the device-global input source names after the latency block.
 // V23 migrates by a whole-block prefix copy; a zeroed entry means unnamed.
+//
+// V25 appends the board name after the source names, migrated the same way.
 
 // Device-global output limiter settings, used when output_config_mode is
 // INDEPENDENT.  Fixed at the RP2350 output count so the layout is the same on
@@ -737,6 +739,10 @@ typedef struct __attribute__((packed)) {
     // V24 addition: user names per InputSource (device-global).  All-zero
     // entry = unnamed; hosts and the display supply the built-in label.
     char input_source_names[INPUT_SOURCE_NAME_SLOTS][INPUT_SOURCE_NAME_LEN];  // 256 bytes
+
+    // V25 addition: user name for the board (device-global).  All zeros =
+    // unnamed; hosts supply their own fallback.
+    char device_name[DEVICE_NAME_LEN];       // 32 bytes
 } PresetDirectory;
 
 // Historical directory layout at V4, where output_config was the 20-byte
@@ -1246,6 +1252,13 @@ _Static_assert(offsetof(PresetDirectory, input_source_names) == PRESET_DIRECTORY
 _Static_assert(sizeof(((PresetDirectory *)0)->input_source_names) == 256,
                "V24 input source name block geometry is frozen");
 
+// V25 only appends, so a V24 directory migrates by copying its whole data block.
+#define PRESET_DIRECTORY_V24_SIZE (PRESET_DIRECTORY_V23_SIZE + 256)
+_Static_assert(offsetof(PresetDirectory, device_name) == PRESET_DIRECTORY_V24_SIZE,
+               "V25 device name block must directly follow the V24 layout");
+_Static_assert(sizeof(((PresetDirectory *)0)->device_name) == 32,
+               "V25 device name block geometry is frozen");
+
 // V20 only differs by the trailing aux table, so the V20->V21 migration is a
 // prefix copy that stops at cs_aux; everything ahead of it must match V21.
 _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirectory, cs_display),
@@ -1254,7 +1267,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  24
+#define DIR_VERSION_CURRENT  25
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1873,10 +1886,35 @@ static bool dir_load_cache(void) {
         return true;
     }
 
+    if (flash_dir->version == 24) {
+        // V24 -> V25 migration.  V25 only appends the board name, so the whole
+        // V24 data block copies across and the board reads as unnamed.
+        const uint8_t *v24_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v24_data_len = PRESET_DIRECTORY_V24_SIZE - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v24_data_start, v24_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memset(&dir_cache, 0, sizeof(dir_cache));
+        // Header excluded: dir_flush() restamps magic/version/crc.
+        memcpy(&dir_cache.startup_mode, v24_data_start, v24_data_len);
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_sanitize_input_source_names();
+        dir_cache_valid = true;
+        (void)dir_flush();   // persist at the current version
+        return true;
+    }
+
     if (flash_dir->version == 23) {
-        // V23 -> V24 migration.  V24 only appends the input source names, so
-        // the whole V23 data block copies across and every source reads as
-        // unnamed.
+        // V23 -> V25 migration.  V24 and V25 only append names, so the whole
+        // V23 data block copies across and every name reads as unset.
         const uint8_t *v23_data_start = (const uint8_t *)&flash_dir->startup_mode;
         size_t v23_data_len = PRESET_DIRECTORY_V23_SIZE - offsetof(PresetDirectory, startup_mode);
         if (crc32(v23_data_start, v23_data_len) != flash_dir->crc32) {
@@ -1900,8 +1938,8 @@ static bool dir_load_cache(void) {
     }
 
     if (flash_dir->version == 22) {
-        // V22 -> V24 migration.  V23/V24 only append the output latency block
-        // and the input source names, so the whole V22 data block copies
+        // V22 -> V25 migration.  V23-V25 only append the output latency block
+        // and the names, so the whole V22 data block copies
         // across; dir_sanitize_output_latency() seeds the zeroed latency block.
         const uint8_t *v22_data_start = (const uint8_t *)&flash_dir->startup_mode;
         size_t v22_data_len = PRESET_DIRECTORY_V22_SIZE - offsetof(PresetDirectory, startup_mode);
@@ -1927,7 +1965,7 @@ static bool dir_load_cache(void) {
     }
 
     if (flash_dir->version == 20) {
-        // V20 -> V24 migration.  V21 dropped the trailing aux output table, so
+        // V20 -> V25 migration.  V21 dropped the trailing aux output table, so
         // copy the V20 data block up to it and discard the rest; any aux output
         // configured on a V20 build is gone and must be rebuilt as a binding.
         const PresetDirectory_v20 *v20 = (const PresetDirectory_v20 *)flash_dir;
@@ -1956,8 +1994,8 @@ static bool dir_load_cache(void) {
     }
 
     if (flash_dir->version == 19 || flash_dir->version == 21) {
-        // V19 / V21 -> V24 migration.  V21 is byte-identical to V19 and V22-V24
-        // only append (limiter, latency, source names), so the whole data block
+        // V19 / V21 -> V25 migration.  V21 is byte-identical to V19 and V22-V25
+        // only append (limiter, latency, names), so the whole data block
         // copies across.
         const PresetDirectory_v19 *v19 = (const PresetDirectory_v19 *)flash_dir;
         const uint8_t *v19_data_start = (const uint8_t *)&v19->startup_mode;
@@ -2958,6 +2996,7 @@ static void dir_sanitize_output_latency(void) {
 static void dir_sanitize_input_source_names(void) {
     for (int s = 0; s < INPUT_SOURCE_NAME_SLOTS; s++)
         dir_cache.input_source_names[s][INPUT_SOURCE_NAME_LEN - 1] = '\0';
+    dir_cache.device_name[DEVICE_NAME_LEN - 1] = '\0';
 }
 
 // Write the RAM-cached directory back to flash.
@@ -4701,13 +4740,23 @@ const char *preset_stored_input_source_name(uint8_t src) {
     return dir_cache.input_source_names[src];
 }
 
+const char *preset_stored_device_name(void) {
+    dir_ensure();
+    return dir_cache.device_name;
+}
+
 uint8_t preset_set_input_source_names(uint8_t mask,
-                                      const char names[][INPUT_SOURCE_NAME_LEN]) {
+                                      const char names[][INPUT_SOURCE_NAME_LEN],
+                                      const char *device_name) {
     dir_ensure();
     for (int s = 0; s < INPUT_SOURCE_NAME_SLOTS; s++) {
         if (!(mask & (1u << s))) continue;
         memcpy(dir_cache.input_source_names[s], names[s], INPUT_SOURCE_NAME_LEN);
         dir_cache.input_source_names[s][INPUT_SOURCE_NAME_LEN - 1] = '\0';
+    }
+    if (device_name) {
+        memcpy(dir_cache.device_name, device_name, DEVICE_NAME_LEN);
+        dir_cache.device_name[DEVICE_NAME_LEN - 1] = '\0';
     }
     return dir_flush() == 0 ? PRESET_OK : PRESET_ERR_FLASH_WRITE;
 }

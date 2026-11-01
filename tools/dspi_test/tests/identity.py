@@ -2,8 +2,8 @@
 Identity, platform, status, and clip-clear commands.
 
 Covers: 0x7E GET_SERIAL, 0x7F GET_PLATFORM, 0x80 GET_BUILD_INFO,
-0x50 GET_STATUS (+ sub-queries), 0x83 CLEAR_CLIPS.  All read-only /
-non-mutating except clear-clips.
+0x50 GET_STATUS (+ sub-queries), 0x83 CLEAR_CLIPS, 0x56/0x57 device name.
+All read-only / non-mutating except clear-clips and the device name.
 """
 
 import re
@@ -140,3 +140,41 @@ def clear_clips_read_then_clear(dev, profile, chk):
     st = dev.get(OP.GET_STATUS, profile.num_channels * 2 + 7, wvalue=9)
     clip = struct.unpack_from("<I", st, profile.num_channels * 2 + 2)[0]
     chk.eq(clip, 0, "status clip_flags 0 after clear")
+
+
+def _device_name(dev):
+    return dev.get_ready(OP.GET_DEVICE_NAME, 32)
+
+
+@test("identity", mutating=True, flash=5)
+def device_name_roundtrip(dev, profile, chk):
+    """0x56/0x57 board name: round-trip, 31-char truncation, NUL clears, non-zero wValue STALLs/ignored, survives preset load."""
+    orig = _device_name(dev)
+    chk.eq(len(orig), 32, "GET is 32 bytes")
+    try:
+        dev.set(OP.SET_DEVICE_NAME, b"QA Board")
+        chk.eq(_device_name(dev).split(b"\x00", 1)[0], b"QA Board", "name round-trip")
+
+        dev.set(OP.SET_DEVICE_NAME, b"B" * 32)
+        chk.eq(_device_name(dev), b"B" * 31 + b"\x00", "32-byte payload keeps 31 + NUL")
+
+        chk.stalls(lambda: dev.get(OP.GET_DEVICE_NAME, 32, wvalue=1), "GET with wValue 1 STALL")
+        chk.no_stall(lambda: dev.set(OP.SET_DEVICE_NAME, b"alias", wvalue=1), "SET with wValue 1 no STALL")
+        chk.eq(_device_name(dev), b"B" * 31 + b"\x00", "SET with a non-zero wValue is ignored")
+
+        dev.set(OP.SET_DEVICE_NAME, b"QA Board")
+        directory = dev.get(OP.PRESET_GET_DIR, 7)
+        occupied = directory[0] | (directory[1] << 8)
+        active = dev.get_u8(OP.PRESET_GET_ACTIVE)
+        if occupied & (1 << active):
+            dev.get(OP.PRESET_LOAD, 1, wvalue=active)
+            dev.wait_ready()
+            chk.eq(_device_name(dev).split(b"\x00", 1)[0], b"QA Board", "name survives a preset load")
+        else:
+            chk.note("active preset slot empty; skipping the preset-load check")
+
+        dev.set(OP.SET_DEVICE_NAME, b"\x00junk")
+        chk.eq(_device_name(dev), bytes(32), "leading NUL clears to all zeros")
+    finally:
+        dev.set(OP.SET_DEVICE_NAME, orig.split(b"\x00", 1)[0] or b"\x00")
+        dev.wait_ready()

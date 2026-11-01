@@ -110,13 +110,15 @@ void preset_get_dac_hw_mute(DacHwMuteConfig *out);
 void preset_set_output_latency(uint8_t id);
 uint8_t preset_get_output_latency(void);
 
-// Input source names (device-global, directory-stored, V24+).  The getter
-// points into the RAM cache (valid until the next directory write; NULL for an
-// index past the table).  The setter writes the entries in mask and flushes
-// once: main loop only, inside a flash write bracket.
+// Input source names (V24+) and the board name (V25+), device-global.  Getters
+// point into the RAM cache (valid until the next directory write).  The setter
+// writes the masked sources plus device_name when non-NULL in one flush: main
+// loop only, inside a flash write bracket.
 const char *preset_stored_input_source_name(uint8_t src);
 uint8_t preset_set_input_source_names(uint8_t mask,
-                                      const char names[][INPUT_SOURCE_NAME_LEN]);
+                                      const char names[][INPUT_SOURCE_NAME_LEN],
+                                      const char *device_name);
+const char *preset_stored_device_name(void);
 
 // External control-interface config (UART/I2C, board-level, directory-stored,
 // V6+).  Setter is synchronous and main-loop only; a NULL pointer leaves that

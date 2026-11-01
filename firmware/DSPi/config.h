@@ -285,7 +285,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Device-global input source names; see Documentation/Features/input_source_names_spec.md.
 #define REQ_SET_INPUT_SOURCE_NAME   0x54  // wValue = source ID, payload = 1-32 byte name (leading NUL clears)
 #define REQ_GET_INPUT_SOURCE_NAME   0x55  // wValue = source ID, returns 32-byte NUL-terminated name (zeros = unnamed)
-// 0x56-0x57 unassigned (were the retired legacy channel mute pair)
+// Device-global board name; see Documentation/Features/device_name_spec.md.
+#define REQ_SET_DEVICE_NAME         0x56  // wValue = 0, payload = 1-32 byte name (leading NUL clears)
+#define REQ_GET_DEVICE_NAME         0x57  // wValue = 0, returns 32-byte NUL-terminated name (zeros = unnamed)
 #define REQ_SET_LOUDNESS            0x58
 #define REQ_GET_LOUDNESS            0x59
 #define REQ_SET_LOUDNESS_REF        0x5A

@@ -749,6 +749,13 @@ static bool vendor_handle_set_body(tusb_control_request_t const *req) {
             }
             break;
 
+        case REQ_SET_DEVICE_NAME:
+            // Persisted on the main loop with the source names.
+            if (buffer->data_len > 0 && vendor_last_wValue == 0) {
+                device_name_stage(vendor_rx_buf, buffer->data_len, _dispatch_src);
+            }
+            break;
+
         case REQ_SET_LOUDNESS:
             if (buffer->data_len >= 1) {
                 loudness_enabled = (vendor_rx_buf[0] != 0);
@@ -2060,6 +2067,13 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     !input_source_name_get((uint8_t)setup->wValue, (char *)resp_buf))
                     return false;
                 vendor_send_response(resp_buf, INPUT_SOURCE_NAME_LEN);
+                return true;
+            }
+
+            case REQ_GET_DEVICE_NAME: {
+                if (setup->wValue != 0) return false;
+                device_name_get((char *)resp_buf);
+                vendor_send_response(resp_buf, DEVICE_NAME_LEN);
                 return true;
             }
 
