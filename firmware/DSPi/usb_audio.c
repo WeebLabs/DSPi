@@ -309,6 +309,9 @@ void get_default_channel_name(int ch, uint8_t input_source,
         } else if (input_source == INPUT_SOURCE_ADAT) {
             // ADAT lightpipe carries 8 discrete channels; number them like USB.
             snprintf(buf, PRESET_NAME_LEN, "ADAT %d", ch + 1);
+        } else if (input_source == INPUT_SOURCE_NET) {
+            // Network stream: a single stereo pair, like SPDIF.
+            snprintf(buf, PRESET_NAME_LEN, "NET %c", (ch % 2 == 0) ? 'L' : 'R');
         } else {  // USB (and any future per-channel source)
             snprintf(buf, PRESET_NAME_LEN, "USB %d", ch + 1);
         }

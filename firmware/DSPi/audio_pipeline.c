@@ -13,6 +13,9 @@
 #include "audio_input.h"
 #include "spdif_input.h"
 #include "i2s_input.h"
+#ifdef DSPI_ENABLE_WIFI
+#include "net_input.h"
+#endif
 #include "config.h"
 #include "dsp_pipeline.h"
 #include "crossover.h"
@@ -1409,6 +1412,10 @@ void siggen_pump(void) {
          spdif_input_get_state() == SPDIF_INPUT_LOCKED) ||
         (active_input_source == INPUT_SOURCE_I2S &&
          i2s_input_get_state() == I2S_INPUT_RUNNING);
+#ifdef DSPI_ENABLE_WIFI
+    if (active_input_source == INPUT_SOURCE_NET && net_input_is_ready())
+        streaming = true;
+#endif
     if (streaming) return;
 
     // Bounded top-up per call to keep the main loop responsive; the loop

@@ -148,6 +148,16 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_PSYBASS_MASK        0x3C
 #define REQ_GET_PSYBASS_MASK        0x3D
 
+// ---- Network (WiFi/Sendspin) input; DSPI_ENABLE_WIFI builds only, others STALL ----
+// REQ_SET_WIFI_CREDS: wValue 0 = SSID bytes (<=32), 1 = passphrase bytes (<=63),
+//   2 = apply staged SSID+passphrase (re-joins if the radio is running),
+//   3 = clear staged passphrase (open network).  Values are RAM-only (phase 1).
+#define REQ_SET_WIFI_CREDS          0x3E
+// REQ_SET_SENDSPIN_SERVER: payload = uint16 port (LE, 0 = default 8927) + host bytes (<=61)
+#define REQ_SET_SENDSPIN_SERVER     0x3F
+// REQ_GET_NET_STATUS: returns NetStatusPacket (net_input.h, 32 bytes)
+#define REQ_GET_NET_STATUS          0x40
+
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42
 #define REQ_GET_EQ_PARAM    0x43

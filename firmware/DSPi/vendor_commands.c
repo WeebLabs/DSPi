@@ -16,6 +16,9 @@
 #include "audio_input.h"
 #include "spdif_input.h"
 #include "i2s_input.h"
+#ifdef DSPI_ENABLE_WIFI
+#include "net_input.h"
+#endif
 #include "lg_sound_sync.h"
 #include "dac_hw_mute.h"
 #include "audio_pipeline.h"
@@ -329,6 +332,9 @@ bool is_valid_gpio_pin(uint8_t pin) {
     // GPIO 16/17 are general-purpose again since the debug UART was removed;
     // when the UART control interface claims them, is_pin_in_use() covers it.
     if (pin >= 23 && pin <= 25) return false;   // Power/LED
+#ifdef DSPI_ENABLE_WIFI
+    if (pin == 29) return false;   // Pico 2 W: CYW43 CLK (shared with VSYS ADC)
+#endif
 #if PICO_RP2350
     return pin <= 29;
 #else
@@ -1441,6 +1447,49 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             }
             break;
         }
+
+#ifdef DSPI_ENABLE_WIFI
+        case REQ_SET_WIFI_CREDS: {
+            // Staged because SSID + passphrase (32 + 63) do not fit one 64-byte
+            // payload.  See config.h for the wValue sub-commands.
+            static char staged_ssid[33];
+            static char staged_pass[64];
+            uint8_t sub = (uint8_t)(vendor_last_wValue & 0xFF);
+            uint16_t n = buffer->data_len;
+            if (sub == 0) {
+                if (n > 32) { handled = false; break; }
+                memset(staged_ssid, 0, sizeof(staged_ssid));
+                memcpy(staged_ssid, vendor_rx_buf, n);
+            } else if (sub == 1) {
+                if (n > 63) { handled = false; break; }
+                memset(staged_pass, 0, sizeof(staged_pass));
+                memcpy(staged_pass, vendor_rx_buf, n);
+            } else if (sub == 2) {
+                net_wifi_set_credentials(staged_ssid, staged_pass);
+            } else if (sub == 3) {
+                memset(staged_pass, 0, sizeof(staged_pass));
+            } else {
+                handled = false;
+            }
+            break;
+        }
+
+        case REQ_SET_SENDSPIN_SERVER: {
+            if (buffer->data_len < 3 || buffer->data_len > 63) { handled = false; break; }
+            uint16_t port = (uint16_t)(vendor_rx_buf[0] | ((uint16_t)vendor_rx_buf[1] << 8));
+            char host[62];
+            uint16_t hl = (uint16_t)(buffer->data_len - 2);
+            memcpy(host, &vendor_rx_buf[2], hl);
+            host[hl] = '\0';
+            net_sendspin_set_server(host, port);
+            break;
+        }
+#else
+        case REQ_SET_WIFI_CREDS:
+        case REQ_SET_SENDSPIN_SERVER:
+            handled = false;   // WiFi build only; STALL elsewhere
+            break;
+#endif
 
         case REQ_SET_LG_SOUND_SYNC_ENABLE: {
             // Payload: 1 byte (0 = off, anything else = on).
@@ -3540,6 +3589,15 @@ static bool vendor_handle_get(tusb_control_request_t const *req) {
                 vendor_send_response(resp_buf, sizeof(vals));
                 return true;
             }
+
+#ifdef DSPI_ENABLE_WIFI
+            case REQ_GET_NET_STATUS: {
+                NetStatusPacket st;
+                net_input_get_status(&st);
+                vendor_send_response(&st, sizeof(st));
+                return true;
+            }
+#endif
 
             case REQ_GET_SPDIF_RX_STATUS: {
                 SpdifRxStatusPacket status;

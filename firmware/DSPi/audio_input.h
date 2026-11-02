@@ -21,9 +21,12 @@ typedef enum {
     INPUT_SOURCE_SPDIF2 = 4,   // Optional SPDIF input 2 (disabled until enabled by host)
     INPUT_SOURCE_SPDIF3 = 5,   // Optional SPDIF input 3 (disabled until enabled by host)
     INPUT_SOURCE_SPDIF4 = 6,   // Optional SPDIF input 4 (disabled until enabled by host)
+    INPUT_SOURCE_NET    = 7,   // WiFi/Sendspin network stream (RP2350 + Pico 2W, DSPI_ENABLE_WIFI builds only)
 } InputSource;
 
-#define INPUT_SOURCE_MAX    INPUT_SOURCE_SPDIF4   // Highest valid value
+#define INPUT_SOURCE_MAX    INPUT_SOURCE_NET      // Highest valid value
+// Last of the contiguous optional-SPDIF block (SPDIF2..SPDIF4)
+#define INPUT_SOURCE_SPDIF_LAST  INPUT_SOURCE_SPDIF4
 
 // Number of selectable SPDIF inputs. Input 0 (INPUT_SOURCE_SPDIF) is the
 // always-present one; inputs 1..3 (SPDIF2..SPDIF4) are optional and share the
@@ -32,8 +35,10 @@ typedef enum {
 
 // The optional inputs must stay contiguous from INPUT_SOURCE_SPDIF2: the
 // index<->source helpers below are arithmetic, not a lookup table.
-_Static_assert(INPUT_SOURCE_MAX == INPUT_SOURCE_SPDIF2 + SPDIF_RX_NUM_INPUTS - 2,
-               "optional SPDIF sources must be contiguous and end at INPUT_SOURCE_MAX");
+_Static_assert(INPUT_SOURCE_SPDIF_LAST == INPUT_SOURCE_SPDIF2 + SPDIF_RX_NUM_INPUTS - 2,
+               "optional SPDIF sources must be contiguous and end at INPUT_SOURCE_SPDIF_LAST");
+_Static_assert(INPUT_SOURCE_MAX == INPUT_SOURCE_NET,
+               "INPUT_SOURCE_MAX must name the highest source");
 
 // Default SPDIF RX GPIO pin.  GPIO 5 sits just below the output-pin
 // neighborhood (SPDIF outs on 6-9, PDM on 10) and is unused by any
@@ -221,8 +226,8 @@ static inline bool adat_slave_mode_active(void) {
            active_input_source == INPUT_SOURCE_ADAT;
 }
 
-// Structurally valid input source value. ADAT (3) is structurally valid on
-// both platforms so presets round-trip; selectability is gated separately.
+// Structurally valid input source value. ADAT (3) and NET (7) are structurally
+// valid on every build so presets round-trip; selectability is gated separately.
 static inline bool input_source_valid(uint8_t src) {
     return src <= INPUT_SOURCE_MAX;
 }
@@ -230,12 +235,12 @@ static inline bool input_source_valid(uint8_t src) {
 // True for any of the SPDIF inputs
 static inline bool input_source_is_spdif(uint8_t src) {
     return src == INPUT_SOURCE_SPDIF ||
-           (src >= INPUT_SOURCE_SPDIF2 && src <= INPUT_SOURCE_MAX);
+           (src >= INPUT_SOURCE_SPDIF2 && src <= INPUT_SOURCE_SPDIF_LAST);
 }
 
 // SPDIF input index (0..SPDIF_RX_NUM_INPUTS-1) for a source; 0 for non-SPDIF
 static inline uint8_t spdif_index_for_source(uint8_t src) {
-    if (src >= INPUT_SOURCE_SPDIF2 && src <= INPUT_SOURCE_MAX)
+    if (src >= INPUT_SOURCE_SPDIF2 && src <= INPUT_SOURCE_SPDIF_LAST)
         return (uint8_t)(src - INPUT_SOURCE_SPDIF2 + 1);
     return 0;
 }
@@ -276,6 +281,13 @@ static inline bool input_source_selectable(uint8_t src) {
         return adat_input_enabled != 0 && adat_input_pin != 0xFF;
 #else
         return false;   // no PIO/DMA/channel budget on RP2040
+#endif
+    }
+    if (src == INPUT_SOURCE_NET) {
+#ifdef DSPI_ENABLE_WIFI
+        return true;
+#else
+        return false;   // only built on RP2350 + Pico 2W (-DDSPI_ENABLE_WIFI=ON)
 #endif
     }
     if (!input_source_is_spdif(src)) return true;

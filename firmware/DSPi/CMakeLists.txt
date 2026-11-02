@@ -156,6 +156,59 @@ target_compile_definitions(DSPi PRIVATE
     PICO_MEM_IN_RAM=1
 )
 
+# ----------------------------------------------------------------------------
+# WiFi / network audio input (-DDSPI_ENABLE_WIFI=ON, RP2350 + pico2_w only)
+# ----------------------------------------------------------------------------
+if (DSPI_ENABLE_WIFI)
+    if (NOT PICO_PLATFORM MATCHES "rp2350")
+        message(FATAL_ERROR "DSPI_ENABLE_WIFI requires PICO_PLATFORM=rp2350 (Pico 2 W)")
+    endif()
+    if (NOT PICO_CYW43_SUPPORTED)
+        message(FATAL_ERROR "DSPI_ENABLE_WIFI requires a CYW43 board: -DPICO_BOARD=pico2_w")
+    endif()
+
+    target_compile_definitions(DSPi PRIVATE DSPI_ENABLE_WIFI=1)
+    # Core 0 runs lwIP -> Sendspin -> Noise/X25519 (mbedtls bignum) from the
+    # main loop: 2 KB (SDK default) is too little.  The stack lives in
+    # SCRATCH_Y, which has 2 KB of otherwise unused space below it.
+    target_compile_definitions(DSPi PRIVATE PICO_STACK_SIZE=0x1000)
+    # lwipopts.h (NO_SYS poll mode, small pools) is found via the DSPi include dir.
+    target_sources(DSPi PRIVATE
+        net_input.c
+        net_input.h
+        lwipopts.h
+        dspi_mbedtls_config.h
+    )
+    set_source_files_properties(net_input.c PROPERTIES COMPILE_FLAGS "-O3")
+
+    # Sendspin client + noise/secure-channel code (written separately).
+    foreach(_f sendspin_noise.c sendspin_client.c)
+        if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${_f})
+            target_sources(DSPi PRIVATE ${_f})
+        else()
+            message(WARNING "DSPI_ENABLE_WIFI: ${_f} not found in DSPi/ (link will fail unless DSPI_NET_EXTRA_SOURCES provides it)")
+        endif()
+    endforeach()
+    # Development aid: extra sources / include dirs (e.g. a local stub of the
+    # Sendspin client kept outside the repo): -DDSPI_NET_EXTRA_SOURCES="a.c;b.c"
+    # -DDSPI_NET_EXTRA_INCLUDES="dir".
+    if (DSPI_NET_EXTRA_SOURCES)
+        target_sources(DSPi PRIVATE ${DSPI_NET_EXTRA_SOURCES})
+    endif()
+    if (DSPI_NET_EXTRA_INCLUDES)
+        target_include_directories(DSPi PRIVATE ${DSPI_NET_EXTRA_INCLUDES})
+    endif()
+
+    # lwIP in poll mode: cyw43_arch_poll() (called from net_input_poll) is the
+    # only place the network stack runs; no background IRQ/async worker.
+    target_link_libraries(DSPi
+        pico_cyw43_arch_lwip_poll
+        pico_lwip
+        pico_mbedtls
+        pico_rand
+    )
+endif()
+
 target_link_libraries(DSPi
     pico_stdlib
     pico_multicore

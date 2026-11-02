@@ -20,6 +20,16 @@ add_compile_definitions(PICO_FLASH_SPI_CLKDIV=6)
 # XIP setup (CLKDIV≈3) stays in force.  The RP2350 override is done at runtime
 # in DSPi/flash_clkdiv.c by writing QMI registers directly.
 
+# WiFi / network audio input (INPUT_SOURCE_NET, Sendspin).  RP2350 + Pico 2 W
+# only: configure with -DPICO_PLATFORM=rp2350 -DPICO_BOARD=pico2_w
+# -DDSPI_ENABLE_WIFI=ON.  OFF by default so normal Pico/Pico 2 builds are
+# unchanged.  Declared here (before pico_sdk_init) because the mbedtls config
+# file must be chosen before the SDK's pico_mbedtls library is created.
+option(DSPI_ENABLE_WIFI "Build the WiFi/Sendspin network input (RP2350, pico2_w)" OFF)
+if (DSPI_ENABLE_WIFI)
+    set(PICO_MBEDTLS_CONFIG_FILE "${CMAKE_CURRENT_LIST_DIR}/DSPi/dspi_mbedtls_config.h")
+endif()
+
 # Pull in PICO SDK (must be before project)
 include(pico_sdk_import.cmake)
 

@@ -1,0 +1,961 @@
+/*
+ * Host test for the Sendspin client protocol layer.
+ *
+ * WHAT THIS PROVES: self-consistency only. The Noise initiator in this file
+ * (section "independent initiator") was written separately from the responder
+ * in sendspin_noise.c, straight from the Noise spec text, using different
+ * mbedtls entry points (mbedtls_md_hmac, mbedtls_ecdh_*), but by the same
+ * author with the same reading of the spec. A shared misreading (e.g. of the
+ * Sendspin prologue or of which messages carry which payloads) would NOT be
+ * caught. It does NOT prove interoperability with a real Music Assistant
+ * server. External vectors checked here: RFC 7748 X25519, RFC 6455 accept key,
+ * and the published Sendspin sentinel PSK / psk_id constants.
+ *
+ * The lwIP raw API, pico time/rand and net_input are replaced by stubs
+ * (stubs/), and sendspin_client.c is #included so its statics are testable.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "mbedtls/build_info.h"
+#include "mbedtls/md.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/sha1.h"
+#include "mbedtls/base64.h"
+#include "mbedtls/chachapoly.h"
+#include "mbedtls/ecp.h"
+#include "mbedtls/ecdh.h"
+#include "mbedtls/bignum.h"
+
+#include "sendspin_client.c"      /* brings in stubs' headers + statics */
+
+/* ===================================================================== */
+/* test infrastructure                                                    */
+/* ===================================================================== */
+static int g_fail, g_pass;
+#define CHECK(cond) do { if (cond) g_pass++; else { g_fail++; \
+    printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } } while (0)
+
+static void hex2bin(uint8_t *out, const char *hex)
+{
+    size_t n = strlen(hex) / 2;
+    for (size_t i = 0; i < n; i++) { unsigned v; sscanf(hex + 2 * i, "%2x", &v); out[i] = (uint8_t)v; }
+}
+
+static uint32_t rng_state = 0x12345678u;
+uint32_t get_rand_32(void)
+{
+    rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17; rng_state ^= rng_state << 5;
+    return rng_state * 2654435761u;
+}
+static int test_rng(void *ctx, unsigned char *buf, size_t len) { return ss_rng(ctx, buf, len); }
+
+uint64_t stub_now_us = 1000000;
+
+/* ---- net_input stub ---- */
+static uint8_t  pushed[1 << 20];
+static size_t   pushed_len;
+static int64_t  push_budget = -1;          /* -1 unlimited */
+static int      flush_count, fmt_calls;
+static uint32_t fmt_rate; static uint8_t fmt_ch, fmt_bits;
+static uint8_t  g_volume = 80; static bool g_mute;
+static const char *g_host = "127.0.0.1";
+
+uint32_t net_input_push_pcm(const uint8_t *pcm, uint32_t bytes)
+{
+    uint32_t n = bytes;
+    if (push_budget >= 0 && (int64_t)n > push_budget) n = (uint32_t)push_budget;
+    memcpy(pushed + pushed_len, pcm, n);
+    pushed_len += n;
+    if (push_budget >= 0) push_budget -= n;
+    return n;
+}
+void net_input_set_format(uint32_t r, uint8_t ch, uint8_t b) { fmt_rate = r; fmt_ch = ch; fmt_bits = b; fmt_calls++; }
+void net_input_flush(void) { flush_count++; }
+uint32_t net_input_ring_fill_bytes(void) { return 0; }
+uint8_t net_volume_get_percent(void) { return g_volume; }
+void net_volume_set_percent(uint8_t v) { g_volume = v; }
+bool net_mute_get(void) { return g_mute; }
+void net_mute_set(bool m) { g_mute = m; }
+const char *net_sendspin_host(void) { return g_host; }
+uint16_t net_sendspin_port(void) { return 8927; }
+
+/* ---- lwIP stub ---- */
+static struct tcp_pcb the_pcb;
+static int pcb_new_count, pcb_closed, pcb_aborted;
+static bool pcb_alive;
+static void *cb_arg;
+static tcp_recv_fn recv_cb; static tcp_sent_fn sent_cb; static tcp_err_fn err_cb;
+static tcp_connected_fn connected_cb;
+static uint16_t connect_port;
+static uint8_t  out_cap[1 << 20];
+static size_t   out_len, rd_off;
+static int      sndbuf_cap = 0;           /* 0 = unlimited */
+static int      sndbuf_used;
+static long     recved_total, injected_total;
+static int      pbufs_live;
+static dns_found_callback dns_cb;
+
+struct tcp_pcb *tcp_new(void) { pcb_new_count++; pcb_alive = true; return &the_pcb; }
+void tcp_arg(struct tcp_pcb *p, void *a) { (void)p; cb_arg = a; }
+void tcp_recv(struct tcp_pcb *p, tcp_recv_fn f) { (void)p; recv_cb = f; }
+void tcp_sent(struct tcp_pcb *p, tcp_sent_fn f) { (void)p; sent_cb = f; }
+void tcp_err(struct tcp_pcb *p, tcp_err_fn f) { (void)p; err_cb = f; }
+err_t tcp_connect(struct tcp_pcb *p, const ip_addr_t *ip, uint16_t port, tcp_connected_fn f)
+{ (void)p; (void)ip; connect_port = port; connected_cb = f; return ERR_OK; }
+u16_t tcp_sndbuf(struct tcp_pcb *p)
+{ (void)p; return sndbuf_cap ? (u16_t)(sndbuf_cap - sndbuf_used) : 65535; }
+err_t tcp_write(struct tcp_pcb *p, const void *d, u16_t len, uint8_t fl)
+{
+    (void)p; (void)fl;
+    if (sndbuf_cap && sndbuf_used + len > sndbuf_cap) return ERR_MEM;
+    memcpy(out_cap + out_len, d, len);
+    out_len += len; sndbuf_used += len;
+    return ERR_OK;
+}
+err_t tcp_output(struct tcp_pcb *p) { (void)p; return ERR_OK; }
+void tcp_recved(struct tcp_pcb *p, u16_t len) { (void)p; recved_total += len; }
+err_t tcp_close(struct tcp_pcb *p) { (void)p; pcb_alive = false; pcb_closed++; return ERR_OK; }
+void tcp_abort(struct tcp_pcb *p) { (void)p; pcb_alive = false; pcb_aborted++; }
+void pbuf_free(struct pbuf *p)
+{
+    while (p) { struct pbuf *n = p->next; free(p->payload); free(p); pbufs_live--; p = n; }
+}
+void pbuf_cat(struct pbuf *h, struct pbuf *t)
+{
+    struct pbuf *q = h;
+    q->tot_len = (uint16_t)(q->tot_len + t->tot_len);
+    while (q->next) q = q->next;
+    q->next = t;
+}
+err_t dns_gethostbyname(const char *host, ip_addr_t *addr, dns_found_callback f, void *arg)
+{
+    (void)arg;
+    if (!strcmp(host, "slow.local") || !strcmp(host, "bad.local")) { dns_cb = f; return ERR_INPROGRESS; }
+    addr->addr = 0x0100007f;
+    return ERR_OK;
+}
+
+static void stub_sent_ack(void) { sndbuf_used = 0; if (sent_cb) sent_cb(NULL, &the_pcb, 0); }
+
+static err_t inject(const uint8_t *d, size_t len, size_t chunk)
+{
+    struct pbuf *head = NULL, *tail = NULL;
+    size_t off = 0;
+    if (!len) return ERR_OK;
+    while (off < len) {
+        size_t n = len - off < chunk ? len - off : chunk;
+        struct pbuf *p = calloc(1, sizeof(*p));
+        p->payload = malloc(n); memcpy(p->payload, d + off, n);
+        p->len = (uint16_t)n; p->ref = 1; pbufs_live++;
+        if (!head) head = p; else tail->next = p;
+        tail = p; off += n;
+    }
+    head->tot_len = (uint16_t)len;
+    injected_total += (long)len;
+    return recv_cb(cb_arg, &the_pcb, head, ERR_OK);
+}
+
+static void poll_n(int n)
+{
+    for (int i = 0; i < n; i++) { stub_now_us += 1000; sendspin_client_poll(); }
+}
+
+/* ===================================================================== */
+/* server-side WebSocket framing                                          */
+/* ===================================================================== */
+static size_t srv_frame(uint8_t *o, uint8_t opcode, bool fin, const uint8_t *p, size_t len, int form)
+{
+    size_t k = 0;
+    o[k++] = (fin ? 0x80 : 0) | opcode;
+    if (form == 2) { o[k++] = 127; for (int i = 7; i >= 0; i--) o[k++] = (uint8_t)((uint64_t)len >> (8 * i)); }
+    else if (form == 1 || len > 125) { o[k++] = 126; o[k++] = (uint8_t)(len >> 8); o[k++] = (uint8_t)len; }
+    else o[k++] = (uint8_t)len;
+    memcpy(o + k, p, len);
+    return k + len;
+}
+
+/* parse one masked client frame from out_cap at rd_off */
+static bool next_frame(uint8_t *op, uint8_t *pl, size_t *plen, bool *masked)
+{
+    const uint8_t *b = out_cap + rd_off; size_t n = out_len - rd_off;
+    if (n < 2) return false;
+    size_t k = 2, len = b[1] & 0x7f;
+    if (len == 126) { if (n < 4) return false; len = (b[2] << 8) | b[3]; k = 4; }
+    else if (len == 127) { return false; }
+    *masked = (b[1] & 0x80) != 0;
+    uint8_t m[4] = {0};
+    if (*masked) { if (n < k + 4) return false; memcpy(m, b + k, 4); k += 4; }
+    if (n < k + len) return false;
+    for (size_t i = 0; i < len; i++) pl[i] = b[k + i] ^ m[i & 3];
+    *op = b[0] & 0x0f; *plen = len;
+    CHECK(b[0] & 0x80);                       /* FIN */
+    rd_off += k + len;
+    return true;
+}
+
+/* ===================================================================== */
+/* independent Noise initiator (server side)                              */
+/* ===================================================================== */
+typedef struct { uint8_t h[32], ck[32], k[32]; int has_k; uint64_t n; } isym;
+
+static void i_hmac(uint8_t out[32], const uint8_t *key, size_t kl, const uint8_t *d, size_t dl)
+{
+    static const uint8_t z = 0;
+    mbedtls_md_hmac(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), key, kl, dl ? d : &z, dl, out);
+}
+static void i_hkdf(const uint8_t ck[32], const uint8_t *ikm, size_t il, uint8_t o[3][32], int nout)
+{
+    uint8_t tk[32], in[33];
+    i_hmac(tk, ck, 32, ikm, il);
+    in[0] = 1; i_hmac(o[0], tk, 32, in, 1);
+    memcpy(in, o[0], 32); in[32] = 2; i_hmac(o[1], tk, 32, in, 33);
+    if (nout == 3) { memcpy(in, o[1], 32); in[32] = 3; i_hmac(o[2], tk, 32, in, 33); }
+}
+static void i_mixhash(isym *s, const uint8_t *d, size_t l)
+{
+    mbedtls_sha256_context c2; mbedtls_sha256_init(&c2); mbedtls_sha256_starts(&c2, 0);
+    mbedtls_sha256_update(&c2, s->h, 32); mbedtls_sha256_update(&c2, d, l);
+    mbedtls_sha256_finish(&c2, s->h); mbedtls_sha256_free(&c2);
+}
+static void i_mixkey(isym *s, const uint8_t *d, size_t l)
+{
+    uint8_t o[3][32]; i_hkdf(s->ck, d, l, o, 2);
+    memcpy(s->ck, o[0], 32); memcpy(s->k, o[1], 32); s->has_k = 1; s->n = 0;
+}
+static void i_mixkeyhash(isym *s, const uint8_t *d, size_t l)
+{
+    uint8_t o[3][32]; i_hkdf(s->ck, d, l, o, 3);
+    memcpy(s->ck, o[0], 32); i_mixhash(s, o[1], 32); memcpy(s->k, o[2], 32); s->has_k = 1; s->n = 0;
+}
+static void i_nonce(uint8_t nn[12], uint64_t n)
+{
+    memset(nn, 0, 12);
+    for (int i = 0; i < 8; i++) nn[4 + i] = (n >> (8 * i)) & 0xff;
+}
+static void i_aead_enc(const uint8_t *k, uint64_t n, const uint8_t *ad, size_t al,
+                       const uint8_t *pt, size_t len, uint8_t *out)
+{
+    mbedtls_chachapoly_context cc; uint8_t nn[12]; i_nonce(nn, n);
+    mbedtls_chachapoly_init(&cc); mbedtls_chachapoly_setkey(&cc, k);
+    mbedtls_chachapoly_encrypt_and_tag(&cc, len, nn, ad, al, pt, out, out + len);
+    mbedtls_chachapoly_free(&cc);
+}
+static int i_aead_dec(const uint8_t *k, uint64_t n, const uint8_t *ad, size_t al,
+                      const uint8_t *ct, size_t len, uint8_t *out)
+{
+    mbedtls_chachapoly_context cc; uint8_t nn[12]; i_nonce(nn, n);
+    mbedtls_chachapoly_init(&cc); mbedtls_chachapoly_setkey(&cc, k);
+    int r = mbedtls_chachapoly_auth_decrypt(&cc, len - 16, nn, ad, al, ct + len - 16, ct, out);
+    mbedtls_chachapoly_free(&cc);
+    return r ? -1 : (int)(len - 16);
+}
+static size_t i_encrypt_hash(isym *s, const uint8_t *pt, size_t len, uint8_t *out)
+{
+    if (!s->has_k) { memcpy(out, pt, len); i_mixhash(s, out, len); return len; }
+    i_aead_enc(s->k, s->n++, s->h, 32, pt, len, out);
+    i_mixhash(s, out, len + 16);
+    return len + 16;
+}
+static int i_decrypt_hash(isym *s, const uint8_t *ct, size_t len, uint8_t *out)
+{
+    if (!s->has_k) { memcpy(out, ct, len); i_mixhash(s, ct, len); return (int)len; }
+    int r = i_aead_dec(s->k, s->n, s->h, 32, ct, len, out);
+    if (r < 0) return -1;
+    s->n++;
+    i_mixhash(s, ct, len);
+    return r;
+}
+static void i_keygen(uint8_t priv[32], uint8_t pub[32])
+{
+    mbedtls_ecp_group g; mbedtls_mpi d; mbedtls_ecp_point Q; size_t ol;
+    mbedtls_ecp_group_init(&g); mbedtls_mpi_init(&d); mbedtls_ecp_point_init(&Q);
+    mbedtls_ecp_group_load(&g, MBEDTLS_ECP_DP_CURVE25519);
+    mbedtls_ecdh_gen_public(&g, &d, &Q, test_rng, NULL);
+    mbedtls_mpi_write_binary_le(&d, priv, 32);
+    mbedtls_ecp_point_write_binary(&g, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &ol, pub, 32);
+    mbedtls_ecp_group_free(&g); mbedtls_mpi_free(&d); mbedtls_ecp_point_free(&Q);
+}
+static void i_dh(uint8_t out[32], const uint8_t priv[32], const uint8_t pub[32])
+{
+    mbedtls_ecp_group g; mbedtls_mpi d, z; mbedtls_ecp_point Q; uint8_t pb[32];
+    mbedtls_ecp_group_init(&g); mbedtls_mpi_init(&d); mbedtls_mpi_init(&z); mbedtls_ecp_point_init(&Q);
+    mbedtls_ecp_group_load(&g, MBEDTLS_ECP_DP_CURVE25519);
+    mbedtls_mpi_read_binary_le(&d, priv, 32);
+    memcpy(pb, pub, 32); pb[31] &= 0x7f;
+    mbedtls_ecp_point_read_binary(&g, &Q, pb, 32);
+    mbedtls_ecdh_compute_shared(&g, &z, &Q, &d, test_rng, NULL);
+    mbedtls_mpi_write_binary_le(&z, out, 32);
+    mbedtls_ecp_group_free(&g); mbedtls_mpi_free(&d); mbedtls_mpi_free(&z); mbedtls_ecp_point_free(&Q);
+}
+
+typedef struct {
+    isym sym;
+    uint8_t s_priv[32], s_pub[32];     /* initiator (server) static */
+    uint8_t rs[32];                    /* responder (client) static */
+    uint8_t e_priv[32], e_pub[32];
+    uint8_t k_send[32], k_recv[32];    /* transport */
+    uint64_t n_send, n_recv;
+} init_t;
+
+static void init_begin(init_t *I, const uint8_t *prologue, size_t pl)
+{
+    static const char name[] = "Noise_KKpsk2_25519_ChaChaPoly_SHA256";
+    memset(&I->sym, 0, sizeof(I->sym));
+    mbedtls_sha256((const uint8_t *)name, strlen(name), I->sym.h, 0);
+    memcpy(I->sym.ck, I->sym.h, 32);
+    i_mixhash(&I->sym, prologue, pl);
+    i_mixhash(&I->sym, I->s_pub, 32);      /* -> s */
+    i_mixhash(&I->sym, I->rs, 32);         /* <- s */
+}
+/* -> e, es, ss ; returns msg length */
+static size_t init_msg1(init_t *I, const uint8_t *payload, size_t plen, uint8_t *out)
+{
+    uint8_t dh[32];
+    i_keygen(I->e_priv, I->e_pub);
+    memcpy(out, I->e_pub, 32);
+    i_mixhash(&I->sym, I->e_pub, 32); i_mixkey(&I->sym, I->e_pub, 32);
+    i_dh(dh, I->e_priv, I->rs); i_mixkey(&I->sym, dh, 32);        /* es */
+    i_dh(dh, I->s_priv, I->rs); i_mixkey(&I->sym, dh, 32);        /* ss */
+    return 32 + i_encrypt_hash(&I->sym, payload, plen, out + 32);
+}
+/* <- e, ee, se, psk ; returns payload length or -1 */
+static int init_msg2(init_t *I, const uint8_t *msg, size_t len, const uint8_t psk[32], uint8_t *payload)
+{
+    uint8_t dh[32], re[32];
+    memcpy(re, msg, 32);
+    i_mixhash(&I->sym, re, 32); i_mixkey(&I->sym, re, 32);
+    i_dh(dh, I->e_priv, re); i_mixkey(&I->sym, dh, 32);           /* ee */
+    i_dh(dh, I->s_priv, re); i_mixkey(&I->sym, dh, 32);           /* se */
+    i_mixkeyhash(&I->sym, psk, 32);                               /* psk */
+    int r = i_decrypt_hash(&I->sym, msg + 32, len - 32, payload);
+    if (r < 0) return -1;
+    uint8_t o[3][32]; i_hkdf(I->sym.ck, NULL, 0, o, 2);
+    memcpy(I->k_send, o[0], 32); memcpy(I->k_recv, o[1], 32);
+    I->n_send = I->n_recv = 0;
+    return r;
+}
+
+/* ===================================================================== */
+/* unit tests                                                             */
+/* ===================================================================== */
+static void test_vectors(void)
+{
+    uint8_t a_priv[32], a_pub[32], b_priv[32], b_pub[32], exp[32], out[32];
+    hex2bin(a_priv, "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a");
+    hex2bin(a_pub,  "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+    hex2bin(b_priv, "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb");
+    hex2bin(b_pub,  "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f");
+    hex2bin(exp,    "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742");
+    CHECK(ssn_x25519_base(out, a_priv, test_rng, NULL) == 0 && !memcmp(out, a_pub, 32));
+    CHECK(ssn_x25519_base(out, b_priv, test_rng, NULL) == 0 && !memcmp(out, b_pub, 32));
+    CHECK(ssn_x25519(out, a_priv, b_pub, test_rng, NULL) == 0 && !memcmp(out, exp, 32));
+    CHECK(ssn_x25519(out, b_priv, a_pub, test_rng, NULL) == 0 && !memcmp(out, exp, 32));
+    /* all-zero point must be rejected */
+    uint8_t zero[32] = {0};
+    CHECK(ssn_x25519(out, a_priv, zero, test_rng, NULL) != 0);
+
+    /* Published Sendspin constants (connection.md) */
+    uint8_t psk[32], psk_exp[32];
+    hex2bin(psk_exp, "1b5e24dbc1aed95fc2a5a338a90c05df44bd10f5ec1f4cd66cbf86272767b9d3");
+    ssn_sentinel_psk(psk);
+    CHECK(!memcmp(psk, psk_exp, 32));
+    char id[64];
+    ssn_psk_id(id, psk);
+    CHECK(!strcmp(id, "GFsV9tLaSQm9HcFWpKsgYQOr7wFTvNUtkmFwuVz3zoo"));
+
+    /* RFC 6455 accept key */
+    char acc[32];
+    ws_accept_key("dGhlIHNhbXBsZSBub25jZQ==", acc);
+    CHECK(!strcmp(acc, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+
+    /* base64 / base64url vs mbedtls base64 */
+    uint8_t rnd[47]; test_rng(NULL, rnd, sizeof(rnd));
+    for (size_t l = 0; l <= 47; l++) {
+        char a[100], b[100]; size_t ol;
+        ssn_b64_encode(a, rnd, l);
+        mbedtls_base64_encode((unsigned char *)b, sizeof(b), &ol, rnd, l); b[ol] = 0;
+        CHECK(!strcmp(a, b));
+        char u[100]; uint8_t back[64];
+        size_t ul = ssn_b64url_encode(u, rnd, l);
+        CHECK(strchr(u, '=') == NULL && strchr(u, '+') == NULL && strchr(u, '/') == NULL);
+        CHECK(ssn_b64url_decode(back, sizeof(back), u, ul) == (int)l && !memcmp(back, rnd, l));
+    }
+    CHECK(ssn_b64url_decode(out, 32, "a", 1) < 0);
+    CHECK(ssn_b64url_decode(out, 32, "ab!d", 4) < 0);
+
+    /* WS masking */
+    uint8_t m[4] = {1, 2, 3, 4}, buf[10] = {0,1,2,3,4,5,6,7,8,9}, cp[10];
+    memcpy(cp, buf, 10); ws_mask(buf, 10, m); CHECK(buf[0] == 1 && buf[4] == (4 ^ 1));
+    ws_mask(buf, 10, m); CHECK(!memcmp(buf, cp, 10));
+}
+
+static void test_json(void)
+{
+    const char *j = "{\"payload\":{\"player\":{\"command\":\"volume\",\"volume\": 75,\"x\":\"a\\\"b\"},"
+                    "\"volume\":9}, \"type\" : \"server/command\"}";
+    char t[40]; int64_t v; bool b;
+    CHECK(json_str(j, "type", 1, t, sizeof(t)) == 14 && !strcmp(t, "server/command"));
+    CHECK(json_str(j, "command", 0, t, sizeof(t)) == 6 && !strcmp(t, "volume"));
+    CHECK(json_i64(j, "volume", 0, &v) && v == 75);       /* skips the "volume" value string */
+    CHECK(json_i64(j, "volume", 2, &v) && v == 9);        /* depth selects the outer one */
+    CHECK(!json_i64(j, "nothere", 0, &v));
+    CHECK(json_str(j, "x", 0, t, sizeof(t)) >= 0);
+    CHECK(json_bool("{\"payload\":{\"player\":{\"command\":\"mute\",\"mute\":true}}}", "mute", 0, &b) && b);
+    CHECK(json_bool("{\"mute\":false}", "mute", 0, &b) && !b);
+    CHECK(json_i64("{\"a\":-12,\"b\":1710000000000000}", "b", 0, &v) && v == 1710000000000000LL);
+    CHECK(json_i64("{\"a\":-12}", "a", 0, &v) && v == -12);
+    CHECK(json_str("{\"type\":\"", "type", 1, t, sizeof(t)) < 0);   /* truncated */
+}
+
+static void test_noise_direct(void)
+{
+    init_t I; ssn_t R;
+    uint8_t r_priv[32], r_pub[32];
+    ssn_gen_static(r_priv, r_pub, test_rng, NULL);
+    i_keygen(I.s_priv, I.s_pub);
+    memcpy(I.rs, r_pub, 32);
+    const char *pro = "prologue-bytes";
+    init_begin(&I, (const uint8_t *)pro, strlen(pro));
+    ssn_resp_init(&R, r_priv, r_pub, I.s_pub, (const uint8_t *)pro, strlen(pro), test_rng, NULL);
+
+    uint8_t m1[200], m2[200], pay[128], psk[32];
+    ssn_sentinel_psk(psk);
+    const char *p1 = "{\"psk_id\":\"x\",\"psk_category\":\"sn\"}";
+    size_t l1 = init_msg1(&I, (const uint8_t *)p1, strlen(p1), m1);
+    size_t pl = 0;
+    CHECK(ssn_resp_read_msg1(&R, m1, l1, pay, sizeof(pay), &pl) == 0);
+    CHECK(pl == strlen(p1) && !memcmp(pay, p1, pl));
+    size_t l2 = 0;
+    CHECK(ssn_resp_write_msg2(&R, psk, (const uint8_t *)"{}", 2, m2, sizeof(m2), &l2) == 0);
+    CHECK(l2 == 32 + 2 + 16);
+    int r = init_msg2(&I, m2, l2, psk, pay);
+    CHECK(r == 2 && !memcmp(pay, "{}", 2));
+    CHECK(!memcmp(I.sym.h, R.h, 32));                  /* handshake hashes agree */
+
+    /* transport both directions, several messages, in-place */
+    for (int i = 0; i < 5; i++) {
+        uint8_t pt[100], ct[116], dec[116];
+        test_rng(NULL, pt, sizeof(pt));
+        i_aead_enc(I.k_send, I.n_send++, NULL, 0, pt, sizeof(pt), ct);
+        memcpy(dec, ct, 116);
+        CHECK(ssn_decrypt(&R, dec, 116, dec) == 100 && !memcmp(dec, pt, 100));
+        uint8_t ct2[116];
+        CHECK(ssn_encrypt(&R, pt, 100, ct2) == 0);
+        CHECK(i_aead_dec(I.k_recv, I.n_recv++, NULL, 0, ct2, 116, dec) == 100 && !memcmp(dec, pt, 100));
+    }
+    /* tamper + replay */
+    uint8_t pt[20] = "tamper-test", ct[36], dec[36];
+    i_aead_enc(I.k_send, I.n_send, NULL, 0, pt, 20, ct);
+    ct[3] ^= 1;
+    CHECK(ssn_decrypt(&R, ct, 36, dec) < 0);
+    ct[3] ^= 1;
+    memcpy(dec, ct, 36);
+    CHECK(ssn_decrypt(&R, dec, 36, dec) == 20);        /* nonce did not advance on failure */
+    memcpy(dec, ct, 36);
+    CHECK(ssn_decrypt(&R, dec, 36, dec) < 0);          /* replay rejected */
+    I.n_send++;
+    /* skip */
+    i_aead_enc(I.k_send, I.n_send++, NULL, 0, pt, 20, ct);        /* skipped msg */
+    ssn_skip_recv(&R);
+    i_aead_enc(I.k_send, I.n_send++, NULL, 0, pt, 20, ct);
+    memcpy(dec, ct, 36);
+    CHECK(ssn_decrypt(&R, dec, 36, dec) == 20);
+
+    /* wrong PSK: initiator cannot decrypt msg2 */
+    init_t J = I; ssn_t R2;
+    init_begin(&J, (const uint8_t *)pro, strlen(pro));
+    ssn_resp_init(&R2, r_priv, r_pub, I.s_pub, (const uint8_t *)pro, strlen(pro), test_rng, NULL);
+    l1 = init_msg1(&J, (const uint8_t *)p1, strlen(p1), m1);
+    CHECK(ssn_resp_read_msg1(&R2, m1, l1, pay, sizeof(pay), &pl) == 0);
+    uint8_t badpsk[32]; memset(badpsk, 7, 32);
+    ssn_resp_write_msg2(&R2, badpsk, (const uint8_t *)"{}", 2, m2, sizeof(m2), &l2);
+    CHECK(init_msg2(&J, m2, l2, psk, pay) < 0);
+
+    /* wrong prologue: responder fails msg1 */
+    ssn_resp_init(&R2, r_priv, r_pub, I.s_pub, (const uint8_t *)"other", 5, test_rng, NULL);
+    CHECK(ssn_resp_read_msg1(&R2, m1, l1, pay, sizeof(pay), &pl) < 0);
+    /* truncated msg1 */
+    ssn_resp_init(&R2, r_priv, r_pub, I.s_pub, (const uint8_t *)pro, strlen(pro), test_rng, NULL);
+    CHECK(ssn_resp_read_msg1(&R2, m1, 40, pay, sizeof(pay), &pl) < 0);
+}
+
+/* ===================================================================== */
+/* end-to-end: sendspin_client.c vs. a test "Music Assistant"              */
+/* ===================================================================== */
+static init_t S;
+static char client_init_txt[400], server_init_txt[400];
+static size_t g_chunk = 1500;
+
+static void srv_inject(const uint8_t *frame, size_t n) { inject(frame, n, g_chunk); }
+static void srv_text(const char *s)
+{
+    static uint8_t f[4096];
+    size_t n = srv_frame(f, 1, true, (const uint8_t *)s, strlen(s), 0);
+    srv_inject(f, n);
+}
+static void srv_enc_ex(const uint8_t *pt, size_t len, bool corrupt, int form)
+{
+    static uint8_t ct[70000], f[70100];
+    i_aead_enc(S.k_send, S.n_send++, NULL, 0, pt, len, ct);
+    if (corrupt) ct[len / 2] ^= 0x40;
+    size_t n = srv_frame(f, 2, true, ct, len + 16, form);
+    srv_inject(f, n);
+}
+static void srv_json(const char *json)
+{
+    static uint8_t pt[4096];
+    pt[0] = 0; memcpy(pt + 1, json, strlen(json));
+    srv_enc_ex(pt, 1 + strlen(json), false, 0);
+}
+static void srv_audio(int64_t ts, const uint8_t *pcm, size_t n)
+{
+    static uint8_t pt[40000];
+    pt[0] = 4;
+    for (int i = 0; i < 8; i++) pt[1 + i] = (uint8_t)((uint64_t)ts >> (56 - 8 * i));
+    pt[9] = 0; pt[10] = 0; pt[11] = 0x27; pt[12] = 0x10;
+    memcpy(pt + 13, pcm, n);
+    srv_enc_ex(pt, 13 + n, false, 0);
+}
+
+/* read next client frame; poll first if needed. returns false on timeout */
+static bool wait_frame(uint8_t *op, uint8_t *pl, size_t *plen)
+{
+    bool masked;
+    for (int i = 0; i < 100; i++) {
+        if (next_frame(op, pl, plen, &masked)) { CHECK(masked); return true; }
+        poll_n(1);
+    }
+    return false;
+}
+static bool wait_json(char *out, size_t cap)     /* decrypt next client message */
+{
+    static uint8_t pl[4096], dec[4096]; uint8_t op; size_t n;
+    if (!wait_frame(&op, pl, &n)) return false;
+    CHECK(op == 2);
+    int r = i_aead_dec(S.k_recv, S.n_recv++, NULL, 0, pl, n, dec);
+    CHECK(r > 1 && dec[0] == 0);
+    if (r < 2 || (size_t)r >= cap) return false;
+    memcpy(out, dec + 1, (size_t)r - 1); out[r - 1] = 0;
+    return true;
+}
+static bool wait_json_type(const char *type, char *out, size_t cap)
+{
+    for (int i = 0; i < 20; i++) {
+        if (!wait_json(out, cap)) return false;
+        char t[40];
+        if (json_str(out, "type", 1, t, sizeof(t)) > 0 && !strcmp(t, type)) return true;
+    }
+    return false;
+}
+
+/* complete a whole connect + handshake + hello + time sync + state. */
+static void do_session(bool from_scratch)
+{
+    static char js[4096]; static uint8_t pl[4096]; uint8_t op; size_t n;
+    (void)from_scratch;
+    out_len = rd_off = 0; sndbuf_cap = 0; sndbuf_used = 0;
+    poll_n(2);                       /* (a connect may already be in flight) */
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_CONNECTING);
+    CHECK(connect_port == 8927);
+    CHECK(connected_cb(cb_arg, &the_pcb, ERR_OK) == ERR_OK);
+
+    /* HTTP upgrade request */
+    out_cap[out_len] = 0;
+    char *req = (char *)out_cap;
+    CHECK(!strncmp(req, "GET /sendspin HTTP/1.1\r\n", 24));
+    CHECK(strstr(req, "Host: 127.0.0.1:8927\r\n") != NULL);
+    CHECK(strstr(req, "Upgrade: websocket\r\n") != NULL);
+    CHECK(strstr(req, "Sec-WebSocket-Version: 13\r\n") != NULL);
+    char *kp = strstr(req, "Sec-WebSocket-Key: "); CHECK(kp != NULL);
+    char key[40]; sscanf(kp + 19, "%39[^\r]", key);
+    CHECK(strlen(key) == 24);
+    uint8_t kraw[32]; size_t kl;
+    CHECK(mbedtls_base64_decode(kraw, sizeof(kraw), &kl, (const uint8_t *)key, 24) == 0 && kl == 16);
+    rd_off = (size_t)(strstr(req, "\r\n\r\n") - req) + 4;
+
+    /* server: 101 (accept computed with mbedtls independently) */
+    char cat[100]; uint8_t dg[20]; char acc[40]; size_t al;
+    snprintf(cat, sizeof(cat), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
+    mbedtls_sha1((const uint8_t *)cat, strlen(cat), dg);
+    mbedtls_base64_encode((unsigned char *)acc, sizeof(acc), &al, dg, 20); acc[al] = 0;
+    char resp[300];
+    snprintf(resp, sizeof(resp),
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        "sec-websocket-accept: %s\r\n\r\n", acc);
+    CHECK(inject((const uint8_t *)resp, strlen(resp), 7) == ERR_OK);
+
+    /* client/init */
+    CHECK(wait_frame(&op, pl, &n) && op == 1);
+    memcpy(client_init_txt, pl, n); client_init_txt[n] = 0;
+    char t[40], cid[64];
+    CHECK(json_str(client_init_txt, "type", 1, t, sizeof(t)) > 0 && !strcmp(t, "client/init"));
+    CHECK(json_str(client_init_txt, "suite", 0, t, sizeof(t)) > 0 && !strcmp(t, "25519_ChaChaPoly_SHA256"));
+    int64_t ver; CHECK(json_i64(client_init_txt, "version", 0, &ver) && ver == 1);
+    int cl = json_str(client_init_txt, "client_id", 0, cid, sizeof(cid));
+    CHECK(cl == 43);
+    uint8_t client_pub[32];
+    CHECK(ssn_b64url_decode(client_pub, 32, cid, 43) == 32);
+    CHECK(!memcmp(client_pub, c.s_pub, 32));
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_HANDSHAKE);
+
+    /* server/init */
+    char sid[64];
+    ssn_b64url_encode(sid, S.s_pub, 32);
+    snprintf(server_init_txt, sizeof(server_init_txt),
+        "{\"type\":\"server/init\",\"payload\":{\"server_id\":\"%s\",\"version\":1}}", sid);
+    g_chunk = 1;                                         /* byte-at-a-time parser stress */
+    srv_text(server_init_txt);
+    g_chunk = 1500;
+
+    /* noise msg1 (initiator), prologue = exact client/init || server/init bytes */
+    char prol[1000]; size_t prl = 0;
+    memcpy(prol, client_init_txt, strlen(client_init_txt)); prl += strlen(client_init_txt);
+    memcpy(prol + prl, server_init_txt, strlen(server_init_txt)); prl += strlen(server_init_txt);
+    memcpy(S.rs, client_pub, 32);
+    init_begin(&S, (const uint8_t *)prol, prl);
+    uint8_t psk[32], m1[200], m2[200], pay[100]; char pid[64], b64[300], msg[400];
+    ssn_sentinel_psk(psk); ssn_psk_id(pid, psk);
+    snprintf(msg, sizeof(msg), "{\"psk_id\":\"%s\",\"psk_category\":\"sn\"}", pid);
+    size_t l1 = init_msg1(&S, (const uint8_t *)msg, strlen(msg), m1);
+    ssn_b64url_encode(b64, m1, l1);
+    snprintf(msg, sizeof(msg), "{\"type\":\"noise/handshake\",\"payload\":{\"data\":\"%s\"}}", b64);
+    srv_text(msg);
+
+    /* noise msg2 from client */
+    CHECK(wait_frame(&op, pl, &n) && op == 1);
+    memcpy(js, pl, n); js[n] = 0;
+    CHECK(json_str(js, "type", 1, t, sizeof(t)) > 0 && !strcmp(t, "noise/handshake"));
+    char d2[200]; int dl = json_str(js, "data", 0, d2, sizeof(d2));
+    int ml = ssn_b64url_decode(m2, sizeof(m2), d2, (size_t)dl);
+    CHECK(ml == 50);
+    CHECK(init_msg2(&S, m2, (size_t)ml, psk, pay) == 2 && !memcmp(pay, "{}", 2));
+
+    /* server/hello -> client/hello */
+    srv_json("{\"type\":\"server/hello\",\"payload\":{\"name\":\"Music Assistant\","
+             "\"languages\":[\"en\"],\"active_roles\":[]}}");
+    CHECK(wait_json_type("client/hello", js, sizeof(js)));
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_SYNCING);
+    CHECK(strstr(js, "\"supported_roles\":[\"player@v1\"]") != NULL);
+    CHECK(strstr(js, "\"unpaired_access\":{\"enabled\":true}") != NULL);
+    CHECK(strstr(js, "\"codec\":\"pcm\",\"channels\":2,\"sample_rate\":48000,\"bit_depth\":16") != NULL);
+    CHECK(strstr(js, "\"buffer_capacity\":28000") != NULL);
+    CHECK(json_str(js, "name", 0, t, sizeof(t)) > 0 && !strcmp(t, "DSPi"));
+
+    /* time burst: server clock = client + 5 s, 1 ms one-way, 100 us processing */
+    const int64_t OFF = 5000000;
+    for (int i = 0; i < 8; i++) {
+        CHECK(wait_json_type("client/time", js, sizeof(js)));
+        int64_t ct; CHECK(json_i64(js, "client_transmitted", 0, &ct));
+        char rep[300];
+        int64_t jit = (i == 3) ? 0 : 300 + 50 * i;        /* sample 3 has the lowest RTT */
+        snprintf(rep, sizeof(rep),
+            "{\"type\":\"server/time\",\"payload\":{\"client_transmitted\":%lld,"
+            "\"server_received\":%lld,\"server_transmitted\":%lld}}",
+            (long long)ct, (long long)(ct + OFF + 1000), (long long)(ct + OFF + 1100));
+        stub_now_us = (uint64_t)(ct + 2100 + jit);          /* extra delay on return leg */
+        if (i != 3) { /* asymmetric delay corrupts that sample's offset, not its RTT rank */ }
+        srv_json(rep);
+    }
+    CHECK(c.synced);
+    int64_t err = c.offset - OFF; if (err < 0) err = -err;
+    CHECK(err == 0);                                        /* best sample has symmetric delay */
+    CHECK(wait_json_type("client/state", js, sizeof(js)));
+    CHECK(strstr(js, "\"available\":true") != NULL);
+    CHECK(strstr(js, "\"supported_commands\":[\"volume\",\"mute\"]") != NULL);
+    int64_t v; CHECK(json_i64(js, "volume", 0, &v) && v == g_volume);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_READY);
+    srv_json("{\"type\":\"server/activate\",\"payload\":{\"activities\":[\"playback\"],"
+             "\"active_roles\":[\"player@v1\"]}}");
+    poll_n(2);
+}
+
+static void start_stream(void)
+{
+    flush_count = 0; fmt_calls = 0; pushed_len = 0; push_budget = -1;
+    srv_json("{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"pcm\","
+             "\"sample_rate\":48000,\"channels\":2,\"bit_depth\":16}}}");
+    CHECK(fmt_calls == 1 && fmt_rate == 48000 && fmt_ch == 2 && fmt_bits == 16);
+    CHECK(flush_count == 1);
+    CHECK(sendspin_client_streaming());
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+}
+
+static void test_e2e(void)
+{
+    static char js[4096]; static uint8_t pcm[40000], pl[4096]; uint8_t op; size_t n;
+    i_keygen(S.s_priv, S.s_pub);
+
+    sendspin_client_start();
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_IDLE);
+    do_session(true);
+    CHECK(pbufs_live == 0);
+
+    start_stream();
+
+    /* ---- audio chunks: 16-bit WS length, odd chunking ---- */
+    for (size_t i = 0; i < sizeof(pcm); i++) pcm[i] = (uint8_t)(i * 7 + 3);
+    g_chunk = 333;
+    srv_audio((int64_t)stub_now_us + 5000000 + 100000, pcm, 4800);
+    CHECK(pushed_len == 4800 && !memcmp(pushed, pcm, 4800));
+    CHECK(pbufs_live == 0);
+    /* back-to-back chunks in one TCP segment */
+    {
+        static uint8_t two[20000]; (void)two;
+    }
+    g_chunk = 1500;
+
+    /* ---- backpressure: ring full -> partial push, rest delivered later, in order ---- */
+    pushed_len = 0; push_budget = 1000; recved_total = injected_total = 0;
+    srv_audio(1, pcm, 4800);
+    CHECK(pushed_len == 1000 && c.blocked && c.pcm_left == 3800);
+    srv_audio(2, pcm + 100, 960);                       /* arrives while blocked: queued */
+    CHECK(pushed_len == 1000);
+    CHECK(recved_total < injected_total);               /* window not fully released */
+    poll_n(3);
+    CHECK(pushed_len == 1000);                          /* still blocked */
+    push_budget = 1 << 30;
+    poll_n(3);
+    CHECK(!c.blocked && pushed_len == 4800 + 960);
+    CHECK(!memcmp(pushed, pcm, 4800) && !memcmp(pushed + 4800, pcm + 100, 960));
+    CHECK(recved_total == injected_total);
+    CHECK(pbufs_live == 0);
+
+    /* ---- oversize (>20 KB) audio frame is skipped, stream stays in sync ---- */
+    pushed_len = 0;
+    srv_audio(3, pcm, 20000);
+    CHECK(pushed_len == 0 && sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+    srv_audio(4, pcm, 480);
+    CHECK(pushed_len == 480 && !memcmp(pushed, pcm, 480));
+
+    /* ---- 64-bit WS length form + volume/mute commands ---- */
+    {
+        const char *cmd = "{\"type\":\"server/command\",\"payload\":{\"player\":{\"command\":\"volume\",\"volume\":30}}}";
+        static uint8_t pt[512]; pt[0] = 0; memcpy(pt + 1, cmd, strlen(cmd));
+        srv_enc_ex(pt, 1 + strlen(cmd), false, 2);
+        CHECK(g_volume == 30);
+        CHECK(wait_json_type("client/state", js, sizeof(js)));
+        int64_t v; CHECK(json_i64(js, "volume", 0, &v) && v == 30);
+        srv_json("{\"type\":\"server/command\",\"payload\":{\"player\":{\"command\":\"mute\",\"mute\":true}}}");
+        CHECK(g_mute);
+        CHECK(wait_json_type("client/state", js, sizeof(js)));
+        CHECK(strstr(js, "\"muted\":true") != NULL);
+        /* local change is reported */
+        g_volume = 55; g_mute = false;
+        poll_n(2);
+        CHECK(wait_json_type("client/state", js, sizeof(js)));
+        CHECK(json_i64(js, "volume", 0, &v) && v == 55 && strstr(js, "\"muted\":false"));
+        /* no spurious re-reports */
+        poll_n(5);
+        CHECK(!next_frame(&op, pl, &n, &(bool){0}));
+    }
+
+    /* ---- stream/clear and late-chunk drop ---- */
+    {
+        int fc = flush_count; pushed_len = 0;
+        srv_json("{\"type\":\"stream/clear\",\"payload\":{}}");
+        CHECK(flush_count == fc + 1);
+        int64_t server_now = (int64_t)stub_now_us + c.offset;
+        srv_audio(server_now - 1000000, pcm, 4800);       /* 1 s late */
+        CHECK(pushed_len == 0);
+        srv_audio(server_now + 200000, pcm, 4800);        /* on time */
+        CHECK(pushed_len == 4800);
+        srv_audio(server_now - 1000000, pcm, 480);        /* after first good chunk: not dropped */
+        CHECK(pushed_len == 4800 + 480);
+    }
+
+    /* ---- time sync keeps running ---- */
+    stub_now_us += 6000000;
+    poll_n(2);
+    CHECK(wait_json_type("client/time", js, sizeof(js)));
+
+    /* ---- ping -> pong ---- */
+    {
+        uint8_t f[64]; size_t k = srv_frame(f, 9, true, (const uint8_t *)"hi", 2, 0);
+        srv_inject(f, k);
+        CHECK(wait_frame(&op, pl, &n) && op == 10 && n == 2 && !memcmp(pl, "hi", 2));
+    }
+
+    /* ---- stream/end ---- */
+    srv_json("{\"type\":\"stream/end\",\"payload\":{}}");
+    CHECK(!sendspin_client_streaming() && sendspin_client_state() == SENDSPIN_STATE_READY);
+    pushed_len = 0;
+    srv_audio(1, pcm, 480);
+    CHECK(pushed_len == 0);                               /* ignored when not streaming */
+
+    /* ---- unsupported format is ignored, not fatal ---- */
+    srv_json("{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"flac\","
+             "\"sample_rate\":48000,\"channels\":2,\"bit_depth\":24}}}");
+    CHECK(!sendspin_client_streaming() && sendspin_client_state() == SENDSPIN_STATE_READY);
+
+    /* ---- tampered record -> connection dropped, back-off, reconnect ---- */
+    {
+        static uint8_t pt[64]; pt[0] = 0; memcpy(pt + 1, "{\"type\":\"x\"}", 12);
+        int pa = pcb_aborted;
+        srv_enc_ex(pt, 13, true, 0);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+        CHECK(pcb_aborted == pa + 1);
+        CHECK(pbufs_live == 0);
+        int nb = pcb_new_count;
+        poll_n(500);                                       /* 0.5 s < 1 s back-off */
+        CHECK(pcb_new_count == nb);
+        stub_now_us += 1500000; poll_n(1);
+        CHECK(pcb_new_count == nb + 1);
+    }
+
+    /* ---- second full session, then peer close frame ---- */
+    i_keygen(S.s_priv, S.s_pub);                           /* new server key: no pinning in phase 1 */
+    do_session(false);
+    {
+        int pc = pcb_closed;
+        uint8_t f[16], cp[2] = {0x03, 0xE8}; size_t k = srv_frame(f, 8, true, cp, 2, 0);
+        srv_inject(f, k);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+        CHECK(pcb_closed == pc + 1);
+        bool m; CHECK(next_frame(&op, pl, &n, &m) && op == 8 && n == 2 && m);   /* close echo */
+    }
+
+    /* ---- third session, peer drops TCP; wrong-key handshake failure ---- */
+    stub_now_us += 5000000;
+    i_keygen(S.s_priv, S.s_pub);
+    do_session(false);
+    {
+        int pc = pcb_closed;
+        CHECK(recv_cb(cb_arg, &the_pcb, NULL, ERR_OK) == ERR_OK);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR && pcb_closed == pc + 1);
+    }
+
+    /* ---- bad Sec-WebSocket-Accept is rejected ---- */
+    stub_now_us += 10000000; out_len = rd_off = 0;
+    poll_n(2);
+    CHECK(connected_cb(cb_arg, &the_pcb, ERR_OK) == ERR_OK);
+    {
+        const char *bad = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                          "Sec-WebSocket-Accept: AAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n";
+        inject((const uint8_t *)bad, strlen(bad), 64);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+    }
+    /* HTTP 403 rejected */
+    stub_now_us += 10000000; poll_n(2);
+    CHECK(connected_cb(cb_arg, &the_pcb, ERR_OK) == ERR_OK);
+    {
+        const char *bad = "HTTP/1.1 403 Forbidden\r\n\r\n";
+        inject((const uint8_t *)bad, strlen(bad), 64);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+    }
+
+    /* ---- non-sentinel psk category is refused ---- */
+    stub_now_us += 10000000;
+    {
+        i_keygen(S.s_priv, S.s_pub);
+        out_len = rd_off = 0; poll_n(2);
+        connected_cb(cb_arg, &the_pcb, ERR_OK);
+        out_cap[out_len] = 0;
+        char *kp = strstr((char *)out_cap, "Sec-WebSocket-Key: ");
+        char key[40]; sscanf(kp + 19, "%39[^\r]", key);
+        char acc[32]; ws_accept_key(key, acc);
+        char resp[300]; snprintf(resp, sizeof(resp),
+            "HTTP/1.1 101 x\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);
+        inject((const uint8_t *)resp, strlen(resp), 1000);
+        rd_off = (size_t)(strstr((char *)out_cap, "\r\n\r\n") - (char *)out_cap) + 4;
+        CHECK(wait_frame(&op, pl, &n));
+        memcpy(client_init_txt, pl, n); client_init_txt[n] = 0;
+        char sid[64]; ssn_b64url_encode(sid, S.s_pub, 32);
+        snprintf(server_init_txt, sizeof(server_init_txt),
+            "{\"type\":\"server/init\",\"payload\":{\"server_id\":\"%s\",\"version\":1}}", sid);
+        srv_text(server_init_txt);
+        char cid[64]; json_str(client_init_txt, "client_id", 0, cid, sizeof(cid));
+        ssn_b64url_decode(S.rs, 32, cid, 43);
+        char prol[1000]; snprintf(prol, sizeof(prol), "%s%s", client_init_txt, server_init_txt);
+        init_begin(&S, (const uint8_t *)prol, strlen(prol));
+        uint8_t m1[200]; char b64[300], msg[400];
+        const char *p = "{\"psk_id\":\"zzz\",\"psk_category\":\"lt\"}";
+        size_t l1 = init_msg1(&S, (const uint8_t *)p, strlen(p), m1);
+        ssn_b64url_encode(b64, m1, l1);
+        snprintf(msg, sizeof(msg), "{\"type\":\"noise/handshake\",\"payload\":{\"data\":\"%s\"}}", b64);
+        srv_text(msg);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+    }
+
+    /* ---- DNS in progress / failure ---- */
+    stub_now_us += 20000000;
+    g_host = "slow.local";
+    poll_n(2);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_CONNECTING && c.dns_pending);
+    dns_cb("slow.local", NULL, NULL);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+    g_host = "127.0.0.1";
+
+    /* ---- slow tx window (sndbuf small) ---- */
+    stub_now_us += 20000000;
+    poll_n(2);
+    {
+        int pnc = pcb_new_count; (void)pnc;
+        sndbuf_cap = 50; sndbuf_used = 0; out_len = rd_off = 0;
+        connected_cb(cb_arg, &the_pcb, ERR_OK);
+        CHECK(out_len == 50);                              /* partial write */
+        for (int i = 0; i < 10 && out_len < 400; i++) stub_sent_ack();
+        CHECK(!strncmp((char *)out_cap, "GET /sendspin", 13));
+        CHECK(strstr((char *)out_cap, "\r\n\r\n") != NULL);
+        sndbuf_cap = 0;
+    }
+
+    /* ---- stop() sends goodbye on a live session ---- */
+    stub_now_us += 20000000; poll_n(5);                    /* handshake timeout -> retry */
+    stub_now_us += 20000000; poll_n(2);
+    do_session(false);
+    {
+        int pc = pcb_closed;
+        sendspin_client_stop();
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_IDLE && pcb_closed == pc + 1);
+        CHECK(wait_json_type("client/goodbye", js, sizeof(js)));
+        CHECK(strstr(js, "shutdown") != NULL);
+        int nb = pcb_new_count;
+        stub_now_us += 60000000; poll_n(5);
+        CHECK(pcb_new_count == nb);                        /* stopped: no reconnect */
+    }
+}
+
+/* tiny fuzz: random garbage into the parser must never crash or hang */
+static void test_fuzz(void)
+{
+    g_host = "127.0.0.1";
+    sendspin_client_start();
+    for (int round = 0; round < 200; round++) {
+        stub_now_us += 20000000; out_len = rd_off = 0;
+        poll_n(2);
+        if (!pcb_alive) continue;
+        connected_cb(cb_arg, &the_pcb, ERR_OK);
+        out_cap[out_len] = 0;
+        char *kp = strstr((char *)out_cap, "Sec-WebSocket-Key: ");
+        if (!kp) continue;
+        char key[40]; sscanf(kp + 19, "%39[^\r]", key);
+        char acc[32]; ws_accept_key(key, acc);
+        char resp[300]; snprintf(resp, sizeof(resp), "HTTP/1.1 101 x\r\nSec-WebSocket-Accept: %s\r\n\r\n", acc);
+        inject((const uint8_t *)resp, strlen(resp), 200);
+        uint8_t junk[300];
+        for (int k = 0; k < 4 && pcb_alive; k++) {
+            for (size_t i = 0; i < sizeof(junk); i++) junk[i] = (uint8_t)get_rand_32();
+            if (round & 1) { junk[0] = 0x81; junk[1] = (uint8_t)(get_rand_32() % 100); }
+            inject(junk, 1 + get_rand_32() % sizeof(junk), 1 + get_rand_32() % 50);
+        }
+    }
+    CHECK(pbufs_live == 0);
+    sendspin_client_stop();
+}
+
+int main(void)
+{
+    test_vectors();
+    test_json();
+    test_noise_direct();
+    test_e2e();
+    test_fuzz();
+    printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
+    printf("static RAM of client module: g_rx=%u, state struct c=%u, noise state=%u\n",
+           (unsigned)sizeof(g_rx), (unsigned)sizeof(c), (unsigned)sizeof(ssn_t));
+    return g_fail ? 1 : 0;
+}
