@@ -585,7 +585,7 @@ anyone restarts it with the configuration still in place. `RTA_CTL_STOP` from
 one host while another is reading is therefore only a glitch: the next read
 restarts the engine, at the cost of one discarded frame and cleared averages.
 Hosts that can see other watchers (a DSPi Link hub) must not forward a STOP
-while another session is watching; see the DSPi Link spec, section 7.10. A
+while another session is watching; see the DSPi Link spec, section 7.15. A
 host that cannot see other watchers may send STOP, since the firmware repairs
 it. `RTA_FLAG_MANUAL` disables this repair and is reserved for a single
 dedicated client; a shared host must not set it.
