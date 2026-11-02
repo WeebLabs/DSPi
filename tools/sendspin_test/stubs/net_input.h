@@ -3,7 +3,10 @@
 #define STUB_NET_INPUT_H
 #include <stdint.h>
 #include <stdbool.h>
-uint32_t net_input_push_pcm(const uint8_t *pcm, uint32_t bytes);
+uint32_t net_input_ring_capacity(void);
+uint32_t net_input_ring_free_bytes(void);
+bool net_input_stage_pcm(uint32_t off, const uint8_t *pcm, uint32_t len);
+void net_input_commit_pcm(uint32_t bytes);
 void net_input_set_format(uint32_t rate_hz, uint8_t channels, uint8_t bits);
 void net_input_flush(void);
 uint32_t net_input_ring_fill_bytes(void);

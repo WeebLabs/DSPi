@@ -5,8 +5,8 @@
  *
  * No lwIP / Pico SDK dependency: only mbedtls (>= 3.x):
  *   MBEDTLS_CHACHAPOLY_C, MBEDTLS_CHACHA20_C, MBEDTLS_POLY1305_C,
- *   MBEDTLS_SHA256_C, MBEDTLS_ECP_C + MBEDTLS_ECP_DP_CURVE25519_ENABLED,
- *   MBEDTLS_BIGNUM_C   (HMAC/HKDF and base64 are implemented locally).
+ *   MBEDTLS_SHA256_C   (HMAC/HKDF, base64 and X25519 are implemented locally;
+ *   X25519 is a heap-free ref10-style implementation, no bignum/ECP needed).
  *
  * Noise pattern (Noise spec rev 34, section 7 + 9.x):
  *   KKpsk2:
@@ -23,6 +23,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+
+#include "mbedtls/chachapoly.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,6 +55,8 @@ typedef struct {
     uint8_t  k_send[32], k_recv[32];  /* transport keys (after msg2) */
     uint64_t n_send, n_recv;
     int      stage;                   /* 0 init, 1 got msg1, 2 transport */
+    mbedtls_chachapoly_context rx;    /* streaming receive record (ssn_rx_*) */
+    bool     rx_active;
     ssn_rng_fn rng;
     void    *rng_ctx;
 } ssn_t;
@@ -107,6 +111,20 @@ int ssn_encrypt(ssn_t *st, const uint8_t *in, size_t len, uint8_t *out);
 /* in-place allowed. Returns plaintext length (>=0) or <0 on auth failure.
  * The receive nonce only advances on success. */
 int ssn_decrypt(ssn_t *st, const uint8_t *in, size_t len, uint8_t *out);
+/* Streaming receive of ONE transport record (ciphertext || 16-byte tag), for
+ * records that are too big to buffer.  The caller feeds the ciphertext in
+ * arbitrary pieces and gets the plaintext back piece by piece; the plaintext is
+ * UNAUTHENTICATED until ssn_rx_finish() returns 0, so the caller must not act
+ * on it (stage it somewhere invisible) before that.
+ *   ssn_rx_begin   -> 0 ok (record n_recv started)
+ *   ssn_rx_update  -> decrypt len ciphertext bytes (out may equal in)
+ *   ssn_rx_finish  -> 0 if the tag matches (receive nonce advances), <0 otherwise
+ *                     (nonce unchanged); always ends the record.
+ *   ssn_rx_abort   -> drop an unfinished record. */
+int  ssn_rx_begin(ssn_t *st);
+int  ssn_rx_update(ssn_t *st, const uint8_t *in, size_t len, uint8_t *out);
+int  ssn_rx_finish(ssn_t *st, const uint8_t tag[SSN_TAG_LEN]);
+void ssn_rx_abort(ssn_t *st);
 /* Skip one received message without decrypting (bumps receive nonce). */
 void ssn_skip_recv(ssn_t *st);
 

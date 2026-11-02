@@ -18,6 +18,7 @@
 #include "i2s_input.h"
 #ifdef DSPI_ENABLE_WIFI
 #include "net_input.h"
+#include "net_persist.h"
 #endif
 #include "lg_sound_sync.h"
 #include "dac_hw_mute.h"
@@ -1466,8 +1467,15 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
                 memcpy(staged_pass, vendor_rx_buf, n);
             } else if (sub == 2) {
                 net_wifi_set_credentials(staged_ssid, staged_pass);
+                net_persist_request_save();   // deferred: main loop writes flash
             } else if (sub == 3) {
                 memset(staged_pass, 0, sizeof(staged_pass));
+            } else if (sub == 4) {
+                // Forget WiFi settings: wipe staged + live + (deferred) stored.
+                memset(staged_ssid, 0, sizeof(staged_ssid));
+                memset(staged_pass, 0, sizeof(staged_pass));
+                net_wifi_set_credentials("", "");
+                net_persist_request_save();
             } else {
                 handled = false;
             }
@@ -1482,6 +1490,7 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             memcpy(host, &vendor_rx_buf[2], hl);
             host[hl] = '\0';
             net_sendspin_set_server(host, port);
+            net_persist_request_save();       // deferred: main loop writes flash
             break;
         }
 #else

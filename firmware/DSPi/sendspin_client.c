@@ -10,8 +10,23 @@
  *   stream/start, audio chunks (type 4), server/command ...
  *
  * Everything is driven from lwIP raw callbacks + sendspin_client_poll() on
- * the main-loop thread. Static RAM is ~22 KB, dominated by the 20 KB receive
- * reassembly buffer.
+ * the main-loop thread.
+ *
+ * Receive path / memory: encrypted records are NOT reassembled.  Each record is
+ * one WebSocket binary frame (ciphertext || 16-byte tag, length known from the
+ * frame header) and is decrypted with the streaming ChaCha20-Poly1305 API while
+ * its bytes arrive from TCP:
+ *   - audio chunks (id 4): the PCM is decrypted straight into the FREE part of
+ *     the NET PCM ring (net_input_stage_pcm(), beyond the write index, invisible
+ *     to the consumer) and published with net_input_commit_pcm() only after the
+ *     Poly1305 tag verified; a failed tag publishes nothing and drops the link.
+ *     The largest chunk is therefore the ring size (32 KB = 170 ms at 48 kHz /
+ *     16-bit stereo; a 150 ms chunk is 28.8 KB), with no extra reassembly RAM.
+ *     If the ring is momentarily too full the stream simply stalls (TCP window
+ *     closes) until the consumer has drained enough; a stall > 5 s drops the link.
+ *   - JSON and other small records: decrypted into the small g_rx buffer
+ *     (SS_RX_BUF); larger ones are still authenticated but ignored.
+ * Static RAM of this module is ~5 KB (g_rx 2 KB + state).
  *
  * Items I could not verify byte-for-byte against the real server are marked
  * "UNVERIFIED:" and are collected in the constants/functions noted there.
@@ -44,8 +59,12 @@
 /* Tunables                                                            */
 /* ------------------------------------------------------------------ */
 #ifndef SS_RX_BUF
-#define SS_RX_BUF            14336   /* WS message reassembly (ciphertext+tag); larger frames are skipped */
+#define SS_RX_BUF            2048    /* HTTP header / text frames / decrypted JSON (+NUL); bigger JSON records are skipped */
 #endif
+#define SS_BLK               256     /* decrypt block size (scratch ds_out) */
+#define SS_STALL_TIMEOUT_US  5000000ull  /* ring full and not draining for this long -> reconnect */
+#define SS_AUDIO_HDR         13      /* id(1) + timestamp(8) + send_ahead(4) */
+_Static_assert(SS_RX_BUF >= 1100, "g_rx must hold the HTTP upgrade response (SS_HTTP_MAX) and handshake text");
 #define SS_TX_BUF            1024    /* one outgoing frame at a time */
 #define SS_PROLOGUE_MAX      640     /* client/init + server/init raw bytes */
 #define SS_INIT_MAX          256     /* max client/init length */
@@ -83,6 +102,7 @@ typedef enum {
 } phase_t;
 
 enum { RX_HDR = 0, RX_PAYLOAD };
+enum { DS_SINK = 0, DS_BUF, DS_RING };   /* where the plaintext of an encrypted record goes */
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -132,10 +152,18 @@ static struct {
     struct pbuf *hold_seg;
     uint16_t hold_off;
 
-    /* pending audio push */
-    bool     blocked;
-    const uint8_t *pcm_ptr;
-    uint32_t pcm_left;
+    /* streaming decrypt of the current encrypted binary record */
+    bool     blocked;             /* no room in the PCM ring: waiting for the consumer */
+    uint64_t blocked_since_us;
+    bool     ds_on;
+    bool     ds_bad;              /* protocol error to raise once the record authenticated */
+    uint8_t  ds_route;            /* DS_*: valid once ds_got > 0 */
+    uint8_t  ds_tag_have;
+    uint32_t ds_len;              /* ciphertext bytes in the record (frame payload - tag) */
+    uint32_t ds_got;              /* ciphertext bytes decrypted so far */
+    uint8_t  ds_tag[SSN_TAG_LEN];
+    uint8_t  ds_hdr[SS_AUDIO_HDR];    /* first plaintext bytes: id + audio header */
+    uint8_t  ds_out[SS_BLK];
 
     /* tx: one framed message at a time */
     uint8_t  tx[SS_TX_BUF] __attribute__((aligned(4)));
@@ -353,7 +381,7 @@ static void rx_reset(void)
 {
     c.rx_st = RX_HDR; c.hdr_have = 0; c.hdr_need = 2;
     c.msg_opcode = 0; c.msg_len = 0; c.msg_total = 0; c.msg_discard = false;
-    c.blocked = false; c.pcm_ptr = NULL; c.pcm_left = 0;
+    c.blocked = false; c.ds_on = false; c.ds_bad = false;
     c.http_have = 0;
 }
 
@@ -382,6 +410,7 @@ static void cleanup(bool graceful)
     c.fatal = false;
     c.close_graceful = false;
     rx_reset();
+    ssn_rx_abort(&c.noise);
     memset(&c.noise, 0, sizeof(c.noise));
     set_phase(PH_NONE);
 }
@@ -414,6 +443,16 @@ static bool send_client_init(void)
     return ws_commit(1, (size_t)n);
 }
 
+/* bytes of audio the server may have outstanding: exactly the PCM ring */
+static uint32_t advertised_capacity(void)
+{
+    uint32_t cap = net_input_ring_capacity();
+#ifdef SENDSPIN_BUFFER_CAPACITY
+    if ((uint32_t)SENDSPIN_BUFFER_CAPACITY < cap) cap = SENDSPIN_BUFFER_CAPACITY;
+#endif
+    return cap;
+}
+
 static bool send_hello(void)
 {
     char *o; size_t cap;
@@ -430,7 +469,7 @@ static bool send_hello(void)
         "\"buffer_capacity\":%u},"
         "\"supported_pair_methods\":{},"
         "\"unpaired_access\":{\"enabled\":true}}}",
-        (unsigned)SENDSPIN_BUFFER_CAPACITY);
+        (unsigned)advertised_capacity());
     return enc_end(n, cap);
 }
 
@@ -609,62 +648,148 @@ static void on_json(char *js)
 }
 
 /* ------------------------------------------------------------------ */
-/* Audio chunk                                                         */
+/* Encrypted records: streaming decrypt                                */
 /* ------------------------------------------------------------------ */
-static bool push_pending(void)
+/* Invariants (see the file header):
+ *  - one record == one unfragmented, unmasked WS binary frame; ds_len bytes of
+ *    ciphertext followed by the 16-byte tag; the AEAD stream is started in
+ *    parse_header() and finished in frame_done();
+ *  - plaintext of an audio record goes to ring bytes [wr, wr + ds_len - 13)
+ *    through net_input_stage_pcm(); nothing is visible to the consumer until
+ *    ds_finish() has verified the tag and calls net_input_commit_pcm();
+ *  - plaintext of other records goes to g_rx[0 .. ds_len) (+ NUL);
+ *  - the first SS_AUDIO_HDR plaintext bytes are always kept in ds_hdr so the
+ *    route can be chosen from the id byte and the audio header parsed later;
+ *  - blocks never straddle the header boundary, so a ring-bound block never
+ *    contains header bytes once the route is known. */
+static uint32_t ds_staged(void)      /* PCM bytes already staged in the ring */
 {
-    while (c.pcm_left) {
-        uint32_t n = net_input_push_pcm(c.pcm_ptr, c.pcm_left);
-        if (n > c.pcm_left) n = c.pcm_left;
-        if (!n) return false;
-        c.pcm_ptr += n; c.pcm_left -= n;
-    }
-    return true;
+    return c.ds_got > SS_AUDIO_HDR ? c.ds_got - SS_AUDIO_HDR : 0;
 }
 
-/* plaintext = [4][i64 BE ts][u32 BE send_ahead][pcm...] */
-static void on_audio(const uint8_t *pt, size_t len)
+static uint32_t ds_ring_room(void)   /* free ring bytes beyond what is staged */
 {
-    if (len < 13) { c.fatal = true; return; }          /* protocol error */
-    if (!c.streaming) return;
+    uint32_t free_b = net_input_ring_free_bytes(), st = ds_staged();
+    return free_b > st ? free_b - st : 0;
+}
+
+/* Is there enough ring room to decrypt the next block? */
+static bool ds_can_step(void)
+{
+    if (c.ds_route != DS_RING || c.ds_got < SS_AUDIO_HDR || c.ds_got >= c.ds_len) return true;
+    uint32_t want = c.ds_len - c.ds_got;
+    if (want > SS_BLK) want = SS_BLK;
+    return ds_ring_room() >= want;
+}
+
+static void ds_begin(void)
+{
+    c.ds_on = true; c.ds_bad = false; c.ds_route = DS_SINK;
+    c.ds_len = (uint32_t)c.plen - SSN_TAG_LEN;
+    c.ds_got = 0; c.ds_tag_have = 0;
+    if (ssn_rx_begin(&c.noise) != 0) c.fatal = true;
+}
+
+/* Choose the destination from the (just decrypted) first plaintext byte. */
+static void ds_route_select(uint8_t id)
+{
+    if (id == SS_ID_PLAYER_AUDIO) {
+        if (c.ds_len < SS_AUDIO_HDR) { c.ds_bad = true; c.ds_route = DS_SINK; }       /* protocol error */
+        else if (c.streaming && c.ds_len - SS_AUDIO_HDR <= net_input_ring_capacity()) c.ds_route = DS_RING;
+        else c.ds_route = DS_SINK;      /* not streaming, or can never fit the ring: authenticate and drop */
+    } else {
+        c.ds_route = (c.ds_len + 1u <= SS_RX_BUF) ? DS_BUF : DS_SINK;
+    }
+}
+
+/* Place n freshly decrypted plaintext bytes (they start at offset c.ds_got). */
+static void ds_store(const uint8_t *pt, uint32_t n)
+{
+    uint32_t off = c.ds_got;
+    for (uint32_t i = 0; i < n && off + i < SS_AUDIO_HDR; i++) c.ds_hdr[off + i] = pt[i];
+    if (off == 0) ds_route_select(pt[0]);
+    if (c.ds_route == DS_BUF) {
+        memcpy(g_rx + off, pt, n);
+    } else if (c.ds_route == DS_RING) {
+        uint32_t skip = off < SS_AUDIO_HDR ? SS_AUDIO_HDR - off : 0;    /* header bytes in this block */
+        if (skip < n && !net_input_stage_pcm(off + skip - SS_AUDIO_HDR, pt + skip, n - skip))
+            c.fatal = true;             /* cannot happen: room was checked before decrypting */
+    }
+}
+
+/* Feed ciphertext of the current record.  Returns the bytes consumed; fewer
+ * than `take` only when the ring has no room (c.blocked is set then). */
+static size_t ds_consume(const uint8_t *d, size_t take)
+{
+    size_t used = 0;
+    while (take && !c.fatal) {
+        if (c.ds_got < c.ds_len) {
+            uint32_t n = c.ds_len - c.ds_got;
+            if (n > take) n = (uint32_t)take;
+            if (n > SS_BLK) n = SS_BLK;
+            if (c.ds_got < SS_AUDIO_HDR && n > SS_AUDIO_HDR - c.ds_got) n = SS_AUDIO_HDR - c.ds_got;
+            if (c.ds_route == DS_RING && c.ds_got >= SS_AUDIO_HDR) {
+                if (!ds_can_step()) {
+                    if (!c.blocked) { c.blocked = true; c.blocked_since_us = time_us_64(); }
+                    break;
+                }
+                uint32_t room = ds_ring_room();
+                if (n > room) n = room;
+            }
+            if (ssn_rx_update(&c.noise, d, n, c.ds_out) != 0) { c.fatal = true; break; }
+            ds_store(c.ds_out, n);
+            c.ds_got += n;
+            d += n; used += n; take -= n;
+        } else {
+            uint32_t n = SSN_TAG_LEN - c.ds_tag_have;
+            if (n > take) n = (uint32_t)take;
+            memcpy(c.ds_tag + c.ds_tag_have, d, n);
+            c.ds_tag_have = (uint8_t)(c.ds_tag_have + n);
+            d += n; used += n; take -= n;
+        }
+    }
+    return used;
+}
+
+/* Audio record authenticated: parse the header and publish the staged PCM. */
+static void ds_audio_commit(void)
+{
     int64_t ts = 0;
-    for (int i = 0; i < 8; i++) ts = (int64_t)(((uint64_t)ts << 8) | pt[1 + i]);
-    /* send_ahead (pt[9..12]) is informational only (phase 1) */
-    const uint8_t *pcm = pt + 13;
-    uint32_t n = (uint32_t)(len - 13);
+    for (int i = 0; i < 8; i++) ts = (int64_t)(((uint64_t)ts << 8) | c.ds_hdr[1 + i]);
+    /* send_ahead (ds_hdr[9..12]) is informational only (phase 1) */
+    uint32_t n = c.ds_len - SS_AUDIO_HDR;
     uint32_t fb = (uint32_t)c.channels * (c.bits / 8u);
     if (fb) n -= n % fb;                               /* whole frames only */
     if (!n) return;
 
     if (c.after_clear && c.synced) {
-        /* drop obviously late chunks after a stream/clear */
+        /* drop obviously late chunks after a stream/clear (nothing was published) */
         int64_t dur = (int64_t)((uint64_t)n * 1000000ull / ((uint64_t)c.rate * fb));
         int64_t server_now = (int64_t)time_us_64() + c.offset;
         if (ts + dur < server_now - SS_LATE_SLACK_US) { SS_LOG("late chunk dropped\n"); return; }
     }
     c.after_clear = false;
-
-    c.pcm_ptr = pcm; c.pcm_left = n;
-    if (!push_pending()) c.blocked = true;
+    net_input_commit_pcm(n);
 }
 
-static void on_binary(void)
+/* End of an encrypted record (called from frame_done). */
+static void ds_finish(void)
 {
-    if (c.msg_discard) {
-        /* too large for our buffer: skip it but keep the nonce counter in step */
-        SS_LOG("oversize frame skipped (%u bytes)\n", (unsigned)c.msg_total);
-        ssn_skip_recv(&c.noise);
-        return;
-    }
-    int pl = ssn_decrypt(&c.noise, g_rx, c.msg_len, g_rx);
-    if (pl <= 0) { c.fatal = true; return; }           /* auth fail / empty */
-    switch (g_rx[0]) {
+    c.ds_on = false;
+    if (c.ds_got != c.ds_len || c.ds_tag_have != SSN_TAG_LEN) { ssn_rx_abort(&c.noise); c.fatal = true; return; }
+    if (ssn_rx_finish(&c.noise, c.ds_tag) != 0) { c.fatal = true; return; }   /* auth failure */
+    if (c.ds_len == 0 || c.ds_bad) { c.fatal = true; return; }               /* empty / short audio record */
+    switch (c.ds_hdr[0]) {
     case SS_ID_JSON:
-        g_rx[pl] = 0;                                   /* tag space is free */
-        on_json((char *)g_rx + 1);
+        if (c.ds_route == DS_BUF) {
+            g_rx[c.ds_len] = 0;                         /* room guaranteed by ds_route_select() */
+            on_json((char *)g_rx + 1);
+        } else {
+            SS_LOG("oversize json record skipped (%u bytes)\n", (unsigned)c.ds_len);
+        }
         break;
     case SS_ID_PLAYER_AUDIO:
-        on_audio(g_rx, (size_t)pl);
+        if (c.ds_route == DS_RING) ds_audio_commit();
         break;
     case SS_ID_FRAGMENT:
         /* UNVERIFIED: fragmentation (id 1) is only used for >65 KB messages;
@@ -701,14 +826,21 @@ static void on_text(char *js)
         set_phase(PH_WAIT_NOISE1);
     } else if (c.phase == PH_WAIT_NOISE1) {
         if (strcmp(type, "noise/handshake")) { c.fatal = true; return; }
-        uint8_t msg[200], payload[128], out[96];
-        char dat[272], b64[136];
-        int dl = json_str(js, "data", 0, dat, sizeof(dat));
-        if (dl < 0) { c.fatal = true; return; }
-        int ml = ssn_b64url_decode(msg, sizeof(msg), dat, (size_t)dl);
+        /* Scratch lives in c.prologue: its content (client/init || server/init) was
+         * consumed by ssn_resp_init() when this phase was entered and is never
+         * read again, so the 640 bytes are free until the next connection. */
+        _Static_assert(SS_PROLOGUE_MAX >= 200 + 128 + 96, "handshake scratch");
+        uint8_t *msg = c.prologue, *payload = c.prologue + 200, *out = c.prologue + 328;
+        const char *dv = json_find(js, "data", 0);
+        if (!dv || *dv != '"') { c.fatal = true; return; }
+        dv++;
+        size_t dl = 0;
+        while (dv[dl] && dv[dl] != '"') dl++;
+        if (dv[dl] != '"') { c.fatal = true; return; }
+        int ml = ssn_b64url_decode(msg, 200, dv, dl);
         if (ml < 0) { c.fatal = true; return; }
         size_t plen = 0;
-        if (ssn_resp_read_msg1(&c.noise, msg, (size_t)ml, payload, sizeof(payload) - 1, &plen) != 0) {
+        if (ssn_resp_read_msg1(&c.noise, msg, (size_t)ml, payload, 127, &plen) != 0) {
             c.fatal = true; return;
         }
         payload[plen] = 0;
@@ -722,15 +854,16 @@ static void on_text(char *js)
         uint8_t psk[32];
         ssn_sentinel_psk(psk);
         size_t ol = 0;
-        if (ssn_resp_write_msg2(&c.noise, psk, (const uint8_t *)"{}", 2, out, sizeof(out), &ol) != 0) {
+        if (ssn_resp_write_msg2(&c.noise, psk, (const uint8_t *)"{}", 2, out, 96, &ol) != 0) {
             c.fatal = true; return;
         }
-        ssn_b64url_encode(b64, out, ol);
         if (tx_busy()) { c.fatal = true; return; }
         char *p = (char *)TX_PAYLOAD();
         int n = snprintf(p, SS_TX_BUF - 8,
-            "{\"type\":\"noise/handshake\",\"payload\":{\"data\":\"%s\"}}", b64);
-        if (n <= 0 || !ws_commit(1, (size_t)n)) { c.fatal = true; return; }
+            "{\"type\":\"noise/handshake\",\"payload\":{\"data\":\"");
+        n += (int)ssn_b64url_encode(p + n, out, ol);            /* 96 bytes -> <= 128 chars */
+        memcpy(p + n, "\"}}", 3); n += 3;
+        if (!ws_commit(1, (size_t)n)) { c.fatal = true; return; }
         set_phase(PH_WAIT_HELLO);       /* transport keys are live now */
     } else {
         /* text frames after the channel is up are not expected */
@@ -743,14 +876,10 @@ static void on_text(char *js)
 /* ------------------------------------------------------------------ */
 static void dispatch_message(void)
 {
-    if (c.msg_opcode == 1) {
-        if (c.msg_discard || c.phase >= PH_WAIT_HELLO) { c.fatal = true; return; }
-        g_rx[c.msg_len] = 0;
-        on_text((char *)g_rx);
-    } else {
-        if (c.phase < PH_WAIT_HELLO) { c.fatal = true; return; }
-        on_binary();
-    }
+    /* text only: encrypted binary records finish in ds_finish() */
+    if (c.msg_discard || c.phase >= PH_WAIT_HELLO) { c.fatal = true; return; }
+    g_rx[c.msg_len] = 0;
+    on_text((char *)g_rx);
 }
 
 static void frame_done(void)
@@ -775,7 +904,7 @@ static void frame_done(void)
             return;
         }
     } else if (c.fin) {
-        dispatch_message();
+        if (c.msg_opcode == 2) ds_finish(); else dispatch_message();
         c.msg_opcode = 0;
         c.msg_len = 0; c.msg_total = 0; c.msg_discard = false;
     }
@@ -809,6 +938,16 @@ static void parse_header(void)
         if (c.msg_opcode) { c.fatal = true; return; }
         c.msg_opcode = c.opcode;
         c.msg_len = 0; c.msg_total = 0; c.msg_discard = false;
+        if (c.opcode == 2) {
+            /* Encrypted record: must be a single unmasked frame (so its length,
+             * and hence where the tag starts, is known up front) holding at
+             * least the tag. */
+            if (c.phase < PH_WAIT_HELLO || !c.fin || c.masked || c.plen < SSN_TAG_LEN) {
+                c.fatal = true; return;
+            }
+            ds_begin();
+            if (c.fatal) return;
+        }
     } else {
         c.fatal = true; return;
     }
@@ -816,17 +955,19 @@ static void parse_header(void)
     if (c.plen == 0) frame_done();
 }
 
-static void consume_payload(const uint8_t *d, size_t take)
+/* Returns the bytes consumed (< take only for a ring-blocked audio record). */
+static size_t consume_payload(const uint8_t *d, size_t take)
 {
     if (c.opcode >= 8) {
         for (size_t i = 0; i < take; i++)
             c.ctl[c.pgot + i] = c.masked ? d[i] ^ c.mask[(c.pgot + i) & 3] : d[i];
-        return;
+        return take;
     }
+    if (c.msg_opcode == 2) return ds_consume(d, take);
     c.msg_total += take;
-    if (c.msg_discard) return;
-    /* text messages need 1 spare byte for NUL; binary needs none (tag space) */
-    if (c.msg_len + take + 1 > SS_RX_BUF) { c.msg_discard = true; return; }
+    if (c.msg_discard) return take;
+    /* text messages need 1 spare byte for NUL */
+    if (c.msg_len + take + 1 > SS_RX_BUF) { c.msg_discard = true; return take; }
     uint8_t *dst = g_rx + c.msg_len;
     if (c.masked) {
         for (size_t i = 0; i < take; i++) dst[i] = d[i] ^ c.mask[(c.pgot + i) & 3];
@@ -834,13 +975,15 @@ static void consume_payload(const uint8_t *d, size_t take)
         memcpy(dst, d, take);
     }
     c.msg_len += (uint32_t)take;
+    return take;
 }
 
 static bool resume_audio(void)
 {
     if (!c.blocked) return true;
-    if (push_pending()) { c.blocked = false; return true; }
-    return false;
+    if (!ds_can_step()) return false;
+    c.blocked = false;
+    return true;
 }
 
 static size_t ws_feed(const uint8_t *d, size_t n)
@@ -860,8 +1003,9 @@ static size_t ws_feed(const uint8_t *d, size_t n)
             size_t take = n - i;
             uint64_t left = c.plen - c.pgot;
             if (take > left) take = (size_t)left;
-            consume_payload(d + i, take);
-            i += take; c.pgot += take;
+            size_t got = consume_payload(d + i, take);
+            i += got; c.pgot += got;
+            if (got < take) break;                       /* ring full: c.blocked is set */
             if (c.pgot == c.plen) frame_done();
         }
     }
@@ -1094,6 +1238,10 @@ void sendspin_client_poll(void)
 
     if (c.fatal) { conn_fail("fatal", false); return; }
 
+    if (c.blocked && now - c.blocked_since_us > SS_STALL_TIMEOUT_US) {
+        conn_fail("ring stalled", false);    /* consumer not draining: resync via reconnect */
+        return;
+    }
     if (c.hold) rx_drain();                  /* retry blocked audio */
     if (!c.pcb) return;
 

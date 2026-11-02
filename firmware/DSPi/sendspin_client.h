@@ -8,7 +8,8 @@
  * cyw43_arch_poll() (pico_cyw43_arch_lwip_poll).
  *
  * Uses (provided by net_input.h):
- *   net_input_push_pcm / net_input_set_format / net_input_flush /
+ *   net_input_ring_capacity / net_input_ring_free_bytes / net_input_stage_pcm /
+ *   net_input_commit_pcm / net_input_set_format / net_input_flush /
  *   net_input_ring_fill_bytes / net_volume_get_percent / net_volume_set_percent /
  *   net_mute_get / net_mute_set / net_sendspin_host / net_sendspin_port
  */
@@ -51,10 +52,10 @@ void sendspin_key_store(const uint8_t priv[32]);   /* called after fresh keygen 
 #ifndef SENDSPIN_CLIENT_NAME
 #define SENDSPIN_CLIENT_NAME "DSPi"
 #endif
-#ifndef SENDSPIN_BUFFER_CAPACITY
-/* bytes of chunk data the server may keep outstanding; keep <= net_input ring */
-#define SENDSPIN_BUFFER_CAPACITY 28000
-#endif
+/* buffer_capacity advertised in client/hello = net_input_ring_capacity(), i.e.
+ * exactly the PCM ring (32 KB; the server may send audio chunks of up to that
+ * size, e.g. 150 ms = 28.8 KB at 48 kHz/16-bit stereo, which are decrypted
+ * directly into the ring).  Define SENDSPIN_BUFFER_CAPACITY to advertise less. */
 
 #ifdef __cplusplus
 }

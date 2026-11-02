@@ -69,6 +69,17 @@ _Static_assert((NET_RING_BYTES & (NET_RING_BYTES - 1u)) == 0, "ring must be a po
 // Backing store is borrowed from the I2S RX DMA rings (idle while NET is the
 // source; see i2s_input_ring_storage()) to save 32 KB of .bss.  NULL while the
 // input is stopped, which also makes push_pcm refuse data.
+//
+// Aliasing invariants (RP2350: 4 pairs x 8 KB == exactly NET_RING_BYTES, so the
+// ring takes ALL of i2s_rx_ring and nothing else of it is left over):
+//  - the ring is only touched between net_input_start() and net_input_stop();
+//    main.c stops one source completely before starting another and starts no
+//    I2S RX while NET is the active source, so the DMA never writes it then;
+//  - bytes [rd, wr) are owned by the consumer (net_input_poll), bytes
+//    [wr, rd + NET_RING_BYTES) by the producer: net_input_stage_pcm() writes
+//    there without publishing, net_input_commit_pcm()/push_pcm() publish by
+//    advancing wr.  A 150 ms Sendspin chunk (28.8 KB) is decrypted straight
+//    into that producer area, so no separate receive buffer is needed.
 static uint8_t *net_ring;
 static volatile uint32_t ring_wr;   // free-running byte counters (wrap mod 2^32)
 static volatile uint32_t ring_rd;
@@ -272,6 +283,40 @@ uint32_t net_input_push_pcm(const uint8_t *pcm, uint32_t bytes) {
     last_push_us = time_us_64();
     stream_active = true;
     return n;
+}
+
+uint32_t net_input_ring_capacity(void) { return NET_RING_BYTES; }
+
+uint32_t net_input_ring_free_bytes(void) {
+    if (!net_ring) return 0;
+    return NET_RING_BYTES - (ring_wr - ring_rd);
+}
+
+// Staging area = ring bytes [wr, rd + NET_RING_BYTES): the consumer only reads
+// [rd, wr), and only the (single) producer context moves wr, so writing there
+// is race-free; the area can only grow while the consumer advances rd.
+bool net_input_stage_pcm(uint32_t off, const uint8_t *pcm, uint32_t len) {
+    if (!net_ring || !pcm) return false;
+    uint32_t wr = ring_wr;
+    uint32_t free_b = NET_RING_BYTES - (wr - ring_rd);
+    if (off > free_b || len > free_b - off) return false;
+    uint32_t pos = (wr + off) & NET_RING_MASK;
+    uint32_t first = NET_RING_BYTES - pos;
+    if (first > len) first = len;
+    memcpy(&net_ring[pos], pcm, first);
+    if (len > first) memcpy(&net_ring[0], pcm + first, len - first);
+    return true;
+}
+
+void net_input_commit_pcm(uint32_t bytes) {
+    if (!net_ring || bytes == 0) return;
+    uint32_t wr = ring_wr;
+    uint32_t free_b = NET_RING_BYTES - (wr - ring_rd);
+    if (bytes > free_b) { bytes = free_b; ring_overflows++; }   // not reachable under the staging contract
+    __dmb();
+    ring_wr = wr + bytes;
+    last_push_us = time_us_64();
+    stream_active = true;
 }
 
 void net_input_flush(void) {

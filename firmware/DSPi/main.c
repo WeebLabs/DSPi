@@ -33,6 +33,7 @@
 #include "adat_input.h"
 #ifdef DSPI_ENABLE_WIFI
 #include "net_input.h"
+#include "net_persist.h"
 #endif
 #include "pdm_generator.h"
 #include "siggen.h"
@@ -1788,6 +1789,12 @@ void core0_init() {
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
 
+#ifdef DSPI_ENABLE_WIFI
+    // Restore saved WiFi SSID/passphrase/Sendspin server before any
+    // net_input_start().  Read-only (XIP); no flash writes at boot.
+    net_persist_load_into_net();
+#endif
+
     // DAC hardware mute init.  Must come AFTER preset_boot_load() so the
     // directory's persisted config (mute pin assignments, polarity, hold
     // time) is available; the config arrives via preset_get_dac_hw_mute()
@@ -2346,6 +2353,17 @@ int main(void) {
 
             i2s_input_poll();
         }
+
+#ifdef DSPI_ENABLE_WIFI
+        // Deferred persist of WiFi/Sendspin settings + device key.  Skipped
+        // (no mute/teardown) when the stored copy already matches.
+        if (net_persist_commit_needed()) {
+            prepare_flash_write_operation();
+            bool np_ok = net_persist_save_current();
+            complete_flash_write_operation_full();
+            if (!np_ok) printf("net_persist: save failed\n");
+        }
+#endif
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,

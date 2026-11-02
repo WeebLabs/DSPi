@@ -86,7 +86,13 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define PDM_FADE_IN_SAMPLES (1u << PDM_FADE_IN_SHIFT) // ~21ms at 48kHz
 
 // SPDIF Buffer Configuration
+#ifdef DSPI_ENABLE_WIFI
+// The WiFi build's heap (lwIP, cyw43 and Sendspin state take RAM) only fits
+// 4 pools x 4 buffers; 8 would panic in calloc at boot.  See wifi_heap_check.cmake.
+#define AUDIO_BUFFER_COUNT    4   // Producer buffers per SPDIF instance
+#else
 #define AUDIO_BUFFER_COUNT    8   // Producer buffers per SPDIF instance
+#endif
 #define SPDIF_CONSUMER_BUFFER_COUNT 16  // Consumer buffers per SPDIF instance (DMA side)
 #define AUDIO_BUFFER_SAMPLES  192
 
@@ -151,7 +157,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 // ---- Network (WiFi/Sendspin) input; DSPI_ENABLE_WIFI builds only, others STALL ----
 // REQ_SET_WIFI_CREDS: wValue 0 = SSID bytes (<=32), 1 = passphrase bytes (<=63),
 //   2 = apply staged SSID+passphrase (re-joins if the radio is running),
-//   3 = clear staged passphrase (open network).  Values are RAM-only (phase 1).
+//   3 = clear staged passphrase (open network),
+//   4 = forget WiFi settings (clears SSID + passphrase, live and stored).
+//   Apply (2), forget (4) and REQ_SET_SENDSPIN_SERVER persist SSID/passphrase/
+//   server (and the Sendspin device key) to a dedicated flash region
+//   (net_persist.c), written from the main loop.  Never readable back.
 #define REQ_SET_WIFI_CREDS          0x3E
 // REQ_SET_SENDSPIN_SERVER: payload = uint16 port (LE, 0 = default 8927) + host bytes (<=61)
 #define REQ_SET_SENDSPIN_SERVER     0x3F

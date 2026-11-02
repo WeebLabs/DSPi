@@ -4,13 +4,24 @@
  *
  * NO_SYS=1 raw API in "poll" mode: lwIP only runs from cyw43_arch_poll(),
  * called by net_input_poll() on Core 0.  The memory pools are deliberately
- * small: one TCP connection (Sendspin) plus DHCP/DNS.  RAM is the constraint
- * (.bss + malloc heap must fit below the stacks): lwIP heap 4 KB + pbuf pool
- * 6 x 1.5 KB + ~1.5 KB of memp.
+ * small: one TCP connection (Sendspin) plus DHCP/DNS.
  *
- * Throughput target: 48 kHz / 16-bit stereo = 192 KB/s (24-bit: 288 KB/s);
- * TCP_WND = 4 * MSS = 5.8 KB sustains > 700 KB/s at 8 ms RTT (it only
- * starves the stream if the WiFi round trip exceeds ~30 ms).
+ * RAM is THE constraint, and the number that matters is the malloc heap
+ * (__end__ .. __HeapLimit): usb_sound_card_init() takes ~51 KB of it at boot for
+ * the four S/PDIF producer pools (4 x AUDIO_BUFFER_COUNT x 1.5 KB), and a
+ * failed calloc panics.  Every static byte below therefore comes straight out
+ * of that budget (see the DSPI_ENABLE_WIFI heap report in CMakeLists.txt).
+ * Static cost of this configuration (from the map file):
+ *   pbuf pool 6 x 1.1 KB + lwIP heap 4 KB + pcb/seg/timeout pools ~1 KB
+ *   + DNS 0.2 KB + ARP 0.1 KB.
+ *
+ * Throughput target: 48 kHz / 16-bit stereo = 192 KB/s (24-bit: 288 KB/s).
+ * MSS 1024 (announced to the server in the SYN) keeps one pool pbuf at ~1.1 KB
+ * instead of ~1.5 KB; TCP_WND = 4 * MSS = 4 KB then sustains > 500 KB/s up to
+ * an 8 ms round trip, and still 192 KB/s up to ~21 ms (WiFi RTT is normally
+ * 2-10 ms; the 170 ms PCM ring absorbs excursions).  The window is also all
+ * that can be pinned in pbufs while the PCM ring is full, so
+ * PBUF_POOL_SIZE = window/MSS (4) + 2 for ACK/ARP/DHCP slack.
  */
 
 #ifndef DSPI_LWIPOPTS_H
@@ -24,10 +35,16 @@
 // Memory
 #define MEM_LIBC_MALLOC             0
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    4096
+#define MEM_SIZE                    4096    // tcp_write copies (<= 2 x ~1.1 KB) + DHCP/DNS/ARP frames
 #define MEMP_NUM_TCP_SEG            16
 #define MEMP_NUM_ARP_QUEUE          4
 #define PBUF_POOL_SIZE              6   // >= TCP_WND/MSS (4) + ACK/ARP slack
+#define IP_REASSEMBLY               0   // no fragments expected; saves the reass pool and pinned pbufs
+#define IP_FRAG                     0
+#define ARP_TABLE_SIZE              4   // gateway + server + spare
+#define DNS_TABLE_SIZE              2
+#define DNS_MAX_NAME_LENGTH         64  // net_host is <= 63 chars; default 256 B/entry
+#define DNS_MAX_REQUESTS            2
 
 // Protocols
 #define LWIP_IPV4                   1
@@ -58,7 +75,7 @@
 #define MEMP_NUM_SYS_TIMEOUT        10
 
 // TCP
-#define TCP_MSS                     1460
+#define TCP_MSS                     1024
 #define TCP_WND                     (4 * TCP_MSS)
 #define TCP_SND_BUF                 (2 * TCP_MSS)
 #define TCP_SND_QUEUELEN            ((4 * (TCP_SND_BUF) + (TCP_MSS - 1)) / (TCP_MSS))

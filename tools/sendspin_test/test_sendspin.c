@@ -56,25 +56,38 @@ static int test_rng(void *ctx, unsigned char *buf, size_t len) { return ss_rng(c
 uint64_t stub_now_us = 1000000;
 
 /* ---- net_input stub ---- */
+/* Simulated NET PCM ring: audio is "staged" beyond the write index and only
+ * becomes visible (pushed[]) when committed; free space is cap - ring_fill. */
 static uint8_t  pushed[1 << 20];
 static size_t   pushed_len;
-static int64_t  push_budget = -1;          /* -1 unlimited */
+static uint8_t  stage_buf[1 << 17];
+static uint32_t stub_ring_cap = 32768;
+static uint32_t ring_fill_sim;             /* bytes "in the ring" (committed, not yet consumed) */
+static uint32_t stage_hi;                  /* highest staged offset + 1 since last commit/flush */
 static int      flush_count, fmt_calls;
 static uint32_t fmt_rate; static uint8_t fmt_ch, fmt_bits;
 static uint8_t  g_volume = 80; static bool g_mute;
 static const char *g_host = "127.0.0.1";
 
-uint32_t net_input_push_pcm(const uint8_t *pcm, uint32_t bytes)
+uint32_t net_input_ring_capacity(void) { return stub_ring_cap; }
+uint32_t net_input_ring_free_bytes(void) { return stub_ring_cap - ring_fill_sim; }
+bool net_input_stage_pcm(uint32_t off, const uint8_t *pcm, uint32_t len)
 {
-    uint32_t n = bytes;
-    if (push_budget >= 0 && (int64_t)n > push_budget) n = (uint32_t)push_budget;
-    memcpy(pushed + pushed_len, pcm, n);
-    pushed_len += n;
-    if (push_budget >= 0) push_budget -= n;
-    return n;
+    uint32_t fr = net_input_ring_free_bytes();
+    if (off > fr || len > fr - off) return false;
+    memcpy(stage_buf + off, pcm, len);
+    if (off + len > stage_hi) stage_hi = off + len;
+    return true;
 }
+void net_input_commit_pcm(uint32_t bytes)
+{
+    CHECK(bytes <= stage_hi && bytes <= net_input_ring_free_bytes());
+    memcpy(pushed + pushed_len, stage_buf, bytes);
+    pushed_len += bytes; ring_fill_sim += bytes; stage_hi = 0;
+}
+static void stub_drain(uint32_t n) { ring_fill_sim = n > ring_fill_sim ? 0 : ring_fill_sim - n; }
 void net_input_set_format(uint32_t r, uint8_t ch, uint8_t b) { fmt_rate = r; fmt_ch = ch; fmt_bits = b; fmt_calls++; }
-void net_input_flush(void) { flush_count++; }
+void net_input_flush(void) { flush_count++; ring_fill_sim = 0; stage_hi = 0; }
 uint32_t net_input_ring_fill_bytes(void) { return 0; }
 uint8_t net_volume_get_percent(void) { return g_volume; }
 void net_volume_set_percent(uint8_t v) { g_volume = v; }
@@ -357,6 +370,72 @@ static void test_vectors(void)
     /* all-zero point must be rejected */
     uint8_t zero[32] = {0};
     CHECK(ssn_x25519(out, a_priv, zero, test_rng, NULL) != 0);
+
+    /* RFC 7748 section 5.2 scalar-multiplication vectors */
+    {
+        uint8_t k[32], u[32], e1[32], e2[32];
+        hex2bin(k,  "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4");
+        hex2bin(u,  "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c");
+        hex2bin(e1, "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552");
+        CHECK(ssn_x25519(out, k, u, NULL, NULL) == 0 && !memcmp(out, e1, 32));
+        hex2bin(k,  "4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d");
+        hex2bin(u,  "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493");
+        hex2bin(e2, "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957");
+        CHECK(ssn_x25519(out, k, u, NULL, NULL) == 0 && !memcmp(out, e2, 32));
+
+        /* iterated: k = u = 9; (k, u) = (X25519(k, u), k) -- after 1 and 1000 rounds */
+        uint8_t kk[32] = {9}, uu[32] = {9}, nk[32];
+        uint8_t it1[32], it1000[32];
+        hex2bin(it1,    "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079");
+        hex2bin(it1000, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51");
+        for (int i = 1; i <= 1000; i++) {
+            CHECK(ssn_x25519(nk, kk, uu, NULL, NULL) == 0);
+            memcpy(uu, kk, 32); memcpy(kk, nk, 32);
+            if (i == 1) CHECK(!memcmp(kk, it1, 32));
+        }
+        CHECK(!memcmp(kk, it1000, 32));
+    }
+
+    /* small-order / non-canonical points are rejected (all-zero shared secret) */
+    {
+        static const char *bad[] = {
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        };
+        uint8_t p[32];
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            hex2bin(p, bad[i]);
+            CHECK(ssn_x25519(out, a_priv, p, NULL, NULL) != 0);
+            p[31] |= 0x80;                                   /* bit 255 must be ignored */
+            CHECK(ssn_x25519(out, a_priv, p, NULL, NULL) != 0);
+        }
+    }
+
+    /* cross-check against mbedtls ECDH (independent bignum implementation) */
+    for (int i = 0; i < 300; i++) {
+        uint8_t kp[32], up[32], pubm[32], mine[32], ref[32], priv_c[32];
+        test_rng(NULL, kp, 32); test_rng(NULL, up, 32);
+        if (i == 0) memset(up, 0xff, 32);                    /* all ones: non-canonical, bit 255 set */
+        if (i == 1) { memset(kp, 0xff, 32); }
+        memcpy(priv_c, kp, 32); priv_c[0] &= 248; priv_c[31] &= 127; priv_c[31] |= 64;
+        i_dh(ref, priv_c, up);
+        int rc = ssn_x25519(mine, kp, up, NULL, NULL);
+        CHECK(rc == 0 && !memcmp(mine, ref, 32));
+        /* public key derivation */
+        mbedtls_ecp_group g; mbedtls_mpi d; mbedtls_ecp_point Q; size_t ol;
+        mbedtls_ecp_group_init(&g); mbedtls_mpi_init(&d); mbedtls_ecp_point_init(&Q);
+        mbedtls_ecp_group_load(&g, MBEDTLS_ECP_DP_CURVE25519);
+        mbedtls_mpi_read_binary_le(&d, priv_c, 32);
+        mbedtls_ecp_mul(&g, &Q, &d, &g.G, test_rng, NULL);
+        mbedtls_ecp_point_write_binary(&g, &Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &ol, pubm, 32);
+        mbedtls_ecp_group_free(&g); mbedtls_mpi_free(&d); mbedtls_ecp_point_free(&Q);
+        CHECK(ssn_x25519_base(mine, kp, NULL, NULL) == 0 && !memcmp(mine, pubm, 32));
+    }
 
     /* Published Sendspin constants (connection.md) */
     uint8_t psk[32], psk_exp[32];
@@ -642,7 +721,7 @@ static void do_session(bool from_scratch)
     CHECK(strstr(js, "\"supported_roles\":[\"player@v1\"]") != NULL);
     CHECK(strstr(js, "\"unpaired_access\":{\"enabled\":true}") != NULL);
     CHECK(strstr(js, "\"codec\":\"pcm\",\"channels\":2,\"sample_rate\":48000,\"bit_depth\":16") != NULL);
-    CHECK(strstr(js, "\"buffer_capacity\":28000") != NULL);
+    CHECK(strstr(js, "\"buffer_capacity\":32768") != NULL);       /* == PCM ring size */
     CHECK(json_str(js, "name", 0, t, sizeof(t)) > 0 && !strcmp(t, "DSPi"));
 
     /* time burst: server clock = client + 5 s, 1 ms one-way, 100 us processing */
@@ -675,7 +754,7 @@ static void do_session(bool from_scratch)
 
 static void start_stream(void)
 {
-    flush_count = 0; fmt_calls = 0; pushed_len = 0; push_budget = -1;
+    flush_count = 0; fmt_calls = 0; pushed_len = 0; ring_fill_sim = 0; stage_hi = 0;
     srv_json("{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"pcm\","
              "\"sample_rate\":48000,\"channels\":2,\"bit_depth\":16}}}");
     CHECK(fmt_calls == 1 && fmt_rate == 48000 && fmt_ch == 2 && fmt_bits == 16);
@@ -708,28 +787,70 @@ static void test_e2e(void)
     }
     g_chunk = 1500;
 
-    /* ---- backpressure: ring full -> partial push, rest delivered later, in order ---- */
-    pushed_len = 0; push_budget = 1000; recved_total = injected_total = 0;
+    /* ---- backpressure: ring nearly full -> the chunk stalls (nothing published),
+     *      later chunks queue behind it, everything is delivered in order ---- */
+    pushed_len = 0; recved_total = injected_total = 0;
+    ring_fill_sim = stub_ring_cap - 1000;                /* only 1000 bytes free */
     srv_audio(1, pcm, 4800);
-    CHECK(pushed_len == 1000 && c.blocked && c.pcm_left == 3800);
-    srv_audio(2, pcm + 100, 960);                       /* arrives while blocked: queued */
-    CHECK(pushed_len == 1000);
-    CHECK(recved_total < injected_total);               /* window not fully released */
+    CHECK(pushed_len == 0 && c.blocked);                 /* unauthenticated bytes are never published */
+    CHECK(c.ds_got < c.ds_len);
+    srv_audio(2, pcm + 100, 960);                        /* arrives while blocked: queued */
+    CHECK(pushed_len == 0);
+    CHECK(recved_total < injected_total);                /* window not fully released */
     poll_n(3);
-    CHECK(pushed_len == 1000);                          /* still blocked */
-    push_budget = 1 << 30;
+    CHECK(pushed_len == 0 && c.blocked);                 /* still blocked */
+    ring_fill_sim = 0;                                   /* consumer drained */
     poll_n(3);
     CHECK(!c.blocked && pushed_len == 4800 + 960);
     CHECK(!memcmp(pushed, pcm, 4800) && !memcmp(pushed + 4800, pcm + 100, 960));
     CHECK(recved_total == injected_total);
     CHECK(pbufs_live == 0);
 
-    /* ---- oversize (>20 KB) audio frame is skipped, stream stays in sync ---- */
-    pushed_len = 0;
-    srv_audio(3, pcm, 20000);
-    CHECK(pushed_len == 0 && sendspin_client_state() == SENDSPIN_STATE_STREAMING);
-    srv_audio(4, pcm, 480);
-    CHECK(pushed_len == 480 && !memcmp(pushed, pcm, 480));
+    /* ---- big chunks: 100 ms .. 150 ms .. a full ring (all > 20 KB) ---- */
+    {
+        static const uint32_t sizes[] = { 19200, 20000, 28800, 32764, 32768 };
+        static const size_t chunks[] = { 1500, 1460, 1, 4096, 333 };
+        for (size_t t = 0; t < sizeof(sizes) / sizeof(sizes[0]); t++) {
+            pushed_len = 0; ring_fill_sim = 0;
+            g_chunk = chunks[t];
+            srv_audio(5, pcm, sizes[t]);
+            g_chunk = 1500;
+            CHECK(pushed_len == sizes[t] && !memcmp(pushed, pcm, sizes[t]));
+            CHECK(sendspin_client_state() == SENDSPIN_STATE_STREAMING && pbufs_live == 0);
+        }
+        /* 150 ms chunk arriving while 10000 bytes are still queued in the ring:
+         * stalls halfway, completes once the consumer has drained */
+        pushed_len = 0; ring_fill_sim = 10000;
+        srv_audio(6, pcm, 28800);
+        CHECK(c.blocked && pushed_len == 0);
+        stub_drain(10000);
+        poll_n(2);
+        CHECK(!c.blocked && pushed_len == 28800 && !memcmp(pushed, pcm, 28800));
+        /* longer than the ring can ever hold: authenticated, dropped, stream stays in sync */
+        pushed_len = 0; ring_fill_sim = 0;
+        srv_audio(7, pcm, 36000);
+        CHECK(pushed_len == 0 && !c.blocked && sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+        srv_audio(8, pcm, 480);
+        CHECK(pushed_len == 480 && !memcmp(pushed, pcm, 480));
+        /* chunk of a partial frame (5 bytes): whole frames only */
+        pushed_len = 0; ring_fill_sim = 0;
+        srv_audio(9, pcm, 4805);
+        CHECK(pushed_len == 4804);
+        ring_fill_sim = 0;
+    }
+
+    /* ---- JSON bigger than g_rx: authenticated, ignored, not fatal ---- */
+    {
+        static char big[SS_RX_BUF + 500];
+        memset(big, 'x', sizeof(big)); big[sizeof(big) - 1] = 0;
+        memcpy(big, "{\"type\":\"server/command\",\"pad\":\"", 32);
+        big[sizeof(big) - 3] = '"'; big[sizeof(big) - 2] = '}';
+        static uint8_t pt[SS_RX_BUF + 600]; pt[0] = 0; memcpy(pt + 1, big, sizeof(big) - 1);
+        srv_enc_ex(pt, 1 + sizeof(big) - 1, false, 1);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+        srv_audio(10, pcm, 480);                           /* nonce stayed in step */
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+    }
 
     /* ---- 64-bit WS length form + volume/mute commands ---- */
     {
@@ -806,9 +927,51 @@ static void test_e2e(void)
         CHECK(pcb_new_count == nb + 1);
     }
 
-    /* ---- second full session, then peer close frame ---- */
+    /* ---- second full session; a corrupted 28.8 KB audio chunk publishes nothing ---- */
     i_keygen(S.s_priv, S.s_pub);                           /* new server key: no pinning in phase 1 */
     do_session(false);
+    start_stream();
+    {
+        static uint8_t bad_pt[28900];
+        bad_pt[0] = 4; memset(bad_pt + 1, 0, 12);
+        for (size_t i = 13; i < sizeof(bad_pt); i++) bad_pt[i] = (uint8_t)i;
+        for (int variant = 0; variant < 2; variant++) {
+            static uint8_t ct[30000], f[30100];
+            int pa = pcb_aborted;
+            i_aead_enc(S.k_send, S.n_send++, NULL, 0, bad_pt, 28813, ct);
+            if (variant == 0) ct[20000] ^= 1;              /* body */
+            else ct[28813 + 5] ^= 0x80;                    /* tag */
+            size_t k = srv_frame(f, 2, true, ct, 28813 + 16, 0);
+            srv_inject(f, k);
+            CHECK(pushed_len == 0);                        /* staged bytes were never committed */
+            CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR && pcb_aborted == pa + 1);
+            CHECK(pbufs_live == 0);
+            if (variant == 0) {
+                stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub);
+                do_session(false);
+                start_stream();
+            }
+        }
+        stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub);
+        do_session(false);
+    }
+    /* ---- fragmented / masked / too-short encrypted frames are protocol errors ---- */
+    {
+        static uint8_t f[64];
+        uint8_t body[20] = {0};
+        int pa = pcb_aborted;
+        size_t k = srv_frame(f, 2, false, body, 20, 0);    /* FIN=0 binary */
+        srv_inject(f, k);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR && pcb_aborted == pa + 1);
+        stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub);
+        do_session(false);
+        pa = pcb_aborted;
+        k = srv_frame(f, 2, true, body, 10, 0);            /* shorter than the tag */
+        srv_inject(f, k);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR && pcb_aborted == pa + 1);
+        stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub);
+        do_session(false);
+    }
     {
         int pc = pcb_closed;
         uint8_t f[16], cp[2] = {0x03, 0xE8}; size_t k = srv_frame(f, 8, true, cp, 2, 0);
@@ -955,7 +1118,7 @@ int main(void)
     test_e2e();
     test_fuzz();
     printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
-    printf("static RAM of client module: g_rx=%u, state struct c=%u, noise state=%u\n",
+    printf("static RAM of client module: g_rx=%u, state struct c=%u (incl. noise state %u)\n",
            (unsigned)sizeof(g_rx), (unsigned)sizeof(c), (unsigned)sizeof(ssn_t));
     return g_fail ? 1 : 0;
 }

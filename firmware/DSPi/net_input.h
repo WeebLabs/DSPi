@@ -62,6 +62,24 @@ bool net_input_is_running(void);
 // keeps the rest and retries, which backpressures the TCP window).
 uint32_t net_input_push_pcm(const uint8_t *pcm, uint32_t bytes);
 
+// Zero-copy-friendly variant used by the Sendspin client for audio chunks that
+// are decrypted while they are still arriving (see sendspin_client.c): the
+// plaintext is written into ring space that is still FREE (beyond the write
+// index, invisible to the consumer) and published in one step once the record
+// has been authenticated, or simply never published if it fails.
+//   net_input_ring_capacity()    total ring size in bytes (what the client
+//                                advertises as buffer_capacity; also the
+//                                largest audio chunk that can ever be taken)
+//   net_input_ring_free_bytes()  free space right now (only grows while the
+//                                consumer drains)
+//   net_input_stage_pcm()        copy len bytes to write_index + off without
+//                                publishing; false if off + len > free space
+//   net_input_commit_pcm()       publish the first `bytes` staged bytes
+uint32_t net_input_ring_capacity(void);
+uint32_t net_input_ring_free_bytes(void);
+bool     net_input_stage_pcm(uint32_t off, const uint8_t *pcm, uint32_t len);
+void     net_input_commit_pcm(uint32_t bytes);
+
 // Declare the stream format.  Only 44100/48000 Hz, 2 channels, 16 or 24 bit
 // are accepted (anything else is ignored).  A change of rate arms the same
 // deferred perform_rate_change() path I2S/ADAT use; a format change empties

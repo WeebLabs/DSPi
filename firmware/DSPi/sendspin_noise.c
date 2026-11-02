@@ -20,8 +20,6 @@
 #include "mbedtls/build_info.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/chachapoly.h"
-#include "mbedtls/ecp.h"
-#include "mbedtls/bignum.h"
 #include "mbedtls/platform_util.h"
 
 #define SSN_PROTOCOL_NAME "Noise_KKpsk2_25519_ChaChaPoly_SHA256"
@@ -84,73 +82,222 @@ static void ssn_hkdf(const uint8_t ck[32], const uint8_t *ikm, size_t ikm_len,
 }
 
 /* ------------------------------------------------------------------ */
-/* X25519                                                              */
+/* X25519 (RFC 7748), heap-free                                        */
 /* ------------------------------------------------------------------ */
+/*
+ * Field arithmetic in GF(2^255 - 19) with ten signed 32-bit limbs of alternating
+ * 26/25 bits (the "ref10" representation; public-domain algorithm by D. J.
+ * Bernstein et al.), written here as compact loops.  No dynamic memory and no
+ * secret-dependent branches or table lookups (loop bounds and the 19x / 2x
+ * factors depend on limb indices only; the ladder uses a masked conditional
+ * swap).  Replaces mbedtls bignum/ECP, which needed ~1.2 KB of heap in ~3100
+ * calloc/free pairs per scalar multiplication plus ~1 KB of stack.  Verified
+ * against the RFC 7748 vectors (incl. the 1000-iteration one) and cross-checked
+ * against mbedtls ECDH in tools/sendspin_test.
+ */
+typedef int32_t fe[10];
 
-static int x25519_mul(uint8_t out[32], const uint8_t k[32], const uint8_t *u,
-                      ssn_rng_fn rng, void *rng_ctx)
+static const uint8_t FE_SH[10] = {26, 25, 26, 25, 26, 25, 26, 25, 26, 25};
+
+static void fe_copy(fe h, const fe f) { for (int i = 0; i < 10; i++) h[i] = f[i]; }
+static void fe_add(fe h, const fe f, const fe g) { for (int i = 0; i < 10; i++) h[i] = f[i] + g[i]; }
+static void fe_sub(fe h, const fe f, const fe g) { for (int i = 0; i < 10; i++) h[i] = f[i] - g[i]; }
+
+/* One signed carry step; limb 9 wraps into limb 0 with the factor 19. */
+static inline void fe_carry_at(int64_t *t, int i)
 {
-    mbedtls_ecp_group grp;
-    mbedtls_ecp_point P, R;
-    mbedtls_mpi d;
-    uint8_t kc[32], uc[32];
-    int ret;
+    int64_t c = (t[i] + ((int64_t)1 << (FE_SH[i] - 1))) >> FE_SH[i];
+    t[i] -= c * ((int64_t)1 << FE_SH[i]);
+    if (i == 9) t[0] += 19 * c; else t[i + 1] += c;
+}
 
-    mbedtls_ecp_group_init(&grp);
-    mbedtls_ecp_point_init(&P);
-    mbedtls_ecp_point_init(&R);
-    mbedtls_mpi_init(&d);
+static void fe_reduce(fe h, int64_t *t, const uint8_t *order, int n)
+{
+    for (int k = 0; k < n; k++) fe_carry_at(t, order[k]);
+    for (int i = 0; i < 10; i++) h[i] = (int32_t)t[i];
+}
 
-    memcpy(kc, k, 32);
-    kc[0] &= 248; kc[31] &= 127; kc[31] |= 64;   /* RFC 7748 clamping */
+static void fe_mul(fe h, const fe f, const fe g)
+{
+    static const uint8_t order[12] = {0, 4, 1, 5, 2, 6, 3, 7, 4, 8, 9, 0};
+    int32_t f2[10], g19[10];
+    int64_t t[10] = {0};
+    for (int i = 0; i < 10; i++) {
+        f2[i] = 2 * f[i];                        /* odd x odd limbs carry an extra 2 */
+        g19[i] = 19 * g[i];                      /* 2^255 = 19 (mod p) for the wrapped terms */
+    }
+    /* Fully unrolled so every index and every 1x/2x/19x choice below is a
+     * compile-time constant: 100 widening multiply-accumulates, no branches. */
+#pragma GCC unroll 10
+    for (int i = 0; i < 10; i++) {
+#pragma GCC unroll 10
+        for (int j = 0; j < 10; j++) {
+            const int k = i + j;
+            const int32_t a = (i & j & 1) ? f2[i] : f[i];
+            const int32_t b = (k >= 10) ? g19[j] : g[j];
+            t[k % 10] += (int64_t)a * b;
+        }
+    }
+    fe_reduce(h, t, order, 12);
+}
 
-    ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
-    if (ret) goto done;
-    ret = mbedtls_mpi_read_binary_le(&d, kc, 32);
-    if (ret) goto done;
+static void fe_mul121666(fe h, const fe f)
+{
+    static const uint8_t order[10] = {9, 1, 3, 5, 7, 0, 2, 4, 6, 8};
+    int64_t t[10];
+    for (int i = 0; i < 10; i++) t[i] = (int64_t)f[i] * 121666;
+    fe_reduce(h, t, order, 10);
+}
+
+static void fe_cswap(fe f, fe g, uint32_t b)
+{
+    int32_t m = (int32_t)(0u - b);
+    for (int i = 0; i < 10; i++) { int32_t x = m & (f[i] ^ g[i]); f[i] ^= x; g[i] ^= x; }
+}
+
+/* limb i covers bits [off, off + width), off = 0,26,51,77,102,128,153,179,204,230 */
+static void fe_frombytes(fe h, const uint8_t s[32])
+{
+    unsigned off = 0;
+    for (int i = 0; i < 10; i++) {
+        unsigned byte = off >> 3, sh = off & 7;
+        uint64_t w = 0;
+        for (unsigned k = 0; k < 5 && byte + k < 32; k++) w |= (uint64_t)s[byte + k] << (8 * k);
+        h[i] = (int32_t)((w >> sh) & (((uint64_t)1 << FE_SH[i]) - 1));
+        off += FE_SH[i];
+    }                                            /* limb 9 stops at bit 254: bit 255 is masked */
+}
+
+static void fe_tobytes(uint8_t s[32], const fe f)
+{
+    int32_t h[10];
+    for (int i = 0; i < 10; i++) h[i] = f[i];
+    /* q = floor((h + 19 * 2^-255) / 2^255); h -= q * p; fully carried */
+    int32_t q = (19 * h[9] + (1 << 24)) >> 25;
+    for (int i = 0; i < 10; i++) q = (h[i] + q) >> FE_SH[i];
+    h[0] += 19 * q;
+    for (int i = 0; i < 9; i++) {
+        int32_t c = h[i] >> FE_SH[i];
+        h[i + 1] += c;
+        h[i] -= c * (1 << FE_SH[i]);
+    }
+    h[9] -= (h[9] >> 25) * (1 << 25);
+    uint64_t acc = 0; unsigned bits = 0, o = 0;
+    for (int i = 0; i < 10; i++) {
+        acc |= (uint64_t)(uint32_t)h[i] << bits;
+        bits += FE_SH[i];
+        while (bits >= 8 && o < 32) { s[o++] = (uint8_t)acc; acc >>= 8; bits -= 8; }
+    }
+    if (o < 32) s[o] = (uint8_t)acc;
+    mbedtls_platform_zeroize(h, sizeof(h));
+}
+
+/* h = f^(2^n), n >= 1 */
+static void fe_sqn(fe h, const fe f, int n)
+{
+    fe_mul(h, f, f);
+    while (--n > 0) fe_mul(h, h, h);
+}
+
+/* out = z^(p-2) (addition chain from ref10) */
+static void fe_invert(fe out, const fe z)
+{
+    fe t0, t1, t2, t3;
+    fe_sqn(t0, z, 1);
+    fe_sqn(t1, t0, 2);
+    fe_mul(t1, z, t1);
+    fe_mul(t0, t0, t1);
+    fe_sqn(t2, t0, 1);
+    fe_mul(t1, t1, t2);
+    fe_sqn(t2, t1, 5);
+    fe_mul(t1, t2, t1);
+    fe_sqn(t2, t1, 10);
+    fe_mul(t2, t2, t1);
+    fe_sqn(t3, t2, 20);
+    fe_mul(t2, t3, t2);
+    fe_sqn(t2, t2, 10);
+    fe_mul(t1, t2, t1);
+    fe_sqn(t2, t1, 50);
+    fe_mul(t2, t2, t1);
+    fe_sqn(t3, t2, 100);
+    fe_mul(t2, t3, t2);
+    fe_sqn(t2, t2, 50);
+    fe_mul(t1, t2, t1);
+    fe_sqn(t1, t1, 5);
+    fe_mul(out, t1, t0);
+}
+
+static int x25519_mul(uint8_t out[32], const uint8_t k[32], const uint8_t *u)
+{
+    uint8_t e[32];
+    fe x1, x2, z2, x3, z3, t0, t1;
+    uint32_t swap = 0;
+
+    memcpy(e, k, 32);
+    e[0] &= 248; e[31] &= 127; e[31] |= 64;         /* RFC 7748 clamping */
     if (u) {
-        memcpy(uc, u, 32);
-        uc[31] &= 0x7f;                          /* RFC 7748: mask bit 255 */
+        fe_frombytes(x1, u);                        /* bit 255 masked by the loader */
     } else {
-        memset(uc, 0, 32);
-        uc[0] = 9;                               /* base point u = 9 */
+        memset(x1, 0, sizeof(x1)); x1[0] = 9;       /* base point u = 9 */
     }
-    ret = mbedtls_ecp_point_read_binary(&grp, &P, uc, 32);
-    if (ret) goto done;
-    ret = mbedtls_ecp_mul(&grp, &R, &d, &P, rng, rng_ctx);
-    if (ret) goto done;
-    {
-        size_t olen = 0;   /* Montgomery export = little-endian u-coordinate */
-        ret = mbedtls_ecp_point_write_binary(&grp, &R, MBEDTLS_ECP_PF_UNCOMPRESSED,
-                                             &olen, out, 32);
-        if (!ret && olen != 32) ret = -1;
-    }
-    if (ret) goto done;
+    memset(x2, 0, sizeof(x2)); x2[0] = 1;
+    memset(z2, 0, sizeof(z2));
+    fe_copy(x3, x1);
+    memset(z3, 0, sizeof(z3)); z3[0] = 1;
 
-    {   /* reject low-order points (all-zero output) */
+    for (int pos = 254; pos >= 0; pos--) {          /* Montgomery ladder (ref10 step) */
+        uint32_t b = (e[pos >> 3] >> (pos & 7)) & 1u;
+        swap ^= b;
+        fe_cswap(x2, x3, swap);
+        fe_cswap(z2, z3, swap);
+        swap = b;
+        fe_sub(t0, x3, z3);
+        fe_sub(t1, x2, z2);
+        fe_add(x2, x2, z2);
+        fe_add(z2, x3, z3);
+        fe_mul(z3, t0, x2);
+        fe_mul(z2, z2, t1);
+        fe_mul(t0, t1, t1);
+        fe_mul(t1, x2, x2);
+        fe_add(x3, z3, z2);
+        fe_sub(z2, z3, z2);
+        fe_mul(x2, t1, t0);
+        fe_sub(t1, t1, t0);
+        fe_mul(z2, z2, z2);
+        fe_mul121666(z3, t1);
+        fe_mul(x3, x3, x3);
+        fe_add(t0, t0, z3);
+        fe_mul(z3, x1, z2);
+        fe_mul(z2, t1, t0);
+    }
+    fe_cswap(x2, x3, swap);
+    fe_cswap(z2, z3, swap);
+
+    fe_invert(z2, z2);
+    fe_mul(x2, x2, z2);
+    fe_tobytes(out, x2);
+
+    mbedtls_platform_zeroize(e, sizeof(e));
+    {   /* reject low-order points (all-zero output), RFC 7748 section 6.1 */
         uint8_t acc = 0;
         for (int i = 0; i < 32; i++) acc |= out[i];
-        if (acc == 0) ret = -1;
+        if (acc == 0) return -1;
     }
-done:
-    mbedtls_ecp_group_free(&grp);
-    mbedtls_ecp_point_free(&P);
-    mbedtls_ecp_point_free(&R);
-    mbedtls_mpi_free(&d);
-    mbedtls_platform_zeroize(kc, sizeof(kc));
-    return ret ? -1 : 0;
+    return 0;
 }
 
 int ssn_x25519(uint8_t out[32], const uint8_t priv[32], const uint8_t pub[32],
                ssn_rng_fn rng, void *rng_ctx)
 {
-    return x25519_mul(out, priv, pub, rng, rng_ctx);
+    (void)rng; (void)rng_ctx;
+    return x25519_mul(out, priv, pub);
 }
 
 int ssn_x25519_base(uint8_t pub[32], const uint8_t priv[32],
                     ssn_rng_fn rng, void *rng_ctx)
 {
-    return x25519_mul(pub, priv, NULL, rng, rng_ctx);
+    (void)rng; (void)rng_ctx;
+    return x25519_mul(pub, priv, NULL);
 }
 
 int ssn_gen_static(uint8_t priv[32], uint8_t pub[32], ssn_rng_fn rng, void *rng_ctx)
@@ -487,4 +634,51 @@ int ssn_decrypt(ssn_t *st, const uint8_t *in, size_t len, uint8_t *out)
 void ssn_skip_recv(ssn_t *st)
 {
     st->n_recv++;
+}
+
+/* ---- streaming receive: one record, any piece sizes ---- */
+int ssn_rx_begin(ssn_t *st)
+{
+    uint8_t nonce[12];
+    if (st->stage != 2) return -1;
+    if (st->rx_active) mbedtls_chachapoly_free(&st->rx);
+    make_nonce(nonce, st->n_recv);
+    mbedtls_chachapoly_init(&st->rx);
+    if (mbedtls_chachapoly_setkey(&st->rx, st->k_recv) != 0 ||
+        mbedtls_chachapoly_starts(&st->rx, nonce, MBEDTLS_CHACHAPOLY_DECRYPT) != 0) {
+        mbedtls_chachapoly_free(&st->rx);
+        st->rx_active = false;
+        return -1;
+    }
+    st->rx_active = true;
+    return 0;
+}
+
+int ssn_rx_update(ssn_t *st, const uint8_t *in, size_t len, uint8_t *out)
+{
+    if (!st->rx_active) return -1;
+    if (len == 0) return 0;
+    return mbedtls_chachapoly_update(&st->rx, len, in, out) == 0 ? 0 : -1;
+}
+
+int ssn_rx_finish(ssn_t *st, const uint8_t tag[SSN_TAG_LEN])
+{
+    uint8_t mac[SSN_TAG_LEN], diff = 0;
+    int ret;
+    if (!st->rx_active) return -1;
+    ret = mbedtls_chachapoly_finish(&st->rx, mac);
+    mbedtls_chachapoly_free(&st->rx);
+    st->rx_active = false;
+    if (ret != 0) return -1;
+    for (int i = 0; i < SSN_TAG_LEN; i++) diff |= (uint8_t)(mac[i] ^ tag[i]);   /* constant time */
+    mbedtls_platform_zeroize(mac, sizeof(mac));
+    if (diff != 0) return -1;
+    st->n_recv++;
+    return 0;
+}
+
+void ssn_rx_abort(ssn_t *st)
+{
+    if (st->rx_active) mbedtls_chachapoly_free(&st->rx);
+    st->rx_active = false;
 }

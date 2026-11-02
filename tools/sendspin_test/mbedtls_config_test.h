@@ -1,9 +1,10 @@
 /*
- * Minimal mbedtls 3.6 config for the Sendspin host test. This is also the
- * list of features the firmware's mbedtls config must provide for
- * sendspin_noise.c / sendspin_client.c:
- *   CHACHA20, POLY1305, CHACHAPOLY, SHA256, SHA1, ECP + CURVE25519, BIGNUM.
- * (MD_C and HMAC are only used by the test's independent initiator.)
+ * Minimal mbedtls 3.6 config for the Sendspin host test.  The firmware itself
+ * (dspi_mbedtls_config.h) needs only CHACHA20, POLY1305, CHACHAPOLY, SHA256 and
+ * SHA1 for sendspin_noise.c / sendspin_client.c: X25519 is local, heap-free code.
+ * MD_C/HMAC, BIGNUM, ECP, ECDH and BASE64 are enabled here only for the test's
+ * independent initiator and as a reference implementation for the X25519
+ * cross-check.
  */
 #ifndef MBEDTLS_CONFIG_TEST_H
 #define MBEDTLS_CONFIG_TEST_H
