@@ -1,6 +1,6 @@
 # Control Surfaces (User-Wired Physical Controls and Indicators)
 
-*Firmware capability format version: 21*
+*Firmware capability format version: 22*
 *Config (flash) version: 2; IR config version: 2*
 *Directory version: 22*
 
@@ -93,6 +93,10 @@ is `output_limiter_spec.md`.
 Caps v21 appends noun 79, `PRESET_SAVE` (sections 4.3 and 5), a `TRIGGER` that
 saves the live state to the active preset slot. No structure or stored-config
 changes; `noun_count` reads 80.
+
+Caps v22 appends noun 80, `OUTPUT_LATENCY` (sections 4.3 and 5), a deferred
+enum over the seven output latency options. No structure or stored-config
+changes; `noun_count` reads 81.
 
 Writing style note: this doc avoids em-dashes per project convention.
 
@@ -254,7 +258,7 @@ giving smooth, jitter-free knob behavior without flooding the dispatcher.
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
 | 0 | 1 | `type` | `CsType` (0-10); `0` = slot cleared |
-| 1 | 1 | `noun` | `CsNoun` (0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20, 0-79 at caps v21; read `noun_count`) |
+| 1 | 1 | `noun` | `CsNoun` (0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20, 0-79 at caps v21, 0-80 at caps v22; read `noun_count`) |
 | 2 | 1 | `action` | `CsAction` (0-11) |
 | 3 | 1 | `flags` | `CS_FLAG_*` bitfield (see 2.2.1); unknown bits are rejected with `CS_STATUS_INVALID_VALUE` |
 | 4 | 1 | `gpio[0]` | primary GPIO |
@@ -338,7 +342,7 @@ reads `max_bindings`. See `control_surfaces_aux_spec.md`.
 
 ### 2.5 `CsNounDesc` (12 bytes)
 
-Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20 and 0-79 at caps v21).
+Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20, 0-79 at caps v21 and 0-80 at caps v22).
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -779,6 +783,7 @@ Action-mask groups used below:
 | `LIMITER_LINK` | 77 | ENUM | - | 5 (0 = unlinked, 1..4 = link group) | OUTPUT_CH | ENUM-RW |
 | `LIMITER_GR` | 78 | CONT | DB | 0..30 dB, read-only | OUTPUT_CH | CONT-RO |
 | `PRESET_SAVE` | 79 | BOOL | - | - | - | `TRIGGER` (`0x0080`) |
+| `OUTPUT_LATENCY` | 80 | ENUM | - | 7 (value = option ID - 1: 0.67, 1, 2, 3, 4, 6, 8 ms) | - | ENUM-RW |
 
 The *effective* legal action set for a (type, noun) pair is the bitwise AND of
 its two masks. Example: an encoder (`STEP` only) on `USER_MUTE` (bool, no
@@ -883,6 +888,7 @@ target and dispatches it.
 | `LIMITER_LINK` | `REQ_LIMITER` (wValue = `(target << 8) \| 3`, float32 LE) | Link group 0..4, 0 = unlinked. Joining a group adopts the group's enable, threshold and release. INC+WRAP cycles. Sent as an integer-valued float. |
 | `LIMITER_GR` | (read-only) | Gain reduction the output applied during the latest audio packet, in dB (0 = none), clamped to 30. Drives `IND_ABOVE` (a "limiting" LED) and `IND_LEVEL` (a PWM gain-reduction meter). |
 | `PRESET_SAVE` | `REQ_PRESET_SAVE` (`0x90`, GET, wValue = active slot) | `TRIGGER` saves the live state to the currently active preset slot via the deferred pipeline-safe path a host save takes. Device-global state (output config in independent mode, CS bindings) is not saved; those keep `REQ_SAVE_OUTPUT_CONFIG` and `REQ_CS_SAVE`. |
+| `OUTPUT_LATENCY` | `REQ_OUTPUT_LATENCY` (`0x03`, SET, 1-byte option ID = value + 1) | Requests an output latency option. Deferred (`CS_NDF_DEFERRED`): the main loop stores it in the directory and restarts every output together at the new target, exactly as a host SET does, so detents in flight coalesce and slot alignment is kept. Reads the *requested* option, not the one in force; a stream-only option (0.67 or 1 ms) chosen on USB input runs as 2 ms but still reads as chosen. INC+WRAP cycles. |
 
 ### 5.1 Enum stepping detail
 

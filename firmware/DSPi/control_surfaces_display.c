@@ -27,6 +27,7 @@
 #include "subharm.h"
 #include "tube.h"
 #include "limiter.h"
+#include "output_latency.h"
 
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
@@ -595,6 +596,7 @@ static const char *const s_noun_label[CS_NOUN_COUNT] = {
     [CS_NOUN_LIMITER] = "Limiter",         [CS_NOUN_LIMITER_THRESHOLD] = "Lim Thr",
     [CS_NOUN_LIMITER_RELEASE] = "Lim Rel", [CS_NOUN_LIMITER_LINK] = "Lim Link",
     [CS_NOUN_LIMITER_GR] = "Lim GR",       [CS_NOUN_PRESET_SAVE] = "Save",
+    [CS_NOUN_OUTPUT_LATENCY] = "Latency",
 };
 
 static const char *const s_input_label[] = {"USB", "SPDIF", "I2S", "ADAT",
@@ -611,6 +613,10 @@ static const char *const s_tube_type_label[] = {
 };
 // Indexed by link group; 0 means the output limits on its own.
 static const char *const s_limiter_link_label[] = {"Off", "1", "2", "3", "4"};
+// Indexed by OutputLatencyId - 1.
+static const char *const s_latency_label[] = {
+    "0.67 ms", "1 ms", "2 ms", "3 ms", "4 ms", "6 ms", "8 ms",
+};
 static const char *const s_center_mode_label[]   = {"Sinner", "Logician", "Off"};
 static const char *const s_surround_mode_label[] = {"Off", "Sinner", "Logician"};
 // Indexed by FilterType; includes the host-only types above the CS cycling
@@ -647,6 +653,8 @@ _Static_assert(DISP_N(s_tube_type_label) == TUBE_TYPE_MAX + 1,
                "tube type names must cover the enum");
 _Static_assert(DISP_N(s_limiter_link_label) == LIMITER_LINK_GROUP_MAX + 1,
                "limiter link names must cover the enum");
+_Static_assert(DISP_N(s_latency_label) == OUTPUT_LATENCY_8MS,
+               "latency names must cover the options");
 #if PICO_RP2350
 _Static_assert(DISP_N(s_center_mode_label) == UPMIX_CENTER_OFF + 1,
                "centre mode names must cover the enum");
@@ -670,6 +678,7 @@ static const char *disp_enum_label(uint8_t noun, int v, bool large) {
         case CS_NOUN_SUBHARM_SELECT:      DISP_TAB(s_subharm_select_label); break;
         case CS_NOUN_TUBE_TYPE:           DISP_TAB(s_tube_type_label); break;
         case CS_NOUN_LIMITER_LINK:        DISP_TAB(s_limiter_link_label); break;
+        case CS_NOUN_OUTPUT_LATENCY:      DISP_TAB(s_latency_label); break;
         case CS_NOUN_UPMIX_CENTER_MODE:   DISP_TAB(s_center_mode_label); break;
         case CS_NOUN_UPMIX_SURROUND_MODE: DISP_TAB(s_surround_mode_label); break;
         case CS_NOUN_FILTER_TYPE:

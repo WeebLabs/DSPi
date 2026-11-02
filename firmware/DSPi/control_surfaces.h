@@ -114,6 +114,9 @@
  * unit the release noun needs.  No structure sizes change.
  * See Documentation/Features/output_limiter_spec.md.
  *
+ * Caps v22 appends OUTPUT_LATENCY (80), a deferred enum over the output
+ * latency options via REQ_OUTPUT_LATENCY.  No structure sizes change.
+ *
  * See Documentation/Features/control_surfaces_spec.md.
  */
 
@@ -250,6 +253,8 @@ typedef enum {
     CS_NOUN_LIMITER_GR     = 78, // continuous dB 0..30, read-only (gain reduction)
     // --- caps v21 additions ---
     CS_NOUN_PRESET_SAVE    = 79, // trigger (save live state to the active preset)
+    // --- caps v22 additions ---
+    CS_NOUN_OUTPUT_LATENCY = 80, // enum 0..6 = OutputLatencyId - 1 (requested option)
     CS_NOUN_COUNT
 } CsNoun;
 
@@ -637,7 +642,7 @@ typedef struct __attribute__((packed)) {
 } CsTypeDesc;
 
 typedef struct __attribute__((packed)) {
-    uint8_t  caps_version; // capability format version (21); see the file
+    uint8_t  caps_version; // capability format version (22); see the file
                            // header for what each version added
     uint8_t  max_bindings; // CS_MAX_BINDINGS
     uint8_t  type_count;   // CS_TYPE_COUNT (table follows, index = CsType)

@@ -33,6 +33,7 @@
 #include "limiter.h"
 #include "upmix.h"
 #include "loudness.h"
+#include "output_latency.h"
 #if PICO_RP2350
 #include "adat_output.h"
 #endif
@@ -109,6 +110,9 @@ extern volatile bool sync_started;
 // Gain-reduction meter span.  The limiter reports up to 120 dB; past the
 // deepest threshold the reading no longer tells a listener anything new.
 #define CS_LIMITER_GR_MAX_DB       30.0f
+
+// Latency enum value v is option ID v + 1; the IDs are dense from 1.
+#define CS_LATENCY_COUNT  OUTPUT_LATENCY_8MS
 
 // Q(8.8) helper for table literals; rounds to nearest (a plain cast would
 // truncate, encoding Q 0.1 as 25 instead of the documented 26).  Must stay a
@@ -269,6 +273,8 @@ const CsNounDesc cs_noun_table[CS_NOUN_COUNT] = {
                                   CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
     [CS_NOUN_PRESET_SAVE]     = { CS_KIND_BOOL, 0, CS_ACT_BIT(CS_ACT_TRIGGER), 0, 0,
                                   CS_UNIT_NONE, CS_TARGET_NONE, 0, 0 },
+    [CS_NOUN_OUTPUT_LATENCY]  = { CS_KIND_ENUM, CS_LATENCY_COUNT, CS_ENUM_RW, 0, 0,
+                                  CS_UNIT_NONE, CS_TARGET_NONE, 0, CS_NDF_DEFERRED },
     [CS_NOUN_LOUDNESS_SPL]    = { CS_KIND_CONTINUOUS, 0, CS_CONT_RW,
                                   Q8(LOUDNESS_REF_SPL_MIN), Q8(LOUDNESS_REF_SPL_MAX),
                                   CS_UNIT_DB, CS_TARGET_NONE, 0, 0 },
@@ -509,6 +515,9 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
         case CS_NOUN_OUTPUT_DELAY:      return matrix_mixer.outputs[target].delay_ms;
         case CS_NOUN_PRESET_RELOAD:     return 0.0f;
         case CS_NOUN_PRESET_SAVE:       return 0.0f;
+        // The request, not the option in force: USB runs a stream-only
+        // request as 2 ms, and reading that back would fight the step.
+        case CS_NOUN_OUTPUT_LATENCY:    return (float)(output_latency_requested() - 1);
         // Both read live: the SET handler stores the value immediately and
         // only the table rebuild is deferred to the main loop.
         case CS_NOUN_LOUDNESS_SPL:       return loudness_ref_spl;
@@ -682,6 +691,13 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_SAVE,
                                     (uint16_t)preset_get_active(), 0, 1, &rd, &rl);
             break;
+        case CS_NOUN_OUTPUT_LATENCY: {
+            // Deferred to the main loop, which writes flash and restarts every
+            // output together at the new target.
+            uint8_t id = (uint8_t)((int)value + 1);
+            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_OUTPUT_LATENCY, 0, 0, &id, 1);
+            break;
+        }
         case CS_NOUN_PRESET:
             // Same deferred, pipeline-safe path a host load takes.
             r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_LOAD,
