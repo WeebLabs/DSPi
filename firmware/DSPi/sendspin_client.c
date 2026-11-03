@@ -121,9 +121,12 @@ enum { CODEC_PCM = 0, CODEC_FLAC };
 /* ------------------------------------------------------------------ */
 /* State                                                               */
 /* ------------------------------------------------------------------ */
-static uint8_t g_rx[SS_RX_BUF] __attribute__((aligned(4)));
-
-static struct {
+/* All of the client's RAM lives in ONE object (g_mem) so that the Slimproto client
+ * can borrow it while Sendspin is stopped (the two protocols never run at the
+ * same time; see sendspin_client_mem_loan()).  c / g_rx keep their old names. */
+static struct ss_mem {
+    uint8_t rx[SS_RX_BUF] __attribute__((aligned(4)));
+    struct {
     bool     enabled;
     uint8_t  state;
     uint8_t  phase;
@@ -208,7 +211,12 @@ static struct {
     uint8_t  burst_idx;
     uint64_t ct_val, last_req_us, next_burst_us;
     int64_t  best_rtt, best_off, offset;
-} c;
+    } c;
+} g_mem;
+#define c    g_mem.c
+#define g_rx g_mem.rx
+static bool g_loaned;                 /* g_mem is on loan to the Slimproto client */
+static bool g_dirty;                  /* ... and was overwritten: re-initialise on start */
 
 static void set_phase(uint8_t ph)
 {
@@ -1279,9 +1287,24 @@ static void begin_connect(void)
 /* ------------------------------------------------------------------ */
 /* Public API                                                          */
 /* ------------------------------------------------------------------ */
+void *sendspin_client_mem_loan(uint32_t *bytes)
+{
+    if (c.enabled || g_loaned) return NULL;
+    g_loaned = true;
+    g_dirty = true;
+    if (bytes) *bytes = (uint32_t)sizeof(g_mem);
+    return &g_mem;
+}
+
+void sendspin_client_mem_return(void)
+{
+    g_loaned = false;
+}
+
 void sendspin_client_start(void)
 {
-    if (c.enabled) return;
+    if (c.enabled || g_loaned) return;
+    if (g_dirty) { memset(&g_mem, 0, sizeof(g_mem)); g_dirty = false; }
     if (!c.key_ok) {
         if (!sendspin_key_load(c.s_priv)) {
             /* Phase 1: fresh X25519 identity each boot. */

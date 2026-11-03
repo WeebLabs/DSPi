@@ -85,6 +85,19 @@ bool nfl_supported_now(void);
  * the arena is not held. */
 int nfl_begin(const char *b64, size_t b64_len, uint32_t rate, uint8_t bits);
 
+/* ---- Slimproto byte-stream mode (see slimproto_client.c) ----
+ * Start a decoder for a native FLAC file stream ('fLaC' + metadata + frames,
+ * arbitrary segmentation).  Feed bytes through nfl_chunk_buf()/nfl_chunk_submit()
+ * /nfl_pump() as for chunks; the decoder state is kept across chunks.  After the
+ * metadata has been parsed the pump pauses (nothing is emitted) until
+ * nfl_stream_ack(); nfl_stream_info() then reports the validated format
+ * (44100/48000 Hz, 2 ch, 16/24 bit).  nfl_stream_failed() is set for an
+ * unsupported header or an unrecoverable decoder error. */
+int  nfl_begin_stream(void);
+bool nfl_stream_info(uint32_t *rate, uint8_t *bits);
+void nfl_stream_ack(void);
+bool nfl_stream_failed(void);
+
 /* stream/clear: drop the pending chunk and resynchronise the decoder. */
 void nfl_reset(void);
 

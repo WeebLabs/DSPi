@@ -1493,9 +1493,20 @@ static bool vendor_handle_set_data(tusb_control_request_t const *req) {
             net_persist_request_save();       // deferred: main loop writes flash
             break;
         }
+
+        case REQ_SET_NET_PROTOCOL: {
+            if (buffer->data_len != 1 && buffer->data_len != 3) { handled = false; break; }
+            if (vendor_rx_buf[0] > NET_PROTO_SLIMPROTO) { handled = false; break; }
+            net_proto_set(vendor_rx_buf[0]);
+            if (buffer->data_len == 3)
+                net_slimproto_set_port((uint16_t)(vendor_rx_buf[1] | ((uint16_t)vendor_rx_buf[2] << 8)));
+            net_persist_request_save();       // deferred: main loop writes flash
+            break;
+        }
 #else
         case REQ_SET_WIFI_CREDS:
         case REQ_SET_SENDSPIN_SERVER:
+        case REQ_SET_NET_PROTOCOL:
             handled = false;   // WiFi build only; STALL elsewhere
             break;
 #endif

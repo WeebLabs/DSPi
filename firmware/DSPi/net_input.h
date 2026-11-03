@@ -31,17 +31,18 @@
 // ---------------------------------------------------------------------------
 
 // Bring up cyw43 + lwIP and start joining the configured WiFi network
-// (non-blocking after the initial radio firmware load).  The Sendspin client
-// is started (sendspin_client_start()) as soon as the link is up with an IP
-// address, and stopped again if the link drops.
+// (non-blocking after the initial radio firmware load).  The selected network
+// protocol client (net_proto_get(): Sendspin or Slimproto, never both) is
+// started as soon as the link is up with an IP address, and stopped again if
+// the link drops or the protocol selection changes.
 void net_input_start(void);
 
-// sendspin_client_stop(), leave the network, cyw43_arch_deinit() (releases the
+// Stop the running protocol client, leave the network, cyw43_arch_deinit() (releases the
 // PIO state machine and DMA channel), empty the ring, input_servo_reset().
 // main.c restores the nominal output dividers (static there), as for I2S/ADAT.
 void net_input_stop(void);
 
-// Main-loop poll: cyw43_arch_poll(), WiFi state machine, sendspin_client_poll(),
+// Main-loop poll: cyw43_arch_poll(), WiFi state machine, <selected client>_poll(),
 // then drain the PCM ring into process_input_block() in blocks of 48..192
 // frames, paced against the output consumer pool.  Returns frames processed.
 uint32_t net_input_poll(void);
@@ -93,6 +94,24 @@ void net_input_flush(void);
 // Bytes currently buffered in the ring.
 uint32_t net_input_ring_fill_bytes(void);
 
+// Free-running (mod 2^32) byte positions of the ring write / read index.  The
+// Slimproto client uses them to mark track boundaries and to derive elapsed
+// play time from what the consumer has taken.
+uint32_t net_input_ring_wr_pos(void);
+uint32_t net_input_ring_rd_pos(void);
+
+// Hold the consumer: while held net_input_poll() does not take data from the
+// ring and net_input_is_ready() reports false (the pipeline mutes exactly as it
+// does for a stalled stream) but the buffered audio is kept, so un-holding
+// resumes where it stopped.  Used for Slimproto pause / "waiting for unpause".
+// Cleared by net_input_start()/net_input_stop().
+void net_input_set_hold(bool hold);
+bool net_input_is_held(void);
+
+// MAC address of the STA interface (CYW43), the Slimproto player id.  All zero
+// until the radio has been initialised once.
+void net_input_get_mac(uint8_t mac[6]);
+
 // ---------------------------------------------------------------------------
 // Volume / mute bridge (the client polls these to report/apply remote state)
 // ---------------------------------------------------------------------------
@@ -117,6 +136,26 @@ void net_mute_set(bool mute);
 void net_wifi_set_credentials(const char *ssid, const char *pass);
 const char *net_wifi_get_ssid(void);
 const char *net_wifi_get_pass(void);
+
+// Network protocol selector (RAM + persisted via net_persist).  Exactly one
+// client runs at a time (they share their RAM).  Changing the selection while
+// the radio is up stops the running client and starts the new one.
+typedef enum {
+    NET_PROTO_SENDSPIN  = 0,   // default
+    NET_PROTO_SLIMPROTO = 1,   // Squeezelite-compatible player (Music Assistant 'Squeezelite' provider)
+} NetProto;
+void    net_proto_set(uint8_t proto);       // values > NET_PROTO_SLIMPROTO are ignored
+uint8_t net_proto_get(void);
+
+// Server host: ONE host string for both protocols (net_sendspin_set_server()
+// stores it); the port is per protocol.  Sendspin: port given to
+// net_sendspin_set_server() (default 8927, WebSocket path "/sendspin").
+// Slimproto: control port (default 3483) set with net_slimproto_set_port();
+// 0 = default.  The Slimproto HTTP stream port/ip come from the server's strm
+// command.
+void net_slimproto_set_port(uint16_t port);
+uint16_t net_slimproto_get_port(void);
+uint16_t net_slimproto_port(void);          // alias used by slimproto_client.c
 
 // Sendspin server (default port 8927, WebSocket path "/sendspin").
 void net_sendspin_set_server(const char *host, uint16_t port);
@@ -145,7 +184,8 @@ NetWifiState net_wifi_get_state(void);
 // REQ_GET_NET_STATUS payload (little-endian, packed).
 typedef struct __attribute__((packed)) {
     uint8_t  wifi_state;        // NetWifiState
-    uint8_t  sendspin_state;    // sendspin_client_state() (SENDSPIN_STATE_*; 0 if client not started)
+    uint8_t  sendspin_state;    // state of the active protocol client: SENDSPIN_STATE_* or SLIMPROTO_STATE_*
+                                // (same numeric meaning, selected by `protocol`; 0 if client not started)
     uint8_t  ready;             // net_input_is_ready()
     uint8_t  active;            // active_input_source == INPUT_SOURCE_NET
     uint32_t ip_addr;           // IPv4, network byte order as stored by lwIP (0 if none)
@@ -156,8 +196,10 @@ typedef struct __attribute__((packed)) {
     uint32_t ring_underruns;    // times the pipeline wanted data and the ring was empty
     int8_t   rssi_dbm;          // 0 if unknown / not connected
     uint8_t  bits;              // stream bit depth (0 if format not set)
-    uint8_t  reserved[2];
-} NetStatusPacket;
+    uint8_t  protocol;          // NetProto selected (v2 firmware; older firmware reports 0 = Sendspin here)
+    uint8_t  reserved;          // 0
+} NetStatusPacket;                // still 32 bytes: the new byte was formerly reserved[0] (always 0)
+_Static_assert(sizeof(NetStatusPacket) == 32, "NetStatusPacket wire size");
 
 void net_input_get_status(NetStatusPacket *out);
 

@@ -26,6 +26,7 @@
 
 #include "net_input.h"
 #include "sendspin_client.h"
+#include "slimproto_client.h"
 #include "config.h"
 #include "audio_input.h"
 #include "i2s_input.h"
@@ -50,6 +51,11 @@ static char     net_pass[NET_PASS_MAX + 1];
 static char     net_host[NET_HOST_MAX + 1];
 static uint16_t net_port = NET_DEFAULT_PORT;
 static const char net_path[] = NET_DEFAULT_PATH;
+#define NET_SLIM_DEFAULT_PORT 3483
+static uint16_t net_slim_port = NET_SLIM_DEFAULT_PORT;
+static uint8_t  net_proto = NET_PROTO_SENDSPIN;   // selected protocol
+static uint8_t  client_proto;                     // protocol of the started client (valid while client_started)
+static volatile bool ring_hold;                   // see net_input_set_hold()
 
 // Retry cadence for failed init / join
 #define NET_RETRY_MS        5000u
@@ -138,9 +144,17 @@ static void net_begin_join(void) {
 
 static void net_client_stop_if_started(void) {
     if (client_started) {
-        sendspin_client_stop();
+        if (client_proto == NET_PROTO_SLIMPROTO) slimproto_client_stop();
+        else sendspin_client_stop();
         client_started = false;
     }
+}
+
+static void net_client_start(void) {
+    client_proto = net_proto;
+    client_started = true;
+    if (client_proto == NET_PROTO_SLIMPROTO) slimproto_client_start();
+    else sendspin_client_start();
 }
 
 static bool net_radio_init(void) {
@@ -182,10 +196,10 @@ static void net_wifi_service(void) {
             printf("net: WiFi up, ip %s\n",
                    ip4addr_ntoa(netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA])));
         }
-        if (!client_started) {
-            client_started = true;
-            sendspin_client_start();
-        }
+        // Protocol switched while running: stop the old client completely (it
+        // releases its pcbs and RAM) before the new one is started next pass.
+        if (client_started && client_proto != net_proto) net_client_stop_if_started();
+        if (!client_started) net_client_start();
         break;
     case CYW43_LINK_FAIL:
     case CYW43_LINK_NONET:
@@ -231,6 +245,7 @@ void net_input_start(void) {
     client_started = false;
     rejoin_requested = false;
     join_in_progress = false;
+    ring_hold = false;
     wifi_state = NET_WIFI_OFF;
     // Firmware download to the radio blocks for a few hundred ms.
     net_radio_init();
@@ -246,6 +261,7 @@ void net_input_stop(void) {
     }
     net_running = false;
     net_ring = NULL;
+    ring_hold = false;
     join_in_progress = false;
     wifi_state = NET_WIFI_OFF;
     stream_active = false;
@@ -257,7 +273,7 @@ bool net_input_is_running(void) { return net_running; }
 
 bool net_input_is_ready(void) {
     return net_running && wifi_state == NET_WIFI_CONNECTED &&
-           fmt_rate != 0 && stream_active;
+           fmt_rate != 0 && stream_active && !ring_hold;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +344,14 @@ void net_input_flush(void) {
 }
 
 uint32_t net_input_ring_fill_bytes(void) { return ring_fill(); }
+uint32_t net_input_ring_wr_pos(void) { return ring_wr; }
+uint32_t net_input_ring_rd_pos(void) { return ring_rd; }
+void net_input_set_hold(bool hold) { ring_hold = hold; __dmb(); }
+bool net_input_is_held(void) { return ring_hold; }
+
+void net_input_get_mac(uint8_t mac[6]) {
+    memcpy(mac, cyw43_state.netif[CYW43_ITF_STA].hwaddr, 6);
+}
 
 void net_input_set_format(uint32_t rate_hz, uint8_t channels, uint8_t bits) {
     if (rate_hz != 44100 && rate_hz != 48000) return;
@@ -404,7 +428,10 @@ uint32_t net_input_poll(void) {
 
     cyw43_arch_poll();
     net_wifi_service();
-    if (client_started) sendspin_client_poll();
+    if (client_started) {
+        if (client_proto == NET_PROTO_SLIMPROTO) slimproto_client_poll();
+        else sendspin_client_poll();
+    }
 
     if (!net_input_is_ready()) return 0;
 
@@ -500,6 +527,14 @@ void net_sendspin_set_server(const char *host, uint16_t port) {
     net_host[NET_HOST_MAX] = '\0';
     net_port = port ? port : NET_DEFAULT_PORT;
 }
+void net_proto_set(uint8_t proto) {
+    if (proto > NET_PROTO_SLIMPROTO) return;
+    net_proto = proto;          // net_wifi_service() restarts the client on its next pass
+}
+uint8_t net_proto_get(void) { return net_proto; }
+void net_slimproto_set_port(uint16_t port) { net_slim_port = port ? port : NET_SLIM_DEFAULT_PORT; }
+uint16_t net_slimproto_get_port(void) { return net_slim_port; }
+uint16_t net_slimproto_port(void) { return net_slim_port; }
 const char *net_sendspin_get_host(void) { return net_host; }
 uint16_t net_sendspin_get_port(void) { return net_port; }
 const char *net_sendspin_get_path(void) { return net_path; }
@@ -516,7 +551,10 @@ NetWifiState net_wifi_get_state(void) { return wifi_state; }
 void net_input_get_status(NetStatusPacket *out) {
     memset(out, 0, sizeof(*out));
     out->wifi_state     = (uint8_t)wifi_state;
-    out->sendspin_state = client_started ? sendspin_client_state() : 0;
+    out->protocol       = net_proto;
+    out->sendspin_state = !client_started ? 0
+                        : (client_proto == NET_PROTO_SLIMPROTO ? slimproto_client_state()
+                                                               : sendspin_client_state());
     out->ready          = net_input_is_ready() ? 1 : 0;
     out->active         = (active_input_source == INPUT_SOURCE_NET) ? 1 : 0;
     out->sample_rate    = fmt_rate;

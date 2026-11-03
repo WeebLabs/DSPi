@@ -65,10 +65,58 @@ int main(void) {
     /* bad version / length with a recomputed valid CRC must still fail */
     np_encode(buf, sizeof(buf), 3, &in);
     NpHeader h; memcpy(&h, buf, sizeof(h));
-    h.version = 2;
+    h.version = 3;
     { NpPayload p; memcpy(&p, buf + sizeof(h), sizeof(p)); h.crc = np_record_crc(&h, &p); }
     memcpy(buf, &h, sizeof(h));
     CHECK(np_decode(buf, sizeof(buf), &seq, &out) == false);
+
+    /* v2 fields: protocol selector + Slimproto port round trip */
+    memset(&in, 0, sizeof(in));
+    in.flags = NP_FLAG_WIFI | NP_FLAG_PROTO;
+    strcpy(in.ssid, "net");
+    in.proto = 1; in.slim_port = 3484;
+    np_encode(buf, sizeof(buf), 9, &in);
+    { NpHeader hh; memcpy(&hh, buf, sizeof(hh)); CHECK(hh.version == 2 && hh.length == 200); }
+    CHECK(np_decode(buf, sizeof(buf), &seq, &out));
+    CHECK(out.proto == 1 && out.slim_port == 3484 && (out.flags & NP_FLAG_PROTO));
+    /* proto fields without the flag are normalised to defaults on encode */
+    in.flags = NP_FLAG_WIFI;
+    np_encode(buf, sizeof(buf), 9, &in);
+    CHECK(np_decode(buf, sizeof(buf), &seq, &out) && out.proto == 0 && out.slim_port == 0);
+
+    /* v1 -> v2 migration: a record written by the Sendspin-only firmware (197-byte payload) */
+    {
+        uint8_t v1[sizeof(NpHeader) + NP_PAYLOAD_V1_BYTES];
+        NpPayload src; memset(&src, 0, sizeof(src));
+        src.flags = NP_FLAG_WIFI | NP_FLAG_SERVER | NP_FLAG_KEY;
+        src.port = 8927; strcpy(src.ssid, "OldNet"); strcpy(src.pass, "oldpass"); strcpy(src.host, "10.1.2.3");
+        for (int i = 0; i < 32; i++) src.key[i] = (uint8_t)(0xA0 + i);
+        NpHeader oh; oh.magic = NP_MAGIC; oh.version = NP_VERSION_V1; oh.length = NP_PAYLOAD_V1_BYTES; oh.seq = 5;
+        oh.crc = np_record_crc_n(&oh, &src, NP_PAYLOAD_V1_BYTES);
+        memcpy(v1, &oh, sizeof(oh)); memcpy(v1 + sizeof(oh), &src, NP_PAYLOAD_V1_BYTES);
+        memset(buf, 0xFF, sizeof(buf)); memcpy(buf, v1, sizeof(v1));          /* rest of the sector erased */
+        NpPayload mig;
+        CHECK(np_decode(buf, sizeof(buf), &seq, &mig) && seq == 5);
+        CHECK(mig.flags == src.flags && mig.port == 8927 && !strcmp(mig.ssid, "OldNet") &&
+              !strcmp(mig.pass, "oldpass") && !strcmp(mig.host, "10.1.2.3") && !memcmp(mig.key, src.key, 32));
+        CHECK(mig.proto == 0 && mig.slim_port == 0);                          /* defaults: Sendspin, port 3483 */
+        /* re-saving the migrated record writes v2 and keeps everything */
+        np_encode(buf, sizeof(buf), 6, &mig);
+        NpPayload again;
+        CHECK(np_decode(buf, sizeof(buf), &seq, &again) && seq == 6 && memcmp(&again, &mig, sizeof(mig)) == 0);
+        /* a v1 record must not carry the v2-only flag, and any bit flip is still caught */
+        for (size_t b = 0; b < sizeof(v1) * 8; b++) {
+            uint8_t t[sizeof(v1)];
+            memcpy(t, v1, sizeof(t)); t[b / 8] ^= (uint8_t)(1u << (b % 8));
+            CHECK(np_decode(t, sizeof(t), &seq, &mig) == false);
+        }
+        NpPayload bad = src; bad.flags |= NP_FLAG_PROTO;
+        oh.crc = np_record_crc_n(&oh, &bad, NP_PAYLOAD_V1_BYTES);
+        memcpy(v1, &oh, sizeof(oh)); memcpy(v1 + sizeof(oh), &bad, NP_PAYLOAD_V1_BYTES);
+        CHECK(np_decode(v1, sizeof(v1), &seq, &mig) == false);
+        /* torn v1 record: payload shorter than declared */
+        CHECK(np_decode(v1, sizeof(v1) - 1, &seq, &mig) == false);
+    }
 
     /* sequence compare, including wrap */
     CHECK(np_seq_newer(2, 1));

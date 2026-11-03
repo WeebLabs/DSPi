@@ -167,6 +167,13 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define REQ_SET_SENDSPIN_SERVER     0x3F
 // REQ_GET_NET_STATUS: returns NetStatusPacket (net_input.h, 32 bytes)
 #define REQ_GET_NET_STATUS          0x40
+// REQ_SET_NET_PROTOCOL: payload = uint8 protocol (0 = Sendspin [default],
+//   1 = Slimproto/Squeezelite) [+ uint16 Slimproto control port LE, 0 = default
+//   3483].  The server host set with REQ_SET_SENDSPIN_SERVER is shared by both
+//   protocols; REQ_SET_SENDSPIN_SERVER's port is the Sendspin port.  Persisted
+//   (net_persist.c, record v2).  The new protocol client is started in place of
+//   the running one (the radio stays up).  Read back through NetStatusPacket.
+#define REQ_SET_NET_PROTOCOL        0x41
 
 // Vendor Request Commands (EP0 control transfers)
 #define REQ_SET_EQ_PARAM    0x42

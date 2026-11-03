@@ -51,6 +51,11 @@ static struct {
     uint32_t   chunk_len, chunk_off;
     fx_flac_state_t last_state;
     uint32_t   resyncs;
+    /* Slimproto native-FLAC byte-stream mode (nfl_begin_stream) */
+    bool       stream;            /* byte-stream mode: no per-chunk reset, header parsed by foxen */
+    bool       info_ok;           /* STREAMINFO parsed and acceptable (rate/bits valid) */
+    bool       acked;             /* caller applied the format: decoded audio may be emitted */
+    bool       failed;            /* stream header unsupported or decoder error */
 } f;
 
 /* ------------------------------------------------------------------ */
@@ -150,6 +155,7 @@ void nfl_end(void)
 {
     f.active = false;
     f.pending = false;
+    f.stream = f.info_ok = f.acked = f.failed = false;
     if (f.held) {
         f.held = false;
         adat_output_ring_return();
@@ -160,6 +166,7 @@ int nfl_begin(const char *b64, size_t b64_len, uint32_t rate, uint8_t bits)
 {
     f.active = false;
     f.pending = false;
+    f.stream = f.info_ok = f.acked = f.failed = false;
     if (!b64 || !b64_len) return NFL_ERR_HEADER;
     if (!arena_take()) return NFL_ERR_NO_ARENA;
 
@@ -200,10 +207,46 @@ int nfl_begin(const char *b64, size_t b64_len, uint32_t rate, uint8_t bits)
     return NFL_OK;
 }
 
+/* Slimproto: the HTTP body is a plain FLAC file stream ('fLaC', metadata blocks,
+ * frames) whose chunking is arbitrary.  The decoder is initialised without the
+ * STREAMINFO replay; foxen parses the metadata itself, and nfl_pump() stops right
+ * after it so the caller can read the format and apply it (nfl_stream_info /
+ * nfl_stream_ack) before any audio is emitted.  Chunks are plain input FIFO
+ * segments: the decoder state is NOT reset between them. */
+int nfl_begin_stream(void)
+{
+    f.active = false;
+    f.pending = false;
+    f.stream = f.info_ok = f.acked = f.failed = false;
+    if (!arena_take()) return NFL_ERR_NO_ARENA;
+    if (!fx_flac_init(f.base, NFL_MAX_BLOCK, 2)) { nfl_end(); return NFL_ERR_DECODER; }
+    f.last_state = FLAC_INIT;
+    f.rate = 0;
+    f.bits = 16;
+    f.max_block = 0;
+    f.stream = true;
+    f.active = true;
+    f.evicted = false;
+    f.chunk_len = f.chunk_off = 0;
+    f.resyncs = 0;
+    return NFL_OK;
+}
+
+bool nfl_stream_info(uint32_t *rate, uint8_t *bits)
+{
+    if (!f.stream || !f.info_ok) return false;
+    if (rate) *rate = f.rate;
+    if (bits) *bits = f.bits;
+    return true;
+}
+void nfl_stream_ack(void) { f.acked = true; }
+bool nfl_stream_failed(void) { return f.failed; }
+
 void nfl_reset(void)
 {
     f.pending = false;
     f.chunk_len = f.chunk_off = 0;
+    if (f.stream) return;                  /* byte-stream mode: callers use nfl_end() */
     if (f.active && !dec_prime()) f.active = false;
 }
 
@@ -262,6 +305,7 @@ static void emit(uint32_t n)
 static void chunk_done(void)
 {
     f.pending = false;
+    if (f.stream) return;                  /* arbitrary segmentation: keep decoder state */
     /* Chunks hold whole frames ("a unit never spans chunks"): whatever state
      * the decoder is in now (clean, or stuck inside a truncated/garbled frame
      * or a half-read header) must not leak into the next chunk. */
@@ -278,6 +322,7 @@ bool nfl_pump(void)
         /* Never call the decoder unless a whole output slice fits in the ring:
          * nothing it produces can be lost, and a full ring just stalls us. */
         if (net_input_ring_free_bytes() < slice_bytes) break;
+        if (f.stream && f.info_ok && !f.acked) break;       /* waiting for the caller to apply the format */
 
         uint32_t left = f.chunk_len - f.chunk_off;
         uint32_t in_len = left < NFL_IN_SLICE ? left : NFL_IN_SLICE;
@@ -294,6 +339,29 @@ bool nfl_pump(void)
         }
         f.last_state = st;
 
+        if (f.stream && !f.info_ok && st == FLAC_END_OF_METADATA) {
+            int64_t sr = fx_flac_get_streaminfo(f.dec, FLAC_KEY_SAMPLE_RATE);
+            int64_t ch = fx_flac_get_streaminfo(f.dec, FLAC_KEY_N_CHANNELS);
+            int64_t bp = fx_flac_get_streaminfo(f.dec, FLAC_KEY_SAMPLE_SIZE);
+            int64_t mb = fx_flac_get_streaminfo(f.dec, FLAC_KEY_MAX_BLOCK_SIZE);
+            if ((sr != 44100 && sr != 48000) || ch != 2 || (bp != 16 && bp != 24) ||
+                mb > (int64_t)NFL_MAX_BLOCK) {
+                NFL_LOG("unsupported stream STREAMINFO\n");
+                f.failed = true;
+                f.pending = false;
+                return false;
+            }
+            f.rate = (uint32_t)sr;
+            f.bits = (uint8_t)bp;
+            f.max_block = (uint16_t)mb;
+            f.info_ok = true;
+            break;                                          /* caller applies the format first */
+        }
+        if (f.stream && st == FLAC_ERR) {
+            f.failed = true;
+            f.pending = false;
+            return false;
+        }
         if (out_len) emit(out_len & ~1u);
         if (st == FLAC_ERR) {
             NFL_LOG("decoder error, resetting\n");

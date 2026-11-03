@@ -2,6 +2,10 @@
  * net_persist.c - persistent WiFi / Sendspin settings and device key.
  * Built only with -DDSPI_ENABLE_WIFI=ON.  See net_persist.h.
  *
+ * Record format: see net_persist_codec.h (version 2 adds the network protocol
+ * selector and the Slimproto port; version 1 records are migrated on load and
+ * rewritten as v2 on the next save).
+ *
  * Flash layout (byte offsets from start of flash):
  *
  *   [ firmware ... ][ free ... ][ NP sector A ][ NP sector B ][ presets: dir + 10 slots ]
@@ -89,6 +93,10 @@ void net_persist_load_into_net(void) {
     if ((persisted.flags & NP_FLAG_SERVER) && persisted.host[0]) {
         net_sendspin_set_server(persisted.host, persisted.port);
     }
+    if (persisted.flags & NP_FLAG_PROTO) {      // v2 records only (v1 migrates to defaults)
+        net_proto_set(persisted.proto);
+        net_slimproto_set_port(persisted.slim_port);
+    }
 }
 
 bool net_persist_loaded(void) { return booted_loaded; }
@@ -113,6 +121,12 @@ static void np_build_current(NpPayload *out) {
         out->flags |= NP_FLAG_SERVER;
         strncpy(out->host, host, NP_HOST_CAP - 1);
         out->port = net_sendspin_get_port();
+    }
+    if (net_proto_get() != NET_PROTO_SENDSPIN ||
+        net_slimproto_get_port() != 3483) {
+        out->flags |= NP_FLAG_PROTO;
+        out->proto = net_proto_get();
+        out->slim_port = net_slimproto_get_port() == 3483 ? 0 : net_slimproto_get_port();
     }
     if (live_key_holder.flags & NP_FLAG_KEY) {
         out->flags |= NP_FLAG_KEY;

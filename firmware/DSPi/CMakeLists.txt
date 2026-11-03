@@ -214,6 +214,15 @@ if (DSPI_ENABLE_WIFI)
             message(WARNING "DSPI_ENABLE_WIFI: ${_f} not found in DSPi/ (link will fail unless DSPI_NET_EXTRA_SOURCES provides it)")
         endif()
     endforeach()
+    # Slimproto (Squeezelite-compatible) player client: the second, mutually
+    # exclusive network protocol (net_proto_set()).  No static RAM of its own: it
+    # borrows the idle Sendspin client's state (sendspin_client_mem_loan()).
+    target_sources(DSPi PRIVATE
+        slimproto_client.c
+        slimproto_client.h
+    )
+    set_source_files_properties(slimproto_client.c PROPERTIES COMPILE_FLAGS "-O2")
+
     # Development aid: extra sources / include dirs (e.g. a local stub of the
     # Sendspin client kept outside the repo): -DDSPI_NET_EXTRA_SOURCES="a.c;b.c"
     # -DDSPI_NET_EXTRA_INCLUDES="dir".

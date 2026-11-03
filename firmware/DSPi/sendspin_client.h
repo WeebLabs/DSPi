@@ -40,6 +40,18 @@ bool    sendspin_client_streaming(void);
 uint8_t sendspin_client_state(void);
 
 /*
+ * RAM loan for the Slimproto client (slimproto_client.c): the whole static state
+ * of this client (about 5.4 KB) is one object.  While Sendspin is stopped it can
+ * be borrowed (NULL if the client is running or already loaned); the client then
+ * refuses to start until sendspin_client_mem_return().  A borrowed object is
+ * zeroed again at the next sendspin_client_start().  Only the protocol selector
+ * (net_input.c) may switch between the two clients, always stop one before
+ * starting the other.
+ */
+void *sendspin_client_mem_loan(uint32_t *bytes);
+void  sendspin_client_mem_return(void);
+
+/*
  * Optional persistence hooks (weak defaults in sendspin_client.c do nothing).
  * Override in flash code to keep the X25519 static identity across reboots
  * (client_id = base64url(pubkey), and MA remembers it). Phase 1 generates a
