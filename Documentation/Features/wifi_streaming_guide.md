@@ -50,7 +50,7 @@ Do these steps:
 5. Apply the settings with `0x3E` and wValue `2`.
 6. Select the NET input with `REQ_SET_INPUT_SOURCE` (`0xE0`). The NET value is `7`.
 
-The settings are saved to flash after you apply them.
+The Pico saves the settings to flash when you apply them.
 Every flash write stops the stream for a few seconds. The Pico then joins the network again.
 
 Default ports:
@@ -60,7 +60,7 @@ Default ports:
 | Sendspin | 8927 | `/sendspin` |
 | Squeezelite | 3483 | not applicable |
 
-## 4. Set up Music Assistant
+## 4. Configure Music Assistant
 
 For Sendspin, use a Music Assistant version that has the Sendspin provider.
 The DSPi connects to Music Assistant. Music Assistant does not need to find the DSPi.
@@ -81,9 +81,9 @@ Squeezelite cannot do this. The next volume command from Music Assistant replace
 
 ## 6. Limits
 
-- The firmware was built and tested in software only. It has not run on a Pico 2 W or with a real Music Assistant server.
+- We built and tested the firmware in software only. It did not run on a Pico 2 W or with a real Music Assistant server.
 - The Sendspin protocol is in technical preview. It can change.
-- The Sendspin device key is saved to flash. The WiFi password and the key are not encrypted.
+- The Pico saves the Sendspin device key to flash. It does not encrypt the WiFi password or the key.
 - FLAC does not work while the ADAT or TDM8 output is on. The stream uses PCM.
 - FLAC blocks must be 4608 samples or fewer. The DSPi drops larger blocks.
 - 24-bit FLAC is not advertised by default.

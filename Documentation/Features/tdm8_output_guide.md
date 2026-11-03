@@ -81,7 +81,7 @@ This is a suggestion. It is not a requirement from the datasheet.
 Refer to the TAD5242 datasheet (SLASF31A) for the analog outputs, the power supply and the other MD pins.
 This guide does not cover them.
 
-## 4. Turn on the TDM8 output
+## 4. Start the TDM8 output
 
 The TDM8 output and the ADAT output share one engine.
 Only one of them can run at a time.
@@ -112,4 +112,4 @@ To stop the output, send `0xCA` with wValue `0`.
 - The settings are not saved to flash. After a restart, the output is off and the format is ADAT.
 - You cannot use the ADAT output and the TDM8 output at the same time.
 - FLAC streaming over WiFi does not work while the bulk output is on. See the WiFi streaming guide.
-- This firmware was built but not tested on hardware.
+- We built this firmware. We did not test it on hardware.
