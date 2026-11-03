@@ -190,6 +190,22 @@ if (DSPI_ENABLE_WIFI)
     )
     set_source_files_properties(net_input.c PROPERTIES COMPILE_FLAGS "-O3")
 
+    # FLAC decode for the Sendspin NET input (phase 2): our glue (net_flac.c)
+    # plus the vendored, unmodified libfoxenflac (LGPL-2.1+, no heap, no libc).
+    # Its decoder + chunk buffers live in the loaned ADAT ring (net_flac.h), so
+    # this adds code but no .bss.  The upstream file is compiled warning-free
+    # for this project's flags with per-file options (-w) and without asserts.
+    target_sources(DSPi PRIVATE
+        net_flac.c
+        net_flac.h
+        third_party/foxen-flac/foxen-flac.c
+        third_party/foxen-flac/foxen-flac.h
+    )
+    target_include_directories(DSPi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/foxen-flac)
+    set_source_files_properties(third_party/foxen-flac/foxen-flac.c PROPERTIES
+        COMPILE_FLAGS "-O3 -w -DNDEBUG")
+    set_source_files_properties(net_flac.c PROPERTIES COMPILE_FLAGS "-O2")
+
     # Sendspin client + noise/secure-channel code (written separately).
     foreach(_f sendspin_noise.c sendspin_client.c)
         if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${_f})

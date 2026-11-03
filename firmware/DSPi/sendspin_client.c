@@ -26,6 +26,18 @@
  *     closes) until the consumer has drained enough; a stall > 5 s drops the link.
  *   - JSON and other small records: decrypted into the small g_rx buffer
  *     (SS_RX_BUF); larger ones are still authenticated but ignored.
+ *   - FLAC audio chunks (phase 2, stream/start codec "flac" with a Base64
+ *     codec_header = 'fLaC' + STREAMINFO): the still-compressed bytes are
+ *     decrypted into net_flac's chunk buffer (a loan of the idle ADAT output
+ *     ring, see net_flac.h), authenticated, and only then queued for decoding;
+ *     net_flac decodes whole frames into the PCM ring from sendspin_client_poll()
+ *     in bounded slices as ring space allows.  While a chunk is queued the next
+ *     record is not started (the TCP window closes), exactly like a full ring
+ *     for PCM.  Per the spec each chunk carries one or more COMPLETE FLAC frames.
+ *     UNVERIFIED against a real server: that codec_header is exactly 'fLaC' +
+ *     STREAMINFO (extra metadata blocks and a clear "last block" flag are
+ *     tolerated), the chunk/frame packing, and the 16-bit stream/start
+ *     bit_depth for flac.
  * Static RAM of this module is ~5 KB (g_rx 2 KB + state).
  *
  * Items I could not verify byte-for-byte against the real server are marked
@@ -34,6 +46,7 @@
 #include "sendspin_client.h"
 #include "sendspin_noise.h"
 #include "net_input.h"
+#include "net_flac.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +115,8 @@ typedef enum {
 } phase_t;
 
 enum { RX_HDR = 0, RX_PAYLOAD };
-enum { DS_SINK = 0, DS_BUF, DS_RING };   /* where the plaintext of an encrypted record goes */
+enum { DS_SINK = 0, DS_BUF, DS_RING, DS_FLAC };   /* where the plaintext of an encrypted record goes */
+enum { CODEC_PCM = 0, CODEC_FLAC };
 
 /* ------------------------------------------------------------------ */
 /* State                                                               */
@@ -182,6 +196,7 @@ static struct {
     bool     need_hello, need_state, need_time, need_goodbye;
     bool     state_sent;
     bool     streaming;
+    uint8_t  codec;               /* CODEC_* of the current stream */
     bool     after_clear;
     uint32_t rate;
     uint8_t  channels, bits;
@@ -406,6 +421,8 @@ static void cleanup(bool graceful)
     c.state_sent = false;
     c.burst_active = c.ct_out = c.synced = false;
     c.streaming = false;
+    c.codec = CODEC_PCM;
+    nfl_end();                   /* returns the FLAC arena (ADAT ring loan) */
     c.after_clear = false;
     c.fatal = false;
     c.close_graceful = false;
@@ -453,6 +470,23 @@ static uint32_t advertised_capacity(void)
     return cap;
 }
 
+/* FLAC entries come first so servers (which honour the order) prefer them.
+ * Only offered while the decoder arena can be borrowed (nfl_supported_now()).
+ * 24-bit FLAC decodes (SENDSPIN_ADVERTISE_FLAC24) but is not advertised by
+ * default: a 24-bit stereo frame of 4096 samples can exceed the ~17 KB
+ * compressed-chunk buffer. */
+static const char *flac_formats(void)
+{
+    if (!nfl_supported_now()) return "";
+    return
+#ifdef SENDSPIN_ADVERTISE_FLAC24
+        "{\"codec\":\"flac\",\"channels\":2,\"sample_rate\":48000,\"bit_depth\":24},"
+        "{\"codec\":\"flac\",\"channels\":2,\"sample_rate\":44100,\"bit_depth\":24},"
+#endif
+        "{\"codec\":\"flac\",\"channels\":2,\"sample_rate\":48000,\"bit_depth\":16},"
+        "{\"codec\":\"flac\",\"channels\":2,\"sample_rate\":44100,\"bit_depth\":16},";
+}
+
 static bool send_hello(void)
 {
     char *o; size_t cap;
@@ -463,13 +497,13 @@ static bool send_hello(void)
         "\"device_info\":{\"product_name\":\"DSPi\",\"manufacturer\":\"DSPi\","
         "\"software_version\":\"phase1\"},"
         "\"supported_roles\":[\"player@v1\"],"
-        "\"player@v1_support\":{\"supported_formats\":["
+        "\"player@v1_support\":{\"supported_formats\":[%s"
         "{\"codec\":\"pcm\",\"channels\":2,\"sample_rate\":48000,\"bit_depth\":16},"
         "{\"codec\":\"pcm\",\"channels\":2,\"sample_rate\":44100,\"bit_depth\":16}],"
         "\"buffer_capacity\":%u},"
         "\"supported_pair_methods\":{},"
         "\"unpaired_access\":{\"enabled\":true}}}",
-        (unsigned)advertised_capacity());
+        flac_formats(), (unsigned)advertised_capacity());
     return enc_end(n, cap);
 }
 
@@ -604,23 +638,45 @@ static void on_json(char *js)
         json_i64(js, "sample_rate", 0, &rate);
         json_i64(js, "channels", 0, &ch);
         json_i64(js, "bit_depth", 0, &bits);
-        if (strcmp(codec, "pcm") || !format_supported(rate, ch, bits)) {
+        bool is_flac = !strcmp(codec, "flac");
+        if (!is_flac) nfl_end();                 /* leaving FLAC: give the arena back */
+        if (is_flac) {
+            /* codec_header = Base64 of 'fLaC' + STREAMINFO (player@v1 spec).  The value
+             * is read in place from g_rx; nfl_begin() decodes it into the arena. */
+            const char *hv = json_find(js, "codec_header", 0);
+            const char *he = (hv && *hv == '"') ? strchr(hv + 1, '"') : NULL;
+            int rc = (he && format_supported(rate, ch, 16) && (bits == 16 || bits == 24))
+                   ? nfl_begin(hv + 1, (size_t)(he - hv - 1), (uint32_t)rate, (uint8_t)bits)
+                   : NFL_ERR_FORMAT;
+            if (rc != NFL_OK) {
+                SS_LOG("unsupported flac stream %d/%d/%d (rc %d)\n", (int)rate, (int)ch, (int)bits, rc);
+                nfl_end();
+                c.streaming = false;
+                if (c.state == SENDSPIN_STATE_STREAMING) c.state = SENDSPIN_STATE_READY;
+                return;
+            }
+        } else if (strcmp(codec, "pcm") || !format_supported(rate, ch, bits)) {
             SS_LOG("unsupported stream %s %d/%d/%d\n", codec, (int)rate, (int)ch, (int)bits);
             c.streaming = false;
+            if (c.state == SENDSPIN_STATE_STREAMING) c.state = SENDSPIN_STATE_READY;
             return;
         }
         net_input_flush();
         net_input_set_format((uint32_t)rate, (uint8_t)ch, (uint8_t)bits);
         c.rate = (uint32_t)rate; c.channels = (uint8_t)ch; c.bits = (uint8_t)bits;
+        c.codec = is_flac ? CODEC_FLAC : CODEC_PCM;
         c.streaming = true;
         c.after_clear = false;
         if (c.state == SENDSPIN_STATE_READY) c.state = SENDSPIN_STATE_STREAMING;
     } else if (!strcmp(type, "stream/clear")) {
         net_input_flush();
+        nfl_reset();                       /* drops the pending chunk, resyncs the decoder */
         c.after_clear = true;
     } else if (!strcmp(type, "stream/end")) {
         /* UNVERIFIED: whether stream/end should also drop buffered audio */
         net_input_flush();
+        nfl_end();
+        c.codec = CODEC_PCM;
         c.streaming = false;
         c.after_clear = false;
         if (c.state == SENDSPIN_STATE_STREAMING) c.state = SENDSPIN_STATE_READY;
@@ -695,6 +751,12 @@ static void ds_route_select(uint8_t id)
 {
     if (id == SS_ID_PLAYER_AUDIO) {
         if (c.ds_len < SS_AUDIO_HDR) { c.ds_bad = true; c.ds_route = DS_SINK; }       /* protocol error */
+        else if (c.streaming && c.codec == CODEC_FLAC) {
+            /* compressed bytes are buffered (untrusted) until the tag verified; a chunk
+             * that cannot fit the buffer is authenticated and dropped */
+            c.ds_route = (nfl_active() && !nfl_pending() && c.ds_len - SS_AUDIO_HDR <= nfl_chunk_cap())
+                         ? DS_FLAC : DS_SINK;
+        }
         else if (c.streaming && c.ds_len - SS_AUDIO_HDR <= net_input_ring_capacity()) c.ds_route = DS_RING;
         else c.ds_route = DS_SINK;      /* not streaming, or can never fit the ring: authenticate and drop */
     } else {
@@ -710,6 +772,9 @@ static void ds_store(const uint8_t *pt, uint32_t n)
     if (off == 0) ds_route_select(pt[0]);
     if (c.ds_route == DS_BUF) {
         memcpy(g_rx + off, pt, n);
+    } else if (c.ds_route == DS_FLAC) {
+        uint32_t skip = off < SS_AUDIO_HDR ? SS_AUDIO_HDR - off : 0;
+        if (skip < n) memcpy(nfl_chunk_buf() + (off + skip - SS_AUDIO_HDR), pt + skip, n - skip);
     } else if (c.ds_route == DS_RING) {
         uint32_t skip = off < SS_AUDIO_HDR ? SS_AUDIO_HDR - off : 0;    /* header bytes in this block */
         if (skip < n && !net_input_stage_pcm(off + skip - SS_AUDIO_HDR, pt + skip, n - skip))
@@ -772,6 +837,23 @@ static void ds_audio_commit(void)
     net_input_commit_pcm(n);
 }
 
+/* FLAC audio record authenticated: queue the compressed chunk for decoding. */
+static void ds_flac_commit(void)
+{
+    int64_t ts = 0;
+    for (int i = 0; i < 8; i++) ts = (int64_t)(((uint64_t)ts << 8) | c.ds_hdr[1 + i]);
+    uint32_t n = c.ds_len - SS_AUDIO_HDR;
+    if (!n) return;
+    if (c.after_clear && c.synced) {
+        /* UNVERIFIED: chunk duration is unknown before decoding; use one max-size frame */
+        int64_t server_now = (int64_t)time_us_64() + c.offset;
+        if (ts + (int64_t)nfl_chunk_dur_us() < server_now - SS_LATE_SLACK_US) { SS_LOG("late flac chunk dropped\n"); return; }
+    }
+    c.after_clear = false;
+    nfl_chunk_submit(n);
+    nfl_pump();
+}
+
 /* End of an encrypted record (called from frame_done). */
 static void ds_finish(void)
 {
@@ -790,6 +872,7 @@ static void ds_finish(void)
         break;
     case SS_ID_PLAYER_AUDIO:
         if (c.ds_route == DS_RING) ds_audio_commit();
+        else if (c.ds_route == DS_FLAC) ds_flac_commit();
         break;
     case SS_ID_FRAGMENT:
         /* UNVERIFIED: fragmentation (id 1) is only used for >65 KB messages;
@@ -981,7 +1064,12 @@ static size_t consume_payload(const uint8_t *d, size_t take)
 static bool resume_audio(void)
 {
     if (!c.blocked) return true;
-    if (!ds_can_step()) return false;
+    if (nfl_pending()) {
+        nfl_pump();
+        if (nfl_pending()) return false;
+    } else if (!ds_can_step()) {
+        return false;
+    }
     c.blocked = false;
     return true;
 }
@@ -991,6 +1079,16 @@ static size_t ws_feed(const uint8_t *d, size_t n)
     size_t i = 0;
     if (!resume_audio()) return 0;
     while (i < n && !c.fatal && !c.blocked) {
+        if (c.rx_st == RX_HDR && c.hdr_have == 0 && nfl_pending()) {
+            /* The compressed-chunk buffer still holds an authenticated chunk that is
+             * waiting for ring space: do not start the next record (it may be audio).
+             * The TCP window stays closed until the pump has drained it. */
+            nfl_pump();
+            if (nfl_pending()) {
+                c.blocked = true; c.blocked_since_us = time_us_64();
+                break;
+            }
+        }
         if (c.rx_st == RX_HDR) {
             c.hdr[c.hdr_have++] = d[i++];
             if (c.hdr_have == 2) {
@@ -1221,6 +1319,10 @@ void sendspin_client_poll(void)
     if (!c.enabled) return;
     uint64_t now = time_us_64();
 
+    if (nfl_take_evicted()) {                /* ADAT/TDM output claimed the FLAC arena */
+        conn_fail("flac arena reclaimed", true);
+        return;
+    }
     if (!c.pcb && !c.dns_pending && c.phase == PH_NONE &&
         (c.state == SENDSPIN_STATE_IDLE || c.state == SENDSPIN_STATE_ERROR) &&
         now >= c.retry_at_us) {
@@ -1242,6 +1344,7 @@ void sendspin_client_poll(void)
         conn_fail("ring stalled", false);    /* consumer not draining: resync via reconnect */
         return;
     }
+    if (nfl_pending()) nfl_pump();           /* decode the authenticated FLAC chunk as ring space allows */
     if (c.hold) rx_drain();                  /* retry blocked audio */
     if (!c.pcb) return;
 

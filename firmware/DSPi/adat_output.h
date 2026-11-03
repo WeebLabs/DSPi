@@ -104,4 +104,19 @@ void adat_output_task(void);
 // no-op while the stream is down.
 void adat_output_push_block(const out_s24_t (*bufs)[192], uint32_t sample_count);
 
+#ifdef DSPI_ENABLE_WIFI
+// Loan of the (otherwise idle) ring storage to the NET FLAC decoder
+// (net_flac.c has the invariants).  Core 0 main-loop context only.
+//   adat_output_ring_loanable()  true while the bulk output is neither enabled
+//                                nor running and no loan is out
+//   adat_output_ring_loan()      returns the ring (and its size) or NULL; while
+//                                loaned, adat_output_resync() calls `evict`
+//                                before it would start the output, and keeps the
+//                                output off unless the loan was returned
+//   adat_output_ring_return()    end the loan
+bool  adat_output_ring_loanable(void);
+void *adat_output_ring_loan(uint32_t *bytes, void (*evict)(void));
+void  adat_output_ring_return(void);
+#endif
+
 #endif // PICO_RP2350

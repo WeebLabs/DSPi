@@ -96,6 +96,23 @@ void net_mute_set(bool m) { g_mute = m; }
 const char *net_sendspin_host(void) { return g_host; }
 uint16_t net_sendspin_port(void) { return 8927; }
 
+
+/* ---- adat_output ring-loan stub: a 56 KB arena with guard bytes around it,
+ * handed out 4 bytes misaligned so the 16-byte alignment in net_flac.c is exercised ---- */
+static struct { uint8_t pre[64]; uint8_t arena[57344]; uint8_t post[64]; } adat_mem = { {0}, {0}, {0} };
+#define adat_guard_ok() 1
+static bool stub_loan_ok = true, stub_loaned;
+static void (*stub_evict)(void);
+bool adat_output_ring_loanable(void) { return stub_loan_ok && !stub_loaned; }
+void *adat_output_ring_loan(uint32_t *bytes, void (*evict)(void))
+{
+    if (!adat_output_ring_loanable()) return NULL;
+    stub_loaned = true; stub_evict = evict;
+    if (bytes) *bytes = sizeof(adat_mem.arena) - 4;
+    return adat_mem.arena + 4;
+}
+void adat_output_ring_return(void) { stub_loaned = false; stub_evict = NULL; }
+
 /* ---- lwIP stub ---- */
 static struct tcp_pcb the_pcb;
 static int pcb_new_count, pcb_closed, pcb_aborted;
@@ -1082,6 +1099,378 @@ static void test_e2e(void)
     }
 }
 
+/* ===================================================================== */
+/* FLAC (phase 2): full client path with encrypted records                */
+/* ===================================================================== */
+static const char *g_fixdir;
+
+typedef struct { size_t off, size, samples; } fx_frame_t;
+typedef struct {
+    uint8_t *flac; size_t flen;
+    uint8_t *pcm;  size_t plen;          /* raw interleaved PCM (WAV header stripped) */
+    fx_frame_t fr[64]; int nfr;
+    uint32_t rate; int bits, bpf;
+} fx_t;
+
+static uint8_t *load_file(const char *dir, const char *name, const char *ext, size_t *n)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s%s", dir, name, ext);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    fseek(fp, 0, SEEK_END); long l = ftell(fp); fseek(fp, 0, SEEK_SET);
+    uint8_t *b = malloc((size_t)l + 1);
+    if (fread(b, 1, (size_t)l, fp) != (size_t)l) { fclose(fp); free(b); return NULL; }
+    fclose(fp);
+    *n = (size_t)l;
+    return b;
+}
+
+static bool fx_load(fx_t *x, const char *name, uint32_t rate, int bits)
+{
+    memset(x, 0, sizeof(*x));
+    x->rate = rate; x->bits = bits; x->bpf = 2 * bits / 8;
+    x->flac = load_file(g_fixdir, name, ".flac", &x->flen);
+    size_t wl; uint8_t *wav = load_file(g_fixdir, name, ".wav", &wl);
+    size_t il; uint8_t *idx = load_file(g_fixdir, name, ".idx", &il);
+    if (!x->flac || !wav || !idx) return false;
+    CHECK(!memcmp(wav + 36, "data", 4));
+    x->pcm = wav + 44; x->plen = wl - 44;
+    idx[il] = 0;
+    char *p = (char *)idx;
+    while (*p && x->nfr < 64) {
+        unsigned long o, s, n; int k = 0;
+        if (sscanf(p, "%lu %lu %lu%n", &o, &s, &n, &k) != 3) break;
+        x->fr[x->nfr].off = o; x->fr[x->nfr].size = s; x->fr[x->nfr].samples = n; x->nfr++;
+        p += k;
+    }
+    size_t tot = 0;
+    for (int i = 0; i < x->nfr; i++) tot += x->fr[i].samples;
+    CHECK(tot * (size_t)x->bpf == x->plen);                /* index covers the whole signal */
+    CHECK(x->fr[0].off > 42 && !memcmp(x->flac, "fLaC", 4));
+    return true;
+}
+
+static size_t fx_sample_pos(const fx_t *x, int frame)        /* PCM byte offset of a frame */
+{
+    size_t s = 0;
+    for (int i = 0; i < frame; i++) s += x->fr[i].samples;
+    return s * (size_t)x->bpf;
+}
+
+static int64_t ts_now(void) { return (int64_t)stub_now_us + c.offset + 200000; }
+
+static void flac_start_json(const fx_t *x, const uint8_t *hdr, size_t hlen, int bits, uint32_t rate)
+{
+    static char b64[4000], js[5000]; size_t ol = 0;
+    mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &ol, hdr, hlen); b64[ol] = 0;
+    snprintf(js, sizeof(js),
+        "{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"flac\","
+        "\"sample_rate\":%u,\"channels\":2,\"bit_depth\":%d,\"codec_header\":\"%s\"}}}",
+        (unsigned)rate, bits, b64);
+    srv_json(js);
+}
+
+static void flac_start(const fx_t *x)
+{
+    flush_count = 0; fmt_calls = 0; pushed_len = 0; ring_fill_sim = 0; stage_hi = 0;
+    flac_start_json(x, x->flac, 42, x->bits, x->rate);       /* 'fLaC' + STREAMINFO */
+}
+
+/* let the "consumer" drain `drain` bytes per poll until everything is decoded */
+static void flac_settle(uint32_t drain)
+{
+    for (int i = 0; i < 4000; i++) {
+        poll_n(1);
+        stub_drain(drain);
+        if (!nfl_pending() && !c.blocked && !c.hold) break;
+    }
+}
+
+static void send_frames(const fx_t *x, int first, int count, int corrupt_frame, int corrupt_mode)
+{
+    static uint8_t buf[60000];
+    size_t n = 0;
+    for (int k = first; k < first + count; k++) {
+        memcpy(buf + n, x->flac + x->fr[k].off, x->fr[k].size);
+        if (k == corrupt_frame) {
+            if (corrupt_mode == 0) buf[n + x->fr[k].size / 2] ^= 0x55;     /* mid payload */
+            else buf[n + x->fr[k].size - 1] ^= 0x01;                       /* CRC-16 only */
+        }
+        n += x->fr[k].size;
+    }
+    srv_audio(ts_now(), buf, n);
+}
+
+static bool pcm_matches(const fx_t *x, int frame, int nframes, size_t at)
+{
+    size_t o = fx_sample_pos(x, frame);
+    size_t l = fx_sample_pos(x, frame + nframes) - o;
+    return pushed_len >= at + l && !memcmp(pushed + at, x->pcm + o, l);
+}
+
+static void test_flac(void)
+{
+    static char js[4096]; uint8_t op; size_t n; static uint8_t pl[4096];
+    fx_t a, b, s, w;
+    CHECK(fx_load(&a, "f44_16", 44100, 16));
+    CHECK(fx_load(&b, "f48_16", 48000, 16));
+    CHECK(fx_load(&s, "f44_16_s", 44100, 16));
+    CHECK(fx_load(&w, "f44_24", 44100, 24));
+    if (!a.pcm || !b.pcm || !s.pcm || !w.pcm) { CHECK(0); return; }
+    printf("flac fixtures: f44_16 %d frames, f48_16 %d, f44_16_s %d, f44_24 %d\n", a.nfr, b.nfr, s.nfr, w.nfr);
+
+    memset(adat_mem.pre, 0xC3, 64); memset(adat_mem.post, 0xC3, 64);
+    sendspin_client_start();
+    stub_now_us += 60000000; i_keygen(S.s_priv, S.s_pub);
+    do_session(false);
+
+    /* ---- hello: flac first, then pcm; and omitted when the arena cannot be loaned ---- */
+    {
+        CHECK(send_hello());
+        CHECK(wait_json_type("client/hello", js, sizeof(js)));
+        const char *f1 = strstr(js, "\"codec\":\"flac\",\"channels\":2,\"sample_rate\":48000,\"bit_depth\":16");
+        const char *f2 = strstr(js, "\"codec\":\"flac\",\"channels\":2,\"sample_rate\":44100,\"bit_depth\":16");
+        const char *p1 = strstr(js, "\"codec\":\"pcm\"");
+        CHECK(f1 && f2 && p1 && f1 < f2 && f2 < p1);
+        CHECK(strstr(js, "\"supported_formats\":[{\"codec\":\"flac\"") != NULL);   /* flac is the first entry */
+        CHECK(strstr(js, "\"bit_depth\":24") == NULL);                              /* 24-bit not advertised */
+        printf("client/hello is %zu bytes (limit %d)\n", strlen(js), SS_TX_BUF - 8 - 1 - SSN_TAG_LEN);
+        stub_loan_ok = false;
+        CHECK(send_hello());
+        CHECK(wait_json_type("client/hello", js, sizeof(js)));
+        CHECK(strstr(js, "flac") == NULL && strstr(js, "\"codec\":\"pcm\"") != NULL);
+        stub_loan_ok = true;
+    }
+
+    /* ---- 1. one frame per chunk, 44.1 kHz, bit-exact (header 'fLaC'+STREAMINFO with last-block flag clear) ---- */
+    flac_start(&a);
+    CHECK(fmt_calls == 1 && fmt_rate == 44100 && fmt_ch == 2 && fmt_bits == 16 && flush_count == 1);
+    CHECK(sendspin_client_streaming() && sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+    CHECK(stub_loaned && nfl_active());
+    g_chunk = 1460;
+    for (int k = 0; k < a.nfr; k++) { send_frames(&a, k, 1, -1, 0); flac_settle(3000); }
+    flac_settle(3000);
+    CHECK(pushed_len == a.plen && !memcmp(pushed, a.pcm, a.plen));
+    CHECK(pbufs_live == 0);
+
+    /* ---- 2. multi-frame chunks, frames split across tiny TCP segments ---- */
+    flac_start(&s);
+    g_chunk = 777;
+    for (int k = 0; k < s.nfr; k += 3) {
+        int cnt = s.nfr - k < 3 ? s.nfr - k : 3;
+        send_frames(&s, k, cnt, -1, 0);
+        flac_settle(2500);
+    }
+    CHECK(pushed_len == s.plen && !memcmp(pushed, s.pcm, s.plen));
+    g_chunk = 1;                                           /* pathological: byte at a time */
+    flac_start(&s);
+    send_frames(&s, 0, 4, -1, 0);
+    flac_settle(100000);
+    CHECK(pcm_matches(&s, 0, 4, 0) && pushed_len == fx_sample_pos(&s, 4));
+    g_chunk = 1500;
+
+    /* ---- 3. ring-full backpressure: never lost, never published early, TCP window closes ---- */
+    flac_start(&a);
+    pushed_len = 0; recved_total = injected_total = 0;
+    ring_fill_sim = stub_ring_cap - 500;                   /* less than one decode slice free */
+    send_frames(&a, 0, 1, -1, 0);
+    CHECK(pushed_len == 0 && nfl_pending() && nfl_chunk_remaining() > 0);
+    send_frames(&a, 1, 1, -1, 0);                          /* queued behind the pending chunk */
+    CHECK(pushed_len == 0 && c.blocked && recved_total < injected_total);
+    poll_n(3);
+    CHECK(pushed_len == 0 && nfl_pending());
+    ring_fill_sim = stub_ring_cap - 3000;                  /* room for two slices only */
+    poll_n(10);                                            /* input-only slices first, then output */
+    CHECK(pushed_len >= 1024 && pushed_len <= 3000);
+    stub_drain(1u << 30);
+    flac_settle(3000);
+    CHECK(!nfl_pending() && !c.blocked && recved_total == injected_total);
+    CHECK(pcm_matches(&a, 0, 2, 0) && pushed_len == fx_sample_pos(&a, 2));
+    /* stalled consumer for > 5 s drops the link (same watchdog as PCM) */
+    ring_fill_sim = stub_ring_cap - 500;
+    send_frames(&a, 2, 1, -1, 0);
+    send_frames(&a, 3, 1, -1, 0);
+    CHECK(c.blocked);
+    stub_now_us += 6000000; poll_n(1);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR && !stub_loaned && !nfl_active());
+    stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub); do_session(false);
+
+    /* ---- 4. corrupted frame: only that frame is dropped ---- */
+    {
+        /* (a) one frame per chunk, payload corrupted: neighbours untouched */
+        flac_start(&s);
+        for (int k = 0; k < s.nfr; k++) { send_frames(&s, k, 1, 5, 0); flac_settle(4000); }
+        size_t before = fx_sample_pos(&s, 5), f5 = s.fr[5].samples * (size_t)s.bpf;
+        CHECK(pushed_len == s.plen - f5);
+        CHECK(!memcmp(pushed, s.pcm, before));
+        CHECK(!memcmp(pushed + before, s.pcm + before + f5, s.plen - before - f5));
+        CHECK(nfl_stat_frames_dropped() >= 1);
+        /* (b) corrupted CRC-16 inside a 3-frame chunk: frames 3 and 5 survive, 4 is dropped */
+        flac_start(&s);
+        send_frames(&s, 3, 3, 4, 1);
+        flac_settle(4000);
+        size_t f3 = s.fr[3].samples * (size_t)s.bpf, f4 = s.fr[4].samples * (size_t)s.bpf, f5b = s.fr[5].samples * (size_t)s.bpf;
+        CHECK(pushed_len == f3 + f5b);
+        CHECK(!memcmp(pushed, s.pcm + fx_sample_pos(&s, 3), f3));
+        CHECK(!memcmp(pushed + f3, s.pcm + fx_sample_pos(&s, 3) + f3 + f4, f5b));
+        /* the stream keeps going afterwards */
+        send_frames(&s, 6, 1, -1, 0); flac_settle(4000);
+        CHECK(pushed_len == f3 + f5b + s.fr[6].samples * (size_t)s.bpf);
+        CHECK(sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+    }
+
+    /* ---- 5. stream/clear mid-stream, then a seek: decoder resynchronised ---- */
+    flac_start(&a);
+    send_frames(&a, 0, 1, -1, 0); flac_settle(3000);
+    send_frames(&a, 1, 1, -1, 0);                          /* leave a partly decoded chunk behind */
+    poll_n(1);
+    int fc = flush_count;
+    ring_fill_sim = stub_ring_cap - 500;                   /* consumer stalls with the chunk pending */
+    send_frames(&a, 2, 1, -1, 0);                          /* may sit pending */
+    srv_json("{\"type\":\"stream/clear\",\"payload\":{}}"); /* queued behind it: handled once it drained */
+    flac_settle(5000);
+    CHECK(flush_count == fc + 1 && !nfl_pending());
+    pushed_len = 0; ring_fill_sim = 0;
+    send_frames(&a, 6, 2, -1, 0);                          /* seek: frames 6,7 */
+    flac_settle(4000);
+    CHECK(pushed_len == fx_sample_pos(&a, 8) - fx_sample_pos(&a, 6) && pcm_matches(&a, 6, 2, 0));
+    /* a half-delivered chunk (truncated final frame) must not poison the next chunk */
+    {
+        static uint8_t buf[40000]; size_t l7 = a.fr[0].size;
+        memcpy(buf, a.flac + a.fr[0].off, l7 - 30);        /* frame 0 cut short */
+        pushed_len = 0;
+        srv_audio(ts_now(), buf, l7 - 30); flac_settle(4000);
+        CHECK(pushed_len < a.fr[0].samples * (size_t)a.bpf);
+        size_t got = pushed_len;
+        send_frames(&a, 1, 1, -1, 0); flac_settle(4000);
+        CHECK(pushed_len == got + a.fr[1].samples * (size_t)a.bpf);
+        CHECK(!memcmp(pushed + got, a.pcm + fx_sample_pos(&a, 1), a.fr[1].samples * (size_t)a.bpf));
+    }
+
+    /* ---- 6. restart with a different rate (no stream/end in between) ---- */
+    flac_start(&b);
+    CHECK(fmt_rate == 48000 && fmt_bits == 16 && fmt_calls == 1 && flush_count == 1 && stub_loaned);
+    for (int k = 0; k < b.nfr; k++) { send_frames(&b, k, 1, -1, 0); flac_settle(3000); }
+    CHECK(pushed_len == b.plen && !memcmp(pushed, b.pcm, b.plen));
+
+    /* ---- 7. 24-bit stream (decodes, packed S24 into the ring) ---- */
+    flac_start(&w);
+    CHECK(fmt_rate == 44100 && fmt_bits == 24 && stub_loaned);
+    for (int k = 0; k < w.nfr; k++) { send_frames(&w, k, 1, -1, 0); flac_settle(3000); }
+    CHECK(pushed_len == w.plen && !memcmp(pushed, w.pcm, w.plen));
+
+    /* ---- 8. bounded work per pump call ---- */
+    flac_start(&a);
+    stub_drain(1u << 30);
+    {
+        int big = 0;                                       /* the largest frame (noise burst) */
+        for (int k = 0; k < a.nfr; k++) if (a.fr[k].size > a.fr[big].size) big = k;
+        send_frames(&a, big, 1, -1, 0);                    /* ds_flac_commit() ran one pump() */
+        uint32_t used = (uint32_t)a.fr[big].size - nfl_chunk_remaining();
+        CHECK(used <= 8u * 256u /* NFL_MAX_SLICES * NFL_IN_SLICE (net_flac.c) */);
+        CHECK(nfl_pending());                              /* a 16 KB frame needs several passes */
+        flac_settle(1u << 30);
+        CHECK(pushed_len == a.fr[big].samples * (size_t)a.bpf);
+    }
+
+    /* ---- 9. unsupported / malformed flac streams are ignored, not fatal ---- */
+    {
+        static uint8_t hdr[200];
+        memcpy(hdr, a.flac, 42);
+        struct { const char *what; int bits; uint32_t rate; int patch; } t[] = {
+            { "bad magic", 16, 44100, 1 }, { "mono", 16, 44100, 2 },
+            { "max_blocksize 8192", 16, 44100, 3 }, { "rate mismatch", 16, 48000, 0 },
+            { "bit depth mismatch", 24, 44100, 0 }, { "short header", 16, 44100, 4 },
+            { "not streaminfo", 16, 44100, 5 },
+        };
+        for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+            memcpy(hdr, a.flac, 42);
+            size_t hl = 42;
+            switch (t[i].patch) {
+            case 1: hdr[0] = 'X'; break;
+            case 2: hdr[20] = (uint8_t)((hdr[20] & ~0x0E) | (0 << 1)); break;      /* 1 channel */
+            case 3: hdr[10] = 0x20; hdr[11] = 0x00; break;
+            case 4: hl = 30; break;
+            case 5: hdr[4] = 4; break;                                               /* VORBIS_COMMENT */
+            }
+            flac_start_json(&a, hdr, hl, t[i].bits, t[i].rate);
+            CHECK(!sendspin_client_streaming() && !stub_loaned && !nfl_active());
+            CHECK(sendspin_client_state() == SENDSPIN_STATE_READY);
+            pushed_len = 0;
+            send_frames(&a, 0, 1, -1, 0);                  /* audio of a rejected stream is ignored */
+            CHECK(pushed_len == 0 && sendspin_client_state() == SENDSPIN_STATE_READY);
+        }
+        /* missing codec_header */
+        srv_json("{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"flac\","
+                 "\"sample_rate\":44100,\"channels\":2,\"bit_depth\":16}}}");
+        CHECK(!sendspin_client_streaming() && !stub_loaned);
+        /* arena not loanable (ADAT/TDM output enabled) */
+        stub_loan_ok = false;
+        flac_start(&a);
+        CHECK(!sendspin_client_streaming() && !nfl_active() && sendspin_client_state() == SENDSPIN_STATE_READY);
+        stub_loan_ok = true;
+        /* a longer header (extra metadata blocks after STREAMINFO) is fine */
+        flac_start_json(&a, a.flac, a.fr[0].off, 16, 44100);
+        CHECK(sendspin_client_streaming() && nfl_active());
+    }
+
+    /* ---- 10. chunk larger than the compressed buffer: authenticated, dropped, stream stays in sync ---- */
+    {
+        static uint8_t big[30000];
+        memset(big, 0xA5, sizeof(big));
+        pushed_len = 0;
+        CHECK(nfl_chunk_cap() > 16500 && nfl_chunk_cap() < 40000);
+        srv_audio(ts_now(), big, nfl_chunk_cap() + 1);
+        CHECK(pushed_len == 0 && !nfl_pending() && sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+        send_frames(&a, 0, 1, -1, 0); flac_settle(4000);
+        CHECK(pcm_matches(&a, 0, 1, 0));
+        /* a chunk of garbage that fits: no output, decoder keeps working */
+        pushed_len = 0;
+        srv_audio(ts_now(), big, 5000); flac_settle(4000);
+        CHECK(pushed_len == 0 && !nfl_pending() && sendspin_client_state() == SENDSPIN_STATE_STREAMING);
+        send_frames(&a, 1, 1, -1, 0); flac_settle(4000);
+        CHECK(pcm_matches(&a, 1, 1, 0));
+    }
+
+    /* ---- 11. tampered chunk (bad tag): nothing decoded, link dropped, arena returned ---- */
+    {
+        static uint8_t pt[20000];
+        pt[0] = 4; memset(pt + 1, 0, 12);
+        memcpy(pt + 13, a.flac + a.fr[0].off, a.fr[0].size);
+        pushed_len = 0;
+        int pa = pcb_aborted;
+        srv_enc_ex(pt, 13 + a.fr[0].size, true, 0);
+        CHECK(pushed_len == 0 && sendspin_client_state() == SENDSPIN_STATE_ERROR && pcb_aborted == pa + 1);
+        CHECK(!stub_loaned && !nfl_active() && pbufs_live == 0);
+        stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub); do_session(false);
+    }
+
+    /* ---- 12. stream/end returns the arena; a later pcm stream works ---- */
+    flac_start(&a);
+    CHECK(stub_loaned);
+    srv_json("{\"type\":\"stream/end\",\"payload\":{}}");
+    CHECK(!stub_loaned && !nfl_active() && !sendspin_client_streaming());
+    start_stream();                                          /* pcm */
+    CHECK(!stub_loaned);
+
+    /* ---- 13. ADAT/TDM output claims the ring: FLAC torn down, client reconnects with pcm only ---- */
+    flac_start(&a);
+    CHECK(stub_loaned && stub_evict);
+    stub_loan_ok = false;                                    /* output enabled now */
+    stub_evict();                                            /* adat_output_resync() -> evict callback */
+    CHECK(!stub_loaned && !nfl_active());
+    poll_n(1);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_ERROR);
+    stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub); do_session(false);
+    stub_loan_ok = true;
+
+    /* arena guard bytes were never touched */
+    for (size_t i = 0; i < 64; i++) CHECK(adat_mem.pre[i] == 0xC3 && adat_mem.post[i] == 0xC3);
+    sendspin_client_stop();
+    (void)op; (void)n; (void)pl;
+}
+
 /* tiny fuzz: random garbage into the parser must never crash or hang */
 static void test_fuzz(void)
 {
@@ -1110,12 +1499,14 @@ static void test_fuzz(void)
     sendspin_client_stop();
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    g_fixdir = argc > 1 ? argv[1] : NULL;
     test_vectors();
     test_json();
     test_noise_direct();
     test_e2e();
+    if (g_fixdir) test_flac(); else printf("FLAC end-to-end tests SKIPPED (no fixtures)\n");
     test_fuzz();
     printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
     printf("static RAM of client module: g_rx=%u, state struct c=%u (incl. noise state %u)\n",

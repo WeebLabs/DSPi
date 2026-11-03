@@ -92,6 +92,16 @@ static uint32_t adat_ring[ADAT_RING_FRAMES * TDM_FRAME_WORDS];
 // Read by the control DMA channel to re-point the data channel at wrap.
 static uint32_t adat_ring_base_holder;
 
+#ifdef DSPI_ENABLE_WIFI
+// Loan of adat_ring to the NET FLAC decoder (see adat_output.h).  The ring is
+// only read/written while adat_running (DMA, push_block, silence top-up) or by
+// adat_output_resync() when it (re)starts the output; a loan can only be
+// granted while !adat_cfg_enabled && !adat_running, and resync gives the
+// borrower the chance to hand it back before it starts anything.
+static bool adat_ring_loaned;
+static void (*adat_ring_evict_cb)(void);
+#endif
+
 // NRZI-encoded silence frames, one per line-entry level, plus each variant's
 // exit level (entry XOR the frame's ones-parity).
 static uint32_t adat_silence_nrzi[2][ADAT_FRAME_WORDS];
@@ -458,6 +468,25 @@ bool bulk_output_owns_pin(uint8_t pin) {
     return pin == adat_cfg_pin;
 }
 
+#ifdef DSPI_ENABLE_WIFI
+bool adat_output_ring_loanable(void) {
+    return !adat_ring_loaned && !adat_cfg_enabled && !adat_running;
+}
+
+void *adat_output_ring_loan(uint32_t *bytes, void (*evict)(void)) {
+    if (!adat_output_ring_loanable()) return NULL;
+    adat_ring_loaned = true;
+    adat_ring_evict_cb = evict;
+    if (bytes) *bytes = (uint32_t)sizeof(adat_ring);
+    return adat_ring;
+}
+
+void adat_output_ring_return(void) {
+    adat_ring_loaned = false;
+    adat_ring_evict_cb = NULL;
+}
+#endif
+
 bool    adat_output_config_enabled(void) { return adat_cfg_enabled != 0; }
 uint8_t adat_output_pin(void)            { return adat_cfg_pin; }
 
@@ -511,6 +540,15 @@ void adat_output_resync(void) {
         return;
     }
 
+#ifdef DSPI_ENABLE_WIFI
+    if (adat_ring_loaned) {
+        if (adat_ring_evict_cb) adat_ring_evict_cb();   // synchronous: borrower stops and returns the ring
+        if (adat_ring_loaned) {                         // defensive: never start over a live loan
+            adat_notify_if_changed();
+            return;
+        }
+    }
+#endif
     adat_hw_init_once();
     const uint8_t fmt  = bulk_cfg_format;
     const uint8_t data = (fmt == BULK_FORMAT_TDM8) ? tdm_cfg_pin : adat_cfg_pin;
