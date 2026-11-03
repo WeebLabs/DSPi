@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 580" font-family="Arial, Helvetica, sans-serif" font-size="13">
+  <title>Pico 2 W to TAD5242 TDM8 wiring</title>
+  <rect width="900" height="580" fill="#ffffff"/>
+  <text x="450" y="28" text-anchor="middle" font-size="18" font-weight="bold">DSPi TDM8 output: Pico 2 W to four TAD5242 DACs</text>
+
+  <!-- Pico 2 W board (right header, pins 21 to 30) -->
+  <rect x="40" y="60" width="230" height="450" rx="10" fill="#e8f1e4" stroke="#2f5d2a" stroke-width="2"/>
+  <rect x="100" y="60" width="70" height="26" fill="#cfcfcf" stroke="#555"/>
+  <text x="135" y="78" text-anchor="middle" font-size="11">USB</text>
+  <text x="130" y="120" text-anchor="middle" font-weight="bold">Raspberry Pi</text>
+  <text x="130" y="138" text-anchor="middle" font-weight="bold">Pico 2 W</text>
+  <text x="130" y="160" text-anchor="middle" font-size="11">(RP2350 and CYW43 WiFi)</text>
+  <text x="130" y="182" text-anchor="middle" font-size="11">View: USB at top, right header</text>
+
+  <!-- header pin column: pins 21..30 -->
+  <g font-size="12">
+    <rect x="230" y="200" width="40" height="22" fill="#f5f5f5" stroke="#777"/><text x="237" y="216">21</text><text x="222" text-anchor="end" y="216" fill="#666">GP16</text>
+    <rect x="230" y="224" width="40" height="22" fill="#f5f5f5" stroke="#777"/><text x="237" y="240">22</text><text x="222" text-anchor="end" y="240" fill="#666">GP17</text>
+    <rect x="230" y="248" width="40" height="22" fill="#f5f5f5" stroke="#777"/><text x="237" y="264">23</text><text x="222" text-anchor="end" y="264" fill="#666">GND</text>
+    <rect x="230" y="272" width="40" height="22" fill="#f5f5f5" stroke="#777"/><text x="237" y="288">24</text><text x="222" text-anchor="end" y="288" fill="#666">GP18</text>
+    <rect x="230" y="296" width="40" height="22" fill="#f5f5f5" stroke="#777"/><text x="237" y="312">25</text><text x="222" text-anchor="end" y="312" fill="#666">GP19</text>
+    <rect x="230" y="320" width="40" height="22" fill="#ffe9b3" stroke="#b8860b" stroke-width="2"/><text x="237" y="336" font-weight="bold">26</text><text x="222" text-anchor="end" y="336" font-weight="bold">GP20  DATA</text>
+    <rect x="230" y="344" width="40" height="22" fill="#ffe9b3" stroke="#b8860b" stroke-width="2"/><text x="237" y="360" font-weight="bold">27</text><text x="222" text-anchor="end" y="360" font-weight="bold">GP21  FSYNC</text>
+    <rect x="230" y="368" width="40" height="22" fill="#d9d9d9" stroke="#444" stroke-width="2"/><text x="237" y="384" font-weight="bold">28</text><text x="222" text-anchor="end" y="384" font-weight="bold">GND</text>
+    <rect x="230" y="392" width="40" height="22" fill="#ffe9b3" stroke="#b8860b" stroke-width="2"/><text x="237" y="408" font-weight="bold">29</text><text x="222" text-anchor="end" y="408" font-weight="bold">GP22  BCLK</text>
+    <rect x="230" y="416" width="40" height="22" fill="#f5f5f5" stroke="#777"/><text x="237" y="432">30</text><text x="222" text-anchor="end" y="432" fill="#666">RUN</text>
+  </g>
+
+  <!-- Bus -->
+  <g stroke-width="2.5" fill="none">
+    <path d="M 270 331 H 420 V 150 H 470" stroke="#c0392b"/>
+    <path d="M 270 355 H 400 V 190 H 470" stroke="#2874a6"/>
+    <path d="M 270 403 H 380 V 230 H 470" stroke="#1e8449"/>
+    <path d="M 270 379 H 360 V 560 H 455" stroke="#333"/>
+  </g>
+  <g font-size="12">
+    <text x="330" y="325" fill="#c0392b">DATA</text>
+    <text x="320" y="349" fill="#2874a6">FSYNC</text>
+    <text x="320" y="397" fill="#1e8449">BCLK</text>
+    <text x="276" y="373" fill="#333">GND</text>
+  <text x="365" y="555" font-size="11" fill="#333">GND to all DACs</text>
+  </g>
+
+  <!-- Bus label -->
+  <text x="470" y="110" font-size="13" font-weight="bold">To DAC 1: DIN, FSYNC, BCLK, GND</text>
+  <text x="470" y="127" font-size="11" fill="#555">Keep the wires short. Add 33 ohm series resistors near the Pico.</text>
+
+  <!-- DAC chain -->
+  <g>
+    <rect x="470" y="140" width="130" height="100" rx="6" fill="#fdf2e9" stroke="#a04000" stroke-width="2"/>
+    <text x="535" y="162" text-anchor="middle" font-weight="bold">TAD5242 #1</text>
+    <text x="535" y="182" text-anchor="middle" font-size="11">Plays slots 6 and 7</text>
+    <text x="535" y="198" text-anchor="middle" font-size="11">DSPi outputs 7-8</text>
+    <text x="535" y="218" text-anchor="middle" font-size="11">MD6 = daisy out</text>
+
+    <rect x="650" y="140" width="130" height="100" rx="6" fill="#fdf2e9" stroke="#a04000" stroke-width="2"/>
+    <text x="715" y="162" text-anchor="middle" font-weight="bold">TAD5242 #2</text>
+    <text x="715" y="182" text-anchor="middle" font-size="11">Plays slots 4 and 5</text>
+    <text x="715" y="198" text-anchor="middle" font-size="11">DSPi outputs 5-6</text>
+
+    <rect x="650" y="290" width="130" height="100" rx="6" fill="#fdf2e9" stroke="#a04000" stroke-width="2"/>
+    <text x="715" y="312" text-anchor="middle" font-weight="bold">TAD5242 #3</text>
+    <text x="715" y="332" text-anchor="middle" font-size="11">Plays slots 2 and 3</text>
+    <text x="715" y="348" text-anchor="middle" font-size="11">DSPi outputs 3-4</text>
+
+    <rect x="470" y="290" width="130" height="100" rx="6" fill="#fdf2e9" stroke="#a04000" stroke-width="2"/>
+    <text x="535" y="312" text-anchor="middle" font-weight="bold">TAD5242 #4</text>
+    <text x="535" y="332" text-anchor="middle" font-size="11">Plays slots 0 and 1</text>
+    <text x="535" y="348" text-anchor="middle" font-size="11">DSPi outputs 1-2</text>
+  </g>
+
+  <!-- daisy chain arrows -->
+  <g stroke="#7d3c98" stroke-width="2" fill="none" stroke-dasharray="6 4">
+    <path d="M 600 210 H 650"/>
+    <path d="M 780 210 H 830 V 340 H 780"/>
+    <path d="M 650 340 H 600"/>
+  </g>
+  <text x="625" y="204" text-anchor="middle" font-size="10" fill="#7d3c98">MD6</text>
+  <text x="835" y="280" font-size="10" fill="#7d3c98">MD6</text>
+  <text x="625" y="334" text-anchor="middle" font-size="10" fill="#7d3c98">MD6</text>
+  <text x="640" y="262" font-size="11" fill="#7d3c98">Daisy chain: each MD6 output</text>
+  <text x="640" y="276" font-size="11" fill="#7d3c98">goes to the DIN input of the next DAC</text>
+
+  <!-- shared BCLK / FSYNC note -->
+  <rect x="470" y="410" width="410" height="120" rx="6" fill="#f4f6f7" stroke="#888"/>
+  <text x="480" y="430" font-weight="bold">Connect to every DAC</text>
+  <text x="480" y="450" font-size="12">BCLK and FSYNC: from Pico pins 29 and 27 to all four DACs.</text>
+  <text x="480" y="468" font-size="12">DIN: DAC 1 only, from Pico pin 26. DACs 2 to 4 take DIN from MD6.</text>
+  <text x="480" y="486" font-size="12">GND: common ground (Pico pin 28) to all DACs.</text>
+  <text x="480" y="504" font-size="12">MD0: 4.7 kOhm to GND on each DAC (target TDM mode).</text>
+  <text x="480" y="522" font-size="12">MD1 and MD2: GND (3.3 V, 32-bit words).</text>
+</svg>
