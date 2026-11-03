@@ -85,7 +85,7 @@ This guide does not cover them.
 
 The TDM8 output and the ADAT output share one engine.
 Only one of them can run at a time.
-Use vendor control requests to set it up.
+Use vendor control requests to configure it.
 
 | Step | Request | wValue | Result |
 |---|---|---|---|
