@@ -33,3 +33,12 @@ __pycache__/
 !Documentation/Features/*.md
 !tools/dspi_test/test_harness.md
 !tools/dspi_test/test_failures_diag.md
+
+# Local build, test and tooling output
+.pio-core/
+build-fw*
+tools/*/build/
+tools/*/.run.sh
+.test.lock
+.beads/
+.pio/

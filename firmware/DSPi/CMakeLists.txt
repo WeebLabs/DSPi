@@ -157,14 +157,22 @@ target_compile_definitions(DSPi PRIVATE
 )
 
 # ----------------------------------------------------------------------------
-# WiFi / network audio input (-DDSPI_ENABLE_WIFI=ON, RP2350 + pico2_w only)
+# WiFi / network audio input (-DDSPI_ENABLE_WIFI=ON; pico2_w/RP2350 only)
 # ----------------------------------------------------------------------------
 if (DSPI_ENABLE_WIFI)
-    if (NOT PICO_PLATFORM MATCHES "rp2350")
-        message(FATAL_ERROR "DSPI_ENABLE_WIFI requires PICO_PLATFORM=rp2350 (Pico 2 W)")
+    if (PICO_PLATFORM STREQUAL "rp2040")
+        message(FATAL_ERROR
+"DSPI_ENABLE_WIFI is not supported on RP2040 (pico_w): the network audio input does not fit in RAM.\n"
+"  Measured on a pico_w build with the WiFi code and no FLAC arena:\n"
+"  .bss is already ~160 KB, leaving ~18 KB malloc-heap slack of the 264 KB RAM.\n"
+"  Needed on top: PCM ring 32 KB (net_input.c NET_RING_BYTES) + FLAC decoder arena ~44 KB\n"
+"  (fx_flac_size(4608,2) = 37328 B + 2 KB out slice + >= 4 KB chunk buffer) = ~76 KB.\n"
+"  RP2350 gets these from the idle I2S RX rings (4 x 8 KB) and the idle ADAT output ring (56 KB);\n"
+"  RP2040 has a single 4 KB I2S RX ring, no ADAT output, so net_input_start() finds no ring.\n"
+"  Configure with -DPICO_PLATFORM=rp2350 -DPICO_BOARD=pico2_w.")
     endif()
     if (NOT PICO_CYW43_SUPPORTED)
-        message(FATAL_ERROR "DSPI_ENABLE_WIFI requires a CYW43 board: -DPICO_BOARD=pico2_w")
+        message(FATAL_ERROR "DSPI_ENABLE_WIFI requires a CYW43 board: -DPICO_BOARD=pico2_w; got PICO_BOARD=${PICO_BOARD}")
     endif()
 
     target_compile_definitions(DSPi PRIVATE DSPI_ENABLE_WIFI=1)
