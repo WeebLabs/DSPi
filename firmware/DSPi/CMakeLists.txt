@@ -156,6 +156,117 @@ target_compile_definitions(DSPi PRIVATE
     PICO_MEM_IN_RAM=1
 )
 
+# ----------------------------------------------------------------------------
+# WiFi / network audio input (-DDSPI_ENABLE_WIFI=ON; pico2_w/RP2350 only)
+# ----------------------------------------------------------------------------
+if (DSPI_ENABLE_WIFI)
+    if (PICO_PLATFORM STREQUAL "rp2040")
+        message(FATAL_ERROR
+"DSPI_ENABLE_WIFI is not supported on RP2040 (pico_w): the network audio input does not fit in RAM.\n"
+"  Measured on a pico_w build with the WiFi code and no FLAC arena:\n"
+"  .bss is already ~160 KB, leaving ~18 KB malloc-heap slack of the 264 KB RAM.\n"
+"  Needed on top: PCM ring 32 KB (net_input.c NET_RING_BYTES) + FLAC decoder arena ~44 KB\n"
+"  (fx_flac_size(4608,2) = 37328 B + 2 KB out slice + >= 4 KB chunk buffer) = ~76 KB.\n"
+"  RP2350 gets these from the idle I2S RX rings (4 x 8 KB) and the idle ADAT output ring (56 KB);\n"
+"  RP2040 has a single 4 KB I2S RX ring, no ADAT output, so net_input_start() finds no ring.\n"
+"  Configure with -DPICO_PLATFORM=rp2350 -DPICO_BOARD=pico2_w.")
+    endif()
+    if (NOT PICO_CYW43_SUPPORTED)
+        message(FATAL_ERROR "DSPI_ENABLE_WIFI requires a CYW43 board: -DPICO_BOARD=pico2_w; got PICO_BOARD=${PICO_BOARD}")
+    endif()
+
+    target_compile_definitions(DSPi PRIVATE DSPI_ENABLE_WIFI=1)
+    # Core 0 runs lwIP -> Sendspin -> Noise/X25519 from the main loop (and every
+    # ISR nests on the same stack).  Measured with -fstack-usage + the objdump
+    # call graph (see the report of the WiFi hardening change): worst realistic
+    # thread path ~1.9 KB (main loop -> net_input_poll -> cyw43/lwIP -> Sendspin
+    # recv -> Noise handshake / tx path), ~2.8 KB with the contrived ioctl-in-recv
+    # re-entrancy, plus ~0.75 KB of nested ISRs (USB 344 + DMA 56 + extended
+    # exception frames) => 2.7-3.5 KB, against the 2 KB SDK default.  The stack
+    # lives in SCRATCH_Y (core 1: SCRATCH_X); both are 4 KB regions that nothing
+    # else uses in this build, so the full 4 KB costs no RAM.
+    target_compile_definitions(DSPi PRIVATE PICO_STACK_SIZE=0x1000)
+    # lwipopts.h (NO_SYS poll mode, small pools) is found via the DSPi include dir.
+    target_sources(DSPi PRIVATE
+        net_input.c
+        net_input.h
+        net_persist.c
+        net_persist.h
+        net_persist_codec.h
+        lwipopts.h
+        dspi_mbedtls_config.h
+    )
+    set_source_files_properties(net_input.c PROPERTIES COMPILE_FLAGS "-O3")
+
+    # FLAC decode for the Sendspin NET input (phase 2): our glue (net_flac.c)
+    # plus the vendored, unmodified libfoxenflac (LGPL-2.1+, no heap, no libc).
+    # Its decoder + chunk buffers live in the loaned ADAT ring (net_flac.h), so
+    # this adds code but no .bss.  The upstream file is compiled warning-free
+    # for this project's flags with per-file options (-w) and without asserts.
+    target_sources(DSPi PRIVATE
+        net_flac.c
+        net_flac.h
+        third_party/foxen-flac/foxen-flac.c
+        third_party/foxen-flac/foxen-flac.h
+    )
+    target_include_directories(DSPi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/foxen-flac)
+    set_source_files_properties(third_party/foxen-flac/foxen-flac.c PROPERTIES
+        COMPILE_FLAGS "-O3 -w -DNDEBUG")
+    set_source_files_properties(net_flac.c PROPERTIES COMPILE_FLAGS "-O2")
+
+    # Sendspin client + noise/secure-channel code (written separately).
+    foreach(_f sendspin_noise.c sendspin_client.c)
+        if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${_f})
+            target_sources(DSPi PRIVATE ${_f})
+        else()
+            message(WARNING "DSPI_ENABLE_WIFI: ${_f} not found in DSPi/ (link will fail unless DSPI_NET_EXTRA_SOURCES provides it)")
+        endif()
+    endforeach()
+    # Slimproto (Squeezelite-compatible) player client: the second, mutually
+    # exclusive network protocol (net_proto_set()).  No static RAM of its own: it
+    # borrows the idle Sendspin client's state (sendspin_client_mem_loan()).
+    target_sources(DSPi PRIVATE
+        slimproto_client.c
+        slimproto_client.h
+    )
+    set_source_files_properties(slimproto_client.c PROPERTIES COMPILE_FLAGS "-O2")
+
+    # Development aid: extra sources / include dirs (e.g. a local stub of the
+    # Sendspin client kept outside the repo): -DDSPI_NET_EXTRA_SOURCES="a.c;b.c"
+    # -DDSPI_NET_EXTRA_INCLUDES="dir".
+    if (DSPI_NET_EXTRA_SOURCES)
+        target_sources(DSPi PRIVATE ${DSPI_NET_EXTRA_SOURCES})
+    endif()
+    if (DSPI_NET_EXTRA_INCLUDES)
+        target_include_directories(DSPi PRIVATE ${DSPI_NET_EXTRA_INCLUDES})
+    endif()
+
+    # lwIP in poll mode: cyw43_arch_poll() (called from net_input_poll) is the
+    # only place the network stack runs; no background IRQ/async worker.
+    target_link_libraries(DSPi
+        pico_cyw43_arch_lwip_poll
+        pico_lwip
+        pico_mbedtls
+        pico_rand
+    )
+
+    # The malloc heap must hold the four S/PDIF producer pools that
+    # usb_sound_card_init() allocates at boot (~51 KB with AUDIO_BUFFER_COUNT 8;
+    # a failed calloc panics).  Report the budget after every link and warn
+    # (or fail, -DDSPI_WIFI_HEAP_CHECK=FATAL) when it does not fit.
+    set(DSPI_WIFI_HEAP_CHECK "WARN" CACHE STRING "WARN, FATAL or OFF: post-build malloc-heap budget check (WiFi build)")
+    set(DSPI_WIFI_HEAP_MARGIN 512 CACHE STRING "Bytes of heap slack the WiFi build must keep after the boot-time pools")
+    if (NOT DSPI_WIFI_HEAP_CHECK STREQUAL "OFF" AND CMAKE_NM)
+        add_custom_command(TARGET DSPi POST_BUILD
+            COMMAND ${CMAKE_COMMAND}
+                -DELF=$<TARGET_FILE:DSPi> -DNM=${CMAKE_NM}
+                -DCONFIG_H=${CMAKE_CURRENT_SOURCE_DIR}/config.h
+                -DMODE=${DSPI_WIFI_HEAP_CHECK} -DMARGIN=${DSPI_WIFI_HEAP_MARGIN}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/wifi_heap_check.cmake
+            VERBATIM)
+    endif()
+endif()
+
 target_link_libraries(DSPi
     pico_stdlib
     pico_multicore

@@ -119,6 +119,17 @@ _Static_assert(I2S_RX_DMA_BASE + 2 * I2S_RX_MAX_PAIRS <= NUM_DMA_CHANNELS,
 static uint32_t __attribute__((aligned(I2S_RX_RING_BYTES)))
     i2s_rx_ring[I2S_RX_MAX_PAIRS][I2S_RX_RING_WORDS];
 
+#ifdef DSPI_ENABLE_WIFI
+// RAM sharing for the WiFi build: inputs are switched, never mixed, so the
+// network input borrows this (idle) DMA ring storage as its PCM ring instead
+// of costing another 32 KB of .bss (see net_input.c).  The caller must not use
+// it while I2S input is running; main.c stops one source before starting the other.
+void *i2s_input_ring_storage(uint32_t *bytes) {
+    if (bytes) *bytes = (uint32_t)sizeof(i2s_rx_ring);
+    return i2s_rx_ring;
+}
+#endif
+
 // ============================================================================
 // PER-PAIR STATE
 // ============================================================================

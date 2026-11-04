@@ -62,6 +62,12 @@ uint32_t i2s_input_poll(void);
 // an I2S output and so cannot supply samples while the outputs are drained.
 void i2s_input_prefill_silence(uint32_t frames);
 
+#ifdef DSPI_ENABLE_WIFI
+// Storage of the (inactive) I2S RX DMA rings, lent to the NET input as PCM ring
+// memory.  Only valid to use while I2S input is not running.
+void *i2s_input_ring_storage(uint32_t *bytes);
+#endif
+
 // Get current state
 I2sInputState i2s_input_get_state(void);
 

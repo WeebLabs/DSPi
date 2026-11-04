@@ -31,6 +31,10 @@
 #include "pico/audio_i2s_multi.h"
 #include "adat_output.h"
 #include "adat_input.h"
+#ifdef DSPI_ENABLE_WIFI
+#include "net_input.h"
+#include "net_persist.h"
+#endif
 #include "pdm_generator.h"
 #include "siggen.h"
 #include "upmix.h"
@@ -367,6 +371,13 @@ static bool i2s_prefilling = false;
 // (frame sync must be verified before audio flows). Cleared by
 // prepare_pipeline_reset(). Driven by the main-loop ADAT block (RP2350).
 static bool adat_prefilling = false;
+
+#ifdef DSPI_ENABLE_WIFI
+// NET (WiFi/Sendspin) input prefill: SPDIF-style lock-gated handshake where
+// "lock" is net_input_is_ready() (WiFi joined + stream data flowing).  Cleared
+// by prepare_pipeline_reset().  Driven by the main-loop NET block.
+static bool net_prefilling = false;
+#endif
 
 // ---------------------------------------------------------------------------
 // process_type_switches — unified output type transition handler
@@ -896,6 +907,9 @@ static bool pipeline_producer_is_streaming(void) {
     if (active_input_source == INPUT_SOURCE_ADAT &&
         adat_input_get_state() == ADAT_INPUT_LOCKED) return true;
 #endif
+#ifdef DSPI_ENABLE_WIFI
+    if (active_input_source == INPUT_SOURCE_NET && net_input_is_ready()) return true;
+#endif
     // The generator's idle pump counts only when it would actually run:
     // siggen_pump() refuses while a source change or type switch is in
     // flight, and (for non-USB sources) while preset_loading is set, since
@@ -923,6 +937,11 @@ static void pipeline_service_producer(void) {
     } else if (active_input_source == INPUT_SOURCE_I2S) {
         i2s_input_poll();
     }
+#ifdef DSPI_ENABLE_WIFI
+    else if (active_input_source == INPUT_SOURCE_NET) {
+        net_input_poll();
+    }
+#endif
     // Generator audio has to fade out like any other source, and the pump is
     // the only block source when no input is streaming.  No-op when idle.
     siggen_pump();
@@ -1025,6 +1044,9 @@ static void prepare_pipeline_reset(uint32_t mute_samples) {
     // call sites.)
     i2s_prefilling = false;
     adat_prefilling = false;
+#ifdef DSPI_ENABLE_WIFI
+    net_prefilling = false;
+#endif
     __dmb();
 
     // preset_loading now owns the mute, so drop the fade request (it would
@@ -1368,7 +1390,8 @@ static void complete_pipeline_reset(void) {
     if (!(preset_loading &&
           (active_input_source == INPUT_SOURCE_I2S ||
            input_source_is_spdif(active_input_source) ||
-           active_input_source == INPUT_SOURCE_ADAT))) {
+           active_input_source == INPUT_SOURCE_ADAT ||
+           active_input_source == INPUT_SOURCE_NET))) {
         dac_hw_mute_release();
     }
 
@@ -1494,6 +1517,12 @@ static bool spdif_suspended_for_flash = false;
 // Same contract for I2S input.
 static bool i2s_suspended_for_flash = false;
 
+#ifdef DSPI_ENABLE_WIFI
+// Same contract for the NET input (radio + Sendspin session are torn down for
+// the flash blackout and re-joined afterwards; takes seconds, phase 1).
+static bool net_suspended_for_flash = false;
+#endif
+
 static void prepare_flash_write_operation(void) {
     // Drain the current input source once before the mute engages so the
     // envelope starts from the freshest possible state.
@@ -1507,6 +1536,11 @@ static void prepare_flash_write_operation(void) {
 #if PICO_RP2350
     else if (active_input_source == INPUT_SOURCE_ADAT) {
         adat_input_poll();
+    }
+#endif
+#ifdef DSPI_ENABLE_WIFI
+    else if (active_input_source == INPUT_SOURCE_NET) {
+        net_input_poll();
     }
 #endif
 
@@ -1557,6 +1591,17 @@ static void prepare_flash_write_operation(void) {
         i2s_suspended_for_flash = true;
     }
 
+#ifdef DSPI_ENABLE_WIFI
+    // NET: the CYW43 SPI/PIO/DMA and lwIP timers cannot ride out a ~45 ms
+    // interrupt blackout, and the Sendspin session would time out anyway.
+    // Tear it down and let resume_net_after_flash() bring it back.
+    if (active_input_source == INPUT_SOURCE_NET && net_input_is_running()) {
+        net_input_stop();
+        restore_nominal_spdif_dividers(audio_state.freq);
+        net_suspended_for_flash = true;
+    }
+#endif
+
     // ADAT is deliberately NOT stopped for the blackout: its RX is an
     // IRQ-less free-running DMA ring (no decode-timeout alarms to race the
     // blackout edge, unlike SPDIF), and the software poll re-acquires frame
@@ -1595,6 +1640,21 @@ static void resume_i2s_after_flash(void) {
     i2s_input_start(i2s_input_should_be_master());
 }
 
+#ifdef DSPI_ENABLE_WIFI
+// Restart the NET input if prepare_flash_write_operation() tore it down.
+static void resume_net_after_flash(void) {
+    if (!net_suspended_for_flash) return;
+    net_suspended_for_flash = false;
+
+    if (active_input_source != INPUT_SOURCE_NET) return;
+    if (input_source_change_pending) return;
+
+    // preset_loading is still set from prepare_pipeline_reset(); the main-loop
+    // NET block runs the drain+prefill handshake once the stream is back.
+    net_input_start();
+}
+#endif
+
 // Completion path for EVERY runtime flash write: drain/restart all output
 // consumer pipelines and reset feedback state via complete_pipeline_reset(),
 // or hand the equivalent synchronized restart to the active input's own
@@ -1630,6 +1690,17 @@ static void complete_flash_write_operation_full(void) {
     // slave against the freshly restarted TX master.
     resume_i2s_after_flash();
 
+#ifdef DSPI_ENABLE_WIFI
+    // Likewise NET: the radio rejoins asynchronously and the main-loop NET
+    // block owns the lock-gated prefill, so (like SPDIF) skip the immediate
+    // pipeline reset below and keep the outputs muted until the stream is back.
+    resume_net_after_flash();
+    if (active_input_source == INPUT_SOURCE_NET) {
+        reset_usb_feedback_loop();
+        return;
+    }
+#endif
+
     if (input_source_is_spdif(active_input_source)) {
         // For SPDIF input: the slots played continuous silence across the
         // window (pre-filled pools, then the framed silence buffers).  Skip
@@ -1648,8 +1719,11 @@ static void complete_flash_write_operation_full(void) {
 }
 
 void core0_init() {
-    // LED setup
+#ifndef DSPI_ENABLE_WIFI
+    // LED setup.  (Pico 2 W: GPIO 23/24/25/29 belong to the CYW43 radio; the
+    // on-board LED hangs off the radio chip, so no GPIO LED here.)
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
+#endif
 
 #if PICO_RP2350
     // Enable flush-to-zero and default-NaN for audio processing.
@@ -1680,7 +1754,9 @@ void core0_init() {
     set_sys_clock_pll(1536000000, 5, 1);
 #endif
 
-    gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);
+#ifndef DSPI_ENABLE_WIFI
+    gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);   // SMPS PS mode (Pico/Pico 2 only; WL_ON on Pico 2 W)
+#endif
 
     pico_get_unique_board_id_string(usb_descriptor_str_serial, 17);
 
@@ -1712,6 +1788,12 @@ void core0_init() {
     // Load preset from flash.  Always selects a preset (factory defaults if
     // the target slot is empty).  Migrates legacy data on first boot.
     preset_boot_load();
+
+#ifdef DSPI_ENABLE_WIFI
+    // Restore saved WiFi SSID/passphrase/Sendspin server before any
+    // net_input_start().  Read-only (XIP); no flash writes at boot.
+    net_persist_load_into_net();
+#endif
 
     // DAC hardware mute init.  Must come AFTER preset_boot_load() so the
     // directory's persisted config (mute pin assignments, polarity, hold
@@ -1899,6 +1981,14 @@ void core0_init() {
         adat_input_start();
     }
 #endif
+#ifdef DSPI_ENABLE_WIFI
+    else if (active_input_source == INPUT_SOURCE_NET) {
+        // Boot-into-NET parity: outputs stay muted until WiFi joins and the
+        // stream delivers data; the main-loop NET block owns drain/prefill/enable.
+        prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+        net_input_start();
+    }
+#endif
 
     // Baseline the notification shadow from the fully-initialised live state.
     // Must come after preset_boot_load() / apply_factory_defaults() so any
@@ -1932,9 +2022,11 @@ void core0_init() {
 }
 
 int main(void) {
-    // Initial LED on to show we're alive
+#ifndef DSPI_ENABLE_WIFI
+    // Initial LED on to show we're alive (GPIO 25 is the CYW43 CS on Pico 2 W)
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
     gpio_put(25, 1);
+#endif
 
 #if !PICO_RP2350
     set_sys_clock_pll(1536000000, 4, 2);
@@ -2108,6 +2200,50 @@ int main(void) {
         }
 #endif
 
+#ifdef DSPI_ENABLE_WIFI
+        // NET (WiFi/Sendspin) input: SPDIF-style lock-gated flow where "lock"
+        // is net_input_is_ready() (WiFi joined, format known, data flowing).
+        // Outputs stay muted/drained until then and prefill against real
+        // audio.  No clock servo: the sender is not rate-locked to us, the
+        // pipeline is pulled at OUR output rate and the ring absorbs drift.
+        else if (active_input_source == INPUT_SOURCE_NET) {
+            bool net_ready = net_input_is_ready();
+
+            // Ready: drain outputs, prefill, then start (same DAC-mute hold
+            // gating as the SPDIF block).
+            if (net_ready && preset_loading && !net_prefilling &&
+                    dac_hw_mute_hold_elapsed() && !rate_change_pending) {
+                drain_and_disable_outputs();
+                preset_loading = false;
+                preset_mute_counter = 0;
+                net_prefilling = true;
+            }
+
+            // The ready gate matters: never enable outputs against a stream
+            // that vanished mid-prefill.
+            if (net_prefilling && net_ready &&
+                get_slot_consumer_fill(0) >= SPDIF_CONSUMER_BUFFER_COUNT / 2) {
+                enable_outputs_in_sync();
+                net_prefilling = false;
+                // Clocks running first, then release the DAC mute (Phase 4
+                // ordering, same as the SPDIF prefill path).
+                dac_hw_mute_release();
+            }
+
+            // Stream stopped / WiFi lost: mute (fade through the normal
+            // bracket) and wait for readiness again.  Also covers a loss
+            // during an in-flight prefill (prepare_pipeline_reset clears
+            // net_prefilling).
+            if (!net_ready && (net_prefilling || !preset_loading)) {
+                prepare_pipeline_reset(PRESET_MUTE_SAMPLES);
+                pipeline_reset_cpu_metering();
+            }
+
+            // Radio/lwIP/client service + drain ring into the pipeline
+            net_input_poll();
+        }
+#endif
+
         // Poll I2S input when active.
         else if (active_input_source == INPUT_SOURCE_I2S &&
                  i2s_clock_mode == I2S_CLOCK_MODE_SLAVE) {
@@ -2217,6 +2353,17 @@ int main(void) {
 
             i2s_input_poll();
         }
+
+#ifdef DSPI_ENABLE_WIFI
+        // Deferred persist of WiFi/Sendspin settings + device key.  Skipped
+        // (no mute/teardown) when the stored copy already matches.
+        if (net_persist_commit_needed()) {
+            prepare_flash_write_operation();
+            bool np_ok = net_persist_save_current();
+            complete_flash_write_operation_full();
+            if (!np_ok) printf("net_persist: save failed\n");
+        }
+#endif
 
         // Handle deferred flash SET commands (fire-and-forget, no result).
         // Atomic snapshot: briefly disable IRQs to copy payload + clear flag,
@@ -2573,7 +2720,8 @@ int main(void) {
             // doesn't release the mute before that block's drain (for ADAT,
             // before the receiver has even re-locked).  USB/SPDIF restart here.
             perform_rate_change(r, active_input_source == INPUT_SOURCE_I2S ||
-                                   active_input_source == INPUT_SOURCE_ADAT);
+                                   active_input_source == INPUT_SOURCE_ADAT ||
+                                   active_input_source == INPUT_SOURCE_NET);
         }
 
         // Handle loudness table recomputation
@@ -3431,6 +3579,7 @@ int main(void) {
                     perform_rate_change(target_rate,
                                         new_source == INPUT_SOURCE_I2S ||
                                         new_source == INPUT_SOURCE_ADAT ||
+                                        new_source == INPUT_SOURCE_NET ||
                                         input_source_is_spdif(new_source));
                     dsp_update_delay_samples((float)target_rate);
 
@@ -3491,6 +3640,29 @@ int main(void) {
                     }
 
                     // Reset DSP state to prevent stale ADAT data leaking
+                    leveller_reset_pending = true;
+                    pipeline_reset_cpu_metering();
+                }
+#endif
+#ifdef DSPI_ENABLE_WIFI
+                else if (old_source == INPUT_SOURCE_NET) {
+                    net_input_stop();
+                    net_prefilling = false;
+
+                    // Same as the I2S/ADAT departure: nothing of NET trims the
+                    // dividers, but net_input_stop() reset the servo cache.
+                    restore_nominal_spdif_dividers(audio_state.freq);
+
+                    // USB endpoint rate is retained while another source is
+                    // active; apply it now (mirrors the I2S/ADAT branches).
+                    if (new_source == INPUT_SOURCE_USB) {
+                        uint32_t target_rate = usb_audio_get_selected_rate();
+                        if (target_rate != audio_state.freq) {
+                            perform_rate_change(target_rate, false);
+                            dsp_update_delay_samples((float)target_rate);
+                        }
+                    }
+
                     leveller_reset_pending = true;
                     pipeline_reset_cpu_metering();
                 }
@@ -3582,6 +3754,16 @@ int main(void) {
                     adat_input_start();
                     // Outputs stay muted until frame sync locks; the main-loop
                     // ADAT block owns drain/prefill/enable + the mute release.
+                }
+#endif
+#ifdef DSPI_ENABLE_WIFI
+                else if (new_source == INPUT_SOURCE_NET) {
+                    // Keep the current pipeline rate; the Sendspin stream's
+                    // format (net_input_set_format) arms any rate change once
+                    // the session is up.  Outputs stay muted until WiFi joins
+                    // and data flows; the main-loop NET block owns
+                    // drain/prefill/enable + the mute release.
+                    net_input_start();
                 }
 #endif
                 else {
@@ -3695,7 +3877,9 @@ int main(void) {
         static uint32_t loop_counter = 0;
         if (++loop_counter >= 1000) {
             loop_counter = 0;
+#ifndef DSPI_ENABLE_WIFI
             gpio_xor_mask(1u << 25);
+#endif
         }
     }
 }

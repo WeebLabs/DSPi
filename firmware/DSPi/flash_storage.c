@@ -1512,6 +1512,26 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     return 0;
 }
 
+#ifdef DSPI_ENABLE_WIFI
+// Raw single-record write for the dedicated net_persist sectors (outside the
+// preset region).  Same bracket as every preset write: Core 1 lockout when not
+// in IRQ context, selective NVIC blackout, clkdiv-restoring erase/program.
+// Caller must have run prepare_flash_write_operation() (main loop only) and
+// completes with complete_flash_write_operation_full().  len <= one sector;
+// offset must be sector-aligned.  Returns 0 on success.
+int flash_storage_write_raw(uint32_t offset, const void *data, size_t len) {
+    if ((offset & (FLASH_SECTOR_SIZE - 1)) != 0 || len == 0 || len > FLASH_SECTOR_SIZE)
+        return -1;
+    return flash_write_sector(offset, data, len);
+}
+
+// Byte offset of the preset region (directory sector); other dedicated
+// regions are placed relative to it, directly below.
+uint32_t flash_storage_preset_base_offset(void) {
+    return (uint32_t)PRESET_BASE_OFFSET;
+}
+#endif
+
 // ============================================================================
 // DIRECTORY MANAGEMENT
 // ============================================================================

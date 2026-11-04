@@ -166,4 +166,10 @@ extern volatile uint32_t preset_mute_counter;
 // input is actually processed, so IRQ-off flash blackouts cost nothing.
 #define PRESET_MUTE_HOLD_MARGIN_MS  120u
 
+#ifdef DSPI_ENABLE_WIFI
+// For net_persist.c (dedicated sectors below the preset region).
+int flash_storage_write_raw(uint32_t offset, const void *data, size_t len);
+uint32_t flash_storage_preset_base_offset(void);
+#endif
+
 #endif // FLASH_STORAGE_H

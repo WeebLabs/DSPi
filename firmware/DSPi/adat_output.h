@@ -41,6 +41,22 @@ bool    adat_output_config_enabled(void);
 uint8_t adat_output_pin(void);
 bool    adat_output_is_active(void);
 
+// Wire format of the bulk output (shared PIO SM / DMA / ring; mutually
+// exclusive).  TDM8: DATA on its pin, FSYNC on pin + 1, BCLK on its own pin;
+// 8 x 32-bit slots, FSYNC-aligned MSB (TI TDM bus mode, e.g. TAD5242).  Both
+// setters only record intent and set adat_output_config_dirty.  The enable
+// flag (adat_output_set_config) covers whichever format is selected.
+#define BULK_FORMAT_ADAT  0
+#define BULK_FORMAT_TDM8  1
+void    bulk_output_set_format(uint8_t format);
+uint8_t bulk_output_format(void);
+void    tdm_output_set_pins(uint8_t data_pin, uint8_t bclk_pin);
+uint8_t tdm_output_data_pin(void);
+uint8_t tdm_output_bclk_pin(void);
+// True if `pin` is currently claimed by the enabled bulk output (ADAT data
+// pin, or any of the three TDM8 pins).
+bool    bulk_output_owns_pin(uint8_t pin);
+
 // Restore-path acceptability check for the ADAT data GPIO (full ownership
 // check; ADAT's own claim never blocks).  Defined in vendor_commands.c.
 bool adat_pin_acceptable(uint8_t pin);
@@ -87,5 +103,20 @@ void adat_output_task(void);
 // output_s24.h).  Called from process_input_block() after the slot gives;
 // no-op while the stream is down.
 void adat_output_push_block(const out_s24_t (*bufs)[192], uint32_t sample_count);
+
+#ifdef DSPI_ENABLE_WIFI
+// Loan of the (otherwise idle) ring storage to the NET FLAC decoder
+// (net_flac.c has the invariants).  Core 0 main-loop context only.
+//   adat_output_ring_loanable()  true while the bulk output is neither enabled
+//                                nor running and no loan is out
+//   adat_output_ring_loan()      returns the ring (and its size) or NULL; while
+//                                loaned, adat_output_resync() calls `evict`
+//                                before it would start the output, and keeps the
+//                                output off unless the loan was returned
+//   adat_output_ring_return()    end the loan
+bool  adat_output_ring_loanable(void);
+void *adat_output_ring_loan(uint32_t *bytes, void (*evict)(void));
+void  adat_output_ring_return(void);
+#endif
 
 #endif // PICO_RP2350
