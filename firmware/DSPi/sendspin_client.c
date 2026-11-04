@@ -276,6 +276,40 @@ static const char *json_find(const char *s, const char *key, int depth)
     return NULL;
 }
 
+/* Unescape a JSON string body in place (js is the writable receive buffer).  `p` points
+ * just after the opening quote.  Handles \/ \\ \" and \u00XX (ASCII), the escapes a JSON
+ * encoder can emit inside base64 text; the tail of the message is moved down so later
+ * fields stay intact.  Returns a pointer to the closing quote, or NULL if unterminated
+ * or an unsupported escape is found. */
+static const char *json_unescape_inplace(char *p)
+{
+    char *w = p, *r = p;
+    while (*r && *r != '"') {
+        char ch = *r++;
+        if (ch == '\\') {
+            ch = *r++;
+            if (ch == 'u') {
+                unsigned v = 0;
+                for (int i = 0; i < 4; i++) {
+                    char hc = r[i];
+                    if (hc >= '0' && hc <= '9') v = v * 16 + (unsigned)(hc - '0');
+                    else if (hc >= 'a' && hc <= 'f') v = v * 16 + (unsigned)(hc - 'a' + 10);
+                    else if (hc >= 'A' && hc <= 'F') v = v * 16 + (unsigned)(hc - 'A' + 10);
+                    else return NULL;
+                }
+                if (v >= 0x80) return NULL;
+                r += 4; ch = (char)v;
+            } else if (ch != '/' && ch != '\\' && ch != '"') {
+                return NULL;
+            }
+        }
+        *w++ = ch;
+    }
+    if (*r != '"') return NULL;
+    if (w != r) memmove(w, r, strlen(r) + 1);
+    return w;
+}
+
 static int json_str(const char *s, const char *key, int depth, char *out, size_t cap)
 {
     const char *v = json_find(s, key, depth);
@@ -652,7 +686,7 @@ static void on_json(char *js)
             /* codec_header = Base64 of 'fLaC' + STREAMINFO (player@v1 spec).  The value
              * is read in place from g_rx; nfl_begin() decodes it into the arena. */
             const char *hv = json_find(js, "codec_header", 0);
-            const char *he = (hv && *hv == '"') ? strchr(hv + 1, '"') : NULL;
+            const char *he = (hv && *hv == '"') ? json_unescape_inplace((char *)hv + 1) : NULL;
             int rc = (he && format_supported(rate, ch, 16) && (bits == 16 || bits == 24))
                    ? nfl_begin(hv + 1, (size_t)(he - hv - 1), (uint32_t)rate, (uint8_t)bits)
                    : NFL_ERR_FORMAT;
@@ -782,7 +816,10 @@ static void ds_store(const uint8_t *pt, uint32_t n)
         memcpy(g_rx + off, pt, n);
     } else if (c.ds_route == DS_FLAC) {
         uint32_t skip = off < SS_AUDIO_HDR ? SS_AUDIO_HDR - off : 0;
-        if (skip < n) memcpy(nfl_chunk_buf() + (off + skip - SS_AUDIO_HDR), pt + skip, n - skip);
+        /* the decoder may have been evicted mid-record (ADAT output took the ring):
+         * the chunk buffer then points into the live output ring, so drop the data */
+        if (!nfl_active()) c.ds_route = DS_SINK;
+        else if (skip < n) memcpy(nfl_chunk_buf() + (off + skip - SS_AUDIO_HDR), pt + skip, n - skip);
     } else if (c.ds_route == DS_RING) {
         uint32_t skip = off < SS_AUDIO_HDR ? SS_AUDIO_HDR - off : 0;    /* header bytes in this block */
         if (skip < n && !net_input_stage_pcm(off + skip - SS_AUDIO_HDR, pt + skip, n - skip))
@@ -1298,8 +1335,18 @@ void *sendspin_client_mem_loan(uint32_t *bytes)
 
 void sendspin_client_mem_return(void)
 {
+    /* The borrower leaves stale bytes behind (c.enabled, c.pcb, ... overlay its own state):
+     * wipe them now so every entry point sees a clean, disabled client. */
+    memset(&g_mem, 0, sizeof(g_mem));
+    g_dirty = false;
     g_loaned = false;
 }
+
+#ifdef SLIMPROTO_TEST_HOOKS
+/* Host test only: byte range of c.enabled .. c.pcb inside the shared RAM. */
+size_t sendspin_enabled_offset(void) { return (size_t)((char *)&c.enabled - (char *)&g_mem); }
+size_t sendspin_pcb_end_offset(void) { return (size_t)((char *)(&c.pcb + 1) - (char *)&g_mem); }
+#endif
 
 void sendspin_client_start(void)
 {
@@ -1324,7 +1371,7 @@ void sendspin_client_start(void)
 
 void sendspin_client_stop(void)
 {
-    if (!c.enabled) return;
+    if (g_loaned || !c.enabled) return;
     if (c.pcb && c.phase >= PH_RUN) {
         c.need_goodbye = true;
         service_tx();
@@ -1334,12 +1381,12 @@ void sendspin_client_stop(void)
     c.state = SENDSPIN_STATE_IDLE;
 }
 
-bool sendspin_client_streaming(void) { return c.streaming; }
-uint8_t sendspin_client_state(void) { return c.state; }
+bool sendspin_client_streaming(void) { return !g_loaned && c.streaming; }
+uint8_t sendspin_client_state(void) { return g_loaned ? SENDSPIN_STATE_IDLE : c.state; }
 
 void sendspin_client_poll(void)
 {
-    if (!c.enabled) return;
+    if (g_loaned || !c.enabled) return;
     uint64_t now = time_us_64();
 
     if (nfl_take_evicted()) {                /* ADAT/TDM output claimed the FLAC arena */

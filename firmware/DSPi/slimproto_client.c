@@ -106,12 +106,13 @@
 #define SL_CONT_WAIT_US      10000000ull
 #define SL_STMT_RUN_US       1000000ull
 #define SL_STMT_IDLE_US      5000000ull
+#define SL_FMT_WAIT_US       5000000ull    /* give up waiting for a paused ring to drain before a format change */
 #define SL_STALL_US          15000000ull   /* running, ring full and not drained */
 #define SL_THRESH_CAP        24576u        /* max bytes of ring fill we wait for */
 #define SL_PCM_TMP           192u          /* byte-swap staging (stack) */
 
 #define SL_CAPS "Model=squeezelite,ModelName=" SLIMPROTO_PLAYER_NAME ",AccuratePlayPoints=1," \
-                "HasDigitalOut=1,MaxSampleRate=48000,flc,pcm"
+                "HasDigitalOut=1,MaxSampleRate=48000,"
 
 enum { PH_NONE = 0, PH_DNS, PH_TCP, PH_RUN };
 enum { SP_NONE = 0, SP_CONNECT, SP_HDR, SP_WAIT_CONT, SP_BODY, SP_DONE };
@@ -144,6 +145,10 @@ typedef struct {
     uint8_t  q_n, q_head;
     struct { uint8_t kind; char code[4]; uint32_t aux; } q[SL_QLEN];
     uint16_t resp_len;           /* bytes of header in rsp+8 queued by Q_RESP */
+    uint32_t s_unrecved;         /* stream bytes received but not yet passed to tcp_recved() */
+    uint64_t fmt_wait_us;        /* since when a format change waits for the old track to drain (0 = not waiting) */
+    bool     pend_resp, pend_stmd;   /* critical events that did not fit in the queue: retried by service_tx */
+    uint8_t  pend_dsco;          /* DSCO reason + 1 that did not fit in the queue (0 = none) */
     char     name[33];
 
     /* player */
@@ -220,9 +225,29 @@ static void sl_set_state(uint8_t st) { c.state = st; }
 /* ------------------------------------------------------------------ */
 /* outgoing queue                                                      */
 /* ------------------------------------------------------------------ */
+/* STMt (periodic or echo) is the only low-value event: the server re-asks with strm t. */
+static bool q_is_stmt(uint8_t i) { return c.q[i].kind == Q_STAT && !memcmp(c.q[i].code, "STMt", 4); }
+
+static void q_remove(uint8_t pos)                  /* pos: index counted from the head */
+{
+    for (uint8_t j = pos; j + 1 < c.q_n; j++)
+        c.q[(c.q_head + j) % SL_QLEN] = c.q[(c.q_head + j + 1) % SL_QLEN];
+    c.q_n--;
+}
+
+/* Make room for a critical event by dropping the newest queued STMt. */
+static bool q_evict_stmt(void)
+{
+    for (int j = (int)c.q_n - 1; j >= 0; j--)
+        if (q_is_stmt((uint8_t)((c.q_head + j) % SL_QLEN))) { q_remove((uint8_t)j); return true; }
+    return false;
+}
+
 static bool q_push(uint8_t kind, const char *code, uint32_t aux)
 {
-    if (c.q_n >= SL_QLEN) return false;       /* dropped: server resynchronises through strm t / STMt */
+    bool low = kind == Q_STAT && code && !memcmp(code, "STMt", 4);
+    if (c.q_n >= SL_QLEN && !low) q_evict_stmt();
+    if (c.q_n >= SL_QLEN) { SL_LOG("event queue full, dropped kind %u\n", kind); return false; }
     uint8_t i = (uint8_t)((c.q_head + c.q_n) % SL_QLEN);
     c.q[i].kind = kind;
     if (code) memcpy(c.q[i].code, code, 4); else memset(c.q[i].code, 0, 4);
@@ -230,9 +255,26 @@ static bool q_push(uint8_t kind, const char *code, uint32_t aux)
     c.q_n++;
     return true;
 }
-static void stat_evt(const char *code, uint32_t ts) { q_push(Q_STAT, code, ts); }
+static bool stat_evt(const char *code, uint32_t ts) { return q_push(Q_STAT, code, ts); }
 
-static void q_clear(void) { c.q_n = 0; c.q_head = 0; c.need_helo = false; }
+/* Periodic STMt: skip when one is already waiting or the queue is filling up (keeps slots for real events). */
+static void stmt_periodic(void)
+{
+    if (c.q_n + 4u > SL_QLEN) return;
+    for (uint8_t j = 0; j < c.q_n; j++) {
+        uint8_t i = (uint8_t)((c.q_head + j) % SL_QLEN);
+        if (q_is_stmt(i) && c.q[i].aux == 0) return;
+    }
+    stat_evt("STMt", 0);
+}
+
+/* DSCO must not get lost: latch it when the queue is full. */
+static void dsco_evt(uint8_t reason)
+{
+    if (!q_push(Q_DSCO, NULL, reason)) c.pend_dsco = (uint8_t)(reason + 1u);
+}
+
+static void q_clear(void) { c.q_n = 0; c.q_head = 0; c.need_helo = false; c.pend_resp = c.pend_stmd = false; c.pend_dsco = 0; }
 
 static bool tx_busy(void) { return c.tx_off < c.tx_end; }
 
@@ -290,7 +332,9 @@ static void build_stat(const char *ev, uint32_t server_ts)
 static void build_helo(void)
 {
     uint8_t *t = c.tx;
-    size_t cl = strlen(SL_CAPS);
+    /* flc only while the ADAT/TDM arena can be borrowed (nfl_begin_stream would refuse it) */
+    const char *codecs = nfl_supported_now() ? "flc,pcm" : "pcm";
+    size_t cl = strlen(SL_CAPS) + strlen(codecs);
     memset(t, 0, 44);
     memcpy(t, "HELO", 4);
     put32(t + 4, (uint32_t)(36 + cl));
@@ -300,7 +344,8 @@ static void build_helo(void)
     put16(t + 32, c.reconnect ? 0x4000 : 0);
     put32(t + 34, (uint32_t)(c.bytes_rx >> 32));
     put32(t + 38, (uint32_t)c.bytes_rx);
-    memcpy(t + 44, SL_CAPS, cl);
+    memcpy(t + 44, SL_CAPS, strlen(SL_CAPS));
+    memcpy(t + 44 + strlen(SL_CAPS), codecs, strlen(codecs));
     c.tx_off = 0; c.tx_end = (uint16_t)(44 + cl);
 }
 
@@ -311,6 +356,9 @@ static void service_tx(void)
         if (tx_busy()) { tx_flush(); if (tx_busy() || c.fatal) return; }
         if (c.phase < PH_RUN) return;
         if (c.need_helo) { build_helo(); c.need_helo = false; tx_flush(); continue; }
+        if (c.pend_resp && q_push(Q_RESP, NULL, 0)) c.pend_resp = false;
+        if (c.pend_stmd && stat_evt("STMd", 0)) c.pend_stmd = false;
+        if (c.pend_dsco && q_push(Q_DSCO, NULL, (uint8_t)(c.pend_dsco - 1u))) c.pend_dsco = 0;
         if (!c.q_n) return;
         uint8_t i = c.q_head;
         uint8_t kind = c.q[i].kind;
@@ -376,10 +424,17 @@ static void ring_reset(void)
 static bool apply_format(uint32_t rate, uint8_t bits)
 {
     if (!(c.fmt_set && c.ring_rate == rate && c.ring_bits == bits)) {
-        if (net_input_ring_fill_bytes() != 0) return false;
+        if (net_input_ring_fill_bytes() != 0) {
+            uint64_t now = time_us_64();
+            if (!c.fmt_wait_us) c.fmt_wait_us = now;
+            if (c.out_state == OUT_RUNNING || now - c.fmt_wait_us < SL_FMT_WAIT_US) return false;
+            SL_LOG("format change: flushing a stuck ring\n");
+            ring_reset();                       /* paused/stopped output never drains it: drop the old tail */
+        }
         net_input_set_format(rate, 2, bits);
         c.fmt_set = true; c.ring_rate = rate; c.ring_bits = bits;
     }
+    c.fmt_wait_us = 0;
     mark_push(net_input_ring_wr_pos(), rate, bits);
     c.fmt_applied = true;
     return true;
@@ -432,19 +487,17 @@ static void play_service(uint64_t now)
             if (need > start_bytes()) need = start_bytes();
             if (fill > 0 && (fill >= need || decode_done)) out_set(OUT_RUNNING);
         } else if (c.autostart == 0 && !c.sent_stml && (buffered || (c.sp == SP_DONE))) {
-            c.sent_stml = true;
-            stat_evt("STMl", 0);
+            c.sent_stml = stat_evt("STMl", 0);
         }
     }
 
     /* output ran dry */
     if (c.out_state == OUT_RUNNING && c.cur_valid && fill == 0 && !c.mark_n) {
         if (stream_open) {
-            if (!c.sent_stmo && c.sp >= SP_BODY) { c.sent_stmo = true; stat_evt("STMo", 0); }
+            if (!c.sent_stmo && c.sp >= SP_BODY) c.sent_stmo = stat_evt("STMo", 0);
         } else if (!c.sent_stmu) {
-            c.sent_stmu = true;
-            c.cur_valid = false;
-            stat_evt("STMu", 0);
+            c.sent_stmu = stat_evt("STMu", 0);
+            if (c.sent_stmu) c.cur_valid = false;
         }
     }
 
@@ -452,7 +505,7 @@ static void play_service(uint64_t now)
     uint64_t period = c.out_state == OUT_RUNNING ? SL_STMT_RUN_US : SL_STMT_IDLE_US;
     if (now - c.last_stmt_us >= period) {
         c.last_stmt_us = now;
-        stat_evt("STMt", 0);
+        stmt_periodic();
     }
 }
 
@@ -461,6 +514,7 @@ static void play_service(uint64_t now)
 /* ------------------------------------------------------------------ */
 static void q_drop_resp(void)
 {
+    c.pend_resp = false;
     for (uint8_t i = 0; i < c.q_n; i++) {
         uint8_t k = (uint8_t)((c.q_head + i) % SL_QLEN);
         if (c.q[k].kind == Q_RESP) c.q[k].kind = 0;     /* rsp buffer is about to be reused */
@@ -479,6 +533,14 @@ static void spcb_release(bool graceful)
     c.spcb = NULL;
     tcp_arg(p, NULL); tcp_recv(p, NULL); tcp_sent(p, NULL); tcp_err(p, NULL);
     if (graceful) {
+        /* tcp_close() sends RST when the receive window is not fully re-opened (lwIP
+         * tcp_close_shutdown); a close from inside the recv callback comes before the
+         * tcp_recved() of the segment being parsed, so acknowledge everything first. */
+        while (c.s_unrecved) {
+            uint16_t k = c.s_unrecved > 0xffffu ? 0xffffu : (uint16_t)c.s_unrecved;
+            tcp_recved(p, k);
+            c.s_unrecved -= k;
+        }
         if (tcp_close(p) != ERR_OK) { tcp_abort(p); c.s_abort = true; }
     } else {
         tcp_abort(p);
@@ -495,7 +557,8 @@ static void stream_reset(void)
     if (c.fmt == 'f') nfl_end();
     c.sp = SP_NONE;
     c.s_blocked = c.s_fin = c.body_complete = false;
-    c.fmt_applied = false;
+    c.fmt_applied = false; c.fmt_wait_us = 0;
+    c.s_unrecved = 0;
     c.hdr_have = 0; c.req_sent = false;
     c.carry_n = 0;
     c.det_n = c.det_off = 0;
@@ -520,6 +583,7 @@ static size_t pcm_push(const uint8_t *d, size_t n)
     const uint32_t bps = c.pcm_bps, bpf = 2u * bps;
     size_t used = 0;
 
+    if (c.carry_n >= bpf) c.carry_n = 0;               /* never trust a stale carry (carry[] holds one frame) */
     if (c.carry_n) {                                   /* finish a frame split across segments */
         uint32_t need = bpf - c.carry_n;
         uint32_t take = (uint32_t)(n < need ? n : need);
@@ -609,6 +673,7 @@ static size_t wav_feed(const uint8_t *d, size_t n)
                 c.w_dataleft = sz;
                 c.ps = PS_APPLY;
             } else {
+                if (sz > 0xfffffff0u) { stream_error(); return n; }   /* sz + pad would wrap to 0 */
                 c.w_skip = sz + (sz & 1u);
                 c.ps = PS_WAV_SKIP;
             }
@@ -723,7 +788,7 @@ static void body_end(uint8_t dsco)
     if (c.body_complete) return;
     c.body_complete = true;
     spcb_release(true);
-    q_push(Q_DSCO, NULL, dsco);
+    dsco_evt(dsco);
 }
 
 static bool hdr_value(const char *name, size_t nl, const char **val)
@@ -748,7 +813,7 @@ static bool http_headers_done(void)
     int status = 0;
     if (!strncmp(s, "HTTP/1.", 7) && s[8] == ' ') status = atoi(s + 9);
     c.resp_len = c.hdr_have;
-    q_push(Q_RESP, NULL, 0);                       /* the server sees whatever we got (also errors/redirects) */
+    if (!q_push(Q_RESP, NULL, 0)) c.pend_resp = true;   /* the server sees whatever we got (also errors/redirects) */
     if (status != 200 && status != 206) {
         SL_LOG("http status %d\n", status);
         return false;
@@ -780,8 +845,10 @@ static size_t body_feed(const uint8_t *d, size_t n)
             if (b >= '0' && b <= '9') c.cs_acc = (c.cs_acc << 4) | (uint32_t)(b - '0');
             else if (b >= 'a' && b <= 'f') c.cs_acc = (c.cs_acc << 4) | (uint32_t)(b - 'a' + 10);
             else if (b >= 'A' && b <= 'F') c.cs_acc = (c.cs_acc << 4) | (uint32_t)(b - 'A' + 10);
-            else if (b == ';') { c.cs = CS_EXT; used++; continue; }
-            else if (b == '\r') { c.cs = CS_SIZE_LF; used++; continue; }
+            else if (b == ';' || b == '\r') {
+                if (!c.cs_digits) { stream_error(); return n; }       /* empty size line is not the last chunk */
+                c.cs = b == ';' ? CS_EXT : CS_SIZE_LF; used++; continue;
+            }
             else { stream_error(); return n; }
             if (++c.cs_digits > 7) { stream_error(); return n; }
             used++;
@@ -862,11 +929,20 @@ static void stream_drain(void)
         size_t used = avail ? stream_feed((const uint8_t *)seg->payload + c.hold_off, avail) : 0;
         if (!c.hold) return;                            /* stream was reset inside (error): chain already freed */
         if (used) {
-            if (c.spcb) tcp_recved(c.spcb, (u16_t)used);
+            if (c.spcb) { tcp_recved(c.spcb, (u16_t)used); c.s_unrecved -= (uint32_t)used; }
             c.bytes_rx += used;
             c.hold_off = (uint16_t)(c.hold_off + used);
         }
-        if (c.hold_off >= seg->len) { c.hold_seg = seg->next; c.hold_off = 0; continue; }
+        if (c.hold_off >= seg->len) {
+            c.hold_seg = seg->next; c.hold_off = 0;
+            while (c.hold && c.hold != c.hold_seg) {        /* give consumed pbufs back to the (6 entry) pool now */
+                struct pbuf *h = c.hold;
+                c.hold = h->next;
+                h->next = NULL; h->tot_len = h->len;
+                pbuf_free(h);
+            }
+            continue;
+        }
         if (c.sp != SP_WAIT_CONT && !c.s_blocked) { c.s_blocked = true; c.s_block_us = time_us_64(); }
         return;                                         /* backpressure: keep the rest un-acked */
     }
@@ -893,6 +969,7 @@ static err_t on_srecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     }
     if (err != ERR_OK) { pbuf_free(p); return ERR_OK; }
     c.s_rx_us = time_us_64();
+    c.s_unrecved += p->tot_len;
     if (c.hold) pbuf_cat(c.hold, p);
     else { c.hold = p; c.hold_seg = p; c.hold_off = 0; }
     stream_drain();
@@ -905,7 +982,7 @@ static void on_serr(void *arg, err_t err)
     if (!g_c) return;
     c.spcb = NULL;                                      /* already freed by lwIP */
     if (c.sp == SP_CONNECT || c.sp == SP_HDR) {
-        q_push(Q_DSCO, NULL, DSCO_UNREACH);
+        dsco_evt(DSCO_UNREACH);
         stream_error();
     } else if (c.sp == SP_BODY || c.sp == SP_WAIT_CONT) {
         c.s_fin = true;                                 /* decode what was received, then finish */
@@ -970,7 +1047,7 @@ static void stream_begin(const uint8_t *f, uint32_t len)
     if (ipraw == 0) c.s_ip = c.srv_ip; else c.s_ip.addr = ipraw;
 
     struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) { stream_reset(); c.sp = SP_DONE; q_push(Q_DSCO, NULL, DSCO_UNREACH); stat_evt("STMn", 0); return; }
+    if (!pcb) { stream_reset(); c.sp = SP_DONE; dsco_evt(DSCO_UNREACH); stat_evt("STMn", 0); return; }
     c.spcb = pcb;
     c.sp = SP_CONNECT;
     c.sp_start_us = time_us_64();
@@ -985,7 +1062,7 @@ static void stream_begin(const uint8_t *f, uint32_t len)
     sl_set_state(SLIMPROTO_STATE_STREAMING);
     if (tcp_connect(pcb, &c.s_ip, c.s_port, on_sconnected) != ERR_OK) {
         spcb_release(false);
-        q_push(Q_DSCO, NULL, DSCO_UNREACH);
+        dsco_evt(DSCO_UNREACH);
         stream_error();
         return;
     }
@@ -998,15 +1075,15 @@ static void stream_service(uint64_t now)
     if (c.sp == SP_NONE || c.sp == SP_DONE) return;
 
     if (nfl_take_evicted()) {                           /* ADAT/TDM output reclaimed the decoder arena */
-        q_push(Q_DSCO, NULL, DSCO_REMOTE);
+        dsco_evt(DSCO_REMOTE);
         stream_error();
         return;
     }
     if (c.sp == SP_CONNECT && now - c.sp_start_us > SL_STREAM_CONN_US) {
-        q_push(Q_DSCO, NULL, DSCO_TIMEOUT); stream_error(); return;
+        dsco_evt(DSCO_TIMEOUT); stream_error(); return;
     }
     if (c.sp == SP_HDR && now - c.sp_start_us > SL_STREAM_CONN_US) {
-        q_push(Q_DSCO, NULL, DSCO_TIMEOUT); stream_error(); return;
+        dsco_evt(DSCO_TIMEOUT); stream_error(); return;
     }
     if (c.sp == SP_WAIT_CONT && now - c.sp_start_us > SL_CONT_WAIT_US) {
         c.autostart = (uint8_t)(c.autostart - 2);   /* server never answered: go on */
@@ -1031,7 +1108,7 @@ static void stream_service(uint64_t now)
 
         /* stalls */
         if (c.s_blocked && c.out_state == OUT_RUNNING && now - c.s_block_us > SL_STALL_US) {
-            q_push(Q_DSCO, NULL, DSCO_TIMEOUT); stream_error(); return;
+            dsco_evt(DSCO_TIMEOUT); stream_error(); return;
         }
         if (!c.s_blocked && !c.body_complete && now - c.s_rx_us > SL_STREAM_IDLE_US && !(c.fmt == 'f' && nfl_pending())) {
             body_end(DSCO_TIMEOUT);
@@ -1041,7 +1118,7 @@ static void stream_service(uint64_t now)
             c.sp = SP_DONE;
             if (c.fmt == 'f') nfl_end();
             c.carry_n = 0;
-            if (!c.sent_stmd) { c.sent_stmd = true; stat_evt("STMd", 0); }
+            if (!c.sent_stmd) { c.sent_stmd = true; if (!stat_evt("STMd", 0)) c.pend_stmd = true; }
             if (c.state == SLIMPROTO_STATE_STREAMING) sl_set_state(SLIMPROTO_STATE_READY);
         }
     }
@@ -1134,6 +1211,7 @@ static void on_setd(const uint8_t *f, uint32_t len)
 static void on_codc(const uint8_t *f, uint32_t len)
 {
     if (len < 9 || c.sp < SP_HDR || c.sp >= SP_DONE) return;
+    if (c.ps != PS_DETECT || c.fmt_applied) return;                   /* format is fixed once the body is decoded */
     uint8_t fmt = f[4];
     if (fmt == 'p' && c.fmt == 'p') {
         bool k = c.pcm_known; uint32_t r = c.pcm_rate; uint8_t b = c.pcm_bps; bool be = c.pcm_be;
@@ -1396,4 +1474,5 @@ void slimproto_client_poll(void)
 #ifdef SLIMPROTO_TEST_HOOKS
 /* Host test only: size of the borrowed state (must fit sendspin_client_mem_loan()). */
 size_t slimproto_state_bytes(void) { return sizeof(sl_t); }
+void *slimproto_state_ptr(void) { return g_c; }
 #endif

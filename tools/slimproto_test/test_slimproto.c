@@ -126,6 +126,9 @@ static struct tcp_pcb pcbs[MAXPCB];
 static void parse_ctl(void);
 static int live_count, created, closed_n, aborted_n, pbufs_live, serial_ctr;
 static int sndbuf_limit = 0;
+static int pbufs_max = 0;                /* high-water mark of pbufs held by the client */
+static int rst_close_n = 0;              /* tcp_close() with unacknowledged receive window: real lwIP sends RST */
+static bool sndbuf_block = false;      /* peer window closed: nothing can be written */
 
 static int live_pcbs(void) { return live_count; }
 struct tcp_pcb *tcp_new(void)
@@ -147,18 +150,18 @@ void tcp_sent(struct tcp_pcb *p, tcp_sent_fn f) { p->sent = f; }
 void tcp_err(struct tcp_pcb *p, tcp_err_fn f) { p->err = f; }
 err_t tcp_connect(struct tcp_pcb *p, const ip_addr_t *ip, uint16_t port, tcp_connected_fn f)
 { p->port = port; p->ip = ip->addr; p->conn = f; return ERR_OK; }
-u16_t tcp_sndbuf(struct tcp_pcb *p) { (void)p; return sndbuf_limit ? (u16_t)sndbuf_limit : 8192; }
+u16_t tcp_sndbuf(struct tcp_pcb *p) { (void)p; if (sndbuf_block && p->port == slim_port) return 0; return sndbuf_limit ? (u16_t)sndbuf_limit : 8192; }
 err_t tcp_write(struct tcp_pcb *p, const void *d, u16_t len, uint8_t fl)
 {
     (void)fl;
-    if (sndbuf_limit && len > sndbuf_limit) return ERR_MEM;
+    if ((sndbuf_block && p->port == slim_port) || (sndbuf_limit && len > sndbuf_limit)) return ERR_MEM;
     memcpy(p->out + p->out_len, d, len); p->out_len += len;
     return ERR_OK;
 }
 err_t tcp_output(struct tcp_pcb *p) { (void)p; return ERR_OK; }
 void tcp_recved(struct tcp_pcb *p, u16_t len) { p->recved += len; }
 static void pcb_free(struct tcp_pcb *p) { if (p->live) { p->live = false; live_count--; } }
-err_t tcp_close(struct tcp_pcb *p) { pcb_free(p); closed_n++; return ERR_OK; }
+err_t tcp_close(struct tcp_pcb *p) { if (p->injected != p->recved) rst_close_n++; pcb_free(p); closed_n++; return ERR_OK; }
 void tcp_abort(struct tcp_pcb *p) { pcb_free(p); aborted_n++; }
 void pbuf_free(struct pbuf *p)
 {
@@ -196,7 +199,7 @@ static err_t inject(struct tcp_pcb *p, const uint8_t *d, size_t len, size_t chun
         size_t n = len - off < chunk ? len - off : chunk;
         struct pbuf *b = calloc(1, sizeof(*b));
         b->payload = malloc(n); memcpy(b->payload, d + off, n);
-        b->len = (uint16_t)n; b->ref = 1; pbufs_live++;
+        b->len = (uint16_t)n; b->ref = 1; pbufs_live++; if (pbufs_live > pbufs_max) pbufs_max = pbufs_live;
         if (!head) head = b; else tail->next = b;
         tail = b; off += n;
     }
@@ -315,7 +318,7 @@ static void world_reset(void)
     for (int i = 0; i < MAXPCB; i++) { free(pcbs[i].out); memset(&pcbs[i], 0, sizeof(pcbs[i])); }
     live_count = 0; created = closed_n = aborted_n = 0;
     nmsgs = 0; msg_store_len = 0; wr = rd = 0; held = false; cur_rate = cur_bits = 0; fmt_calls = flush_calls = 0;
-    consumed_len = 0; g_vol = 77; g_mute = false; sndbuf_limit = 0; slim_port = 3483;
+    consumed_len = 0; g_vol = 77; g_mute = false; sndbuf_limit = 0; sndbuf_block = false; pbufs_max = 0; rst_close_n = 0; slim_port = 3483;
     stub_loaned = false; ctl = NULL;
 }
 
@@ -852,6 +855,180 @@ static void test_flac(void)
     stub_loaned = false;
 }
 
+static void test_caps_gating(void)
+{
+    /* dspi-60z: flc is advertised only while the ADAT/TDM arena can be borrowed */
+    world_reset();
+    stub_loaned = true;                                 /* output holds the arena at HELO time */
+    session_start();
+    parse_ctl();
+    CHECK(nmsgs >= 1 && !strcmp(msgs[0].op, "HELO"));
+    if (nmsgs >= 1) {
+        const char *caps = "Model=squeezelite,ModelName=DSPi,AccuratePlayPoints=1,HasDigitalOut=1,MaxSampleRate=48000,pcm";
+        CHECK(msgs[0].len == 36 + strlen(caps));
+        CHECK(!memcmp(msgs[0].p + 36, caps, strlen(caps)));
+    }
+    slimproto_client_stop();
+    stub_loaned = false;
+}
+
+static void test_queue_overflow(void)
+{
+    /* dspi-dxk: with the peer window closed, a flood of strm t echoes fills the
+     * 12-entry event queue.  RESP / DSCO / STMd must still get through. */
+    world_reset(); session_start();
+    uint8_t b[24];
+    sndbuf_block = true;
+    for (int i = 0; i < 30; i++) {
+        build_strm(b, 't', '0', '?', '?', '?', '?', '?', 0, 0, 0, 100 + i, 0, 0, NULL);
+        srv_frame(ctl, "strm", b, 24, 0); step(1);
+    }
+    struct tcp_pcb *sp;
+    srv_play('3', 'p', '1', '3', '2', '1', &sp);
+    CHECK(sp != NULL);
+    if (!sp) { sndbuf_block = false; return; }
+    srv_response(sp, HDR200, 100);
+    srv_cont();
+    gen_pattern(body_buf, 400, 5);
+    inject(sp, body_buf, 400, 400);
+    step(3);
+    inject_fin(sp);
+    step(3);
+    sndbuf_block = false;
+    step(10);
+    CHECK(count_op("RESP") == 1);
+    CHECK(count_op("DSCO") == 1);
+    CHECK(count_stat("STMc") == 1);
+    CHECK(count_stat("STMd") == 1);
+    slimproto_client_stop();
+    CHECK(live_pcbs() == 0 && pbufs_live == 0);
+}
+
+static void test_parse_nits(void)
+{
+    struct tcp_pcb *sp;
+    /* dspi-0e1: a chunked body with an empty chunk-size line is a protocol error, not the last chunk */
+    world_reset(); session_start();
+    srv_play('3', 'p', '1', '3', '2', '1', &sp);
+    CHECK(sp != NULL);
+    if (!sp) return;
+    const char *h = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+    srv_response(sp, h, 1000);
+    srv_cont();
+    gen_pattern(body_buf, 400, 21);
+    static uint8_t cb[1024]; size_t cl = 0;
+    cl += (size_t)sprintf((char *)cb + cl, "190\r\n"); memcpy(cb + cl, body_buf, 400); cl += 400;
+    memcpy(cb + cl, "\r\n\r\n", 4); cl += 4;                     /* empty size line */
+    cl += (size_t)sprintf((char *)cb + cl, "190\r\n"); memcpy(cb + cl, body_buf, 400); cl += 400;
+    memcpy(cb + cl, "\r\n0\r\n\r\n", 7); cl += 7;
+    inject(sp, cb, cl, cl);
+    for (int i = 0; i < 20; i++) { step(1); consume(4096); }
+    CHECK(count_stat("STMn") == 1 && count_stat("STMd") == 0);
+    slimproto_client_stop();
+
+    /* WAV chunk size 0xFFFFFFFF: size + pad overflows to 0 and used to be parsed as an empty chunk */
+    world_reset(); session_start();
+    srv_play('3', 'p', '?', '?', '?', '?', &sp);
+    CHECK(sp != NULL);
+    if (!sp) return;
+    srv_response(sp, HDR200, 1000);
+    srv_cont();
+    uint8_t wav[12 + 8 + 8 + 16 + 8];
+    size_t k = 0;
+    memcpy(wav + k, "RIFF", 4); wbe32(wav + k + 4, 0xffffffffu); memcpy(wav + k + 8, "WAVE", 4); k += 12;
+    memcpy(wav + k, "LIST", 4); wbe32(wav + k + 4, 0xffffffffu); k += 8;          /* nonsense length (byte order irrelevant: all FF) */
+    memcpy(wav + k, "fmt ", 4); wav[k + 4] = 16; wav[k + 5] = wav[k + 6] = wav[k + 7] = 0; k += 8;
+    uint8_t fm[16] = { 1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0x10, 0xB1, 2, 0, 4, 0, 16, 0 };
+    memcpy(wav + k, fm, 16); k += 16;
+    memcpy(wav + k, "data", 4); wbe32(wav + k + 4, 0xffffffffu); k += 8;
+    gen_pattern(body_buf, 800, 22);
+    static uint8_t wb[2048];
+    memcpy(wb, wav, k); memcpy(wb + k, body_buf, 800);
+    inject(sp, wb, k + 800, k + 800);
+    for (int i = 0; i < 20; i++) { step(1); consume(4096); }
+    CHECK(count_stat("STMn") == 1 && consumed_len == 0);
+    slimproto_client_stop();
+
+    /* format change while the old track sits unplayed in a paused ring: must not wait forever */
+    world_reset(); session_start();
+    srv_play('2', 'p', '1', '3', '2', '1', &sp);                   /* 44.1 kHz, no autostart: output stays held */
+    srv_response(sp, HDR200, 100);
+    srv_cont();
+    gen_pattern(body_buf, 2000, 23);
+    inject(sp, body_buf, 2000, 1000);
+    step(3);
+    inject_fin(sp);
+    step(3);
+    CHECK(held && cur_rate == 44100 && net_input_ring_fill_bytes() > 0);
+    srv_play('2', 'p', '1', '4', '2', '1', &sp);                   /* 48 kHz */
+    CHECK(sp != NULL);
+    if (sp) {
+        srv_response(sp, HDR200, 100);
+        srv_cont();
+        inject(sp, body_buf, 1000, 500);
+        step(3);
+        CHECK(cur_rate == 44100);                                   /* still waiting for the old track to drain */
+        for (int i = 0; i < 8; i++) { stub_now_us += 1000000; slimproto_client_poll(); }
+        step(3);
+        CHECK(cur_rate == 48000);                                   /* gave up waiting: old data flushed */
+    }
+    slimproto_client_stop();
+    CHECK(live_pcbs() == 0 && pbufs_live == 0);
+}
+
+static void test_jdv_close_and_pbufs(void)
+{
+    struct tcp_pcb *sp;
+    /* dspi-jdv: a graceful close from inside the receive callback must first acknowledge the
+     * whole receive window, else lwIP's tcp_close() sends RST (rcv_wnd != TCP_WND_MAX) */
+    world_reset(); session_start();
+    srv_play('2', 'p', '1', '3', '2', '1', &sp);
+    CHECK(sp != NULL);
+    if (!sp) return;
+    gen_pattern(body_buf, 4100, 31);
+    srv_response(sp, "HTTP/1.0 200 OK\r\nContent-Length: 4000\r\n\r\n", 100);
+    srv_cont();
+    inject(sp, body_buf, 4100, 1000);                       /* 100 bytes beyond Content-Length are ignored */
+    for (int i = 0; i < 30; i++) { step(1); consume(4096); }
+    CHECK(count_stat("STMd") == 1 && closed_n >= 1);
+    CHECK(rst_close_n == 0);
+    slimproto_client_stop();
+
+    /* chunked end inside a segment, trailing bytes after the last chunk */
+    world_reset(); session_start();
+    srv_play('2', 'p', '1', '3', '2', '1', &sp);
+    CHECK(sp != NULL);
+    if (!sp) return;
+    srv_response(sp, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 100);
+    srv_cont();
+    static uint8_t cb[1200]; size_t cl = 0;
+    cl += (size_t)sprintf((char *)cb + cl, "190\r\n"); memcpy(cb + cl, body_buf, 400); cl += 400;
+    memcpy(cb + cl, "\r\n0\r\n\r\n", 7); cl += 7;
+    inject(sp, cb, cl, 300);
+    for (int i = 0; i < 30; i++) { step(1); consume(4096); }
+    CHECK(count_stat("STMd") == 1 && rst_close_n == 0);
+    slimproto_client_stop();
+
+    /* pbuf pool is 6: fully consumed segments must be returned at once, not when the whole chain drains */
+    world_reset(); session_start();
+    srv_play('2', 'p', '1', '3', '2', '1', &sp);
+    CHECK(sp != NULL);
+    if (!sp) return;
+    srv_response(sp, HDR200, 100);
+    srv_cont();
+    gen_pattern(body_buf, 150000, 32);
+    uint8_t ub[24]; build_strm(ub, 'u', '0', '?', '?', '?', '?', '?', 0, 0, 0, 0, 0, 0, NULL); srv_frame(ctl, "strm", ub, 24, 0); step(2);
+    pbufs_max = 0;
+    for (size_t sent = 0, it = 0; it < 4000 && sp->live; it++) {      /* TCP_WND = 4 x 1024: never more than 4096 unacked */
+        while (sent + 1000 <= 150000 && sp->injected - sp->recved + 1000 <= 4096) { inject(sp, body_buf + sent, 1000, 1000); sent += 1000; }
+        step(1); consume(700);                               /* slow consumer: ring stays full, window keeps refilling */
+    }
+    CHECK(pbufs_max <= 5 && consumed_len > 100000);
+    printf("pbufs_max %d\n", pbufs_max);
+    slimproto_client_stop();
+    CHECK(live_pcbs() == 0 && pbufs_live == 0);
+}
+
 static void test_reconnect_and_switch(void)
 {
     world_reset(); session_start();
@@ -957,6 +1134,72 @@ static void test_protocol_switch(void)
     }
 }
 
+static void test_stale_loan_ram(void)
+{
+    extern size_t slimproto_state_bytes(void);
+    extern void *slimproto_state_ptr(void);
+    extern size_t sendspin_enabled_offset(void);
+    extern size_t sendspin_pcb_end_offset(void);
+    world_reset();
+    /* Slimproto -> run -> stop leaves its state in the shared RAM.  Fill it with stale
+     * non-zero ASCII (as a long HTTP response would): Sendspin start must still
+     * re-initialise instead of reading a stale c.enabled / c.pcb. */
+    slimproto_client_start(); step(3);
+    ctl = find_pcb(3483); CHECK(ctl != NULL); accept_pcb(ctl); step(2);
+    struct tcp_pcb *sp;
+    srv_play('2', 'p', '1', '3', '2', '1', &sp);
+    srv_response(sp, HDR200, 100);
+    uint8_t *mem = (uint8_t *)slimproto_state_ptr();
+    CHECK(mem != NULL);
+    CHECK(sendspin_pcb_end_offset() <= slimproto_state_bytes());
+    if (mem)                                                      /* Slimproto data overlaying Sendspin's c.enabled .. c.pcb */
+        memset(mem + sendspin_enabled_offset(), 'A', sendspin_pcb_end_offset() - sendspin_enabled_offset());
+    slimproto_client_stop();
+    CHECK(live_pcbs() == 0);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_IDLE);       /* stale bytes must not be reported */
+    CHECK(!sendspin_client_streaming());
+    sendspin_client_poll();                                       /* must not touch a stale pcb */
+    sendspin_client_start();
+    for (int i = 0; i < 5; i++) { stub_now_us += 1000; sendspin_client_poll(); }
+    CHECK(find_pcb(8927) != NULL && live_pcbs() == 1);
+    CHECK(sendspin_client_state() == SENDSPIN_STATE_CONNECTING);
+    sendspin_client_stop();
+    CHECK(live_pcbs() == 0);
+}
+
+static void test_codc_midstream(void)
+{
+    world_reset();
+    session_start();
+    /* 24-bit LE 44.1k PCM; the stream is cut so that 4 bytes of a 6-byte frame sit in the carry */
+    struct tcp_pcb *sp;
+    srv_play('2', 'p', '2', '3', '2', '1', &sp);
+    CHECK(sp != NULL);
+    if (!sp) return;
+    srv_response(sp, HDR200, 100);
+    const size_t n1 = 100 * 6 + 4, n2 = 200 * 6 + 2, blen = n1 + n2;
+    gen_pattern(body_buf, blen, 0x387);
+    srv_cont();                                                       /* decode starts: carry holds 4 bytes after n1 */
+    inject(sp, body_buf, n1, n1);
+    step(3);
+    /* a codc switching to 16-bit LE arrives mid-stream: it must not change the running format */
+    uint8_t cd[5] = { 'p', '1', '3', '2', '1' };
+    srv_frame(ctl, "codc", cd, 5, 0);
+    step(2);
+    inject(sp, body_buf + n1, n2, n2);
+    step(3);
+    uint8_t u[24]; build_strm(u, 'u', '0', '?', '?', '?', '?', '?', 0, 0, 0, 0, 0, 0, NULL);
+    srv_frame(ctl, "strm", u, 24, 0);
+    step(2);
+    for (int i = 0; i < 20; i++) { step(1); consume(4096); }
+    inject_fin(sp);
+    for (int i = 0; i < 20; i++) { step(1); consume(4096); }
+    CHECK(consumed_len == blen - blen % 6);                           /* whole 24-bit frames only */
+    CHECK(consumed_len <= blen && !memcmp(consumed, body_buf, consumed_len));
+    slimproto_client_stop();
+    CHECK(live_pcbs() == 0 && pbufs_live == 0);
+}
+
 int main(int argc, char **argv)
 {
     g_fix = argc > 1 ? argv[1] : NULL;
@@ -966,8 +1209,14 @@ int main(int argc, char **argv)
     test_transport();
     test_gapless();
     if (g_fix) test_flac(); else printf("FLAC end-to-end tests SKIPPED (no fixtures)\n");
+    test_caps_gating();
+    test_queue_overflow();
+    test_parse_nits();
+    test_jdv_close_and_pbufs();
     test_reconnect_and_switch();
     test_protocol_switch();
+    test_stale_loan_ram();
+    test_codc_midstream();
     printf("\n%d checks passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

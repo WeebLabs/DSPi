@@ -17,6 +17,7 @@ CASES = [
     ("f48_16",   48000, 16, 0.70, 4096),
     ("f44_24",   44100, 24, 0.40, 2048),
     ("f44_16_s", 44100, 16, 0.30, 1152),   # small blocks: many frames
+    ("m44_16",   44100, 16, 0.30, 2048, 1),  # MONO (used to check that off-format frames are dropped)
 ]
 
 
@@ -51,14 +52,14 @@ def gen(rate, bits, secs):
     return frames
 
 
-def write_wav(path, rate, bits, frames):
+def write_wav(path, rate, bits, frames, ch=2):
     with wave.open(path, "wb") as w:
-        w.setnchannels(2)
+        w.setnchannels(ch)
         w.setsampwidth(bits // 8)
         w.setframerate(rate)
         buf = bytearray()
         for l, r in frames:
-            for s in (l, r):
+            for s in ((l, r) if ch == 2 else (l,)):
                 buf += (s & ((1 << bits) - 1)).to_bytes(bits // 8, "little")
         w.writeframes(bytes(buf))
 
@@ -66,13 +67,15 @@ def write_wav(path, rate, bits, frames):
 def main():
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
-    for name, rate, bits, secs, fs in CASES:
+    for case in CASES:
+        name, rate, bits, secs, fs = case[:5]
+        ch = case[5] if len(case) > 5 else 2
         wav = os.path.join(out, name + ".wav")
         flac = os.path.join(out, name + ".flac")
-        write_wav(wav, rate, bits, gen(rate, bits, secs))
+        write_wav(wav, rate, bits, gen(rate, bits, secs), ch)
         fmt = "s16" if bits == 16 else "s32"
         cmd = ["ffmpeg", "-loglevel", "error", "-y", "-i", wav, "-c:a", "flac",
-               "-compression_level", "5", "-sample_fmt", fmt, "-frame_size", str(fs)]
+               "-ac", str(ch), "-compression_level", "5", "-sample_fmt", fmt, "-frame_size", str(fs)]
         if bits == 24:
             cmd += ["-bits_per_raw_sample", "24"]
         subprocess.check_call(cmd + [flac])

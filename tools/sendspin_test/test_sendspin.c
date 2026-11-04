@@ -1108,6 +1108,7 @@ typedef struct { size_t off, size, samples; } fx_frame_t;
 typedef struct {
     uint8_t *flac; size_t flen;
     uint8_t *pcm;  size_t plen;          /* raw interleaved PCM (WAV header stripped) */
+    uint8_t *wav;                        /* allocation that pcm points into */
     fx_frame_t fr[64]; int nfr;
     uint32_t rate; int bits, bpf;
 } fx_t;
@@ -1126,14 +1127,15 @@ static uint8_t *load_file(const char *dir, const char *name, const char *ext, si
     return b;
 }
 
-static bool fx_load(fx_t *x, const char *name, uint32_t rate, int bits)
+static bool fx_load_ch(fx_t *x, const char *name, uint32_t rate, int bits, int ch)
 {
     memset(x, 0, sizeof(*x));
-    x->rate = rate; x->bits = bits; x->bpf = 2 * bits / 8;
+    x->rate = rate; x->bits = bits; x->bpf = ch * bits / 8;
     x->flac = load_file(g_fixdir, name, ".flac", &x->flen);
     size_t wl; uint8_t *wav = load_file(g_fixdir, name, ".wav", &wl);
     size_t il; uint8_t *idx = load_file(g_fixdir, name, ".idx", &il);
-    if (!x->flac || !wav || !idx) return false;
+    x->wav = wav;
+    if (!x->flac || !wav || !idx) { free(idx); return false; }
     CHECK(!memcmp(wav + 36, "data", 4));
     x->pcm = wav + 44; x->plen = wl - 44;
     idx[il] = 0;
@@ -1148,8 +1150,18 @@ static bool fx_load(fx_t *x, const char *name, uint32_t rate, int bits)
     for (int i = 0; i < x->nfr; i++) tot += x->fr[i].samples;
     CHECK(tot * (size_t)x->bpf == x->plen);                /* index covers the whole signal */
     CHECK(x->fr[0].off > 42 && !memcmp(x->flac, "fLaC", 4));
+    free(idx);
     return true;
 }
+
+static void fx_free(fx_t *x)
+{
+    free(x->flac); free(x->wav);
+    memset(x, 0, sizeof(*x));
+}
+
+static bool fx_load(fx_t *x, const char *name, uint32_t rate, int bits)
+{ return fx_load_ch(x, name, rate, bits, 2); }
 
 static size_t fx_sample_pos(const fx_t *x, int frame)        /* PCM byte offset of a frame */
 {
@@ -1163,7 +1175,10 @@ static int64_t ts_now(void) { return (int64_t)stub_now_us + c.offset + 200000; }
 static void flac_start_json(const fx_t *x, const uint8_t *hdr, size_t hlen, int bits, uint32_t rate)
 {
     static char b64[4000], js[5000]; size_t ol = 0;
-    mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &ol, hdr, hlen); b64[ol] = 0;
+    int rc = mbedtls_base64_encode((unsigned char *)b64, sizeof(b64) - 1, &ol, hdr, hlen);
+    CHECK(rc == 0);                       /* header must fit the test buffers (and srv_json's 4 KB record) */
+    if (rc != 0) return;
+    b64[ol] = 0;
     snprintf(js, sizeof(js),
         "{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"flac\","
         "\"sample_rate\":%u,\"channels\":2,\"bit_depth\":%d,\"codec_header\":\"%s\"}}}",
@@ -1217,7 +1232,11 @@ static void test_flac(void)
     CHECK(fx_load(&b, "f48_16", 48000, 16));
     CHECK(fx_load(&s, "f44_16_s", 44100, 16));
     CHECK(fx_load(&w, "f44_24", 44100, 24));
-    if (!a.pcm || !b.pcm || !s.pcm || !w.pcm) { CHECK(0); return; }
+    if (!a.pcm || !b.pcm || !s.pcm || !w.pcm) {
+        CHECK(0);
+        fx_free(&a); fx_free(&b); fx_free(&s); fx_free(&w);
+        return;
+    }
     printf("flac fixtures: f44_16 %d frames, f48_16 %d, f44_16_s %d, f44_24 %d\n", a.nfr, b.nfr, s.nfr, w.nfr);
 
     memset(adat_mem.pre, 0xC3, 64); memset(adat_mem.post, 0xC3, 64);
@@ -1411,7 +1430,14 @@ static void test_flac(void)
         CHECK(!sendspin_client_streaming() && !nfl_active() && sendspin_client_state() == SENDSPIN_STATE_READY);
         stub_loan_ok = true;
         /* a longer header (extra metadata blocks after STREAMINFO) is fine */
-        flac_start_json(&a, a.flac, a.fr[0].off, 16, 44100);
+        {
+            static uint8_t lh[42 + 4 + 1000];                /* fLaC + STREAMINFO + one 1000-byte PADDING block */
+            memcpy(lh, a.flac, 42);
+            lh[4] &= 0x7F;                                   /* STREAMINFO is no longer the last block */
+            lh[42] = 0x81; lh[43] = 0; lh[44] = 1000 >> 8; lh[45] = 1000 & 0xFF;   /* last block, type PADDING */
+            memset(lh + 46, 0, 1000);
+            flac_start_json(&a, lh, sizeof(lh), 16, 44100);
+        }
         CHECK(sendspin_client_streaming() && nfl_active());
     }
 
@@ -1465,9 +1491,94 @@ static void test_flac(void)
     stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub); do_session(false);
     stub_loan_ok = true;
 
+    /* ---- 14. dspi-rpm: nfl_end() must clear a pending eviction flag ---- */
+    CHECK(nfl_begin_stream() == NFL_OK && stub_evict);
+    stub_loan_ok = false;
+    stub_evict();                                            /* output claims the ring while a stream is open */
+    stub_loan_ok = true;
+    nfl_end();                                               /* protocol switch / stream teardown */
+    CHECK(!nfl_take_evicted());                              /* stale flag must not kill the next stream */
+    CHECK(nfl_begin_stream() == NFL_OK && !nfl_take_evicted());
+    nfl_end();
+
+    /* ---- 15. dspi-91m: frames that differ from STREAMINFO (mono, other rate) are dropped ---- */
+    {
+        fx_t m;
+        CHECK(fx_load_ch(&m, "m44_16", 44100, 16, 1));
+        flac_start(&a);
+        uint32_t d0 = nfl_stat_frames_dropped();
+        for (int k = 0; k < m.nfr && k < 3; k++) { send_frames(&m, k, 1, -1, 0); flac_settle(3000); }
+        CHECK(pushed_len == 0);                              /* mono frame must not be played as stereo */
+        CHECK(nfl_stat_frames_dropped() > d0);
+        for (int k = 0; k < 2; k++) { send_frames(&b, k, 1, -1, 0); flac_settle(3000); }
+        CHECK(pushed_len == 0);                              /* 48 kHz frame in a 44.1 kHz stream */
+        send_frames(&a, 0, 1, -1, 0); flac_settle(3000);     /* decoder still in sync afterwards */
+        CHECK(pcm_matches(&a, 0, 1, 0) && pushed_len == a.fr[0].samples * 4u);
+        send_frames(&m, 0, 1, -1, 0); send_frames(&a, 1, 1, -1, 0); flac_settle(3000);
+        CHECK(pcm_matches(&a, 1, 1, a.fr[0].samples * 4u) &&
+              pushed_len == (a.fr[0].samples + a.fr[1].samples) * 4u);
+        srv_json("{\"type\":\"stream/end\",\"payload\":{}}");
+        fx_free(&m);
+    }
+
+    /* ---- 16. dspi-3eq: ADAT claims the ring mid-record; the rest of the record must not
+     * be written into the (now live) ring ---- */
+    {
+        static uint8_t pt[3100], ct[3200], f[3400];
+        flac_start(&a);
+        CHECK(stub_loaned && stub_evict && nfl_active());
+        uint8_t *cb = nfl_chunk_buf();
+        pt[0] = 4; memset(pt + 1, 0, 12);
+        memset(pt + 13, 0x11, 3000);
+        i_aead_enc(S.k_send, S.n_send++, NULL, 0, pt, 3013, ct);
+        size_t fn = srv_frame(f, 2, true, ct, 3013 + 16, 0);
+        inject(f, 1500, 1500);                               /* first TCP segment: record start */
+        memset(cb + 1700, 0xA5, 1200);                       /* sentinel beyond what has arrived */
+        stub_loan_ok = false;
+        stub_evict();                                        /* adat_output_resync() */
+        CHECK(!nfl_active());
+        inject(f + 1500, fn - 1500, 1500);                   /* rest arrives before the next poll */
+        int bad = 0;
+        for (int i = 1700; i < 2900; i++) if (cb[i] != 0xA5) bad++;
+        CHECK(bad == 0);
+        poll_n(1);
+        CHECK(!stub_loaned);
+        stub_now_us += 20000000; i_keygen(S.s_priv, S.s_pub); do_session(false);
+        stub_loan_ok = true;
+    }
+
+    /* ---- 17. dspi-0e1 (Sendspin part): codec_header with JSON-escaped '/' (and \u002b) ---- */
+    {
+        static char b64[200], esc[400], js[800]; size_t ol = 0, k = 0;
+        /* escape every '/' as \/ and '+' as \u002b, plus char 1 as \u00XX so the test
+         * does not depend on the header's base64 text containing those characters */
+        uint8_t h[42]; memcpy(h, a.flac, 42);
+        mbedtls_base64_encode((unsigned char *)b64, sizeof(b64), &ol, h, 42); b64[ol] = 0;
+        int nesc = 0;
+        for (size_t i = 0; i < ol; i++) {
+            if (b64[i] == '/') { esc[k++] = '\\'; esc[k++] = '/'; nesc++; }
+            else if (b64[i] == '+') { memcpy(esc + k, "\\u002b", 6); k += 6; nesc++; }
+            else if (i == 1) { k += (size_t)sprintf(esc + k, "\\u%04x", (unsigned)b64[i]); nesc++; }
+            else esc[k++] = b64[i];
+        }
+        esc[k] = 0;
+        CHECK(nesc >= 1);
+        snprintf(js, sizeof(js),
+            "{\"type\":\"stream/start\",\"payload\":{\"player\":{\"codec\":\"flac\","
+            "\"sample_rate\":%u,\"channels\":2,\"bit_depth\":%d,\"codec_header\":\"%s\"}}}",
+            (unsigned)a.rate, a.bits, esc);
+        flush_count = 0; fmt_calls = 0; pushed_len = 0; ring_fill_sim = 0; stage_hi = 0;
+        srv_json(js);
+        CHECK(sendspin_client_streaming() && nfl_active());
+        send_frames(&a, 0, 1, -1, 0); flac_settle(4000);
+        CHECK(pcm_matches(&a, 0, 1, 0));
+        srv_json("{\"type\":\"stream/end\",\"payload\":{}}");
+    }
+
     /* arena guard bytes were never touched */
     for (size_t i = 0; i < 64; i++) CHECK(adat_mem.pre[i] == 0xC3 && adat_mem.post[i] == 0xC3);
     sendspin_client_stop();
+    fx_free(&a); fx_free(&b); fx_free(&s); fx_free(&w);
     (void)op; (void)n; (void)pl;
 }
 
