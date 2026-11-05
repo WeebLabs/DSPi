@@ -161,6 +161,27 @@ void input_servo_apply(float actual_freq, int fill_slot) {
     soft_vcxo_set_ppm(ppm);
 }
 
+bool input_servo_seed(float actual_freq, uint32_t nominal_hz) {
+    if (actual_freq < 20000.0f || actual_freq > 200000.0f || nominal_hz == 0) return false;
+    uint32_t div = audio_base_divider_16_8(nominal_hz);
+    float ppm = ((actual_freq * (float)div) / (float)clock_get_hz(clk_sys) - 1.0f) * 1e6f;
+    if (ppm > 2000.0f || ppm < -2000.0f) return false;
+
+    fill_smooth_target_frames = output_ring_target_frames;
+    fill_smooth = servo_fill_target();
+    fill_integral_ppm = 0.0f;
+    soft_vcxo_set_ppm(ppm);
+    last_cmd_ppm = soft_vcxo_current_ppm();   // post-clamp, so the slew starts from the real trim
+#if DSPI_CLOCK_DIAG
+    diag_servo.actual_freq  = actual_freq;
+    diag_servo.ppm_ff       = ppm;
+    diag_servo.ppm_total    = last_cmd_ppm;
+    diag_servo.integral_ppm = 0.0f;
+    diag_servo.fill_error   = 0;
+#endif
+    return true;
+}
+
 void input_servo_reset(void) {
     fill_smooth_target_frames = output_ring_target_frames;
     fill_smooth = servo_fill_target();   // seed at target so the IIR has no start transient

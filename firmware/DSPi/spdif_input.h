@@ -40,6 +40,10 @@ void spdif_input_start(void);
 // Stop SPDIF RX hardware (called when switching away from SPDIF input)
 void spdif_input_stop(void);
 
+// Stop the receiver for a stop-and-restart of the same source (flash write, reconfig).
+// Unlike stop, the VCXO keeps its trim, so running output clocks do not step.
+void spdif_input_suspend(void);
+
 // Main-loop poll: check lock/unlock events, read FIFO, feed pipeline.
 // Returns number of stereo samples processed (0 if no data).
 uint32_t spdif_input_poll(void);
@@ -52,6 +56,14 @@ void spdif_input_discard_queued(void);
 // Clock servo: trim the soft VCXO to track the SPDIF input clock.
 // Called from main loop after spdif_input_poll().
 void spdif_input_update_clock_servo(void);
+
+// Lock-time seed. Ready once LOCKED with SERVO_LONG_MIN_US of rate window; the
+// seed then steps the VCXO to the measured rate, so call it only with outputs stopped.
+bool spdif_input_seed_ready(void);
+void spdif_input_seed_servo(void);
+
+// Measured input rate in mHz from the long window, 0 until one is valid.
+uint32_t spdif_input_measured_rate_mhz(void);
 
 // Get current SPDIF input state
 SpdifInputState spdif_input_get_state(void);
@@ -72,13 +84,11 @@ bool spdif_input_check_rate_change(void);
 
 #include "config.h"
 #if DSPI_CLOCK_DIAG
-// Rate-estimator internals for the CLKDIAG dump (no getter existed for the
-// servo statics).  which_long is true when the long-window count-based rate
-// is in use, false while the IIR bridge estimate covers the first ~1 s.
+// Rate-estimator internals for the CLKDIAG dump. which_long is true once a
+// long-window rate exists (from the lock-time seed onward).
 typedef struct {
     float    hz_long;      // count-based long-window rate estimate
-    float    hz_smooth;    // IIR bridge estimate
-    bool     which_long;   // true = hz_long applied, false = hz_smooth
+    bool     which_long;   // true = hz_long valid
     uint32_t span_ms;      // long-window anchor span in ms
 } SpdifServoDiag;
 

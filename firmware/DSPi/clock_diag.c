@@ -378,12 +378,12 @@ void clock_diag_poll(void) {
         spdif_input_get_status(&st);
         SpdifServoDiag sd;
         spdif_input_get_servo_diag(&sd);
-        fmt_hz(a, sd.hz_long); fmt_hz(b, sd.hz_smooth);
-        printf("CLKDIAG input: src=%u st=%u rate=%lu lk=%u ls=%u par=%lu fifo=%u%% hzL=%s hzS=%s use=%c span=%lums\n",
+        fmt_hz(a, sd.hz_long);
+        printf("CLKDIAG input: src=%u st=%u rate=%lu lk=%u ls=%u par=%lu fifo=%u%% hzL=%s use=%c span=%lums\n",
                (unsigned)active_input_source, (unsigned)st.state,
                (unsigned long)st.sample_rate, (unsigned)st.lock_count,
                (unsigned)st.loss_count, (unsigned long)st.parity_errors,
-               (unsigned)st.fifo_fill_pct, a, b, sd.which_long ? 'L' : 'S',
+               (unsigned)st.fifo_fill_pct, a, sd.which_long ? 'L' : '-',
                (unsigned long)sd.span_ms);
 
         g_snapshot.in_src        = active_input_source;

@@ -558,7 +558,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
     bool rx_was_running = (input_source_is_spdif(active_input_source) &&
                            spdif_input_get_state() != SPDIF_INPUT_INACTIVE);
     if (rx_was_running) {
-        spdif_input_stop();
+        spdif_input_suspend();
         spdif_prefilling = false;
     }
 
@@ -851,7 +851,7 @@ static void process_pin_changes(uint8_t mask) {
     bool rx_was_running = (input_source_is_spdif(active_input_source) &&
                            spdif_input_get_state() != SPDIF_INPUT_INACTIVE);
     if (rx_was_running) {
-        spdif_input_stop();
+        spdif_input_suspend();
         spdif_prefilling = false;
     }
 
@@ -1574,7 +1574,7 @@ static void prepare_flash_write_operation(void) {
     // cleanly here; complete_flash_write_operation_*() restarts.
     if (input_source_is_spdif(active_input_source) &&
         spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
-        spdif_input_stop();
+        spdif_input_suspend();
         spdif_prefilling = false;
         spdif_suspended_for_flash = true;
     }
@@ -1961,19 +1961,27 @@ static void input_service_handshakes(void) {
     if (input_source_is_spdif(active_input_source)) {
         SpdifInputState rx_state = spdif_input_get_state();
 
-        // Lock acquired: drain outputs, prefill, then start. The DAC mute hold
-        // armed by prepare_pipeline_reset() must complete BEFORE the drain
-        // stops the output clocks; on an instant re-lock this waits a few polls.
+        // Lock acquired: drain outputs, seed the VCXO, prefill, then start. The DAC
+        // mute hold armed by prepare_pipeline_reset() must complete BEFORE the drain
+        // stops the output clocks; the seed waits for a usable rate window.
         if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling
-                && dac_hw_mute_hold_elapsed()) {
+                && dac_hw_mute_hold_elapsed() && spdif_input_seed_ready()) {
             spdif_input_check_rate_change();
             // Disable outputs and drain consumer buffers so they can
             // be prefilled with real audio before playback begins.
             drain_and_disable_outputs();
+            // Step sys_clk to the source while every output clock is stopped.
+            spdif_input_seed_servo();
             preset_loading = false;
             preset_mute_counter = 0;
             spdif_prefilling = true;
             spdif_input_discard_queued();   // prefill starts from live input
+        } else if (rx_state == SPDIF_INPUT_LOCKED && preset_loading && !spdif_prefilling) {
+            // Muted blocks keep flowing while this waits and burn preset_mute_counter;
+            // left to expire it clears preset_loading and this branch never fires.
+            uint32_t floor_samples = samples_for_duration_ms(
+                audio_state.freq ? audio_state.freq : 48000u, PIPELINE_OP_MUTE_FLOOR_MS);
+            if (preset_mute_counter < floor_samples) preset_mute_counter = floor_samples;
         }
 
         // Prefill: wait for the slot 0 ring to reach the target fill before enabling outputs
@@ -2124,7 +2132,10 @@ static void input_service_handshakes(void) {
 // on time (INPUT_SERVO_TICK_US).
 static void input_service_servos(void) {
     if (input_source_is_spdif(active_input_source)) {
-        spdif_input_update_clock_servo();
+        // Hold while muted or prefilling: the fill term would steer on rings that
+        // are stopped or filling from empty. The lock-time seed sets the trim.
+        if (!preset_loading && !spdif_prefilling)
+            spdif_input_update_clock_servo();
     }
 #if PICO_RP2350
     else if (active_input_source == INPUT_SOURCE_ADAT) {
@@ -2868,7 +2879,7 @@ int main(void) {
                 bool suspended_spdif = false;
                 if (input_source_is_spdif(active_input_source) &&
                     spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
-                    spdif_input_stop();
+                    spdif_input_suspend();
                     spdif_prefilling = false;
                     suspended_spdif = true;
                 }
@@ -3053,7 +3064,7 @@ int main(void) {
                 bool suspended_spdif = false;
                 if (input_source_is_spdif(active_input_source) &&
                     spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
-                    spdif_input_stop();
+                    spdif_input_suspend();
                     spdif_prefilling = false;
                     suspended_spdif = true;
                 }
@@ -3197,7 +3208,7 @@ int main(void) {
             bool suspended_spdif = false;
             if (input_source_is_spdif(active_input_source) &&
                 spdif_input_get_state() != SPDIF_INPUT_INACTIVE) {
-                spdif_input_stop();
+                spdif_input_suspend();
                 spdif_prefilling = false;
                 suspended_spdif = true;
             }
@@ -3684,7 +3695,7 @@ int main(void) {
                 // producer is gone and prepare_pipeline_reset()'s settle has
                 // nothing left to fade with, so the swap would cut live audio.
                 pipeline_settle_to_silence();
-                spdif_input_stop();
+                spdif_input_suspend();
                 spdif_prefilling = false;
                 // Restart on the new pin; outputs stay muted until lock
                 // is acquired (input_service_handshakes).

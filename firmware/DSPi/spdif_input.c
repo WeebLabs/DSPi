@@ -42,24 +42,12 @@
 // ADAT input's slave clock mode); this module owns lock gating, rate limiting
 // (INPUT_SERVO_TICK_US), and the library's rate measurement.
 
-// Long-window rate measurement (mirrors the ADAT slave dual-anchor scheme in
-// adat_input.c). The library's samp_freq_actual is an 8-block moving average
-// of DMA IRQ intervals; the average telescopes to two IRQ timestamps only
-// ~32 ms apart (16 ms at 96 kHz), so a few us of IRQ latency jitter is
-// 100+ ppm of rate noise. Fed raw to the servo that slams the 16.8 output
-// dividers (1 LSB = 156 ppm at 48 kHz) across several LSBs every tick, which
-// bounces the consumer fill and frequency-modulates the outgoing SPDIF
-// carrier. Instead: count decoded blocks (exactly 192 frames each while
-// stable) against the completing IRQ's entry timestamp, via the coherent
-// {count, time} pair the library publishes (spdif_rx_get_block_ref). Anchors
-// rotate every SERVO_LONG_HALF_US, so the steady-state span is 8-16 s and
-// endpoint jitter is well under 1 ppm. The count-based rate is trusted once
-// the span reaches SERVO_LONG_MIN_US (~10 ppm noise at 1 s, still far below
-// one divider LSB); an IIR-smoothed library estimate bridges the first
-// second after lock.
-#define SERVO_LONG_MIN_US   1000000ull  // min anchor span for count-based rate
+// Rate = decoded blocks between two IRQ-timestamped anchors (spdif_rx_get_block_ref);
+// the library's samp_freq_actual carries 100+ ppm of IRQ jitter. Outputs only start
+// after spdif_input_seed_servo() has stepped the VCXO from a window of at least
+// SERVO_LONG_MIN_US, so the servo never runs on a shorter one. See "Clock Servo".
+#define SERVO_LONG_MIN_US   500000ull   // min anchor span (~10 ppm at 5 us IRQ jitter)
 #define SERVO_LONG_HALF_US  8000000ull  // anchor rotation half-period
-#define SERVO_SMOOTH_ALPHA  0.25f       // bridge-estimate IIR coefficient
 
 // ============================================================================
 // STATE
@@ -83,11 +71,12 @@ static uint8_t spdif_loss_count = 0;
 
 // Clock servo state
 static uint32_t servo_tick_last_us = 0;
+// Set by spdif_input_suspend(): the VCXO keeps its trim until the next start or stop.
+static bool     spdif_trim_held = false;
 static uint64_t servo_long_us[2];       // dual-anchor timestamps
 static uint32_t servo_long_blocks[2];   // dual-anchor decoded-block counts
 static bool     servo_long_valid = false;
 static float    servo_hz_long = 0.0f;   // count-based long-window rate
-static float    servo_hz_smooth = 0.0f; // IIR-smoothed bridge estimate
 #if DSPI_CLOCK_DIAG
 static uint32_t servo_long_span_ms = 0; // last long-window anchor span (ms)
 #endif
@@ -145,9 +134,8 @@ static void __not_in_flash_func(on_lost_stable_callback)(void) {
 // ============================================================================
 
 
-// Re-anchor the long-window rate measurement and clear the bridge estimate.
-// Call when lock is (re)acquired; the library republishes the {count, time}
-// pair every block IRQ, so the snapshot read here is at most one block old.
+// Re-anchor the long-window rate measurement. Call when lock is (re)acquired;
+// the library republishes the {count, time} pair every block IRQ.
 static void servo_meas_arm(void) {
     uint32_t blocks;
     uint64_t t_us;
@@ -156,7 +144,21 @@ static void servo_meas_arm(void) {
     servo_long_blocks[0] = servo_long_blocks[1] = blocks;
     servo_long_valid = false;
     servo_hz_long = 0.0f;
-    servo_hz_smooth = 0.0f;
+}
+
+// Rate over [anchor 0, newest block]; false until the span reaches SERVO_LONG_MIN_US.
+static bool servo_meas_long(float *hz) {
+    uint32_t blocks;
+    uint64_t t_us;
+    spdif_rx_get_block_ref(&blocks, &t_us);
+    uint64_t span = t_us - servo_long_us[0];
+#if DSPI_CLOCK_DIAG
+    servo_long_span_ms = (uint32_t)(span / 1000u);
+#endif
+    if (span < SERVO_LONG_MIN_US) return false;
+    *hz = (float)(blocks - servo_long_blocks[0]) * (float)(SPDIF_BLOCK_SIZE / 2) *
+          1e6f / (float)span;
+    return true;
 }
 
 // ============================================================================
@@ -213,29 +215,42 @@ void spdif_input_start(void) {
     spdif_rx_detected_rate = 0;
     servo_tick_last_us = time_us_32();
     servo_long_valid = false;  // real re-anchor happens at lock (servo_meas_arm)
-    input_servo_reset();  // park the VCXO and zero the fill integrator
+    // A resume after spdif_input_suspend() keeps the trim; the lock seed replaces it.
+    if (!spdif_trim_held) input_servo_reset();
+    spdif_trim_held = false;
     lock_debounced = false;
 
     printf("SPDIF RX: started on GPIO %u\n", spdif_active_data_pin);
 }
 
-void spdif_input_stop(void) {
-    if (spdif_state != SPDIF_INPUT_INACTIVE) {
-        spdif_rx_end();
-        // The library's teardown leaves the pad muxed to PIO input; reset it
-        // so a pin/input switch actually frees the old GPIO (mirrors
-        // i2s_input_stop).
-        if (spdif_active_data_pin != 0xFF) {
-            gpio_set_function(spdif_active_data_pin, GPIO_FUNC_NULL);
-            gpio_set_dir(spdif_active_data_pin, GPIO_IN);
-            spdif_active_data_pin = 0xFF;
-        }
-        input_servo_reset();   // park the VCXO; no longer tracking
-        spdif_state = SPDIF_INPUT_INACTIVE;
-        spdif_rx_detected_rate = 0;
-        input_arena_release(INPUT_ARENA_SPDIF);
-        printf("SPDIF RX: stopped\n");
+static void spdif_input_halt(void) {
+    spdif_rx_end();
+    // The library's teardown leaves the pad muxed to PIO input; reset it
+    // so a pin/input switch actually frees the old GPIO (mirrors
+    // i2s_input_stop).
+    if (spdif_active_data_pin != 0xFF) {
+        gpio_set_function(spdif_active_data_pin, GPIO_FUNC_NULL);
+        gpio_set_dir(spdif_active_data_pin, GPIO_IN);
+        spdif_active_data_pin = 0xFF;
     }
+    spdif_state = SPDIF_INPUT_INACTIVE;
+    spdif_rx_detected_rate = 0;
+    input_arena_release(INPUT_ARENA_SPDIF);
+    printf("SPDIF RX: stopped\n");
+}
+
+void spdif_input_stop(void) {
+    bool active = (spdif_state != SPDIF_INPUT_INACTIVE);
+    if (active) spdif_input_halt();
+    // Also parks a trim an earlier suspend held, so leaving S/PDIF always ends at nominal.
+    if (active || spdif_trim_held) input_servo_reset();
+    spdif_trim_held = false;
+}
+
+void spdif_input_suspend(void) {
+    if (spdif_state == SPDIF_INPUT_INACTIVE) return;
+    spdif_input_halt();
+    spdif_trim_held = true;
 }
 
 SpdifInputState spdif_input_get_state(void) {
@@ -429,16 +444,8 @@ void spdif_input_update_clock_servo(void) {
     // Rate-limit: crystal drift is slow (ppm), no need to run every iteration.
     if (!input_servo_tick_due(&servo_tick_last_us)) return;
 
-    // Bridge estimate: IIR-smoothed library measurement, only used until the
-    // long window is valid (see the SERVO_LONG_* comment for why the raw
-    // value is too jittery to apply directly).
-    float lib_hz = spdif_rx_get_samp_freq_actual();
-    if (servo_hz_smooth == 0.0f) servo_hz_smooth = lib_hz;
-    else servo_hz_smooth += SERVO_SMOOTH_ALPHA * (lib_hz - servo_hz_smooth);
-
-    // Long window: exact decoded-block count between two IRQ-timestamped
-    // anchors (dual-anchor rotation, adat_input.c pattern). A lock drop
-    // re-arms the anchors, so counts never span a library block_count reset.
+    // Dual-anchor rotation (adat_input.c pattern). A lock drop re-arms the
+    // anchors, so counts never span a library block_count reset.
     uint32_t blocks;
     uint64_t t_us;
     spdif_rx_get_block_ref(&blocks, &t_us);
@@ -448,19 +455,32 @@ void spdif_input_update_clock_servo(void) {
         servo_long_us[1] = t_us;
         servo_long_blocks[1] = blocks;
     }
-    uint64_t span = t_us - servo_long_us[0];
-#if DSPI_CLOCK_DIAG
-    servo_long_span_ms = (uint32_t)(span / 1000u);
-#endif
-    if (span >= SERVO_LONG_MIN_US) {
-        uint32_t delta_blocks = blocks - servo_long_blocks[0];
-        servo_hz_long = (float)delta_blocks * (float)(SPDIF_BLOCK_SIZE / 2) *
-                        1e6f / (float)span;
-        servo_long_valid = true;
-    }
+    float hz;
+    if (!servo_meas_long(&hz)) return;
+    servo_hz_long = hz;
+    servo_long_valid = true;
 
     // Servo terms and VCXO actuation are shared (input_servo.c).
-    input_servo_apply(servo_long_valid ? servo_hz_long : servo_hz_smooth, 0);
+    input_servo_apply(servo_hz_long, 0);
+}
+
+bool spdif_input_seed_ready(void) {
+    float hz;
+    return spdif_state == SPDIF_INPUT_LOCKED && !spdif_rx_lost_flag &&
+           spdif_rx_detected_rate != 0 && servo_meas_long(&hz);
+}
+
+void spdif_input_seed_servo(void) {
+    float hz;
+    if (!spdif_input_seed_ready() || !servo_meas_long(&hz)) return;
+    if (!input_servo_seed(hz, spdif_rx_detected_rate)) return;
+    servo_hz_long = hz;
+    servo_long_valid = true;
+}
+
+uint32_t spdif_input_measured_rate_mhz(void) {
+    if (spdif_state != SPDIF_INPUT_LOCKED || !servo_long_valid) return 0;
+    return (uint32_t)((double)servo_hz_long * 1000.0 + 0.5);
 }
 
 // ============================================================================
@@ -516,7 +536,6 @@ void spdif_input_get_channel_status(uint8_t *out_24_bytes) {
 #if DSPI_CLOCK_DIAG
 void spdif_input_get_servo_diag(SpdifServoDiag *out) {
     out->hz_long    = servo_hz_long;
-    out->hz_smooth  = servo_hz_smooth;
     out->which_long = servo_long_valid;
     out->span_ms    = servo_long_span_ms;
 }

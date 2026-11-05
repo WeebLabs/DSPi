@@ -104,13 +104,13 @@ XIP during a flash op would stall.
 
 `soft_vcxo_set_ppm(float ppm)` (RAM-resident, `DSP_TIME_CRITICAL`):
 
-1. Clamp to +-`SOFT_VCXO_MAX_PPM` (300).
+1. Clamp to +-`SOFT_VCXO_MAX_PPM` (1000, the IEC 60958-3 Level II tolerance).
 2. `freq = |ppm| * 262.144`; below 30 Hz, park (see above).
 3. Set `fbdivs[0]` = 129 (ppm > 0) or 127 (ppm < 0).
 4. Program the PWM pacer: pick the smallest power-of-two clkdiv (1..128)
    whose wrap fits 16 bits, then `wrap = round(307.2e6 / clkdiv / freq)`.
-   Reachable rate span: ~18 Hz to well past the 78.6 kHz needed at
-   300 ppm (duty at 300 ppm is ~4%, so pulses never merge).
+   Reachable rate span: ~18 Hz to well past the 262 kHz needed at
+   1000 ppm (duty at 1000 ppm is ~13%, so pulses never merge).
 
 A sign flip or rate change mid-pulse can at worst mis-sign one pulse
 (~0.004 ppm-seconds of phase); the servo loop absorbs it. Changing the
@@ -270,7 +270,7 @@ I2S RX 5-8, spare 9-10, VCXO 11-12, ADAT out 13-14, ADAT in 15.
   (XOSC), so `time_us_*` based rate measurement is independent of the
   trim; the servo loop is well-posed.
 - **clk_peri consumers** (UART) and the flash clkdiv shift by the trim
-  (< 300 ppm); orders of magnitude inside tolerance.
+  (< 1000 ppm); orders of magnitude inside tolerance.
 - **`clock_get_hz(clk_sys)` stays nominal.** This is intentional; do not
   "fix" call sites to account for the trim. The trim is a closed-loop
   correction, not a reported frequency.
@@ -283,6 +283,11 @@ I2S RX 5-8, spare 9-10, VCXO 11-12, ADAT out 13-14, ADAT in 15.
   stops servo updates but does NOT park the VCXO; sys_clk keeps the
   last-good ppm so relock re-converges from where it was instead of
   slewing from nominal. Full stop/disarm/source-switch paths do park.
+  Since 2026-11-05 every S/PDIF lock also steps the trim straight to the
+  measured rate before the outputs start (`input_servo_seed()`; see
+  "Lock-time seed" in current_architecture.md). S/PDIF stop-and-restart
+  suspends (flash writes, reconfigurations) keep the trim too, through
+  `spdif_input_suspend()`; only a switch away parks.
 - **RP2350 low-clock boot fallback** (150 MHz, only if the 307.2 MHz PLL
   setup ever failed): the VCXO stays inert and tracked inputs fall back
   to untracked (nominal outputs, buffers eventually slip). The fallback
@@ -290,10 +295,10 @@ I2S RX 5-8, spare 9-10, VCXO 11-12, ADAT out 13-14, ADAT in 15.
 
 ## 6. Limits
 
-- Authority: +-300 ppm (clamp). Sources further off-spec behave like
-  before: fill runs off and the existing overrun/underrun handling
-  applies. The mechanism itself could reach ~1000 ppm by raising the
-  clamp and max PWM rate if ever needed.
+- Authority: +-1000 ppm (clamp), the full IEC 60958-3 Level II
+  tolerance; RP2040 bench-verified linear to the clamp on 2026-11-05.
+  Sources further off-spec behave like before: fill runs off and the
+  existing overrun/underrun handling applies.
 - Resolution floor: ~0.11 ppm static (park threshold); the integrator
   dithers across it, so the average is finer.
 - 44.1 kHz still uses a fractional nominal divider (307.2e6/44100 is not

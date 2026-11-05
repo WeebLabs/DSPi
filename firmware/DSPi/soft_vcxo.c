@@ -22,8 +22,8 @@
  * needed; residual gain error is absorbed by the fill terms.
  *
  * RP2350 needs an ACCESSCTRL grant for DMA writes to PLL_SYS. RP2040 has
- * no ACCESSCTRL (APB is open to the DMA master) but fbdiv dithering there
- * is pending hardware verification.
+ * no ACCESSCTRL (APB is open to the DMA master). On both chips a pulse under
+ * ~4 ref periods counts short or not at all; keep PULSE_CYCLES well above it.
  */
 
 #include "soft_vcxo.h"
@@ -40,7 +40,9 @@
 #undef pll_sys
 #endif
 
-#define SOFT_VCXO_MAX_PPM      300.0f
+// IEC 60958-3 Level II sources may sit anywhere within +-1000 ppm (pulse
+// duty at 1000 ppm is ~13%); a narrower clamp drains the rings.
+#define SOFT_VCXO_MAX_PPM      1000.0f
 // Pulse width: one DMA-timer period, in sys cycles.
 #define SOFT_VCXO_PULSE_CYCLES 150u
 // Commands below this park instead; the servo integrator dithers across the

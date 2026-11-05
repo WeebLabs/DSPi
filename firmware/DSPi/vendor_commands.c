@@ -15,6 +15,7 @@
 #include "usb_audio.h"
 #include "audio_input.h"
 #include "spdif_input.h"
+#include "soft_vcxo.h"
 #include "clock_diag.h"
 #include "i2s_input.h"
 #include "lg_sound_sync.h"
@@ -2451,6 +2452,12 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     case 29: resp = input_delivery_worst_gap_us; break;  // worst input delivery gap, us
                     case 30: resp = usb_audio_worst_packet_gap_us; break;  // worst USB packet gap, us
                     case 31: resp = bg_over_budget_count; break;  // background steps over budget
+                    case 32: resp = spdif_input_measured_rate_mhz(); break;  // S/PDIF input rate, mHz (0 = none)
+                    case 33: {  // soft VCXO trim, ppm x100, signed
+                        float p = soft_vcxo_current_ppm() * 100.0f;
+                        resp = (uint32_t)(int32_t)(p + (p >= 0.0f ? 0.5f : -0.5f));
+                        break;
+                    }
 #ifdef DSPI_LOOP_PROF
                     default:
                         if (setup->wValue >= LOOP_PROF_BG_PACE_BASE &&

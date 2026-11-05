@@ -40,6 +40,11 @@ void input_servo_apply(float actual_freq, int fill_slot);
 // pipeline-reset path would park a locked VCXO mid-lock.
 void input_servo_reset(void);
 
+// Step the VCXO straight to the feed-forward for actual_freq against nominal_hz's
+// divider (no slew) and re-seed the fill terms. Outputs must be stopped. False, and
+// nothing changed, when the rate is implausible or outside the +-2000 ppm gate.
+bool input_servo_seed(float actual_freq, uint32_t nominal_hz);
+
 #include "config.h"
 #if DSPI_CLOCK_DIAG
 // Per-tick servo snapshot for the CLKDIAG dump.  ppm fields are the last
