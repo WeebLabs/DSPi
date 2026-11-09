@@ -2148,6 +2148,12 @@ static void input_service_servos(void) {
     }
 }
 
+void uart_out(const char *str) {
+#if DBG_UART
+ while (*str && uart_is_writable(uart0)) { uart_putc_raw(uart0, *str++); }
+#endif
+}
+
 int main(void) {
     // Initial LED on to show we're alive
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
@@ -2161,6 +2167,24 @@ int main(void) {
 
     // Enable watchdog
     watchdog_enable(8000, 1);
+
+#if DBG_UART
+    // required after clock change, pins defined in CMakeLists.txt
+    stdio_uart_init_full(uart0, DBG_UART_BAUD, DBG_UART_TX, DBG_UART_RX);
+    uint baud = uart_init(uart0, DBG_UART_BAUD); // optional, to report actual baud
+#if defined(PICO_RP2040)
+    #define CHIP_NAME "RP2040"
+#elif defined(PICO_RP2350)
+    #define CHIP_NAME "RP2350"
+#else
+    #define CHIP_NAME "Unknown"
+#endif
+    printf("\r\n" CHIP_NAME " dspi started\r\n");
+    printf("SYS clock: %.2f MHz\r\n", (double)clock_get_hz(clk_sys) / 1000000.0);
+    printf("PERI clock: %.2f MHz\r\n", (double)clock_get_hz(clk_peri) / 1000000.0);
+    printf("UART baud: %u\r\n", baud);
+    // non-blocking use: uart_out("test 123\r\n");
+#endif
 
     while (1) {
         // Update watchdog
