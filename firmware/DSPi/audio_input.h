@@ -35,6 +35,9 @@ typedef enum {
 _Static_assert(INPUT_SOURCE_MAX == INPUT_SOURCE_SPDIF2 + SPDIF_RX_NUM_INPUTS - 2,
                "optional SPDIF sources must be contiguous and end at INPUT_SOURCE_MAX");
 
+#ifdef DSPI_PLATFORM_PINS
+#include "platform_pins.h"      // the platform's default pins in place of the block below
+#else
 // Default SPDIF RX GPIO pin.  GPIO 5 sits just below the output-pin
 // neighborhood (SPDIF outs on 6-9, PDM on 10) and is unused by any
 // default output, leaving GPIO 11 free for the DAC hardware-mute
@@ -55,6 +58,7 @@ _Static_assert(INPUT_SOURCE_MAX == INPUT_SOURCE_SPDIF2 + SPDIF_RX_NUM_INPUTS - 2
 // RP2350), so enabling 4/6/8-channel input out of the box never self-collides.
 // Real boards override these per wiring.
 #define PICO_I2S_RX_PIN_DEFAULT    1
+#endif
 
 // Maximum I2S RX stereo pairs.  Each pair is one PIO state machine + one DMA
 // ring + one serial-data pin, sharing the single BCK/LRCLK.  RP2350 fans out to
@@ -312,6 +316,14 @@ bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
 // contention and an invalid GPIO can fault pio_gpio_init()).  Defined in
 // vendor_commands.c; declared here for the same reason as above.
 bool i2s_bck_pin_acceptable(uint8_t bck_pin);
+// The same check for the SPLIT-mode slave pair. A DSPI_PLATFORM_PINS build applies the platform's
+// slave-pair rule; the RP2040 and RP2350 check both pairs alike.
+#ifdef DSPI_PLATFORM_PINS
+bool i2s_bck_slave_pin_acceptable(uint8_t bck_pin);
+#define I2S_BCK_SLAVE_PIN_ACCEPTABLE(bck_pin) i2s_bck_slave_pin_acceptable(bck_pin)
+#else
+#define I2S_BCK_SLAVE_PIN_ACCEPTABLE(bck_pin) i2s_bck_pin_acceptable(bck_pin)
+#endif
 
 // True if a restored, enabled MCK may drive `pin` (no other fixed-peripheral
 // owner; MCK's own claim ignored).  Defined in vendor_commands.c.

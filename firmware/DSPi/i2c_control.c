@@ -350,10 +350,15 @@ uint8_t i2c_ctrl_validate(const I2cCtrlConfig *cfg) {
     if (!is_valid_gpio_pin(cfg->sda_pin) || !is_valid_gpio_pin(cfg->scl_pin))
         return PIN_CONFIG_INVALID_PIN;
     if (!cfg->enabled) return PIN_CONFIG_SUCCESS;
+#ifdef DSPI_PLATFORM_PINS
+    if (!dspi_platform_pin_pair_valid(DSPI_PIN_FN_I2C_CTRL, cfg->sda_pin, cfg->scl_pin))
+        return PIN_CONFIG_INVALID_PIN;
+#else
     if ((cfg->sda_pin & 1) != 0 || (cfg->scl_pin & 1) != 1)
         return PIN_CONFIG_INVALID_PIN;
     if (i2c_instance_index(cfg->sda_pin) != i2c_instance_index(cfg->scl_pin))
         return PIN_CONFIG_INVALID_PIN;
+#endif
     // The CS display holds the other hardware instance as I2C master; a
     // target config on the same instance (even on different pins) would
     // reset that block out from under it.

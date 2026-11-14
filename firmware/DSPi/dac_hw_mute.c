@@ -139,7 +139,9 @@ static inline bool unmuted_level(void) {
 /* Platform-aware GPIO range check.  Mirrors is_valid_pin() in
  * vendor_commands.c without forcing a circular include. */
 static inline bool gpio_in_range(uint8_t pin) {
-#if PICO_RP2350
+#ifdef DSPI_PLATFORM_PINS
+    return dspi_platform_pin_valid(DSPI_PIN_FN_DAC_MUTE, pin);
+#elif PICO_RP2350
     return pin <= 47;
 #else
     return pin <= 29;

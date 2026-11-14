@@ -81,7 +81,11 @@
  * spdif_rx_pin to 11), the runtime pin-conflict check in
  * dac_hw_mute_set_config() rejects with PIN_CONFIG_PIN_IN_USE and the
  * user picks another. */
+#ifdef DSPI_PLATFORM_PINS
+#include "platform_pins.h"      // supplies DAC_HW_MUTE_DEFAULT_PIN
+#else
 #define DAC_HW_MUTE_DEFAULT_PIN  11u
+#endif
 
 /* Reasonable defaults for the most common DAC chip (PCM5102A on
  * AliExpress / Adafruit breakouts) — active-low XSMT with a soft

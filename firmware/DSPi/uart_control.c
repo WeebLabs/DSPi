@@ -543,10 +543,15 @@ uint8_t uart_ctrl_validate(const UartCtrlConfig *cfg) {
     if (!cfg->enabled) return PIN_CONFIG_SUCCESS;
 
     // Enabled: pins must land on the correct UART mux and the same instance.
+#ifdef DSPI_PLATFORM_PINS
+    if (!dspi_platform_pin_pair_valid(DSPI_PIN_FN_UART_CTRL, cfg->tx_pin, cfg->rx_pin))
+        return PIN_CONFIG_INVALID_PIN;
+#else
     if ((cfg->tx_pin & 3u) != 0u) return PIN_CONFIG_INVALID_PIN;   // TX at pin%4==0
     if ((cfg->rx_pin & 3u) != 1u) return PIN_CONFIG_INVALID_PIN;   // RX at pin%4==1
     if (uart_instance_index(cfg->tx_pin) != uart_instance_index(cfg->rx_pin))
         return PIN_CONFIG_INVALID_PIN;
+#endif
     uint8_t st = ctrl_iface_check_pin(cfg->tx_pin);
     if (st == PIN_CONFIG_SUCCESS) st = ctrl_iface_check_pin(cfg->rx_pin);
     return st;

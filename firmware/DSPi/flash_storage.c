@@ -3069,12 +3069,23 @@ static bool io_pin_valid(uint8_t pin) {
     // boot the interfaces are not yet up, so stored audio pins win and a
     // colliding control config stays down (visible via 0xF9).
     if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return false;
+#ifdef DSPI_PLATFORM_PINS
+    bool valid = dspi_platform_pin_valid(DSPI_PIN_FN_ANY, pin);
+#else
     bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
 #if !PICO_RP2350
     if (pin > 28) valid = false;
 #endif
+#endif
     return valid;
 }
+
+// io_pin_valid() for one function: a DSPI_PLATFORM_PINS build adds the platform's rule for it.
+#ifdef DSPI_PLATFORM_PINS
+#define IO_PIN_VALID_FOR(fn, pin) (io_pin_valid(pin) && dspi_platform_pin_valid(fn, pin))
+#else
+#define IO_PIN_VALID_FOR(fn, pin) io_pin_valid(pin)
+#endif
 
 // Firmware IO factory defaults: all-SPDIF outputs, default pins, MCK off,
 // default SPDIF RX pin.  Matches apply_factory_defaults' former IO block.
@@ -3310,13 +3321,14 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
     };
     for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
         uint8_t pin = cfg->output_pins[i];
-        output_pins[i] = io_pin_valid(pin) ? pin : default_pins[i];
+        output_pins[i] = IO_PIN_VALID_FOR(i < NUM_SPDIF_INSTANCES ? DSPI_PIN_FN_OUTPUT : DSPI_PIN_FN_PDM, pin)
+                             ? pin : default_pins[i];
     }
 
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) output_types[i] = cfg->output_types[i];
 
     // SPDIF RX pin (reject 0 = "absent"; hot-swap if it changed while RX active).
-    if (cfg->spdif_rx_pin != 0 && io_pin_valid(cfg->spdif_rx_pin) &&
+    if (cfg->spdif_rx_pin != 0 && IO_PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, cfg->spdif_rx_pin) &&
         cfg->spdif_rx_pin != spdif_rx_pin) {
         spdif_rx_pin = cfg->spdif_rx_pin;
         if (input_source_is_spdif(active_input_source) &&
@@ -3331,7 +3343,7 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
         uint8_t dflt = spdif_rx_pin_default_for_index((uint8_t)(i + 1));
         uint8_t stored = cfg_spdif_ext_pin_get(cfg, i);
         uint8_t pin = stored ? stored : dflt;
-        if (!io_pin_valid(pin)) pin = dflt;
+        if (!IO_PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, pin)) pin = dflt;
         if (pin != spdif_rx_pin_ext[i]) {
             spdif_rx_pin_ext[i] = pin;
             if (input_source_is_spdif(active_input_source) &&
@@ -3417,7 +3429,7 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
         uint8_t p = cfg->i2s_bck_pin_slave ? cfg->i2s_bck_pin_slave : i2s_bck_pin_slave;
         bool overlap = (p == i2s_bck_pin) || (p == (uint8_t)(i2s_bck_pin + 1)) ||
                        ((uint8_t)(p + 1) == i2s_bck_pin);
-        if (i2s_bck_pin_acceptable(p) && !overlap) {
+        if (I2S_BCK_SLAVE_PIN_ACCEPTABLE(p) && !overlap) {
             i2s_bck_pin_slave = p;
         } else {
             printf("io_config: I2S slave BCK pin %u rejected (invalid/conflict); kept %u\n",

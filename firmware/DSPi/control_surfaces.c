@@ -1651,9 +1651,14 @@ static uint8_t cs_validate_display_container(const CsBinding *b, uint8_t slot) {
         return CS_STATUS_INVALID_VALUE;
     if (b->value != 0 && (b->value < 0x08 || b->value > 0x77))
         return CS_STATUS_INVALID_VALUE;
+#ifdef DSPI_PLATFORM_PINS
+    if (!dspi_platform_pin_pair_valid(DSPI_PIN_FN_CS_DISPLAY, b->gpio[0], b->gpio[1]))
+        return CS_STATUS_PIN_NOT_I2C;
+#else
     if ((b->gpio[0] & 1) != 0 || (b->gpio[1] & 1) != 1 ||
         ((b->gpio[0] >> 1) & 1) != ((b->gpio[1] >> 1) & 1))
         return CS_STATUS_PIN_NOT_I2C;
+#endif
     if (i2c_ctrl_live_instance() == (int)((b->gpio[0] >> 1) & 1))
         return CS_STATUS_I2C_IN_USE;
     for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
@@ -1777,6 +1782,9 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
         if (td->pin_class == CS_PINCLASS_ADC &&
             (pin < CS_ADC_PIN_FIRST || pin > CS_ADC_PIN_LAST))
             return CS_STATUS_PIN_NOT_ADC;
+#ifdef DSPI_PLATFORM_PINS
+        if (!dspi_platform_cs_pin_valid(b->type, pin)) return PIN_CONFIG_INVALID_PIN;
+#endif
         if (control_surfaces_owns_pin(pin)) {
             if (b->type != CS_TYPE_BUTTON) return PIN_CONFIG_PIN_IN_USE;
             uint8_t st = cs_check_button_share(b, slot);

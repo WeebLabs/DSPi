@@ -474,9 +474,14 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
 #endif
         for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
             uint8_t pin = in->pins.pins[i];
+#ifdef DSPI_PLATFORM_PINS
+            bool valid = dspi_platform_pin_valid(i < NUM_SPDIF_INSTANCES ? DSPI_PIN_FN_OUTPUT : DSPI_PIN_FN_PDM,
+                                                 pin);
+#else
             bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
 #if !PICO_RP2350
             if (pin > 28) valid = false;
+#endif
 #endif
             // Never let a pushed config steal a live control interface's
             // GPIOs: over UART/I2C that would sever the link doing the push
@@ -490,10 +495,14 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         // new GPIO without a vendor-command round trip.
         {
             uint8_t pin = in->input_config.spdif_rx_pin;
+#ifdef DSPI_PLATFORM_PINS
+            bool valid = (pin > 0) && dspi_platform_pin_valid(DSPI_PIN_FN_SPDIF_RX, pin);
+#else
             bool valid = (pin > 0) && (pin <= 29) &&
                          !(pin >= 23 && pin <= 25);
 #if !PICO_RP2350
             if (pin > 28) valid = false;
+#endif
 #endif
             if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
             if (valid && pin != spdif_rx_pin) {
@@ -512,9 +521,13 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
             uint8_t pin = in->input_config.spdif_rx_pin_ext[i];
             if (pin == 0) continue;  // absent; keep live
+#ifdef DSPI_PLATFORM_PINS
+            bool valid = dspi_platform_pin_valid(DSPI_PIN_FN_SPDIF_RX, pin);
+#else
             bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
 #if !PICO_RP2350
             if (pin > 28) valid = false;
+#endif
 #endif
             if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
             if (valid && pin != spdif_rx_pin_ext[i]) {
@@ -625,7 +638,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             bool overlap = (sp == i2s_bck_pin) ||
                            (sp == (uint8_t)(i2s_bck_pin + 1)) ||
                            ((uint8_t)(sp + 1) == i2s_bck_pin);
-            if (i2s_bck_pin_acceptable(sp) && !overlap) {
+            if (I2S_BCK_SLAVE_PIN_ACCEPTABLE(sp) && !overlap) {
                 i2s_bck_pin_slave = sp;
             } else {
                 printf("Bulk apply: I2S slave BCK pin %u rejected (invalid/conflict); kept %u\n",

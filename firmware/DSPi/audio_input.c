@@ -59,7 +59,11 @@ uint8_t spdif_rx_enabled_ext = 0;
 uint8_t i2s_rx_pin[I2S_RX_MAX_PAIRS] = {
     PICO_I2S_RX_PIN_DEFAULT,            // pair 0 = GPIO 1
 #if I2S_RX_MAX_PAIRS > 1
+#ifdef DSPI_PLATFORM_PINS
+    PICO_I2S_RX_PIN2_DEFAULT, PICO_I2S_RX_PIN3_DEFAULT, PICO_I2S_RX_PIN4_DEFAULT,
+#else
     2, 3, 4,                            // pairs 1/2/3 = GPIO 2/3/4
+#endif
 #endif
 };
 

@@ -31,6 +31,9 @@ extern volatile uint32_t nominal_feedback_10_14;
 
 #define ENABLE_SUB 1
 
+#ifdef DSPI_PLATFORM_PINS
+#include "platform_pins.h"      // the platform's default pins in place of the blocks marked below
+#else
 // S/PDIF Output Pins
 #undef PICO_AUDIO_SPDIF_PIN
 #define PICO_AUDIO_SPDIF_PIN   6    // S/PDIF 1 (Out 1-2)
@@ -49,6 +52,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 #if PICO_RP2350
 #define PICO_ADAT_PIN          12
 #endif
+#endif  // !DSPI_PLATFORM_PINS
 
 // Legacy aliases
 #define PICO_AUDIO_SPDIF_SUB_PIN PICO_PDM_PIN
@@ -643,13 +647,17 @@ typedef struct __attribute__((packed)) {
 #define CTRL_IFACE_PROTO_VERSION    1
 
 // Defaults (both interfaces ship disabled; one-time USB setup enables them)
+#ifndef DSPI_PLATFORM_PINS
 #define UART_CTRL_DEFAULT_TX_PIN    16
 #define UART_CTRL_DEFAULT_RX_PIN    17
+#endif
 #define UART_CTRL_DEFAULT_BAUD      115200u
 #define UART_CTRL_BAUD_MIN          9600u
 #define UART_CTRL_BAUD_MAX          1000000u
+#ifndef DSPI_PLATFORM_PINS
 #define I2C_CTRL_DEFAULT_SDA_PIN    18
 #define I2C_CTRL_DEFAULT_SCL_PIN    19
+#endif
 #define I2C_CTRL_DEFAULT_ADDRESS    0x42
 #define I2C_CTRL_ADDRESS_MIN        0x08
 #define I2C_CTRL_ADDRESS_MAX        0x77
@@ -710,6 +718,7 @@ typedef struct __attribute__((packed)) {
 #define OUTPUT_TYPE_SPDIF           0
 #define OUTPUT_TYPE_I2S             1
 
+#ifndef DSPI_PLATFORM_PINS
 // I2S default pins
 #define PICO_I2S_BCK_PIN            14   // BCK; LRCLK = BCK + 1 = GPIO 15
 
@@ -746,6 +755,7 @@ typedef struct __attribute__((packed)) {
 #else
 #define PICO_I2S_MCK_PIN            21
 #endif
+#endif  // !DSPI_PLATFORM_PINS
 
 // S/PDIF RX DMA channel assignments (explicit, not auto-claimed)
 #if PICO_RP2350

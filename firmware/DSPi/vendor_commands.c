@@ -370,6 +370,9 @@ static const uint8_t default_output_pins[NUM_PIN_OUTPUTS] = {
 };
 
 bool is_valid_gpio_pin(uint8_t pin) {
+#ifdef DSPI_PLATFORM_PINS
+    return dspi_platform_pin_valid(DSPI_PIN_FN_ANY, pin);
+#else
     // GPIO 16/17 are general-purpose again since the debug UART was removed;
     // when the UART control interface claims them, is_pin_in_use() covers it.
     if (pin >= 23 && pin <= 25) return false;   // Power/LED
@@ -378,7 +381,16 @@ bool is_valid_gpio_pin(uint8_t pin) {
 #else
     return pin <= 28;
 #endif
+#endif
 }
+
+// A pin's validity for one function. On the RP2040 and RP2350 this is is_valid_gpio_pin() itself;
+// a DSPI_PLATFORM_PINS build applies the platform's rule for that function (platform_pins.h).
+#ifdef DSPI_PLATFORM_PINS
+#define PIN_VALID_FOR(fn, pin) dspi_platform_pin_valid(fn, pin)
+#else
+#define PIN_VALID_FOR(fn, pin) is_valid_gpio_pin(pin)
+#endif
 
 // Pin claimed by a "fixed" peripheral other than MCK (outputs, SPDIF RX, ADAT,
 // DAC mute, control pins).  Excludes the I2S clocks and RX data pins, whose
@@ -449,7 +461,7 @@ static bool i2s_rx_pair_pin_taken(uint8_t pin, uint8_t exclude_pair, uint8_t n_p
 // The BCK/LRCLK clocks count as ALWAYS claimed, so a clash cannot first surface
 // on the switch INTO I2S.
 static uint8_t check_i2s_rx_pin(uint8_t pin, uint8_t pair, uint8_t n_pairs) {
-    if (!is_valid_gpio_pin(pin))                              return PIN_CONFIG_INVALID_PIN;
+    if (!PIN_VALID_FOR(DSPI_PIN_FN_I2S_RX, pin))              return PIN_CONFIG_INVALID_PIN;
     if (i2s_clock_pin_claimed(pin))                           return PIN_CONFIG_PIN_IN_USE;
     if (pin_used_by_fixed_peripheral(pin, 0xFF))             return PIN_CONFIG_PIN_IN_USE;
     if (i2s_rx_pair_pin_taken(pin, pair, n_pairs))           return PIN_CONFIG_PIN_IN_USE;
@@ -464,7 +476,7 @@ static uint8_t check_i2s_rx_pin(uint8_t pin, uint8_t pair, uint8_t n_pairs) {
 bool spdif_input_enable_acceptable(uint8_t idx) {
     if (idx == 0 || idx >= SPDIF_RX_NUM_INPUTS) return false;
     uint8_t pin = spdif_rx_pin_for_index(idx);
-    return is_valid_gpio_pin(pin) && !is_pin_in_use(pin, 0xFF);
+    return PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, pin) && !is_pin_in_use(pin, 0xFF);
 }
 
 // Validate a proposed I2S RX data-pin SET (the first `n_pairs` entries of
@@ -481,7 +493,7 @@ bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
     if (n_pairs > I2S_RX_MAX_PAIRS) return false;
     for (uint8_t p = 0; p < n_pairs; p++) {
         uint8_t pin = pins[p];
-        if (!is_valid_gpio_pin(pin)) return false;
+        if (!PIN_VALID_FOR(DSPI_PIN_FN_I2S_RX, pin)) return false;
         if (pin == bck_pin || pin == (uint8_t)(bck_pin + 1)) return false;
         if (bck2_pin != 0xFF &&
             (pin == bck2_pin || pin == (uint8_t)(bck2_pin + 1))) return false;
@@ -504,19 +516,31 @@ bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
 // not-yet-restored RX pins would spuriously reject a valid stored config.  No
 // "reject while an I2S output is active" guard (cf. REQ_SET_I2S_BCK_PIN): a
 // restore installs the output config and the clock pair together as one set.
+#ifdef DSPI_PLATFORM_PINS
+static bool i2s_bck_pair_acceptable(uint8_t fn, uint8_t bck_pin) {
+#else
 bool i2s_bck_pin_acceptable(uint8_t bck_pin) {
+#endif
     uint8_t lrck = (uint8_t)(bck_pin + 1);
-    if (!is_valid_gpio_pin(bck_pin) || !is_valid_gpio_pin(lrck)) return false;
+    if (!PIN_VALID_FOR(fn, bck_pin) || !PIN_VALID_FOR(fn, lrck)) return false;
     if (pin_used_by_fixed_peripheral(bck_pin, 0xFF)) return false;
     if (pin_used_by_fixed_peripheral(lrck, 0xFF)) return false;
     return true;
 }
+#ifdef DSPI_PLATFORM_PINS
+bool i2s_bck_pin_acceptable(uint8_t bck_pin) {
+    return i2s_bck_pair_acceptable(DSPI_PIN_FN_I2S_CLK, bck_pin);
+}
+bool i2s_bck_slave_pin_acceptable(uint8_t bck_pin) {
+    return i2s_bck_pair_acceptable(DSPI_PIN_FN_I2S_CLK_SLAVE, bck_pin);
+}
+#endif
 
 // True if an enabled MCK may drive `pin` in a restore: valid and owned by no
 // other fixed peripheral.  Ignores MCK's own claim so a kept pin passes.  The
 // later BCK check covers the clock pair against MCK; RX data pins check MCK.
 bool i2s_mck_pin_acceptable(uint8_t pin) {
-    return is_valid_gpio_pin(pin) && !pin_used_by_fixed_peripheral_except_mck(pin, 0xFF);
+    return PIN_VALID_FOR(DSPI_PIN_FN_MCK, pin) && !pin_used_by_fixed_peripheral_except_mck(pin, 0xFF);
 }
 
 #if PICO_RP2350
@@ -524,7 +548,7 @@ bool i2s_mck_pin_acceptable(uint8_t pin) {
 // restore paths.  ADAT is a push-pull output driver, so a collision with any
 // owned pin is driver contention; ADAT's own current claim never blocks it.
 bool adat_pin_acceptable(uint8_t pin) {
-    if (!is_valid_gpio_pin(pin)) return false;
+    if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_OUT, pin)) return false;
     if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
     return !is_pin_in_use(pin, 0xFF);
 }
@@ -535,8 +559,13 @@ bool adat_pin_acceptable(uint8_t pin) {
 // owned pin is a conflict.  The share applies only while ADAT output is enabled:
 // a disabled output's stored pin is free for anything else to take.
 bool adat_input_pin_acceptable(uint8_t pin) {
-    if (!is_valid_gpio_pin(pin)) return false;
+    if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_IN, pin)) return false;
     if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
+#ifdef DSPI_PLATFORM_PINS
+    // A platform build's ADAT input may share S/PDIF input 1's pin, its one receiver input; DSPi runs
+    // one input source at a time.
+    if (pin == spdif_rx_pin) return true;
+#endif
     return !is_pin_in_use(pin, 0xFF);
 }
 #endif
@@ -2689,7 +2718,8 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
 
                 if (out_idx >= NUM_PIN_OUTPUTS) {
                     status = PIN_CONFIG_INVALID_OUTPUT;
-                } else if (!is_valid_gpio_pin(new_pin)) {
+                } else if (!PIN_VALID_FOR(out_idx < NUM_SPDIF_INSTANCES ? DSPI_PIN_FN_OUTPUT : DSPI_PIN_FN_PDM,
+                                          new_pin)) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (is_pin_in_use(new_pin, out_idx)) {
                     status = PIN_CONFIG_PIN_IN_USE;
@@ -3426,7 +3456,8 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
 
                 if (role > 1) {
                     status = PIN_CONFIG_INVALID_OUTPUT;
-                } else if (!is_valid_gpio_pin(new_pin) || !is_valid_gpio_pin(new_pin + 1)) {
+                } else if (!PIN_VALID_FOR(role ? DSPI_PIN_FN_I2S_CLK_SLAVE : DSPI_PIN_FN_I2S_CLK, new_pin) ||
+                           !PIN_VALID_FOR(role ? DSPI_PIN_FN_I2S_CLK_SLAVE : DSPI_PIN_FN_I2S_CLK, new_pin + 1)) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (new_pin == (role ? i2s_bck_pin_slave : i2s_bck_pin)) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
@@ -3603,7 +3634,7 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 uint8_t new_pin = (uint8_t)setup->wValue;
                 uint8_t status;
                 if (new_pin == PIN_RESET_TO_DEFAULT) new_pin = PICO_I2S_MCK_PIN;
-                if (!is_valid_gpio_pin(new_pin)) {
+                if (!PIN_VALID_FOR(DSPI_PIN_FN_MCK, new_pin)) {
                     status = PIN_CONFIG_INVALID_PIN;
                 }
                 // GPOUT-capability check: MCK is now driven by hardware
@@ -3689,7 +3720,7 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     // Enabling from disabled: validate the configured ADAT pin.
                     // ADAT is not yet config-enabled, so it never blocks itself.
                     uint8_t pin = adat_output_pin();
-                    if (!is_valid_gpio_pin(pin)) {
+                    if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_OUT, pin)) {
                         status = PIN_CONFIG_INVALID_PIN;
                     } else if (is_pin_in_use(pin, 0xFF)) {
                         status = PIN_CONFIG_PIN_IN_USE;
@@ -3732,7 +3763,7 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                 // convention is a persistence-layer migration artifact, not a
                 // wire semantic here).
                 if (pin == PIN_RESET_TO_DEFAULT) pin = PICO_ADAT_PIN;
-                if (!is_valid_gpio_pin(pin)) {
+                if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_OUT, pin)) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (pin == adat_output_pin()) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
@@ -3819,7 +3850,7 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     new_pin = spdif_rx_pin_default_for_index(index);
                 if (index >= SPDIF_RX_NUM_INPUTS) {
                     status = PIN_CONFIG_INVALID_OUTPUT;   // no such SPDIF input
-                } else if (!is_valid_gpio_pin(new_pin)) {
+                } else if (!PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, new_pin)) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (new_pin == spdif_rx_pin_for_index(index)) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
@@ -3944,9 +3975,13 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                     // sharing the ADAT TX pin is the supported loopback
                     // self-test; ADAT input is not yet enabled, never self-blocks.
                     uint8_t pin = adat_input_pin;
-                    if (pin == 0xFF || !is_valid_gpio_pin(pin)) {
+                    if (pin == 0xFF || !PIN_VALID_FOR(DSPI_PIN_FN_ADAT_IN, pin)) {
                         status = PIN_CONFIG_INVALID_PIN;
-                    } else if (pin != adat_output_pin() && is_pin_in_use(pin, 0xFF)) {
+                    } else if (pin != adat_output_pin() && is_pin_in_use(pin, 0xFF)
+#ifdef DSPI_PLATFORM_PINS
+                               && pin != spdif_rx_pin     // shared receiver pin (adat_input_pin_acceptable())
+#endif
+                               ) {
                         status = PIN_CONFIG_PIN_IN_USE;
                     } else {
                         adat_input_enabled = 1;
@@ -4001,11 +4036,15 @@ static bool vendor_handle_get_body(tusb_control_request_t const *req) {
                         adat_input_pin = 0xFF;
                         status = PIN_CONFIG_SUCCESS;
                     }
-                } else if (!is_valid_gpio_pin(pin)) {
+                } else if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_IN, pin)) {
                     status = PIN_CONFIG_INVALID_PIN;
                 } else if (pin == adat_input_pin) {
                     status = PIN_CONFIG_SUCCESS;  // No-op
-                } else if (pin != adat_output_pin() && is_pin_in_use(pin, 0xFF)) {
+                } else if (pin != adat_output_pin() && is_pin_in_use(pin, 0xFF)
+#ifdef DSPI_PLATFORM_PINS
+                           && pin != spdif_rx_pin     // shared receiver pin (adat_input_pin_acceptable())
+#endif
+                           ) {
                     // New pin differs from the current ADAT input pin, so it
                     // never self-blocks; the TX-pin exception allows loopback.
                     status = PIN_CONFIG_PIN_IN_USE;
