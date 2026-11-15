@@ -140,7 +140,7 @@ When `true`, the CLK_GPOUTn block is configured (AUXSRC = clk_sys, divider loade
 
 The pin must satisfy **all** of:
 
-1. `is_valid_gpio_pin(pin)` — not GPIO 12 (UART TX), not in 23–25 (board-reserved), in range for the platform.
+1. `is_valid_gpio_pin(pin)`: not in 23-25 (board-reserved) and in range for the platform. GPIO 12 is no longer reserved (updated 2026-11-15).
 2. `GPIO_TO_GPOUT_CLOCK_HANDLE(pin, clk_sys) != clk_sys` — pin must map to a CLK_GPOUTn block on the current platform.
 3. Not in use by any other output / RX feature (`is_pin_in_use(pin, 0xFF) == false`).
 4. MCK currently disabled (`i2s_mck_enabled == false`).

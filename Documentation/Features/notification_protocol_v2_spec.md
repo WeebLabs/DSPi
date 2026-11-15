@@ -59,6 +59,8 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 
 ### 3.3 Event IDs
 
+*Last updated: 2026-11-15 (rows for 0x08-0x0B, 0x0F and 0x10 added from `notify.h` / `notify.c`).*
+
 | ID   | Name                          | Class        | Description |
 |------|-------------------------------|--------------|-------------|
 | 0x00 | `NOTIFY_EVT_IDLE`             | Idle         | Keep-alive. Host discards. Sent after 100 ms without a packet, only to keep the pipe active. |
@@ -69,9 +71,16 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x05 | `NOTIFY_EVT_INPUT_FORMAT`     | Discrete     | Active USB/pipeline input channel count changed. Payload: `uint8_t channels` (byte 4). |
 | 0x06 | reserved (coalesceable)      |              | Reserved for batched `PARAM_CHANGED` (see §10.5). |
 | 0x07 | `NOTIFY_EVT_SIGGEN_STATE`     | Discrete     | Test-signal generator start/stop/completion. See §3.8. |
+| 0x08 | `NOTIFY_EVT_ADAT_STATE`       | Discrete     | RP2350 ADAT output started or stopped. 8-byte packet `[ver=2, 0x08, 0, seq, enabled, active, pin, 0]`. See `adat_output_spec.md`. |
+| 0x09 | `NOTIFY_EVT_I2S_SLAVE_STATE`  | Discrete     | I2S slave lock state changed. 9-byte packet `[ver=2, 0x09, 0, seq, state, rate (uint32 LE)]`. See `i2s_slave_input_spec.md`. |
+| 0x0A | `NOTIFY_EVT_CS_IR_LEARN`      | Discrete     | IR learn finished. 12-byte packet `[ver=2, 0x0A, 0, seq, state, protocol, 0, 0, code (uint32 LE)]`; state 2 = done, 3 = timeout. See `control_surfaces_spec.md`. |
+| 0x0B | `NOTIFY_EVT_ADAT_INPUT_STATE` | Discrete     | RP2350 ADAT input lock state changed. 10-byte packet `[ver=2, 0x0B, 0, seq, state, rate (uint32 LE), clock_mode]`. See `adat_input_spec.md`. |
 | 0x0C | `NOTIFY_EVT_CS_AUX`           | Discrete     | Aux output state or level changed. 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot (0-15), state (0/1), level_q8 (uint16 LE, 8.8 percent), src]`. `slot` is the Control Surfaces binding slot holding the aux component; `level_q8` reads 0 on a `CS_TYPE_AUX_OUT` slot. Pushed on every `REQ_SET_CS_AUX_STATE` (0x04) and `REQ_SET_CS_AUX_LEVEL` (0x06) that changes a value, whatever the origin. `src` identifies it: `GPIO` for a bound control, `HOST_SET` for USB, `UART` / `I2C` for those transports. See `control_surfaces_aux_spec.md`. |
 | 0x0D | `NOTIFY_EVT_RTA_CONFIG`       | Discrete     | The spectrum analyser applied a configuration. See §3.9. |
-| 0x0E..0x7F | reserved (coalesceable) |              | |
+| 0x0E | reserved                      |              | Held for the AC-3/DTS work; not emitted by this firmware. |
+| 0x0F | `NOTIFY_EVT_INPUT_SOURCE_NAME`| Discrete     | An input source name was stored. 40-byte packet `[ver=2, 0x0F, 0, seq, source_id, src, 0, 0, name (32 bytes)]`; name all zero when cleared. See `input_source_names_spec.md`. |
+| 0x10 | `NOTIFY_EVT_DEVICE_NAME`      | Discrete     | The board name was stored. 40-byte packet `[ver=2, 0x10, 0, seq, 0, src, 0, 0, name (32 bytes)]`. See `device_name_spec.md`. |
+| 0x11..0x7F | reserved (coalesceable) |              | |
 | 0x80..0xFF | reserved (discrete)     |              | |
 
 > **Note on discrete IDs below 0x80.** The original design reserved `0x80..0xFF`

@@ -1,6 +1,6 @@
 # LG Sound Sync (Optical) — Specification & Implementation Plan
 
-*Status: design / pre-implementation — 2026-05-08*
+*Status: implemented (`firmware/DSPi/lg_sound_sync.c`, vendor commands 0xE6-0xE8, bulk section `lg_sound_sync`). Written 2026-05-08 as the design and implementation plan; the plan wording ("DSPi will...") is kept as written. Last updated: 2026-11-15.*
 
 ## 1. Overview
 

@@ -33,16 +33,16 @@
 ---
 
 ## System Overview
-*Last updated: 2026-07-05*
+*Last updated: 2026-11-15 (unified channel model: 17/7 EQ channels, input sources, any slot S/PDIF or I2S). Previously 2026-07-05.*
 
-DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350). It receives stereo PCM audio over USB and routes it through a configurable DSP pipeline to multiple output channels via PIO-based S/PDIF and PDM.
+DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspberry Pi Pico (RP2040) and Pico 2 (RP2350). It takes PCM audio from USB (stereo on RP2040, 2/4/6/8 channels on RP2350), S/PDIF, or I2S (plus ADAT on RP2350) and routes it through a configurable DSP pipeline to multiple output channels. Each output slot is a PIO-driven S/PDIF or I2S stereo pair, and one more output drives a PDM sub.
 
-- **RP2350:** 9 output channels — 4 S/PDIF stereo pairs (8 channels) + 1 PDM sub
-- **RP2040:** 5 output channels — 2 S/PDIF stereo pairs (4 channels) + 1 PDM sub
+- **RP2350:** 9 output channels. 4 S/PDIF or I2S stereo slots (8 channels) + 1 PDM sub, plus an optional ADAT mirror of outputs 1-8
+- **RP2040:** 5 output channels. 2 S/PDIF or I2S stereo slots (4 channels) + 1 PDM sub
 
 **Key capabilities:**
-- Per-channel input preamp (independent gain per USB input channel)
-- Parametric EQ: 11 channels on RP2350 (2 master + 9 outputs), 7 channels on RP2040 (2 master + 5 outputs)
+- Per-channel input preamp (independent gain per input channel)
+- Parametric EQ on every channel: 17 channels on RP2350 (8 inputs + 9 outputs), 7 channels on RP2040 (2 inputs + 5 outputs). Inputs are channels in their own right; there is no "master" channel (see "Channel Layout")
 - Matrix mixer with per-output gain, mute, phase invert, and delay
 - Master volume: device-side attenuation-only ceiling on all outputs (post-output-gain)
 - BS2B crossfeed for headphone listening (per output pair, selectable output-pair mask)
@@ -526,7 +526,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 ---
 
 ## USB Audio Loopback Capture (DSPI_LOOPBACK)
-*Last updated: 2026-08-02 (capture glitch counters on REQ_GET_STATUS 24/25)*
+*Last updated: 2026-11-15 (Host side: harness already captures from DSPi; release builds read 0 at GET_STATUS 24/25). Previously 2026-08-02 (capture glitch counters on REQ_GET_STATUS 24/25)*
 
 A **debug/verification-only** feature, compiled in only when the `DSPI_LOOPBACK`
 build flag is defined. It folds the standalone `~/USBrx` S/PDIF-to-USB recorder's
@@ -613,8 +613,9 @@ Two free-running counters make the two distinguishable:
 | 24 | `loopback_get_overflow_count()` | once per frame dropped with the ring full |
 | 25 | `loopback_get_underrun_count()` | once per underrun episode (the following packets take the prime branch, so an episode counts once) |
 
-Both are `#ifdef DSPI_LOOPBACK`, so indices 24/25 STALL on a release build and
-the host treats them as optional. The harness samples them either side of a
+Both are `#ifdef DSPI_LOOPBACK`, so on a release build indices 24/25 have no
+case and read 0 (`REQ_GET_STATUS` never STALLs on an unknown index); the host
+treats them as optional. The harness samples them either side of a
 capture (`_clean_capture` in `tools/dspi_test/tests/audio_loopback.py`): a
 measurement whose counters moved is retried once, and a persistent glitch is
 reported as a transport fault instead of being asserted on. With the counters
@@ -628,12 +629,15 @@ array under `DSPI_LOOPBACK`. Because both audio-control interfaces match
 scoped to `bInterfaceNumber == ITF_NUM_AUDIO_CONTROL` (gated) and the capture
 driver to `ITF_NUM_LOOPBACK_AC`, so neither hijacks the other's function.
 
-### Host side (deferred)
+### Host side
+*Last updated: 2026-11-15*
+
 The capture appears on the **DSPi composite device** (DSPi's VID/PID), not as a
-separate "USBrx" device — on macOS, one Core Audio device named "DSPi" exposes
-both output and input channels. The loopback harness
-(`tools/dspi_test/audio.py`, `USBRX_IN_NAME`) must point its input at "DSPi"; that
-host-side change is **not yet made**.
+separate "USBrx" device. On macOS, Core Audio lists two entries that share the
+name "DSPi", one with output channels and one with input channels. The loopback
+harness (`tools/dspi_test/audio.py`) captures from it: `DSPI_IN_NAME` is "DSPi"
+and direction filtering tells the two entries apart. `USBRX_IN_NAME` survives
+only as a back-compat alias.
 
 ### Files
 `loopback.c` / `loopback.h` (ring + driver + servo), `usb_descriptors.c` / `.h`
@@ -2474,7 +2478,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2484,7 +2488,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | SRAM | 264 KB | 520 KB |
 | FPU | None (software float) | Single-precision VFP |
 | DCP | N/A | Double-precision coprocessor |
-| VREG | 1.20V (for OC) | 1.10V |
+| VREG | 1.15 V (`main.c`, set before the 307.2 MHz clock) | 1.15 V (identical) |
 | UART + I2C external control | Yes (identical) | Yes (identical) |
 | Control Surfaces nouns (caps v22) | 81 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 81, all usable |
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
@@ -2494,7 +2498,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 42,772 B (2026-10-12) | 77,144 B (2026-10-12) |
 | Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
 | Output slot rings | 2 × 8 KB `.slot_rings` at the top of RAM (512 frames) | 4 × 8 KB `.slot_rings` at the top of RAM (512 frames) |
-| Output latency (ring fill target) | Option table: low latency 0.67 ms (stream inputs), 2/3/4/6/8 ms, default 4 ms; identical on both | Same; 4-8 ms clamp to 3.66 ms at 96 kHz on both |
+| Output latency (ring fill target) | Option table: 0.67 ms and 1 ms (stream inputs only; USB falls back to 2 ms), 2/3/4/6/8 ms, default 4 ms; identical on both | Same; 4-8 ms clamp to 3.66 ms at 96 kHz on both |
 | Custom XIP linker script | `memmap_dspi_rp2040_xip.ld` (+divider/int64/bit-ops IN_RAM defines) | `memmap_dspi_rp2350_xip.ld` |
 
 ### DSP Processing
@@ -2508,7 +2512,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Filter architecture | TDF2 biquad only | Hybrid SVF/biquad (SVF below Fs/7.5, TDF2 above) |
 | Biquad impl | Block-based assembly (`dsp_process_rp2040.S`) | C, per-type SVF specialization |
 | Processing mode | Block-based (two-phase) | Block-based |
-| EQ bands (master) | 10 | 10 |
+| EQ bands (input) | 10 | 10 |
 | EQ bands (output) | 10 | 10 |
 | Crossover bands (per output) | 4 | 4 |
 | Max crossover sections per band | 4 | 4 |
@@ -2538,7 +2542,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Output limiter | Per output, post-loudness, pre-delay; Q30 gains on raw Q28 levels (full scale 2^29), one hardware divide per 16-sample block, two-multiply Q15 apply; 5 outputs; 2,444 B RAM text, 1,238 B BSS | Per output, post-loudness, pre-delay; float; 9 outputs; 2,200 B RAM text, 2,126 B BSS. Both platforms: 32-sample lookahead engaged on every output only while any limiter is on (switched in silence), no overshoot, link groups with a per-packet cross-core meeting when a group spans both cores |
 | Spectrum analyser (RTA) | Q15 `int16_t` kernel; default order 9 (512 points), max 10 (1024); measured per-bin dynamic range 78 dB (`RtaCaps.dynamic_range_db` = 78); 5 tracked channels; Q27 continuous 10–200 Hz bass bank (6th-order bands) with 64-bit power; ~6.9 KB analyser BSS | Float kernel; default order 10 (1024 points), max 10 (1024); dynamic range 120 dB, limited by the wire level byte rather than arithmetic; 9 tracked channels; float continuous 10–200 Hz bass bank (6th-order bands); ~11.2 KB analyser BSS |
 | Stereo upmixer | Not available (compiled out; matrix untouched) | Stereo input only: derives C/Ls/Rs into matrix rows 2..4 (passive/adaptive/off centre; off/passive/adaptive surround). Zero-latency steering; deliberate per-row surround Haas delay |
-| EQ channels | 7 (NUM_CHANNELS) | 11 (NUM_CHANNELS) |
+| EQ channels | 7 (NUM_CHANNELS) | 17 (NUM_CHANNELS) |
 
 ### Delay Lines
 
@@ -3065,7 +3069,7 @@ Any RP2040 code that compares a sample-derived level with an absolute dBFS value
 Until 2026-10-23 every row except the output limiter assumed 2^28, so each was 6 dB off on RP2040. The meters read hot, clip flags tripped at -6 dBFS and the signal generator played 6 dB low. The leveller, subharm ceiling, tube drive and psybass clip point all acted 6 dB away from their set levels. The RP2350 was the reference and is unchanged, except for the PDM sub.
 
 ## Channel Metering
-*Last updated: 2026-10-23*
+*Last updated: 2026-11-15 (peak array table follows the unified channel model). Previously 2026-10-23.*
 
 Full peak metering for all input and output channels. Peak values are `uint16_t` in Q15 format (0–32767 maps to 0.0–1.0 full scale). Per-channel clip detection via sticky `clip_flags` bitmask.
 
@@ -3073,19 +3077,22 @@ Full peak metering for all input and output channels. Peak values are `uint16_t`
 
 ### Peak Array Layout (`global_status.peaks[NUM_CHANNELS]`)
 
-| Index | RP2350 (11 channels) | RP2040 (7 channels) |
+| Index | RP2350 (17 channels) | RP2040 (7 channels) |
 |-------|----------------------|---------------------|
-| 0 | Input L | Input L |
-| 1 | Input R | Input R |
-| 2 | SPDIF 1 L | SPDIF 1 L |
-| 3 | SPDIF 1 R | SPDIF 1 R |
-| 4 | SPDIF 2 L | SPDIF 2 L |
-| 5 | SPDIF 2 R | SPDIF 2 R |
-| 6 | SPDIF 3 L | PDM Sub |
-| 7 | SPDIF 3 R | — |
-| 8 | SPDIF 4 L | — |
-| 9 | SPDIF 4 R | — |
-| 10 | PDM Sub | — |
+| 0 | Input 1 (L) | Input 1 (L) |
+| 1 | Input 2 (R) | Input 2 (R) |
+| 2 to 7 | Inputs 3 to 8 | SPDIF 1 L, SPDIF 1 R, SPDIF 2 L, SPDIF 2 R, PDM Sub (2 to 6) |
+| 8 | SPDIF 1 L | |
+| 9 | SPDIF 1 R | |
+| 10 | SPDIF 2 L | |
+| 11 | SPDIF 2 R | |
+| 12 | SPDIF 3 L | |
+| 13 | SPDIF 3 R | |
+| 14 | SPDIF 4 L | |
+| 15 | SPDIF 4 R | |
+| 16 | PDM Sub | |
+
+Indices follow the channel index (see "Channel Layout"): inputs first, then outputs from `CH_OUT_1`. On RP2350 the input peaks beyond the active input count read zero, except that the stereo upmixer, when running, meters its derived C/Ls/Rs rows at indices 2 to 4.
 
 ### Dual-Core Peak Tracking
 
@@ -4443,11 +4450,11 @@ lands on a hot path and the audio path is untouched.
 | REQ_GET_I2S_CLOCK_PIN_MODE | 0xFF | IN | Get live I2S clock-pin mode (returns uint8_t: 0 = unified, 1 = split) |
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-09-22 (wire V32: output limiter section appended at 6028, total 6136; 2026-09-20: wire V31 tube section revised in place: `xfmr_damping` / `xfmr_res_hz` plus a reserved float, still 48 bytes and total 6028; 2026-09-18 wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
+*Last updated: 2026-11-15 (wire-format paragraph: crossover section is 1088 bytes at 17 channels, arrays sized for 17 channels, SET accepts only V32). Previously 2026-09-22 (wire V32: output limiter section appended at 6028, total 6136; 2026-09-20: wire V31 tube section revised in place: `xfmr_damping` / `xfmr_res_hz` plus a reserved float, still 48 bytes and total 6028; 2026-09-18 wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
 
 Transfers the complete DSP state in a single USB control transfer (3664 bytes at V11/V12), replacing dozens of individual vendor requests.
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 32, total 6136 bytes); packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), user volume/mute (`WireUserVolume`, 16 bytes), DAC hardware mute (`WireDacHwMute`, 16 bytes, V10+), and **crossover bands** (`WireCrossoverConfig`, 704 bytes = 11 × 4 × `WireBandParams`, V11+). V12 claims two reserved bytes inside `WireInputConfig` for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000); V12 payloads are byte-identical in size to V11. All arrays sized at platform maximums (RP2350: 11 channels, 9 outputs, 5 pins, 12 PEQ bands, 4 crossover bands per channel). Unused entries zero-padded; for crossover, master rows (channel < `CH_OUT_1`) are zeroed on collect and skipped on apply. **V20** repurposes the `WireCrossfeedParams` reserved byte (offset 3) as `output_pair_mask` (bit p = crossfeed on output pair p); struct sizes are unchanged. **V22** carries the Linkwitz-Transform target `Q` in the EQ `WireBandParams.reserved[2]` bytes (`uint16` LE, `Q*512`; zero for non-LT types), so struct sizes stay unchanged. (V21 claimed one `WireInputConfig` reserved byte for the I2S clock master/slave mode, also size-neutral.) **V23** tail-appends the 24-byte `WirePsybassParams` (psychoacoustic bass: `enabled` + `output_mask` + five floats), bringing the total to 5900 bytes. **V24** claims three `WireInputConfig` reserved bytes for the ADAT input (`adat_input_pin`, `adat_input_enabled_p1`, `adat_clock_mode_p1`, each 0 = absent/keep-live); struct sizes and the 5900-byte total are unchanged. **V25** tail-appends the 44-byte `WireUpmixParams` (RP2350 stereo upmixer: enabled + centre/surround modes + reserved + ten floats; layout-identical to `UpmixConfigPacket`), bringing the total to 5944 bytes; the section is zeroed on collect and ignored on apply on RP2040. **V28** widens `WireInputConfig.spdif_rx_pin_ext` from 2 to 3 entries (SPDIF input 4), consuming that section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and the 5944-byte total and every later section offset are unchanged. The input-config section now has no reserved bytes left. **V29** tail-appends the 16-byte `WireSubharmParams` (subharmonic synthesizer: `enabled` + `reserved0` + `output_mask` + `low_db`/`high_db`/`boost_db`) at offset 5944, bringing the total to 5960 bytes. **V30** grows that section to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, bringing the total to 5980 bytes; the section offset stays 5944 and `solo` is deliberately absent (runtime-only). **V31** tail-appends the 48-byte `WireTubeParams` (tube preamp: `enabled` + `tube_type` + `rectifier` + `xfmr_enabled` + `output_mask` + two reserved bytes + nine floats + one reserved float) at offset 5980, bringing the total to 6028 bytes. The two output-stage floats are `xfmr_damping` and `xfmr_res_hz`; the layout was revised in place before release, so there is only one V31. Apply clamps `tube_type` and `rectifier` and copies the character fields verbatim, never running the tube-type row lookup, which would overwrite a saved Custom voicing. **V32** tail-appends the 108-byte `WireLimiterParams` (output limiter: nine 12-byte per-output records of `enabled`, `link_group`, two reserved bytes, `threshold_db`, `release_ms`) at offset 6028, bringing the total to 6136 bytes.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 32, total 6136 bytes); packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), user volume/mute (`WireUserVolume`, 16 bytes), DAC hardware mute (`WireDacHwMute`, 16 bytes, V10+), and **crossover bands** (`WireCrossoverConfig`, V11+; 1088 bytes = 17 × 4 × `WireBandParams` since the V16 unified channel model). V12 claims two reserved bytes inside `WireInputConfig` for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000); V12 payloads are byte-identical in size to V11. All arrays sized at platform maximums (RP2350: 17 channels, 8 inputs, 9 outputs, 5 pins, 12 PEQ bands, 4 crossover bands per channel), indexed by firmware channel index, so RP2040 uses rows 0-6. Unused entries zero-padded; for crossover, input rows (channel < `CH_OUT_1`) are zeroed on collect and skipped on apply. SET accepts only the current `format_version` at exactly 6136 bytes with matching platform and channel counts; anything else is dropped silently. **V20** repurposes the `WireCrossfeedParams` reserved byte (offset 3) as `output_pair_mask` (bit p = crossfeed on output pair p); struct sizes are unchanged. **V22** carries the Linkwitz-Transform target `Q` in the EQ `WireBandParams.reserved[2]` bytes (`uint16` LE, `Q*512`; zero for non-LT types), so struct sizes stay unchanged. (V21 claimed one `WireInputConfig` reserved byte for the I2S clock master/slave mode, also size-neutral.) **V23** tail-appends the 24-byte `WirePsybassParams` (psychoacoustic bass: `enabled` + `output_mask` + five floats), bringing the total to 5900 bytes. **V24** claims three `WireInputConfig` reserved bytes for the ADAT input (`adat_input_pin`, `adat_input_enabled_p1`, `adat_clock_mode_p1`, each 0 = absent/keep-live); struct sizes and the 5900-byte total are unchanged. **V25** tail-appends the 44-byte `WireUpmixParams` (RP2350 stereo upmixer: enabled + centre/surround modes + reserved + ten floats; layout-identical to `UpmixConfigPacket`), bringing the total to 5944 bytes; the section is zeroed on collect and ignored on apply on RP2040. **V28** widens `WireInputConfig.spdif_rx_pin_ext` from 2 to 3 entries (SPDIF input 4), consuming that section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and the 5944-byte total and every later section offset are unchanged. The input-config section now has no reserved bytes left. **V29** tail-appends the 16-byte `WireSubharmParams` (subharmonic synthesizer: `enabled` + `reserved0` + `output_mask` + `low_db`/`high_db`/`boost_db`) at offset 5944, bringing the total to 5960 bytes. **V30** grows that section to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, bringing the total to 5980 bytes; the section offset stays 5944 and `solo` is deliberately absent (runtime-only). **V31** tail-appends the 48-byte `WireTubeParams` (tube preamp: `enabled` + `tube_type` + `rectifier` + `xfmr_enabled` + `output_mask` + two reserved bytes + nine floats + one reserved float) at offset 5980, bringing the total to 6028 bytes. The two output-stage floats are `xfmr_damping` and `xfmr_res_hz`; the layout was revised in place before release, so there is only one V31. Apply clamps `tube_type` and `rectifier` and copies the character fields verbatim, never running the tube-type row lookup, which would overwrite a saved Custom voicing. **V32** tail-appends the 108-byte `WireLimiterParams` (output limiter: nine 12-byte per-output records of `enabled`, `link_group`, two reserved bytes, `threshold_db`, `release_ms`) at offset 6028, bringing the total to 6136 bytes.
 
 **Per-version size anchors** live in `bulk_params.h` (`WIRE_BULK_PARAMS_V{N}_SIZE`, N=2..12). Each legacy-section apply gate inside `bulk_params_apply()` compares `payload_length` against its own version's anchor, NOT against `sizeof(WireBulkParams)`. Without this discipline, growing the struct would silently lock older payloads out of the very tail sections they own (e.g. a V10 payload would stop applying its DAC-mute section the moment V11 was added). V<11 payloads leave crossover state untouched on apply; V<12 payloads leave the I2S input pin/rate untouched.
 
