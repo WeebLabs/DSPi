@@ -220,6 +220,11 @@ target_compile_definitions(DSPi PRIVATE
     # RP2040 mem_ops ROM shims (memset/memcpy wraps) go to RAM; called from core 1
     # and per-block paths. No effect on RP2350 (compiler mem ops; see linker script).
     PICO_MEM_IN_RAM=1
+
+    DBG_UART=1
+    DBG_UART_TX=28
+    DBG_UART_RX=29
+    DBG_UART_BAUD=115200
 )
 
 target_link_libraries(DSPi
@@ -235,6 +240,7 @@ target_link_libraries(DSPi
     pico_audio_i2s_multi
     pico_spdif_rx
     tinyusb_device
+    pico_stdio_uart
 )
 
 # Debug UART removed; GPIO 16/17 are freed for the UART control interface.
