@@ -96,7 +96,7 @@ static const tusb_desc_device_t device_descriptor = {
 // 175  CS iso data EP                                  (7 bytes)
 // 182  Std iso feedback EP IN 0x82                     (9 bytes)
 // 191  Vendor std interface (itf 2, class 0xFF, 1 EP)  (9 bytes)
-// 200  Std interrupt EP IN 0x83 (notifications, 4 ms)  (7 bytes)
+// 200  Std bulk EP IN 0x83 (notifications)             (7 bytes)
 // 207  total
 //
 // The offsets above are the RP2040 (stereo-only) layout.  On RP2350 the
@@ -442,7 +442,7 @@ const uint8_t usb_config_descriptor[] = {
     TUSB_DESC_INTERFACE,
     ITF_NUM_VENDOR,                     // bInterfaceNumber (= 2)
     0x00,                               // bAlternateSetting
-    0x01,                               // bNumEndpoints (interrupt IN)
+    0x01,                               // bNumEndpoints (bulk IN 0x83)
     0xFF,                               // bInterfaceClass (vendor specific)
     0x00,                               // bInterfaceSubClass
     0x00,                               // bInterfaceProtocol

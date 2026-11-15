@@ -159,7 +159,7 @@ Enable flow:
 3. Wait for `NOTIFY_EVT_ADAT_STATE` with `active=1` (or poll 0xCE). If
    `rate_ok=0` the device is above 48 kHz; the stream starts when the rate
    drops, with another 0x08 event.
-4. Persist: in WITH_PRESET mode save the preset (0x91); in INDEPENDENT mode
+4. Persist: in WITH_PRESET mode save the preset (0x90, `PRESET_SAVE`); in INDEPENDENT mode
    send `REQ_SAVE_OUTPUT_CONFIG` (0x52).
 
 Rate handling: apps do not need to manage the 48 kHz restriction. Selecting

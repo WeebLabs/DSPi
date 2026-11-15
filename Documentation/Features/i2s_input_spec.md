@@ -92,7 +92,7 @@ All commands are EP0 control transfers on the vendor interface (wIndex = 2), sam
 | `0x02` | `PIN_CONFIG_PIN_IN_USE` | GPIO already used by an output, clock, RX pin or DAC mute |
 | `0x04` | `PIN_CONFIG_OUTPUT_ACTIVE` | (BCK only) rejected because an output slot is I2S |
 
-Reserved GPIOs (always rejected): 12 (UART TX), 23..25 (power/LED), above 28 (RP2040) / 29 (RP2350). The in-use check covers: all output data pins, BCK/LRCLK whenever any output slot is I2S **or I2S is the active input**, the MCK pin when MCK is enabled, the SPDIF RX pin, the I2S RX pin, and DAC hardware-mute pins.
+Reserved GPIOs (always rejected): 23..25 (power/LED), above 28 (RP2040) / 29 (RP2350). GPIO 12 is an ordinary pin (it was reserved for the debug UART TX until that UART was removed; updated 2026-11-15). The in-use check covers: all output data pins, BCK/LRCLK whenever any output slot is I2S **or I2S is the active input**, the MCK pin when MCK is enabled, the SPDIF RX pin, the I2S RX pin, and DAC hardware-mute pins.
 
 ### 3.3 REQ_SET_INPUT_SOURCE (0xE0), updated
 
