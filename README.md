@@ -774,6 +774,24 @@ make
 ```
 *Output:* `DSPi/DSPi.uf2`
 
+**Option C: Build for Olimex RP2350-PICO2-XXL**
+
+```bash
+# From the repository root:
+cmake -S firmware -B firmware/build-olimex-rp2350 \
+  -DPICO_BOARD=olimex_rp2350_xxl \
+  -DPICO_PLATFORM=rp2350-arm-s \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build firmware/build-olimex-rp2350 --parallel 2
+```
+
+*Output:* `firmware/build-olimex-rp2350/DSPi/DSPi.uf2`
+
+Reserves PSRAM chip-select GPIO 8; uses GPIO 26 for S/PDIF output 3 and
+GPIO 28/29 for secondary I2S slave clocks.
+
+Keep the microSD slot empty. Potentiometers use GPIO 40–42.
+
 ### 4. Flash the Device
 1.  Hold the **BOOTSEL** button on your board while plugging it in.
 2.  Drag and drop the generated `.uf2` file onto the `RPI-RP2` (or `RP2350`) drive.

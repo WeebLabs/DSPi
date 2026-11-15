@@ -104,6 +104,8 @@ bool is_pin_in_use(uint8_t pin, uint8_t exclude);
 // Full acceptability check for a UART/I2C control-interface GPIO (validity,
 // I2S clock pair always claimed, live peripherals).  Returns PIN_CONFIG_*.
 uint8_t ctrl_iface_check_pin(uint8_t pin);
+// ADC-specific check for Control Surface potentiometer GPIOs.
+uint8_t ctrl_iface_check_adc_pin(uint8_t pin);
 // adat_pin_acceptable() is declared in adat_output.h (lightweight, so the
 // restore paths can call it without pulling TinyUSB in) and defined here.
 // i2s_rx_pin_set_acceptable() is declared in audio_input.h (lightweight, so the

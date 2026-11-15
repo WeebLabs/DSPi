@@ -91,10 +91,13 @@
 #define CS_LOG_QUANT_STEPS    24.0f
 #define CS_LIN_QUANT          0.5f
 
-// ADC-capable pot pins: GPIO 26..28 = ADC channels 0..2 on both platforms.
-// GPIO 29 is the board's VSYS/3 monitor on Pico and Pico 2, so it is excluded.
-#define CS_ADC_PIN_FIRST      26
-#define CS_ADC_PIN_LAST       28
+// Three ADC0..2 pot inputs use GPIOs 26..28 on standard boards and 40..42
+// on RP2350B (Olimex).
+#define CS_ADC_PIN_FIRST      DSPI_CONTROL_ADC_FIRST_PIN
+#define CS_ADC_PIN_LAST       DSPI_CONTROL_ADC_LAST_PIN
+
+_Static_assert(DSPI_CONTROL_ADC_FIRST_PIN == ADC_BASE_PIN,
+               "Control Surface ADC pins must start at ADC0");
 
 // Deferred SET handoff (vendor_commands.c writes, main.c consumes)
 volatile bool    cs_set_binding_pending = false;
@@ -1782,7 +1785,9 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
             uint8_t st = cs_check_button_share(b, slot);
             if (st != PIN_CONFIG_SUCCESS) return st;
         } else {
-            uint8_t st = ctrl_iface_check_pin(pin);
+            uint8_t st = (td->pin_class == CS_PINCLASS_ADC)
+                             ? ctrl_iface_check_adc_pin(pin)
+                             : ctrl_iface_check_pin(pin);
             if (st != PIN_CONFIG_SUCCESS) return st;
         }
     }

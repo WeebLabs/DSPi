@@ -52,6 +52,7 @@
 #include "bulk_params.h"       /* WireBulkParams offsets */
 #include "uart_control.h"      /* uart_ctrl_owns_pin */
 #include "i2c_control.h"       /* i2c_ctrl_owns_pin */
+#include "control_surfaces.h"  /* control_surfaces_owns_pin */
 
 #include "hardware/gpio.h"
 #include "pico/time.h"         /* time_us_64 */
@@ -139,6 +140,7 @@ static inline bool unmuted_level(void) {
 /* Platform-aware GPIO range check.  Mirrors is_valid_pin() in
  * vendor_commands.c without forcing a circular include. */
 static inline bool gpio_in_range(uint8_t pin) {
+    if (dspi_board_gpio_is_reserved(pin)) return false;
 #if PICO_RP2350
     return pin <= 47;
 #else
@@ -175,6 +177,7 @@ static bool collides_with_other_subsystem(uint8_t pin) {
         if (spdif_input_enabled(i) && pin == spdif_rx_pin_for_index(i)) return true;
     /* Live UART / I2C control interface pins */
     if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return true;
+    if (control_surfaces_owns_pin(pin)) return true;
 #if PICO_RP2350
     /* ADAT output and input, only while enabled */
     if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
@@ -252,6 +255,10 @@ static void claim_pin(uint8_t pin, bool assert_muted) {
 /* ----------------------------------------------------------------- */
 
 void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
+    // Do not restore a saved mute pin that belongs to this board's PSRAM.
+    // The existing NULL path below disables the board-incompatible config.
+    if (cfg && dspi_board_gpio_is_reserved(cfg->pin)) cfg = NULL;
+
     /* Carry an in-flight pipeline/flash mute across a live config re-apply.
      * set_config() is invoked from inside the flash-write brackets:
      * prepare_flash_write_operation() (via prepare_pipeline_reset ->

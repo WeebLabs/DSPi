@@ -1,6 +1,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include "board_config.h"
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <limits.h>
@@ -36,7 +38,11 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define PICO_AUDIO_SPDIF_PIN   6    // S/PDIF 1 (Out 1-2)
 #define PICO_SPDIF_PIN_2       7    // S/PDIF 2 (Out 3-4)
 #if PICO_RP2350
+#if defined(OLIMEX_RP2350_XXL)
+#define PICO_SPDIF_PIN_3       26   // S/PDIF 3 (Out 5-6); GPIO 8 is PSRAM CS
+#else
 #define PICO_SPDIF_PIN_3       8    // S/PDIF 3 (Out 5-6) — RP2350 only
+#endif
 #define PICO_SPDIF_PIN_4       9    // S/PDIF 4 (Out 7-8) — RP2350 only
 #endif
 
@@ -714,12 +720,14 @@ typedef struct __attribute__((packed)) {
 #define PICO_I2S_BCK_PIN            14   // BCK; LRCLK = BCK + 1 = GPIO 15
 
 // Default slave-mode clock pair for SPLIT clock-pin mode (dormant in UNIFIED
-// mode).  Nearest sequential pair to BCK/LRCLK that no other feature defaults
-// to: RP2040 has 12/13 free (ADAT is RP2350-only, MCK defaults to 21); on
-// RP2350 everything adjacent is a feature default, so 26/27 is the closest
-// clean pair.
+// mode).  RP2040 has 12/13 free; standard RP2350 uses 26/27, while Olimex
+// moves the pair to 28/29 so it does not collide with S/PDIF 3 on GPIO 26.
 #if PICO_RP2350
+#if defined(OLIMEX_RP2350_XXL)
+#define PICO_I2S_BCK_PIN_SLAVE      28   // slave BCK; LRCLK = 29
+#else
 #define PICO_I2S_BCK_PIN_SLAVE      26   // slave BCK; LRCLK = 27
+#endif
 #else
 #define PICO_I2S_BCK_PIN_SLAVE      12   // slave BCK; LRCLK = 13
 #endif

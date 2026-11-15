@@ -1710,7 +1710,11 @@ void core0_init() {
     set_sys_clock_pll(1536000000, 5, 1);
 #endif
 
-    gpio_init(23); gpio_set_dir(23, GPIO_OUT); gpio_put(23, 1);
+#ifdef PICO_SMPS_MODE_PIN
+    gpio_init(PICO_SMPS_MODE_PIN);
+    gpio_set_dir(PICO_SMPS_MODE_PIN, GPIO_OUT);
+    gpio_put(PICO_SMPS_MODE_PIN, 1);
+#endif
 
     pico_get_unique_board_id_string(usb_descriptor_str_serial, 17);
 

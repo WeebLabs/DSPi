@@ -1694,7 +1694,7 @@ struct audio_spdif_config spdif_config_2 = {
 
 #if PICO_RP2350
 struct audio_spdif_config spdif_config_3 = {
-    .pin = PICO_SPDIF_PIN_3,  // GPIO 8
+    .pin = PICO_SPDIF_PIN_3,  // Board-specific S/PDIF 3 default
     .dma_channel = 2,
     .pio_sm = 2,
     .pio = PICO_AUDIO_SPDIF_PIO,

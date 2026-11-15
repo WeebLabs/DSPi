@@ -989,9 +989,10 @@ so rapid detents on two different filter knobs cannot overwrite each other.
 
 ### 6.4 Potentiometers / faders (ADC GPIO only)
 
-- **Only GPIO 26, 27, 28** (ADC channels 0-2, on both RP2040 and RP2350). GPIO 29
-  is the board's VSYS/3 monitor and is excluded. A pot on any other GPIO is
-  rejected with `CS_STATUS_PIN_NOT_ADC`.
+- **Three inputs, ADC channels 0–2:** GPIO 26–28 on Pico/Pico 2, or GPIO 40–42
+  on the Olimex RP2350-PICO2-XXL. Pico/Pico 2 GPIO 29 is the VSYS/3 monitor
+  and remains excluded. A pot on any other GPIO is rejected with
+  `CS_STATUS_PIN_NOT_ADC`.
 - **Full-range or custom span.** With `range_min == range_max == 0`, the knob
   spans the noun's full range; otherwise it spans `[range_min, range_max]`
   (unit-encoded, must satisfy `range_min < range_max` and lie inside the noun

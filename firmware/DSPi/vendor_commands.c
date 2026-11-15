@@ -371,12 +371,7 @@ static const uint8_t default_output_pins[NUM_PIN_OUTPUTS] = {
 bool is_valid_gpio_pin(uint8_t pin) {
     // GPIO 16/17 are general-purpose again since the debug UART was removed;
     // when the UART control interface claims them, is_pin_in_use() covers it.
-    if (pin >= 23 && pin <= 25) return false;   // Power/LED
-#if PICO_RP2350
-    return pin <= 29;
-#else
-    return pin <= 28;
-#endif
+    return dspi_gpio_is_valid(pin);
 }
 
 // Pin claimed by a "fixed" peripheral other than MCK (outputs, SPDIF RX, ADAT,
@@ -548,6 +543,13 @@ bool adat_input_pin_acceptable(uint8_t pin) {
 // clocks stomp the live control link).
 uint8_t ctrl_iface_check_pin(uint8_t pin) {
     if (!is_valid_gpio_pin(pin))                              return PIN_CONFIG_INVALID_PIN;
+    if (i2s_clock_pin_claimed(pin))                           return PIN_CONFIG_PIN_IN_USE;
+    if (is_pin_in_use(pin, 0xFF))                             return PIN_CONFIG_PIN_IN_USE;
+    return PIN_CONFIG_SUCCESS;
+}
+
+uint8_t ctrl_iface_check_adc_pin(uint8_t pin) {
+    if (!dspi_control_adc_pin_is_valid(pin))                  return PIN_CONFIG_INVALID_PIN;
     if (i2s_clock_pin_claimed(pin))                           return PIN_CONFIG_PIN_IN_USE;
     if (is_pin_in_use(pin, 0xFF))                             return PIN_CONFIG_PIN_IN_USE;
     return PIN_CONFIG_SUCCESS;

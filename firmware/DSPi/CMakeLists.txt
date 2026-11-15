@@ -35,6 +35,7 @@ add_executable(DSPi
     bg_job.h
     bulk_params.c
     bulk_params.h
+    board_config.h
     config.h
     control_surfaces.c
     control_surfaces.h
