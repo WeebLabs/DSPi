@@ -1,6 +1,6 @@
 # DSPi Firmware
 
-**DSPi** transforms a Raspberry Pi Pico or other RP2040-based board into a very competent and inexpensive little digital audio processor. It acts as a USB sound card with an onboard DSP engine, allowing you to make use of essential tools like room correction, active crossovers, parametric EQ, time alignment, loudness compensation, and headphone crossfeed.
+**DSPi** transforms a Raspberry Pi Pico or other RP2040/RP2350-based board into a very competent and inexpensive little digital audio processor. It acts as a USB sound card with an onboard DSP engine, allowing you to make use of essential tools like room correction, active crossovers, parametric EQ, time alignment, loudness compensation, headphone crossfeed, limiting and bass enhancement.
 
 It is my hope that the RP2040 and RP2350 will garner a reputation as the "swiss army knife of audio for less than a cup of coffee".
 
@@ -14,24 +14,32 @@ Feel free to join the [official Discord server](https://discord.gg/RCyqxAQ5xS) f
 - [Platform Support](#platform-support)
 - [Audio Signal Chain](#audio-signal-chain)
 - [Hardware Setup](#hardware-setup)
+- [Inputs](#inputs)
+- [Outputs](#outputs)
 - [DSP Features](#dsp-features)
   - [Matrix Mixer](#matrix-mixer)
   - [Parametric Equalization](#parametric-equalization)
   - [Crossover Filters](#crossover-filters)
-  - [Loudness Compensation](#loudness-compensation)
-  - [Headphone Crossfeed](#headphone-crossfeed)
+  - [Per-Input Preamp](#per-input-preamp)
   - [Volume Leveller](#volume-leveller)
-  - [Per-Channel Preamp](#per-channel-preamp)
-  - [Master Volume](#master-volume)
-  - [I2S Output](#i2s-output)
-  - [Subwoofer PDM Output](#subwoofer-pdm-output)
+  - [Stereo Upmixer (RP2350)](#stereo-upmixer-rp2350)
+  - [Headphone Crossfeed](#headphone-crossfeed)
+  - [Subharmonic Synthesizer](#subharmonic-synthesizer)
+  - [Psychoacoustic Bass](#psychoacoustic-bass)
+  - [Tube Preamp Emulation](#tube-preamp-emulation)
+  - [Loudness Compensation](#loudness-compensation)
+  - [Output Limiter](#output-limiter)
+  - [Volume Controls](#volume-controls)
+  - [Spectrum Analyser](#spectrum-analyser)
+  - [Signal Generator](#signal-generator)
+- [Control Surfaces](#control-surfaces)
 - [User Presets](#user-presets)
 - [Developer Reference](#developer-reference)
   - [System Architecture](#system-architecture)
   - [Performance Tuning](#performance-tuning)
-  - [USB Control Protocol](#usb-control-protocol)
+  - [Control Interfaces](#control-interfaces)
   - [System Telemetry](#reqgetstatus-0x50---system-telemetry)
-  - [Data Structures](#data-structures)
+  - [Runtime Pin Configuration](#runtime-pin-configuration)
   - [USB Audio Loopback Capture (DSPI_LOOPBACK)](#usb-audio-loopback-capture-dspi_loopback)
 - [Building from Source](#building-from-source)
 - [Detailed Specifications](#detailed-specifications)
@@ -41,25 +49,31 @@ Feel free to join the [official Discord server](https://discord.gg/RCyqxAQ5xS) f
 
 ## Key Capabilities
 
-*   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS. Supports 16-bit and 24-bit PCM input at 44.1, 48, and 96 kHz.
-*   **S/PDIF Input:** 24-bit PCM stereo audio at 44.1 or 48kHz. Channel status bits and LG SoundSync are decoded. LG Soundsync volume and mute status is optionally used to control the DSPi user volume and output mute.
-*   **24-bit S/PDIF or I2S Outputs:** Up to four independent stereo output slots (8 channels on RP2350, 4 channels on RP2040). Each slot can be switched at runtime between S/PDIF and I2S, enabling direct connection to any standard DAC. I2S slots share a common BCK/LRCLK and can optionally produce a 128×/256× master clock.
-*   **Per-Channel Preamp:** Independent gain control for each USB input channel (L/R), applied as PASS 1 of the DSP pipeline before any other processing.
-*   **Matrix Mixer:** Route either or both USB input channels to any output with independent gain and phase invert per crosspoint. 2x9 on RP2350, 2x5 on RP2040.
-*   **Parametric Equalization:** Up to 10 PEQ bands per channel with 11 filter types (peaking, low/high shelf, low/high pass, notch, all-pass, plus gentle first-order shelf and all-pass variants). 110 total filter bands on RP2350, 70 on RP2040. RP2350 uses a hybrid SVF/biquad architecture for superior low-frequency accuracy.
-*   **Active Crossovers:** Up to 4 dedicated crossover filters per output channel: Linkwitz-Riley, Butterworth, and Bessel low/high-pass up to 8th order (48 dB/oct), for multi-way speaker and subwoofer integration.
-*   **Volume Leveller:** RMS-based, stereo-linked, soft-knee upward compressor that lifts quieter content toward a target level without ever amplifying loud passages. Optional 10 ms lookahead, configurable speed and max-gain ceiling, with a -6 dBFS gain-reduction safety limiter.
-*   **Loudness Compensation:** Volume-dependent EQ based on the ISO 226:2003 equal-loudness contour standard. Automatically boosts bass and treble at low listening levels to maintain perceived tonal balance.
-*   **Headphone Crossfeed:** BS2B-based crossfeed with interaural time delay (ITD) reduces unnatural stereo separation for headphone listening. Three classic presets plus fully custom parameters.
-*   **Master Volume:** Device-side output ceiling (-128 to 0 dB, with a true-mute sentinel) applied at the very end of the signal chain, independent of USB host volume and DSP processing. Two persistence modes: stored independently of presets (default — survives reboots, unaffected by preset switching) or saved/restored as part of each preset.
-*   **Per-Output Gain & Mute:** Independent gain and mute controls for each output channel.
-*   **Time Alignment:** Per-output delay (up to 85ms) for speaker/subwoofer alignment with automatic latency compensation between S/PDIF/I2S and PDM output paths.
-*   **Subwoofer Output:** Dedicated mono PDM output channel with a high-performance 2nd-order delta-sigma modulator, enabling direct subwoofer output without the need for a second DAC.
-*   **Dual-Core DSP:** EQ processing is split across both cores on both platforms for maximum throughput when multiple outputs are active.
-*   **Configurable Output Pins:** All output GPIO pins (including I2S BCK/MCK) can be reassigned at runtime to suit custom PCB layouts, no reflashing required.
-*   **10-Slot Preset System:** Save, load, and manage up to 10 complete DSP configurations with user-defined names. Includes per-channel naming, configurable startup slot, and bulk parameter transfer for fast state synchronization.
-*   **Diagnostics:** Per-channel peak/clip metering, USB PHY error counters (CRC, bit-stuff, timeout, overflow, sequence), buffer fill statistics, S/PDIF DMA starvation counters per output slot, and CPU load reporting per core.
-*   **Firmware Update via USB:** A vendor command reboots the device into the UF2 bootloader, allowing the host app to push new firmware without a physical BOOTSEL press.
+*   **USB Audio Interface:** Plug-and-play under macOS, Windows, Linux, and iOS. Stereo 16-bit and 24-bit PCM at 44.1, 48, and 96 kHz. The RP2350 also offers 4, 6, and 8-channel modes at 48 kHz.
+*   **Multiple Inputs:** Up to four selectable S/PDIF inputs, I2S input (DSPi as clock master, or slaved to an external master), and 8-channel ADAT lightpipe input on RP2350. LG Sound Sync volume and mute can optionally drive the DSPi volume.
+*   **24-bit S/PDIF or I2S Outputs:** Up to four independent stereo output slots (8 channels on RP2350, 4 on RP2040). Each slot can be switched at runtime between S/PDIF and I2S. I2S slots share a common BCK/LRCLK and can optionally produce a 128× or 256× master clock. All slots stay sample-aligned with each other.
+*   **ADAT Output (RP2350):** An 8-channel lightpipe output that mirrors outputs 1-8.
+*   **Subwoofer PDM Output:** A dedicated mono delta-sigma output that can drive a subwoofer amplifier through a simple RC filter, with no second DAC needed.
+*   **Unified Channel Model:** Every input is a first-class channel with its own preamp, 10-band PEQ and meter. Every output has its own PEQ, crossovers, gain, mute, delay, and limiter.
+*   **Matrix Mixer:** Route any input to any output with per-crosspoint gain and phase invert. 8x9 on RP2350, 2x5 on RP2040.
+*   **Parametric Equalization:** 10 PEQ bands per channel with 13 filter types, including first-order shelves and the Linkwitz Transform. 170 bands in total on RP2350 and 70 on RP2040. The RP2350 uses a hybrid SVF/biquad design for better low-frequency accuracy.
+*   **Active Crossovers:** 4 crossover filters per output: Linkwitz-Riley, Butterworth, and Bessel low/high-pass up to 8th order (48 dB/oct).
+*   **Bass Enhancement:** A dbx-style subharmonic synthesizer and a psychoacoustic "missing fundamental" bass enhancer, each selectable per output.
+*   **Tube Preamp Emulation:** 16 modelled tube types with rectifier sag and output transformer, per output.
+*   **Output Limiter:** A brickwall lookahead peak limiter on every output, with link groups.
+*   **Volume Leveller:** An RMS upward compressor that lifts quiet content toward a target level without amplifying loud passages.
+*   **Loudness Compensation:** Volume-dependent EQ based on ISO 226:2003, selectable per output.
+*   **Headphone Crossfeed:** BS2B-based crossfeed with interaural time delay, selectable per output pair.
+*   **Stereo Upmixer (RP2350):** Derives centre and surround channels from a stereo source.
+*   **Time Alignment:** Per-output delay of up to 42 ms on RP2350 and 21 ms on RP2040 (at 48 kHz).
+*   **Selectable Output Latency:** From 0.67 ms to 8 ms, trading latency against tolerance of host timing jitter.
+*   **Spectrum Analyser and Signal Generator:** A built-in third-octave RTA on any input or output, and a 15-type test signal generator for setup and measurement.
+*   **Control Surfaces:** Wire your own buttons, encoders, pots, LEDs, IR remote, and character or OLED displays directly to spare GPIOs.
+*   **External Control:** Besides the USB vendor interface, DSPi can be controlled over UART or I2C by a microcontroller, such as a front-panel board.
+*   **Configurable Pins:** Every output, input, and clock pin can be reassigned at runtime to suit custom PCB layouts, with no reflashing required.
+*   **10-Slot Preset System:** Save, load, and name up to 10 complete configurations. Preset switches fade to silence first, so they don't pop.
+*   **Diagnostics:** Per-channel peak/clip metering, CPU load per core, USB error counters, output ring health, S/PDIF input rate, clock trim, and temperature.
+*   **Firmware Update via USB:** A vendor command reboots the device into the UF2 bootloader, so the host app can push new firmware without a BOOTSEL press.
 
 ---
 
@@ -70,144 +84,127 @@ Feel free to join the [official Discord server](https://discord.gg/RCyqxAQ5xS) f
 | **System Clock** | 307.2 MHz (overclock) | 307.2 MHz |
 | **Core Voltage** | 1.15 V | 1.15 V |
 | **Sample Rates** | 44.1 / 48 / 96 kHz | 44.1 / 48 / 96 kHz |
-| **Audio Processing** | Q28 Fixed-Point | Single-Precision Float |
-| **EQ Bands** | 10 per channel (70 total) | 10 per channel (110 total) |
-| **Total Channels** | 7 (2 master + 4 S/PDIF·I2S + 1 PDM) | 11 (2 master + 8 S/PDIF·I2S + 1 PDM) |
+| **Audio Processing** | Q28 fixed-point | Single-precision float |
+| **Channels** | 7 (2 inputs + 5 outputs) | 17 (8 inputs + 9 outputs) |
+| **USB Input** | Stereo | Stereo, plus 4/6/8 channels at 48 kHz |
+| **S/PDIF Inputs** | 4 selectable | 4 selectable |
+| **I2S Input** | Stereo, master or slave | Up to 8 channels, master or slave |
+| **ADAT Input / Output** | No | 8 channels each |
 | **Output Slots** | 2 stereo (each S/PDIF or I2S) | 4 stereo (each S/PDIF or I2S) |
 | **Output Bit Depth** | 24-bit | 24-bit |
 | **PDM Output** | 1 (subwoofer) | 1 (subwoofer) |
-| **Max Delay** | 85ms per output | 85ms per output |
-| **Math Engine** | Hand-optimized ARM Assembly | Hardware FPU (hybrid SVF/biquad EQ) |
+| **Matrix Mixer** | 2x5 | 8x9 |
+| **PEQ Bands** | 10 per channel (70 total) | 10 per channel (170 total) |
+| **Crossover Bands** | 4 per output | 4 per output |
+| **Max Delay** | 1023 samples (21 ms at 48 kHz) | 2047 samples (42 ms at 48 kHz) |
+| **Stereo Upmixer** | No | Yes |
+| **Math Engine** | Hand-optimized ARM assembly | Hardware FPU (hybrid SVF/biquad EQ) |
 | **Dual-Core EQ** | Yes (Core 1 processes outputs 3-4) | Yes (Core 1 processes outputs 3-8) |
 | **User Presets** | 10 slots | 10 slots |
-| **S/PDIF Input** | Yes | Yes |
-| **Status** | Production | Production |
 
-Both platforms are fully tested and production-ready. The RP2040 reaches 307.2 MHz with a slight voltage bump; the RP2350 hits the same frequency at the same voltage. Clock is fixed (no rate-dependent switching), and PIO dividers are integer at every supported sample rate. The RP2350 offers significantly more processing headroom thanks to its hardware floating-point unit, enabling more output channels and a hybrid SVF/biquad filter architecture for improved low-frequency accuracy.
+Both platforms run at 307.2 MHz at 1.15 V. The clock is fixed, with no rate-dependent switching, and the audio clock dividers are integer at every supported sample rate. When DSPi follows an external clock (S/PDIF, ADAT, or I2S slave input), it trims the system PLL by a few ppm to track the source rather than resampling. The RP2350 has much more processing headroom thanks to its hardware floating-point unit, which is why it gets more channels, the upmixer, and the hybrid SVF/biquad filters.
 
 ---
 
 ## Audio Signal Chain
 
-DSPi processes audio in a linear, low-latency pipeline:
-
-**RP2350 (11 channels, 9 outputs):**
+DSPi processes audio in a linear, low-latency pipeline. The order is the same on both platforms, except that the upmixer exists only on RP2350.
 
 ```
-USB Input (16/24-bit PCM Stereo, 44.1 / 48 / 96 kHz)
-or
-S/PDIF Input (24 bit PCM Stereo, 44.1 / 48 kHz)
+Input:  USB (stereo 16/24-bit at 44.1/48/96 kHz; RP2350 also 4/6/8 ch at 48 kHz)
+        or S/PDIF 1-4, I2S (master or slave), ADAT (RP2350)
     |
-PASS 1: Per-Channel Preamp (independent L/R gain) + USB Volume
+PASS 1    Per-input preamp
     |
-PASS 2: Master EQ (10 bands per channel, Left/Right)
+PASS 2    Input PEQ (10 bands per input) -> input meters / RTA input tap
     |
-PASS 2.5: Volume Leveller (RMS upward compression, optional)
+PASS 2.5  Volume Leveller (optional)
     |
-PASS 3: Headphone Crossfeed (BS2B + ITD, optional) + Master Peak Metering
+PASS 3    Stereo Upmixer (RP2350 only, stereo input only, optional)
     |
-        Loudness Compensation (volume-dependent EQ, optional)
+PASS 4    Matrix Mixer (2x5 on RP2040, 8x9 on RP2350)
+          Signal generator injection (when active)
     |
-PASS 4: Matrix Mixer (2 inputs x 9 outputs, per-crosspoint gain & phase)
+PASS 4.5  Headphone Crossfeed (per output pair, optional)
     |
-PASS 5: Per-Output EQ -> Gain/Mute -> Delay -> Output Gain × Master Volume
+PASS 5    Per output:
+            Subharmonic Synth -> Psychoacoustic Bass -> Tube Preamp
+            -> Crossover -> Output PEQ
+            -> Output Gain x User Volume x Master Volume (and mute)
+            -> Loudness Compensation -> Limiter -> Delay
+            -> output meters / RTA output tap
     |
     +-- Out 1-2 --> S/PDIF or I2S slot 0 (data: GPIO 6 default)
     +-- Out 3-4 --> S/PDIF or I2S slot 1 (data: GPIO 7 default)
-    +-- Out 5-6 --> S/PDIF or I2S slot 2 (data: GPIO 8 default)
-    +-- Out 7-8 --> S/PDIF or I2S slot 3 (data: GPIO 9 default)
-    +-- Out 9   --> PDM Sub               (data: GPIO 10 default)
-                  (I2S BCK/LRCLK shared on GPIO 14/15 default; optional MCK on GPIO 13 default)
+    +-- Out 5-6 --> S/PDIF or I2S slot 2 (data: GPIO 8 default, RP2350)
+    +-- Out 7-8 --> S/PDIF or I2S slot 3 (data: GPIO 9 default, RP2350)
+    +-- Out 1-8 --> ADAT output mirror    (data: GPIO 12 default, RP2350)
+    +-- Sub     --> PDM                   (data: GPIO 10 default; Out 9 on RP2350, Out 5 on RP2040)
 ```
 
-**RP2040 (7 channels, 5 outputs):**
-
-```
-USB Input (16/24-bit PCM Stereo, 44.1 / 48 / 96 kHz)
-or
-S/PDIF Input (24 bit PCM Stereo, 44.1 / 48 kHz)
-    |
-PASS 1: Per-Channel Preamp + USB Volume
-    |
-PASS 2: Master EQ (10 bands per channel, Left/Right)
-    |
-PASS 2.5: Volume Leveller (RMS upward compression, optional)
-    |
-PASS 3: Headphone Crossfeed (BS2B + ITD, optional) + Master Peak Metering
-    |
-        Loudness Compensation (volume-dependent EQ, optional)
-    |
-PASS 4: Matrix Mixer (2 inputs x 5 outputs, per-crosspoint gain & phase)
-    |
-PASS 5: Per-Output EQ -> Gain/Mute -> Delay -> Output Gain × Master Volume
-    |
-    +-- Out 1-2 --> S/PDIF or I2S slot 0 (data: GPIO 6 default)
-    +-- Out 3-4 --> S/PDIF or I2S slot 1 (data: GPIO 7 default)
-    +-- Out 5   --> PDM Sub               (data: GPIO 10 default)
-                  (I2S BCK/LRCLK shared on GPIO 14/15 default; optional MCK on GPIO 13 default)
-```
-
-### Signal Chain Details
-
-1.  **Input (USB):** 16-bit or 24-bit PCM stereo audio at 44.1, 48, or 96 kHz. Bit depth is selected via USB alt setting; sample rate via the USB Audio Class rate-set request.
-2.  **Input (S/PDIF):** 24-bit PCM stereo audio at 44.1 or 48kHz. Channel status bits and LG SoundSync are decoded. LG Soundsync volume and mute status is optionally used to control the DSPi user volume and output mute.
-3.  **Per-Channel Preamp (PASS 1):** Independent gain control for the USB Left and Right input channels in dB. Applied at the very start of the DSP chain so its setting affects all downstream processing.
-4.  **Master EQ (PASS 2):** Up to 10 bands of parametric EQ per channel (Left/Right). Supports all PEQ filter types (see [Parametric Equalization](#parametric-equalization)).
-5.  **Volume Leveller (PASS 2.5):** Optional feedforward, stereo-linked, single-band RMS compressor with soft-knee upward compression — quieter content is boosted toward a target level while content above the threshold passes through untouched. Configurable speed, max-gain ceiling, and noise gate. Optional 10 ms lookahead. A -6 dBFS gain-reduction safety limiter prevents output overshoots.
-6.  **Headphone Crossfeed (PASS 3):** Optional BS2B crossfeed that mixes a filtered, delayed portion of each channel into the opposite channel. Uses a complementary filter design with interaural time delay (ITD) via an all-pass filter. Three presets (Default, Chu Moy, Jan Meier) plus custom frequency and feed level. ITD can be independently toggled. Master peak metering taps into this stage.
-7.  **Loudness Compensation:** Optional ISO 226:2003 equal-loudness EQ that adapts to the current volume level. At low volumes, bass and treble are boosted to compensate for the ear's reduced sensitivity. Configurable reference SPL and intensity. Driven by the USB host volume position so it remains correct regardless of master-volume attenuation downstream.
-8.  **Matrix Mixer (PASS 4):** Routes the two USB input channels (Left/Right) to all output channels. Each crosspoint has independent enable, gain (-inf to +12 dB), and phase invert. Outputs can be individually enabled/disabled to save CPU. RP2350 has a 2x9 matrix (9 outputs), RP2040 has a 2x5 matrix (5 outputs).
-9.  **Output EQ (PASS 5):** Independent 10-band EQ per output channel on both platforms. Ideal for crossover filters and per-driver correction. On RP2350, filters below Fs/7.5 use SVF topology for superior low-frequency accuracy; higher frequencies use traditional biquad.
-10.  **Per-Output Gain & Mute:** Independent gain (-inf to +12 dB) and mute for each output channel.
-11. **Time Alignment:** Per-output delay for speaker alignment, up to 85 ms (4096 samples at 48 kHz). Automatic latency compensation between S/PDIF/I2S and PDM output paths.
-12. **Master Volume:** Device-side output ceiling, -128 to 0 dB with a true-mute sentinel at -128. Folded into the per-output multiplier at PASS 5 so it's effectively free CPU-wise. Independent of the USB host volume — the two multiply together. Does not affect loudness-compensation behavior.
-13. **Outputs:** Each numbered slot is configurable as either 24-bit S/PDIF or 24-bit I2S (left-justified, MSB-first). I2S slots share a common BCK/LRCLK clock pair (LRCLK is always BCK + 1 due to a PIO side-set constraint). An optional master clock (MCK) at 128× or 256× Fs can be routed to a separate GPIO. PDM subwoofer is always on its own dedicated output and pin.
+The subharmonic synth, psychoacoustic bass, tube preamp, loudness, and crossfeed stages each run only on the outputs selected in their output mask. A muted output skips its per-output DSP to save CPU.
 
 ---
 
 ## Hardware Setup
 
 ### Flashing the Firmware
-1.  Download the latest `DSPi.uf2` release for your board.
+1.  Download the latest release UF2 for your board (`DSPi-RP2040-<version>.uf2` or `DSPi-RP2350-<version>.uf2`).
 2.  Hold the **BOOTSEL** button on your Pico while plugging it into your computer.
-3.  A drive named `RPI-RP2` will appear.
+3.  A drive named `RPI-RP2` (or `RP2350`) will appear.
 4.  Drag and drop the `.uf2` file onto this drive.
 5.  The Pico will reboot and appear as a "Weeb Labs DSPi" audio device.
 6.  Download and launch the DSPi Console application to control the DSPi.
 
 ### Wiring Guide
 
-**RP2350 (Pico 2) — up to 8 output pins:**
+All pins below are defaults. Every one of them can be moved in DSPi Console. Optional functions claim no GPIO until they are enabled.
+
+**RP2350 (Pico 2):**
 
 | Function | Pin | Connection |
 | :--- | :--- | :--- |
-| **S/PDIF Input** | `GPIO 5` (default) | S/PDIF Input |
-| **Output Slot 0** (Out 1-2) | `GPIO 6` (default) | S/PDIF or I2S data for main L/R or multi-way pair 1 |
-| **Output Slot 1** (Out 3-4) | `GPIO 7` (default) | S/PDIF or I2S data for multi-way pair 2 |
-| **Output Slot 2** (Out 5-6) | `GPIO 8` (default) | S/PDIF or I2S data for multi-way pair 3 |
-| **Output Slot 3** (Out 7-8) | `GPIO 9` (default) | S/PDIF or I2S data for multi-way pair 4 |
-| **Subwoofer Out** (PDM, Out 9) | `GPIO 10` (default) | Active subwoofer or PDM-to-analog filter |
-| **I2S BCK** (shared, I2S only) | `GPIO 14` (default) | Bit clock for any slot configured as I2S |
-| **I2S LRCLK** (I2S only) | `GPIO 15` (BCK + 1, fixed) | Word/frame clock; always BCK + 1 |
-| **I2S MCK** (optional) | `GPIO 13` (default) | 128× or 256× Fs master clock when MCK is enabled |
+| **S/PDIF Input 1** | `GPIO 5` | S/PDIF receiver output |
+| **S/PDIF Inputs 2-4** (optional) | `GPIO 20` / `21` / `22` | Additional S/PDIF receivers |
+| **I2S Input data** | `GPIO 1` (pairs 2-4 on `GPIO 2` / `3` / `4`) | ADC or I2S source data |
+| **ADAT Input** | No default; set in Console | Optical lightpipe receiver |
+| **Output Slot 0** (Out 1-2) | `GPIO 6` | S/PDIF or I2S data |
+| **Output Slot 1** (Out 3-4) | `GPIO 7` | S/PDIF or I2S data |
+| **Output Slot 2** (Out 5-6) | `GPIO 8` | S/PDIF or I2S data |
+| **Output Slot 3** (Out 7-8) | `GPIO 9` | S/PDIF or I2S data |
+| **Subwoofer Out** (PDM, Out 9) | `GPIO 10` | Active subwoofer or PDM-to-analog filter |
+| **DAC Hardware Mute** (optional) | `GPIO 11` | Active-low DAC mute input |
+| **ADAT Output** | `GPIO 12` | Optical lightpipe transmitter |
+| **I2S MCK** (optional) | `GPIO 13` | 128× or 256× Fs master clock |
+| **I2S BCK** (shared) | `GPIO 14` | Bit clock for I2S outputs and inputs |
+| **I2S LRCLK** | `GPIO 15` (always BCK + 1) | Word clock |
+| **UART Control** (optional) | `GPIO 16` TX / `GPIO 17` RX | External controller |
+| **I2C Control** (optional) | `GPIO 18` SDA / `GPIO 19` SCL | External controller |
 | **USB** | `Micro-USB` | Host device (PC/Mac/Mobile Device) |
 
-**RP2040 (Pico) — up to 6 output pins:**
+**RP2040 (Pico):**
 
 | Function | Pin | Connection |
 | :--- | :--- | :--- |
-| **S/PDIF Input** | `GPIO 5` (default) | S/PDIF Input |
-| **Output Slot 0** (Out 1-2) | `GPIO 6` (default) | S/PDIF or I2S data for main L/R or stereo pair 1 |
-| **Output Slot 1** (Out 3-4) | `GPIO 7` (default) | S/PDIF or I2S data for stereo pair 2 |
-| **Subwoofer Out** (PDM, Out 5) | `GPIO 10` (default) | Active subwoofer or PDM-to-analog filter |
-| **I2S BCK** (shared, I2S only) | `GPIO 14` (default) | Bit clock for any slot configured as I2S |
-| **I2S LRCLK** (I2S only) | `GPIO 15` (BCK + 1, fixed) | Word/frame clock; always BCK + 1 |
-| **I2S MCK** (optional) | `GPIO 13` (default) | 128× or 256× Fs master clock when MCK is enabled |
+| **S/PDIF Input 1** | `GPIO 5` | S/PDIF receiver output |
+| **S/PDIF Inputs 2-4** (optional) | `GPIO 20` / `21` / `22` | Additional S/PDIF receivers |
+| **I2S Input data** | `GPIO 1` | ADC or I2S source data |
+| **Output Slot 0** (Out 1-2) | `GPIO 6` | S/PDIF or I2S data |
+| **Output Slot 1** (Out 3-4) | `GPIO 7` | S/PDIF or I2S data |
+| **Subwoofer Out** (PDM, Out 5) | `GPIO 10` | Active subwoofer or PDM-to-analog filter |
+| **DAC Hardware Mute** (optional) | `GPIO 11` | Active-low DAC mute input |
+| **I2S BCK** (shared) | `GPIO 14` | Bit clock for I2S outputs and inputs |
+| **I2S LRCLK** | `GPIO 15` (always BCK + 1) | Word clock |
+| **UART Control** (optional) | `GPIO 16` TX / `GPIO 17` RX | External controller |
+| **I2C Control** (optional) | `GPIO 18` SDA / `GPIO 19` SCL | External controller |
+| **I2S MCK** (optional) | `GPIO 21` | 128× or 256× Fs master clock |
 | **USB** | `Micro-USB` | Host device (PC/Mac/Mobile Device) |
 
-> **Warning:** RP2040 input pins are not 5v tolerant, use only 3.3v external devices such as optical receivers.
+> **Note:** On RP2040, S/PDIF Input 3 and I2S MCK share GPIO 21 by default. Move one of them if you need both.
 
-> **Notes:** S/PDIF input requires either a Toshiba TORX141 optical receiver or a suitable receiver circuit. Possible receiver circuits are described by ST Microelectronics [here](https://www.st.com/resource/en/application_note/an5073-receiving-spdif-audio-stream-with-the-stm32f4f7h7-series-stmicroelectronics.pdf). S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider. I2S output is a standard 24-bit-in-32-bit left-justified frame — wires straight into most I2S DACs. PDM output is a 1-bit logic signal that requires a resistor and capacitor to form a low-pass filter for conversion to analog audio.
+> **Warning:** RP2040 and RP2350 input pins are not 5 V tolerant. Use only 3.3 V external devices such as optical receivers.
+
+> **Notes:** S/PDIF input requires either a Toshiba TORX141 optical receiver or a suitable receiver circuit. Possible receiver circuits are described by ST Microelectronics [here](https://www.st.com/resource/en/application_note/an5073-receiving-spdif-audio-stream-with-the-stm32f4f7h7-series-stmicroelectronics.pdf). S/PDIF output requires either a Toshiba TX179 optical transmitter or a simple resistor divider. I2S output is a standard 24-bit-in-32-bit left-justified frame that wires straight into most I2S DACs. PDM output is a 1-bit logic signal that requires a resistor and capacitor to form a low-pass filter for conversion to analog audio.
 
 #### PCM1808 ADC Module on Pico 2 (I2S Input)
 
@@ -215,15 +212,75 @@ PASS 5: Per-Output EQ -> Gain/Mute -> Delay -> Output Gain × Master Volume
 
 Use the PCM1808 in slave, standard-I2S mode: `MD1 = LOW`, `MD0 = LOW`, and `FMT = LOW`. In DSPi Console, select **I2S** as the input source, set RX data to `GPIO 4`, keep BCK on `GPIO 14` (`GPIO 15` is LRCLK), enable MCK on `GPIO 13`, and set the MCK multiplier to **256x**. That gives the PCM1808 `SCKI/MCLK` frequencies of 11.2896 MHz at 44.1 kHz, 12.288 MHz at 48 kHz, and 24.576 MHz at 96 kHz.
 
-PCM1808 modules vary: some expose separate `VDD/3V3` and `VCC/5V` pins, while others have a regulator and only expose `VCC`. Follow the module silkscreen for power, keep all digital I/O at 3.3 V logic, and always share ground with the Pico 2.
+PCM1808 modules vary. Some expose separate `VDD/3V3` and `VCC/5V` pins, while others have a regulator and only expose `VCC`. Follow the module silkscreen for power, keep all digital I/O at 3.3 V logic, and always share ground with the Pico 2.
 
 ### Custom Pin Assignments
 
-All default pin assignments above work out of the box, but every output pin — including I2S BCK and MCK — can be reassigned at runtime through the DSPi Console application. No reflashing required. This is useful when designing custom PCBs or adapting to boards where the default GPIOs are inconvenient.
+Every default pin above works out of the box, but each one can be reassigned at runtime through DSPi Console. This is useful when designing custom PCBs or adapting to boards where the default GPIOs are inconvenient.
 
-Pin assignments are saved to flash and restored automatically at boot. A few GPIOs are reserved and unavailable for output use: GPIO 12 (UART TX) and GPIOs 23-25 (power control and LED). LRCLK is always pinned to BCK + 1 due to a PIO side-set constraint.
+Pin assignments are saved to flash and restored at boot. Only GPIOs 23-25 (power control and LED) are reserved. The firmware refuses a pin that another function is already using. LRCLK is always BCK + 1 because of a PIO side-set constraint.
 
-<img src="Images/toslink.jpg" alt="Alt text" width="49%">  <img src="Images/spdif_converter.jpg" alt="Alt text" width="49%">
+<img src="Images/toslink.jpg" alt="Toslink optical module wiring" width="49%">  <img src="Images/spdif_converter.jpg" alt="S/PDIF converter wiring" width="49%">
+
+---
+
+## Inputs
+
+One input source is active at a time. Switching sources is done from DSPi Console, a control surface, or an external controller.
+
+*   **USB:** Stereo 16-bit or 24-bit at 44.1, 48, or 96 kHz, selected by the host. On RP2350 the device also offers 4, 6, and 8-channel 16-bit modes and a 4-channel 24-bit mode, all at 48 kHz. Each channel arrives as its own input with its own preamp, PEQ and meter.
+*   **S/PDIF (1-4):** Stereo 24-bit PCM at 44.1, 48, or 96 kHz. Input 1 is always available; inputs 2-4 are opt-in and share the same receiver hardware, so only one is live at a time. Off-nominal sources are acquired at lock, and DSPi follows the source clock by trimming its PLL. Channel status bits and LG Sound Sync are decoded. LG Sound Sync volume and mute can optionally drive the DSPi user volume and mute.
+*   **I2S, DSPi as clock master:** DSPi generates BCK, LRCLK, and optionally MCK at 44.1, 48, or 96 kHz. The RP2040 takes one stereo pair. The RP2350 takes up to four pairs (8 channels).
+*   **I2S, slave mode:** An external master drives BCK and LRCLK. DSPi detects the rate automatically and follows the external clock. The clock pins can be shared with the I2S outputs (unified) or moved to a separate pair (split).
+*   **ADAT (RP2350):** 8 channels at 44.1 or 48 kHz, as clock master or slave.
+
+Each input source can be given a user-defined name, which is stored on the device rather than in a preset.
+
+---
+
+## Outputs
+
+### S/PDIF and I2S Slots
+
+Each output slot can be switched at runtime between S/PDIF (default) and I2S, independently per slot. A single device can drive a mix, for example slot 0 as I2S into a DAC chip and slot 1 as S/PDIF over Toslink to an external receiver.
+
+*   **S/PDIF:** 24-bit with IEC 60958-3 channel status. The biphase-mark encoding runs in PIO.
+*   **I2S format:** 24-bit data, left-justified, MSB-first, 32-bit frames. Drop-in to most standard I2S DACs (PCM5102, ES9038Q2M, etc.).
+*   **Shared clocks:** All I2S slots share a single BCK/LRCLK pair. LRCLK is always BCK + 1.
+*   **Optional MCK:** A 128× or 256× Fs master clock on a configurable GPIO, for DACs that have no internal PLL. Both multipliers work at every sample rate.
+*   **Sample alignment:** All slots, the PDM sub, and the ADAT output start together and stay sample-aligned through rate changes, input switches, preset loads, and pin moves.
+
+The DSP pipeline is identical for both output types. Only the final encoding differs.
+
+### Subwoofer PDM Output
+
+The subwoofer output uses a software delta-sigma modulator running on Core 1.
+
+*   **Modulation:** 2nd-order delta-sigma with leaky integrators to prevent DC build-up.
+*   **Oversampling Ratio:** 256× (12.288 MHz bit clock at 48 kHz).
+*   **Dither:** High-pass shaped dither that keeps the modulator free of idle tones.
+*   **Soft start:** The output fades in on start-up so it doesn't thump.
+
+The PDM sub is automatically delay-compensated against the S/PDIF and I2S outputs.
+
+**Core 1 sharing:** Core 1 is either the PDM modulator or the EQ worker for the higher-numbered outputs, never both. When the PDM sub is enabled, only Out 1-2 (slot 0) can be enabled alongside it. When PDM is off, Core 1 processes Out 3-8 on RP2350 or Out 3-4 on RP2040 in parallel with Core 0.
+
+| Platform | PDM enabled | PDM disabled |
+|----------|-------------|--------------|
+| **RP2350** | Out 1-2 + Out 9 (PDM) | Out 1-8 |
+| **RP2040** | Out 1-2 + Out 5 (PDM) | Out 1-4 |
+
+### ADAT Output (RP2350)
+
+An 8-channel ADAT lightpipe output that mirrors outputs 1-8, sample-aligned with the S/PDIF and I2S slots. It runs at 44.1 and 48 kHz and suspends itself at 96 kHz.
+
+### DAC Hardware Mute
+
+An optional active-low GPIO that mutes an external DAC while DSPi restarts its outputs, such as during a preset load or rate change. This hides any click that the DAC itself would make when its clocks stop.
+
+### Output Latency
+
+The output buffering is selectable, trading latency against tolerance of host timing jitter. The options are 0.67, 1, 2, 3, 4 (default), 6, and 8 ms. The 0.67 and 1 ms options apply only to S/PDIF, I2S, and ADAT inputs; on USB they fall back to 2 ms. Changing the setting causes one brief mute while the outputs restart together.
 
 ---
 
@@ -231,36 +288,18 @@ Pin assignments are saved to flash and restored automatically at boot. A few GPI
 
 ### Matrix Mixer
 
-The matrix mixer routes the USB stereo input to all output channels. RP2350 has a 2x9 matrix (9 outputs), RP2040 has a 2x5 matrix (5 outputs). Each crosspoint (input/output pair) has:
+The matrix mixer routes the inputs to the outputs. The RP2350 matrix is 8x9 (up to 8 inputs, 9 outputs). The RP2040 matrix is 2x5. On RP2350, the stereo upmixer can add derived centre and surround rows. Each crosspoint has:
 
 *   **Enable/Disable:** Route active or inactive.
-*   **Gain:** -inf to +12 dB per crosspoint.
+*   **Gain:** Per-crosspoint gain.
 *   **Phase Invert:** Polarity flip for driver alignment.
 
 Each output channel also has:
 
-*   **Enable:** Disabled outputs skip all processing (EQ, delay, conversion) to save CPU.
-*   **Gain:** Per-output gain (-inf to +12 dB).
+*   **Enable:** Disabled outputs skip all processing to save CPU.
+*   **Gain:** Per-output gain.
 *   **Mute:** Soft mute per output.
 *   **Delay:** Per-output time alignment.
-
-**Output Availability:** Core 1 is shared between the PDM subwoofer modulator and the EQ worker that processes higher-numbered S/PDIF outputs. PDM and EQ worker modes are mutually exclusive:
-
-**RP2350:**
-
-| Mode | Available Outputs | Core 1 Usage |
-|------|-------------------|--------------|
-| **PDM enabled** (Out 9 on) | Out 1-2 (S/PDIF 1) + Out 9 (PDM) | Delta-sigma modulator |
-| **PDM disabled** (Out 9 off) | Out 1-8 (S/PDIF 1-4) | EQ worker for Out 3-8 |
-
-**RP2040:**
-
-| Mode | Available Outputs | Core 1 Usage |
-|------|-------------------|--------------|
-| **PDM enabled** (Out 5 on) | Out 1-2 (S/PDIF 1) + Out 5 (PDM) | Delta-sigma modulator |
-| **PDM disabled** (Out 5 off) | Out 1-4 (S/PDIF 1-2) | EQ worker for Out 3-4 |
-
-When the PDM subwoofer is active, Core 1 is fully dedicated to the delta-sigma modulator, so higher-numbered S/PDIF outputs are unavailable. When PDM is off, Core 1 runs as an EQ worker processing those outputs in parallel with Core 0.
 
 **Common Configurations (RP2350):**
 
@@ -281,7 +320,7 @@ When the PDM subwoofer is active, Core 1 is fully dedicated to the delta-sigma m
 
 ### Parametric Equalization
 
-Each band can be set to any of these 14 types. Every type uses a corner/center **frequency**; **Q** and **gain** apply only where listed (other types ignore them).
+Every input and every output has 10 PEQ bands. Each band can be set to any of these 14 types. Every type uses a corner/center **frequency**; **Q** and **gain** apply only where listed.
 
 | Type | Order | Parameters | Description |
 |------|-------|------------|-------------|
@@ -300,33 +339,20 @@ Each band can be set to any of these 14 types. Every type uses a corner/center *
 | First-Order Low Pass | 1st | freq | Gentle 6 dB/oct rolloff above freq; -3 dB at freq, no resonance |
 | First-Order High Pass | 1st | freq | Gentle 6 dB/oct rolloff below freq; -3 dB at freq, no resonance |
 
-Frequency ranges from 10 Hz to 0.45xFs; Q from 0.1 to 20. First-order types are single-pole (6 dB/oct) and have no resonance.
+Frequency ranges from 10 Hz to 0.45×Fs; Q from 0.1 to 20. First-order types are single-pole (6 dB/oct) and have no resonance.
 
-On RP2040, all filters use biquad IIR (Transposed Direct Form II) with Q28 fixed-point arithmetic. On RP2350, the firmware uses a hybrid SVF/biquad architecture: filters below Fs/7.5 (~6.4 kHz at 48 kHz) use the Cytomic SVF (linear trapezoid) topology for superior numerical accuracy at low frequencies, while higher frequencies use traditional TDF2 biquad. Flat bands (and zero-gain peaking/shelf bands) are automatically bypassed for zero CPU overhead.
+On RP2040, all filters use biquad IIR with Q28 fixed-point arithmetic. On RP2350, filters below Fs/7.5 (~6.4 kHz at 48 kHz) use the Cytomic SVF (linear trapezoid) topology for better numerical accuracy at low frequencies, while higher frequencies use a TDF2 biquad. Flat bands (and zero-gain peaking/shelf bands) are automatically bypassed for zero CPU overhead.
 
-**Channel Layout:**
+**Channel Layout:** Inputs come first in the channel index, then outputs.
 
-**RP2350 (11 channels):**
-
-| Channel | Index | EQ Bands |
-|---------|-------|----------|
-| Master Left | 0 | 10 |
-| Master Right | 1 | 10 |
-| Output 1-8 (S/PDIF) | 2-9 | 10 each |
-| Output 9 (PDM Sub) | 10 | 10 |
-
-**RP2040 (7 channels):**
-
-| Channel | Index | EQ Bands |
-|---------|-------|----------|
-| Master Left | 0 | 10 |
-| Master Right | 1 | 10 |
-| Output 1-4 (S/PDIF) | 2-5 | 10 each |
-| Output 5 (PDM Sub) | 6 | 10 |
+| Platform | Inputs | Outputs 1-8 (S/PDIF or I2S) | PDM Sub |
+|----------|--------|-----------------------------|---------|
+| **RP2350** (17 channels) | 0-7 | 8-15 | 16 |
+| **RP2040** (7 channels) | 0-1 | 2-5 (Out 1-4) | 6 |
 
 ### Crossover Filters
 
-In addition to the parametric bands above, every output channel has up to 4 dedicated crossover filter bands for building active multi-way speaker and subwoofer systems. Crossover filters are low-pass or high-pass only and are tuned by corner frequency alone (Q and gain are not used). Three families are available:
+In addition to the parametric bands above, every output channel has 4 dedicated crossover filter bands for building active multi-way speaker and subwoofer systems. Crossover filters are low-pass or high-pass only and are tuned by corner frequency alone. Three families are available:
 
 | Family | Orders | Slopes | Character |
 |--------|--------|--------|-----------|
@@ -334,22 +360,42 @@ In addition to the parametric bands above, every output channel has up to 4 dedi
 | Butterworth (BW) | 1-8 | 6 / 12 / 18 / 24 / 30 / 36 / 42 / 48 dB/oct | -3 dB at the corner; maximally flat passband. BW1 is a gentle 6 dB/oct first-order slope. |
 | Bessel (BES) | 2, 4, 6, 8 | 12 / 24 / 36 / 48 dB/oct | Maximally flat group delay for the best transient response and phase behavior. |
 
-Each crossover filter is built from a cascade of up to four biquad sections. On RP2350 the same hybrid rule applies per section (sections below Fs/7.5 use the Cytomic SVF for low-frequency accuracy). Crossover bands exist on output channels only, separate from and in addition to that channel's 10 parametric bands. A typical 2-way active speaker drives one output through a high-pass crossover (tweeter/mid) and another through a low-pass (woofer); a subwoofer output usually takes a low-pass.
+Each crossover filter is built from a cascade of up to four biquad sections. On RP2350 the same hybrid rule applies per section. Crossovers exist on output channels only and run before that output's PEQ. A typical 2-way active speaker drives one output through a high-pass crossover (tweeter/mid) and another through a low-pass (woofer); a subwoofer output usually takes a low-pass.
 
-### Loudness Compensation
+### Per-Input Preamp
 
-Based on the ISO 226:2003 equal-loudness contour standard. At low listening volumes, the human ear is less sensitive to bass and treble frequencies. Loudness compensation applies a volume-dependent EQ curve to maintain perceived tonal balance across all listening levels.
+Each input channel (8 on RP2350, 2 on RP2040) has its own preamp gain in dB, applied before any other processing. Useful for trimming channel imbalance, attenuating hot inputs ahead of EQ, or matching levels across sources. A legacy single-value command remains for backward compatibility and sets every input to the same value.
 
-*   **Reference SPL:** Configurable (40-100 dB). Set this to the SPL where your system sounds tonally balanced at full volume.
-*   **Intensity:** Adjustable from 0-200% of the standard ISO curve.
-*   **Implementation:** Precomputed coefficient tables for all 91 volume steps, double-buffered for glitch-free updates.
+### Volume Leveller
+
+A feedforward RMS compressor that keeps perceived volume consistent across content with varying loudness. It runs on the inputs, after input PEQ and before the matrix.
+
+*   **Upward compression:** Boosts content below a -20 dBFS threshold, with a 6 dB soft knee, and leaves louder content untouched. No makeup gain needed.
+*   **Channel selection:** A detector mask chooses which inputs drive the gain and an apply mask chooses which inputs receive it. The loudest detector channel sets one shared gain, which preserves the image.
+*   **Amount:** 0-100 %, mapping to a ratio of 1:1 to 20:1.
+*   **Speed presets:** Slow, medium, and fast attack/release.
+*   **Max gain:** A cap on how far quiet content can be lifted (up to 35 dB on RP2350, 18 dB on RP2040).
+*   **Silence gate:** Below this level the leveller stops boosting, so it doesn't amplify noise.
+*   **Optional lookahead:** 240 samples (5 ms at 48 kHz) for smoother transitions.
+*   **Safety limiter:** A smoothed limiter on the boost holds the lifted signal under -3 dBFS. It never cuts content that was already above that level.
+
+The leveller is independent of Loudness Compensation; both can be enabled together.
+
+### Stereo Upmixer (RP2350)
+
+Derives a centre channel and, optionally, left and right surround channels from a stereo source. The derived channels appear as extra rows in the matrix mixer, so they can be routed to any output.
+
+*   **Centre:** Passive or adaptive extraction, with strength, width, correlation gate, attack/release, and a presence control.
+*   **Surround:** Passive or adaptive (Dolby-style), with delay, band limiting, and decorrelation.
+
+The upmixer only runs with a stereo input and parks itself in multichannel input modes.
 
 ### Headphone Crossfeed
 
-Implements Bauer Stereophonic-to-Binaural (BS2B) crossfeed with a complementary filter design that reduces unnatural stereo separation for headphone listening. Each channel receives a lowpass-filtered, time-delayed mix of the opposite channel, simulating the acoustic crossfeed that occurs with loudspeaker listening.
+Implements Bauer Stereophonic-to-Binaural (BS2B) crossfeed with a complementary filter design that reduces unnatural stereo separation for headphone listening. Each channel receives a lowpass-filtered, time-delayed mix of the opposite channel, simulating the acoustic crossfeed that occurs with loudspeaker listening. Crossfeed is applied per output pair, selected by a mask (output pair 1 by default). It works in every input mode.
 
 *   **Complementary Design:** Direct path = input - lowpass(input). Guarantees mono signals pass through at unity gain with no coloration.
-*   **Interaural Time Delay (ITD):** First-order all-pass filter adds ~220us of delay to the crossfeed path, modeling sound traveling around the head for 60-degree stereo speaker placement. ITD can be independently enabled/disabled.
+*   **Interaural Time Delay (ITD):** A first-order all-pass filter adds ~220 µs of delay to the crossfeed path, modeling sound traveling around the head for 60-degree stereo speaker placement. ITD can be independently enabled/disabled.
 *   **Presets:**
 
 | Preset | Cutoff | Feed Level | Character |
@@ -359,73 +405,112 @@ Implements Bauer Stereophonic-to-Binaural (BS2B) crossfeed with a complementary 
 | Jan Meier | 650 Hz | 9.5 dB | Subtle, natural |
 | Custom | 500-2000 Hz | 0-15 dB | User-defined |
 
-### Volume Leveller
+### Subharmonic Synthesizer
 
-A feedforward, stereo-linked, single-band RMS dynamic range compressor that maintains consistent perceived volume across content with varying loudness.
+A dbx 120A-style octave divider that synthesizes new bass an octave below the program material, for subwoofers that can reach lower than the recording does. It runs per output, selected by a mask.
 
-*   **Upward compression:** Boosts content below the threshold while leaving content above the threshold completely untouched. No makeup gain needed.
-*   **RMS-based detection:** Tracks root-mean-square envelope, which correlates with perceived loudness better than peak detection.
-*   **Soft-knee:** Gradual transition between full boost and unity gain for transparent, artifact-free behavior.
-*   **Stereo-linked:** The louder of the two channels determines gain for both, preserving the stereo image.
-*   **Gain-reduction safety limiter:** -6 dBFS ceiling enforced via gain reduction (instant attack, 100 ms release) rather than hard clipping. Rarely engages since loud content passes through at unity.
-*   **Optional 10 ms lookahead** for smoother transitions.
-*   **Configurable:** speed (attack/release), max-gain ceiling (cap on how much quiet content can be lifted), and gate threshold (below which the leveller stops boosting to avoid amplifying silence/noise).
+*   **Three bands:** 48-72 Hz generates 24-36 Hz, 72-112 Hz generates 36-56 Hz, and 112-160 Hz generates 56-80 Hz. Each has its own level (-30 dB, which is off, up to +12 dB).
+*   **Selectivity:** Respond to all content, percussive content only, or sustained content only.
+*   **Sub ceiling:** An optional limit on the synthesized level.
+*   **Extras:** A low-frequency boost, linked S/PDIF pairs, a solo control for setup, and a per-output meter.
 
-The leveller sits at PASS 2.5 — after Master EQ, before crossfeed. Independent of Loudness Compensation; both can be enabled together without conflict.
+### Psychoacoustic Bass
 
-### Per-Channel Preamp
+Adds harmonics of the bass so small speakers that can't reproduce the fundamental still sound like they have it (the "missing fundamental" effect). It runs per output, selected by a mask, before the crossover.
 
-Each USB input channel (Left and Right) has an independent preamp gain in dB, applied at PASS 1 before any other processing. Useful for trimming channel imbalance, attenuating hot inputs ahead of EQ, or matching levels across sources. A legacy single-value command remains for backward compatibility (sets both channels to the same value).
+*   **Cutoff:** 30-300 Hz.
+*   **Harmonics level:** -24 to +12 dB, with drive up to 18 dB.
+*   **Character:** Blend from even to odd harmonics.
+*   **Original bass level:** Keep or reduce the low band that the speaker can't play.
+*   Adds no latency.
 
-### Master Volume
+### Tube Preamp Emulation
 
-A device-side output ceiling applied at the very end of the signal chain, independent of USB host volume.
+Models a vacuum-tube preamp stage, per output, selected by a mask, before the crossover.
 
-*   **Range:** -128 to 0 dB. -128 is a sentinel for true silence (mute).
-*   **Independent of USB host volume:** the two multiply together. The host slider operates within whatever range master volume permits.
-*   **Independent of DSP processing:** loudness compensation, EQ, leveller, and crossfeed are all driven by the raw USB volume, not the master volume — their behavior is unchanged regardless of the master setting.
-*   **Two persistence modes** (selectable at runtime, persists across reboots):
-    *   **Mode 0 — Independent (default).** Master volume is a stand-alone device setting. The app calls a save command to capture the current value into the directory; that value is applied at every subsequent boot. Preset save/load do not touch master volume — switching presets never moves the volume.
-    *   **Mode 1 — With preset.** Master volume is part of each preset. Saved with the preset, restored on preset load, like any other DSP parameter. Useful when different presets target speaker setups with different sensitivity / maximum-output requirements.
-*   **Default at first boot:** -20 dB (configurable via `MASTER_VOL_DEFAULT_DB` in firmware).
+*   **Tube types:** 12AX7, 5751, 12AT7, 12AY7, 12AU7, 6SN7, 6SL7, 6DJ8, EF86, 6SJ7, EL84, EL34, 6L6, 6V6, KT88, 300B, or custom.
+*   **Controls:** Drive, bias, asymmetry, hardness, mix, and trim.
+*   **Power supply:** Solid-state, GZ34, 5U4, or 5Y3 rectifier, with sag.
+*   **Output transformer:** Damping factor and low-frequency resonance.
 
-### I2S Output
+### Loudness Compensation
 
-Each output slot can be switched at runtime between S/PDIF (default) and I2S, independently per slot. A single device can drive a mix — e.g., slot 0 as I2S into a DAC chip, slot 1 as S/PDIF over Toslink to an external receiver, all from the same audio pipeline.
+Based on the ISO 226:2003 equal-loudness contours. At low listening volumes, the human ear is less sensitive to bass and treble. Loudness compensation applies a volume-dependent low and high shelf to maintain perceived tonal balance at every listening level. It runs per output, selected by a mask (all outputs by default).
 
-*   **I2S format:** 24-bit data, left-justified, MSB-first, 32-bit frames. Drop-in to most standard I2S DACs (PCM5102, ES9038Q2M, etc.).
-*   **Shared clocks:** All I2S slots share a single BCK/LRCLK pair. LRCLK is always BCK + 1 (PIO side-set hardware constraint).
-*   **Optional MCK:** When enabled, a 128× or 256× Fs master clock is generated on a configurable GPIO. Required by some DACs that don't have an internal PLL. At 96 kHz, only 128× is selectable due to PIO clock-divisor limits.
-*   **Sample-aligned start:** I2S slots can be brought up together so multiple DACs stay phase-locked.
+*   **Reference SPL:** Configurable (40-100 dB). Set this to the SPL where your system sounds tonally balanced at full volume.
+*   **Intensity:** Adjustable from 0-200 % of the standard ISO curve.
+*   **Tracking:** Follows the user/host volume in 61 steps of 1 dB (-60 to 0 dB). Master volume does not affect it.
 
-The DSP pipeline is identical for both output types — only the final encoding differs (BMC/NRZI for S/PDIF vs. raw left-justified PCM for I2S).
+### Output Limiter
 
-### Subwoofer PDM Output
+A brickwall peak limiter on each output, placed after loudness and before delay.
 
-The subwoofer output uses a high-performance software-defined delta-sigma modulator running on Core 1.
+*   **Threshold:** -30 to 0 dB.
+*   **Release:** 10-1000 ms.
+*   **Lookahead:** 32 samples. While any limiter is enabled, every output gets the same lookahead delay, so outputs stay aligned.
+*   **Link groups:** Outputs in the same group share gain reduction, which keeps a stereo pair or a multi-way speaker balanced.
 
-*   **Modulation:** 2nd-Order Delta-Sigma
-*   **Oversampling Ratio:** 256x (12.288 MHz bit clock at 48 kHz)
-*   **Dither:** TPDF (Triangular Probability Density Function) with noise shaping
-*   **DC Protection:** Leaky integrator design preventing DC offset accumulation
+### Volume Controls
 
-The objective was to use as much of Core 1 as necessary to produce an output that could be used full-range while sounding perfectly fine, even if it will only be used to feed a subwoofer. This implementation is very stable and without pops, clicks or idle tones.
+DSPi has two volume stages. They multiply together inside each output's gain stage.
+
+*   **User volume:** -60 to 0 dB in 1 dB steps. This is the USB host volume slider, and it can also be set from DSPi Console, a control surface, an external controller, or LG Sound Sync. Loudness compensation follows it.
+*   **Master volume:** A device-side ceiling from -127 to 0 dB, with -128 as a true mute. The host slider operates within whatever range master volume permits. It defaults to -20 dB at first boot.
+
+Master volume has two persistence modes:
+
+*   **Independent (default):** Master volume is a stand-alone device setting. It is saved on request and applied at every boot. Switching presets never moves it.
+*   **With preset:** Master volume is saved with each preset and restored on preset load. This is useful when presets target speaker setups with different sensitivity.
+
+### Spectrum Analyser
+
+A real-time third-octave analyser that can tap any input (after input PEQ) or output (after gain and delay).
+
+*   **Bands:** Third-octave from 10 Hz. 34 bands at 44.1/48 kHz and 37 at 96 kHz.
+*   **Engine:** A continuous filter bank for bands up to 200 Hz and a 256 to 1024-point FFT above that. Raw FFT bins are also available.
+*   **Range:** -121.5 to +6 dBFS in 0.5 dB steps.
+
+The analyser is off at boot and is never saved.
+
+### Signal Generator
+
+A built-in test signal generator for setting up and measuring a system. It injects after the matrix on the selected outputs and can run with no input streaming.
+
+*   **15 signal types:** Sine, square, white noise, pink noise, log/linear/stepped sweep, impulse, alternating clicks, polarity pulse, tone burst, tone pair (IMD), multitone, inter-sample-peak test, and channel ID.
+*   **RAW mode:** Bypasses the per-output DSP so the signal reaches the output untouched.
+
+The generator is never saved and always starts off.
+
+---
+
+## Control Surfaces
+
+DSPi can read physical controls wired straight to spare GPIOs, so a finished build can have a front panel without a separate microcontroller. Controls are configured in DSPi Console as up to 16 binding slots.
+
+*   **Inputs:** Buttons (with long press, double press, momentary, and repeat gestures), latching switches, quadrature encoders with acceleration, and pots or faders on the ADC pins.
+*   **IR remote:** NEC, RC5, and RC6 decoding, plus a learn mode for unknown remotes.
+*   **Indicators:** On/off LEDs, dimmable LEDs, and LED level meters.
+*   **Displays:** I2C character LCDs (HD44780 via PCF8574 backpack), character OLEDs (US2066/RW1063), and graphic OLEDs (SSD1306, SH1106), with up to 16 pages.
+*   **Aux outputs:** On/off or dimmable GPIO outputs, for example to switch an amplifier.
+*   **Targets:** Volume, mute, input source, preset, individual filter and channel parameters, groups of targets, and macros of up to 8 steps.
+
+See [`control_surfaces_spec.md`](Documentation/Features/control_surfaces_spec.md) for details.
 
 ---
 
 ## User Presets
 
-DSPi includes a 10-slot preset system that stores complete DSP configurations in flash. A preset is always active — there is no "no preset" state.
+DSPi includes a 10-slot preset system that stores complete configurations in flash. A preset is always active; there is no "no preset" state.
 
-*   **10 Preset Slots:** Each slot stores the full DSP state: per-channel preamp, EQ bands, delays, loudness, leveller, crossfeed, matrix mixer, output gains/mutes, output type (S/PDIF or I2S), I2S clock configuration, pin assignments, master volume (used in Mode 1), and per-channel names.
-*   **Per-Channel Names:** Each channel can be given a user-defined name (up to 31 characters) that is stored with the preset.
-*   **Startup Configuration:** Choose which preset loads on boot — either a specific default slot or whichever slot was last active.
-*   **Pin Config Inclusion:** Optionally include or exclude GPIO pin assignments when saving/loading presets (default: include — pin layout travels with the preset).
-*   **Master Volume Mode:** Selects whether master volume is part of each preset (Mode 1) or stored independently in the preset directory (Mode 0, default). See [Master Volume](#master-volume).
-*   **Preset-Switch Mute:** Audio output is briefly muted (~10 ms) during preset transitions to prevent audible glitches.
-*   **Legacy Commands:** The original save/load/reset commands (0x51-0x53) redirect through the preset system, operating on the currently active slot.
-*   **Bulk Parameter Transfer:** The complete DSP state can be read or written in a single USB control transfer (~2.9 KB) for fast synchronization with host applications.
-*   **Auto-Migration:** Older preset directories are upgraded transparently on first boot of new firmware — slot names, startup config, and other persisted state are preserved.
+*   **10 Preset Slots:** Each slot stores the full DSP state, including preamps, EQ, crossovers, matrix, output gains/mutes/delays, loudness, crossfeed, leveller, bass enhancement, tube, limiter, upmixer, and per-channel names. It can also store the active input source and the I/O configuration (output types, pins, I2S and MCK settings, input pins).
+*   **Names:** Each preset and each channel can be given a name of up to 31 characters.
+*   **Startup Configuration:** Choose which preset loads on boot, either a specific slot or whichever slot was last active.
+*   **Output Config Mode:** Choose whether the I/O configuration travels with each preset (default) or is a single device-wide setting that preset loads leave alone.
+*   **Master Volume Mode:** Choose whether master volume is part of each preset or stored independently (default). See [Volume Controls](#volume-controls).
+*   **Device-wide names:** The device name and the input source names are stored on the device, outside the presets.
+*   **Silent switching:** A preset load fades the outputs to silence, restarts them together so they stay sample-aligned, and fades back up. If a DAC hardware mute pin is configured, it is held during the restart.
+*   **Bulk Parameter Transfer:** The complete DSP state (6136 bytes) can be read or written in one transfer, or in chunks for Windows' 4 KB control-transfer limit.
+*   **Auto-Migration:** Presets saved by older firmware are upgraded transparently on first boot of new firmware.
 
 ---
 
@@ -433,228 +518,109 @@ DSPi includes a 10-slot preset system that stores complete DSP configurations in
 
 ### System Architecture
 
-*   **Core 0:** USB communication, audio streaming, DSP processing (master EQ, crossfeed, loudness, matrix mixing, output EQ for S/PDIF pair 1), and control logic.
+*   **Core 0:** USB, input handling, the input stages of the DSP pipeline, the matrix, outputs 1-2, and control logic.
 *   **Core 1 (three modes):**
-    *   **PDM Mode:** Delta-sigma modulator for subwoofer output (when the PDM output is enabled).
-    *   **EQ Worker Mode:** Processes output EQ, delay, and S/PDIF conversion for higher-numbered outputs in parallel with Core 0. On RP2350: outputs 3-8. On RP2040: outputs 3-4. Activated when any of those outputs are enabled and PDM is disabled.
+    *   **PDM Mode:** Delta-sigma modulator for the subwoofer output.
+    *   **EQ Worker Mode:** Runs the per-output DSP for Out 3-8 on RP2350 or Out 3-4 on RP2040, in parallel with Core 0.
     *   **Idle Mode:** When no outputs requiring Core 1 are enabled.
-*   **PIO & DMA:** Hardware offloading for S/PDIF encoding (PIO0) and PDM bitstream generation (PIO1) ensures zero CPU overhead for I/O.
+*   **PIO & DMA:** S/PDIF, I2S, ADAT, and PDM I/O all run in PIO with DMA. Outputs play from free-running DMA rings, so the output path needs no interrupts.
+*   **Code placement:** The firmware runs from flash (XIP), with the audio and USB hot paths pinned in RAM.
 *   **Math Engine:**
     *   **RP2040:** 32-bit fixed-point (Q28) processing with hand-optimized ARM assembly for the inner DSP loop.
-    *   **RP2350:** Single-precision float pipeline with hardware FPU. Hybrid SVF/biquad EQ — Cytomic SVF for low frequencies (below Fs/7.5), TDF2 biquad above. SVF provides superior numerical accuracy for low-frequency filters where biquad coefficient quantization becomes problematic.
-
-> **Note:** PDM mode and EQ Worker mode are mutually exclusive on Core 1. When the PDM output is enabled, Core 0 handles all S/PDIF output EQ processing. When PDM is disabled and higher-numbered outputs are active, Core 1 runs as an EQ worker for those outputs.
+    *   **RP2350:** Single-precision float pipeline with hardware FPU. Hybrid SVF/biquad EQ: Cytomic SVF for low frequencies (below Fs/7.5), TDF2 biquad above.
 
 ### Performance Tuning
 
-Both platforms run at a fixed 307.2 MHz system clock (VCO 1536 MHz / 5 / 1) so PIO dividers stay integer at every supported sample rate, eliminating sample-rate-dependent clock switching glitches.
+Both platforms run at a fixed 307.2 MHz system clock (VCO 1536 MHz / 5 / 1) so audio clock dividers stay integer at every supported sample rate, eliminating sample-rate-dependent clock switching glitches.
 
 | Platform | System Clock | Core Voltage |
 |----------|--------------|--------------|
 | **RP2040** | 307.2 MHz (overclock) | 1.15 V |
 | **RP2350** | 307.2 MHz | 1.15 V |
 
-The RP2040 reaches 307.2 MHz with a slight voltage bump above the 1.10 V nominal; the RP2350 is comfortable at the same voltage at this clock. The voltage step is applied before the frequency change. Sample rate changes do not retune the system clock, only the PIO dividers, so transitions between 44.1 / 48 / 96 kHz are seamless.
+The RP2040 reaches 307.2 MHz with a slight voltage bump above the 1.10 V nominal. The voltage step is applied before the frequency change. Sample rate changes retune only the audio dividers, never the system clock.
 
-Flash access is also tuned: `PICO_FLASH_SPI_CLKDIV` is set to 6 to keep XIP and erase/program operations safely below the W25Q080's 104–133 MHz spec at this clock. On the RP2350, runtime QMI register management is handled by `firmware/DSPi/flash_clkdiv.c` since the bootrom does not honor the boot2 setting on that platform.
+Flash access is also tuned. `PICO_FLASH_SPI_CLKDIV` is set to 6 to keep XIP and erase/program operations safely below the W25Q080's 104-133 MHz spec at this clock. On the RP2350, the QMI register is set at runtime by `firmware/DSPi/flash_clkdiv.c` because the bootrom does not honor the boot2 setting on that platform.
 
-### USB Control Protocol
+### Control Interfaces
 
-Configuration is performed via **Interface 2** (Vendor Interface) using Control Transfers under Windows and via **Interface 0** under macOS. The device supports WinUSB/WCID for automatic driverless installation on Windows.
+*   **USB vendor interface:** Configuration uses control transfers on **interface 2** (the vendor interface). The device carries Microsoft OS 2.0 descriptors, so Windows binds WinUSB automatically with no driver install. VID:PID is `0x2E8B:0xFEAA`.
+*   **Notifications:** The device pushes change events (parameter changes, preset loads, volume, input state, and more) to the host on bulk IN endpoint `0x83`, so a host app never has to poll.
+*   **UART and I2C:** Both ship disabled and are enabled once over USB. They carry the same command set as USB, except the commands that configure the UART and I2C transports themselves, which are USB-only. UART defaults to 115200 baud 8N1 on GPIO 16/17 and can also push notifications. The I2C target defaults to address `0x42` on GPIO 18/19. See [`control_interfaces_spec.md`](Documentation/Features/control_interfaces_spec.md).
 
-**Request Table**
+The firmware defines about 250 vendor commands. Each feature's command set is documented in its spec under [`Documentation/Features/`](Documentation/Features/), and [`Documentation/commands.md`](Documentation/commands.md) covers the core commands.
 
-| Code | Name | Direction | Payload | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `0x42` | `REQ_SET_EQ_PARAM` | OUT | 16 bytes | Upload filter parameters |
-| `0x43` | `REQ_GET_EQ_PARAM` | IN | 16 bytes | Read filter parameters |
-| `0x44` | `REQ_SET_PREAMP` | OUT | 4 bytes | Set global gain (float dB) |
-| `0x45` | `REQ_GET_PREAMP` | IN | 4 bytes | Get global gain |
-| `0x46` | `REQ_SET_BYPASS` | OUT | 1 byte | Bypass Master EQ (1=On, 0=Off) |
-| `0x47` | `REQ_GET_BYPASS` | IN | 1 byte | Get bypass state |
-| `0x48` | `REQ_SET_DELAY` | OUT | 4 bytes | Set channel delay (float ms) |
-| `0x49` | `REQ_GET_DELAY` | IN | 4 bytes | Get channel delay |
-| `0x50` | `REQ_GET_STATUS` | IN | 4-12 bytes | Get system statistics (wValue selects field) |
-| `0x51` | `REQ_SAVE_PARAMS` | IN | 1 byte | Save to active preset slot |
-| `0x52` | `REQ_LOAD_PARAMS` | IN | 1 byte | Reload active preset slot |
-| `0x53` | `REQ_FACTORY_RESET` | IN | 1 byte | Reset live state to defaults |
-| `0x54` | `REQ_SET_CHANNEL_GAIN` | OUT | 4 bytes | Set output channel gain (float dB) |
-| `0x55` | `REQ_GET_CHANNEL_GAIN` | IN | 4 bytes | Get output channel gain |
-| `0x56` | `REQ_SET_CHANNEL_MUTE` | OUT | 1 byte | Mute output channel (1=Muted) |
-| `0x57` | `REQ_GET_CHANNEL_MUTE` | IN | 1 byte | Get mute state |
-| `0x58` | `REQ_SET_LOUDNESS` | OUT | 1 byte | Enable/disable loudness (1=On) |
-| `0x59` | `REQ_GET_LOUDNESS` | IN | 1 byte | Get loudness state |
-| `0x5A` | `REQ_SET_LOUDNESS_REF` | OUT | 4 bytes | Set reference SPL (float, 40-100) |
-| `0x5B` | `REQ_GET_LOUDNESS_REF` | IN | 4 bytes | Get reference SPL |
-| `0x5C` | `REQ_SET_LOUDNESS_INTENSITY` | OUT | 4 bytes | Set intensity % (float, 0-200) |
-| `0x5D` | `REQ_GET_LOUDNESS_INTENSITY` | IN | 4 bytes | Get intensity |
-| `0x5E` | `REQ_SET_CROSSFEED` | OUT | 1 byte | Enable/disable crossfeed (1=On) |
-| `0x5F` | `REQ_GET_CROSSFEED` | IN | 1 byte | Get crossfeed state |
-| `0x60` | `REQ_SET_CROSSFEED_PRESET` | OUT | 1 byte | Set preset (0-3) |
-| `0x61` | `REQ_GET_CROSSFEED_PRESET` | IN | 1 byte | Get current preset |
-| `0x62` | `REQ_SET_CROSSFEED_FREQ` | OUT | 4 bytes | Set custom frequency (float Hz, 500-2000) |
-| `0x63` | `REQ_GET_CROSSFEED_FREQ` | IN | 4 bytes | Get custom frequency |
-| `0x64` | `REQ_SET_CROSSFEED_FEED` | OUT | 4 bytes | Set custom feed level (float dB, 0-15) |
-| `0x65` | `REQ_GET_CROSSFEED_FEED` | IN | 4 bytes | Get custom feed level |
-| `0x66` | `REQ_SET_CROSSFEED_ITD` | OUT | 1 byte | Enable/disable ITD (1=On) |
-| `0x67` | `REQ_GET_CROSSFEED_ITD` | IN | 1 byte | Get ITD state |
-| `0x70` | `REQ_SET_MATRIX_ROUTE` | OUT | 8 bytes | Set matrix crosspoint (MatrixRoutePacket) |
-| `0x71` | `REQ_GET_MATRIX_ROUTE` | IN | 8 bytes | Get matrix crosspoint |
-| `0x72` | `REQ_SET_OUTPUT_ENABLE` | OUT | 1 byte | Enable/disable output channel |
-| `0x73` | `REQ_GET_OUTPUT_ENABLE` | IN | 1 byte | Get output enable state |
-| `0x74` | `REQ_SET_OUTPUT_GAIN` | OUT | 4 bytes | Set per-output gain (float dB) |
-| `0x75` | `REQ_GET_OUTPUT_GAIN` | IN | 4 bytes | Get per-output gain |
-| `0x76` | `REQ_SET_OUTPUT_MUTE` | OUT | 1 byte | Mute output (1=Muted) |
-| `0x77` | `REQ_GET_OUTPUT_MUTE` | IN | 1 byte | Get output mute state |
-| `0x78` | `REQ_SET_OUTPUT_DELAY` | OUT | 4 bytes | Set per-output delay (float ms) |
-| `0x79` | `REQ_GET_OUTPUT_DELAY` | IN | 4 bytes | Get per-output delay |
-| `0x7A` | `REQ_GET_CORE1_MODE` | IN | 1 byte | Get Core 1 mode (0=Idle, 1=PDM, 2=EQ Worker) |
-| `0x7B` | `REQ_GET_CORE1_CONFLICT` | IN | 1 byte | Check if PDM vs EQ Worker conflict exists |
-| `0x7C` | `REQ_SET_OUTPUT_PIN` | IN | 1 byte | Change output GPIO pin (returns status) |
-| `0x7D` | `REQ_GET_OUTPUT_PIN` | IN | 1 byte | Get current GPIO pin for an output |
-| `0x7E` | `REQ_GET_SERIAL` | IN | variable | Get unique board serial number |
-| `0x7F` | `REQ_GET_PLATFORM` | IN | 6 bytes | Get platform ID, firmware version, output count |
-| `0x83` | `REQ_CLEAR_CLIPS` | OUT | — | Clear clip detection latches |
-| `0x90` | `REQ_PRESET_SAVE` | IN | 1 byte | Save live state to preset slot (wValue=slot) |
-| `0x91` | `REQ_PRESET_LOAD` | IN | 1 byte | Load preset slot to live state (wValue=slot) |
-| `0x92` | `REQ_PRESET_DELETE` | IN | 1 byte | Delete preset slot (wValue=slot) |
-| `0x93` | `REQ_PRESET_GET_NAME` | IN | 32 bytes | Get preset name (wValue=slot) |
-| `0x94` | `REQ_PRESET_SET_NAME` | OUT | 32 bytes | Set preset name (wValue=slot) |
-| `0x95` | `REQ_PRESET_GET_DIR` | IN | variable | Get preset directory (occupancy, startup config) |
-| `0x96` | `REQ_PRESET_SET_STARTUP` | OUT | 2 bytes | Set startup mode and default slot |
-| `0x97` | `REQ_PRESET_GET_STARTUP` | IN | 2 bytes | Get startup configuration |
-| `0x98` | `REQ_PRESET_SET_INCLUDE_PINS` | OUT | 1 byte | Set pin config inclusion (1=include) |
-| `0x99` | `REQ_PRESET_GET_INCLUDE_PINS` | IN | 1 byte | Get pin config inclusion setting |
-| `0x9A` | `REQ_PRESET_GET_ACTIVE` | IN | 1 byte | Get currently active preset slot index |
-| `0x9B` | `REQ_SET_CHANNEL_NAME` | OUT | 32 bytes | Set channel name (wValue=channel) |
-| `0x9C` | `REQ_GET_CHANNEL_NAME` | IN | 32 bytes | Get channel name (wValue=channel) |
-| `0xA0` | `REQ_GET_ALL_PARAMS` | IN | ~2896 bytes | Bulk read entire DSP state (multi-packet) |
-| `0xA1` | `REQ_SET_ALL_PARAMS` | OUT | ~2896 bytes | Bulk write entire DSP state (multi-packet) |
-| `0xB0` | `REQ_GET_BUFFER_STATS` | IN | variable | Read buffer fill statistics |
-| `0xB1` | `REQ_RESET_BUFFER_STATS` | IN | 1 byte | Reset buffer statistics counters |
-| `0xB2` | `REQ_GET_USB_ERROR_STATS` | IN | 24 bytes | Read USB PHY error counters (CRC/bit-stuff/timeout/overflow/seq) |
-| `0xB3` | `REQ_RESET_USB_ERROR_STATS` | IN | 1 byte | Reset USB PHY error counters |
-| `0xB4` | `REQ_SET_LEVELLER_ENABLE` | OUT | 1 byte | Enable/disable Volume Leveller |
-| `0xB5` | `REQ_GET_LEVELLER_ENABLE` | IN | 1 byte | Get leveller enable state |
-| `0xB6` | `REQ_SET_LEVELLER_AMOUNT` | OUT | 4 bytes | Set leveller target/amount (float) |
-| `0xB7` | `REQ_GET_LEVELLER_AMOUNT` | IN | 4 bytes | Get leveller amount |
-| `0xB8` | `REQ_SET_LEVELLER_SPEED` | OUT | 1 byte | Set leveller attack/release speed |
-| `0xB9` | `REQ_GET_LEVELLER_SPEED` | IN | 1 byte | Get leveller speed |
-| `0xBA` | `REQ_SET_LEVELLER_MAX_GAIN` | OUT | 4 bytes | Set max upward gain (float dB) |
-| `0xBB` | `REQ_GET_LEVELLER_MAX_GAIN` | IN | 4 bytes | Get max upward gain |
-| `0xBC` | `REQ_SET_LEVELLER_LOOKAHEAD` | OUT | 1 byte | Enable/disable 10 ms lookahead |
-| `0xBD` | `REQ_GET_LEVELLER_LOOKAHEAD` | IN | 1 byte | Get lookahead state |
-| `0xBE` | `REQ_SET_LEVELLER_GATE` | OUT | 4 bytes | Set noise-gate threshold (float dB) |
-| `0xBF` | `REQ_GET_LEVELLER_GATE` | IN | 4 bytes | Get noise-gate threshold |
-| `0xC0` | `REQ_SET_OUTPUT_TYPE` | OUT | 1 byte | Set slot output type (0=S/PDIF, 1=I2S; wValue=slot) |
-| `0xC1` | `REQ_GET_OUTPUT_TYPE` | IN | 1 byte | Get slot output type (wValue=slot) |
-| `0xC2` | `REQ_SET_I2S_BCK_PIN` | OUT | 1 byte | Set shared I2S BCK GPIO (LRCLK auto = BCK + 1) |
-| `0xC3` | `REQ_GET_I2S_BCK_PIN` | IN | 1 byte | Get current I2S BCK pin |
-| `0xC4` | `REQ_SET_MCK_ENABLE` | OUT | 1 byte | Enable/disable I2S master clock output |
-| `0xC5` | `REQ_GET_MCK_ENABLE` | IN | 1 byte | Get MCK enable state |
-| `0xC6` | `REQ_SET_MCK_PIN` | OUT | 1 byte | Set MCK GPIO |
-| `0xC7` | `REQ_GET_MCK_PIN` | IN | 1 byte | Get MCK GPIO |
-| `0xC8` | `REQ_SET_MCK_MULTIPLIER` | OUT | 1 byte | Set MCK multiplier (0=128×, 1=256×) |
-| `0xC9` | `REQ_GET_MCK_MULTIPLIER` | IN | 1 byte | Get MCK multiplier |
-| `0xD0` | `REQ_SET_PREAMP_CH` | OUT | 4 bytes | Set per-channel preamp (wValue=channel, payload=float dB) |
-| `0xD1` | `REQ_GET_PREAMP_CH` | IN | 4 bytes | Get per-channel preamp (wValue=channel) |
-| `0xD2` | `REQ_SET_MASTER_VOLUME` | OUT | 4 bytes | Set master volume (-128 mute sentinel, -127..0 dB) |
-| `0xD3` | `REQ_GET_MASTER_VOLUME` | IN | 4 bytes | Get current live master volume |
-| `0xD4` | `REQ_SET_MASTER_VOLUME_MODE` | OUT | 1 byte | Set persistence mode (0=independent, 1=with preset) |
-| `0xD5` | `REQ_GET_MASTER_VOLUME_MODE` | IN | 1 byte | Get persistence mode |
-| `0xD6` | `REQ_SAVE_MASTER_VOLUME` | IN | 1 byte | Save live master volume to directory (mode 0 persistence) |
-| `0xD7` | `REQ_GET_SAVED_MASTER_VOLUME` | IN | 4 bytes | Read directory's saved master-volume value |
-| `0xF0` | `REQ_ENTER_BOOTLOADER` | IN | 1 byte | Reboot into UF2 bootloader for firmware update |
+**`REQ_GET_PLATFORM` (0x7F)** returns 7 bytes:
+
+| Byte | Meaning |
+|------|---------|
+| 0 | Platform (0 = RP2040, 1 = RP2350) |
+| 1 | Firmware major version |
+| 2 | Legacy packed version: `(minor << 4) \| patch` |
+| 3 | Number of output channels (5 on RP2040, 9 on RP2350) |
+| 4 | Firmware minor version |
+| 5 | Firmware patch version |
+| 6 | Beta number (0 = final release) |
 
 ### REQ_GET_STATUS (0x50) - System Telemetry
 
-The `REQ_GET_STATUS` request returns data based on the `wValue` field:
+The `REQ_GET_STATUS` request returns data based on the `wValue` field. Every field is a 4-byte value except wValue 9.
 
-| wValue | Returns | Description |
-| :--- | :--- | :--- |
-| `0` | uint32 | Peaks for channels 0-1 (packed 16-bit values) |
-| `1` | uint32 | Peaks for channels 2-3 (packed 16-bit values) |
-| `2` | uint32 | Peak for channel 4 + CPU0/CPU1 load (packed) |
-| `3` | uint32 | PDM ring buffer overruns |
-| `4` | uint32 | PDM ring buffer underruns |
-| `5` | uint32 | PDM DMA overruns |
-| `6` | uint32 | PDM DMA underruns |
-| `7` | uint32 | S/PDIF overruns |
-| `8` | uint32 | S/PDIF underruns |
-| `9` | 12 bytes | Combined: all 5 peaks + CPU loads |
-| `10` | uint32 | USB audio packet count |
-| `11` | uint32 | USB alt setting |
-| `12` | uint32 | USB audio mounted state |
-| `13` | uint32 | System clock frequency (Hz) |
-| `14` | uint32 | Core voltage (millivolts) |
-| `15` | uint32 | Sample rate (Hz) |
-| `16` | int32 | System temperature (centi-degrees C) |
-| `17` | uint32 | Total S/PDIF DMA starvations (all slots combined) |
-| `18` | uint32 | S/PDIF slot 0 starvations (Out 1-2) |
-| `19` | uint32 | S/PDIF slot 1 starvations (Out 3-4) |
-| `20` | uint32 | S/PDIF slot 2 starvations (Out 5-6, RP2350) |
-| `21` | uint32 | S/PDIF slot 3 starvations (Out 7-8, RP2350) |
+| wValue | Description |
+| :--- | :--- |
+| `0`-`2` | Legacy packed peaks for channels 0-4; wValue 2 also carries CPU0/CPU1 load |
+| `3`-`6` | PDM ring overruns, ring underruns, DMA overruns, DMA underruns |
+| `7` | Retired (always 0) |
+| `8` | S/PDIF underruns |
+| `9` | Combined packet: 16-bit peak per channel, CPU0 and CPU1 load, 32-bit clip flags, active input count (21 bytes on RP2040, 41 on RP2350) |
+| `10` | USB audio packet count |
+| `11` | USB alt setting |
+| `12` | USB audio mounted state |
+| `13` | System clock frequency (Hz) |
+| `14` | Core voltage (millivolts) |
+| `15` | Sample rate (Hz) |
+| `16` | Temperature (centi-degrees C, signed) |
+| `17` | Total S/PDIF DMA starvations |
+| `18`-`21` | S/PDIF starvations for slots 0-3 |
+| `22` | USB audio ring overruns |
+| `23` | Active input channel count |
+| `24`-`25` | Loopback capture overflows and underruns (`DSPI_LOOPBACK` builds only) |
+| `26` | Output ring underrun episodes |
+| `27` | Blocks refused by ring admission |
+| `28` | Lowest ring fill before a write (frames) |
+| `29` | Worst input delivery gap (µs) |
+| `30` | Worst USB packet gap (µs) |
+| `31` | Background job steps over budget |
+| `32` | Measured S/PDIF input rate (mHz; 0 = no signal) |
+| `33` | Soft VCXO trim (ppm × 100, signed) |
 
-A starvation event means the S/PDIF DMA needed a buffer but the consumer pool was empty, so the firmware substituted a silence buffer for that transfer. This is a more direct output-side dropout signal than the older `spdif_underruns` USB-packet-gap heuristic.
-
-### Data Structures
-
-**Filter Packet (16 bytes):**
-```c
-struct __attribute__((packed)) {
-    uint8_t channel;  // RP2350: 0-10, RP2040: 0-6
-    uint8_t band;     // 0-9
-    uint8_t type;     // 0=Flat, 1=Peak, 2=LS, 3=HS, 4=LP, 5=HP
-    uint8_t reserved;
-    float freq;       // Hz
-    float Q;
-    float gain_db;
-}
-```
-
-**Matrix Route Packet (8 bytes):**
-```c
-struct __attribute__((packed)) {
-    uint8_t input;          // 0-1 (USB L/R)
-    uint8_t output;         // RP2350: 0-8, RP2040: 0-4
-    uint8_t enabled;        // 0 or 1
-    uint8_t phase_invert;   // 0 or 1
-    float gain_db;          // -inf to +12dB
-}
-```
+`REQ_CLEAR_CLIPS` (0x83) reads and clears the clip flags.
 
 ### Runtime Pin Configuration
 
-Output GPIO pins can be reassigned at runtime without reflashing. This is useful for custom PCB layouts or when the default pin assignments conflict with other hardware.
+**`REQ_SET_OUTPUT_PIN` (0x7C)** is an IN transfer that returns a 1-byte status.
 
-**`REQ_SET_OUTPUT_PIN` (0x7C)** — IN transfer, returns 1-byte status:
-*   `wValue` = `(new_pin << 8) | output_index`
-*   RP2350: `output_index` 0-3 for S/PDIF outputs 1-4, 4 for PDM subwoofer
-*   RP2040: `output_index` 0-1 for S/PDIF outputs 1-2, 2 for PDM subwoofer
-*   S/PDIF outputs are automatically disabled and re-enabled during the pin change (~1ms audio dropout on that output only)
-*   PDM output must be disabled first (disable via `REQ_SET_OUTPUT_ENABLE`), otherwise returns `PIN_CONFIG_OUTPUT_ACTIVE`
+*   `wValue` = `(new_pin << 8) | output_index`.
+*   RP2350: `output_index` 0-3 for output slots 0-3, 4 for the PDM sub.
+*   RP2040: `output_index` 0-1 for output slots 0-1, 2 for the PDM sub.
+*   Slot pin moves restart all slots together so they stay aligned.
+*   The PDM pin can only be moved while PDM is disabled; otherwise the request returns `PIN_CONFIG_OUTPUT_ACTIVE`.
+*   On every pin SET command, a pin value of `0xFF` resets that pin to its default. A value of 0 always means GPIO 0.
 
 | Status Code | Value | Meaning |
 |-------------|-------|---------|
 | `PIN_CONFIG_SUCCESS` | 0x00 | Pin changed successfully |
-| `PIN_CONFIG_INVALID_PIN` | 0x01 | Pin out of range or reserved (GPIO 12, 23-25) |
-| `PIN_CONFIG_PIN_IN_USE` | 0x02 | Pin already assigned to another output |
+| `PIN_CONFIG_INVALID_PIN` | 0x01 | Pin out of range or reserved (GPIO 23-25) |
+| `PIN_CONFIG_PIN_IN_USE` | 0x02 | Pin already assigned to another function |
 | `PIN_CONFIG_INVALID_OUTPUT` | 0x03 | Output index out of range |
 | `PIN_CONFIG_OUTPUT_ACTIVE` | 0x04 | PDM output must be disabled before changing its pin |
+| `PIN_CONFIG_INVALID_PARAM` | 0x05 | Invalid parameter |
 
-**`REQ_GET_OUTPUT_PIN` (0x7D)** — IN transfer, returns 1 byte:
-*   `wValue` = output_index
-*   Returns the current GPIO pin number for that output
-
-Pin assignments are stored in each preset and can optionally be included during preset save/load (controlled via `REQ_PRESET_SET_INCLUDE_PINS`).
+**`REQ_GET_OUTPUT_PIN` (0x7D)** takes `wValue` = output_index and returns the current GPIO for that output.
 
 ### USB Audio Loopback Capture (DSPI_LOOPBACK)
 
-A build-flag-gated capture path for bench measurement and automated verification. When the firmware is compiled with `DSPI_LOOPBACK`, the device exposes a second USB Audio Class 1 function that streams **output slot 0** back to the host as a recording input, so a host tool can play a signal into DSPi and record exactly what slot 0 produced. This folds the capability of the standalone Weeb Labs USBrx (an external S/PDIF-to-USB recorder) into DSPi itself, removing the second board and the S/PDIF jumper from the loopback rig. The feature is excluded from release builds; a production device never exposes the capture endpoint.
-
-**Building**
-
-The loopback build lives in dedicated build directories so release artifacts are unaffected:
+A build-flag-gated capture path for bench measurement and automated verification. When the firmware is compiled with `DSPI_LOOPBACK`, the device exposes a second USB Audio Class 1 function that streams **output slot 0** back to the host as a 2-channel 24-bit recording input at 44.1 or 48 kHz. A host tool can then play a signal into DSPi and record exactly what slot 0 produced. Release builds never include it.
 
 ```bash
 # Configure once (from the repo root):
@@ -666,67 +632,12 @@ cmake --build build-rp2040-loopback -j
 cmake --build build-rp2350-loopback -j
 ```
 
-`DSPI_LOOPBACK` is a CMake `option` (default `OFF`); enabling it adds `loopback.c` to the target and defines the `DSPI_LOOPBACK` macro that gates every firmware change. With the flag off, the build is byte-for-byte identical to the normal firmware.
+*   **Topology:** The capture function is appended after the vendor interface as interfaces 3 and 4, so the existing interfaces keep their numbers. It uses isochronous asynchronous IN endpoint `0x81`.
+*   **Tap:** Slot 0's finished samples are copied after all DSP and immediately before the output encoder, so the capture matches slot 0 whether it is S/PDIF or I2S. The tap is read-only and cannot disturb output alignment.
+*   **Rate matching:** A servo varies the packet size each USB frame to keep a 1024-frame ring near its target fill, with no resampling.
+*   **Glitch counters:** `REQ_GET_STATUS` wValue 24 and 25 count capture overflows and underruns.
 
-**USB topology**
-
-The capture is a self-contained UAC1 audio function appended after the vendor interface, so the existing interfaces (0 Audio Control, 1 Audio Streaming, 2 Vendor) keep their numbers. The configuration descriptor grows from 207 to 309 bytes.
-
-| Element | Value |
-|---|---|
-| Interface 3 | Capture Audio Control (own IAD grouping interfaces 3 + 4) |
-| Interface 4 | Capture Audio Streaming (alt 0 zero-bandwidth, alt 1 streaming) |
-| Endpoint | `0x81` isochronous, asynchronous IN, `bInterval` 1 |
-| `wMaxPacketSize` | 384 bytes (64 stereo frames of headroom) |
-| Format | Type I PCM, 2 channels, 24-bit, 44.1 / 48 kHz |
-| Terminals | Input terminal ID 4 (internal: slot 0) feeds Output terminal ID 5 (USB streaming) |
-
-The host sees one USB device with both a playback output and a 2-channel capture input. On macOS these appear as two Core Audio entries that share the name "Weeb Labs DSPi" (one with output channels, one with input channels). The Microsoft OS 2.0 / WinUSB descriptors are unchanged: their Function Subset still scopes WinUSB to the vendor interface only, so adding the capture function does not disturb driverless vendor-interface binding on Windows.
-
-**Capture data path**
-
-```
-output slot 0 (audio_pipeline.c, post-DSP, pre-encode)
-  -> loopback_push_slot0() -> SPSC ring (1024 frames, ~8 KB, .bss)
-      -> rate-matching servo (fill_audio_packet, per USB frame)
-          -> iso async IN endpoint 0x81 -> USB host
-```
-
-*   **Tap.** A single call in `process_input_block()` reads slot 0's finished, interleaved 24-bit samples from `audio_buf[0]` immediately before the buffer is handed to the output DMA. It runs after all DSP (EQ, crossover, matrix, gain, delay, mute) and before the output encoder, so it captures exactly what slot 0 sends out whether slot 0 is configured as S/PDIF or I2S. The tap is read-only: it copies samples out and never writes back, so it cannot perturb the firmware's inter-slot output alignment.
-*   **Ring.** A single-producer / single-consumer ring of 1024 interleaved stereo frames (two `int32` per frame, ~8 KB in `.bss`). The producer is the audio pipeline; the consumer is the USB transfer-complete callback. Both run in core-0 thread context, so plain volatile head/tail indices are sufficient. On overflow (host not draining) the producer drops frames and the servo re-primes.
-
-**Rate-matching servo**
-
-The capture IN endpoint is asynchronous to the host's USB frame (SOF) clock in every input mode: with USB input, DSPi is the feedback master on its own crystal; with S/PDIF or I2S input, the output runs on the external source clock. A rate-matching servo therefore varies the packet size each USB frame (implicit feedback), with no resampling:
-
-```
-frames_this_frame = nominal + correction
-  nominal    = audio_state.freq / 1000          (samples per 1 ms USB frame)
-  correction = clamp(KP * (ring_fill - target), +/- MAX_CORR)
-```
-
-A fractional-sample accumulator carries the remainder across frames so non-integer rates (44.1 kHz) stay exact. The stream primes to the target fill level before sending audio and emits silence on underrun.
-
-| Constant | Value | Meaning |
-|---|---|---|
-| `TARGET_FILL_FRAMES` | 256 | Ring set-point (~5.3 ms @ 48 kHz) |
-| `SERVO_KP` | 0.008 | Proportional gain (samples/frame per frame of fill error) |
-| `SERVO_MAX_CORR` | 2.0 | Correction clamp (samples/frame) |
-| `RING_FRAMES` | 1024 | Ring capacity (~21 ms @ 48 kHz) |
-
-**Driver registration**
-
-The capture function uses a dedicated custom UAC1 class driver (`loopback.c`), registered alongside the playback driver. With `DSPI_LOOPBACK` defined, `usbd_app_driver_get_cb()` returns both drivers. Because both audio-control interfaces match the same class / subclass / alt-setting, each driver's `open()` is scoped by interface number: the playback driver claims interface 0 only and the loopback driver claims interface 3 only, so neither hijacks the other's function. All capture control requests (SET / GET_INTERFACE, the endpoint sampling-frequency control) and the isochronous transfers route to the loopback driver.
-
-**Resource cost**
-
-The capture ring and buffers add roughly 8.7 KB of BSS on both platforms (RP2040 129436 to 138120 bytes; RP2350 237404 to 246092 bytes). Because the firmware is built `copy_to_ram`, this BSS competes with the program image in RAM; the RP2040 loopback build has about 6 KB of headroom, which is acceptable for a debug build and is part of why the feature is excluded from release. Capture rates are capped at DSPi's operating range (44.1 / 48 kHz), which also keeps the extra isochronous endpoint within the RP2040 USB controller's DPRAM budget.
-
-**Host usage**
-
-Any class-compliant recording tool can open the DSPi capture input. The repository's verification harness drives it directly: `python3 -m tools.dspi_test.run --group audio` plays signals into DSPi, records slot 0 from the capture, and checks the measured response against the firmware's filter math. See `tools/dspi_test/test_harness.md` for the full rig guide and `Documentation/current_architecture.md` ("USB Audio Loopback Capture") for additional firmware detail.
-
-**Files:** `firmware/DSPi/loopback.c` / `loopback.h` (ring, driver, servo), with `DSPI_LOOPBACK`-gated additions in `usb_descriptors.c` / `.h` (descriptor block), `usb_audio.c` (driver registration and interface scoping), `audio_pipeline.c` (the slot-0 tap), and `CMakeLists.txt` (the build option).
+The verification harness uses it directly: `python3 -m tools.dspi_test.run --group audio` plays signals into DSPi, records slot 0, and checks the measured response against the firmware's filter math. See `tools/dspi_test/test_harness.md` for the rig guide and `Documentation/current_architecture.md` ("USB Audio Loopback Capture") for firmware detail.
 
 ---
 
@@ -754,25 +665,23 @@ git submodule update --init --recursive
 ```
 
 ### 3. Build the Firmware
-You can build for either the standard **RP2040** (Raspberry Pi Pico) or the newer **RP2350** (Raspberry Pi Pico 2). The build system uses separate directories to avoid conflicts.
+You can build for either the **RP2040** (Raspberry Pi Pico) or the **RP2350** (Raspberry Pi Pico 2). Each platform uses its own build directory. Run these from the repository root.
 
-**Option A: Build for RP2040 (Standard Pico)**
+**Option A: Build for RP2040 (Pico)**
 ```bash
-mkdir build-rp2040
-cd build-rp2040
-cmake -DPICO_BOARD=pico -DPICO_EXTRAS_PATH=../firmware/pico-extras ../firmware
-make
+cmake -S firmware -B build-rp2040 -DPICO_PLATFORM=rp2040 -DPICO_BOARD=pico
+cmake --build build-rp2040 -j
 ```
-*Output:* `DSPi/DSPi.uf2`
+*Output:* `build-rp2040/DSPi/DSPi.uf2`
 
 **Option B: Build for RP2350 (Pico 2)**
 ```bash
-mkdir build-rp2350
-cd build-rp2350
-cmake -DPICO_BOARD=pico2 -DPICO_EXTRAS_PATH=../firmware/pico-extras ../firmware
-make
+cmake -S firmware -B build-rp2350 -DPICO_PLATFORM=rp2350-arm-s -DPICO_BOARD=pico2
+cmake --build build-rp2350 -j
 ```
-*Output:* `DSPi/DSPi.uf2`
+*Output:* `build-rp2350/DSPi/DSPi.uf2`
+
+Optional CMake flags, all off by default, enable bench instrumentation: `DSPI_LOOPBACK` (USB capture of slot 0), `DSPI_CLOCK_DIAG` (clock diagnostics), and `DSPI_LOOP_PROF` (main-loop profiling).
 
 ### 4. Flash the Device
 1.  Hold the **BOOTSEL** button on your board while plugging it in.
@@ -784,25 +693,56 @@ Alternatively, an already-running DSPi can be put into bootloader mode without a
 
 ## Detailed Specifications
 
-In-depth specs for each subsystem are kept under [`Documentation/Features/`](Documentation/Features/). These are the authoritative source for protocol formats, wire layouts, edge cases, and host-app integration patterns.
+In-depth specs for each subsystem are kept under [`Documentation/Features/`](Documentation/Features/). These are the authoritative source for protocol formats, wire layouts, edge cases, and host-app integration patterns. [`Documentation/current_architecture.md`](Documentation/current_architecture.md) describes how the firmware fits together.
 
 | Feature | Spec |
 |---------|------|
 | Matrix Mixer | [`matrixmixer_spec.md`](Documentation/Features/matrixmixer_spec.md) |
-| User Presets | [`user_presets_spec.md`](Documentation/Features/user_presets_spec.md) |
-| Master Volume | [`master_volume_spec.md`](Documentation/Features/master_volume_spec.md) |
+| PEQ Filters | [`peq_filters.md`](Documentation/Features/peq_filters.md) |
+| Crossover Filters | [`crossover_filters_spec.md`](Documentation/Features/crossover_filters_spec.md) |
 | Per-Channel Preamp | [`per_channel_preamp_spec.md`](Documentation/Features/per_channel_preamp_spec.md) |
 | Volume Leveller | [`volume_leveller_spec.md`](Documentation/Features/volume_leveller_spec.md) |
+| Stereo Upmixer | [`upmixer_spec.md`](Documentation/Features/upmixer_spec.md) |
+| Subharmonic Synthesizer | [`subharmonic_synth_spec.md`](Documentation/Features/subharmonic_synth_spec.md) |
+| Psychoacoustic Bass | [`psychoacoustic_bass_spec.md`](Documentation/Features/psychoacoustic_bass_spec.md) |
+| Tube Preamp | [`tube_preamp_spec.md`](Documentation/Features/tube_preamp_spec.md) |
+| Loudness Compensation | [`loudness_compensation_spec.md`](Documentation/Features/loudness_compensation_spec.md) |
+| Output Limiter | [`output_limiter_spec.md`](Documentation/Features/output_limiter_spec.md) |
+| Master Volume | [`master_volume_spec.md`](Documentation/Features/master_volume_spec.md) |
+| Spectrum Analyser | [`spectrum_analyser_spec.md`](Documentation/Features/spectrum_analyser_spec.md) |
+| Signal Generator | [`test_signals_spec.md`](Documentation/Features/test_signals_spec.md) |
+| User Presets | [`user_presets_spec.md`](Documentation/Features/user_presets_spec.md) |
+| Output Config Mode | [`output_config_independent_load.md`](Documentation/Features/output_config_independent_load.md) |
+| Silent State Changes | [`silent_state_changes_spec.md`](Documentation/Features/silent_state_changes_spec.md) |
+| Multichannel USB Input | [`usb_8ch_input_spec.md`](Documentation/Features/usb_8ch_input_spec.md) |
+| Input Switching | [`input_switching_spec.md`](Documentation/Features/input_switching_spec.md) |
+| S/PDIF Input | [`SPDIF_input_spec.md`](Documentation/Features/SPDIF_input_spec.md) |
+| LG Sound Sync | [`lg_sound_sync_spec.md`](Documentation/Features/lg_sound_sync_spec.md) |
+| I2S Input | [`i2s_input_spec.md`](Documentation/Features/i2s_input_spec.md) |
+| I2S Slave Input | [`i2s_slave_input_spec.md`](Documentation/Features/i2s_slave_input_spec.md) |
+| I2S Clock Pins | [`clock_pins_spec.md`](Documentation/Features/clock_pins_spec.md) |
+| ADAT Input | [`adat_input_spec.md`](Documentation/Features/adat_input_spec.md) |
+| Input Source Names | [`input_source_names_spec.md`](Documentation/Features/input_source_names_spec.md) |
+| Soft VCXO (clock tracking) | [`soft_vcxo_spec.md`](Documentation/Features/soft_vcxo_spec.md) |
 | I2S Output | [`i2s_output_spec.md`](Documentation/Features/i2s_output_spec.md) |
+| Master Clock (MCK) | [`master_clock_spec.md`](Documentation/Features/master_clock_spec.md) |
+| ADAT Output | [`adat_output_spec.md`](Documentation/Features/adat_output_spec.md) |
+| DAC Hardware Mute | [`dac_hardware_mute_spec.md`](Documentation/Features/dac_hardware_mute_spec.md) |
+| Core 1 Modes | [`core1_modes_spec.md`](Documentation/Features/core1_modes_spec.md) |
+| Control Surfaces | [`control_surfaces_spec.md`](Documentation/Features/control_surfaces_spec.md) |
+| Control Surface Displays | [`control_surfaces_display_spec.md`](Documentation/Features/control_surfaces_display_spec.md) |
+| Control Surface Groups and Macros | [`control_surfaces_groups_macros_spec.md`](Documentation/Features/control_surfaces_groups_macros_spec.md) |
+| Control Surface Aux Outputs | [`control_surfaces_aux_spec.md`](Documentation/Features/control_surfaces_aux_spec.md) |
+| UART / I2C Control | [`control_interfaces_spec.md`](Documentation/Features/control_interfaces_spec.md) |
+| Notifications | [`notification_protocol_v2_spec.md`](Documentation/Features/notification_protocol_v2_spec.md) |
+| Device Identification | [`device_identification_spec.md`](Documentation/Features/device_identification_spec.md) |
+| Device Name | [`device_name_spec.md`](Documentation/Features/device_name_spec.md) |
+| Firmware Versioning | [`firmware_versioning_spec.md`](Documentation/Features/firmware_versioning_spec.md) |
 | Peak / Clip Metering | [`peak_clip_metering_spec.md`](Documentation/Features/peak_clip_metering_spec.md) |
 | Buffer Statistics | [`buffer_statistics_spec.md`](Documentation/Features/buffer_statistics_spec.md) |
 | S/PDIF DMA Starvation | [`spdif_starvation_spec.md`](Documentation/Features/spdif_starvation_spec.md) |
 | USB Error Diagnostics | [`usb_errors_spec.md`](Documentation/Features/usb_errors_spec.md) |
-| Core 1 Modes | [`core1_modes_spec.md`](Documentation/Features/core1_modes_spec.md) |
-| Device Identification | [`device_identification_spec.md`](Documentation/Features/device_identification_spec.md) |
-| S/PDIF Input (planned) | [`SPDIF_input_spec.md`](Documentation/Features/SPDIF_input_spec.md) |
-| Firmware Update via USB | [`Documentation/Features/firmware_update.md`](Documentation/Features/firmware_update.md) |
-| Roadmap | [`roadmap.md`](Documentation/Features/roadmap.md) |
+| Firmware Update via USB | [`firmware_update.md`](Documentation/Features/firmware_update.md) |
 
 ---
 
