@@ -1,356 +1,186 @@
 """
-Presets / channel names / bulk-params group.
-
-Non-flash: invalid-slot in-band errors, name/dir/startup/active reads, channel
-name round-trip (RAM), bulk GET/SET round-trip + version/size guards.
-
-Flash-gated (--allow-flash): preset save/load/delete lifecycle, preset name,
-startup, output-config mode + save — all bracketed and restored, using one
-scratch slot.
+Channel names, the STORE.ALL_PARAMS header and live apply, and how a preset load treats live IO and the limiter
+under each STORE.OUTPUT_CONFIG_MODE. Flash tests (--allow-flash) use one scratch slot, delete it even when a
+step fails, and push the pre-test live state back.
 """
 
 import struct
-import time
 
-from ..device import OP, Stall
 from ..framework import test
+from ..helpers import expect_stall, push_bulk, read_bulk, settle, wait_for
 
 PRESET_SLOTS = 10
-PRESET_OK = 0x00
-PRESET_ERR_INVALID_SLOT = 0x01
 
 
-def _dir(dev):
-    d = dev.get(OP.PRESET_GET_DIR, 7)
-    return {
-        "occupied": d[0] | (d[1] << 8),
-        "startup_mode": d[2], "default_slot": d[3], "active": d[4],
-        "output_config_mode": d[5], "mv_mode": d[6],
-    }
+def _occupied(dev):
+    return struct.unpack_from("<H", dev.pget_ready("STORE.DIRECTORY", length=7))[0]
 
 
 def _scratch_slot(dev):
-    occ = _dir(dev)["occupied"]
-    for s in range(PRESET_SLOTS - 1, -1, -1):
-        if not (occ & (1 << s)):
-            return s
-    return None
+    occ = _occupied(dev)
+    return next((s for s in range(PRESET_SLOTS - 1, -1, -1) if not occ & (1 << s)), None)
 
 
-def _poll(fn, want, timeout_s=1.5):
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if fn() == want:
-            return True
-        time.sleep(0.04)
-    return False
+def _slot_used(dev, slot):
+    return (_occupied(dev) >> slot) & 1
+
+
+def _drop_scratch(dev, slot):
+    """Delete the scratch preset if a save reached flash; raise naming the slot if it will not go."""
+    dev.wait_ready()
+    wait_for(lambda: _slot_used(dev, slot), 1, timeout_s=1.0)   # a queued save may still be landing
+    if not _slot_used(dev, slot):
+        return
+    dev.pset("STORE.PRESET_DELETE", b"", slot)
+    if wait_for(lambda: _slot_used(dev, slot), 0) != 0:
+        raise AssertionError(f"scratch preset slot {slot} is still occupied after cleanup: delete it by hand")
+
+
+def _run_all(*steps):
+    """Run every cleanup step even when an earlier one raises, then re-raise the first failure."""
+    first = None
+    for step in steps:
+        try:
+            step()
+        except Exception as e:  # noqa: BLE001
+            first = first or e
+    if first is not None:
+        raise first
+
+
+def _mode(dev):
+    return dev.pget_ready("STORE.OUTPUT_CONFIG_MODE", length=1)[0]
+
+
+def _set_mode(dev, mode):
+    dev.pset_u8("STORE.OUTPUT_CONFIG_MODE", mode)
+    settle(dev)
+    return wait_for(lambda: _mode(dev), mode)
+
+
+def _load(dev, slot):
+    dev.pset("STORE.PRESET_LOAD", b"", slot)
+    settle(dev, 0.3)
 
 
 # --- Non-flash --------------------------------------------------------------
 
-@test("presets")
-def preset_invalid_slot_inband(dev, profile, chk):
-    """Save/load/delete with slot >= PRESET_SLOTS return PRESET_ERR_INVALID_SLOT in-band (no STALL, no flash)."""
-    for op, name in [(OP.PRESET_SAVE, "save"), (OP.PRESET_LOAD, "load"), (OP.PRESET_DELETE, "delete")]:
-        r = chk.no_stall(lambda op=op: dev.get(op, 1, wvalue=PRESET_SLOTS), f"{name} slot=10 no STALL")
-        if r is not None:
-            chk.eq(r[0], PRESET_ERR_INVALID_SLOT, f"{name} slot=10 -> INVALID_SLOT")
-        r = chk.no_stall(lambda op=op: dev.get(op, 1, wvalue=0xFF), f"{name} slot=255 no STALL")
-        if r is not None:
-            chk.eq(r[0], PRESET_ERR_INVALID_SLOT, f"{name} slot=255 -> INVALID_SLOT")
-
-
-@test("presets")
-def preset_name_and_dir_reads(dev, profile, chk):
-    """0x93 name (STALL slot>=10), 0x95 dir (7B), 0x97 startup (3B), 0x99 output-config mode, 0x9A active."""
-    chk.eq(len(dev.get(OP.PRESET_GET_NAME, 32, wvalue=0)), 32, "preset 0 name 32B")
-    chk.stalls(lambda: dev.get(OP.PRESET_GET_NAME, 32, wvalue=PRESET_SLOTS), "name slot=10 STALL")
-    d = _dir(dev)
-    chk.member(d["startup_mode"], (0, 1), "startup mode")
-    chk.in_range(d["default_slot"], 0, PRESET_SLOTS - 1, "default slot")
-    chk.in_range(d["active"], 0, PRESET_SLOTS - 1, "active slot")
-    chk.member(d["output_config_mode"], (0, 1), "output_config_mode")
-    chk.member(d["mv_mode"], (0, 1), "mv mode")
-    chk.eq(len(dev.get(OP.PRESET_GET_STARTUP, 3)), 3, "startup 3B")
-    chk.member(dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), (0, 1), "output-config-mode byte")
-    chk.in_range(dev.get_u8(OP.PRESET_GET_ACTIVE), 0, PRESET_SLOTS - 1, "active byte")
-
-
 @test("presets", mutating=True)
 def channel_name_roundtrip(dev, profile, chk):
-    """0x9B/0x9C channel names round-trip (RAM, no flash); truncate to 31 chars; ch>=count STALLs."""
+    """ROUTE.CHANNEL_NAME round-trips in RAM and keeps 31 of 32 bytes; longer names change nothing.
+    33 or more bytes is VC_ERR_LENGTH; a channel past the end is VC_ERR_ADDRESS."""
     ch = 2
-    orig = dev.get(OP.GET_CHANNEL_NAME, 32, wvalue=ch)
+    name = lambda: dev.pget("ROUTE.CHANNEL_NAME", ch, 32)  # noqa: E731
+    orig = name()
     try:
-        dev.set(OP.SET_CHANNEL_NAME, b"QA Test Name", wvalue=ch)
-        got = dev.get(OP.GET_CHANNEL_NAME, 32, wvalue=ch).split(b"\x00", 1)[0]
-        chk.eq(got, b"QA Test Name", "channel name round-trip")
-        # 40-char payload truncates to 31 + NUL.
-        dev.set(OP.SET_CHANNEL_NAME, b"A" * 40, wvalue=ch)
-        got = dev.get(OP.GET_CHANNEL_NAME, 32, wvalue=ch).split(b"\x00", 1)[0]
-        chk.eq(len(got), 31, "name truncated to 31 chars")
-        chk.stalls(lambda: dev.get(OP.GET_CHANNEL_NAME, 32, wvalue=profile.num_channels), "ch>=count STALL")
-        chk.no_stall(lambda: dev.set(OP.SET_CHANNEL_NAME, b"x", wvalue=profile.num_channels),
-                     "SET bad ch no STALL")
+        dev.pset("ROUTE.CHANNEL_NAME", b"QA Test Name", ch)
+        chk.eq(name().split(b"\x00", 1)[0], b"QA Test Name", "channel name round-trip")
+        dev.pset("ROUTE.CHANNEL_NAME", b"A" * 32, ch)
+        chk.eq(name(), b"A" * 31 + b"\x00", "32-byte name keeps 31 + NUL")
+        before = name()
+        for n in (33, 40):
+            expect_stall(chk, lambda: dev.pset("ROUTE.CHANNEL_NAME", b"B" * n, ch), "VC_ERR_LENGTH",
+                         f"{n}-byte name")
+            chk.eq(name(), before, f"{n}-byte name left the stored name alone")
+        n_ch = profile.num_channels
+        expect_stall(chk, lambda: dev.pget("ROUTE.CHANNEL_NAME", n_ch, 32), "VC_ERR_ADDRESS", "GET ch==count")
+        expect_stall(chk, lambda: dev.pset("ROUTE.CHANNEL_NAME", b"x", n_ch), "VC_ERR_ADDRESS", "SET ch==count")
     finally:
-        dev.set(OP.SET_CHANNEL_NAME, orig.split(b"\x00", 1)[0], wvalue=ch)
+        dev.pset("ROUTE.CHANNEL_NAME", orig.split(b"\x00", 1)[0] or b"\x00", ch)
 
 
 @test("presets")
 def bulk_get_header(dev, profile, chk):
-    """0xA0 header reports the wire format version, platform, and channel geometry."""
-    hdr = dev.get(OP.GET_ALL_PARAMS, 16)
+    """STORE.ALL_PARAMS header reports the wire format, platform, channel geometry and payload length."""
+    hdr = dev.pget("STORE.ALL_PARAMS", length=16)
     (fmt, plat, nch, nout, nin, mbands, plen) = struct.unpack_from("<BBBBBBH", hdr, 0)
     chk.eq(fmt, profile.wire_format_version, "format version")
     chk.eq(plat, profile.platform_id, "platform id")
     chk.eq(nch, profile.num_channels, "num_channels")
-    chk.eq(nout, profile.num_output_channels, "num_output_channels")
+    chk.eq(nout, profile.num_output_channels, "num_output_channels (SYS.PLATFORM)")
     chk.eq(nin, profile.num_input_channels, "num_input_channels")
     chk.eq(plen, profile.bulk_payload_len, "payload length")
 
 
 @test("presets", mutating=True)
 def bulk_roundtrip_apply(dev, profile, chk):
-    """0xA1 apply is idempotent (reaches a stable fixpoint) and live edits show up in 0xA0 (0 flash).
-
-    Note: a single GET->SET->GET is NOT byte-identical for arbitrary state because
-    0xA1 normalizes some fields (e.g. out-of-range EQ freq/Q are clamped on apply,
-    unlike the raw-storing 0x42 path).  The correct invariant is a fixpoint:
-    applying a blob, then applying the result, yields the same bytes.
-    """
-    # Two applies reach a fixpoint: the first normalizes (e.g. clamps out-of-range
-    # EQ freq/Q), the second reproduces the normalized blob exactly.  A
-    # re-enumeration mid-apply reloads the active preset and breaks the compare,
-    # so only assert on a re-enum-free attempt; surface the re-enum otherwise.
-    ok = False
+    """STORE.ALL_PARAMS apply reaches a fixpoint, and a live change shows in the next snapshot.
+    The first apply may clamp fields. A re-enumeration mid-apply reloads the preset, so it is not compared."""
+    d = None
     for attempt in range(3):
-        a = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
-        dev.set(OP.SET_ALL_PARAMS, a)
-        dev.wait_ready()
-        time.sleep(0.1)
-        c = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+        a = read_bulk(dev, profile)
+        push_bulk(dev, a, settle_s=0.1)
+        c = read_bulk(dev, profile)
         reenum0 = dev.reenumerations
-        dev.set(OP.SET_ALL_PARAMS, c)
-        dev.wait_ready()
-        time.sleep(0.1)
-        d = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
+        push_bulk(dev, c, settle_s=0.1)
+        d = read_bulk(dev, profile)
         if dev.reenumerations != reenum0:
-            chk.note(f"re-enumeration during bulk apply (attempt {attempt}); device reloaded preset — retrying")
+            chk.note(f"re-enumeration during bulk apply (attempt {attempt}); device reloaded preset, retrying")
             continue
         chk.eq(c, d, "bulk apply reaches a stable fixpoint (idempotent round-trip)")
-        ok = True
         break
-    if not ok:
-        chk.note("could not complete a re-enum-free bulk fixpoint in 3 tries (device re-enumerates under bulk apply)")
+    else:
+        chk.note("could not complete a re-enum-free bulk fixpoint in 3 tries")
         chk.ok(dev.is_alive(), "device still responsive after bulk-apply re-enum churn")
-    # A live param change is reflected in the next bulk snapshot.
-    byp = dev.get_u8(OP.GET_BYPASS)
+    byp = dev.pget_u8("FILTER.EQ_BYPASS")
     try:
-        dev.set_u8(OP.SET_BYPASS, 0 if byp else 1)
-        e = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
-        chk.ne(e, d, "bulk snapshot reflects a live param change")
+        dev.pset_u8("FILTER.EQ_BYPASS", 0 if byp else 1)
+        chk.ne(read_bulk(dev, profile), d, "bulk snapshot reflects a live param change")
     finally:
-        dev.set_u8(OP.SET_BYPASS, byp)
-
-
-@test("presets", mutating=True)
-def bulk_version_and_size_guards(dev, profile, chk):
-    """0xA1 silently ignores a bad header version (no STALL, no change); oversized/short-large STALL."""
-    a = bytearray(dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len))
-    bad = bytearray(a)
-    bad[0] = 99  # format_version out of range
-    chk.no_stall(lambda: dev.set(OP.SET_ALL_PARAMS, bytes(bad)), "bad-version SET no STALL")
-    dev.wait_ready()
-    time.sleep(0.1)
-    after = dev.get_ready(OP.GET_ALL_PARAMS, profile.bulk_payload_len)
-    chk.eq(after, bytes(a), "bad-version bulk SET ignored (state unchanged)")
-    # Oversized and short-but-large both STALL at the transport/gate.
-    chk.stalls(lambda: dev.set(OP.SET_ALL_PARAMS, b"\x00" * (profile.bulk_payload_len + 1)), "oversized bulk STALL")
-    chk.stalls(lambda: dev.set(OP.SET_ALL_PARAMS, b"\x00" * 100), "short-but->64 bulk STALL")
+        dev.pset_u8("FILTER.EQ_BYPASS", byp)
 
 
 # --- Flash-gated ------------------------------------------------------------
 
-@test("presets", mutating=True, flash=6)
-def preset_save_load_delete_lifecycle(dev, profile, chk):
-    """Full preset lifecycle on a scratch slot: save->load->delete, deferred completion polled, restored."""
+def _mode_isolation(dev, profile, chk, what, get, put, slot_val, live_val):
+    """Save `slot_val` into a scratch preset, then load it in mode 0 (live `live_val` must survive) and in
+    mode 1 (the slot's value must apply). Cleans up the scratch slot, the mode and the live state."""
     scratch = _scratch_slot(dev)
     if scratch is None:
-        chk.note("all preset slots occupied — skipping lifecycle to avoid clobbering user data")
+        chk.note(f"all preset slots occupied, skipping {what} isolation test")
         return
-    orig_active = dev.get_u8(OP.PRESET_GET_ACTIVE)
+    live = read_bulk(dev, profile)
+    orig_mode = _mode(dev)
+    orig_active = dev.pget_u8("STORE.PRESET_ACTIVE")
+    saved = False
     try:
-        # Save current live state to the scratch slot.
-        r = dev.get(OP.PRESET_SAVE, 1, wvalue=scratch)
-        chk.eq(r[0], PRESET_OK, "save accepted")
-        chk.ok(_poll(lambda: dev.get_u8(OP.PRESET_GET_ACTIVE), scratch), "active became scratch after save")
-        chk.ok((_dir(dev)["occupied"] >> scratch) & 1, "scratch slot now occupied")
-        # Load it back.
-        r = dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
-        chk.eq(r[0], PRESET_OK, "load accepted")
-        dev.wait_ready()
-        chk.ok(_poll(lambda: dev.get_u8(OP.PRESET_GET_ACTIVE), scratch), "active is scratch after load")
-        chk.ok(dev.is_alive(), "device responsive after load")
-        # Delete it.
-        r = dev.get(OP.PRESET_DELETE, 1, wvalue=scratch)
-        chk.eq(r[0], PRESET_OK, "delete accepted")
-        chk.ok(_poll(lambda: (_dir(dev)["occupied"] >> scratch) & 1, 0), "scratch slot freed after delete")
+        put(slot_val)
+        saved = True
+        dev.pset("STORE.PRESET_SAVE", b"", scratch)
+        chk.eq(wait_for(lambda: _slot_used(dev, scratch), 1), 1, "scratch preset saved")
+
+        chk.eq(_set_mode(dev, 0), 0, "mode 0 (independent)")
+        put(live_val)
+        _load(dev, scratch)
+        chk.eq(get(), live_val, f"independent: preset load left the live {what} unchanged")
+
+        chk.eq(_set_mode(dev, 1), 1, "mode 1 (with preset)")
+        put(live_val)
+        _load(dev, scratch)
+        chk.eq(wait_for(get, slot_val), slot_val, f"with-preset: preset load applied the slot's {what}")
     finally:
-        # Restore the original active slot pointer (global restore fixes live state after).
-        dev.get(OP.PRESET_LOAD, 1, wvalue=orig_active)
-        dev.wait_ready()
-
-
-@test("presets", mutating=True, flash=2)
-def preset_name_roundtrip(dev, profile, chk):
-    """0x94/0x93 preset name round-trips through flash on a scratch slot and is restored."""
-    scratch = _scratch_slot(dev)
-    if scratch is None:
-        chk.note("no scratch slot; skipping preset name test")
-        return
-    orig = dev.get(OP.PRESET_GET_NAME, 32, wvalue=scratch).split(b"\x00", 1)[0]
-    try:
-        dev.set(OP.PRESET_SET_NAME, b"QA Scratch", wvalue=scratch)
-        chk.ok(_poll(lambda: dev.get(OP.PRESET_GET_NAME, 32, wvalue=scratch).split(b"\x00", 1)[0],
-                     b"QA Scratch"), "preset name persisted")
-    finally:
-        dev.set(OP.PRESET_SET_NAME, orig, wvalue=scratch)
-        dev.wait_ready()
-
-
-@test("presets", mutating=True, flash=2)
-def preset_startup_roundtrip(dev, profile, chk):
-    """0x96/0x97 startup config round-trips through flash and is restored."""
-    s = dev.get(OP.PRESET_GET_STARTUP, 3)
-    orig_mode, orig_slot = s[0], s[1]
-    new_mode = 0 if orig_mode == 1 else 1
-    try:
-        dev.set(OP.PRESET_SET_STARTUP, bytes([new_mode, orig_slot]))
-        chk.ok(_poll(lambda: dev.get(OP.PRESET_GET_STARTUP, 3)[0], new_mode), "startup mode persisted")
-        # Invalid mode (2) is a silent no-op.
-        dev.set(OP.PRESET_SET_STARTUP, bytes([2, orig_slot]))
-        time.sleep(0.1)
-        chk.eq(dev.get(OP.PRESET_GET_STARTUP, 3)[0], new_mode, "invalid mode ignored")
-    finally:
-        dev.set(OP.PRESET_SET_STARTUP, bytes([orig_mode, orig_slot]))
-        dev.wait_ready()
-
-
-@test("presets", mutating=True, flash=3)
-def output_config_mode_roundtrip(dev, profile, chk):
-    """0x98/0x99 output-config mode round-trips {0,1}; value > 1 clamps to independent (writes directory; flash)."""
-    orig = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
-    try:
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
-        chk.ok(_poll(lambda: dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), 1), "mode 1 (with-preset)")
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
-        chk.ok(_poll(lambda: dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), 0), "mode 0 (independent)")
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 5)
-        chk.ok(_poll(lambda: dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), 0), "mode 5 clamps to independent")
-    finally:
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig)
-        dev.wait_ready()
-
-
-@test("presets", mutating=True, flash=1)
-def output_config_save(dev, profile, chk):
-    """0x52 REQ_SAVE_OUTPUT_CONFIG (repurposed dead LOAD_PARAMS) persists live IO to the device-global block; accepted, mode untouched."""
-    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
-    ack = dev.get(OP.SAVE_OUTPUT_CONFIG, 1)            # re-saves current live IO (idempotent)
-    chk.eq(ack[0], PRESET_OK, "save-output-config accepted (PRESET_OK)")
-    dev.wait_ready()
-    chk.eq(dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE), orig_mode, "persistence mode unchanged by save")
+        # Reload the original slot so the scratch is no longer active, then drop it and push the live state.
+        _run_all(lambda: _set_mode(dev, orig_mode),
+                 lambda: _load(dev, orig_active),
+                 lambda: _drop_scratch(dev, scratch) if saved else None,
+                 lambda: push_bulk(dev, live))
 
 
 @test("presets", mutating=True, flash=10)
 def output_config_independent_isolation(dev, profile, chk):
-    """Core behavior: in INDEPENDENT mode a preset load leaves live IO untouched; in WITH_PRESET it applies the slot's IO.
-
-    Marker is the MCK multiplier (0/1) — part of the IO config block but inert
-    while MCK is off, so it flips the assertion without disturbing live audio.
-    """
-    scratch = _scratch_slot(dev)
-    if scratch is None:
-        chk.note("all preset slots occupied — skipping output-config isolation test")
-        return
-    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
-    orig_active = dev.get_u8(OP.PRESET_GET_ACTIVE)
-    orig_mult = dev.get_u8(OP.GET_MCK_MULTIPLIER)
-    m_slot = 1 - orig_mult          # multiplier baked into the scratch preset
-    m_live = orig_mult              # different live value set before each load
-    try:
-        # Build a scratch preset whose stored MCK multiplier = m_slot.
-        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=m_slot)
-        chk.eq(dev.get(OP.PRESET_SAVE, 1, wvalue=scratch)[0], PRESET_OK, "scratch preset saved")
-        chk.ok(_poll(lambda: (_dir(dev)["occupied"] >> scratch) & 1, 1), "scratch occupied")
-
-        # INDEPENDENT: a load must NOT touch live IO.
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
-        dev.wait_ready()
-        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=m_live)   # live differs from the slot
-        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
-        dev.wait_ready()
-        chk.eq(dev.get_u8(OP.GET_MCK_MULTIPLIER), m_live,
-               "independent: preset load left live MCK multiplier unchanged")
-
-        # WITH_PRESET: a load DOES apply the slot's IO.
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
-        dev.wait_ready()
-        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=m_live)   # reset live to differ again
-        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
-        dev.wait_ready()
-        chk.ok(_poll(lambda: dev.get_u8(OP.GET_MCK_MULTIPLIER), m_slot),
-               "with-preset: preset load applied the slot's MCK multiplier")
-    finally:
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig_mode)
-        dev.get(OP.PRESET_LOAD, 1, wvalue=orig_active)     # restore active slot + live state
-        dev.wait_ready()
-        dev.get(OP.PRESET_DELETE, 1, wvalue=scratch)       # scratch no longer active -> safe
-        dev.get_u8(OP.SET_MCK_MULTIPLIER, wvalue=orig_mult)
-        dev.wait_ready()
+    """A preset load leaves live IO alone in INDEPENDENT mode and applies the slot's IO in WITH_PRESET mode.
+    The marker is CLOCK.MCK_MULTIPLIER: part of the IO config but inert while MCK is off."""
+    mult = dev.pget_u8("CLOCK.MCK_MULTIPLIER")
+    _mode_isolation(dev, profile, chk, "MCK multiplier",
+                    lambda: dev.pget_u8("CLOCK.MCK_MULTIPLIER"),
+                    lambda v: dev.pset_u8("CLOCK.MCK_MULTIPLIER", v), 1 - mult, mult)
 
 
 @test("presets", mutating=True, flash=10)
 def limiter_follows_output_config_mode(dev, profile, chk):
-    """The output limiter follows output_config_mode: INDEPENDENT keeps live settings across a load, WITH_PRESET applies the slot's.
-
-    Marker is the last output's limiter threshold with its limiter left off, so
-    it changes nothing audible.  It never sends 0x52, so the device-wide limiter
-    block in flash is left as it was.
-    """
-    scratch = _scratch_slot(dev)
-    if scratch is None:
-        chk.note("all preset slots occupied, skipping limiter persistence test")
-        return
+    """The output limiter follows STORE.OUTPUT_CONFIG_MODE across a preset load, like the IO config.
+    The marker is the last output's DYN.LIMITER_THRESHOLD with its limiter off; OUTPUT_CONFIG_SAVE is never sent."""
     out = profile.num_output_channels - 1
-    wv = (out << 8) | 1                                     # LIMITER_PARAM_THRESHOLD_DB
-    orig_mode = dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE)
-    orig_active = dev.get_u8(OP.PRESET_GET_ACTIVE)
-    orig_thr = dev.get_f32(OP.LIMITER, wvalue=wv)
-    t_slot, t_live = -17.0, -5.0
-    try:
-        dev.set_f32(OP.LIMITER, t_slot, wvalue=wv)
-        chk.eq(dev.get(OP.PRESET_SAVE, 1, wvalue=scratch)[0], PRESET_OK, "scratch preset saved")
-        chk.ok(_poll(lambda: (_dir(dev)["occupied"] >> scratch) & 1, 1), "scratch occupied")
-
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 0)
-        dev.wait_ready()
-        dev.set_f32(OP.LIMITER, t_live, wvalue=wv)
-        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
-        dev.wait_ready()
-        chk.approx(dev.get_f32(OP.LIMITER, wvalue=wv), t_live, 1e-3,
-                   "independent: preset load left the live limiter unchanged")
-
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, 1)
-        dev.wait_ready()
-        dev.get(OP.PRESET_LOAD, 1, wvalue=scratch)
-        dev.wait_ready()
-        chk.approx(dev.get_f32(OP.LIMITER, wvalue=wv), t_slot, 1e-3,
-                   "with-preset: preset load applied the slot's limiter")
-    finally:
-        dev.set_u8(OP.SET_OUTPUT_CONFIG_MODE, orig_mode)
-        dev.get(OP.PRESET_LOAD, 1, wvalue=orig_active)
-        dev.wait_ready()
-        dev.get(OP.PRESET_DELETE, 1, wvalue=scratch)
-        dev.set_f32(OP.LIMITER, orig_thr, wvalue=wv)
-        dev.wait_ready()
+    _mode_isolation(dev, profile, chk, "limiter threshold",
+                    lambda: round(dev.pget_f32("DYN.LIMITER_THRESHOLD", out), 3),
+                    lambda v: dev.pset_f32("DYN.LIMITER_THRESHOLD", v, out), -17.0, -5.0)

@@ -8,9 +8,8 @@ import math
 import struct
 
 from ..device import Stall
-from ..framework import Skip, test
-from .paged_route import finite_rule, nonfinite_refused
-from .paged_sys import _bits, _expect_stall, _paged, _registry
+from ..framework import test
+from ..helpers import expect_stall, finite_rule, nonfinite_refused, page_matches_registry, require_page
 
 FX = 0x08
 
@@ -111,12 +110,6 @@ GUARDS = {
 }
 
 
-def _fx(dev):
-    _paged(dev)
-    if FX not in dev.paged_commands():
-        raise Skip("FX page not implemented on this firmware")
-
-
 def _name(n):
     return f"FX.{n}"
 
@@ -183,39 +176,17 @@ def _unguard(dev, saved):
     _restore(dev, saved, ["SUBHARM_SOLO", "SUBHARM_LINK"] + masks + enables)
 
 
-def page_matches_registry(dev, chk, page, rp2350):
-    """PAGE_COMMANDS and COMMAND_INFO of `page` match the registry; build-gated rows exist only on RP2350."""
-    pg = next((p for p in _registry(dev)["pages"] if p["page"] == page), None)
-    if pg is None:
-        raise Skip(f"registry has no page 0x{page:02X}")
-    bm = dev.pget("SYS.PAGE_COMMANDS", addr=page, length=64)
-    got_get, got_set = _bits(bm[:32]), _bits(bm[32:])
-    for c in pg["commands"]:
-        name = f"{pg['mnemonic']}.{c['name']}"
-        present = not c.get("build") or rp2350
-        chk.eq(c["cmd"] in got_get, bool(c["get"]) and present, f"GET bit of {name}")
-        chk.eq(c["cmd"] in got_set, bool(c["set"]) and present, f"SET bit of {name}")
-        if not present:
-            continue
-        r = dev.pget("SYS.COMMAND_INFO", addr=(page << 8) | c["cmd"], length=8)
-        _flags, get_len, smin, smax, _ak, has = struct.unpack("<HHBBBB", r)
-        want = 0xFFFF if c["get_len"] == "var" else (c["get_len"] or 0)
-        chk.eq((get_len, smin, smax, has & 3), (want, c["set_min"], c["set_max"],
-               (1 if c["get"] else 0) | (2 if c["set"] else 0)), f"{name} COMMAND_INFO")
-    chk.eq(sorted((got_get | got_set) - {c["cmd"] for c in pg["commands"]}), [], "unlisted bits")
-
-
 @test("paged_fx")
 def fx_page_matches_registry(dev, profile, chk):
     """FX.PAGE_COMMANDS and COMMAND_INFO match the registry; the upmixer block exists only on RP2350."""
-    _fx(dev)
+    require_page(dev, FX)
     page_matches_registry(dev, chk, FX, _rp2350(profile))
 
 
 @test("paged_fx")
 def fx_reads_shape(dev, profile, chk):
     """Every FX GET has its table size and a well-formed value; UPMIX_CONFIG agrees with the UPMIX_* parameters."""
-    _fx(dev)
+    require_page(dev, FX)
     for n, kind, _v, _c in SCALARS:
         r = _get(dev, n)
         if not chk.eq(len(r), len(ENC[kind](0)), f"FX.{n} length"):
@@ -246,7 +217,7 @@ def fx_reads_shape(dev, profile, chk):
 @test("paged_fx", mutating=True)
 def fx_scalars_roundtrip(dev, profile, chk):
     """Each scalar: two SETs read back exactly, clamps hold, and everything is restored."""
-    _fx(dev)
+    require_page(dev, FX)
     saved = _save(dev, SCALAR)
     guard = _guard_all(dev)
     try:
@@ -273,7 +244,7 @@ def fx_scalars_roundtrip(dev, profile, chk):
 @test("paged_fx", mutating=True)
 def fx_tube_roundtrip(dev, profile, chk):
     """Each FX.TUBE_* command holds its own value through two SETs, clamps, and is restored."""
-    _fx(dev)
+    require_page(dev, FX)
     names = [n for n, _v, _c in TUBE]
     saved = _save(dev, names)
     guard = _guard_all(dev)
@@ -299,16 +270,16 @@ def fx_tube_roundtrip(dev, profile, chk):
 @test("paged_fx", mutating=True)
 def fx_tube_nan_rejected(dev, profile, chk):
     """FX.TUBE_DRIVE refuses NaN with VC_ERR_VALUE and keeps its value (1.1.6 ignored it silently)."""
-    _fx(dev)
+    require_page(dev, FX)
     before = _get(dev, "TUBE_DRIVE")
-    _expect_stall(chk, lambda: _set(dev, "TUBE_DRIVE", _f32(math.nan)), "VC_ERR_VALUE", "NaN drive")
+    expect_stall(chk, lambda: _set(dev, "TUBE_DRIVE", _f32(math.nan)), "VC_ERR_VALUE", "NaN drive")
     chk.eq(_get(dev, "TUBE_DRIVE"), before, "drive unchanged")
 
 
 @test("paged_fx", mutating=True)
 def fx_nonfinite_refused(dev, profile, chk):
     """Every tube parameter refuses NaN. Crossfeed, subharm, psybass and upmix floats refuse NaN and infinity."""
-    _fx(dev)
+    require_page(dev, FX)
     if not finite_rule(dev, profile, chk):
         return
     nan, inf = _f32(math.nan), _f32(math.inf)
@@ -334,32 +305,32 @@ def fx_nonfinite_refused(dev, profile, chk):
 @test("paged_fx", mutating=True)
 def fx_value_and_length_errors(dev, profile, chk):
     """Bad values, lengths, addresses and directions STALL with the right VC_* code and change nothing."""
-    _fx(dev)
+    require_page(dev, FX)
     preset = _get(dev, "CROSSFEED_PRESET")
     for bad in (4, 0xFF):
-        _expect_stall(chk, lambda: _set(dev, "CROSSFEED_PRESET", _u8(bad)), "VC_ERR_VALUE", f"preset {bad}")
+        expect_stall(chk, lambda: _set(dev, "CROSSFEED_PRESET", _u8(bad)), "VC_ERR_VALUE", f"preset {bad}")
     chk.eq(_get(dev, "CROSSFEED_PRESET"), preset, "preset unchanged by rejected values")
     for n, payload in (("SUBHARM_LOW", b"\x00\x00\x00"), ("SUBHARM_LOW", bytes(5)),
                        ("SUBHARM_ENABLE", b""), ("SUBHARM_ENABLE", b"\x00\x00"),
                        ("PSYBASS_MASK", b"\x00"), ("TUBE_DRIVE", b"\x00\x00"),
                        ("CROSSFEED_FREQ", bytes(8))):
-        _expect_stall(chk, lambda: _set(dev, n, payload), "VC_ERR_LENGTH", f"FX.{n} {len(payload)} bytes")
+        expect_stall(chk, lambda: _set(dev, n, payload), "VC_ERR_LENGTH", f"FX.{n} {len(payload)} bytes")
     for n in ("SUBHARM_HEADROOM", "SUBHARM_METER"):
-        _expect_stall(chk, lambda: _set(dev, n, bytes(4)), "VC_ERR_DIRECTION", f"SET to FX.{n}")
-    _expect_stall(chk, lambda: dev.pget("FX.SUBHARM_LOW", addr=1), "VC_ERR_ADDRESS", "GET at wValue 1")
-    _expect_stall(chk, lambda: dev.pset("FX.SUBHARM_LOW", _f32(-30.0), addr=1), "VC_ERR_ADDRESS",
-                  "SET at wValue 1")
+        expect_stall(chk, lambda: _set(dev, n, bytes(4)), "VC_ERR_DIRECTION", f"SET to FX.{n}")
+    expect_stall(chk, lambda: dev.pget("FX.SUBHARM_LOW", addr=1), "VC_ERR_ADDRESS", "GET at wValue 1")
+    expect_stall(chk, lambda: dev.pset("FX.SUBHARM_LOW", _f32(-30.0), addr=1), "VC_ERR_ADDRESS",
+                 "SET at wValue 1")
     if _rp2350(profile):
-        _expect_stall(chk, lambda: _set(dev, "UPMIX_STATUS", bytes(16)), "VC_ERR_DIRECTION", "SET UPMIX_STATUS")
-        _expect_stall(chk, lambda: _set(dev, "UPMIX_CONFIG", bytes(43)), "VC_ERR_LENGTH", "43-byte UPMIX_CONFIG")
+        expect_stall(chk, lambda: _set(dev, "UPMIX_STATUS", bytes(16)), "VC_ERR_DIRECTION", "SET UPMIX_STATUS")
+        expect_stall(chk, lambda: _set(dev, "UPMIX_CONFIG", bytes(43)), "VC_ERR_LENGTH", "43-byte UPMIX_CONFIG")
 
 
 @test("paged_fx", mutating=True)
 def fx_upmix_roundtrip(dev, profile, chk):
     """UPMIX_CONFIG and each UPMIX_* parameter round-trip and stay in step with each other; enable is never changed."""
-    _fx(dev)
+    require_page(dev, FX)
     if not _rp2350(profile):
-        _expect_stall(chk, lambda: _get(dev, "UPMIX_CONFIG", 44), "VC_ERR_UNKNOWN", "UPMIX_CONFIG on RP2040")
+        expect_stall(chk, lambda: _get(dev, "UPMIX_CONFIG", 44), "VC_ERR_UNKNOWN", "UPMIX_CONFIG on RP2040")
         return
     names = [n for n, _v in UPMIX]
     cfg = _get(dev, "UPMIX_CONFIG")

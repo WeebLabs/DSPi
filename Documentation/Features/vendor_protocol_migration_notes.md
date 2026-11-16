@@ -1,8 +1,10 @@
 # Vendor Protocol Migration Notes (working file)
 
-*Last updated: 2026-11-16 (page 0, finite-value rule, `RTA_BINS`, ROUTE delay note, discovery, `SPDIF_TX_STATS`, factory reset, command flags)*
+*Last updated: 2026-11-16 (pointer to `legacy_map.json`). Previously 2026-11-16 (page 0, finite-value rule, `RTA_BINS`, ROUTE delay note, discovery, `SPDIF_TX_STATS`, factory reset, command flags)*
 
 Raw material for the host migration guide (`Documentation/vendor_protocol_migration.md`, plan Phase 7). Each entry is a place where the paged protocol in 1.1.7 behaves differently from the 1.1.6 opcode, beyond the renumbering. They were recorded by the agents who ported each page and checked against the device. This file is folded into the guide and then deleted.
+
+The old-to-new table for every 1.1.6 opcode is machine-readable in `Documentation/protocol/legacy_map.json`. `scripts/gen_vendor_protocol.py --check` keeps it consistent with the command registry.
 
 ## Rules that apply everywhere
 

@@ -1,70 +1,19 @@
 """
-Identity, platform, status, and clip-clear commands.
-
-Covers: 0x7E GET_SERIAL, 0x7F GET_PLATFORM, 0x80 GET_BUILD_INFO,
-0x50 GET_STATUS (+ sub-queries), 0x83 CLEAR_CLIPS, 0x56/0x57 device name.
-All read-only / non-mutating except clear-clips and the device name.
+Identity, meters, clip flags and the device name (SYS.BUILD_INFO, MEAS.LEVELS, INPUT.STATUS,
+MEAS.CLIP_FLAGS / CLIP_CLEAR, SYS.DEVICE_NAME). Platform, serial, sizes and the name's length
+and address rules are in paged_sys; these add what those do not assert.
 """
 
 import re
 
-from ..device import OP, Stall
 from ..framework import test
-
-
-@test("identity")
-def serial_is_printable_hex(dev, profile, chk):
-    """0x7E returns 16 printable ASCII-hex bytes matching the USB serial descriptor."""
-    raw = dev.get(OP.GET_SERIAL, 16)
-    chk.eq(len(raw), 16, "serial length")
-    try:
-        s = raw.decode("ascii")
-    except UnicodeDecodeError:
-        chk.ok(False, f"serial not ASCII: {raw!r}")
-        return
-    chk.ok(all(c in "0123456789ABCDEFabcdef" for c in s), f"serial not hex: {s!r}")
-    # Cross-check against the enumerated iSerialNumber descriptor.
-    try:
-        import usb.util
-        desc = usb.util.get_string(dev.dev, dev.dev.iSerialNumber)
-        if desc:
-            chk.ok(s.upper().startswith(desc.upper()[:16]) or desc.upper().startswith(s.upper()),
-                   f"serial {s!r} != descriptor {desc!r}")
-    except Exception:  # noqa: BLE001
-        chk.note("could not read iSerialNumber descriptor for cross-check")
-
-
-@test("identity")
-def platform_packet(dev, profile, chk):
-    """0x7F returns [platform, fw_major, legacy minor.patch nibbles,
-    num_output_channels, fw_minor, fw_patch, fw_beta]."""
-    p = dev.get(OP.GET_PLATFORM, 7)
-    chk.eq(len(p), 7, "platform length")
-    chk.member(p[0], (0, 1), "platform id")
-    chk.eq(p[3], profile.num_output_channels, "output-channel count byte")
-    chk.in_range(p[1], 0, 99, "fw major byte")
-    # Legacy nibbles must mirror the full-width bytes while both fit in 4 bits.
-    if p[4] <= 15 and p[5] <= 15:
-        chk.eq((p[2] >> 4) & 0xF, p[4], "legacy minor nibble")
-        chk.eq(p[2] & 0xF, p[5], "legacy patch nibble")
-    chk.eq(p[6], profile.fw_beta, "beta ordinal byte")
-    # Truncation to wLength is the whole backward-compatibility story; an older
-    # host asking for 6 or 4 must get exactly the bytes it always got.
-    for short_len in (6, 4):
-        q = dev.get(OP.GET_PLATFORM, short_len)
-        chk.eq(len(q), short_len, f"platform length at wLength={short_len}")
-        chk.eq(bytes(q), bytes(p[:short_len]), f"prefix match at wLength={short_len}")
+from ..helpers import input_status, levels, settle, wait_for
 
 
 @test("identity")
 def build_info(dev, profile, chk):
-    """0x80 returns 64 bytes: [0..47] git describe string, [48..59] build date
-    YYYY-MM-DD, [60..63] reserved zero.  ASCII, NUL padded, informational only."""
-    try:
-        data = dev.get(OP.GET_BUILD_INFO, 64)
-    except Stall:
-        chk.note("GET_BUILD_INFO unsupported (pre-widening firmware); skipped")
-        return
+    """SYS.BUILD_INFO: a git describe string, a YYYY-MM-DD build date and four reserved zero bytes."""
+    data = dev.pget("SYS.BUILD_INFO", length=64)
     chk.eq(len(data), 64, "build info length")
     if len(data) != 64:
         return
@@ -85,96 +34,55 @@ def build_info(dev, profile, chk):
 
 @test("identity")
 def status_combined(dev, profile, chk):
-    """0x50 wValue=9: peaks[NUM_CHANNELS] + cpu0 + cpu1 + clip_flags(u32) +
-    active_input_count. Layout is NUM_CHANNELS*2 + 7 bytes (clip widened to u32
-    and the live input count appended with the unified channel model)."""
-    expected_len = profile.num_channels * 2 + 7
-    data = dev.get(OP.GET_STATUS, 64, wvalue=9)
-    chk.ok(len(data) >= expected_len, f"status len {len(data)} < {expected_len}")
-    if len(data) < expected_len:
-        return
-    import struct
-    peaks = struct.unpack_from(f"<{profile.num_channels}H", data, 0)
-    off = profile.num_channels * 2
-    cpu0 = data[off]
-    cpu1 = data[off + 1]
-    clip = struct.unpack_from("<I", data, off + 2)[0]
-    active_in = data[off + 6]
-    # Idle: peaks small (not strictly 0 — may retain residue), cpu plausible.
-    for i, pk in enumerate(peaks):
-        chk.in_range(pk, 0, 65535, f"peak[{i}] range")
-    chk.in_range(cpu0, 0, 100, "cpu0 load")
-    chk.in_range(cpu1, 0, 100, "cpu1 load")
-    chk.member(active_in, (2, 4, 6, 8), "active input channel count")
-    chk.note(f"idle peaks max={max(peaks)} cpu0={cpu0} cpu1={cpu1} "
-             f"clip=0x{clip:08X} active_in={active_in}")
-
-
-@test("identity")
-def status_subqueries(dev, profile, chk):
-    """0x50 diagnostic sub-queries return plausible values; unknown wValue -> zeros, no STALL."""
-    fs = dev.get_u32(OP.GET_STATUS, wvalue=15)        # sample rate
-    chk.member(fs, (44100, 48000, 88200, 96000), "sample rate")
-    clk = dev.get_u32(OP.GET_STATUS, wvalue=13)       # clk_sys Hz
-    chk.ok(clk > 1_000_000, f"clk_sys implausible: {clk}")
-    mounted = dev.get_u32(OP.GET_STATUS, wvalue=12)
-    chk.member(mounted, (0, 1), "mounted flag")
-    active_in = dev.get_u32(OP.GET_STATUS, wvalue=23)  # live active USB input channel count
-    chk.member(active_in, (2, 4, 6, 8), "active input count (sub-query 23)")
-    # Unknown sub-query must return zeros, never STALL.
-    unk = chk.no_stall(lambda: dev.get_u32(OP.GET_STATUS, wvalue=200), "unknown sub-query")
-    chk.eq(unk, 0, "unknown sub-query returns 0")
-    chk.note(f"Fs={fs} clk_sys={clk} mounted={mounted} active_in={active_in}")
+    """MEAS.LEVELS carries plausible CPU loads and a live input count of 2, 4, 6 or 8 that INPUT.STATUS agrees with."""
+    lv = levels(dev, profile.num_channels)
+    chk.eq(len(lv["raw"]), profile.num_channels * 2 + 7, "MEAS.LEVELS length")
+    chk.in_range(lv["cpu0_load"], 0, 100, "cpu0 load")
+    chk.in_range(lv["cpu1_load"], 0, 100, "cpu1 load")
+    chk.member(lv["active_input_channels"], (2, 4, 6, 8), "active input channel count")
+    st = input_status(dev)
+    chk.eq(st["active_input_channels"], lv["active_input_channels"], "INPUT.STATUS agrees with MEAS.LEVELS")
+    chk.note(f"idle peaks max={max(lv['peaks'])} cpu0={lv['cpu0_load']} cpu1={lv['cpu1_load']} "
+             f"clip=0x{lv['clip_flags']:08X} active_in={lv['active_input_channels']}")
 
 
 @test("identity", mutating=True)
 def clear_clips_read_then_clear(dev, profile, chk):
-    """0x83 returns prior clip flags (u32) then zeroes them; second read must be 0 (idle)."""
-    import struct
-    first = dev.get(OP.CLEAR_CLIPS, 4)
-    chk.eq(len(first), 4, "clear-clips length")
-    second = dev.get(OP.CLEAR_CLIPS, 4)
-    val2 = struct.unpack_from("<I", second, 0)[0]
-    chk.eq(val2, 0, "second clear-clips must be 0 when idle")
-    # And the combined status clip field must also read 0 now.
-    st = dev.get(OP.GET_STATUS, profile.num_channels * 2 + 7, wvalue=9)
-    clip = struct.unpack_from("<I", st, profile.num_channels * 2 + 2)[0]
-    chk.eq(clip, 0, "status clip_flags 0 after clear")
+    """MEAS.CLIP_FLAGS then MEAS.CLIP_CLEAR: idle, the flags and the MEAS.LEVELS clip field then read 0."""
+    first = dev.pget("MEAS.CLIP_FLAGS", length=4)
+    chk.eq(len(first), 4, "clip flags length")
+    chk.no_stall(lambda: dev.pset("MEAS.CLIP_CLEAR"), "MEAS.CLIP_CLEAR")
+    chk.eq(dev.pget_u32("MEAS.CLIP_FLAGS"), 0, "clip flags must be 0 after a clear when idle")
+    chk.eq(levels(dev, profile.num_channels)["clip_flags"], 0, "MEAS.LEVELS clip flags 0 after clear")
 
 
 def _device_name(dev):
-    return dev.get_ready(OP.GET_DEVICE_NAME, 32)
+    return dev.pget_ready("SYS.DEVICE_NAME", length=32)
 
 
 @test("identity", mutating=True, flash=5)
 def device_name_roundtrip(dev, profile, chk):
-    """0x56/0x57 board name: round-trip, 31-char truncation, NUL clears, non-zero wValue STALLs/ignored, survives preset load."""
+    """SYS.DEVICE_NAME is device-wide: it survives a preset load, and a leading NUL clears it to all zeros."""
     orig = _device_name(dev)
     chk.eq(len(orig), 32, "GET is 32 bytes")
     try:
-        dev.set(OP.SET_DEVICE_NAME, b"QA Board")
+        dev.pset("SYS.DEVICE_NAME", b"QA Board")
         chk.eq(_device_name(dev).split(b"\x00", 1)[0], b"QA Board", "name round-trip")
 
-        dev.set(OP.SET_DEVICE_NAME, b"B" * 32)
-        chk.eq(_device_name(dev), b"B" * 31 + b"\x00", "32-byte payload keeps 31 + NUL")
-
-        chk.stalls(lambda: dev.get(OP.GET_DEVICE_NAME, 32, wvalue=1), "GET with wValue 1 STALL")
-        chk.no_stall(lambda: dev.set(OP.SET_DEVICE_NAME, b"alias", wvalue=1), "SET with wValue 1 no STALL")
-        chk.eq(_device_name(dev), b"B" * 31 + b"\x00", "SET with a non-zero wValue is ignored")
-
-        dev.set(OP.SET_DEVICE_NAME, b"QA Board")
-        directory = dev.get(OP.PRESET_GET_DIR, 7)
+        directory = dev.pget("STORE.DIRECTORY", length=7)
         occupied = directory[0] | (directory[1] << 8)
-        active = dev.get_u8(OP.PRESET_GET_ACTIVE)
+        active = dev.pget_u8("STORE.PRESET_ACTIVE")
         if occupied & (1 << active):
-            dev.get(OP.PRESET_LOAD, 1, wvalue=active)
-            dev.wait_ready()
-            chk.eq(_device_name(dev).split(b"\x00", 1)[0], b"QA Board", "name survives a preset load")
+            settle(dev)          # the name's own flash write must finish before the load
+            dev.pset("STORE.PRESET_LOAD", addr=active)
+            settle(dev)
+            got = wait_for(lambda: _device_name(dev).split(b"\x00", 1)[0], b"QA Board")
+            chk.eq(got, b"QA Board", "name survives a preset load")
         else:
             chk.note("active preset slot empty; skipping the preset-load check")
 
-        dev.set(OP.SET_DEVICE_NAME, b"\x00junk")
+        dev.pset("SYS.DEVICE_NAME", b"\x00junk")
         chk.eq(_device_name(dev), bytes(32), "leading NUL clears to all zeros")
     finally:
-        dev.set(OP.SET_DEVICE_NAME, orig.split(b"\x00", 1)[0] or b"\x00")
+        dev.pset("SYS.DEVICE_NAME", orig.split(b"\x00", 1)[0] or b"\x00")
         dev.wait_ready()

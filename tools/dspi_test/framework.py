@@ -9,7 +9,7 @@ Design notes:
     `chk`.  The test PASSes iff `chk` collected no failures.  Raising `Skip`
     marks SKIP; any other exception (incl. Disconnected) is ERROR/abort.
   * Liveness: after every test flagged `mutating=True`, the runner pings
-    GET_PLATFORM.  A dead device turns the result into a hard failure and aborts
+    SYS.PLATFORM.  A dead device turns the result into a hard failure and aborts
     the run (a crash must not be silently swallowed by later tests).
   * Flash budget: each test declares `flash` (erase-cycle cost).  Flash tests are
     skipped unless `--allow-flash`, and the runner enforces a hard cap.

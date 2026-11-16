@@ -101,6 +101,12 @@ def _require():
             + "  (pip install sounddevice numpy scipy)")
 
 
+def _require_numpy():
+    """Signal generation is pure numpy, so it works without PortAudio."""
+    if np is None:
+        raise AudioUnavailable("numpy is not installed  (pip install sounddevice numpy scipy)")
+
+
 # ---------------------------------------------------------------------------
 # Device discovery
 # ---------------------------------------------------------------------------
@@ -161,7 +167,7 @@ def _fade(x, fs, ms=5.0):
 
 def make_sweep(fs, dur_s=1.0, f1=20.0, f2=None, amp=0.4):
     """Exponential (log) sine sweep f1 -> f2, faded at the edges."""
-    _require()
+    _require_numpy()
     f2 = f2 if f2 is not None else fs * 0.45
     n = int(dur_s * fs)
     t = np.arange(n) / fs
@@ -171,7 +177,7 @@ def make_sweep(fs, dur_s=1.0, f1=20.0, f2=None, amp=0.4):
 
 
 def make_tone(fs, freq=1000.0, dur_s=0.5, amp=0.4):
-    _require()
+    _require_numpy()
     n = int(dur_s * fs)
     t = np.arange(n) / fs
     return _fade(amp * np.sin(2.0 * np.pi * freq * t).astype(np.float32), fs)

@@ -1,40 +1,32 @@
 """
-Spectrum analyser (RTA / FFT) group.
-
-RTA  0x08-0x0F
-
-Covers section 8 of Documentation/Features/spectrum_analyser_spec.md.  The
-analyser is transient state (never persisted, not in the bulk snapshot), so
-every test stops it and the generator in a finally, on failure as well as pass.
-
-Most tests need the pipeline to be running: the taps live inside the per-channel
-meter loops, which only execute while a source streams or the signal generator's
-pump drives the pipeline.  That is why the level tests hold a generator signal
-rather than measuring silence.
+Spectrum analyser (MEAS.RTA_*), section 8 of Documentation/Features/spectrum_analyser_spec.md.
+The analyser is transient and outside the bulk snapshot, so every test stops it and the generator in
+a finally. The taps only run while the pipeline does, so level tests drive it with a generator signal.
 """
 
 import struct
 import time
 
-from ..device import OP, Stall
-from ..framework import test, Skip
+from ..device import PagedStall, Stall
+from ..framework import Skip, test
+from ..helpers import expect_stall, has_command, pipeline_stats, sample_rate, wait_for
 
 # --- rta.h wire constants ---------------------------------------------------
 
 RTA_CFG_VERSION = 3
 RTA_TAP_INPUT, RTA_TAP_OUTPUT = 0, 1
 RTA_STATE_IDLE, RTA_STATE_CAPTURING, RTA_STATE_TRANSFORMING = 0, 1, 2
-RTA_CTL_STOP, RTA_CTL_START, RTA_CTL_RESET_AVG = 0, 1, 2
 RTA_CH_NONE = 0xFF
+RTA_BAND_FRAME = 82
+RTA_BINS_PER_READ = 256      # MEAS.RTA_BINS reply ceiling
+RTA_BIN_HEADER = 16
 
-# --- siggen.h wire constants (the generator is the only signal source that
-# needs no host audio, and its pump also drives the pipeline when nothing
-# streams) --------------------------------------------------------------------
+# --- siggen.h wire constants (the generator needs no host audio, and its pump
+# drives the pipeline when nothing streams) ------------------------------------
 
 SIGGEN_CFG_VERSION = 1
 SIGGEN_SINE, SIGGEN_PINK = 0, 3
 SIGGEN_FLAG_RAW = 0x01
-SIGGEN_CTL_START, SIGGEN_CTL_STOP_NOW = 1, 2
 
 # --- Tolerances -------------------------------------------------------------
 
@@ -47,10 +39,12 @@ PINK_AVG_MS = 2000
 PINK_SPREAD_DB = 2.0
 PINK_MIN_BINS = 12           # below this the integer bin edges tilt the band
 AGE_SLACK = 1.5              # x the measured rotation interval
-# GET_BANDS reads are serialised over EP0, so a whole-set sweep costs a few ms
+# MEAS.RTA_BANDS reads are serialised over EP0, so a whole-set sweep costs a few ms
 # per channel; without this the age bound fails on read latency, not staleness.
 AGE_READ_SLACK_MS = 50.0
-BUSY_BUDGET_US_PER_S = {0: 100000, 1: 5000}   # platform_id -> ceiling at order 10
+# Transform time per frame, platform_id -> us: spec section 3.1, "a fraction of a millisecond on
+# RP2350 and a couple of milliseconds on RP2040".
+FRAME_BUDGET_US = {1: 1000, 0: 2000}
 BUSY_SETTLE_S = 8.0          # busy_us_per_s is a 1 s-window EMA at quarter weight
 AUTO_OFF_WAIT_S = 6.0        # > RTA_IDLE_TIMEOUT_MS
 LEVEL_FLOOR_DBFS = -200.0    # what a level byte of 0 means to the assertions
@@ -61,13 +55,10 @@ SUPPORTED_RATES = (44100, 48000, 96000)
 # --- Wire helpers -----------------------------------------------------------
 
 def _caps(dev):
-    """RtaCaps as a dict.  Raises Skip on firmware without the analyser."""
-    try:
-        raw = dev.get(OP.RTA_GET_CAPS, 16, wvalue=0)
-    except Stall as e:
-        raise Skip(f"spectrum analyser not present on this firmware: {e}")
-    if len(raw) < 16:
-        raise Skip(f"RTA caps short ({len(raw)} B)")
+    """MEAS.RTA_CAPS as a dict. Raises Skip on firmware without the analyser."""
+    if not has_command(dev, "MEAS.RTA_CAPS", "GET"):
+        raise Skip("spectrum analyser not present on this firmware")
+    raw = dev.pget("MEAS.RTA_CAPS", length=16)
     (version, n_in, n_out, o_min, o_max, o_def, bass_bands, max_bands,
      level_zero, dyn_db, idle_ms, max_bin, bass_dyn_db) = struct.unpack("<10BHHH", raw)
     if version != RTA_CFG_VERSION:
@@ -81,11 +72,11 @@ def _caps(dev):
 
 
 def _centres(dev, caps):
-    """Band centre frequencies in Hz, read from the caps table in 32-band chunks."""
+    """Band centre frequencies in Hz from MEAS.RTA_BAND_CENTRES, 32 bands per chunk."""
     out = []
-    chunk = 1
+    chunk = 0
     while len(out) < caps["max_bands"]:
-        raw = dev.get(OP.RTA_GET_CAPS, 64, wvalue=chunk)
+        raw = dev.pget("MEAS.RTA_BAND_CENTRES", chunk, 64)
         if not raw:
             break
         out += list(struct.unpack(f"<{len(raw) // 2}H", raw[:len(raw) // 2 * 2]))
@@ -99,14 +90,14 @@ def _config(tap, mask, order, avg_ms=250, peak_db_s=20, flags=0):
 
 
 def _get_config(dev):
-    raw = dev.get(OP.RTA_GET_CONFIG, 12)
+    raw = dev.pget("MEAS.RTA_CONFIG", length=12)
     (version, tap, mask, order, _reserved, avg_ms, peak, flags, _r) = struct.unpack("<BBHBBHBBH", raw)
     return {"version": version, "tap": tap, "mask": mask, "order": order,
             "avg_ms": avg_ms, "peak_decay_db_s": peak, "flags": flags}
 
 
 def _status(dev):
-    raw = dev.get(OP.RTA_GET_STATUS, 24)
+    raw = dev.pget("MEAS.RTA_STATUS", length=24)
     (version, state, tap, fast_ch, _res0, live_count, live_mask, frames_per_s,
      busy, last_us, idle_ms, fs, first_band, _r, bass_busy) = struct.unpack("<6B5HIBBH", raw)
     return {"version": version, "state": state, "tap": tap,
@@ -118,8 +109,8 @@ def _status(dev):
 
 
 def _bands(dev, ch, caps):
-    """One channel's RtaBandFrame, levels already decoded to dBFS."""
-    raw = dev.get(OP.RTA_GET_BANDS, 8 + 2*caps["max_bands"], wvalue=ch)
+    """One channel's MEAS.RTA_BANDS frame, levels already decoded to dBFS."""
+    raw = dev.pget("MEAS.RTA_BANDS", ch, RTA_BAND_FRAME)
     version, channel, seq, n_bands, age, _res = struct.unpack("<BBBBHH", raw[:8])
     nb = caps["max_bands"]
     avg = raw[8:8 + nb]
@@ -136,20 +127,16 @@ def _level_db(v, caps):
     return LEVEL_FLOOR_DBFS if v == 0 else (v - caps["level_zero"]) * 0.5
 
 
-def _control(dev, action):
-    return dev.get_u8(OP.RTA_CONTROL, wvalue=action)
-
-
 def _stop_rta(dev):
     try:
-        _control(dev, RTA_CTL_STOP)
+        dev.pset("MEAS.RTA_STOP")
     except (Stall, OSError):
         pass
 
 
 def _stop_siggen(dev):
     try:
-        dev.get_u8(OP.SIGGEN_CONTROL, wvalue=SIGGEN_CTL_STOP_NOW)
+        dev.pset("MEAS.SIGGEN_STOP_NOW")
     except (Stall, OSError):
         pass
 
@@ -158,12 +145,12 @@ def _siggen(dev, sig_type, mask, level_db, p1=0.0):
     """Hold a continuous generator signal on `mask`, RAW so the output-side tap
     sees the generator itself and not whatever PEQ the previous test left."""
     try:
-        dev.set(OP.SIGGEN_SET_CONFIG,
-                struct.pack("<BBHHBBfIHHffff", SIGGEN_CFG_VERSION, sig_type, mask,
-                            0, SIGGEN_FLAG_RAW, 0, level_db, 0, 0, 0,
-                            p1, 0.0, 0.0, 0.0))
-        dev.get_u8(OP.SIGGEN_CONTROL, wvalue=SIGGEN_CTL_START)
-    except Stall as e:
+        dev.pset("MEAS.SIGGEN_CONFIG",
+                 struct.pack("<BBHHBBfIHHffff", SIGGEN_CFG_VERSION, sig_type, mask,
+                             0, SIGGEN_FLAG_RAW, 0, level_db, 0, 0, 0,
+                             p1, 0.0, 0.0, 0.0))
+        dev.pset("MEAS.SIGGEN_START")
+    except PagedStall as e:
         raise Skip(f"onboard signal generator unavailable: {e}")
     dev.wait_ready()
 
@@ -174,48 +161,56 @@ def _open_outputs(dev, outs):
     """Enable and unmute `outs` at unity, with both volumes at 0 dB, so the
     output tap reads the generator's own level.  Returns the saved state."""
     saved = {"enable": {}, "mute": {}, "gain": {},
-             "master": dev.get_f32(OP.GET_MASTER_VOLUME),
-             "user": dev.get_f32(OP.GET_USER_VOLUME),
-             "user_mute": dev.get_u8(OP.GET_USER_MUTE)}
+             "master": dev.pget("ROUTE.MASTER_VOLUME", length=4),
+             "user": dev.pget("ROUTE.USER_VOLUME", length=4),
+             "user_mute": dev.pget("ROUTE.USER_MUTE", length=1)}
     for o in outs:
-        saved["enable"][o] = dev.get_u8(OP.GET_OUTPUT_ENABLE, wvalue=o)
-        saved["mute"][o] = dev.get_u8(OP.GET_OUTPUT_MUTE, wvalue=o)
-        saved["gain"][o] = dev.get_f32(OP.GET_OUTPUT_GAIN, wvalue=o)
-        dev.set_u8(OP.SET_OUTPUT_ENABLE, 1, wvalue=o)
-        dev.set_u8(OP.SET_OUTPUT_MUTE, 0, wvalue=o)
-        dev.set_f32(OP.SET_OUTPUT_GAIN, 0.0, wvalue=o)
-    dev.set_f32(OP.SET_MASTER_VOLUME, 0.0)
-    dev.set_f32(OP.SET_USER_VOLUME, 0.0)
-    dev.set_u8(OP.SET_USER_MUTE, 0)
+        saved["enable"][o] = dev.pget("ROUTE.OUTPUT_ENABLE", o, 1)
+        saved["mute"][o] = dev.pget("ROUTE.OUTPUT_MUTE", o, 1)
+        saved["gain"][o] = dev.pget("ROUTE.OUTPUT_GAIN", o, 4)
+    try:
+        for o in outs:
+            try:
+                dev.pset_u8("ROUTE.OUTPUT_ENABLE", 1, o)
+            except PagedStall as s:
+                # VC_ERR_STATE: the core 1 mode cannot run this output too; it stays off and out of the live mask.
+                if s.result_name != "VC_ERR_STATE":
+                    raise
+            dev.pset_u8("ROUTE.OUTPUT_MUTE", 0, o)
+            dev.pset_f32("ROUTE.OUTPUT_GAIN", 0.0, o)
+        dev.pset_f32("ROUTE.MASTER_VOLUME", 0.0)
+        dev.pset_f32("ROUTE.USER_VOLUME", 0.0)
+        dev.pset_u8("ROUTE.USER_MUTE", 0)
+    except BaseException:
+        _restore_outputs(dev, saved)
+        raise
     dev.wait_ready()
     return saved
 
 
 def _restore_outputs(dev, saved):
-    for o, v in saved["enable"].items():
+    # Disables first, so re-enabling an output never collides with one this test enabled.
+    order = sorted(saved["enable"], key=lambda o: saved["enable"][o] != b"\x00")
+    for o in order:
+        for cmd, key in (("ROUTE.OUTPUT_ENABLE", "enable"), ("ROUTE.OUTPUT_MUTE", "mute"),
+                         ("ROUTE.OUTPUT_GAIN", "gain")):
+            try:
+                dev.pset(cmd, saved[key][o], o)
+            except (Stall, OSError):
+                pass
+    for cmd, key in (("ROUTE.MASTER_VOLUME", "master"), ("ROUTE.USER_VOLUME", "user"),
+                     ("ROUTE.USER_MUTE", "user_mute")):
         try:
-            dev.set_u8(OP.SET_OUTPUT_ENABLE, v, wvalue=o)
-            dev.set_u8(OP.SET_OUTPUT_MUTE, saved["mute"][o], wvalue=o)
-            dev.set_f32(OP.SET_OUTPUT_GAIN, saved["gain"][o], wvalue=o)
+            dev.pset(cmd, saved[key])
         except (Stall, OSError):
             pass
-    for op, val in ((OP.SET_MASTER_VOLUME, saved["master"]),
-                    (OP.SET_USER_VOLUME, saved["user"])):
-        try:
-            dev.set_f32(op, val)
-        except (Stall, OSError):
-            pass
-    try:
-        dev.set_u8(OP.SET_USER_MUTE, saved["user_mute"])
-    except (Stall, OSError):
-        pass
     dev.wait_ready()
 
 
 # --- Band geometry ----------------------------------------------------------
 
 def _rate(dev):
-    fs = dev.get_u32(OP.GET_STATUS, wvalue=15)
+    fs = sample_rate(dev)
     if fs not in SUPPORTED_RATES:
         raise Skip(f"no RTA band table at {fs} Hz (supported: {SUPPORTED_RATES})")
     return fs
@@ -273,14 +268,16 @@ def _await_frames(dev, ch, caps, timeout_s=4.0):
     return None
 
 
+def _apply_config(dev, cfg):
+    """SET MEAS.RTA_CONFIG and wait until the main loop has applied it (the GET shows the applied one)."""
+    dev.pset("MEAS.RTA_CONFIG", cfg)
+    return wait_for(lambda: dev.pget("MEAS.RTA_CONFIG", length=12), cfg, timeout_s=1.0)
+
+
 def _start(dev, cfg):
-    """Stage a config, let rta_service() apply it, and start the engine."""
-    dev.set(OP.RTA_SET_CONFIG, cfg)
-    dev.wait_ready()
-    # The config is staged and applied by rta_service(); give the main loop a
-    # turn so START does not arm the previous one and immediately re-arm.
-    time.sleep(0.05)
-    _control(dev, RTA_CTL_START)
+    """Apply a config, then start the engine, so START never arms the previous config."""
+    _apply_config(dev, cfg)
+    dev.pset("MEAS.RTA_START")
     time.sleep(0.1)
 
 
@@ -288,7 +285,7 @@ def _start(dev, cfg):
 
 @test("rta", mutating=True)
 def rta_config_validation(dev, profile, chk):
-    """0x08 rejects an empty mask and an out-of-range order; a valid config round-trips."""
+    """MEAS.RTA_CONFIG refuses an empty mask and an out-of-range order with VC_ERR_VALUE; a valid one applies."""
     caps = _caps(dev)
     chk.in_range(caps["order_default"], caps["order_min"], caps["order_max"],
                  "caps default order inside the caps range")
@@ -297,30 +294,22 @@ def rta_config_validation(dev, profile, chk):
     try:
         good = _config(RTA_TAP_OUTPUT, (1 << profile.num_output_channels) - 1,
                        caps["order_default"], avg_ms=250, peak_db_s=20)
-        chk.no_stall(lambda: dev.set(OP.RTA_SET_CONFIG, good), "valid config accepted")
-        dev.wait_ready()
+        chk.no_stall(lambda: _apply_config(dev, good), "valid config accepted")
         applied = _get_config(dev)
         chk.eq(applied["tap"], RTA_TAP_OUTPUT, "tap applied")
         chk.eq(applied["order"], caps["order_default"], "order applied")
         chk.eq(applied["mask"], (1 << profile.num_output_channels) - 1, "mask applied")
 
-        chk.stalls(lambda: dev.set(OP.RTA_SET_CONFIG,
-                                   _config(RTA_TAP_OUTPUT, 0, caps["order_default"])),
-                   "empty channel mask STALLs")
-        chk.stalls(lambda: dev.set(OP.RTA_SET_CONFIG,
-                                   _config(RTA_TAP_OUTPUT, 0x1,
-                                           caps["order_max"] + 1)),
-                   f"order {caps['order_max'] + 1} above the caps ceiling STALLs")
-        chk.stalls(lambda: dev.set(OP.RTA_SET_CONFIG,
-                                   _config(RTA_TAP_OUTPUT, 0x1,
-                                           caps["order_min"] - 1)),
-                   f"order {caps['order_min'] - 1} below the caps floor STALLs")
-        # A mask with only bits above the tap's width is empty after masking.
-        chk.stalls(lambda: dev.set(OP.RTA_SET_CONFIG,
-                                   _config(RTA_TAP_OUTPUT,
-                                           0xFFFF << profile.num_output_channels & 0xFFFF,
-                                           caps["order_default"])),
-                   "mask with no in-range bit STALLs")
+        bad = [(_config(RTA_TAP_OUTPUT, 0, caps["order_default"]), "empty channel mask"),
+               (_config(RTA_TAP_OUTPUT, 0x1, caps["order_max"] + 1),
+                f"order {caps['order_max'] + 1} above the caps ceiling"),
+               (_config(RTA_TAP_OUTPUT, 0x1, caps["order_min"] - 1),
+                f"order {caps['order_min'] - 1} below the caps floor"),
+               # Only bits above the tap's width: empty after masking.
+               (_config(RTA_TAP_OUTPUT, 0xFFFF << profile.num_output_channels & 0xFFFF,
+                        caps["order_default"]), "mask with no in-range bit")]
+        for cfg, label in bad:
+            expect_stall(chk, lambda: dev.pset("MEAS.RTA_CONFIG", cfg), "VC_ERR_VALUE", label)
         # The rejected configs must not have displaced the applied one.
         chk.eq(_get_config(dev)["order"], caps["order_default"],
                "applied config survives the rejected ones")
@@ -472,15 +461,15 @@ def rta_rotation_refreshes_every_channel(dev, profile, chk):
 
 @test("rta", mutating=True)
 def rta_busy_within_budget(dev, profile, chk):
-    """At order 10 the transform's main-loop cost stays inside the platform budget."""
+    """At order 10 each frame's transform stays inside the spec's per-frame time, and the averaged cost agrees."""
     caps = _caps(dev)
     _rate(dev)
     order = 10
     if order > caps["order_max"]:
         raise Skip(f"caps order_max is {caps['order_max']}, no order 10")
-    budget = BUSY_BUDGET_US_PER_S.get(profile.platform_id)
+    budget = FRAME_BUDGET_US.get(profile.platform_id)
     if budget is None:
-        raise Skip(f"no busy budget for platform id {profile.platform_id}")
+        raise Skip(f"no transform budget for platform id {profile.platform_id}")
     outs = list(range(profile.num_output_channels))
     mask = (1 << profile.num_output_channels) - 1
     saved = _open_outputs(dev, outs)
@@ -495,22 +484,25 @@ def rta_busy_within_budget(dev, profile, chk):
             raise Skip("no RTA frame completed; the pipeline is not running")
         # busy_us_per_s is an EMA over 1 s windows at quarter weight, so it needs
         # several seconds before it means anything.
+        worst = 0
+        over0 = pipeline_stats(dev)["bg_over_budget_count"]
         deadline = time.monotonic() + BUSY_SETTLE_S
         while time.monotonic() < deadline:
             _bands(dev, live[0], caps)
+            worst = max(worst, _status(dev)["last_frame_us"])
             time.sleep(0.25)
         st = _status(dev)
-        chk.ok(st["busy_us_per_s"] < budget,
-               f"busy_us_per_s {st['busy_us_per_s']} under {budget} "
-               f"({profile.platform_name}, order {order})")
-        # The EMA lags, so also grade the unsmoothed figure it converges towards.
-        instant = st["last_frame_us"] * st["frames_per_s"]
-        chk.ok(instant < budget,
-               f"last_frame_us x frames_per_s = {instant} us/s under {budget}")
-        chk.note(f"busy: {st['busy_us_per_s']} us/s EMA, last frame "
-                 f"{st['last_frame_us']} us, {st['frames_per_s']} frames/s; "
-                 f"bass taps: {st['bass_busy_us_per_s']} us/s summed over both cores "
-                 "(65535 means saturated; excludes packet bookkeeping)")
+        fps = st["frames_per_s"]
+        over = pipeline_stats(dev)["bg_over_budget_count"] - over0
+        chk.ok(worst < budget, f"worst last_frame_us {worst} under {budget} us per frame "
+                               f"({profile.platform_name}, order {order})")
+        # The EMA lags, so grade it against what the per-frame budget allows at the measured rate.
+        chk.ok(st["busy_us_per_s"] < budget * max(fps, 1),
+               f"busy_us_per_s {st['busy_us_per_s']} under {budget} us x {fps} frames/s")
+        chk.note(f"busy: {st['busy_us_per_s']} us/s EMA, last frame {st['last_frame_us']} us "
+                 f"(worst {worst}), {fps} frames/s of {st['sample_rate_hz'] / (1 << order):.1f} possible, "
+                 f"{over} background steps over budget; bass taps: {st['bass_busy_us_per_s']} us/s summed "
+                 "over both cores (65535 means saturated; excludes packet bookkeeping)")
     finally:
         _stop_rta(dev)
         _stop_siggen(dev)
@@ -533,8 +525,7 @@ def rta_auto_off_and_restart(dev, profile, chk):
             raise Skip(f"engine will not arm (live_mask 0x{st['live_mask']:04X}, "
                        f"{st['sample_rate_hz']} Hz)")
 
-        # GET_STATUS is deliberately not a read, so polling it here must not keep
-        # the analyser alive.
+        # MEAS.RTA_STATUS is not a keepalive, so polling it here must not keep the analyser alive.
         deadline = time.monotonic() + AUTO_OFF_WAIT_S
         while time.monotonic() < deadline:
             time.sleep(0.5)
@@ -555,7 +546,7 @@ def rta_auto_off_and_restart(dev, profile, chk):
 
 @test("rta", mutating=True)
 def rta_bin_frame_seq_consistency(dev, profile, chk):
-    """0x0C: a chunked bin-frame read validates seq head == tail, re-reading on a turnover."""
+    """MEAS.RTA_BINS read in 256-byte pieces: seq head equals tail (re-read on a turnover); past the end is VC_ERR_ADDRESS."""
     caps = _caps(dev)
     fs = _rate(dev)
     order = caps["order_default"]
@@ -580,8 +571,8 @@ def rta_bin_frame_seq_consistency(dev, profile, chk):
                f"{caps['max_bin_frame']} B maximum")
         chk.eq(frame["bytes"][2], frame["bytes"][frame["total"] - 1],
                "seq head equals seq tail")
-        chk.stalls(lambda: dev.get(OP.RTA_GET_BINS, 16, wvalue=frame["total"]),
-                   "offset past the end of the frame STALLs")
+        expect_stall(chk, lambda: dev.pget("MEAS.RTA_BINS", frame["total"], 16), "VC_ERR_ADDRESS",
+                     "offset past the end of the frame")
         chk.note(f"bin frame: {frame['total']} B, {frame['n_bins']} bins, "
                  f"seq {frame['bytes'][2]}, {attempts} read attempt(s)")
     finally:
@@ -590,37 +581,34 @@ def rta_bin_frame_seq_consistency(dev, profile, chk):
         _restore_outputs(dev, saved)
 
 
-def _read_bin_frame(dev, chk, chunk=64, tries=8):
-    """Read the whole bin frame in chunks, retrying while head and tail disagree.
-
-    No lock is taken on the device side, so a frame that turns over mid-read is
-    expected and the retry is the protocol, not a workaround.
-    """
+def _read_bin_frame(dev, chk, tries=12):
+    """Read the whole bin frame in 256-byte pieces (offsets 0, 256, 512), retrying while head and tail
+    disagree. The device takes no lock, so a turnover mid-read is expected; the retry gap varies so the
+    reads cannot stay in phase with the publish cadence."""
+    seen = []
     for attempt in range(1, tries + 1):
-        hdr = dev.get(OP.RTA_GET_BINS, 16, wvalue=0)
-        if len(hdr) < 16:
+        buf = bytearray(dev.pget("MEAS.RTA_BINS", 0, RTA_BINS_PER_READ))
+        if len(buf) < RTA_BIN_HEADER:
             time.sleep(0.1)
             continue
         (version, channel, seq, order, fs, n_bins, _r0, _r1,
-         _r2) = struct.unpack("<BBBBIHHHH", hdr)
+         _r2) = struct.unpack_from("<BBBBIHHHH", buf)
         if version != RTA_CFG_VERSION or n_bins == 0:
-            time.sleep(0.1)              # no frame published yet
+            time.sleep(0.1)              # zero header: no transform published yet
             continue
-        total = 16 + n_bins + 1
-        buf = bytearray(hdr)
-        off = 16
-        while off < total:
-            piece = dev.get(OP.RTA_GET_BINS, min(chunk, total - off), wvalue=off)
+        total = RTA_BIN_HEADER + n_bins + 1
+        while len(buf) < total:
+            piece = dev.pget("MEAS.RTA_BINS", len(buf), RTA_BINS_PER_READ)
             if not piece:
                 break
             buf += piece
-            off += len(piece)
         if len(buf) == total and buf[2] == buf[total - 1]:
             return {"version": version, "channel": channel, "seq": seq,
                     "fft_order": order, "sample_rate_hz": fs, "n_bins": n_bins,
                     "total": total, "bytes": bytes(buf)}, attempt
-        time.sleep(0.05)
-    chk.ok(False, f"bin frame seq head never matched its tail in {tries} reads")
+        seen.append((buf[2], buf[-1]))
+        time.sleep(0.003 + 0.006 * (attempt % 4))
+    chk.ok(False, f"bin frame seq head never matched its tail in {tries} reads (head, tail): {seen}")
     return None, tries
 
 

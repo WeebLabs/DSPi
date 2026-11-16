@@ -96,7 +96,7 @@ On USB the stage where a refusal shows up depends on the kind of request.
 | Zero-length SET | At SETUP | At SETUP | STALLs the status stage |
 | SET with payload | At SETUP | After the data stage arrives | A check failure STALLs the data stage. A handler failure STALLs the status stage |
 
-Every outcome, success or failure, is recorded in `SYS.LAST_RESULT` for the transport it came from. A host library sees each STALL as a pipe error (`EPIPE` in libusb) on that transfer.
+Every outcome, success or failure, is recorded in `SYS.LAST_RESULT` for the transport it came from. The one exception is a GET of `SYS.LAST_RESULT` itself (section 1.5). A host library sees each STALL as a pipe error (`EPIPE` in libusb) on that transfer.
 
 A STALL is an answer, not a fault. Retrying the same request gives the same answer, except for `VC_ERR_BUSY`.
 
@@ -137,7 +137,7 @@ One set of result codes covers every command.
 | 4 | u16 | `wValue` of that request |
 | 6 | u16 | Reserved, 0 |
 
-Reading `SYS.LAST_RESULT` does not overwrite it. It is kept per transport (USB, UART, I2C), not per host. Two USB hosts on one device, such as DSPi Console and a script, overwrite each other's result. A host should read it straight after the STALL it wants to explain and check that the ID, direction and `wValue` match its own request.
+A GET of `SYS.LAST_RESULT` is never recorded, whether it succeeds or is refused (for example with a non-zero `wValue`), so reading it never overwrites it. Every other request is recorded, a SET of `SYS.LAST_RESULT` and the discovery commands included. A UART or I2C frame that fails at the transport (status `0x01` to `0x07`) never reaches a command and is not recorded. The record is kept per transport (USB, UART, I2C), not per host. Two USB hosts on one device, such as DSPi Console and a script, overwrite each other's result. A host should read it straight after the STALL it wants to explain and check that the ID, direction and `wValue` match its own request.
 
 ### 1.6 Deferred operations and the busy window
 
@@ -500,7 +500,7 @@ Discovery, identity, the device name, the last result, the bootloader jump, and 
 | 10 | u16 | Largest non-bulk GET reply (256) |
 | 12 | u32 | Reserved, 0 |
 
-`SYS.PAGE_LIST`, `SYS.PAGE_COMMANDS` and `SYS.COMMAND_INFO` are described in sections 2.2 to 2.4, and `SYS.LAST_RESULT` in section 1.5. None of them records itself in `SYS.LAST_RESULT` except a failed request.
+`SYS.PAGE_LIST`, `SYS.PAGE_COMMANDS` and `SYS.COMMAND_INFO` are described in sections 2.2 to 2.4, and `SYS.LAST_RESULT` in section 1.5. The three discovery commands are recorded in `SYS.LAST_RESULT` like any other request, success included. A GET of `SYS.LAST_RESULT` is the only request never recorded, even when it is refused.
 
 ### 6.2 Identity
 

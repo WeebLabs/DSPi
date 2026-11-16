@@ -5,9 +5,8 @@ build that enables it; on a standard build every one answers VC_ERR_UNKNOWN.
 
 import struct
 
-from ..device import ProtocolError
 from ..framework import Skip, test
-from .paged_sys import _expect_stall
+from ..helpers import expect_stall, require_paged
 
 DIAG = 0xF0
 CLOCK_DIAG, LOOPBACK_STATS = 0x10, 0x20
@@ -17,12 +16,7 @@ SLOW_GET = ("STORE.ALL_PARAMS", 6136)   # a handler that always takes measurable
 
 
 def _diag_cmds(dev):
-    try:
-        info = dev.protocol_info()
-    except ProtocolError as e:
-        raise AssertionError(str(e)) from None
-    if info is None:
-        raise Skip("no paged dispatcher: SYS.PROTOCOL_INFO STALLs (firmware 1.1.6 or older)")
+    require_paged(dev)
     gets, sets = dev.paged_commands().get(DIAG, (frozenset(), frozenset()))
     return gets | sets
 
@@ -35,8 +29,8 @@ def pdiag_absent_commands_unknown(dev, profile, chk):
         if cmd in gets:
             chk.note(f"DIAG 0x{cmd:02X} is built in")
             continue
-        _expect_stall(chk, lambda: dev.pget((DIAG << 8) | cmd, length=8), "VC_ERR_UNKNOWN", f"GET DIAG 0x{cmd:02X}")
-        _expect_stall(chk, lambda: dev.pset((DIAG << 8) | cmd), "VC_ERR_UNKNOWN", f"SET DIAG 0x{cmd:02X}")
+        expect_stall(chk, lambda: dev.pget((DIAG << 8) | cmd, length=8), "VC_ERR_UNKNOWN", f"GET DIAG 0x{cmd:02X}")
+        expect_stall(chk, lambda: dev.pset((DIAG << 8) | cmd), "VC_ERR_UNKNOWN", f"SET DIAG 0x{cmd:02X}")
     if not gets:
         page_list = dev.pget("SYS.PAGE_LIST", length=256)
         chk.ok(DIAG not in page_list[0::2], "DIAG page not listed when it has no command")
@@ -52,7 +46,7 @@ def pdiag_clock_diag_shape(dev, profile, chk):
     chk.eq(pkt[0], 1, "format version")
     chk.eq((pkt[1], pkt[2]), (profile.platform_id, profile.num_spdif), "platform and slot count match the profile")
     chk.member(pkt[3], (0, 1), "PLL lock flag")
-    _expect_stall(chk, lambda: dev.pget("DIAG.CLOCK_DIAG", addr=1, length=256), "VC_ERR_ADDRESS", "wValue 1")
+    expect_stall(chk, lambda: dev.pget("DIAG.CLOCK_DIAG", addr=1, length=256), "VC_ERR_ADDRESS", "wValue 1")
 
 
 @test("paged_diag")
@@ -65,7 +59,7 @@ def pdiag_loopback_stats_shape(dev, profile, chk):
     chk.eq(len(a), 8, "reply length")
     (o1, u1), (o2, u2) = struct.unpack("<II", a), struct.unpack("<II", b)
     chk.ok(o2 >= o1 and u2 >= u1, f"counters never run backwards ({o1},{u1}) then ({o2},{u2})")
-    _expect_stall(chk, lambda: dev.pget("DIAG.LOOPBACK_STATS", addr=1, length=8), "VC_ERR_ADDRESS", "wValue 1")
+    expect_stall(chk, lambda: dev.pget("DIAG.LOOPBACK_STATS", addr=1, length=8), "VC_ERR_ADDRESS", "wValue 1")
 
 
 def _loop_prof(dev):
@@ -89,10 +83,10 @@ def pdiag_loop_prof_sections_and_jobs(dev, profile, chk):
     chk.ok(all(b >= a for a, b in zip(first, second)), "a second read is never below the first (no clear-on-read)")
     for i in range(len(jobs)):
         chk.eq(len(dev.pget(LP_JOB, addr=i, length=4)), 4, f"job {jobs[i]} reads 4 bytes")
-    _expect_stall(chk, lambda: dev.pget(LP_SECTION, addr=len(sections), length=4), "VC_ERR_ADDRESS",
-                  "section one past LOOP_PROF_SECTION_LIST")
-    _expect_stall(chk, lambda: dev.pget(LP_JOB, addr=len(jobs), length=4), "VC_ERR_ADDRESS",
-                  "job one past BG_JOB_LIST")
+    expect_stall(chk, lambda: dev.pget(LP_SECTION, addr=len(sections), length=4), "VC_ERR_ADDRESS",
+                 "section one past LOOP_PROF_SECTION_LIST")
+    expect_stall(chk, lambda: dev.pget(LP_JOB, addr=len(jobs), length=4), "VC_ERR_ADDRESS",
+                 "job one past BG_JOB_LIST")
 
 
 @test("paged_diag")
@@ -109,10 +103,10 @@ def pdiag_loop_prof_command_times(dev, profile, chk):
     chk.eq(_lp_u32(dev, LP_COMMAND, slow), 0, "LOOP_PROF_RESET zeroes it")
     chk.eq(len(dev.pget(LP_COMMAND, addr=LP_RESET, length=4)), 4, "a SET-only command has a slot too")
     for bad in (0x0050, 0xDF10, (DIAG << 8) | 0xFF):
-        _expect_stall(chk, lambda b=bad: dev.pget(LP_COMMAND, addr=b, length=4), "VC_ERR_ADDRESS",
-                      f"command 0x{bad:04X} is not built")
-    _expect_stall(chk, lambda: dev.pget(LP_RESET, length=4), "VC_ERR_DIRECTION", "RESET has no GET")
-    _expect_stall(chk, lambda: dev.pset(LP_RESET, b"\x00"), "VC_ERR_LENGTH", "RESET takes no payload")
+        expect_stall(chk, lambda b=bad: dev.pget(LP_COMMAND, addr=b, length=4), "VC_ERR_ADDRESS",
+                     f"command 0x{bad:04X} is not built")
+    expect_stall(chk, lambda: dev.pget(LP_RESET, length=4), "VC_ERR_DIRECTION", "RESET has no GET")
+    expect_stall(chk, lambda: dev.pset(LP_RESET, b"\x00"), "VC_ERR_LENGTH", "RESET takes no payload")
 
 
 @test("paged_diag")
@@ -126,8 +120,8 @@ def pdiag_loop_prof_bg_pace(dev, profile, chk):
         chk.eq(pace(), 7, "SET 7 reads back 7")
         dev.pset(LP_BG_PACE, struct.pack("<H", 0))
         chk.eq(pace(), 1, "SET 0 reads back 1")
-        _expect_stall(chk, lambda: dev.pset(LP_BG_PACE, b"\x05"), "VC_ERR_LENGTH", "1-byte payload")
-        _expect_stall(chk, lambda: dev.pget(LP_BG_PACE, addr=1, length=2), "VC_ERR_ADDRESS", "wValue 1")
+        expect_stall(chk, lambda: dev.pset(LP_BG_PACE, b"\x05"), "VC_ERR_LENGTH", "1-byte payload")
+        expect_stall(chk, lambda: dev.pget(LP_BG_PACE, addr=1, length=2), "VC_ERR_ADDRESS", "wValue 1")
     finally:
         dev.pset(LP_BG_PACE, struct.pack("<H", orig or 1))
     chk.eq(pace(), orig or 1, "pacing restored")

@@ -70,8 +70,8 @@ python3 tools/latency_bench/latency_bench.py restore --out bench_results/latency
 `INPUT.I2S_RX_RATE` for the I2S sources), writes each latency option and holds
 `ROUTE.USER_MUTE`. At the end it puts back the source and the mute, not the latency
 or the I2S rate, and reports whether the parameters changed. `--profile 4way` loads an
-empty preset slot (`STORE.PRESET_LOAD`) and applies the heavy 4-way profile that
-`tools/batch_bench` also uses (both cores busy), written with `FILTER.BAND`,
+empty preset slot (`STORE.PRESET_LOAD`) and applies the heavy 4-way profile first
+defined for `tools/batch_bench` (both cores busy), written with `FILTER.BAND`,
 `ROUTE.MATRIX_ROUTE`, `ROUTE.OUTPUT_ENABLE` and `ROUTE.CHANNEL_DELAY`. `restore` reloads the original slot,
 pushes the captured parameters back and restores the original latency. The `siggen`
 source starts the signal generator (`MEAS.SIGGEN_START`) on outputs 1 to 8.
@@ -141,6 +141,9 @@ python3 tools/latency_bench/loop_prof.py --seconds 5 --top 15
 
 ## Shared helpers
 
-`paged.py` reads each telemetry struct in one transfer and names the fields as the
-firmware does. `SYS.SPDIF_TX_STATS` field `spdif_underruns` is the USB packet gap
-count, reported as `usb_packet_gaps`.
+The telemetry struct readers come from the QA harness, `tools/dspi_test/telemetry.py`.
+Each reads one struct in one transfer and names the fields as the firmware does.
+`SYS.SPDIF_TX_STATS` field `spdif_underruns` is the USB packet gap count, reported
+as `usb_packet_gaps`. `paged.py` holds only `stats_reset`, which has no harness
+equivalent. Device access goes through the harness `DspiDevice`, so the scripts need
+firmware 1.1.7 or later and stop with its `ProtocolError` on anything older.

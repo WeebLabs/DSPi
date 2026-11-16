@@ -282,5 +282,93 @@ class BadInput(unittest.TestCase):
             self.assertFalse(os.path.exists(js))
 
 
+class LegacyMap(unittest.TestCase):
+    """check_legacy_map against the fixture registry: a consistent map passes, each drift is named by key."""
+
+    def setUp(self):
+        self.reg = g.build_registry(FIX_PAGES, FIX_CORE)
+        self.doc = {
+            "pages": {"SYS": 1, "STORE": 2, "ROUTE": 5},
+            "commands": {
+                "SYS.PLATFORM": {"page": "SYS", "cmd": 0x20, "dir": "G", "addr": "NONE", "get_len": 7},
+                "SYS.DEVICE_NAME": {"page": "SYS", "cmd": 0x24, "dir": "GS", "addr": "NONE", "get_len": 32,
+                                    "set": [1, 32]},
+                "SYS.ENTER_BOOTLOADER": {"page": "SYS", "cmd": 0x30, "dir": "S0", "addr": "NONE"},
+                "SYS.CLOCK_DIAG": {"page": "SYS", "cmd": 0x60, "dir": "G", "addr": "NONE", "get_len": 48,
+                                   "build": "DSPI_CLOCK_DIAG"},
+                "STORE.ALL_PARAMS": {"page": "STORE", "cmd": 0x40, "dir": "GS", "addr": "NONE",
+                                     "get_len": 6136, "set": [6136, 6136]},
+                "ROUTE.OUTPUT_GAIN": {"page": "ROUTE", "cmd": 0x21, "dir": "GS", "addr": "OUTPUT_ALL",
+                                      "get_len": 4, "set": [4, 4]},
+            },
+            "opcodes": {
+                "GET_PLATFORM": {"code": 0x7F, "in": {"kind": "direct", "target": "SYS.PLATFORM"}},
+                "SET_OUTPUT_GAIN": {"code": 0x74, "out": {"kind": "direct", "target": "ROUTE.OUTPUT_GAIN"}},
+                "SPLIT": {"code": 0x01, "in": {"kind": "split", "cases": {
+                    "0": {"kind": "direct", "target": "SYS.PLATFORM"},
+                    "1": {"kind": "act_addr", "target": "SYS.ENTER_BOOTLOADER"}},
+                    "default": {"kind": "custom", "fn": "x", "uses": ["ROUTE.OUTPUT_GAIN:S"]}}},
+            },
+        }
+
+    def errs(self):
+        return g.check_legacy_map(self.reg, self.doc)
+
+    def test_consistent_map_passes(self):
+        self.assertEqual(self.errs(), [])
+
+    def test_catalog_drift_named_by_key(self):
+        c = self.doc["commands"]
+        c["SYS.PLATFORM"]["cmd"] = 0x21
+        c["SYS.DEVICE_NAME"]["set"] = [1, 31]
+        c["ROUTE.OUTPUT_GAIN"]["get_len"] = 8
+        c["ROUTE.OUTPUT_GAIN"]["addr"] = "OUTPUT"
+        c["SYS.CLOCK_DIAG"]["dir"] = "GS"
+        c["SYS.CLOCK_DIAG"].pop("build")
+        c["SYS.GONE"] = {"page": "SYS", "cmd": 0x70, "dir": "G", "addr": "NONE", "get_len": 1}
+        self.doc["pages"]["ROUTE"] = 6
+        errs = "\n".join(self.errs())
+        for want in ("commands.SYS.PLATFORM: cmd 33", "commands.SYS.DEVICE_NAME: set [1, 31]",
+                     "commands.ROUTE.OUTPUT_GAIN: get_len 8", "commands.ROUTE.OUTPUT_GAIN: addr OUTPUT",
+                     "commands.SYS.CLOCK_DIAG: dir GS", "commands.SYS.CLOCK_DIAG: build None",
+                     "commands.SYS.GONE: not in the registry", "pages.ROUTE: 0x06"):
+            self.assertIn(want, errs)
+
+    def test_bulk_set_bounds_not_compared(self):
+        self.doc["commands"]["STORE.ALL_PARAMS"]["set"] = [1, 2]
+        self.assertEqual(self.errs(), [])
+
+    def test_adapter_targets_and_uses(self):
+        ops = self.doc["opcodes"]
+        ops["GET_PLATFORM"]["in"]["target"] = "SYS.NOPE"
+        ops["SET_OUTPUT_GAIN"]["out"]["target"] = "SYS.PLATFORM"
+        ops["SPLIT"]["in"]["default"]["uses"] = ["ROUTE.OUTPUT_GAIN", "ROUTE.MASTER_VOLUME:G"]
+        errs = "\n".join(self.errs())
+        for want in ("opcodes.GET_PLATFORM.in: SYS.NOPE not in the registry",
+                     "opcodes.SET_OUTPUT_GAIN.out: SYS.PLATFORM has no SET",
+                     "opcodes.SPLIT.in: malformed use 'ROUTE.OUTPUT_GAIN'",
+                     "opcodes.SPLIT.in: ROUTE.MASTER_VOLUME not in the commands catalog"):
+            self.assertIn(want, errs)
+
+    def test_cli_check_reports_mismatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            js, doc, lm = (os.path.join(td, n) for n in ("r.json", "d.md", "lm.json"))
+            base = ["--pages", FIX_PAGES, "--core-h", FIX_CORE, "--json", js, "--docs", doc,
+                    "--legacy-map", lm]
+            with open(doc, "w", encoding="utf-8") as fh:
+                fh.write("x\n")
+            with open(lm, "w", encoding="utf-8") as fh:
+                json.dump(self.doc, fh)
+            self.assertEqual(run_cli(base)[0], 0)
+            rc, out, _ = run_cli(base + ["--check"])
+            self.assertEqual(rc, 0, out)
+            self.doc["commands"]["SYS.PLATFORM"]["get_len"] = 9
+            with open(lm, "w", encoding="utf-8") as fh:
+                json.dump(self.doc, fh)
+            rc, out, _ = run_cli(base + ["--check"])
+            self.assertEqual(rc, 1)
+            self.assertIn("commands.SYS.PLATFORM: get_len 9", out)
+
+
 if __name__ == "__main__":
     unittest.main()

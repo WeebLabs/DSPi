@@ -86,7 +86,7 @@ def main(argv=None):
 
     _import_tests()
     from .framework import REGISTRY, Runner, catalog_markdown
-    from .device import DspiDevice, Disconnected
+    from .device import DspiDevice, Disconnected, ProtocolError
 
     groups = set(g.strip() for g in args.group.split(",")) if args.group else None
     cases = [tc for tc in REGISTRY if (groups is None or tc.group in groups)]
@@ -132,11 +132,18 @@ def main(argv=None):
         return 2
 
     from .profile import build_profile
-    from . import lifecycle
+    from . import lifecycle, telemetry
 
-    profile = build_profile(dev)
+    try:
+        info = dev.protocol_info()
+        if info is None:
+            dev.pget("SYS.PLATFORM")    # raises the ProtocolError that names the firmware needed
+        profile = build_profile(dev)
+    except ProtocolError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     profile.stress_iters = args.stress
-    print(f"Device: {profile.summary()} | protocol {dev.protocol}")
+    print(f"Device: {profile.summary()} | protocol {info['major']}.{info['minor']}")
     print(f"Running {len(cases)} tests"
           + (f" in groups {sorted(groups)}" if groups else "")
           + (" | flash ENABLED" if args.allow_flash else " | flash disabled")
@@ -169,12 +176,12 @@ def main(argv=None):
                         print(f"  ⚠️ {len(diffs)} bulk byte(s) differ after restore: {offs}")
                     else:
                         print("  ✓ live state restored byte-for-byte")
-                    dir_after = dev.get(lifecycle.OP.PRESET_GET_DIR, 7)
-                    if bytes(dir_after) != bytes(snap.directory):
-                        print(f"  ⚠️ directory changed: {snap.directory.hex()} -> {bytes(dir_after).hex()}")
+                    dir_after = dev.pget("STORE.DIRECTORY", length=7)
+                    if dir_after != bytes(snap.directory):
+                        print(f"  ⚠️ directory changed: {snap.directory.hex()} -> {dir_after.hex()}")
                     # The operating rate is host driven, so the bulk restore
                     # cannot put it back; only report drift.
-                    rate_after = dev.get_u32(lifecycle.OP.GET_STATUS, wvalue=15)
+                    rate_after = telemetry.sample_rate(dev)
                     if rate_after != snap.sample_rate:
                         print(f"  ⚠️ sample rate changed: {snap.sample_rate} -> {rate_after} Hz "
                               f"(host driven; re-open a stream at {snap.sample_rate} to restore)")

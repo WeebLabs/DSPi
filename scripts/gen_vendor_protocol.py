@@ -18,6 +18,7 @@ DEFAULT_PAGES = os.path.join(REPO, "firmware", "DSPi", "vendor", "pages")
 DEFAULT_CORE_H = os.path.join(REPO, "firmware", "DSPi", "vendor", "vc_core.h")
 DEFAULT_JSON = os.path.join(REPO, "Documentation", "protocol", "dspi_commands.json")
 DEFAULT_DOCS = [os.path.join(REPO, "Documentation", "commands.md")]
+DEFAULT_LEGACY_MAP = os.path.join(REPO, "Documentation", "protocol", "legacy_map.json")
 
 ADDR_KINDS = (
     "NONE", "CHANNEL", "INPUT", "OUTPUT", "OUTPUT_ALL", "SLOT", "PIN_OUTPUT",
@@ -688,6 +689,75 @@ def _write(path, text):
         fh.write(text)
 
 
+def _adapters(node):
+    """Every adapter node of one legacy_map.json opcode direction, split cases included."""
+    yield node
+    if node.get("kind") == "split":
+        for case in node.get("cases", {}).values():
+            yield from _adapters(case)
+        if node.get("default"):
+            yield from _adapters(node["default"])
+
+
+def check_legacy_map(reg, doc):
+    """Mismatches between legacy_map.json and the registry, each prefixed with its JSON key.
+    Checks the commands catalog (page, number, direction, address, sizes) and every adapter target and use."""
+    errs = []
+    by_name = {"%s.%s" % (p["mnemonic"], c["name"]): (p, c) for p in reg["pages"] for c in p["commands"]}
+    page_no = {p["mnemonic"]: p["page"] for p in reg["pages"]}
+    for mnem, num in sorted(doc.get("pages", {}).items()):
+        if page_no.get(mnem) != num:
+            errs.append("pages.%s: 0x%02X, registry has %s" % (
+                mnem, num, "0x%02X" % page_no[mnem] if mnem in page_no else "no such page"))
+    for name, e in sorted(doc.get("commands", {}).items()):
+        key = "commands.%s" % name
+        if name not in by_name:
+            errs.append("%s: not in the registry" % key)
+            continue
+        pg, c = by_name[name]
+        if e.get("page") != pg["mnemonic"] or doc.get("pages", {}).get(e.get("page")) != pg["page"]:
+            errs.append("%s: page %s, registry 0x%02X" % (key, e.get("page"), pg["page"]))
+        if e.get("cmd") != c["cmd"]:
+            errs.append("%s: cmd %s, registry 0x%02X" % (key, e.get("cmd"), c["cmd"]))
+        d = e.get("dir", "")
+        if ("G" in d) != c["get"] or ("S" in d) != c["set"]:
+            errs.append("%s: dir %s, registry %s" % (key, d, _dir(c)))
+        if e.get("addr") != c["addr"]:
+            errs.append("%s: addr %s, registry %s" % (key, e.get("addr"), c["addr"]))
+        if c["get"] and e.get("get_len") != c["get_len"]:
+            errs.append("%s: get_len %s, registry %s" % (key, e.get("get_len"), c["get_len"]))
+        # A BULK command checks its own length, so the registry carries no SET bounds for it.
+        want_set = e.get("set", [0, 0] if d == "S0" else None)
+        if c["set"] and "BULK" not in c["flags"] and want_set != [c["set_min"], c["set_max"]]:
+            errs.append("%s: set %s, registry [%d, %d]" % (key, want_set, c["set_min"], c["set_max"]))
+        if e.get("build") != c["build"]:
+            errs.append("%s: build %s, registry %s" % (key, e.get("build"), c["build"]))
+    for op, rec in sorted(doc.get("opcodes", {}).items()):
+        for usb_dir in ("in", "out"):
+            if usb_dir not in rec:
+                continue
+            key = "opcodes.%s.%s" % (op, usb_dir)
+            for node in _adapters(rec[usb_dir]):
+                need = []
+                if "target" in node:
+                    getter = node.get("kind") == "direct" and usb_dir == "in"
+                    need.append((node["target"], "G" if getter else "S"))
+                for use in node.get("uses", []):
+                    target, _, how = use.partition(":")
+                    if how not in ("G", "S"):
+                        errs.append("%s: malformed use %r (want PAGE.NAME:G or :S)" % (key, use))
+                        continue
+                    need.append((target, how))
+                for target, how in need:
+                    if target not in by_name:
+                        errs.append("%s: %s not in the registry" % (key, target))
+                    elif target not in doc.get("commands", {}):
+                        errs.append("%s: %s not in the commands catalog" % (key, target))
+                    elif not by_name[target][1]["get" if how == "G" else "set"]:
+                        errs.append("%s: %s has no %s" % (key, target, "GET" if how == "G" else "SET"))
+    return errs
+
+
 def _rel(path):
     return os.path.relpath(path, REPO) if path.startswith(REPO + os.sep) else path
 
@@ -705,8 +775,13 @@ def main(argv=None):
     ap.add_argument("--docs", action="append", metavar="PATH",
                     help="Markdown file with VC:BEGIN/VC:END blocks (repeatable; "
                          "default Documentation/commands.md)")
+    ap.add_argument("--legacy-map", default=None,
+                    help="old-opcode migration map that --check validates against the registry "
+                         "(default Documentation/protocol/legacy_map.json when --pages is the default)")
     a = ap.parse_args(argv)
     docs = a.docs if a.docs else [p for p in DEFAULT_DOCS if os.path.exists(p)]
+    if a.legacy_map is None and os.path.abspath(a.pages) == DEFAULT_PAGES:
+        a.legacy_map = DEFAULT_LEGACY_MAP
 
     try:
         reg = build_registry(a.pages, a.core_h)
@@ -741,6 +816,10 @@ def main(argv=None):
 
     stale = [(p, new, old) for p, new, old in outputs if new != old]
     if a.check:
+        lm = _read(a.legacy_map) if a.legacy_map else None
+        lm_errs = [] if lm is None else check_legacy_map(reg, json.loads(lm))
+        for m in lm_errs:
+            print("MISMATCH %s: %s" % (_rel(a.legacy_map), m))
         for p, new, old in stale:
             if old is None:
                 print("STALE %s: missing" % _rel(p))
@@ -748,9 +827,13 @@ def main(argv=None):
                 print("STALE %s:\n%s" % (_rel(p), _diff(old, new, os.path.basename(p))))
         if stale:
             print("%d file(s) out of date; run scripts/gen_vendor_protocol.py" % len(stale))
+        if lm_errs:
+            print("%d legacy map mismatch(es)" % len(lm_errs))
+        if stale or lm_errs:
             return 1
-        print("OK: %d page(s), %d command(s); %d file(s) up to date" % (
-            len(reg["pages"]), sum(len(p["commands"]) for p in reg["pages"]), len(outputs)))
+        print("OK: %d page(s), %d command(s); %d file(s) up to date%s" % (
+            len(reg["pages"]), sum(len(p["commands"]) for p in reg["pages"]), len(outputs),
+            "" if lm is None else "; %s matches the registry" % _rel(a.legacy_map)))
         return 0
 
     for p, new, _old in stale:

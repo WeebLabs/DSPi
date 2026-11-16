@@ -26,8 +26,9 @@ from tools.latency_bench import loop_prof  # noqa: E402
 from tools.latency_bench.latency_bench import (  # noqa: E402
     SRC_USB, SRC_SPDIF, SRC_I2S, Player, audio_available, latency_get, sample_rate, set_latency,
     set_source, wait_rate)
-from tools.latency_bench.paged import (  # noqa: E402
-    has_command, pget_ready, pipeline_stats, spdif_tx_stats, stats_reset, usb_audio_status)
+from tools.dspi_test.helpers import has_command  # noqa: E402
+from tools.dspi_test.telemetry import pipeline_stats, spdif_tx_stats, usb_audio_status  # noqa: E402
+from tools.latency_bench.paged import stats_reset  # noqa: E402
 
 SOURCES = {"usb": (SRC_USB, None), "spdif": (SRC_SPDIF, None), "i2s48": (SRC_I2S, 48000)}
 CS_TYPE_POT, CS_TYPE_BUTTON = 3, 1
@@ -94,8 +95,8 @@ class Soak:
                                                        struct.pack("<f", rng.randrange(2)),
                                                        addr=rng.randrange(no))),
                    ("output_mute", flag("ROUTE.OUTPUT_MUTE", per_output=True))]
-        host = [("bulk_read", lambda: pget_ready(dev, "STORE.ALL_PARAMS",
-                                                 length=max(prof.bulk_payload_len, 2960))),
+        host = [("bulk_read", lambda: dev.pget_ready("STORE.ALL_PARAMS",
+                                                     length=max(prof.bulk_payload_len, 2960))),
                 ("rta_reconfigure", self.rta_reconfigure),
                 ("siggen_toggle", self.siggen_toggle),
                 ("cs_bind_or_revert", self.cs_bind_or_revert)]

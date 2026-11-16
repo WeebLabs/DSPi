@@ -6,7 +6,7 @@ The walk sends raw requests with no retries, so a STALL costs one SETUP and the 
 
 import usb.core
 
-from ..device import ProtocolError, Stall
+from ..device import VENDOR_IFACE, ProtocolError
 from ..framework import Skip, test
 
 BM_IN_IFACE, BM_OUT_IFACE, BM_IN_DEV, BM_OUT_DEV = 0xC1, 0x41, 0xC0, 0x40
@@ -32,10 +32,16 @@ def _guard(dev):
         raise Skip(f"refusing the page 0 walk: SYS.PLATFORM reports {ver[0]}.{ver[1]}.{ver[2]}, "
                    f"page 0 is only empty from 1.1.7")
     try:
-        dev.raw_get(OLD_GET_PLATFORM, 7)
-    except Stall:
-        return
+        dev.raw_request(BM_IN_IFACE, OLD_GET_PLATFORM, 0, VENDOR_IFACE, 7)
+    except usb.core.USBError as e:
+        if _stalled(e):
+            return
+        raise Skip(f"refusing the page 0 walk: the old GET_PLATFORM probe failed other than by STALL: {e}")
     raise Skip("refusing the page 0 walk: page 0 still answers the old GET_PLATFORM")
+
+
+def _stalled(e):
+    return getattr(e, "errno", None) == 32 or "pipe" in str(e).lower()
 
 
 def _plan():
@@ -64,9 +70,8 @@ def _label(bm, req, windex, dl):
 def ms_os20_descriptor_served(dev, profile, chk):
     """The Microsoft OS 2.0 request (0xC0, 0x01, wIndex 7) still returns the WINUSB descriptor set."""
     bm, req, windex = MS_OS_20
-    dev.gets += 1
     try:
-        ms = bytes(dev.dev.ctrl_transfer(bm, req, 0, windex, MS_OS_20_LEN, timeout=1500))
+        ms = dev.raw_request(bm, req, 0, windex, MS_OS_20_LEN, timeout_ms=1500)
     except usb.core.USBError as e:
         chk.ok(False, f"MS OS 2.0 descriptor request failed: {e}")
         return
@@ -82,15 +87,11 @@ def page0_walk_all_stall(dev, profile, chk):
     before = _state(dev)
     answered, errors = [], []
     for bm, req, windex, dl in plan:
-        if bm & 0x80:
-            dev.gets += 1
-        else:
-            dev.sets += 1
         try:
-            r = dev.dev.ctrl_transfer(bm, req, 0, windex, dl, timeout=WALK_TIMEOUT_MS)
-            answered.append(f"{_label(bm, req, windex, dl)} -> {bytes(r).hex() if bm & 0x80 else r}")
+            r = dev.raw_request(bm, req, 0, windex, dl, timeout_ms=WALK_TIMEOUT_MS)
+            answered.append(f"{_label(bm, req, windex, dl)} -> {r.hex() if bm & 0x80 else r}")
         except usb.core.USBError as e:
-            if getattr(e, "errno", None) != 32 and "pipe" not in str(e).lower():
+            if not _stalled(e):
                 errors.append(f"{_label(bm, req, windex, dl)}: {e}")
     lr = dev.last_result()
     chk.eq(len(answered), 0, f"page 0 requests answered (first: {answered[:5]})")

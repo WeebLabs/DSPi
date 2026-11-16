@@ -9,7 +9,8 @@ import time
 
 from ..device import PagedStall, Stall
 from ..framework import Skip, test
-from .paged_cs import AUX_TYPES, PENDING, _limits, _paged, _settle, _snapshot, _status, restore_preview
+from ..helpers import BAND_FMT, band_addr, require_page, set_retry_busy
+from ._cs import AUX_TYPES, CS, PENDING, cs_limits, cs_settle, cs_snapshot, cs_status, restore_preview
 
 # CsNoun numbers (control_surfaces.h).
 MASTER_VOLUME, USER_MUTE, PRESET, CLIP, LEVELLER_SPEED = 1, 2, 6, 8, 14
@@ -25,7 +26,6 @@ FLAG_GROUP = 0x20
 TARGET_DSP_CH = 3
 PEAKING, LOWSHELF, LT = 1, 2, 11
 FLAT_WHEN_ZERO_GAIN = (PEAKING, LOWSHELF, 3, 9, 10)
-BAND_FMT = "<BBHfff"
 QP = 777                      # marker Qp: survives only if every RMW carries the stored value
 
 
@@ -67,7 +67,7 @@ class _Ctx:
     def put(self, name, payload, addr, tag):
         """Preview SET that must apply cleanly; CS.STATUS reports the outcome."""
         self.dev.pset(name, payload, addr=addr)
-        st = _settle(self.dev)
+        st = cs_settle(self.dev)
         if st is None or (st["last"], st["slot"]) != (0, tag):
             raise AssertionError(f"{name} @0x{addr:04X} not applied: {st and (hex(st['last']), hex(st['slot']))}")
 
@@ -232,24 +232,13 @@ def _case_effects(c):
         _value_case(c, "UPMIX_CENTER_MODE SET (enum as f32)", UPMIX_CENTER_MODE, "FX.UPMIX_CENTER_MODE", w, w)
 
 
-def _band_set(dev, ch, band, payload, retries=50):
-    for _ in range(retries):
-        try:
-            return dev.pset("FILTER.BAND", payload, addr=(ch << 8) | band)
-        except PagedStall as s:
-            if s.result_name != "VC_ERR_BUSY":
-                raise
-            time.sleep(0.01)
-    raise AssertionError("FILTER.BAND stayed VC_ERR_BUSY")
-
-
 def _band(dev, ch, band):
-    return dev.pget("FILTER.BAND", addr=(ch << 8) | band)
+    return dev.pget("FILTER.BAND", addr=band_addr(ch, band))
 
 
 def _band_put(c, ch, band, fields):
     payload = struct.pack(BAND_FMT, *fields)
-    _band_set(c.dev, ch, band, payload)
+    set_retry_busy(c.dev, "FILTER.BAND", payload, band_addr(ch, band))
     got = _poll(lambda: _band(c.dev, ch, band), lambda b: b == payload)
     if got != payload:
         raise AssertionError(f"band {ch}/{band} setup did not apply")
@@ -322,7 +311,7 @@ def _case_eq(c):
             c.record(f"group FILTER_FREQ ch {ch}", round(v[3], 2))
     finally:
         for ch, rec in ((a, orig[0]), (b, orig[1])):
-            _band_set(c.dev, ch, band, rec)
+            set_retry_busy(c.dev, "FILTER.BAND", rec, band_addr(ch, band))
             got = _poll(lambda: _band(c.dev, ch, band), lambda x: x == rec)
             c.chk.eq(got, rec, f"band {ch}/{band} restored")
 
@@ -371,16 +360,16 @@ def _case_preset(c, label, noun, action):
 @test("paged_cs_nouns", mutating=True, flash=1)
 def pcsn_macro_noun_dispatch(dev, profile, chk):
     """Every noun dispatch shape fired from a macro changes its target as a host SET would; all restored, CS saved unchanged."""
-    _paged(dev)
-    lim = _limits(dev)
-    st0 = _status(dev)
+    require_page(dev, CS)
+    lim = cs_limits(dev)
+    st0 = cs_status(dev)
     if st0["dirty"]:
         raise Skip("Control Surfaces has an unsaved preview")
     if st0["last"] == PENDING:
         raise Skip("a deferred CS request is still pending")
     if dev.pget("CS.EXT_STATUS")[3] != 0xFF:
         raise Skip("a macro is running")
-    snap = _snapshot(dev, lim)
+    snap = cs_snapshot(dev, lim)
     if any(b[0] in AUX_TYPES for b in snap["binding"]):
         raise Skip("an aux binding exists: SAVE would fold its live value")
     empty_mac = [m for m, r in enumerate(snap["macro"]) if r == bytes(132)]
@@ -399,4 +388,4 @@ def pcsn_macro_noun_dispatch(dev, profile, chk):
             chk.note(f"observed {label}: {v}")
         st = restore_preview(dev, lim, snap)
     chk.ok((st["last"], st["dirty"]) == (0, 0), f"preview restored and saved clean: {st['raw'][:4].hex()}")
-    chk.eq(_snapshot(dev, lim), snap, "records unchanged by the SAVE")
+    chk.eq(cs_snapshot(dev, lim), snap, "records unchanged by the SAVE")

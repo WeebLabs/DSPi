@@ -1,114 +1,113 @@
 """
-lifecycle.py — capture the full device state before the suite and restore it
-after, so a run leaves the DSPi exactly as it was found.
-
-Primary restore primitive is the bulk parameter blob (REQ_GET_ALL_PARAMS /
-REQ_SET_ALL_PARAMS), which round-trips all *live* DSP state with ZERO flash
-writes.  Directory/preset metadata (startup mode, output-config mode, master-
-volume mode, saved master volume, slot names/occupancy, active slot) is NOT in
-the bulk blob — those are captured separately and only ever rewritten by the
-flash-gated tests, which restore what they touch.  This module also captures them
-so a restore helper is available and so the final report can flag any drift.
-
-Note: bulk GET/SET round-trips live IO (pins/types/MCK/RX pin) regardless of the
-output-config mode — that mode only governs preset save/load and boot, not the
-live snapshot.  Tests that move pins/types restore them inline; this is the
-backstop for everything else.
+lifecycle.py: capture the device state before the suite and restore it after. STORE.ALL_PARAMS
+round-trips all live state, live IO included, with no flash write. Directory and preset metadata are
+outside it: they are captured to report drift, and the flash-gated tests restore what they change.
 """
 
 from __future__ import annotations
 
+import struct
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from .device import DspiDevice, OP, Stall
+from .device import DspiDevice, PagedStall
+from .telemetry import sample_rate
+
+BULK_BUSY_RETRIES = 10
 
 
 @dataclass
 class Snapshot:
-    bulk: bytes                       # full REQ_GET_ALL_PARAMS blob
-    directory: bytes                  # REQ_PRESET_GET_DIR (7 bytes)
-    startup: bytes                    # REQ_PRESET_GET_STARTUP (3 bytes)
-    output_config_mode: int           # REQ_GET_OUTPUT_CONFIG_MODE
-    mv_mode: int                      # REQ_GET_MASTER_VOLUME_MODE
-    saved_mv: float                   # REQ_GET_SAVED_MASTER_VOLUME
-    master_vol: float                 # REQ_GET_MASTER_VOLUME (live)
+    bulk: bytes                       # STORE.ALL_PARAMS
+    directory: bytes                  # STORE.DIRECTORY (7 bytes)
+    startup: bytes                    # STORE.STARTUP {mode, slot} + DIRECTORY byte 4 (last active)
+    output_config_mode: int           # STORE.OUTPUT_CONFIG_MODE
+    mv_mode: int                      # ROUTE.MASTER_VOLUME_MODE
+    saved_mv: float                   # ROUTE.MASTER_VOLUME_SAVED
+    master_vol: float                 # ROUTE.MASTER_VOLUME (live)
     user_vol: float
     user_mute: int
     input_source: int
-    spdif_rx_pin: int
-    i2s_bck_pin: int
+    spdif_rx_pin: int                 # S/PDIF input 0
+    i2s_bck_pin: int                  # role 0
     mck_enable: int
     mck_pin: int
     mck_mult: int
     lg_enable: int
     dac_mute_cfg: bytes               # 16 bytes
-    output_pins: list                 # current pins
-    output_types: list                # current per-slot types
-    channel_names: list               # current per-channel names (raw 32B)
+    output_pins: list                 # OUTPUT.PIN per pin output
+    output_types: list                # OUTPUT.TYPE per slot
+    channel_names: list               # ROUTE.CHANNEL_NAME per channel (raw 32 B)
     active_slot: int
     occupied_mask: int
-    sample_rate: int                  # live audio_state.freq (GET_STATUS 15)
+    sample_rate: int                  # SYS.SYSTEM_STATUS sample rate
+
+
+def _bulk_len(profile) -> int:
+    return max(profile.bulk_payload_len, 2960)
 
 
 def capture(dev: DspiDevice, profile) -> Snapshot:
-    bulk = dev.get_ready(OP.GET_ALL_PARAMS, max(profile.bulk_payload_len, 2960))
-    directory = dev.get(OP.PRESET_GET_DIR, 7)
-    occupied_mask = directory[0] | (directory[1] << 8)
-    output_pins = [dev.get_u8(OP.GET_OUTPUT_PIN, wvalue=i) for i in range(profile.num_pin_outputs)]
-    output_types = [dev.get_u8(OP.GET_OUTPUT_TYPE, wvalue=i) for i in range(profile.num_spdif)]
-    channel_names = [dev.get(OP.GET_CHANNEL_NAME, 32, wvalue=ch) for ch in range(profile.num_channels)]
+    bulk = read_bulk(dev, profile)
+    directory = dev.pget("STORE.DIRECTORY", length=7)
+    u8, f32 = dev.pget_u8, dev.pget_f32
     return Snapshot(
         bulk=bulk,
         directory=directory,
-        startup=dev.get(OP.PRESET_GET_STARTUP, 3),
-        output_config_mode=dev.get_u8(OP.GET_OUTPUT_CONFIG_MODE),
-        mv_mode=dev.get_u8(OP.GET_MASTER_VOLUME_MODE),
-        saved_mv=dev.get_f32(OP.GET_SAVED_MASTER_VOLUME),
-        master_vol=dev.get_f32(OP.GET_MASTER_VOLUME),
-        user_vol=dev.get_f32(OP.GET_USER_VOLUME),
-        user_mute=dev.get_u8(OP.GET_USER_MUTE),
-        input_source=dev.get_u8(OP.GET_INPUT_SOURCE),
-        spdif_rx_pin=dev.get_u8(OP.GET_SPDIF_RX_PIN),
-        i2s_bck_pin=dev.get_u8(OP.GET_I2S_BCK_PIN),
-        mck_enable=dev.get_u8(OP.GET_MCK_ENABLE),
-        mck_pin=dev.get_u8(OP.GET_MCK_PIN),
-        mck_mult=dev.get_u8(OP.GET_MCK_MULTIPLIER),
-        lg_enable=dev.get_u8(OP.GET_LG_SOUND_SYNC_ENABLE),
-        dac_mute_cfg=dev.get(OP.GET_DAC_HW_MUTE_CONFIG, 16),
-        output_pins=output_pins,
-        output_types=output_types,
-        channel_names=channel_names,
-        active_slot=dev.get_u8(OP.PRESET_GET_ACTIVE),
-        occupied_mask=occupied_mask,
-        # Host-driven, so NOT in the bulk blob and not restorable from it. The
-        # audio group returns the device to its primary rate itself; capturing
-        # it here lets the final report flag any drift the suite left behind.
-        sample_rate=dev.get_u32(OP.GET_STATUS, wvalue=15),
+        # Kept in the 1.1.6 three-byte shape so pickled snapshots compare equal.
+        startup=dev.pget("STORE.STARTUP", length=2)[:2] + directory[4:5],
+        output_config_mode=u8("STORE.OUTPUT_CONFIG_MODE"),
+        mv_mode=u8("ROUTE.MASTER_VOLUME_MODE"),
+        saved_mv=f32("ROUTE.MASTER_VOLUME_SAVED"),
+        master_vol=f32("ROUTE.MASTER_VOLUME"),
+        user_vol=f32("ROUTE.USER_VOLUME"),
+        user_mute=u8("ROUTE.USER_MUTE"),
+        input_source=u8("INPUT.SOURCE"),
+        spdif_rx_pin=u8("INPUT.SPDIF_RX_PIN"),
+        i2s_bck_pin=u8("CLOCK.I2S_BCK_PIN"),
+        mck_enable=u8("CLOCK.MCK_ENABLE"),
+        mck_pin=u8("CLOCK.MCK_PIN"),
+        mck_mult=u8("CLOCK.MCK_MULTIPLIER"),
+        lg_enable=u8("INPUT.LG_SOUND_SYNC_ENABLE"),
+        dac_mute_cfg=dev.pget("OUTPUT.DAC_MUTE_CONFIG", length=16),
+        output_pins=[u8("OUTPUT.PIN", i) for i in range(profile.num_pin_outputs)],
+        output_types=[u8("OUTPUT.TYPE", s) for s in range(profile.num_spdif)],
+        channel_names=[dev.pget("ROUTE.CHANNEL_NAME", ch, 32) for ch in range(profile.num_channels)],
+        active_slot=u8("STORE.PRESET_ACTIVE"),
+        occupied_mask=struct.unpack_from("<H", directory)[0],
+        # Host driven, so not in the bulk blob and not restorable from it; captured to report drift.
+        sample_rate=sample_rate(dev),
     )
 
 
-def restore_live(dev: DspiDevice, snap: Snapshot, settle_s: float = 0.4):
-    """Push the captured bulk blob back (live DSP state, 0 flash).
+def read_bulk(dev: DspiDevice, profile) -> bytes:
+    """The whole STORE.ALL_PARAMS blob, retried across a busy window."""
+    return dev.pget_ready("STORE.ALL_PARAMS", length=_bulk_len(profile))
 
-    The apply runs a deferred, mute-bracketed pipeline reset; allow it to settle
-    before the caller re-reads (the transport also retries transient timeouts).
-    """
-    dev.set(OP.SET_ALL_PARAMS, snap.bulk, wvalue=0)
+
+def push_bulk(dev: DspiDevice, blob: bytes, settle_s: float = 0.4):
+    """SET STORE.ALL_PARAMS (live state, no flash), then wait out its deferred restart.
+    A refusal raises PagedStall; only VC_ERR_BUSY (bulk buffer held elsewhere) is retried."""
+    for attempt in range(BULK_BUSY_RETRIES):
+        try:
+            dev.pset("STORE.ALL_PARAMS", blob)
+            break
+        except PagedStall as s:
+            if s.result_name != "VC_ERR_BUSY" or attempt == BULK_BUSY_RETRIES - 1:
+                raise
+            time.sleep(0.1)
     time.sleep(settle_s)
     dev.wait_ready()
 
 
-def diff_bulk(dev: DspiDevice, snap: Snapshot, profile) -> list:
-    """Re-read bulk params and return [(offset, before, after), ...] differences.
+def restore_live(dev: DspiDevice, snap: Snapshot, settle_s: float = 0.4):
+    """Push the captured bulk blob back."""
+    push_bulk(dev, snap.bulk, settle_s)
 
-    Skips the header's volatile-but-harmless bytes (none currently) — the blob is
-    deterministic config, so a clean restore should match byte-for-byte.
-    """
-    after = dev.get_ready(OP.GET_ALL_PARAMS, max(profile.bulk_payload_len, 2960))
+
+def diff_bulk(dev: DspiDevice, snap: Snapshot, profile) -> list:
+    """Re-read the bulk blob and return [(offset, before, after), ...] differences.
+    The blob is deterministic config, so a clean restore matches byte for byte."""
+    after = read_bulk(dev, profile)
     n = min(len(snap.bulk), len(after))
-    diffs = []
-    for i in range(n):
-        if snap.bulk[i] != after[i]:
-            diffs.append((i, snap.bulk[i], after[i]))
-    return diffs
+    return [(i, snap.bulk[i], after[i]) for i in range(n) if snap.bulk[i] != after[i]]

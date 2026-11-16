@@ -20,9 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tools.dspi_test.device import DspiDevice, PagedStall  # noqa: E402
 from tools.dspi_test.profile import build_profile  # noqa: E402
 from tools.dspi_test import lifecycle  # noqa: E402
-from tools.latency_bench.paged import (  # noqa: E402
-    buffer_stats, pdm_stats, pget_ready, pipeline_stats, spdif_tx_stats, stats_reset, system_status,
-    usb_audio_status, wait_ready)
+from tools.dspi_test.telemetry import (  # noqa: E402
+    buffer_stats, pdm_stats, pipeline_stats, spdif_tx_stats, system_status, usb_audio_status)
+from tools.latency_bench.paged import stats_reset  # noqa: E402
 
 LAT_FMT = "<BBHHHBBH"             # OutputLatencyStatus in firmware/DSPi/config.h
 SRC_USB, SRC_SPDIF, SRC_I2S = 0, 1, 2
@@ -107,7 +107,7 @@ def preset_active(dev):
 
 
 def bulk(dev, prof):
-    return pget_ready(dev, "STORE.ALL_PARAMS", length=max(prof.bulk_payload_len, 2960))
+    return dev.pget_ready("STORE.ALL_PARAMS", length=max(prof.bulk_payload_len, 2960))
 
 
 def load_slot(dev, slot, timeout_s=5.0):
@@ -118,7 +118,7 @@ def load_slot(dev, slot, timeout_s=5.0):
         try:
             if preset_active(dev) == slot:
                 time.sleep(0.5)
-                wait_ready(dev)
+                dev.wait_ready()
                 return
         except Exception:  # noqa: BLE001  (busy window during the deferred load)
             pass
@@ -173,7 +173,7 @@ def apply_4way(dev, prof):
         band(dev, ch, XOVER_BAND_BASE + 1, FILTER_LR4_LP if lp else FILTER_FLAT, lp or 1000.0, 0.707, 0.0)
         dev.pset("ROUTE.CHANNEL_DELAY", struct.pack("<f", 1.5 if o < 2 else 0.0), addr=ch)
     time.sleep(0.5)
-    wait_ready(dev)
+    dev.wait_ready()
 
 
 # --- host playback -----------------------------------------------------------------------------

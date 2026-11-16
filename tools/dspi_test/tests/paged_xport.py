@@ -7,8 +7,7 @@ interface and writes flash even when unchanged. Only refusals caught before queu
 import struct
 
 from ..framework import test
-from .paged_input import BAD_GPIO, MAX_GPIO, need_page, read_len
-from .paged_sys import _expect_stall
+from ..helpers import BAD_GPIO, HIGHEST_GPIO, expect_stall, read_len, require_page
 
 XPORT = 0x0B
 
@@ -16,15 +15,15 @@ XPORT = 0x0B
 @test("paged_xport")
 def xport_shapes(dev, profile, chk):
     """UART_CONFIG, I2C_CONFIG and STATUS have their 8-byte layouts with in-range fields and zero reserved bytes."""
-    need_page(dev, XPORT)
+    require_page(dev, XPORT)
     en, tx, rx, ntf, baud = struct.unpack("<BBBBI", read_len(chk, dev, "XPORT.UART_CONFIG", 8))
     chk.member(en, (0, 1), "UART enabled")
     chk.member(ntf, (0, 1), "UART notify")
     chk.in_range(baud, 9600, 1_000_000, "UART baud")
-    chk.ok(tx <= MAX_GPIO and rx <= MAX_GPIO, f"UART pins are GPIOs: {tx}/{rx}")
+    chk.ok(tx <= HIGHEST_GPIO and rx <= HIGHEST_GPIO, f"UART pins are GPIOs: {tx}/{rx}")
     i2c = read_len(chk, dev, "XPORT.I2C_CONFIG", 8)
     chk.member(i2c[0], (0, 1), "I2C enabled")
-    chk.ok(i2c[1] <= MAX_GPIO and i2c[2] <= MAX_GPIO, f"I2C pins are GPIOs: {i2c[1]}/{i2c[2]}")
+    chk.ok(i2c[1] <= HIGHEST_GPIO and i2c[2] <= HIGHEST_GPIO, f"I2C pins are GPIOs: {i2c[1]}/{i2c[2]}")
     chk.in_range(i2c[3], 0x08, 0x77, "I2C target address")
     chk.eq(i2c[4:], bytes(4), "I2C config reserved")
     st = read_len(chk, dev, "XPORT.STATUS", 8)
@@ -38,8 +37,8 @@ def xport_shapes(dev, profile, chk):
 @test("paged_xport", mutating=True)
 def refused_config_writes(dev, profile, chk):
     """Bad scalar fields, bad GPIOs and bad lengths STALL and leave config and STATUS untouched."""
-    need_page(dev, XPORT)
-    E = _expect_stall
+    require_page(dev, XPORT)
+    E = expect_stall
     uart = dev.pget("XPORT.UART_CONFIG", length=8)
     i2c = dev.pget("XPORT.I2C_CONFIG", length=8)
     st = dev.pget("XPORT.STATUS", length=8)

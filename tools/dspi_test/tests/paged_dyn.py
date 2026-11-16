@@ -6,21 +6,12 @@ The limiter keeps its float32 payloads for every parameter.
 import math
 import struct
 
-from ..framework import Skip, test
-from .paged_route import finite_rule, nonfinite_refused
-from .paged_sys import _expect_stall, _paged
+from ..framework import test
+from ..helpers import INF, NAN, expect_stall, finite_rule, nonfinite_refused, require_page
 
 DYN = 0x07
-NAN = struct.pack("<I", 0x7FC00000)
-INF = struct.pack("<f", math.inf)
 LIM = ["LIMITER_ENABLE", "LIMITER_THRESHOLD", "LIMITER_RELEASE", "LIMITER_LINK_GROUP"]
 ALL = 0xFF
-
-
-def _page(dev):
-    _paged(dev)
-    if DYN not in dev.paged_commands():
-        raise Skip("DYN page not implemented on this firmware")
 
 
 def _f(v):
@@ -54,7 +45,7 @@ LIM_RANGES = {"LIMITER_ENABLE": (0.0, 1.0), "LIMITER_THRESHOLD": (-30.0, 0.0),
 @test("paged_dyn")
 def limiter_gets_all(dev, profile, chk):
     """Every limiter parameter is a finite float32 inside its clamp range on every output; status and meters fit."""
-    _page(dev)
+    require_page(dev, DYN)
     n = profile.num_output_channels
     for k in range(n):
         for name in LIM:
@@ -74,7 +65,7 @@ def limiter_gets_all(dev, profile, chk):
 @test("paged_dyn", mutating=True)
 def limiter_set_roundtrip(dev, profile, chk):
     """Limiter SETs round-trip, clamp to their ranges, 0xFF writes every output, NaN is refused."""
-    _page(dev)
+    require_page(dev, DYN)
     n = profile.num_output_channels
     saved = _lim_save(dev, profile)
     try:
@@ -94,7 +85,7 @@ def limiter_set_roundtrip(dev, profile, chk):
         dev.pset("DYN.LIMITER_THRESHOLD", _f(-11.0), 0)
         chk.eq(_f32(dev.pget("DYN.LIMITER_THRESHOLD", 0)), -11.0, "single-output write after 0xFF")
         chk.eq(_f32(dev.pget("DYN.LIMITER_THRESHOLD", n - 1)), -4.0, "other outputs keep the 0xFF value")
-        _expect_stall(chk, lambda: dev.pset("DYN.LIMITER_THRESHOLD", NAN, 0), "VC_ERR_VALUE", "NaN")
+        expect_stall(chk, lambda: dev.pset("DYN.LIMITER_THRESHOLD", NAN, 0), "VC_ERR_VALUE", "NaN")
         chk.eq(_f32(dev.pget("DYN.LIMITER_THRESHOLD", 0)), -11.0, "NaN left the value alone")
     finally:
         _lim_restore(dev, saved)
@@ -103,16 +94,16 @@ def limiter_set_roundtrip(dev, profile, chk):
 @test("paged_dyn")
 def limiter_errors(dev, profile, chk):
     """0xFF on a GET, an output past the end, a short payload and a SET to a read-only command are refused."""
-    _page(dev)
+    require_page(dev, DYN)
     n = profile.num_output_channels
     for name in LIM:
-        _expect_stall(chk, lambda: dev.pget(f"DYN.{name}", ALL), "VC_ERR_ADDRESS", f"{name} GET 0xFF")
-        _expect_stall(chk, lambda: dev.pget(f"DYN.{name}", n), "VC_ERR_ADDRESS", f"{name} GET past the end")
-        _expect_stall(chk, lambda: dev.pset(f"DYN.{name}", _f(0.0), n), "VC_ERR_ADDRESS", f"{name} SET past the end")
-        _expect_stall(chk, lambda: dev.pset(f"DYN.{name}", b"\x00\x00", 0), "VC_ERR_LENGTH", f"{name} 2-byte SET")
+        expect_stall(chk, lambda: dev.pget(f"DYN.{name}", ALL), "VC_ERR_ADDRESS", f"{name} GET 0xFF")
+        expect_stall(chk, lambda: dev.pget(f"DYN.{name}", n), "VC_ERR_ADDRESS", f"{name} GET past the end")
+        expect_stall(chk, lambda: dev.pset(f"DYN.{name}", _f(0.0), n), "VC_ERR_ADDRESS", f"{name} SET past the end")
+        expect_stall(chk, lambda: dev.pset(f"DYN.{name}", b"\x00\x00", 0), "VC_ERR_LENGTH", f"{name} 2-byte SET")
     for name in ("LIMITER_METERS", "LIMITER_STATUS"):
-        _expect_stall(chk, lambda: dev.pset(f"DYN.{name}", bytes(4)), "VC_ERR_DIRECTION", f"SET {name}")
-        _expect_stall(chk, lambda: dev.pget(f"DYN.{name}", 1, 64), "VC_ERR_ADDRESS", f"{name} at wValue 1")
+        expect_stall(chk, lambda: dev.pset(f"DYN.{name}", bytes(4)), "VC_ERR_DIRECTION", f"SET {name}")
+        expect_stall(chk, lambda: dev.pget(f"DYN.{name}", 1, 64), "VC_ERR_ADDRESS", f"{name} at wValue 1")
 
 
 # ---- Leveller and loudness ----
@@ -153,7 +144,7 @@ SCALARS = [
 @test("paged_dyn")
 def scalar_gets(dev, profile, chk):
     """Every leveller and loudness GET has its size and a value inside its clamp range; wValue 1 is VC_ERR_ADDRESS."""
-    _page(dev)
+    require_page(dev, DYN)
     for name, size, rng, _ in SCALARS:
         r = dev.pget(f"DYN.{name}")
         if not chk.eq(len(r), size, f"{name} length"):
@@ -162,13 +153,13 @@ def scalar_gets(dev, profile, chk):
             chk.member(r[0], rng, name)
         elif size == 4:
             chk.ok(math.isfinite(_f32(r)) and rng[0] <= _f32(r) <= rng[1], f"{name} in {rng}: {_f32(r)}")
-        _expect_stall(chk, lambda: dev.pget(f"DYN.{name}", 1), "VC_ERR_ADDRESS", f"{name} at wValue 1")
+        expect_stall(chk, lambda: dev.pget(f"DYN.{name}", 1), "VC_ERR_ADDRESS", f"{name} at wValue 1")
 
 
 @test("paged_dyn", mutating=True)
 def scalar_set_roundtrip(dev, profile, chk):
     """Leveller and loudness SETs clamp and read back; a GET reply is a valid SET payload; bad sizes are refused."""
-    _page(dev)
+    require_page(dev, DYN)
     saved = {name: dev.pget(f"DYN.{name}") for name, *_ in SCALARS}
     try:
         for name, size, _rng, cases in SCALARS:
@@ -178,10 +169,10 @@ def scalar_set_roundtrip(dev, profile, chk):
             dev.pset(f"DYN.{name}", cases[0][0])
             dev.pset(f"DYN.{name}", dev.pget(f"DYN.{name}"))
             chk.eq(dev.pget(f"DYN.{name}"), cases[0][1], f"{name} GET reply written back unchanged")
-            _expect_stall(chk, lambda: dev.pset(f"DYN.{name}", bytes(size + 1)), "VC_ERR_LENGTH",
-                          f"{name} {size + 1}-byte SET")
+            expect_stall(chk, lambda: dev.pset(f"DYN.{name}", bytes(size + 1)), "VC_ERR_LENGTH",
+                         f"{name} {size + 1}-byte SET")
         dev.pset("DYN.LEVELLER_SPEED", b"\x01")
-        _expect_stall(chk, lambda: dev.pset("DYN.LEVELLER_SPEED", b"\x03"), "VC_ERR_VALUE", "speed 3")
+        expect_stall(chk, lambda: dev.pset("DYN.LEVELLER_SPEED", b"\x03"), "VC_ERR_VALUE", "speed 3")
         chk.eq(dev.pget("DYN.LEVELLER_SPEED"), b"\x01", "bad speed left the value alone")
     finally:
         for name, raw in saved.items():
@@ -191,7 +182,7 @@ def scalar_set_roundtrip(dev, profile, chk):
 @test("paged_dyn", mutating=True)
 def nonfinite_floats_refused(dev, profile, chk):
     """Leveller and loudness floats refuse NaN and infinity; every limiter parameter refuses NaN."""
-    _page(dev)
+    require_page(dev, DYN)
     if not finite_rule(dev, profile, chk):
         return
     k = profile.num_output_channels - 1

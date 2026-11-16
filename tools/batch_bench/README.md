@@ -1,5 +1,9 @@
 # batch_bench
 
+> **Does not run today.** These scripts target an experimental firmware command (the
+> `DSPI_BATCH_BENCH` build) and the pre-1.1.7 harness API (`OP`, old opcodes). They do not
+> run against firmware 1.1.7 or the current `tools/dspi_test` harness, and they fail at import.
+
 Measures how DSP pipeline CPU load changes with input batch size: the number of
 frames handed to `process_input_block()` per call. USB audio is the test bed.
 

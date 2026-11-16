@@ -527,7 +527,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 ---
 
 ## USB Audio Loopback Capture (DSPI_LOOPBACK)
-*Last updated: 2026-11-16 (glitch counters read through `DIAG.LOOPBACK_STATS`). Previously 2026-11-15 (Host side: harness already captures from DSPi; release builds read 0 at GET_STATUS 24/25); 2026-08-02 (capture glitch counters on REQ_GET_STATUS 24/25)*
+*Last updated: 2026-11-16 (harness capture retry described as built: `_capture`, three attempts, then SKIP). Previously 2026-11-16 (glitch counters read through `DIAG.LOOPBACK_STATS`); 2026-11-15 (Host side: harness already captures from DSPi; release builds read 0 at GET_STATUS 24/25); 2026-08-02 (capture glitch counters on REQ_GET_STATUS 24/25)*
 
 A **debug/verification-only** feature, compiled in only when the `DSPI_LOOPBACK`
 build flag is defined. It folds the standalone `~/USBrx` S/PDIF-to-USB recorder's
@@ -616,9 +616,9 @@ Two free-running counters make the two distinguishable. `DIAG.LOOPBACK_STATS` re
 
 The command is `#ifdef DSPI_LOOPBACK`, so a release build has no such command and
 a request STALLs with `VC_ERR_UNKNOWN`. The host treats the counters as optional. The harness samples them either side of a
-capture (`_clean_capture` in `tools/dspi_test/tests/audio_loopback.py`): a
-measurement whose counters moved is retried once, and a persistent glitch is
-reported as a transport fault instead of being asserted on. With the counters
+capture (`_capture` in `tools/dspi_test/tests/audio_loopback.py`). A
+measurement whose counters moved is retried, three attempts in all, and a
+persistent glitch SKIPs the test as a transport fault instead of being asserted on. With the counters
 absent the harness degrades to its previous behaviour.
 
 ### Driver registration
@@ -1638,7 +1638,7 @@ Follows the psybass module pattern:
 ---
 
 ## Output Limiter
-*Last updated: 2026-11-16 (DYN.LIMITER_* commands replace the single multiplexed opcode). Previously 2026-09-28 (Control Surfaces nouns 74-78; 2026-09-26: link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
+*Last updated: 2026-11-16 (limiter device tests passed on hardware). Previously 2026-11-16 (DYN.LIMITER_* commands replace the single multiplexed opcode); 2026-09-28 (Control Surfaces nouns 74-78; 2026-09-26: link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
 
 ### Purpose
 
@@ -1687,7 +1687,7 @@ The delay exists only while at least one output's limiter is enabled; with none 
 
 ### Verification
 
-The real `limiter.c` was compiled on the host against stub headers for both `PICO_RP2350` values and driven with random packet sizes (1-192 samples), random thresholds and releases, sines with bursting envelopes and full-scale impulses up to +18 dB (+11 dB on the RP2040 variant, its Q28 headroom). Results: no sample above threshold on any limited output (float worst case 1e-6 dB, rounding; fixed point exactly 0), including right after a mid-stream join, and none from the ring after a mid-limit leave, whose gain then changes by at most 0.0006 per sample on its way back to exact unity. Delay-only outputs are an exact 32-sample delay. Linked outputs carry identical gain. Dual-core runs on two threads are bit-identical to single-core with groups spanning both cores. The engage protocol flips at 32 silent samples and not at 31. Release measures 8.6 dB per 100 ms against 8.69 designed, and the gain returns to exact unity (bit-exact passthrough) when quiet. Device-side protocol tests are in `tools/dspi_test/tests/dynamics.py` (`limiter_*`); they have not run on hardware yet.
+The real `limiter.c` was compiled on the host against stub headers for both `PICO_RP2350` values and driven with random packet sizes (1-192 samples), random thresholds and releases, sines with bursting envelopes and full-scale impulses up to +18 dB (+11 dB on the RP2040 variant, its Q28 headroom). Results: no sample above threshold on any limited output (float worst case 1e-6 dB, rounding; fixed point exactly 0), including right after a mid-stream join, and none from the ring after a mid-limit leave, whose gain then changes by at most 0.0006 per sample on its way back to exact unity. Delay-only outputs are an exact 32-sample delay. Linked outputs carry identical gain. Dual-core runs on two threads are bit-identical to single-core with groups spanning both cores. The engage protocol flips at 32 silent samples and not at 31. Release measures 8.6 dB per 100 ms against 8.69 designed, and the gain returns to exact unity (bit-exact passthrough) when quiet. Device-side protocol tests are in `tools/dspi_test/tests/dynamics.py` (`limiter_*`). They passed on an RP2350 with firmware 1.1.7 beta 1 on 2026-11-16.
 
 ### Interactions and Edge Cases
 
@@ -3694,7 +3694,7 @@ value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
 is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
-*Last updated: 2026-11-16 (CS SETs named by `CS.*` command; length and busy refusals are `VcResult` codes). Previously 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`); 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
+*Last updated: 2026-11-16 (revert tests are opt-in behind `DSPI_TEST_CS_REVERT`). Previously 2026-11-16 (CS SETs named by `CS.*` command; length and busy refusals are `VcResult` codes); 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`); 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
 
 `CS.BINDING` SET requires the full 24-byte payload. Any other length is refused
 by the dispatcher with `VC_ERR_LENGTH` before the handler runs, so it never
@@ -3765,6 +3765,9 @@ it, and binding reads polled across 20 reverts all equal the stored image. A
 revert lasts about a millisecond, shorter than one host read, so on a
 `DSPI_LOOP_PROF` build the test slows background jobs to one unit per 50 passes
 (`DIAG.LOOP_PROF_BG_PACE`) to land reads mid-revert (159 of them on 2026-10-24).
+The group SKIPs unless `DSPI_TEST_CS_REVERT=1` is set. On current firmware a revert
+leaves stored non-button bindings down with a pin-in-use status, so the tests stay
+off until that bug is fixed.
 
 The per-slot work and the state derived from the whole binding set are split.
 `cs_apply_binding_slot()` releases, validates, claims and seeds one slot, and
@@ -4434,13 +4437,13 @@ The one request answered without a page lookup is the Microsoft OS 2.0 descripto
 The per-command storage is one `uint32_t` per command built into the image, indexed by `vc_cmd_index()`, the command's position across the page directory in table order. The host never sees that index. `loop_prof.c` sizes the array by expanding every `.def` file at compile time, and a page missing from its list fails the build. The array is 744 B on RP2040 and 836 B on RP2350 (186 and 209 commands). `tools/latency_bench/loop_prof.py` reads it, and `soak.py` resets before each measured window.
 
 ### Tests and verification tooling
-*Last updated: 2026-11-16*
+*Last updated: 2026-11-16 (Phase 6: native harness, translation layer deleted, native golden reference, `legacy_map.json` check). Previously 2026-11-16*
 
-- **Generator.** `scripts/gen_vendor_protocol.py` (standard library only) parses the `.def` files and writes `Documentation/protocol/dspi_commands.json` and the command tables between the `VC:BEGIN` / `VC:END` markers in `Documentation/commands.md`. `--check` writes nothing and fails when either file is stale or a `.def` is invalid. `--list` prints a compact listing. Its own tests are in `scripts/tests/gen_vendor_protocol/`.
-- **Paged tests.** `tools/dspi_test` has one group per page, `paged_<page>` (modules `tests/paged_*.py`). They send only paged commands and assert against the specification, the finite-value rule included. They SKIP on firmware without the paged dispatcher.
+- **Generator.** `scripts/gen_vendor_protocol.py` (standard library only) parses the `.def` files and writes `Documentation/protocol/dspi_commands.json` and the command tables between the `VC:BEGIN` / `VC:END` markers in `Documentation/commands.md`. `--check` writes nothing and fails when either file is stale or a `.def` is invalid. It also checks `Documentation/protocol/legacy_map.json`, the old-to-new migration data for host maintainers. Its command catalog must match the registry (page, number, directions, address kind, sizes, build), and every old opcode must map onto commands and directions that exist. `--list` prints a compact listing. Its own tests are in `scripts/tests/gen_vendor_protocol/`.
+- **Harness.** `tools/dspi_test` speaks only the paged protocol. It reads `SYS.PROTOCOL_INFO` first, and on firmware that does not answer it raises `ProtocolError` (firmware 1.1.7 or later needed) and sends nothing else. Usage is in `tools/dspi_test/README.md`.
+- **Paged tests.** One group per page, `paged_<page>` (modules `tests/paged_*.py`), checks protocol conformance. Each checks discovery, reply shapes, round trips and refusals against the specification, the finite-value rule included. The other groups test feature behaviour, such as clamps, cross-feature interactions, bulk round trips, stress, the spectrum analyser, presets, pin moves and the audio loopback.
 - **Page 0 test.** `paged_page0` walks every `bRequest` on page 0 (both recipients, GET and both SET shapes), checks that each STALLs and leaves the parameters and directory unchanged, and checks that the MS OS 2.0 request is still served. It refuses to run unless the firmware provably has no page 0.
-- **Translation layer (temporary).** `tools/dspi_test/legacy_map.py`, driven by `Documentation/protocol/legacy_map.json`, translates the 1.1.6 requests of the not-yet-ported test groups into paged commands. `device.py` selects it automatically on paged firmware (`DSPI_TEST_PROTOCOL` forces a mode). It is scheduled for deletion once those tests are ported (plan, Phase 6). `legacy_map.json` stays as migration data for hosts.
-- **Golden capture.** `tools/dspi_test/golden/` holds a byte-for-byte capture of every vendor read on firmware 1.1.6, before and after a scripted set of writes, with a mask of fields that legitimately vary. It is replayed against the paged handlers through the translation layer (`legacy_map:golden_transport`).
+- **Golden regression.** `tools/dspi_test/golden/` holds a native paged request script per platform and an RP2350 reference. The reference records the reply to every read before and after a scripted set of writes, and a mask lists the fields that legitimately vary. `capture.py compare` reports every reply that changed. The reference was captured on 1.1.7 beta 1 in the same session in which the 1.1.6 requests, replayed through the since-deleted translation layer, matched the 1.1.6 capture with no unexplained difference. The reference's metadata says how to recover the 1.1.6 capture from git.
 - **wIndex page test.** `tools/windex_page_test.py` checks that a host stack delivers the page byte intact. It sends refused requests to several pages and reads them back through `SYS.LAST_RESULT`. Procedure in `Documentation/Features/windex_page_test.md`.
 
 ## Vendor Command Reference

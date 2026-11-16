@@ -25,9 +25,10 @@ import os
 import struct
 import time
 
-from ..device import OP, Stall, Timeout
+from ..device import Stall, Timeout
 from .. import coreaudio
 from ..framework import test, Skip, REGISTRY
+from ..helpers import band_addr, read_field, read_route, wait_for, write_band, write_route
 from .. import audio
 
 try:
@@ -78,15 +79,8 @@ XO_BAND = 20                  # XOVER_BAND_BASE
 XO_BANDS = 4                  # MAX_XOVER_BANDS
 TYPE_SPDIF, TYPE_I2S = 0, 1   # OutputType enum (firmware)
 
-# GET_STATUS sub-indices (vendor_commands.c REQ_GET_STATUS switch).
-STATUS_SAMPLE_RATE = 15       # audio_state.freq, the live operating rate
-STATUS_INPUT_COUNT = 23       # active_input_channel_count()
-STATUS_LB_OVERFLOW = 24       # DSPI_LOOPBACK only; STALLs on a release build
-STATUS_LB_UNDERRUN = 25
-
-# Feature-specific constants used to neutralize a stage (firmware headers).
-UPMIX_PARAM_ENABLED = 0       # upmix.h
-SIGGEN_CTL_STOP_NOW = 2       # siggen.h: immediate hard stop, no fade
+# Capture servo counters: DSPI_LOOPBACK builds only, VC_ERR_UNKNOWN on a release build.
+LOOPBACK_STATS = "DIAG.LOOPBACK_STATS"
 
 # The loopback capture function advertises 44.1/48 kHz only, and the servo can
 # emit at most LOOPBACK_MAX_FRAMES_PER_PACKET (52) stereo frames per USB frame.
@@ -147,20 +141,8 @@ def _wait_applied(getter, expected, timeout_s=None, poll_s=None):
     Bounds resolve from the module constants here, not in the signature, so
     raising BARRIER_TIMEOUT_S at runtime actually takes effect.
     """
-    timeout_s = BARRIER_TIMEOUT_S if timeout_s is None else timeout_s
-    poll_s = BARRIER_POLL_S if poll_s is None else poll_s
-    deadline = time.monotonic() + timeout_s
-    last = None
-    while True:
-        try:
-            last = getter()
-            if last == expected:
-                return last
-        except (Stall, Timeout):
-            pass
-        if time.monotonic() >= deadline:
-            return last
-        time.sleep(poll_s)
+    return wait_for(getter, expected, BARRIER_TIMEOUT_S if timeout_s is None else timeout_s,
+                    BARRIER_POLL_S if poll_s is None else poll_s)
 
 
 def _read_settled(getter, timeout_s=None):
@@ -181,14 +163,14 @@ def _read_settled(getter, timeout_s=None):
 def _set_output_type(dev, slot, otype):
     """Switch `slot` to `otype` and wait until APPLIED; True on success.
     A request matching the applied type costs one GET and no reset."""
-    cur = _read_settled(lambda: dev.get_u8(OP.GET_OUTPUT_TYPE, wvalue=slot))
+    cur = _read_settled(lambda: dev.pget_u8("OUTPUT.TYPE", slot))
     if cur is None:
         return False        # device never answered
     if cur == otype:
         return True
-    if dev.get_u8(OP.SET_OUTPUT_TYPE, wvalue=(otype << 8) | slot) != 0:
-        return False        # rejected outright (bad slot / type / pin conflict)
-    if _wait_applied(lambda: dev.get_u8(OP.GET_OUTPUT_TYPE, wvalue=slot), otype) != otype:
+    if _optional(lambda: dev.pset_u8("OUTPUT.TYPE", otype, slot), False) is False:
+        return False        # refused outright (bad slot / type / pin conflict)
+    if _wait_applied(lambda: dev.pget_u8("OUTPUT.TYPE", slot), otype) != otype:
         return False        # accepted but never applied
     time.sleep(PIPELINE_SETTLE_S)
     return True
@@ -196,16 +178,15 @@ def _set_output_type(dev, slot, otype):
 
 def _set_input_source(dev, src):
     """Switch the input source and wait until it is APPLIED.  Returns True on
-    success.  The SET returns no status and input_source_selectable() can reject
-    it silently (e.g. a disabled S/PDIF 2/3), so the read-back is also the only
-    way to know the switch happened at all."""
-    cur = _read_settled(lambda: dev.get_u8(OP.GET_INPUT_SOURCE))
+    success; a refused source (e.g. a disabled S/PDIF 2/3) returns False."""
+    cur = _read_settled(lambda: dev.pget_u8("INPUT.SOURCE"))
     if cur is None:
         return False
     if cur == src:
         return True
-    dev.set_u8(OP.SET_INPUT_SOURCE, src)
-    if _wait_applied(lambda: dev.get_u8(OP.GET_INPUT_SOURCE), src) != src:
+    if _optional(lambda: dev.pset_u8("INPUT.SOURCE", src), False) is False:
+        return False
+    if _wait_applied(lambda: dev.pget_u8("INPUT.SOURCE"), src) != src:
         return False
     time.sleep(PIPELINE_SETTLE_S)
     return True
@@ -217,9 +198,8 @@ def _glitches(dev):
     A dropped or inserted frame splices the captured stream and fails a strict
     comparison exactly as a DSP fault would; sampling these tells them apart.
     """
-    ov = _optional(lambda: dev.get_u32(OP.GET_STATUS, wvalue=STATUS_LB_OVERFLOW))
-    un = _optional(lambda: dev.get_u32(OP.GET_STATUS, wvalue=STATUS_LB_UNDERRUN))
-    return None if ov is None or un is None else (ov, un)
+    raw = _optional(lambda: dev.pget(LOOPBACK_STATS, length=8))
+    return None if raw is None or len(raw) < 8 else struct.unpack_from("<II", raw)
 
 
 # Capture dump instrumentation (test_failures_diag.md section 8): with
@@ -239,15 +219,16 @@ def _dump_capture(dev, before, after):
     os.makedirs(_DUMP_DIR, exist_ok=True)
     name = framework.CURRENT_TEST or "unknown"
     extra = {}
-    for label, idx in (("spdif_over", 7), ("spdif_under", 8), ("clk_sys", 13),
-                       ("dma_starve", 17), ("usb_ring_over", 22)):
-        extra[label] = _optional(lambda i=idx: dev.get_u32(OP.GET_STATUS, wvalue=i))
+    for label, struct_name, field in (("spdif_under", "SYS.SPDIF_TX_STATS", "spdif_underruns"),
+                                      ("clk_sys", "SYS.SYSTEM_STATUS", "clk_sys_hz"),
+                                      ("dma_starve", "SYS.SPDIF_TX_STATS", "dma_starvations"),
+                                      ("usb_ring_over", "SYS.USB_AUDIO_STATUS", "ring_overruns")):
+        extra[label] = _optional(lambda n=struct_name, f=field: read_field(dev, n, f))
     meta = {"test": name, "seq": _DUMP_SEQ[0], "fs_host": run["fs"],
             "attempts": run["attempts"], "final_bad": run["final_bad"],
             "in_blocks": run.get("in_blocks"), "in_block_max": run.get("in_block_max"),
             "glitch_before": before, "glitch_after": after,
-            "dev_rate": _optional(lambda: dev.get_u32(OP.GET_STATUS,
-                                                      wvalue=STATUS_SAMPLE_RATE)),
+            "dev_rate": _optional(lambda: _sample_rate(dev)),
             "counters": extra, "time": time.time()}
     np.savez(os.path.join(_DUMP_DIR, f"{_DUMP_SEQ[0]:04d}_{name}.npz"),
              exc=run["exc"], cap=run["cap"], meta=json.dumps(meta))
@@ -322,10 +303,14 @@ def _capture(dev, fn, attempts=3):
         return result
 
 
+def _sample_rate(dev):
+    return read_field(dev, "SYS.SYSTEM_STATUS", "sample_rate_hz")
+
+
 def _device_rate(dev):
     """DSPi's live operating rate (audio_state.freq), or None if it will not
     answer (see _read_settled)."""
-    return _read_settled(lambda: dev.get_u32(OP.GET_STATUS, wvalue=STATUS_SAMPLE_RATE))
+    return _read_settled(lambda: _sample_rate(dev))
 
 
 def _set_rate(dev, out_dev, in_dev, fs):
@@ -340,7 +325,7 @@ def _set_rate(dev, out_dev, in_dev, fs):
         return True
     if not coreaudio.set_rate_by_name(audio.DSPI_OUT_NAME, fs):
         return False
-    got = _wait_applied(lambda: dev.get_u32(OP.GET_STATUS, wvalue=STATUS_SAMPLE_RATE), fs)
+    got = _wait_applied(lambda: _sample_rate(dev), fs)
     if got != fs:
         return False
     time.sleep(PIPELINE_SETTLE_S)
@@ -365,19 +350,16 @@ def _require_rate(dev, fs):
     return actual
 
 
-# --- Vendor-command helpers (mirror tests/eq.py, tests/outputs.py) -----------
+# --- Vendor-command helpers --------------------------------------------------
 
-def _eq_packet(ch, band, ftype, freq, q, gain, bypass=0):
-    return struct.pack("<BBBBfff", ch, band, ftype, bypass, freq, q, gain)
-
-
-def _set_band(dev, ch, band, ftype, freq, q, gain):
-    dev.set(OP.SET_EQ_PARAM, _eq_packet(ch, band, ftype, freq, q, gain))
+def _set_band(dev, ch, band, ftype, freq, q, gain, qp_x512=0):
+    """FILTER.BAND write, blocking until it reads back: the write is deferred and
+    the next measurement must see it applied."""
+    return write_band(dev, ch, band, ftype, freq, q, gain, qp_x512=qp_x512, wait=True)
 
 
 def _route(dev, inp, out, enabled, gain_db=0.0, phase=0):
-    # MatrixRoutePacket: <input, output, enabled, phase_invert, gain_db>.
-    dev.set(OP.SET_MATRIX_ROUTE, struct.pack("<BBBBf", inp, out, enabled, phase, gain_db))
+    write_route(dev, inp, out, enabled, gain_db, phase)
 
 
 def _signal_amp(gain_db):
@@ -430,31 +412,31 @@ def _baseline(dev, profile):
     # Gain stages.  Master volume powers on at MASTER_VOL_DEFAULT_DB (-20 dB),
     # and user volume / user mute are independent stages; all must be zeroed or
     # absolute-level measurements read low.
-    dev.set_f32(OP.SET_MASTER_VOLUME, 0.0)
-    dev.set_f32(OP.SET_USER_VOLUME, 0.0)
-    dev.set_u8(OP.SET_USER_MUTE, 0)
+    dev.pset_f32("ROUTE.MASTER_VOLUME", 0.0)
+    dev.pset_f32("ROUTE.USER_VOLUME", 0.0)
+    dev.pset_u8("ROUTE.USER_MUTE", 0)
     for ch in range(profile.num_input_channels):
-        dev.set_f32(OP.SET_PREAMP_CH, 0.0, wvalue=ch)
+        dev.pset_f32("ROUTE.PREAMP", 0.0, ch)
 
     # Per-input PEQ off.  bypass_master_eq gates ONLY the per-input EQ pass
     # (audio_pipeline.c PASS 2, both platforms); output-channel EQ is untouched,
     # and that is what the filter tests drive.
-    dev.set_u8(OP.SET_BYPASS, 1)
+    dev.pset_u8("FILTER.EQ_BYPASS", 1)
 
     # Each sits on a different part of the chain, so none covers the others.
-    dev.set_u8(OP.SET_LOUDNESS, 0)
-    dev.set_u8(OP.SET_CROSSFEED, 0)
-    dev.set_u8(OP.SET_LEVELLER_ENABLE, 0)
-    dev.set_u8(OP.SET_PSYBASS, 0)
-    _optional(lambda: dev.set_f32(OP.UPMIX_SET_PARAM, 0.0, wvalue=UPMIX_PARAM_ENABLED))
-    _optional(lambda: dev.get_u8(OP.SIGGEN_CONTROL, wvalue=SIGGEN_CTL_STOP_NOW))
+    dev.pset_u8("DYN.LOUDNESS_ENABLE", 0)
+    dev.pset_u8("FX.CROSSFEED_ENABLE", 0)
+    dev.pset_u8("DYN.LEVELLER_ENABLE", 0)
+    dev.pset_u8("FX.PSYBASS_ENABLE", 0)
+    _optional(lambda: dev.pset_f32("FX.UPMIX_ENABLE", 0.0))
+    _optional(lambda: dev.pset("MEAS.SIGGEN_STOP_NOW"))
 
     # Output stage at unity on EVERY output, not just the target pair: a stray
     # delay or mute on the other leg would skew an inter-leg lag measurement.
     for out in range(profile.num_output_channels):
-        dev.set_f32(OP.SET_OUTPUT_GAIN, 0.0, wvalue=out)
-        dev.set_u8(OP.SET_OUTPUT_MUTE, 0, wvalue=out)
-        dev.set_f32(OP.SET_OUTPUT_DELAY, 0.0, wvalue=out)
+        dev.pset_f32("ROUTE.OUTPUT_GAIN", 0.0, out)
+        dev.pset_u8("ROUTE.OUTPUT_MUTE", 0, out)
+        dev.pset_f32("ROUTE.OUTPUT_DELAY", 0.0, out)
     dev.wait_ready()
 
 
@@ -464,29 +446,29 @@ def _neutral_state(dev, profile):
     Entries a platform does not implement are reported with actual=None by
     _optional() and skipped by the caller."""
     checks = [
-        ("input source",   INPUT_USB, _optional(lambda: dev.get_u8(OP.GET_INPUT_SOURCE))),
-        ("master volume",  0.0,  _optional(lambda: dev.get_f32(OP.GET_MASTER_VOLUME))),
-        ("user volume",    0.0,  _optional(lambda: dev.get_f32(OP.GET_USER_VOLUME))),
-        ("user mute",      0,    _optional(lambda: dev.get_u8(OP.GET_USER_MUTE))),
-        ("input EQ bypass", 1,   _optional(lambda: dev.get_u8(OP.GET_BYPASS))),
-        ("loudness",       0,    _optional(lambda: dev.get_u8(OP.GET_LOUDNESS))),
-        ("crossfeed",      0,    _optional(lambda: dev.get_u8(OP.GET_CROSSFEED))),
-        ("leveller",       0,    _optional(lambda: dev.get_u8(OP.GET_LEVELLER_ENABLE))),
-        ("psybass",        0,    _optional(lambda: dev.get_u8(OP.GET_PSYBASS))),
+        ("input source",   INPUT_USB, _optional(lambda: dev.pget_u8("INPUT.SOURCE"))),
+        ("master volume",  0.0,  _optional(lambda: dev.pget_f32("ROUTE.MASTER_VOLUME"))),
+        ("user volume",    0.0,  _optional(lambda: dev.pget_f32("ROUTE.USER_VOLUME"))),
+        ("user mute",      0,    _optional(lambda: dev.pget_u8("ROUTE.USER_MUTE"))),
+        ("input EQ bypass", 1,   _optional(lambda: dev.pget_u8("FILTER.EQ_BYPASS"))),
+        ("loudness",       0,    _optional(lambda: dev.pget_u8("DYN.LOUDNESS_ENABLE"))),
+        ("crossfeed",      0,    _optional(lambda: dev.pget_u8("FX.CROSSFEED_ENABLE"))),
+        ("leveller",       0,    _optional(lambda: dev.pget_u8("DYN.LEVELLER_ENABLE"))),
+        ("psybass",        0,    _optional(lambda: dev.pget_u8("FX.PSYBASS_ENABLE"))),
     ]
     for ch in range(profile.num_input_channels):
         checks.append((f"preamp ch{ch}", 0.0,
-                       _optional(lambda c=ch: dev.get_f32(OP.GET_PREAMP_CH, wvalue=c))))
+                       _optional(lambda c=ch: dev.pget_f32("ROUTE.PREAMP", c))))
     for out in range(profile.num_output_channels):
         checks.append((f"output {out} gain", 0.0,
-                       _optional(lambda o=out: dev.get_f32(OP.GET_OUTPUT_GAIN, wvalue=o))))
+                       _optional(lambda o=out: dev.pget_f32("ROUTE.OUTPUT_GAIN", o))))
         checks.append((f"output {out} mute", 0,
-                       _optional(lambda o=out: dev.get_u8(OP.GET_OUTPUT_MUTE, wvalue=o))))
+                       _optional(lambda o=out: dev.pget_u8("ROUTE.OUTPUT_MUTE", o))))
         checks.append((f"output {out} delay", 0.0,
-                       _optional(lambda o=out: dev.get_f32(OP.GET_OUTPUT_DELAY, wvalue=o))))
+                       _optional(lambda o=out: dev.pget_f32("ROUTE.OUTPUT_DELAY", o))))
     # Upmixer: RP2350-only, so absent entries are legitimate.  Its status byte 0
     # is "processing this packet stream", which is what actually matters.
-    st = _optional(lambda: dev.get(OP.UPMIX_GET_STATUS, 16))
+    st = _optional(lambda: dev.pget("FX.UPMIX_STATUS", length=16))
     if st is not None:
         checks.append(("upmixer active", 0, st[0]))
     return checks
@@ -510,7 +492,7 @@ _BAND_CEILING = {}   # channel -> PEQ band count, probed once per channel
 
 
 def _band_ceiling(dev, ch, hi=16):
-    """PEQ band count for THIS channel: the smallest band index that STALLs.
+    """PEQ band count for THIS channel: the smallest band index whose GET STALLs.
     channel_band_counts[] is per-channel, and profile.band_ceiling comes from
     channel 0 (an input), so it can under-flatten the output channels."""
     if ch in _BAND_CEILING:
@@ -518,7 +500,7 @@ def _band_ceiling(dev, ch, hi=16):
     ceiling = hi + 1
     for band in range(hi + 1):
         try:
-            dev.get(OP.GET_EQ_PARAM, 4, wvalue=(ch << 8) | (band << 3) | 0)
+            dev.pget("FILTER.BAND", band_addr(ch, band), 16)
         except Stall:
             ceiling = band
             break
@@ -536,8 +518,8 @@ def _config_slot(dev, profile, slot, flatten_all=False, otype=TYPE_SPDIF):
         raise Skip(f"slot {slot} could not be set to "
                    f"{'I2S' if otype == TYPE_I2S else 'S/PDIF'} output "
                    f"(check BCK pin / pin conflict)")
-    dev.set_u8(OP.SET_OUTPUT_ENABLE, 1, wvalue=out_l)
-    dev.set_u8(OP.SET_OUTPUT_ENABLE, 1, wvalue=out_r)
+    dev.pset_u8("ROUTE.OUTPUT_ENABLE", 1, out_l)
+    dev.pset_u8("ROUTE.OUTPUT_ENABLE", 1, out_r)
     dev.wait_ready()
     _route_only(dev, profile, out_l, out_r)
     if flatten_all:
@@ -561,8 +543,8 @@ def _autoprobe_slot(dev, profile, out_dev, in_dev, fs):
         ol, orr = 2 * k, 2 * k + 1
         if not _set_output_type(dev, k, TYPE_SPDIF):
             raise Skip(f"could not put slot {k} into S/PDIF mode for the probe")
-        dev.set_u8(OP.SET_OUTPUT_ENABLE, 1, wvalue=ol)
-        dev.set_u8(OP.SET_OUTPUT_ENABLE, 1, wvalue=orr)
+        dev.pset_u8("ROUTE.OUTPUT_ENABLE", 1, ol)
+        dev.pset_u8("ROUTE.OUTPUT_ENABLE", 1, orr)
     dev.wait_ready()
 
     best, best_lvl = None, -200.0
@@ -696,11 +678,10 @@ def loopback_baseline_clean(dev, profile, chk):
     stray = []
     for inp in range(profile.num_input_channels):
         for out in range(profile.num_output_channels):
-            r = _optional(lambda i=inp, o=out: dev.get(OP.GET_MATRIX_ROUTE, 8,
-                                                       wvalue=(i << 8) | o))
+            r = _optional(lambda i=inp, o=out: read_route(dev, i, o))
             if r is None:
                 continue
-            enabled = bool(r[2])
+            enabled = bool(r.enabled)
             if enabled != ((inp, out) in want_on):
                 stray.append(f"in{inp}->out{out}={'on' if enabled else 'off'}")
     chk.ok(not stray, "matrix not isolated to the target pair: " + ", ".join(stray[:8]) +
@@ -973,14 +954,14 @@ def output_gain_level(dev, profile, chk):
     out_l = _slot_indices(profile, rig["slot"])[0]
     try:
         _flatten_chain(dev, rig["ch_l"])
-        dev.set_f32(OP.SET_OUTPUT_GAIN, 0.0, wvalue=out_l); dev.wait_ready()
+        dev.pset_f32("ROUTE.OUTPUT_GAIN", 0.0, out_l); dev.wait_ready()
         base = _tone_level(dev, rig)
         for g in (-6.0, -3.0, 3.0):
-            dev.set_f32(OP.SET_OUTPUT_GAIN, g, wvalue=out_l); dev.wait_ready()
+            dev.pset_f32("ROUTE.OUTPUT_GAIN", g, out_l); dev.wait_ready()
             chk.approx(_tone_level(dev, rig) - base, g, LEVEL_TOL_DB, f"output gain {g:+g} dB -> level delta")
         chk.note(f"output_gain base={base:.2f}dBFS")
     finally:
-        dev.set_f32(OP.SET_OUTPUT_GAIN, 0.0, wvalue=out_l); dev.wait_ready()
+        dev.pset_f32("ROUTE.OUTPUT_GAIN", 0.0, out_l); dev.wait_ready()
 
 
 @test("audio", mutating=True)
@@ -992,14 +973,14 @@ def output_mute_silences(dev, profile, chk):
         _flatten_chain(dev, rig["ch_l"])
         base = _tone_level(dev, rig)
         chk.ok(base > -20.0, f"signal present before mute ({base:.1f} dBFS)")
-        dev.set_u8(OP.SET_OUTPUT_MUTE, 1, wvalue=out_l); dev.wait_ready()
+        dev.pset_u8("ROUTE.OUTPUT_MUTE", 1, out_l); dev.wait_ready()
         muted = _tone_level(dev, rig)
         chk.ok(muted < MUTE_FLOOR_DBFS, f"muted output is silent ({muted:.1f} dBFS)")
-        dev.set_u8(OP.SET_OUTPUT_MUTE, 0, wvalue=out_l); dev.wait_ready()
+        dev.pset_u8("ROUTE.OUTPUT_MUTE", 0, out_l); dev.wait_ready()
         chk.approx(_tone_level(dev, rig), base, LEVEL_TOL_DB, "unmute restores level")
         chk.note(f"mute: base={base:.1f} muted={muted:.1f} dBFS")
     finally:
-        dev.set_u8(OP.SET_OUTPUT_MUTE, 0, wvalue=out_l); dev.wait_ready()
+        dev.pset_u8("ROUTE.OUTPUT_MUTE", 0, out_l); dev.wait_ready()
 
 
 @test("audio", mutating=True)
@@ -1009,19 +990,19 @@ def level_controls(dev, profile, chk):
     try:
         _flatten_chain(dev, rig["ch_l"])
         base = _tone_level(dev, rig)
-        for op, label in ((OP.SET_MASTER_VOLUME, "master volume"),
-                          (OP.SET_USER_VOLUME, "user volume")):
-            dev.set_f32(op, -6.0); dev.wait_ready()
+        for cmd, label in (("ROUTE.MASTER_VOLUME", "master volume"),
+                           ("ROUTE.USER_VOLUME", "user volume")):
+            dev.pset_f32(cmd, -6.0); dev.wait_ready()
             chk.approx(_tone_level(dev, rig) - base, -6.0, LEVEL_TOL_DB, f"{label} -6 dB")
-            dev.set_f32(op, 0.0); dev.wait_ready()
-        dev.set_f32(OP.SET_PREAMP_CH, -6.0, wvalue=0); dev.wait_ready()  # input 0 feeds the captured leg
+            dev.pset_f32(cmd, 0.0); dev.wait_ready()
+        dev.pset_f32("ROUTE.PREAMP", -6.0, 0); dev.wait_ready()  # input 0 feeds the captured leg
         chk.approx(_tone_level(dev, rig) - base, -6.0, LEVEL_TOL_DB, "preamp ch0 -6 dB")
-        dev.set_f32(OP.SET_PREAMP_CH, 0.0, wvalue=0); dev.wait_ready()
+        dev.pset_f32("ROUTE.PREAMP", 0.0, 0); dev.wait_ready()
         chk.note(f"level_controls base={base:.2f}dBFS")
     finally:
-        dev.set_f32(OP.SET_MASTER_VOLUME, 0.0)
-        dev.set_f32(OP.SET_USER_VOLUME, 0.0)
-        dev.set_f32(OP.SET_PREAMP_CH, 0.0, wvalue=0)
+        dev.pset_f32("ROUTE.MASTER_VOLUME", 0.0)
+        dev.pset_f32("ROUTE.USER_VOLUME", 0.0)
+        dev.pset_f32("ROUTE.PREAMP", 0.0, 0)
         dev.wait_ready()
 
 
@@ -1076,12 +1057,12 @@ def output_delay(dev, profile, chk):
             _route(dev, 1, out, 0)
         _route(dev, 0, out_l, 1, 0.0)
         _route(dev, 0, out_r, 1, 0.0)
-        dev.set_f32(OP.SET_OUTPUT_DELAY, 0.0, wvalue=out_l)
-        dev.set_f32(OP.SET_OUTPUT_DELAY, 0.0, wvalue=out_r)
+        dev.pset_f32("ROUTE.OUTPUT_DELAY", 0.0, out_l)
+        dev.pset_f32("ROUTE.OUTPUT_DELAY", 0.0, out_r)
         dev.wait_ready()
         lag_base, _ = _capture(
             dev, lambda: audio.measure_interchannel_lag(rig["out"], rig["in"], rig["fs"]))
-        dev.set_f32(OP.SET_OUTPUT_DELAY, delay_ms, wvalue=out_l); dev.wait_ready()
+        dev.pset_f32("ROUTE.OUTPUT_DELAY", delay_ms, out_l); dev.wait_ready()
         lag_delayed, _ = _capture(
             dev, lambda: audio.measure_interchannel_lag(rig["out"], rig["in"], rig["fs"]))
         delta = lag_delayed - lag_base
@@ -1089,8 +1070,8 @@ def output_delay(dev, profile, chk):
                    f"output delay {delay_ms:g} ms = {expect} samples (measured {delta})")
         chk.note(f"output_delay: lag_base={lag_base} lag_delayed={lag_delayed} delta={delta} expect={expect}")
     finally:
-        dev.set_f32(OP.SET_OUTPUT_DELAY, 0.0, wvalue=out_l)
-        dev.set_f32(OP.SET_OUTPUT_DELAY, 0.0, wvalue=out_r)
+        dev.pset_f32("ROUTE.OUTPUT_DELAY", 0.0, out_l)
+        dev.pset_f32("ROUTE.OUTPUT_DELAY", 0.0, out_r)
         dev.wait_ready()
 
 
@@ -1266,7 +1247,7 @@ def _note_input_count(dev, chk):
     Loudness, leveller and crossfeed are input-count agnostic (audio_pipeline.c
     PASS 2.5 / 4.5 / 5-7), but the count selects which path ran.
     """
-    nin = dev.get_u32(OP.GET_STATUS, wvalue=STATUS_INPUT_COUNT)
+    nin = read_field(dev, "INPUT.STATUS", "active_input_channels")
     chk.note(f"active input channels: {nin}")
     return nin
 
@@ -1309,12 +1290,12 @@ def loudness_shape(dev, profile, chk):
         _flatten_chain(dev, rig["ch_l"])
         # Loudness is applied per output through loudness_output_mask; a preset
         # that cleared the target's bit would make the enable a silent no-op.
-        dev.set(OP.SET_LOUDNESS_MASK, struct.pack("<H", 0xFFFF))
-        dev.set_f32(OP.SET_USER_VOLUME, -40.0)
-        dev.set_u8(OP.SET_LOUDNESS, 0); dev.wait_ready()
+        dev.pset("DYN.LOUDNESS_MASK", struct.pack("<H", 0xFFFF))
+        dev.pset_f32("ROUTE.USER_VOLUME", -40.0)
+        dev.pset_u8("DYN.LOUDNESS_ENABLE", 0); dev.wait_ready()
         freqs = _test_freqs(rig["fs"])
         off, _p, _s = _capture(dev, lambda: audio.measure_transfer(rig["out"], rig["in"], rig["chan"], rig["fs"], freqs, amp=0.4))
-        dev.set_u8(OP.SET_LOUDNESS, 1); dev.wait_ready()
+        dev.pset_u8("DYN.LOUDNESS_ENABLE", 1); dev.wait_ready()
         on, _p, _s = _capture(dev, lambda: audio.measure_transfer(rig["out"], rig["in"], rig["chan"], rig["fs"], freqs, amp=0.4))
         diff = on - off
         mid = diff[int(np.argmin(np.abs(freqs - 1000.0)))]
@@ -1324,7 +1305,7 @@ def loudness_shape(dev, profile, chk):
         chk.ok(hf > 1.0, f"loudness boosts treble (+{hf:.1f} dB @12kHz vs mid)")
         chk.note(f"loudness_shape: LF +{lf:.1f} HF +{hf:.1f} dB vs mid @ -40 dB vol")
     finally:
-        dev.set_u8(OP.SET_LOUDNESS, 0); dev.set_f32(OP.SET_USER_VOLUME, 0.0); dev.wait_ready()
+        dev.pset_u8("DYN.LOUDNESS_ENABLE", 0); dev.pset_f32("ROUTE.USER_VOLUME", 0.0); dev.wait_ready()
 
 
 @test("audio", mutating=True)
@@ -1337,17 +1318,17 @@ def crossfeed_bleed(dev, profile, chk):
         _flatten_chain(dev, rig["ch_l"]); _flatten_chain(dev, rig["ch_r"])
         # Crossfeed runs per output PAIR, selected by output_pair_mask; without
         # the target slot's bit the enable below would do nothing.
-        dev.set_u8(OP.SET_CROSSFEED_OUTPUTS, 1 << rig["slot"])
-        dev.set_u8(OP.SET_CROSSFEED, 0); dev.wait_ready()
+        dev.pset_u8("FX.CROSSFEED_OUTPUTS", 1 << rig["slot"])
+        dev.pset_u8("FX.CROSSFEED_ENABLE", 0); dev.wait_ready()
         l_off, r_off, _ = _capture(dev, lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"], 200.0, amp=0.4, left_only=True))
-        dev.set_u8(OP.SET_CROSSFEED, 1); dev.wait_ready()
+        dev.pset_u8("FX.CROSSFEED_ENABLE", 1); dev.wait_ready()
         l_on, r_on, _ = _capture(dev, lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"], 200.0, amp=0.4, left_only=True))
         chk.ok(r_off < -50.0, f"crossfeed off: opposite channel silent ({r_off:.1f} dBFS)")
         chk.ok(r_on > r_off + 15.0, f"crossfeed on: bleed into opposite channel ({r_off:.1f} -> {r_on:.1f} dBFS)")
         chk.ok(r_on < l_on - 1.0, f"bleed attenuated vs direct (R {r_on:.1f} < L {l_on:.1f} dBFS)")
         chk.note(f"crossfeed: off R={r_off:.1f} on R={r_on:.1f} direct L={l_on:.1f} dBFS")
     finally:
-        dev.set_u8(OP.SET_CROSSFEED, 0); dev.wait_ready()
+        dev.pset_u8("FX.CROSSFEED_ENABLE", 0); dev.wait_ready()
 
 
 @test("audio", mutating=True)
@@ -1360,21 +1341,21 @@ def leveller_boost(dev, profile, chk):
         # Detector and apply masks select which INPUT channels the one linked
         # gain is derived from and applied to; a preset that cleared the stereo
         # pair's bits would leave the leveller enabled but inert here.
-        dev.set(OP.SET_LEVELLER_MASKS, bytes([0xFF, 0xFF]))
-        dev.set_u8(OP.SET_LEVELLER_ENABLE, 0); dev.wait_ready()
+        dev.pset("DYN.LEVELLER_MASKS", bytes([0xFF, 0xFF]))
+        dev.pset_u8("DYN.LEVELLER_ENABLE", 0); dev.wait_ready()
         off, _r, _t = _capture(dev, lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"], 1000.0, dur_s=1.2, amp=0.05))
-        dev.set_f32(OP.SET_LEVELLER_AMOUNT, 100.0)
-        dev.set_f32(OP.SET_LEVELLER_MAX_GAIN, 12.0)
-        dev.set_u8(OP.SET_LEVELLER_SPEED, 2)
-        dev.set_u8(OP.SET_LEVELLER_ENABLE, 1); dev.wait_ready()
+        dev.pset_f32("DYN.LEVELLER_AMOUNT", 100.0)
+        dev.pset_f32("DYN.LEVELLER_MAX_GAIN", 12.0)
+        dev.pset_u8("DYN.LEVELLER_SPEED", 2)
+        dev.pset_u8("DYN.LEVELLER_ENABLE", 1); dev.wait_ready()
         on, _r, _t = _capture(dev, lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"], 1000.0, dur_s=1.2, amp=0.05))
         boost = on - off
         chk.ok(boost > 3.0, f"leveller lifts quiet signal (+{boost:.1f} dB)")
         chk.ok(boost <= 13.0, f"boost within max-gain ceiling (+{boost:.1f} dB <= ~12)")
         chk.note(f"leveller: quiet off={off:.1f} on={on:.1f} boost=+{boost:.1f} dB")
     finally:
-        dev.set_u8(OP.SET_LEVELLER_ENABLE, 0)
-        dev.set_f32(OP.SET_LEVELLER_AMOUNT, 0.0)
+        dev.pset_u8("DYN.LEVELLER_ENABLE", 0)
+        dev.pset_f32("DYN.LEVELLER_AMOUNT", 0.0)
         dev.wait_ready()
 
 
@@ -1399,9 +1380,7 @@ def output_clip_limit(dev, profile, chk):
 # --- Phase 5: feature coverage ----------------------------------------------
 
 LT_TYPE = 11                  # FILTER_LINKWITZ_TRANSFORM
-UPMIX_PARAM_CENTER_MODE = 1   # upmix.h
-UPMIX_PARAM_SURROUND_MODE = 2
-UPMIX_CENTER_OFF = 2
+UPMIX_CENTER_OFF = 2          # upmix.h
 UPMIX_SURROUND_PASSIVE = 1
 UPMIX_ROW_LS = 3
 PSYBASS_CUTOFF, PSYBASS_HARMONICS, PSYBASS_DRIVE = 120.0, 12.0, 18.0
@@ -1421,7 +1400,7 @@ SUBHARM_SELECT_TONE_S = 1.5   # >= 1 s so the 30-95% window clears hold + releas
 SUBHARM_SELECT_HOLD_MS = 100.0
 SUBHARM_SELECT_DROP_DB = 10.0     # percussive gates a sustained tone at least this far
 SUBHARM_SELECT_KEEP_TOL_DB = 1.5  # sustained must match "all" this closely
-# Meter (0x1F) scale: peak of the synthesized sub, 32767 = full scale.  With no
+# FX.SUBHARM_METER scale: peak of the synthesized sub, 32767 = full scale.  With no
 # ceiling the divider leaves the sub 6.3 dB under the drive peak at 60 Hz.
 SUBHARM_METER_DRIVE_DB = -6.3
 SUBHARM_METER_TOL_DB = 3.0
@@ -1432,14 +1411,12 @@ SUBHARM_METER_DRIVE_LO_DB = -18.0
 # siggen.h wire constants: a held tone lets a live meter be read while it plays.
 SIGGEN_CFG_VERSION = 1
 SIGGEN_SINE = 0
-SIGGEN_CTL_START = 1
 
 
 def _set_lt_band(dev, ch, band, f0, q0, fp, qp):
-    """Linkwitz Transform SET: the 16-byte EqParamPacket carries f0/Q0/fp in the
-    freq/Q/gain fields, with target Qp appended as uint16 Q*512 (wire V22)."""
-    dev.set(OP.SET_EQ_PARAM,
-            _eq_packet(ch, band, LT_TYPE, f0, q0, fp) + struct.pack("<H", round(qp * 512)))
+    """Linkwitz Transform band: f0/Q0/fp ride in the freq/Q/gain fields of FILTER.BAND
+    and the target Qp in qp_x512 (Q * 512)."""
+    return _set_band(dev, ch, band, LT_TYPE, f0, q0, fp, qp_x512=round(qp * 512))
 
 
 @test("audio", mutating=True)
@@ -1531,16 +1508,16 @@ def loudness_output_mask(dev, profile, chk):
     out_l = _slot_indices(profile, rig["slot"])[0]
     try:
         _flatten_chain(dev, rig["ch_l"])
-        dev.set_f32(OP.SET_USER_VOLUME, -40.0)
-        dev.set_u8(OP.SET_LOUDNESS, 1)
-        dev.set(OP.SET_LOUDNESS_MASK, struct.pack("<H", 0))          # target excluded
+        dev.pset_f32("ROUTE.USER_VOLUME", -40.0)
+        dev.pset_u8("DYN.LOUDNESS_ENABLE", 1)
+        dev.pset("DYN.LOUDNESS_MASK", struct.pack("<H", 0))          # target excluded
         dev.wait_ready()
         freqs = _test_freqs(rig["fs"])
         lf_i = int(np.argmin(np.abs(freqs - 60.0)))
         mid_i = int(np.argmin(np.abs(freqs - 1000.0)))
         off, _p, _s = _capture(dev, lambda: audio.measure_transfer(rig["out"], rig["in"], rig["chan"],
                                              rig["fs"], freqs, amp=0.4))
-        dev.set(OP.SET_LOUDNESS_MASK, struct.pack("<H", 1 << out_l))  # target included
+        dev.pset("DYN.LOUDNESS_MASK", struct.pack("<H", 1 << out_l))  # target included
         dev.wait_ready()
         on, _p, _s = _capture(dev, lambda: audio.measure_transfer(rig["out"], rig["in"], rig["chan"],
                                             rig["fs"], freqs, amp=0.4))
@@ -1548,9 +1525,9 @@ def loudness_output_mask(dev, profile, chk):
         chk.ok(lift > 2.0, f"masked-in output gains bass lift (+{lift:.1f} dB @60Hz vs mid)")
         chk.note(f"loudness_mask: lift={lift:.1f}dB with bit {out_l} set")
     finally:
-        dev.set_u8(OP.SET_LOUDNESS, 0)
-        dev.set(OP.SET_LOUDNESS_MASK, struct.pack("<H", 0xFFFF))
-        dev.set_f32(OP.SET_USER_VOLUME, 0.0); dev.wait_ready()
+        dev.pset_u8("DYN.LOUDNESS_ENABLE", 0)
+        dev.pset("DYN.LOUDNESS_MASK", struct.pack("<H", 0xFFFF))
+        dev.pset_f32("ROUTE.USER_VOLUME", 0.0); dev.wait_ready()
 
 
 @test("audio", mutating=True)
@@ -1565,14 +1542,12 @@ def upmix_centre_off_passthrough(dev, profile, chk):
         raise Skip("upmixer is RP2350-only")
     out_l, out_r, _cl, _cr = _slot_indices(profile, rig["slot"])
     try:
-        if _optional(lambda: dev.set_f32(OP.UPMIX_SET_PARAM, float(UPMIX_CENTER_OFF),
-                                         wvalue=UPMIX_PARAM_CENTER_MODE)) is None:
+        if _optional(lambda: dev.pset_f32("FX.UPMIX_CENTER_MODE", float(UPMIX_CENTER_OFF))) is None:
             raise Skip("upmixer not available on this build")
-        dev.set_f32(OP.UPMIX_SET_PARAM, float(UPMIX_SURROUND_PASSIVE),
-                    wvalue=UPMIX_PARAM_SURROUND_MODE)
-        dev.set_f32(OP.UPMIX_SET_PARAM, 1.0, wvalue=UPMIX_PARAM_ENABLED)
+        dev.pset_f32("FX.UPMIX_SURROUND_MODE", float(UPMIX_SURROUND_PASSIVE))
+        dev.pset_f32("FX.UPMIX_ENABLE", 1.0)
         dev.wait_ready()
-        st = dev.get(OP.UPMIX_GET_STATUS, 16)
+        st = dev.pget("FX.UPMIX_STATUS", length=16)
         if not st[0]:
             raise Skip(f"upmixer parked (reason {st[1]}: "
                        f"1=disabled 2=input not stereo 3=rate>48k)")
@@ -1594,7 +1569,7 @@ def upmix_centre_off_passthrough(dev, profile, chk):
         chk.ok(lvl > -40.0, f"derived Ls row carries audio ({lvl:.1f} dBFS)")
         chk.note(f"upmix: resid={resid:.1f}dBFS Ls={lvl:.1f}dBFS")
     finally:
-        _optional(lambda: dev.set_f32(OP.UPMIX_SET_PARAM, 0.0, wvalue=UPMIX_PARAM_ENABLED))
+        _optional(lambda: dev.pset_f32("FX.UPMIX_ENABLE", 0.0))
         _route(dev, UPMIX_ROW_LS, out_l, 0)
         _route(dev, 0, out_l, 1, 0.0)
         dev.wait_ready()
@@ -1608,14 +1583,14 @@ def psybass_harmonics(dev, profile, chk):
     tone = 60.0                        # well below PSYBASS_CUTOFF
     try:
         _flatten_chain(dev, rig["ch_l"])
-        dev.set_u8(OP.SET_PSYBASS, 0); dev.wait_ready()
+        dev.pset_u8("FX.PSYBASS_ENABLE", 0); dev.wait_ready()
         _lvl0, thd0, _s = _capture(dev, lambda: audio.measure_tone(rig["out"], rig["in"], rig["chan"],
                                              rig["fs"], tone, amp=0.4))
-        dev.set_f32(OP.SET_PSYBASS_CUTOFF, PSYBASS_CUTOFF)
-        dev.set_f32(OP.SET_PSYBASS_HARMONICS, PSYBASS_HARMONICS)
-        dev.set_f32(OP.SET_PSYBASS_DRIVE, PSYBASS_DRIVE)
-        dev.set(OP.SET_PSYBASS_MASK, struct.pack("<H", 1 << out_l))
-        dev.set_u8(OP.SET_PSYBASS, 1); dev.wait_ready()
+        dev.pset_f32("FX.PSYBASS_CUTOFF", PSYBASS_CUTOFF)
+        dev.pset_f32("FX.PSYBASS_HARMONICS", PSYBASS_HARMONICS)
+        dev.pset_f32("FX.PSYBASS_DRIVE", PSYBASS_DRIVE)
+        dev.pset("FX.PSYBASS_MASK", struct.pack("<H", 1 << out_l))
+        dev.pset_u8("FX.PSYBASS_ENABLE", 1); dev.wait_ready()
         _lvl1, thd1, _s = _capture(dev, lambda: audio.measure_tone(rig["out"], rig["in"], rig["chan"],
                                              rig["fs"], tone, amp=0.4))
         chk.ok(thd1 > thd0 + 1.0,
@@ -1623,7 +1598,7 @@ def psybass_harmonics(dev, profile, chk):
         chk.note(f"psybass: {tone:g}Hz THD {thd0:.3f}% -> {thd1:.3f}% "
                  f"(cutoff {PSYBASS_CUTOFF:g}Hz)")
     finally:
-        dev.set_u8(OP.SET_PSYBASS, 0); dev.wait_ready()
+        dev.pset_u8("FX.PSYBASS_ENABLE", 0); dev.wait_ready()
 
 
 @test("audio", mutating=True)
@@ -1635,14 +1610,14 @@ def subharm_octave(dev, profile, chk):
     probes = (sub, SUBHARM_TONE)
     try:
         _flatten_chain(dev, rig["ch_l"])
-        dev.set_u8(OP.SET_SUBHARM, 0); dev.wait_ready()
+        dev.pset_u8("FX.SUBHARM_ENABLE", 0); dev.wait_ready()
         off = _capture(dev, lambda: audio.measure_tone_bins(rig["out"], rig["in"], rig["chan"],
                                             rig["fs"], SUBHARM_TONE, probes))
-        dev.set_f32(OP.SET_SUBHARM_LOW, 0.0)
-        dev.set_f32(OP.SET_SUBHARM_HIGH, -30.0)     # floor = band off
-        dev.set_f32(OP.SET_SUBHARM_BOOST, 0.0)
-        dev.set(OP.SET_SUBHARM_MASK, struct.pack("<H", 1 << out_l))
-        dev.set_u8(OP.SET_SUBHARM, 1); dev.wait_ready()
+        dev.pset_f32("FX.SUBHARM_LOW", 0.0)
+        dev.pset_f32("FX.SUBHARM_HIGH", -30.0)     # floor = band off
+        dev.pset_f32("FX.SUBHARM_BOOST", 0.0)
+        dev.pset("FX.SUBHARM_MASK", struct.pack("<H", 1 << out_l))
+        dev.pset_u8("FX.SUBHARM_ENABLE", 1); dev.wait_ready()
         on = _capture(dev, lambda: audio.measure_tone_bins(rig["out"], rig["in"], rig["chan"],
                                            rig["fs"], SUBHARM_TONE, probes))
         rise = on[sub] - off[sub]
@@ -1656,39 +1631,32 @@ def subharm_octave(dev, profile, chk):
                f"fundamental untouched ({off[SUBHARM_TONE]:.1f} -> {on[SUBHARM_TONE]:.1f} dBFS)")
         chk.note(f"subharm: {SUBHARM_TONE:g}Hz in, {sub:g}Hz sub rose {rise:.1f} dB")
     finally:
-        dev.set_u8(OP.SET_SUBHARM, 0); dev.wait_ready()
+        dev.pset_u8("FX.SUBHARM_ENABLE", 0); dev.wait_ready()
 
 
 # Every subharm scalar a test below may move, saved and restored wholesale so
 # each test only has to state what it needs.
-_SUBHARM_F32 = ((OP.SET_SUBHARM_LOW, OP.GET_SUBHARM_LOW),
-                (OP.SET_SUBHARM_HIGH, OP.GET_SUBHARM_HIGH),
-                (OP.SET_SUBHARM_TOP, OP.GET_SUBHARM_TOP),
-                (OP.SET_SUBHARM_BOOST, OP.GET_SUBHARM_BOOST),
-                (OP.SET_SUBHARM_CEILING, OP.GET_SUBHARM_CEILING),
-                (OP.SET_SUBHARM_DEPTH, OP.GET_SUBHARM_DEPTH),
-                (OP.SET_SUBHARM_HOLD, OP.GET_SUBHARM_HOLD))
-_SUBHARM_U8 = ((OP.SET_SUBHARM, OP.GET_SUBHARM),
-               (OP.SET_SUBHARM_SELECT, OP.GET_SUBHARM_SELECT),
-               (OP.SET_SUBHARM_LINK, OP.GET_SUBHARM_LINK))
+_SUBHARM_F32 = ("FX.SUBHARM_LOW", "FX.SUBHARM_HIGH", "FX.SUBHARM_TOP", "FX.SUBHARM_BOOST",
+                "FX.SUBHARM_CEILING", "FX.SUBHARM_DEPTH", "FX.SUBHARM_HOLD")
+_SUBHARM_U8 = ("FX.SUBHARM_ENABLE", "FX.SUBHARM_SELECT", "FX.SUBHARM_LINK")
 
 
 def _subharm_save(dev):
-    return ([(s, dev.get_f32(g)) for s, g in _SUBHARM_F32],
-            [(s, dev.get_u8(g)) for s, g in _SUBHARM_U8],
-            dev.get_u16(OP.GET_SUBHARM_MASK))
+    return ([(c, dev.pget_f32(c)) for c in _SUBHARM_F32],
+            [(c, dev.pget_u8(c)) for c in _SUBHARM_U8],
+            dev.pget_u16("FX.SUBHARM_MASK"))
 
 
 def _subharm_restore(dev, saved):
     """Undo a _subharm_setup().  Solo is forced off rather than restored: it is
     runtime-only monitoring that must never survive into the next test."""
     f32, u8, mask = saved
-    dev.set_u8(OP.SET_SUBHARM_SOLO, 0)
-    for op, val in f32:
-        dev.set_f32(op, val)
-    dev.set(OP.SET_SUBHARM_MASK, struct.pack("<H", mask))
-    for op, val in u8:
-        dev.set_u8(op, val)
+    dev.pset_u8("FX.SUBHARM_SOLO", 0)
+    for cmd, val in f32:
+        dev.pset_f32(cmd, val)
+    dev.pset("FX.SUBHARM_MASK", struct.pack("<H", mask))
+    for cmd, val in u8:
+        dev.pset_u8(cmd, val)
     dev.wait_ready()
 
 
@@ -1700,18 +1668,18 @@ def _subharm_setup(dev, out_mask, low=0.0, high=SUBHARM_LEVEL_OFF_DB,
     The LF boost is always 0: solo bypasses the boost bell, so a solo on/off
     comparison would not be like-for-like with it running.
     """
-    dev.set_f32(OP.SET_SUBHARM_LOW, low)
-    dev.set_f32(OP.SET_SUBHARM_HIGH, high)
-    dev.set_f32(OP.SET_SUBHARM_TOP, top)
-    dev.set_f32(OP.SET_SUBHARM_BOOST, 0.0)
-    dev.set_f32(OP.SET_SUBHARM_CEILING, ceiling)
-    dev.set_f32(OP.SET_SUBHARM_DEPTH, depth)
-    dev.set_f32(OP.SET_SUBHARM_HOLD, hold)
-    dev.set_u8(OP.SET_SUBHARM_SELECT, select)
-    dev.set_u8(OP.SET_SUBHARM_LINK, link)
-    dev.set_u8(OP.SET_SUBHARM_SOLO, solo)
-    dev.set(OP.SET_SUBHARM_MASK, struct.pack("<H", out_mask))
-    dev.set_u8(OP.SET_SUBHARM, enable)
+    dev.pset_f32("FX.SUBHARM_LOW", low)
+    dev.pset_f32("FX.SUBHARM_HIGH", high)
+    dev.pset_f32("FX.SUBHARM_TOP", top)
+    dev.pset_f32("FX.SUBHARM_BOOST", 0.0)
+    dev.pset_f32("FX.SUBHARM_CEILING", ceiling)
+    dev.pset_f32("FX.SUBHARM_DEPTH", depth)
+    dev.pset_f32("FX.SUBHARM_HOLD", hold)
+    dev.pset_u8("FX.SUBHARM_SELECT", select)
+    dev.pset_u8("FX.SUBHARM_LINK", link)
+    dev.pset_u8("FX.SUBHARM_SOLO", solo)
+    dev.pset("FX.SUBHARM_MASK", struct.pack("<H", out_mask))
+    dev.pset_u8("FX.SUBHARM_ENABLE", enable)
     dev.wait_ready()
 
 
@@ -1773,7 +1741,7 @@ def subharm_solo(dev, profile, chk):
         _flatten_chain(dev, rig["ch_l"])
         _subharm_setup(dev, 1 << out_l, solo=0)
         off, st_off = bins()
-        dev.set_u8(OP.SET_SUBHARM_SOLO, 1); dev.wait_ready()
+        dev.pset_u8("FX.SUBHARM_SOLO", 1); dev.wait_ready()
         on, st_on = bins()
         if min(st_off, st_on) < CORR_MIN:
             raise Skip(f"envelope alignment never locked "
@@ -1786,7 +1754,7 @@ def subharm_solo(dev, profile, chk):
                    f"sub level unchanged by solo ({off[sub]:.1f} -> {on[sub]:.1f} dBFS)")
         chk.note(f"subharm solo: dry -{drop:.1f} dB, sub {on[sub]:.1f} dBFS")
     finally:
-        dev.set_u8(OP.SET_SUBHARM_SOLO, 0)
+        dev.pset_u8("FX.SUBHARM_SOLO", 0)
         _subharm_restore(dev, saved)
 
 
@@ -1806,7 +1774,7 @@ def subharm_ceiling(dev, profile, chk):
         # available.  A hot drive puts the uncapped sub well above both ceilings.
         _subharm_setup(dev, 1 << out_l, ceiling=SUBHARM_CEILING_DBFS)
         hi = _subharm_bins(dev, rig, SUBHARM_TONE, probes, amp=SUBHARM_HOT_AMP)
-        dev.set_f32(OP.SET_SUBHARM_CEILING, lower); dev.wait_ready()
+        dev.pset_f32("FX.SUBHARM_CEILING", lower); dev.wait_ready()
         lo = _subharm_bins(dev, rig, SUBHARM_TONE, probes, amp=SUBHARM_HOT_AMP)
         chk.approx(hi[sub], SUBHARM_CEILING_BIN_DBFS, SUBHARM_CEILING_TOL_DB,
                    f"ceiling {SUBHARM_CEILING_DBFS:g} dBFS holds the sub at {hi[sub]:.1f} dBFS")
@@ -1878,7 +1846,7 @@ def subharm_link_pair(dev, profile, chk):
         _subharm_setup(dev, pair_mask, link=1)
         in_phase = sub_level(1.0)
         anti = sub_level(-1.0)
-        dev.set_u8(OP.SET_SUBHARM_LINK, 0); dev.wait_ready()
+        dev.pset_u8("FX.SUBHARM_LINK", 0); dev.wait_ready()
         unlinked = sub_level(-1.0)
         chk.ok(in_phase - anti > SUBHARM_MIN_RISE_DB,
                f"linked: anti-phase pair sums to silence, no sub "
@@ -1898,17 +1866,17 @@ def _siggen_sine(dev, mask, freq, level_db):
     The loopback capture is synchronous, so a captured tone is long over by the
     time the host can read a live meter; a held generator tone is not.
     """
-    dev.set(OP.SIGGEN_SET_CONFIG,
+    dev.pset("MEAS.SIGGEN_CONFIG",
             struct.pack("<BBHHBBfIHHffff", SIGGEN_CFG_VERSION, SIGGEN_SINE, mask,
                         0, 0, 0, level_db, 0, 0, 0, freq, 0.0, 0.0, 0.0))
-    dev.get_u8(OP.SIGGEN_CONTROL, wvalue=SIGGEN_CTL_START)
+    dev.pset("MEAS.SIGGEN_START")
     dev.wait_ready()
 
 
 def _subharm_meter(dev, profile, out):
     """(raw uint16, dBFS) of one output's sub peak; 32767 is full scale."""
     n = profile.num_output_channels
-    peaks = struct.unpack(f"<{n}H", dev.get(OP.GET_SUBHARM_METER, 2 * n))
+    peaks = struct.unpack(f"<{n}H", dev.pget("FX.SUBHARM_METER", length=2 * n))
     return peaks[out], 20.0 * np.log10(max(peaks[out], 1) / 32767.0)
 
 
@@ -1940,19 +1908,19 @@ def subharm_meter(dev, profile, chk):
         # The ceiling pins the sub's peak to a known dBFS, which checks the
         # meter's absolute scale without leaning on a band-filter model.
         _siggen_sine(dev, 1 << out_l, SUBHARM_TONE, SUBHARM_METER_DRIVE_HI_DB)
-        dev.set_f32(OP.SET_SUBHARM_CEILING, SUBHARM_CEILING_DBFS); dev.wait_ready()
+        dev.pset_f32("FX.SUBHARM_CEILING", SUBHARM_CEILING_DBFS); dev.wait_ready()
         time.sleep(SUBHARM_METER_SETTLE_S)
         _raw_c, capped = _subharm_meter(dev, profile, out_l)
         chk.approx(capped, SUBHARM_CEILING_DBFS, 2.0,
                    f"meter matches the {SUBHARM_CEILING_DBFS:g} dBFS ceiling "
                    f"({capped:.1f} dBFS)")
-        dev.set_u8(OP.SET_SUBHARM, 0); dev.wait_ready()
+        dev.pset_u8("FX.SUBHARM_ENABLE", 0); dev.wait_ready()
         time.sleep(1.0)                     # 300 ms meter tau, plus slack
         raw_off, _off = _subharm_meter(dev, profile, out_l)
         chk.eq(raw_off, 0, "meter clears within a second of disabling the effect")
         chk.note(f"subharm meter: raw {raw_hi} = {hi:.1f} dBFS, capped {capped:.1f} dBFS")
     finally:
-        _optional(lambda: dev.get_u8(OP.SIGGEN_CONTROL, wvalue=SIGGEN_CTL_STOP_NOW))
+        _optional(lambda: dev.pset("MEAS.SIGGEN_STOP_NOW"))
         _subharm_restore(dev, saved)
 
 

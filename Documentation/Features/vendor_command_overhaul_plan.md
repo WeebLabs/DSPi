@@ -1,8 +1,8 @@
 # Vendor Command Overhaul Plan
 
-*Last updated: 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text). Previously 2026-11-16 (8.11, Phase 4)*
+*Last updated: 2026-11-16 (status line, 8.13 As built (Phase 6), 7.5 and Phase 6 as done, items awaiting a decision in 14.1). Previously 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text); 2026-11-16 (8.11, Phase 4)*
 
-Status: approved by the user on 2026-11-15 with the decisions in section 14. Implementation is in progress. Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
+Status: approved by the user on 2026-11-15 with the decisions in section 14. Phases 0 to 6 are done, and sections 8.8 to 8.13 record what was built. The Windows run of the `wIndex` test is still owed by the user (11.1). What remains is the migration guide (Phase 7) and release readiness (Phase 8). Four questions await the user's decision (14.1). Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
 
 ## 1. TL;DR
 
@@ -20,7 +20,7 @@ The firmware side becomes a table. Each row names a command, its read and write 
 
 This is a clean break. The new scheme ships in firmware v1.1.7-beta1, the release contributors were told would overhaul the opcodes, and the old numbers stop working in that release. Old hosts send a zero in the `wIndex` high byte, so they land on page 0, which answers nothing.
 
-What it means in practice: every host must be ported for that release. This work delivers the firmware, the test harness and a comprehensive migration guide. It does not change any host app. The refactor is proven without shipping any compatibility code. A byte-for-byte capture of 1.1.6 replies is the reference, and a translation layer inside the test harness lets the existing 173 tests run against the new handlers until they are ported to native paged calls.
+What it means in practice: every host must be ported for that release. This work delivers the firmware, the test harness and a comprehensive migration guide. It does not change any host app. The refactor is proven without shipping any compatibility code. A byte-for-byte capture of 1.1.6 replies was the reference, and a translation layer inside the test harness let the existing 173 tests run against the new handlers until Phase 6 ported them to native paged calls and deleted the layer.
 
 ## 2. Facts verified for this plan
 
@@ -635,15 +635,15 @@ The second row is the dangerous direction. Old firmware ignores `wIndex`, so an 
 
 ### 7.5 Proving the refactor without a compatibility path
 
-A clean break leaves no old path in the shipped firmware to compare against. Three things provide the regression proof, and none of them ships.
+A clean break leaves no old path in the shipped firmware to compare against. Three things provided the regression proof, and none of them ships.
 
-1. **A golden capture of 1.1.6.** Before any code changes, record every GET reply of firmware 1.1.6, in two states: factory defaults, and after a scripted sequence that writes a non-default value to every settable command. A mask list excludes fields that legitimately vary (meters, counters, temperature, serial, build info, version).
-2. **A temporary translation layer in the test harness.** `tools/dspi_test/legacy_map.py` turns each old call (`OP.X`, direction, `wValue`, payload) into the new paged request, using a data file that is the machine-readable form of section 6. It needs only a few adapters: direct, value from `wValue`, packed address and value, and a small custom function for each split command. The existing 173 tests then run against the new handlers without being rewritten. Replaying the golden script through this layer and comparing bytes is the regression proof.
-3. **Old and new side by side during development.** Until the flip phase, page 0 on the working branch still reaches the old switches. Every migrated command can be compared with its original on the same device, in the same state. The flip deletes the old code before anything is released.
+1. **A golden capture of 1.1.6.** Before the code changed, every GET reply of firmware 1.1.6 was recorded twice, before and after a scripted sequence that writes a non-default value to every settable command it can safely touch. A mask list excludes fields that legitimately vary (meters, counters, temperature, serial, build info, version).
+2. **A temporary translation layer in the test harness.** `tools/dspi_test/legacy_map.py` turned each old call (`OP.X`, direction, `wValue`, payload) into the new paged request, using a data file that is the machine-readable form of section 6. It needed only a few kinds of adapter. They were direct, value from `wValue`, packed address and value, and a small custom function for each split command. The existing 173 tests then ran against the new handlers without being rewritten. Replaying the golden script through this layer and comparing bytes was the regression proof. On 1.1.7 beta 1 it matched the 1.1.6 capture with 0 unexplained differences.
+3. **Old and new side by side during development.** Until the flip phase, page 0 on the working branch still reached the old switches. Every migrated command was compared with its original on the same device, in the same state. The flip deleted the old code before anything was released.
 
-The translation layer is scaffolding. After the flip the tests are ported to native paged calls and the layer is deleted (Phase 6). The mapping data file stays, as `Documentation/protocol/legacy_map.json`, because it is also the machine-readable migration table for host maintainers.
+The translation layer was scaffolding. Phase 6 ported the tests to native paged calls and deleted it (8.13). The native golden reference was captured in the same session as the matching translated replay, which ties it to 1.1.6. The mapping data file stays, as `Documentation/protocol/legacy_map.json`, because it is also the machine-readable migration table for host maintainers. `scripts/gen_vendor_protocol.py --check` keeps it consistent with the registry.
 
-Tests that assert an old quirk are the exception to "unchanged". A rejected write is now an error, not a silent drop, and an unknown status selector no longer returns zeros. Those tests are updated to expect the new behaviour and are listed in the phase report.
+Tests that asserted an old quirk were the exception to "unchanged". A rejected write is now an error, not a silent drop, and an unknown status selector no longer returns zeros. Those tests were updated to expect the new behaviour and listed in the phase reports.
 
 ### 7.6 Release gate for v1.1.7-beta1
 
@@ -841,7 +841,7 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - `MEAS.RTA_BINS` returns at most 256 bytes per request.
 - `DIAG.CLOCK_DIAG` is guarded by `#if DSPI_CLOCK_DIAG`, because `config.h` defines the symbol as 0 when the option is off.
 - Every place the new behaviour differs from 1.1.6 is recorded in `vendor_protocol_migration_notes.md`, which feeds the migration guide.
-- The harness has a third mode, hybrid, which sends an old call through the paged commands only when the device has every command it needs. It was used to run the existing tests and the golden replay through each page as it landed.
+- The harness had a third mode, hybrid, which sent an old call through the paged commands only when the device had every command it needed. It was used to run the existing tests and the golden replay through each page as it landed. Phase 6 removed it (8.13).
 
 ### 8.10 As built (Phase 3)
 
@@ -865,7 +865,7 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - **Size.** Flash text falls by 19.8 KB (RP2040) and 19.6 KB (RP2350). BSS falls by 216 B and 220 B. `scripts/ram_baseline.json` holds the new figures.
 - **Dead save path removed.** `save_params_pending` lost its last setter at the flip. The flag, its main-loop branch and `flash_save_params()` are deleted.
 - **Finite-value checks.** A NaN or infinite float SET is refused with `VC_ERR_VALUE` and stores nothing in ROUTE (matrix gain, output gain, output delay, channel delay), DYN (leveller amount, max gain and gate, loudness reference and intensity), FX (crossfeed cutoff and feed, every subharm and psybass float, every upmix parameter and `UPMIX_CONFIG`) and `FILTER.BAND` (freq, Q, gain). The limiter and tube setters refuse NaN and clamp infinity. The siggen config sanitises its floats. The bulk SET stores floats raw. The handlers as copied from 1.1.6 stored a NaN output gain or channel delay.
-- **Harness auto mode.** `device.py` probes `SYS.PROTOCOL_INFO` and selects `translate` on paged firmware and `old` on 1.1.6. `DSPI_TEST_PROTOCOL` still forces a mode.
+- **Harness auto mode.** `device.py` probed `SYS.PROTOCOL_INFO` and selected `translate` on paged firmware and `old` on 1.1.6. `DSPI_TEST_PROTOCOL` forced a mode. Phase 6 removed the modes (8.13).
 - **Page 0 test.** `tests/paged_page0.py` walks every `bRequest` on page 0 (both recipients, GET and both SET shapes) and checks that each one STALLs and leaves the parameters and directory unchanged, and that the MS OS 2.0 request is still served. It refuses to run unless the firmware provably has no page 0.
 - **Paged tests stand alone.** The 14 `tests/paged_*.py` modules no longer send old opcodes. Their A/B halves are replaced by assertions against the spec, and new tests cover the finite-value rule. Each of those first proves the rule on one `ROUTE.OUTPUT_GAIN` write and sends no further non-finite value if it fails.
 - **Windows test.** The echo build is gone. `tools/windex_page_test.py` runs against the normal firmware (11.1).
@@ -874,9 +874,24 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 
 - **`commands.md` is generated per page.** Each page section holds its command table between `<!-- VC:BEGIN <MNEM> -->` and `<!-- VC:END <MNEM> -->`, the page map sits in a `PAGES` block, and the name-sorted command index at the end is an `INDEX` block. The index links each command to its page section when the `## N. MNEM (0xPP)` heading exists. `PAGES` and `INDEX` are reserved mnemonics. `scripts/gen_vendor_protocol.py --check` fails when any block, or the JSON registry, differs from the `.def` files. The prose around the blocks stays hand-written.
 - **Old numbers** appear only in section 25 of `commands.md`, which points to `vendor_protocol_migration_notes.md` and `legacy_map.json`. `current_architecture.md`, the feature specs and `README.md` name commands as `PAGE.NAME`.
-- **Tools.** `tools/dspi_poke/` reads names, directions, address kinds and sizes from `dspi_commands.json`, found by walking up from the script or the working directory, and also accepts numeric forms without it. `tools/latency_bench/` resolves names through `tools.dspi_test.device` (`resolve_command`, `pget`), with the shared struct readers in `tools/latency_bench/paged.py`. `tools/clkdiag_poll.py` and `tools/ring_health_poll.py` stay standalone pyusb scripts with page and command numbers as named constants. `dspi_poke`, `clkdiag_poll.py` and `ring_health_poll.py` probe `SYS.PROTOCOL_INFO` first and stop on older firmware. The latency bench relies on the harness device's own protocol probe.
+- **Tools.** `tools/dspi_poke/` reads names, directions, address kinds and sizes from `dspi_commands.json`, found by walking up from the script or the working directory, and also accepts numeric forms without it. `tools/latency_bench/` resolves names through `tools.dspi_test.device` (`resolve_command`, `pget`), with the shared struct readers in `tools/latency_bench/paged.py` (moved to `tools/dspi_test/telemetry.py` in Phase 6). `tools/clkdiag_poll.py` and `tools/ring_health_poll.py` stay standalone pyusb scripts with page and command numbers as named constants. `dspi_poke`, `clkdiag_poll.py` and `ring_health_poll.py` probe `SYS.PROTOCOL_INFO` first and stop on older firmware. The latency bench relies on the harness device's own protocol probe.
 - **Flag audit.** `RESTART` now marks every command that can interrupt audio. Every flash-writing command carries it, because each ends in `complete_flash_write_operation_full()`. So do the input pin and clock commands that restart a live input under mute (`INPUT.SPDIF_RX_PIN`, `INPUT.I2S_RX_PIN`, `INPUT.I2S_RX_CHANNELS`, `INPUT.ADAT_RX_PIN`, `CLOCK.I2S_BCK_PIN`, `CLOCK.I2S_CLOCK_PIN_MODE`), `OUTPUT.DAC_MUTE_TEST` and `SYS.ENTER_BOOTLOADER`. `STORE.FACTORY_RESET` lost `FLASH`: it resets the live state, writes no flash and keeps every stored preset, as 1.1.6 did. The protocol is unreleased, so no page revision changed.
 - **Doc strings.** `SYS.SPDIF_TX_STATS` describes its first field as the USB packet-gap count it is, `SYS.PLATFORM` lists its bytes, and `STORE.ALL_PARAMS_CHUNK` says that only SET chunks must arrive in order.
+
+### 8.13 As built (Phase 6)
+
+- **Deleted.** `tools/dspi_test/legacy_map.py`, the `old`, `translate`, `hybrid` and `auto` protocol modes with `DSPI_TEST_PROTOCOL`, the old-style `dev.get` / `dev.set` / `OP` API, and `raw_get` / `raw_set`. From `golden/`, `script.py`, `rp2350_1.1.6.json`, `intended.json` and `legacy_opcodes.json`. All of them are in commit edf11eb.
+- **Device API.** `pget` / `pset` and their typed forms, `pget_ready`, `last_result()`, `protocol_info()`, `paged_commands()`, `resolve()`, `wait_ready()` / `is_alive()` over `SYS.PLATFORM`, and one raw primitive, `raw_request()`, used only by the page 0 test. A paged request to firmware that does not answer `SYS.PROTOCOL_INFO` raises `ProtocolError`, which says the harness needs firmware 1.1.7 or later.
+- **Shared support.** `helpers.py` holds the native helpers. They cover float and bool round trips, expected result codes, non-finite refusal, waits, busy retry, `FILTER.BAND` and `ROUTE.MATRIX_ROUTE` packing, and GPIO choice from the firmware's valid-pin rule. The new `telemetry.py` reads the telemetry structs for the harness and for `tools/latency_bench`, whose `paged.py` keeps only `stats_reset`. The new `tests/_cs.py` holds the Control Surfaces support.
+- **Two test families, not merged.** The plan said to merge the Phase 2 paged tests into the older modules. They were kept apart, because the two do different jobs. The `paged_*` modules check per-page protocol conformance (shapes, round trips, refusals, discovery). The other 13 modules, all ported to native calls, check feature behaviour (clamps and ranges, cross-feature interactions, bulk round trips, stress and fuzz, the spectrum analyser, preset isolation, pin moves, audio loopback). Tests in the older modules that only duplicated `paged_*` coverage were removed.
+- **Stale tests fixed.** These were test errors, not firmware errors. Pin tests assumed GPIO 12 was invalid, but it is valid, and one test moved a live output pin by accident. The tube drive clamp test expected -6 dB, where the documented range is -30 to 24 dB. A subharm headroom expectation now follows the spec's 4.2 dB for one band. The RTA bin frame reader used 64-byte reads, slower than a frame.
+- **Native golden regression.** `capture.py` has the `capture` and `compare` modes and `--selfcheck`, with the `--allow-flash` and `--allow-reconfig` tiers. `script_rp2350.json` and `script_rp2040.json` hold native requests (format 2). The RP2040 script is derived and has no reference. `reference_rp2350.json` was captured from 1.1.7 beta 1 in the same session in which the translated replay matched the 1.1.6 capture with 0 unexplained differences. Its metadata records how to recover the 1.1.6 capture, with `git show edf11eb:tools/dspi_test/golden/rp2350_1.1.6.json`.
+- **Migration data checked.** `scripts/gen_vendor_protocol.py --check` also verifies `Documentation/protocol/legacy_map.json` against the registry, so the old-to-new table cannot drift from the firmware.
+- **Opt-in CS revert tests.** `tests/control_surfaces.py` (three `CS.REVERT` tests) SKIPs unless `DSPI_TEST_CS_REVERT=1` is set, because `CS.REVERT` takes stored non-button bindings down on current firmware (14.1).
+- **Selftest.** A section that needs a missing optional module (`numpy`, `sounddevice`) reports SKIP and the run exits 0. The result is OK 170, SKIP 1, FAILURES 0.
+- **Hardware result.** The whole suite with `--allow-flash` on the bench RP2350 gave 180 of 191 passing, 1 failing and 10 SKIPs. The skips are the bootloader policy (1), no `sounddevice` (1), the CS revert opt-in (3) and the bench-build `DIAG` commands (5). The audio loopback group was not part of this run.
+- **The one failure** is `rta.rta_busy_within_budget`. The analyser's worst frame time measures 1.04 to 1.08 ms at FFT order 10 on RP2350, where `spectrum_analyser_spec.md` section 3.1 says "a fraction of a millisecond". It is left failing until the user decides whether the spec or the firmware is wrong (14.1).
+- **Not ported.** `tools/batch_bench/` drives an experimental firmware command that this firmware does not have. It still imports `OP` and fails at import, and its README says so.
 
 ## 9. Generated docs and capability data
 
@@ -906,7 +921,7 @@ At runtime the device reports the same data through `SYS.PAGE_LIST`, `SYS.PAGE_C
 
 ### 10.2 Tools in this repo
 
-- **`tools/dspi_test`.** `device.py` is the single choke point. It gains a page argument and loads the JSON registry in place of the `config.h` regex, since the `REQ_*` defines are deleted. The existing tests run through the translation layer until Phase 6 ports them. Three spots depend on opcode values and need care: `crosscut.py:35` (hard-coded free list), the `OPCODE_NAME` map keyed by integer, and the `selftest.py` mocks.
+- **`tools/dspi_test`.** `device.py` is the single choke point. It gains a page argument and loads the JSON registry in place of the `config.h` regex, since the `REQ_*` defines are deleted. The existing tests ran through the translation layer until Phase 6 ported them (8.13). Three spots depended on opcode values and needed care. They were `crosscut.py:35` (hard-coded free list), the `OPCODE_NAME` map keyed by integer, and the `selftest.py` mocks.
 - **`dspi_poke`.** Accept `PAGE.NAME` and a `--page` option. Its own `config.h` parser is replaced by the registry.
 - **Pollers and benches** (`clkdiag_poll.py`, `ring_health_poll.py`, `latency_bench`, `batch_bench`). Move literals to names from the registry. `loop_prof.py` assumes an 8-bit opcode key and follows the profiler change. `batch_bench` talks to an experimental command that is not ported, so it is left alone.
 
@@ -960,7 +975,7 @@ This is the summary. The guide carries the detail.
 | No fallback path in the field | With a clean break, a wrong handler is a broken feature for every user of the beta | Golden replay and on-device A/B before the flip (7.5). Release gate (7.6) |
 | A host is ported from the guide and the guide is wrong or thin | Maintainers cannot be expected to read firmware source | The guide is generated from the same tables as the firmware where possible, and each host appendix is checked against that host's code |
 | A new host sends a paged command to old firmware | Old firmware ignores `wIndex` and would run an unrelated opcode | Mandatory `PROTOCOL_INFO` probe (5.14). The probe number was chosen because it STALLs on 1.1.6 |
-| The harness translation layer hides a firmware bug, or has one of its own | It sits between the tests and the device | It is data-driven from the same mapping file the docs use. Native paged tests per page cross-check it. The on-device A/B in Phase 2 does not go through it. It is deleted in Phase 6 |
+| The harness translation layer hid a firmware bug, or had one of its own | It sat between the tests and the device | It was data-driven from the same mapping file the docs use. Native paged tests per page cross-checked it. The on-device A/B in Phase 2 did not go through it. It was deleted in Phase 6 |
 | Slot alignment regression | Hard project constraint | Invariant 8.7. Handlers move verbatim. Review gate on any diff that touches a pending flag or a reset call. Loopback alignment tests in the harness |
 | Flash growth during development | Old switches and new handlers coexist until the flip | Expected and temporary. The size baseline in `scripts/ram_baseline.json` is updated once, after the flip |
 | RAM placement | Firmware is XIP with hot code pinned | The dispatcher and table are cold and stay in flash. Run `check_ram_placement.py` every phase. Nothing new is called from an ISR except `vendor_is_bulk_set()`, which keeps its current shape |
@@ -995,6 +1010,8 @@ Each phase is run by Opus subagents under one orchestrator. The orchestrator ass
 - `Documentation/current_architecture.md` updated by one agent at a time.
 
 Each phase is committed once, on `vendor-command-overhaul`, after its gate passes. Only that phase's files are staged. Nothing is pushed, tagged or merged.
+
+Phases 0 to 6 are done. Their text below is the plan as it was carried out, kept as a record, and sections 8.8 to 8.13 say what was actually built.
 
 ### Phase 0. Validation spikes and golden capture
 
@@ -1060,7 +1077,7 @@ Work:
 - Delete both switches, every `REQ_*` define and the echo command.
 - Refuse every page 0 request.
 - Set `FW_VERSION_PATCH` to 7 and `FW_VERSION_BETA` to 1.
-- Switch the harness default to "translate to paged". As built, the harness probes the firmware and picks the mode itself (8.11).
+- Switch the harness default to "translate to paged". As built, the harness probed the firmware and picked the mode itself (8.11), until Phase 6 removed the modes.
 - Make the native paged tests independent of page 0. Their old-opcode A/B halves become spec assertions.
 
 Verification beyond the gate:
@@ -1087,11 +1104,13 @@ The closing pass corrected the page flags and doc strings, fixed stale firmware 
 
 ### Phase 6. Port the tests and delete the translation layer
 
-Agents split the 13 older test modules in `tools/dspi_test/tests/` (the ones that still call old opcode names through the translation layer) between them, one owner per file. Each test is rewritten to call paged commands by name. The paged tests written in Phase 2 no longer depend on old opcodes since Phase 4, and are merged into the matching modules.
+Done. Section 8.13 records the result.
 
-When every module is ported, one agent deletes `legacy_map.py` and the "send old" mode from `device.py`, and fixes `crosscut.py`, `stress.py` and `selftest.py`. `Documentation/protocol/legacy_map.json` stays as migration data.
+Agents split the 13 older test modules in `tools/dspi_test/tests/` (the ones that still called old opcode names through the translation layer) between them, one owner per file. Each test was rewritten to call paged commands by name, and tests that only duplicated `paged_*` coverage were removed. The plan was to merge the Phase 2 paged tests into the matching modules. That was not done. The `paged_*` modules check per-page protocol conformance and the older modules check feature behaviour, so they stay two families.
 
-Verification: the full native harness passes on hardware, and the golden replay is re-expressed in native calls and still matches.
+When every module was ported, `legacy_map.py` and the protocol modes were deleted from the harness, and `crosscut.py`, `stress.py` and `selftest.py` were fixed. `Documentation/protocol/legacy_map.json` stays as migration data, checked by the generator.
+
+Verification: the full native harness ran on hardware with 180 of 191 passing. The one failure is a spec question (14.1). The golden regression was re-expressed in native requests, and the native reference was captured in the same session as a matching translated replay.
 
 ### Phase 7. Migration guide
 
@@ -1109,7 +1128,7 @@ Run the section 7.6 gate and report. Cutting the release waits for the user's ex
 |---|---|
 | No write-as-read anywhere. Actions are zero-length SETs, and failure is a STALL plus `LAST_RESULT` | A read that changes state is the same kind of hidden behaviour the overhaul is removing. It also makes every GET safe to probe or dump. The enabling fix is small: run zero-length SETs at SETUP |
 | Page 0 is empty, not a legacy table | The user chose a clean break with no old commands kept |
-| A compatibility layer exists only in the test harness, and only until the tests are ported | It lets the existing tests prove the new handlers, and it ships nothing |
+| A compatibility layer existed only in the test harness, and only until the tests were ported (deleted in Phase 6) | It let the existing tests prove the new handlers, and it shipped nothing |
 | Commands start at 0x10 in every page, not just 0x01 reserved | Also covers WebUSB's 0x02 and leaves room for protocol-level use at no real cost |
 | `CLOCK` and `DIAG` pages added, `NAME` page dropped. Private range 0xE0-0xEF added | Section 4 |
 | Parameter-indexed commands (tube, upmixer, limiter) are split per parameter | A parameter index in `wValue` is an operation selector by another name, and it hides the commands from the table and the capability data |
@@ -1133,9 +1152,17 @@ The user answered the open questions on 2026-11-15. Three were left to the desig
 | `overclock`, `ac3-dts-decode` | Not merged, not rebased, no reserved numbers |
 | Which hosts block the release | Not applicable. This work delivers firmware, harness and migration guide. Host apps are ported by their maintainers |
 | DSPi Link | The repo is at `/Users/weeblabs/DSPi-Link`, read-only for this work. Its port is covered by a guide appendix |
-| Harness translation layer | Temporary. Tests are ported to native paged calls and the layer is deleted (Phase 6) |
+| Harness translation layer | Temporary. The tests were ported to native paged calls and the layer was deleted in Phase 6 (8.13) |
 | Commits | One commit per finished and verified phase, on `vendor-command-overhaul` only. No push, tag or merge |
 
 ### 14.1 Still open
 
-None that block the work. The Phase 0 Windows result is the only outstanding input.
+None blocks the remaining phases. These inputs and decisions are outstanding, recorded here so they are not lost.
+
+| Item | Status |
+|---|---|
+| Phase 0 Windows `wIndex` result | The user runs `tools/windex_page_test.py` on Windows (11.1). It passes on macOS |
+| `DIAG.CLOCK_DIAG` transports | It is USB only (`USB_ONLY`, 8.10). Replies are now up to 256 bytes on every transport, so it could also be served on UART and I2C. Awaiting the user's decision |
+| Meaning of `VC_F_RESTART` | Today it marks every command that can interrupt audio (8.12), flash writes and live input restarts included. The alternative is to mark output restarts only. Awaiting the user's decision |
+| RTA frame time | `spectrum_analyser_spec.md` section 3.1 says a frame's transform takes "a fraction of a millisecond on RP2350". It measures 1.04 to 1.08 ms at FFT order 10. Either the spec sentence or the firmware is wrong. `rta.rta_busy_within_budget` fails until this is decided |
+| `CS.REVERT` takes stored bindings down | A firmware bug, out of scope for this work and tracked separately. A revert leaves every stored non-button binding down with a pin-in-use status. The three `control_surfaces` tests are opt-in (`DSPI_TEST_CS_REVERT=1`) until it is fixed |

@@ -1,262 +1,258 @@
-# dspi_test — DSPi firmware control-plane QA suite
+# dspi_test: DSPi firmware QA suite
 
-A repeatable, host-executable test harness that exercises **every** DSPi vendor
-command over USB and asserts the device never crashes, hangs, stalls
-unexpectedly, or returns wrong/out-of-range results. This is the standardized
-firmware-stability gate.
+**TL;DR.** This is the host-side test suite for the DSPi firmware. It talks to a DSPi over USB, sends
+it vendor commands, and checks every answer: values round-trip, ranges clamp, bad requests are refused
+with the right reason, settings persist, and the device never crashes or hangs. It speaks only the paged
+vendor protocol of firmware 1.1.7 and later. A run puts the device back the way it found it.
 
-It is **control-plane only by default**: it verifies command round-trips, parameter
-ranges, validation behavior (STALL / in-band error / silent no-op / clamp), flash
-persistence, cross-feature state, and device liveness. The default firmware has no USB
-capture endpoint, so the core suite does not measure audio. An **optional hardware
-audio-loopback group** (`--audio`) adds real signal measurement when DSPi is flashed
-with the `DSPI_LOOPBACK` build, which exposes output slot 0 as a USB capture input
-(no external recorder or wiring); see [Audio loopback](#audio-loopback-optional).
-
-> **New here?** [`test_harness.md`](test_harness.md) is the full, explain-everything guide
-> to the audio-loopback rig: the DSPI_LOOPBACK firmware, setup, every test and parameter,
-> and troubleshooting. This README is the quick-start.
+By default the suite checks the control plane only, because release firmware has no USB capture
+endpoint. An optional audio group (`--audio`) also measures real signal when DSPi runs the
+`DSPI_LOOPBACK` build. [`test_harness.md`](test_harness.md) is the full guide to that audio rig. This
+README is the quick start.
 
 ## Requirements
 
 ```
 pip install pyusb           # plus `brew install libusb` on macOS
 ```
-A DSPi plugged in (VID `0x2E8B`, PID `0xFEAA`), not held exclusively by another
-app. Run from the repo root so the registry and mapping files under `Documentation/protocol/` are found.
+
+- A DSPi on USB (VID `0x2E8B`, PID `0xFEAA`), not held by another app. Close DSPi Console first.
+- **Firmware 1.1.7 or later.** The harness reads `SYS.PROTOCOL_INFO` before anything else. Older
+  firmware does not answer it, and the harness then stops with a `ProtocolError` saying it needs
+  1.1.7 or later. It sends such firmware nothing else, because 1.1.6 would run a paged command as
+  whichever old opcode shares its number.
+- Run from the repo root, so the command registry `Documentation/protocol/dspi_commands.json` is found.
 
 ## Run
 
 ```bash
-# COMPLETE SUITE — run everything in one command (audio loopback + flash +
-# factory reset). This is the one to use if you just want "run all the tests".
-# The audio group runs first so its auto-probe sees a pristine device. Needs DSPi
-# flashed with the DSPI_LOOPBACK build + sounddevice for the audio part (those tests
-# SKIP, never fail, if absent):
-python3 -m tools.dspi_test.run --all
-
-# Full non-flash run (safe, fast, no flash wear):
+# Default run: every group except audio. No flash writes.
 python3 -m tools.dspi_test.run
 
-# Include flash-writing tests (preset save/load/delete, names, startup,
-# output-config mode/save, master-volume save, DAC-mute config). Budget-capped & restored:
+# Add the flash-writing tests (presets, names, startup, output-config and master volume saves).
+# Erases are budget-capped (default 30) and every change is put back.
 python3 -m tools.dspi_test.run --allow-flash
 
-# Also run the one-shot factory-reset test:
-python3 -m tools.dspi_test.run --allow-flash --allow-factory-reset
+# Everything: audio group, flash tests and the factory-reset gate.
+python3 -m tools.dspi_test.run --all
 
-# Only some groups; write reports:
+# Some groups only, with reports.
 python3 -m tools.dspi_test.run --group eq,volume --report report.md --json report.json
 
-# Heavier stress/fuzz:
+# Heavier stress and fuzz.
 python3 -m tools.dspi_test.run --stress 500
 
-# List tests / write the catalog without touching the device:
+# List the tests, or write the catalog. Neither needs a device.
 python3 -m tools.dspi_test.run --list
 python3 -m tools.dspi_test.run --catalog catalog.md
 ```
 
-Exit code is `0` only if there are no `FAIL`/`ERROR` results.
+The exit code is 0 only when no test FAILs or ERRORs.
 
 ### Options
 
 | Flag | Effect |
 |---|---|
-| `--all` | **Complete suite:** audio loopback + flash + factory reset, in one command (= `--audio --allow-flash --allow-factory-reset`). Audio runs first. |
-| `--group G[,G...]` | Run only these groups (default: all except `audio`). |
-| `--audio` | Include the hardware audio-loopback group (needs the DSPI_LOOPBACK firmware + sounddevice). |
-| `--allow-flash` | Enable flash-writing tests (capped at `--flash-cap`, default 30 erases). |
-| `--allow-factory-reset` | Enable the one-shot factory-reset test. |
-| `--flash-cap N` | Hard cap on flash erase cycles for the run. |
-| `--stress N` | Iteration count for stress/fuzz tests. |
-| `--report PATH.md` / `--json PATH` | Write reports. |
-| `--catalog PATH.md` | Emit the test catalog (from metadata) and exit. |
-| `--no-restore` | Skip the final snapshot restore (debugging only). |
-| `--quiet` | Suppress per-test console lines. |
+| `--group G[,G...]` | Run only these groups. Default: every group except `audio` |
+| `--allow-flash` | Run the flash-writing tests, capped at `--flash-cap` erases |
+| `--flash-cap N` | Hard cap on flash erases for the run (default 30) |
+| `--allow-factory-reset` | Gate for factory-reset tests. No current test needs it: `STORE.FACTORY_RESET` is only sent in shapes the firmware refuses |
+| `--audio` | Include the audio loopback group |
+| `--audio-rates HZ[,HZ...]` | Rates for the audio group (default `48000,44100`) |
+| `--all` | Same as `--audio --allow-flash --allow-factory-reset`. The audio group runs first |
+| `--stress N` | Iterations for the stress and fuzz tests (default 0, a light pass) |
+| `--report PATH.md`, `--json PATH` | Write reports |
+| `--list`, `--catalog PATH.md` | List the tests, or write the catalog from test metadata, and exit |
+| `--no-restore` | Skip the final restore (debugging only) |
+| `--quiet` | No per-test console lines |
 
-## Groups
+## How the tests are organised
 
-`identity` · `eq` · `dynamics` · `outputs` · `volume` · `inputs` · `diagnostics`
-· `presets` · `crosscut` · `stress` · `rta` (spectrum analyser; needs the
-siggen, one test also needs `--audio`) · `audio` (opt-in, `--audio`) · `paged_<page>` for each
-page of the paged protocol, plus `paged_page0` (see below)
+There are two families of test modules, with different jobs.
+
+- **`paged_*` modules: protocol conformance, one per page.** They check each page against the
+  specification in `Documentation/commands.md`. Discovery data matches the registry, every reply has
+  its documented shape, values round-trip, and wrong lengths, addresses, directions and non-finite
+  floats are refused with the documented `VC_*` code. `paged_page0` proves page 0 answers nothing.
+- **The other modules: feature behaviour.** Clamps and ranges, interactions between features, bulk
+  parameter round trips, stress and fuzz, the spectrum analyser, preset isolation, pin moves and the
+  audio loopback. They assume the protocol works and test what the device does with it.
+
+A new test goes in the family that matches its purpose. A shape or refusal check belongs in the page's
+`paged_*` module, and a behaviour check belongs in the feature module.
+
+### Groups
+
+From `python3 -m tools.dspi_test.run --list` (191 tests in 27 groups, plus the opt-in `audio` group).
+
+| Group | Tests | Group | Tests |
+|---|---|---|---|
+| `identity` | 4 | `paged_sys` | 18 |
+| `eq` | 2 | `paged_store` | 12 |
+| `dynamics` | 15 | `paged_input` | 13 |
+| `outputs` | 9 | `paged_output` | 5 |
+| `volume` | 3 | `paged_clock` | 5 |
+| `inputs` | 11 | `paged_xport` | 2 |
+| `diagnostics` | 3 | `paged_route` | 16 |
+| `presets` | 5 | `paged_filter` | 7 |
+| `crosscut` | 7 | `paged_dyn` | 6 |
+| `stress` | 3 | `paged_fx` | 8 |
+| `rta` | 8 | `paged_meas` | 10 |
+| `control_surfaces` | 3 (opt-in) | `paged_cs` | 7 |
+| `audio` | opt-in, `--audio` | `paged_cs_nouns` | 1 |
+| | | `paged_diag` | 6 |
+| | | `paged_page0` | 2 |
+
+### Opt-in tests and gates
+
+- **`audio`.** Runs only with `--audio`, `--all` or an explicit `--group audio`. Needs the
+  `DSPI_LOOPBACK` firmware and `sounddevice`. See [Audio loopback](#audio-loopback-optional).
+- **`control_surfaces`.** Its three `CS.REVERT` tests SKIP unless `DSPI_TEST_CS_REVERT=1` is set. On
+  current firmware a revert leaves stored non-button bindings down with a pin-in-use status, so the
+  tests stay off until that firmware bug is fixed.
+- **Bench-build `DIAG` tests.** `DIAG.CLOCK_DIAG`, `DIAG.LOOPBACK_STATS` and `DIAG.LOOP_PROF_*` exist
+  only in the `DSPI_CLOCK_DIAG`, `DSPI_LOOPBACK` and `DSPI_LOOP_PROF` builds. Their shape tests SKIP
+  on a release build.
+- **`rta_input_tap_usb_sine`** plays a tone to the DSPi over USB, so it SKIPs without `sounddevice`.
+  Any firmware build works.
+- **Flash tests** SKIP without `--allow-flash`.
+- **`SYS.ENTER_BOOTLOADER`** is never sent. Its quarantine test is a permanent SKIP.
+
+## How a run stays safe
+
+- **Snapshot and restore.** Before the first test the harness reads the whole live state with
+  `STORE.ALL_PARAMS`, plus the preset directory, startup settings, pins, output types and names. After
+  the run it writes the bulk state back and checks it byte for byte. Tests that move pins, output types,
+  the input source or MCK put those back themselves.
+- **Flash budget.** Each flash test declares its erase cost. The runner enforces the cap and never
+  loops a flash writer. Preset tests use one scratch slot and restore it.
+- **Liveness.** After every mutating test the runner polls `SYS.PLATFORM` (`wait_ready`). A device
+  that never answers again aborts the run.
+- **Re-enumeration.** Some operations block control transfers briefly, and the host may reset the
+  bus. The transport retries timeouts and re-acquires the handle. The report counts re-enumerations.
+
+## Writing a test
+
+Tests call the paged protocol by name. `dev.pget(cmd, addr=0, length=None)` and
+`dev.pset(cmd, data=b"", addr=0)` take a `PAGE.NAME` (or a numeric ID). The typed forms are
+`pget_u8/u16/u32/i32/f32/str` and `pset_u8/u16/u32/i32/f32`. A refused request raises `PagedStall`,
+whose `result_name` is the `VC_*` code read back from `SYS.LAST_RESULT`.
+
+```python
+from ..framework import test
+from ..helpers import expect_stall, float_roundtrip
+
+
+@test("mygroup", mutating=True)
+def my_output_gain(dev, profile, chk):
+    """ROUTE.OUTPUT_GAIN round-trips on output 0 and refuses an output that does not exist."""
+    float_roundtrip(dev, chk, "ROUTE.OUTPUT_GAIN", -6.0, addr=0)
+    missing = profile.num_output_channels
+    expect_stall(chk, lambda: dev.pset_f32("ROUTE.OUTPUT_GAIN", 0.0, missing),
+                 "VC_ERR_ADDRESS", "output past the last")
+```
+
+Register the module in `tests/__init__.py`. Follow these rules.
+
+- **Use the shared helpers** in `helpers.py` before writing your own. They cover float and bool round
+  trips and clamps, `expect_stall` and `expect_result` for expected result codes, non-finite and
+  wrong-length refusals, `wait_for` for deferred work, `set_retry_busy` for `VC_ERR_BUSY`,
+  `FILTER.BAND` and `ROUTE.MATRIX_ROUTE` packing, and GPIO choice from the firmware's valid-pin rule.
+  `telemetry.py` reads the `SYS`, `INPUT`, `MEAS` and `DIAG` telemetry structs, and `tests/_cs.py`
+  holds the Control Surfaces support.
+- **Expect the exact code.** Assert a refusal with `expect_stall(chk, fn, "VC_ERR_...", msg)`, not a
+  bare STALL. It retries because `SYS.LAST_RESULT` is shared by every USB host.
+- **Mark what the test does.** `mutating=True` if it changes device state. `flash=N` (erase cost) if it
+  writes flash, which also gates it behind `--allow-flash`.
+- **Restore what the snapshot cannot.** The final restore covers live DSP state. Put back flash
+  contents, pins, output types and the input source in a `finally`.
+- **Use `pget_ready` only where success is required.** It retries through a busy window, which would
+  hide an expected refusal.
 
 ## Audio loopback (optional)
 
-The `audio` group is the one part of the suite that measures **real audio**. It plays a
-signal out the DSPi USB audio output, lets the DSP process it, and captures **output
-slot 0** from DSPi's own USB capture input (the `DSPI_LOOPBACK` firmware build taps
-slot 0 after all DSP and streams it back — no external recorder or wiring), then
-verifies the measured result against the firmware's filter math
-(`tools/filter_tester/compare_filter.py`). The chain is single-clock and digital, so the
-capture is a fixed-latency, near bit-exact copy of slot 0.
+The `audio` group measures real audio. It plays a signal into the DSPi USB output, lets the DSP process
+it, and captures output slot 0 from DSPi's own USB capture input. The `DSPI_LOOPBACK` build taps slot 0
+after all DSP and streams it back, so no recorder or wiring is needed. The results are checked against
+the firmware's filter math (`tools/filter_tester/compare_filter.py`). The chain is digital on one clock,
+so the capture is a fixed-latency, near bit-exact copy of slot 0.
 
-It is excluded from the default run. **Flash DSPi with the `DSPI_LOOPBACK` build** (the
-default firmware has no capture endpoint), then enable with `--audio` (or
-`--group audio`) and install the extra deps:
+Flash DSPi with the `DSPI_LOOPBACK` build, then install the extra packages.
 
 ```
 pip install sounddevice numpy scipy     # macOS also: brew install portaudio
 ```
 
-Then:
-
 ```bash
-# Bring-up: enumerate host audio devices, then a raw loopback tone + level/THD/noise:
+# Bring-up: list host audio devices, then a raw loopback tone with level, THD and noise.
 python3 -m tools.dspi_test.audio --list
 python3 -m tools.dspi_test.audio --probe
 
-# Run the loopback suite (integrity baseline + PEQ frequency response):
+# The loopback suite.
 python3 -m tools.dspi_test.run --audio --group audio
 ```
 
-What it checks:
+The group checks the following.
 
-- **`loopback_integrity`** — flat path: signal reaches the DSPi capture at unity gain,
-  low noise floor and THD, and near bit-exact reproduction.
-- **`peq_*`** — sets each PEQ type (peaking, shelves, low/high pass, notch, first-order
-  shelves) on the target output and asserts the measured magnitude response matches the
-  RBJ reference within 0.7 dB, spanning both sides of the RP2350 SVF/biquad boundary.
-- **`loopback_allpass_phase`** — first-order all-pass: flat magnitude and correct phase shape.
-- **`xo_*`** — sets each crossover type (Linkwitz-Riley, Butterworth, Bessel; orders 1-8;
-  LP and HP) on a crossover band and asserts the measured magnitude response matches the
-  scipy reference (mirrors `tools/filter_tester/test_crossover.py`) within 1 dB over the
-  measurable region.
-- **`xo_lr4_complementary_sum`** — LR4 LP+HP measured in one capture sum to flat magnitude
-  (the defining Linkwitz-Riley property).
-- **output controls** — `output_gain_level` (level tracks set dB), `output_mute_silences`
-  (mute -> silence), `level_controls` (master volume / user volume / preamp scale by the set
-  dB), `matrix_routing` (crosspoint enable), `matrix_phase_invert` (polarity flips), and
-  `output_delay` (a per-output delay shifts that leg by exactly the set sample count).
-- **alignment** — `slot_lr_alignment` (the slot's L/R are sample-aligned) and that this
-  survives pipeline-reset operations: `alignment_after_input_switch` (USB->S/PDIF->USB) and
-  `alignment_after_output_type_switch` (S/PDIF->I2S->S/PDIF). Note: the capture taps one
-  slot (slot 0), so this checks INTRA-slot L/R; full inter-slot alignment needs multichannel capture.
-- **output types** — `output_type_i2s_audio` measures real audio with slot 0 as **I2S**
-  (unity, low THD, near bit-exact, L/R aligned); since the tap is pre-encoder, a dead I2S
-  output path stalls the producer and the tone vanishes, so a clean tone proves the I2S
-  consumer is draining. `output_type_switch_stress` cycles slot 0 SPDIF<->I2S several times
-  and re-measures after each switch (signal present, unity level, L/R aligned), exercising the
-  shared-DMA-channel teardown/re-setup path. Both SKIP if the I2S switch is unavailable.
-- **full chain / dynamics** — `multiband_eq` (stacked PEQ bands = sum of their responses),
-  `loudness_shape` (loudness boosts bass/treble at low volume), `crossfeed_bleed` (one channel
-  bleeds an attenuated copy into the opposite), `leveller_boost` (a quiet signal is lifted
-  within the max-gain ceiling), and `output_clip_limit` (driving past 0 dBFS clamps at full
-  scale and raises THD instead of wrapping).
+- **Integrity.** `loopback_integrity`: unity gain, low noise and THD, near bit-exact reproduction.
+- **PEQ.** Each PEQ type against the RBJ reference within 0.7 dB, on both sides of the RP2350
+  SVF/biquad boundary, and the first-order all-pass phase.
+- **Crossovers.** Linkwitz-Riley, Butterworth and Bessel at orders 1 to 8, LP and HP, against the scipy
+  reference within 1 dB, and LR4 LP plus HP summing flat.
+- **Output controls.** Output gain, mute, master and user volume, preamp, matrix routing and phase
+  invert, and per-output delay to the exact sample.
+- **Alignment.** Slot 0 left and right stay sample-aligned, also after an input source switch and an
+  output type switch. The capture taps one slot, so inter-slot alignment needs multichannel capture.
+- **Output types.** Slot 0 as I2S measures clean audio, and repeated S/PDIF to I2S switches recover.
+- **Full chain.** Stacked PEQ bands, loudness, crossfeed, leveller and clipping at full scale.
 
-The captured slot (always slot 0) is **auto-probed** once per session. macOS prompts for
-microphone access for the DSPi capture input on first run. Both the output and the capture
-are matched by the name substring `DSPi`; the harness disambiguates them by direction
-(output vs input channels). Adjust in `audio.py` if your OS names them differently.
+The captured slot is probed once per session. macOS asks for microphone access to the DSPi capture
+input on the first run. Output and capture are both found by the name `DSPi` and told apart by
+direction. Adjust `audio.py` if your OS names them differently.
 
-## How it stays safe
-
-- **Snapshot/restore.** Before any test, the full live DSP state is captured via
-  `REQ_GET_ALL_PARAMS` (plus directory metadata). After the run it is restored
-  via `REQ_SET_ALL_PARAMS` and verified byte-for-byte. Mutating tests also
-  restore hardware resources (pins, output types, input source, MCK) inline.
-- **Flash minimization.** Each flash-writing test declares its erase cost; the
-  run is hard-capped and never loops a flash writer. Preset lifecycle uses one
-  scratch slot (the highest unoccupied) and restores it.
-- **Liveness sentinel.** After every mutating test the device is polled
-  (`REQ_GET_PLATFORM`); a device that never recovers aborts the run.
-- **Resilience.** The transport retries transient timeouts and **re-acquires the
-  handle on re-enumeration** (some heavy ops briefly disable the USB control IRQ
-  long enough that the host resets the bus — recoverable, and the count is
-  reported).
-- **Exclusions.** `0xF0 ENTER_BOOTLOADER` is never sent (would drop the device
-  to BOOTSEL); it appears as a documented SKIP. (`0x52` is no longer excluded —
-  the dead `LOAD_PARAMS` was repurposed as `REQ_SAVE_OUTPUT_CONFIG`, a safe
-  action covered by `output_config_save`.)
-
-## Paged protocol and the translation layer
-
-*Added 2026-11-16 for the vendor command overhaul (`Documentation/Features/vendor_command_overhaul_plan.md`).*
-
-`DspiDevice` speaks both protocols. Paged commands go through `dev.pget(cmd, addr=0, length=None)` and
-`dev.pset(cmd, data=b"", addr=0)`, where `cmd` is a name such as `"FILTER.BAND"` or a numeric ID such as
-`0x0610`. Names resolve through `Documentation/protocol/dspi_commands.json`, then through the plan
-numbering in `Documentation/protocol/legacy_map.json`. A refused paged request raises `PagedStall` (a
-`Stall`) whose `result_name` is the `VC_*` code read back from `SYS.LAST_RESULT`. `dev.protocol_info()`
-returns `None` on firmware without the paged dispatcher, and every paged request is refused locally on
-such firmware, because 1.1.6 would run it as the old opcode with the same number.
-
-The legacy `dev.get(OP.X, ...)` and `dev.set(...)` calls take the 1.1.6 opcode numbers. `OP` comes
-from `golden/legacy_opcodes.json`, since `config.h` no longer defines them. How those calls reach the
-device depends on the protocol mode:
-
-| Mode | What it is for |
-|---|---|
-| `auto` (default) | Probes `SYS.PROTOCOL_INFO` once when the device is opened. Firmware 1.1.7 and later answers, so `translate` is used. 1.1.6 STALLs the probe harmlessly, so `old` is used |
-| `translate` | Every old call becomes paged commands. The only mode that works on 1.1.7, where page 0 answers nothing |
-| `old` | Old opcodes go to page 0 unchanged. Only for firmware 1.1.6, for example to recapture the golden reference |
-| `hybrid` | Translates an old call when the device has every paged command it needs, otherwise sends it to page 0. Useful only on development builds from before the flip, which had both. On firmware without page 0 it acts as `translate`, and an opcode `legacy_map.json` does not know raises `UnmappedRequest` |
+## Selftest
 
 ```bash
-python3 -m tools.dspi_test.run                                 # auto
-DSPI_TEST_PROTOCOL=old  python3 -m tools.dspi_test.run         # force a mode (or protocol= in code)
-python3 -m tools.dspi_test.legacy_map --check                  # validate the mapping data
+python3 -m tools.dspi_test.selftest
 ```
 
-`dev.protocol` holds the mode in use and `dev.protocol_auto` says whether it was chosen by the probe.
+No device needed. It checks the harness's own logic against fakes of the firmware. A section whose
+optional module (`numpy`, `sounddevice`) is missing reports SKIP and the run still exits 0. It does
+need `pyusb` to import. The current result is OK 170, SKIP 1, FAILURES 0.
 
-In translate mode `legacy_map.py` follows `legacy_map.json` (its `_schema` key documents the format).
-Write-as-read commands become SETs and answer the 1.1.6 status byte. A refused OUT write is swallowed,
-as 1.1.6 ACKed it, and logged in `dev.swallowed`. `legacy_map.golden_transport` replays the golden
-capture through the same layer:
-`python -m tools.dspi_test.golden.capture compare ... --transport tools.dspi_test.legacy_map:golden_transport`.
-The layer and the `old` mode are removed in plan Phase 6. The JSON stays as migration data.
+## Golden regression
 
-In hybrid mode the decision is per opcode, per split selector, and per `GET_STATUS` selector. Custom
-adapters declare what they touch in the `uses` list of their JSON entry. What exists is read from
-`SYS.PAGE_LIST` and `SYS.PAGE_COMMANDS` once per handle (not from the registry), so reconnect or make a
-new `DspiDevice` after flashing. Whether page 0 still answers is probed once, with the old
-`GET_PLATFORM`, the first time a call would go there. `dev.hybrid_counts` counts calls per old opcode
-name and the one-line `dev.hybrid_summary()` is printed at exit. The golden replay's
-`legacy_map:golden_transport_hybrid` routes on its own and does not have the page 0 check, so use
-`golden_transport` against 1.1.7.
+`golden/` holds a byte-for-byte record of the firmware's answers to a fixed script of paged requests,
+and `python3 -m tools.dspi_test.golden.capture compare --ref ...` reports every reply that changed. The
+reference is tied back to firmware 1.1.6. See [`golden/README.md`](golden/README.md).
 
-The `paged_*` groups hold native tests, one module per page. They SKIP on firmware without the paged
-dispatcher.
+## Current results
 
-`paged_page0` proves page 0 is empty. It walks every `bRequest` 0x00-0xFF on page 0: a 4-byte GET, a
-zero-length SET and a 4-byte SET, with interface recipient at `wIndex` 0 and 2 and with device
-recipient at `wIndex` 0 (2,304 requests, a few seconds). Every one must STALL, `SYS.LAST_RESULT` must
-read `VC_ERR_UNKNOWN` for the last, and `STORE.ALL_PARAMS` and `STORE.DIRECTORY` must be unchanged. A
-second test checks that the Microsoft OS 2.0 request (`0xC0`, `bRequest` 0x01, `wIndex` 7) still
-returns the WinUSB descriptor set. On 1.1.6 the walk would run every old opcode, factory reset and
-bootloader included, so it SKIPs unless `SYS.PROTOCOL_INFO` answers, `SYS.PLATFORM` reports 1.1.7 or
-later, and the old `GET_PLATFORM` on page 0 STALLs.
+On the bench RP2350 with firmware 1.1.7 beta 1, `--allow-flash`: 180 of 191 pass, 1 fails, 10 SKIP.
 
-The Windows `wIndex` check is a separate standalone script, `tools/windex_page_test.py`
-(procedure in `Documentation/Features/windex_page_test.md`).
+- **The failure** is `rta.rta_busy_within_budget`. The analyser's worst frame time measures about
+  1.05 ms at FFT order 10, and `Documentation/Features/spectrum_analyser_spec.md` section 3.1 says "a
+  fraction of a millisecond on RP2350". It is left failing until it is decided whether the spec or the
+  firmware is wrong.
+- **The skips** are the bootloader quarantine (1), `rta_input_tap_usb_sine` without `sounddevice`
+  (1), the opt-in `CS.REVERT` tests (3) and the bench-build `DIAG` tests (5).
 
 ## Layout
 
 | File | Role |
 |---|---|
-| `device.py` | `DspiDevice` USB transport; typed get/set; paged `pget`/`pset`; STALL/Timeout/Disconnect handling; opcode map. |
-| `legacy_map.py` | Temporary translation of 1.1.6 requests into paged commands, and its `--check`. |
-| `profile.py` | `PlatformProfile` — probes the device for counts/ceilings (platform-adaptive). |
-| `lifecycle.py` | Snapshot & restore. |
-| `framework.py` | Test registry, `Check` assertions, `Runner`, reports, catalog. |
-| `helpers.py` | Reusable round-trip / clamp / bool / NaN patterns. |
-| `run.py` | CLI entry point. |
-| `tests/` | One module per command group. |
+| `device.py` | `DspiDevice`: USB transport, `pget`/`pset` and typed forms, `protocol_info`, `last_result`, `paged_commands`, `resolve`, `wait_ready`/`is_alive`, `raw_request` (page 0 test only), and the exceptions `Stall`, `PagedStall`, `Disconnected`, `Timeout`, `ProtocolError` |
+| `profile.py` | `PlatformProfile`: counts and ceilings probed from the device |
+| `lifecycle.py` | Snapshot and restore |
+| `framework.py` | Test registry, `Check` assertions, `Runner`, reports, catalog |
+| `helpers.py` | Shared test helpers |
+| `telemetry.py` | Readers for the telemetry structs, also used by `tools/latency_bench` |
+| `actions.py` | Live-parameter action catalogue shared by the stress test and the latency soak |
+| `audio.py`, `coreaudio.py` | Audio measurement engine and macOS sample-rate control |
+| `run.py` | CLI entry point |
+| `selftest.py` | No-hardware checks of the harness |
+| `tests/` | Test modules, one group each. `tests/_cs.py` is shared Control Surfaces support |
+| `golden/` | Golden regression |
 
-## Adding a test
-
-```python
-from ..device import OP
-from ..framework import test
-
-@test("mygroup", mutating=True, flash=0)
-def my_check(dev, profile, chk):
-    """One-line description (shown in the catalog)."""
-    dev.set_f32(OP.SET_SOMETHING, 1.5)
-    chk.approx(dev.get_f32(OP.GET_SOMETHING), 1.5, 1e-3, "round-trip")
-    chk.stalls(lambda: dev.get(OP.GET_SOMETHING, 4, wvalue=999), "bad index STALLs")
-```
-Set `mutating=True` if it changes device state, and `flash=N` (erase cost) if it
-writes flash. The global snapshot restores live state; restore hardware
-resources (pins/types/input) inline in a `finally`.
+The Windows `wIndex` check is a separate script, `tools/windex_page_test.py` (procedure in
+`Documentation/Features/windex_page_test.md`).

@@ -5,6 +5,9 @@ firmware and device fully exonerated. Harness self-heal fix recommended in
 8c, not yet implemented. Last updated 2026-08-02 evening (RP2350, firmware
 v1.1.5 loopback build, wire v27).*
 
+*Command names updated to the paged vendor protocol (firmware 1.1.7) on 2026-11-16. The findings and
+their dates are unchanged.*
+
 Four tests in the `audio` group failed under full `run.py` invocations and
 passed under every controlled sequence. This document records how that was
 root-caused, because the failure signature will recur on any macOS rig.
@@ -118,7 +121,7 @@ without new evidence.
 |---|---|
 | Host-side sample-rate conversion between the two CoreAudio devices | Residual energy **falls** with frequency (-29 dB at 0-500 Hz, -78 dB at 12-20 kHz). SRC interpolation error rises with frequency. |
 | Clock drift between the playback and capture functions | A tone burst at the start and end of a 6 s capture had **identical** delay (5704 samples both times): 0 samples drift, 0.0 ppm. |
-| The stereo upmixer corrupting L/R | `UPMIX_GET_STATUS` read `active=0, parked_reason=1` (disabled) while the errors persisted. |
+| The stereo upmixer corrupting L/R | `FX.UPMIX_STATUS` (then `UPMIX_GET_STATUS`) read `active=0, parked_reason=1` (disabled) while the errors persisted. |
 | The onboard signal generator injecting a tone | `SiggenStatus.state = 0` (IDLE) and all output peak meters read zero with no host audio. Note byte 0 of that struct is `version`, not a run flag. |
 | Lost EQ writes (`eq_update_pending` is a single slot, no queue) | Wrote four EQ params back-to-back and read all four back: **0 of 4 lost**, at 0 ms, 5 ms and 30 ms spacing. |
 | `output_clip_limit` leaving state that breaks the next test | Ran the pair back-to-back three times: **all pass at 0.001 dB**. Also contradicted by an earlier bisect where the LT test failed running first. |
@@ -459,6 +462,6 @@ Before interpreting any failure:
 - `tools/dspi_test/test_harness.md` sections 9 and 9a: how the measurement works
   and how rates are handled.
 - `Documentation/current_architecture.md`, "USB Audio Loopback Capture": the tap,
-  the rate-matching servo, and the glitch counters on `REQ_GET_STATUS` 24/25.
+  the rate-matching servo, and the glitch counters (`DIAG.LOOPBACK_STATS`).
 - `tools/dspi_test/selftest.py`: no-hardware checks of the harness's own logic,
   including that every capture call routes through `_capture()`.

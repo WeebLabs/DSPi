@@ -5,34 +5,15 @@ ENTER_BOOTLOADER is never sent, in either direction. The device name test writes
 Registry comparisons use Documentation/protocol/dspi_commands.json.
 """
 
-import json
 import struct
 
-from ..device import (PagedStall, ProtocolError, REGISTRY_REL, VC_CODES, _find_repo_file)
+from ..device import VC_CODES
 from ..framework import Skip, test
+from ..helpers import bits, expect_stall, has_command, registry, require_paged
 
 SYS = 0x01
 UNUSED_PAGE = 0xDF          # inside the reserved 0x80-0xDF block, never allocated
 NEVER_SEND = {"ENTER_BOOTLOADER", "FACTORY_RESET", "PRESET_SAVE", "PRESET_LOAD", "PRESET_DELETE"}
-
-
-def _paged(dev):
-    try:
-        info = dev.protocol_info()
-    except ProtocolError as e:
-        raise AssertionError(str(e)) from None
-    if info is None:
-        raise Skip("no paged dispatcher: SYS.PROTOCOL_INFO STALLs (firmware 1.1.6 or older)")
-    return info
-
-
-def _registry(dev):
-    if isinstance(getattr(dev, "registry", None), dict):
-        return dev.registry
-    p = _find_repo_file(REGISTRY_REL)
-    if p is None:
-        raise Skip(f"{REGISTRY_REL} not generated yet")
-    return json.loads(p.read_text())
 
 
 def _sys_page(reg):
@@ -42,29 +23,10 @@ def _sys_page(reg):
     raise Skip("registry has no SYS page")
 
 
-def _expect_stall(chk, fn, code, msg, retries=3):
-    """fn() must STALL with VC code `code`. Retried because LAST_RESULT is shared by all USB hosts."""
-    seen = None
-    for _ in range(retries):
-        try:
-            r = fn()
-        except PagedStall as s:
-            if s.result is not None:
-                return chk.eq(s.result_name, code, f"{msg}: LAST_RESULT")
-            seen = s
-            continue
-        return chk.ok(False, f"{msg}: expected STALL with {code}, got {r!r}")
-    return chk.ok(False, f"{msg}: STALLed but LAST_RESULT unreadable or overwritten ({seen})")
-
-
-def _bits(bitmap: bytes) -> set:
-    return {i for i in range(len(bitmap) * 8) if bitmap[i // 8] >> (i % 8) & 1}
-
-
 @test("paged_sys")
 def protocol_info_fields(dev, profile, chk):
     """SYS.PROTOCOL_INFO: "DSPi" magic, protocol version, page count, transfer limits, reserved zero."""
-    info = _paged(dev)
+    info = require_paged(dev)
     raw = dev.pget(0x0110, length=16)
     chk.eq(len(raw), 16, "reply length")
     chk.eq(raw[:4], b"DSPi", "magic")
@@ -74,7 +36,7 @@ def protocol_info_fields(dev, profile, chk):
     chk.eq(info["reserved"], 0, "reserved")
     chk.eq(info["page_count"], len(dev.pget(0x0111, length=256)) // 2, "page count matches PAGE_LIST")
     try:
-        reg = _registry(dev)
+        reg = registry(dev)
     except Skip as s:
         chk.note(str(s))
         return
@@ -85,7 +47,7 @@ def protocol_info_fields(dev, profile, chk):
 @test("paged_sys")
 def page_list_ascending(dev, profile, chk):
     """SYS.PAGE_LIST: {page, revision} pairs, strictly ascending, SYS present, page 0 absent."""
-    _paged(dev)
+    require_paged(dev)
     raw = dev.pget(0x0111, length=256)
     chk.eq(len(raw) % 2, 0, "even length")
     pairs = [(raw[i], raw[i + 1]) for i in range(0, len(raw) - 1, 2)]
@@ -97,7 +59,7 @@ def page_list_ascending(dev, profile, chk):
         bm = dev.pget(0x0112, addr=p, length=64)
         chk.ok(any(bm), f"page 0x{p:02X} listed but PAGE_COMMANDS is empty")
     try:
-        sysrev = _sys_page(_registry(dev))["revision"]
+        sysrev = _sys_page(registry(dev))["revision"]
     except Skip as s:
         chk.note(str(s))
         return
@@ -107,11 +69,11 @@ def page_list_ascending(dev, profile, chk):
 @test("paged_sys")
 def page_commands_sys_matches_registry(dev, profile, chk):
     """SYS.PAGE_COMMANDS for SYS equals the registry's GET and SET sets; an unlisted page is VC_ERR_ADDRESS."""
-    _paged(dev)
-    sys_pg = _sys_page(_registry(dev))
+    require_paged(dev)
+    sys_pg = _sys_page(registry(dev))
     bm = dev.pget(0x0112, addr=SYS, length=64)
     chk.eq(len(bm), 64, "bitmap length")
-    got_get, got_set = _bits(bm[:32]), _bits(bm[32:64])
+    got_get, got_set = bits(bm[:32]), bits(bm[32:64])
     for c in sys_pg["commands"]:
         if c.get("build"):
             continue   # present only in some builds
@@ -120,15 +82,15 @@ def page_commands_sys_matches_registry(dev, profile, chk):
     known = {c["cmd"] for c in sys_pg["commands"]}
     chk.eq(sorted((got_get | got_set) - known), [], "bits set for commands the registry lacks")
     chk.eq(sorted(n for n in got_get | got_set if n < 0x10), [], "no bit below 0x10")
-    _expect_stall(chk, lambda: dev.pget(0x0112, addr=UNUSED_PAGE, length=64), "VC_ERR_ADDRESS",
-                  "PAGE_COMMANDS of an unimplemented page")
+    expect_stall(chk, lambda: dev.pget(0x0112, addr=UNUSED_PAGE, length=64), "VC_ERR_ADDRESS",
+                 "PAGE_COMMANDS of an unimplemented page")
 
 
 @test("paged_sys")
 def command_info_sys_matches_registry(dev, profile, chk):
     """SYS.COMMAND_INFO for each SYS command matches the registry sizes and directions."""
-    _paged(dev)
-    sys_pg = _sys_page(_registry(dev))
+    require_paged(dev)
+    sys_pg = _sys_page(registry(dev))
     addr_byte: dict[str, int] = {}
     for c in sys_pg["commands"]:
         r = dev.pget(0x0113, addr=(SYS << 8) | c["cmd"], length=8)
@@ -149,20 +111,20 @@ def command_info_sys_matches_registry(dev, profile, chk):
 @test("paged_sys")
 def command_info_missing_command(dev, profile, chk):
     """SYS.COMMAND_INFO of a command that does not exist STALLs with VC_ERR_ADDRESS."""
-    _paged(dev)
-    sys_pg = _sys_page(_registry(dev))
+    require_paged(dev)
+    sys_pg = _sys_page(registry(dev))
     used = {c["cmd"] for c in sys_pg["commands"]} | {r["cmd"] for r in sys_pg.get("reserved", [])}
     free = next(n for n in range(0xFF, 0x0F, -1) if n not in used)
-    _expect_stall(chk, lambda: dev.pget(0x0113, addr=(SYS << 8) | free, length=8), "VC_ERR_ADDRESS",
-                  f"COMMAND_INFO of SYS 0x{free:02X}")
-    _expect_stall(chk, lambda: dev.pget(0x0113, addr=(UNUSED_PAGE << 8) | 0x10, length=8), "VC_ERR_ADDRESS",
-                  "COMMAND_INFO on an unimplemented page")
+    expect_stall(chk, lambda: dev.pget(0x0113, addr=(SYS << 8) | free, length=8), "VC_ERR_ADDRESS",
+                 f"COMMAND_INFO of SYS 0x{free:02X}")
+    expect_stall(chk, lambda: dev.pget(0x0113, addr=(UNUSED_PAGE << 8) | 0x10, length=8), "VC_ERR_ADDRESS",
+                 "COMMAND_INFO on an unimplemented page")
 
 
 @test("paged_sys")
 def identity_fields(dev, profile, chk):
     """SYS.PLATFORM / SERIAL / BUILD_INFO / CORE1_MODE have their table sizes and agree with the profile."""
-    _paged(dev)
+    require_paged(dev)
     plat = dev.pget("SYS.PLATFORM", length=7)
     if chk.eq(len(plat), 7, "SYS.PLATFORM length") and profile is not None:
         chk.eq((plat[0], plat[1], plat[3], plat[4], plat[5], plat[6]),
@@ -194,24 +156,24 @@ def identity_fields(dev, profile, chk):
 @test("paged_sys")
 def unknown_page_and_command(dev, profile, chk):
     """An unknown page or command STALLs both ways and LAST_RESULT reads VC_ERR_UNKNOWN."""
-    _paged(dev)
-    sys_cmds = {c["cmd"] for c in _sys_page(_registry(dev))["commands"]}
+    require_paged(dev)
+    sys_cmds = {c["cmd"] for c in _sys_page(registry(dev))["commands"]}
     free = next(n for n in range(0xFE, 0x0F, -1) if n not in sys_cmds)
     for cid, what in (((UNUSED_PAGE << 8) | 0x10, "unknown page"), ((SYS << 8) | free, "unknown SYS command")):
-        _expect_stall(chk, lambda: dev.pget(cid, length=8), "VC_ERR_UNKNOWN", f"GET {what}")
-        _expect_stall(chk, lambda: dev.pset(cid, b"\x00"), "VC_ERR_UNKNOWN", f"SET {what}")
+        expect_stall(chk, lambda: dev.pget(cid, length=8), "VC_ERR_UNKNOWN", f"GET {what}")
+        expect_stall(chk, lambda: dev.pset(cid, b"\x00"), "VC_ERR_UNKNOWN", f"SET {what}")
 
 
 @test("paged_sys")
 def wrong_direction(dev, profile, chk):
     """A SET to a GET-only command (and a GET to a safe SET-only one) gives VC_ERR_DIRECTION."""
-    _paged(dev)
-    _expect_stall(chk, lambda: dev.pset("SYS.PLATFORM"), "VC_ERR_DIRECTION", "zero-length SET to SYS.PLATFORM")
-    _expect_stall(chk, lambda: dev.pset("SYS.PLATFORM", b"\x01"), "VC_ERR_DIRECTION", "SET with payload")
-    for c in _sys_page(_registry(dev))["commands"]:
+    require_paged(dev)
+    expect_stall(chk, lambda: dev.pset("SYS.PLATFORM"), "VC_ERR_DIRECTION", "zero-length SET to SYS.PLATFORM")
+    expect_stall(chk, lambda: dev.pset("SYS.PLATFORM", b"\x01"), "VC_ERR_DIRECTION", "SET with payload")
+    for c in _sys_page(registry(dev))["commands"]:
         if c["set"] and not c["get"] and c["name"] not in NEVER_SEND and not c["flags"]:
-            _expect_stall(chk, lambda: dev.pget((SYS << 8) | c["cmd"], length=8), "VC_ERR_DIRECTION",
-                          f"GET to SET-only SYS.{c['name']}")
+            expect_stall(chk, lambda: dev.pget((SYS << 8) | c["cmd"], length=8), "VC_ERR_DIRECTION",
+                         f"GET to SET-only SYS.{c['name']}")
             break
     else:
         chk.note("no SET-only SYS command safe to probe with a GET yet")
@@ -220,8 +182,8 @@ def wrong_direction(dev, profile, chk):
 @test("paged_sys")
 def set_bad_length(dev, profile, chk):
     """A SET whose payload is outside the command's bounds gives VC_ERR_LENGTH."""
-    _paged(dev)
-    reg = _registry(dev)
+    require_paged(dev)
+    reg = registry(dev)
     cand = [(pg["page"], c) for pg in reg["pages"] for c in pg["commands"]
             if c["set"] and c["name"] not in NEVER_SEND and "BULK" not in c["flags"]
             and not {"FLASH", "RESTART"} & set(c["flags"]) and c["set_max"] < 64]
@@ -229,25 +191,25 @@ def set_bad_length(dev, profile, chk):
         raise Skip("no SET command besides ENTER_BOOTLOADER in the registry yet")
     page, c = min(cand, key=lambda pc: (pc[0] != SYS, pc[0], pc[1]["cmd"]))
     cid = (page << 8) | c["cmd"]
-    _expect_stall(chk, lambda: dev.pset(cid, bytes(c["set_max"] + 1)), "VC_ERR_LENGTH",
-                  f"{c['set_max'] + 1}-byte SET to {c['name']}")
+    expect_stall(chk, lambda: dev.pset(cid, bytes(c["set_max"] + 1)), "VC_ERR_LENGTH",
+                 f"{c['set_max'] + 1}-byte SET to {c['name']}")
     if c["set_min"] > 1:
-        _expect_stall(chk, lambda: dev.pset(cid, bytes(c["set_min"] - 1)), "VC_ERR_LENGTH",
-                      f"{c['set_min'] - 1}-byte SET to {c['name']}")
+        expect_stall(chk, lambda: dev.pset(cid, bytes(c["set_min"] - 1)), "VC_ERR_LENGTH",
+                     f"{c['set_min'] - 1}-byte SET to {c['name']}")
 
 
 @test("paged_sys")
 def none_address_rejects_wvalue(dev, profile, chk):
     """A command whose address kind is NONE refuses a non-zero wValue with VC_ERR_ADDRESS."""
-    _paged(dev)
+    require_paged(dev)
     for name in ("SYS.PLATFORM", "SYS.PROTOCOL_INFO"):
-        _expect_stall(chk, lambda: dev.pget(name, addr=1), "VC_ERR_ADDRESS", f"{name} at wValue 1")
+        expect_stall(chk, lambda: dev.pget(name, addr=1), "VC_ERR_ADDRESS", f"{name} at wValue 1")
 
 
 @test("paged_sys")
 def get_truncated_to_wlength(dev, profile, chk):
     """GET replies are truncated to wLength, so a short read is a prefix of the full one."""
-    _paged(dev)
+    require_paged(dev)
     for cid, full, short in ((0x0120, 7, 4), (0x0122, 64, 10), (0x0110, 16, 8)):
         a, b = dev.pget(cid, length=full), dev.pget(cid, length=short)
         chk.eq(len(b), short, f"0x{cid:04X} length at wLength {short}")
@@ -257,7 +219,7 @@ def get_truncated_to_wlength(dev, profile, chk):
 @test("paged_sys")
 def last_result_tracks_requests(dev, profile, chk):
     """SYS.LAST_RESULT records ID, direction, VC_OK and wValue of the last request, never itself."""
-    _paged(dev)
+    require_paged(dev)
     for _ in range(3):
         dev.pget("SYS.PLATFORM", length=7)
         first, second = dev.last_result(), dev.last_result()
@@ -295,16 +257,9 @@ TELEMETRY = {"SYS.SYSTEM_STATUS": (16, (14, 16)), "SYS.USB_AUDIO_STATUS": (16, (
              "SYS.PDM_STATS": (16, None), "SYS.SPDIF_TX_STATS": (24, None)}
 
 
-def _has(dev, name):
-    """True when the attached firmware implements the GET or SET of `name`."""
-    info = dev.resolve(name)
-    gets, sets = dev.paged_commands().get(info.page, ((), ()))
-    return info.cmd in gets or info.cmd in sets
-
-
 def _need(dev, *names):
-    _paged(dev)
-    missing = [n for n in names if not _has(dev, n)]
+    require_paged(dev)
+    missing = [n for n in names if not has_command(dev, n)]
     if missing:
         raise Skip(f"firmware lacks {', '.join(missing)}")
 
@@ -353,8 +308,8 @@ def telemetry_cpu_loads(dev, profile, chk):
 @test("paged_sys")
 def telemetry_shapes_and_errors(dev, profile, chk):
     """Telemetry GETs have their table lengths and zero reserved bytes; SETs and wValue 1 are refused."""
-    _paged(dev)
-    present = [n for n in TELEMETRY if _has(dev, n)]
+    require_paged(dev)
+    present = [n for n in TELEMETRY if has_command(dev, n)]
     if not present:
         raise Skip("firmware has no SYS telemetry command")
     for name in present:
@@ -363,8 +318,8 @@ def telemetry_shapes_and_errors(dev, profile, chk):
         chk.eq(len(raw), n, f"{name} length")
         if reserved:
             chk.eq(raw[reserved[0]:reserved[1]], bytes(reserved[1] - reserved[0]), f"{name} reserved bytes")
-        _expect_stall(chk, lambda: dev.pset(name, b"\x00"), "VC_ERR_DIRECTION", f"SET {name}")
-        _expect_stall(chk, lambda: dev.pget(name, addr=1, length=n), "VC_ERR_ADDRESS", f"{name} at wValue 1")
+        expect_stall(chk, lambda: dev.pset(name, b"\x00"), "VC_ERR_DIRECTION", f"SET {name}")
+        expect_stall(chk, lambda: dev.pget(name, addr=1, length=n), "VC_ERR_ADDRESS", f"{name} at wValue 1")
 
 
 @test("paged_sys")
@@ -395,15 +350,15 @@ def buffer_stats_shape(dev, profile, chk):
 def stats_reset(dev, profile, chk):
     """SYS.STATS_RESET bit 0 reseeds the watermarks; mask 0 is a no-op; undefined bits and bad sizes are refused."""
     _need(dev, "SYS.STATS_RESET")
-    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x02"), "VC_ERR_VALUE", "undefined bit 1")
-    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x81"), "VC_ERR_VALUE", "bit 0 with bit 7")
-    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET"), "VC_ERR_LENGTH", "zero-length SET")
-    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x01\x00"), "VC_ERR_LENGTH", "2-byte SET")
-    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x01", addr=1), "VC_ERR_ADDRESS", "wValue 1")
-    _expect_stall(chk, lambda: dev.pget("SYS.STATS_RESET", length=1), "VC_ERR_DIRECTION", "GET")
+    expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x02"), "VC_ERR_VALUE", "undefined bit 1")
+    expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x81"), "VC_ERR_VALUE", "bit 0 with bit 7")
+    expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET"), "VC_ERR_LENGTH", "zero-length SET")
+    expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x01\x00"), "VC_ERR_LENGTH", "2-byte SET")
+    expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x01", addr=1), "VC_ERR_ADDRESS", "wValue 1")
+    expect_stall(chk, lambda: dev.pget("SYS.STATS_RESET", length=1), "VC_ERR_DIRECTION", "GET")
     chk.no_stall(lambda: dev.pset("SYS.STATS_RESET", b"\x00"), "mask 0 accepted")
     chk.no_stall(lambda: dev.pset("SYS.STATS_RESET", b"\x01"), "bit 0 accepted")
-    if _has(dev, "SYS.BUFFER_STATS"):
+    if has_command(dev, "SYS.BUFFER_STATS"):
         data = dev.pget("SYS.BUFFER_STATS", length=44)
         for i in range(data[0]):
             mn, mx = data[4 + i * 8 + 4], data[4 + i * 8 + 5]
@@ -425,11 +380,11 @@ def device_name_roundtrip(dev, profile, chk):
         chk.eq(name(), got, "a GET reply is a valid SET payload")
         dev.pset("SYS.DEVICE_NAME", b"C" * 32)
         chk.eq(name(), b"C" * 31 + b"\x00", "32-byte SET keeps 31 + NUL")
-        _expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME", b"D" * 33), "VC_ERR_LENGTH", "33-byte SET")
-        _expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME"), "VC_ERR_LENGTH", "zero-length SET")
-        _expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME", b"x", addr=1), "VC_ERR_ADDRESS", "SET wValue 1")
-        _expect_stall(chk, lambda: dev.pget("SYS.DEVICE_NAME", addr=1, length=32), "VC_ERR_ADDRESS",
-                      "GET wValue 1")
+        expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME", b"D" * 33), "VC_ERR_LENGTH", "33-byte SET")
+        expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME"), "VC_ERR_LENGTH", "zero-length SET")
+        expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME", b"x", addr=1), "VC_ERR_ADDRESS", "SET wValue 1")
+        expect_stall(chk, lambda: dev.pget("SYS.DEVICE_NAME", addr=1, length=32), "VC_ERR_ADDRESS",
+                     "GET wValue 1")
         chk.eq(name(), b"C" * 31 + b"\x00", "refused SETs left the name alone")
     finally:
         dev.pset("SYS.DEVICE_NAME", orig.split(b"\x00", 1)[0] or b"\x00")

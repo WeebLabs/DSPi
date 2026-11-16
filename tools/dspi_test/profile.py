@@ -1,15 +1,7 @@
 """
-profile.py — PlatformProfile: everything the suite needs to adapt to whichever
-board is attached, derived from the device itself (never hardcoded to one SKU).
-
-Sources, in order of authority:
-  * REQ_GET_PLATFORM (0x7F)  -> platform id, fw version, output-channel count.
-  * REQ_GET_ALL_PARAMS (0xA0) 16-byte header -> total/ input channel counts,
-    max bands, wire format version (also cross-checks platform id).
-  * REQ_GET_BUFFER_STATS (0xB0) byte 0 -> live SPDIF instance count.
-  * Empirical probing of the EQ index ceilings (GET_EQ_PARAM until STALL) so the
-    channel count and per-channel band ceiling are *verified against firmware
-    behaviour*, not assumed.
+profile.py: PlatformProfile, everything the suite needs to adapt to the attached board, read from the
+device (never hardcoded to one SKU): SYS.PLATFORM, the STORE.ALL_PARAMS header, SYS.BUFFER_STATS byte 0,
+and the FILTER.BAND address ceilings probed until the device refuses them.
 """
 
 from __future__ import annotations
@@ -17,12 +9,12 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-from .device import DspiDevice, OP, Stall
+from .device import DspiDevice, Stall
 
 PLATFORM_NAMES = {0: "RP2040", 1: "RP2350"}
 
 # Documented factory pin defaults per platform (used ONLY to verify a
-# factory-reset; live tests always read current pins via REQ_GET_OUTPUT_PIN).
+# factory-reset; live tests always read current pins via OUTPUT.PIN).
 DEFAULT_OUTPUT_PINS = {
     1: [6, 7, 8, 9, 10],   # RP2350: SPDIF1-4 + PDM
     0: [6, 7, 8],          # RP2040: SPDIF1-2 + PDM
@@ -30,8 +22,6 @@ DEFAULT_OUTPUT_PINS = {
 DEFAULT_SPDIF_RX_PIN = 5
 DEFAULT_I2S_BCK_PIN = 14
 DEFAULT_MCK_PIN = {1: 13, 0: 21}
-# GPIO pins that REQ_SET_*_PIN must reject as invalid (UART TX + power/LED).
-INVALID_GPIO_PINS = [12, 23, 24, 25]
 MAX_GPIO = {1: 29, 0: 28}
 
 
@@ -53,7 +43,7 @@ class PlatformProfile:
     wire_format_version: int
     bulk_payload_len: int
     default_output_pins: list = field(default_factory=list)
-    build_info: str = ""    # git describe stamp from 0x80; "" on old firmware
+    build_info: str = ""    # git describe stamp from SYS.BUILD_INFO; "" where it STALLs
 
     @property
     def fw_str(self) -> str:
@@ -69,33 +59,26 @@ class PlatformProfile:
                 f"bulk={self.bulk_payload_len}B")
 
 
-def _probe_band_ceiling(dev: DspiDevice, channel: int, hi: int = 16) -> int:
-    """Smallest band index that STALLs on GET_EQ_PARAM == the ceiling.
+def _band_refused(dev: DspiDevice, channel: int, band: int) -> bool:
+    try:
+        dev.pget("FILTER.BAND", (channel << 8) | band, 16)
+        return False
+    except Stall:
+        return True
 
-    wValue = (channel<<8)|(band<<3)|param(=0 type); band is a 5-bit field.
-    """
-    for band in range(hi + 1):
-        wv = (channel << 8) | (band << 3) | 0
-        try:
-            dev.get(OP.GET_EQ_PARAM, 4, wvalue=wv)
-        except Stall:
-            return band
-    return hi + 1
+
+def _probe_band_ceiling(dev: DspiDevice, channel: int, hi: int = 16) -> int:
+    """Smallest band index FILTER.BAND refuses on `channel`: the PEQ band count (the gap starts there)."""
+    return next((b for b in range(hi + 1) if _band_refused(dev, channel, b)), hi + 1)
 
 
 def _probe_channel_ceiling(dev: DspiDevice, hi: int = 16) -> int:
-    """Smallest channel index that STALLs on GET_EQ_PARAM (band 0) == count."""
-    for ch in range(hi + 1):
-        wv = (ch << 8) | (0 << 3) | 0
-        try:
-            dev.get(OP.GET_EQ_PARAM, 4, wvalue=wv)
-        except Stall:
-            return ch
-    return hi + 1
+    """Smallest channel whose band 0 FILTER.BAND refuses: the channel count."""
+    return next((ch for ch in range(hi + 1) if _band_refused(dev, ch, 0)), hi + 1)
 
 
 def build_profile(dev: DspiDevice) -> PlatformProfile:
-    plat = dev.get(OP.GET_PLATFORM, 7)
+    plat = dev.pget("SYS.PLATFORM", length=7)
     platform_id = plat[0]
     fw_major = plat[1]
     if len(plat) >= 6:
@@ -109,21 +92,20 @@ def build_profile(dev: DspiDevice) -> PlatformProfile:
     fw_beta = plat[6] if len(plat) >= 7 else 0
     num_output_channels = plat[3]
 
-    # Build provenance stamp (0x80); optional, old firmware STALLs.
     try:
-        bi = dev.get(OP.GET_BUILD_INFO, 64)
+        bi = dev.pget("SYS.BUILD_INFO", length=64)
         build_info = bi[:48].split(b"\0")[0].decode("ascii", "replace")
     except Stall:
         build_info = ""
 
-    # Bulk header (first 16 bytes is the WireHeader).
-    hdr = dev.get(OP.GET_ALL_PARAMS, 16)
+    # The first 16 bytes of the bulk blob are its WireHeader.
+    hdr = dev.pget("STORE.ALL_PARAMS", length=16)
     (fmt_ver, hdr_plat, num_channels, num_out_hdr, num_input_channels,
      max_bands, payload_len, fw_maj_hdr, fw_min_hdr, _resv) = struct.unpack("<BBBBBBHHHI", hdr)
 
-    # Live SPDIF instance count from buffer stats (authoritative).
+    # Live output slot count (authoritative).
     try:
-        num_spdif = dev.get(OP.GET_BUFFER_STATS, 44)[0]
+        num_spdif = dev.pget("SYS.BUFFER_STATS", length=44)[0]
     except Stall:
         num_spdif = 4 if num_output_channels >= 9 else 2
 

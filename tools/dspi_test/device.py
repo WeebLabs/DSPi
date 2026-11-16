@@ -1,22 +1,18 @@
 """
-DspiDevice: the QA suite's single USB vendor-control transport (VID/PID and bmRequestType as in
-tools/dspi_poke). Refusals raise Stall, a vanished device raises Disconnected, OP is the frozen 1.1.6
-opcode table, and pget/pset plus the protocol modes are described in README.md.
+DspiDevice: the QA suite's single USB vendor-control transport (VID/PID as in tools/dspi_poke). It speaks
+only the paged protocol (Documentation/commands.md): pget/pset name a command as PAGE.NAME or its ID.
+Refusals raise PagedStall carrying the VC_* reason, a vanished device raises Disconnected.
 Control-plane only: no audio streaming, no isochronous endpoints.
 """
 
 from __future__ import annotations
 
-import atexit
 import json
-import os
-import re
 import struct
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 try:
     import usb.core
@@ -55,11 +51,11 @@ def paged_windex(page: int) -> int:
 class Stall(Exception):
     """The firmware refused/stalled the control transfer (libusb pipe error)."""
 
-    def __init__(self, opcode, direction, errno, message):
-        self.opcode = opcode
+    def __init__(self, request, direction, errno, message):
+        self.request = request   # bRequest, or the command ID for a PagedStall
         self.direction = direction
         self.errno = errno
-        super().__init__(f"STALL on {direction} 0x{opcode:02X}: {message}")
+        super().__init__(f"STALL on {direction} 0x{request:02X}: {message}")
 
 
 class PagedStall(Stall):
@@ -86,11 +82,6 @@ class ProtocolError(Exception):
     """The device does not speak the paged protocol (SYS.PROTOCOL_INFO STALLed or lacked "DSPi")."""
 
 
-class UnmappedRequest(Exception):
-    """Hybrid mode on firmware without page 0 got an old opcode legacy_map.json does not know.
-    Deliberately not a Stall, so a test cannot mistake it for a device refusal."""
-
-
 # --- Repo files -------------------------------------------------------------
 
 def _find_repo_file(rel: Path) -> Path | None:
@@ -107,45 +98,6 @@ def _find_config_h() -> Path | None:
 
 
 REGISTRY_REL = Path("Documentation") / "protocol" / "dspi_commands.json"
-LEGACY_MAP_REL = Path("Documentation") / "protocol" / "legacy_map.json"
-
-
-# --- Opcode table (parsed from config.h, single source of truth) ------------
-
-def load_opcodes(config_h: Path | None = None) -> dict[str, int]:
-    """Parse `#define REQ_FOO 0xNN` lines into {SHORTNAME: opcode}, keys WITHOUT the REQ_ prefix
-    (so tests write `OP.GET_PLATFORM`). Returns {} where config.h has none, as from 1.1.7 on.
-    """
-    path = config_h or _find_config_h()
-    if path is None or not path.is_file():
-        return {}
-    pat = re.compile(r"^\s*#define\s+REQ_(\w+)\s+(0[xX][0-9A-Fa-f]+|\d+)")
-    out: dict[str, int] = {}
-    for line in path.read_text().splitlines():
-        m = pat.match(line)
-        if m:
-            out[m.group(1).upper()] = int(m.group(2), 0)
-    return out
-
-
-def load_legacy_opcodes() -> dict[str, int]:
-    """The frozen 1.1.6 table, used once the flip removes REQ_* from config.h."""
-    path = Path(__file__).resolve().parent / "golden" / "legacy_opcodes.json"
-    try:
-        return {k.upper(): int(v) for k, v in json.loads(path.read_text())["opcodes"].items()}
-    except (OSError, ValueError, KeyError):
-        return {}
-
-
-_OPCODES = load_opcodes() or load_legacy_opcodes()
-# Attribute access: OP.GET_PLATFORM == 0x7F
-OP = SimpleNamespace(**_OPCODES)
-# Reverse map for labelling in reports/errors.
-OPCODE_NAME = {v: f"REQ_{k}" for k, v in _OPCODES.items()}
-
-
-def opcode_label(opcode: int) -> str:
-    return OPCODE_NAME.get(opcode, f"0x{opcode:02X}")
 
 
 # --- Paged command metadata -------------------------------------------------
@@ -159,7 +111,7 @@ class CommandInfo:
     has_set: bool
     addr: str            # contract ADDR_KIND token, "?" when unknown
     get_len: object      # int, "var" or None
-    source: str          # "registry", "legacy_map" or "numeric"
+    source: str          # "registry" or "numeric"
 
     @property
     def id(self) -> int:
@@ -193,43 +145,22 @@ def _registry_from_json(doc: dict) -> dict[str, CommandInfo]:
     return out
 
 
-_CATALOG_CACHE: dict = {}
-
-
-def load_catalog() -> dict[str, CommandInfo]:
-    """The plan section 5 numbering kept in legacy_map.json, the fallback for names."""
-    if "c" not in _CATALOG_CACHE:
-        p = _find_repo_file(LEGACY_MAP_REL)
-        out = {}
-        try:
-            doc = json.loads(p.read_text()) if p else {}
-            pages = doc.get("pages", {})
-            for name, c in doc.get("commands", {}).items():
-                out[name] = CommandInfo(pages[c["page"]], c["cmd"], name, "G" in c["dir"], "S" in c["dir"],
-                                        c.get("addr", "?"), c.get("get_len"), "legacy_map")
-        except (OSError, ValueError, KeyError, TypeError):
-            out = {}
-        _CATALOG_CACHE["c"] = out
-    return _CATALOG_CACHE["c"]
-
-
 def resolve_command(cmd, registry=None) -> CommandInfo:
-    """Numeric IDs always resolve. Names try the registry first, then the legacy_map catalog."""
+    """Numeric IDs always resolve, names only through the registry (dspi_commands.json)."""
     if isinstance(cmd, CommandInfo):
         return cmd
     if isinstance(cmd, int):
         if not 0 <= cmd <= 0xFFFF:
             raise ValueError(f"command ID out of range: {cmd:#x}")
-        for table in (load_registry(registry), load_catalog()):
-            for info in table.values():
-                if info.id == cmd:
-                    return info
+        for info in load_registry(registry).values():
+            if info.id == cmd:
+                return info
         return CommandInfo(cmd >> 8, cmd & 0xFF, f"0x{cmd:04X}", True, True, "?", None, "numeric")
     name = str(cmd).upper()
-    for table in (load_registry(registry), load_catalog()):
-        if name in table:
-            return table[name]
-    raise KeyError(f"unknown paged command {cmd!r} (not in dspi_commands.json or legacy_map.json)")
+    table = load_registry(registry)
+    if name in table:
+        return table[name]
+    raise KeyError(f"unknown paged command {cmd!r} (not in dspi_commands.json)")
 
 
 @dataclass(frozen=True)
@@ -244,60 +175,24 @@ class LastResult:
         return VC_RESULTS.get(self.result, f"0x{self.result:02X}")
 
 
-def _normalise_protocol(p: str | None) -> str:
-    p = (p or os.environ.get("DSPI_TEST_PROTOCOL") or "auto").strip().lower()
-    if p in ("old", "send-old", "send_old", "legacy"):
-        return "old"
-    if p in ("translate", "paged", "hybrid", "auto"):
-        return "translate" if p == "paged" else p
-    raise ValueError(f"unknown DSPI_TEST_PROTOCOL {p!r} (use auto, old, translate or hybrid)")
-
-
-_LEGACY_NAMES: dict = {}
-
-
-def _legacy_name(code: int) -> str | None:
-    """1.1.6 name of an old opcode that legacy_map.json translates, None for any other number."""
-    if not _LEGACY_NAMES:
-        from . import legacy_map
-        _LEGACY_NAMES.update({r["code"]: n for n, r in legacy_map.load_map()["opcodes"].items()})
-    return _LEGACY_NAMES.get(code)
-
-
 # --- The device wrapper -----------------------------------------------------
 
 class DspiDevice:
-    def __init__(self, timeout_ms: int = 1500, protocol: str | None = None, usb_dev=None, registry=None):
+    def __init__(self, timeout_ms: int = 1500, usb_dev=None, registry=None):
         dev = usb_dev if usb_dev is not None else usb.core.find(idVendor=VID, idProduct=PID)
         if dev is None:
             raise Disconnected(
                 f"no DSPi at {VID:04X}:{PID:04X}. Is it plugged in and not held by another app?")
         self.dev = dev
         self.timeout = timeout_ms
-        self.protocol = _normalise_protocol(protocol)
-        self.protocol_auto = self.protocol == "auto"
         self.registry = registry
         # Count every transfer for the report.
         self.gets = 0
         self.sets = 0
-        # A device that drops off and comes back (re-enumeration) staled the
-        # handle; we re-acquire and continue.  Counted because frequent
-        # re-enumerations on benign commands are themselves a finding.
+        # Re-enumerations on benign commands are themselves a finding, so they are counted.
         self.reenumerations = 0
-        # Translated OUT writes the firmware refused. 1.1.6 ACKed these silently,
-        # so legacy_map swallows the STALL and records it here instead.
-        self.swallowed: list[dict] = []
         self._paged_ok = None   # None until SYS.PROTOCOL_INFO has been probed
         self._paged_cmds = None  # {page: (GET cmds, SET cmds)} read from the device once
-        self._page0 = None      # None until page0_alive() has probed
-        # Hybrid routing per old opcode name: calls sent paged vs left on page 0.
-        self.hybrid_counts = {"translated": {}, "passed": {}}
-        self._hybrid_atexit = False
-        if self.protocol_auto:
-            # The probe STALLs harmlessly on 1.1.6 (plan 5.14), which still needs the old opcodes.
-            self.protocol = "translate" if self.protocol_info() is not None else "old"
-        if self.protocol == "hybrid":
-            self._register_hybrid_summary()
 
     def _reacquire(self) -> bool:
         try:
@@ -310,11 +205,10 @@ class DspiDevice:
             self.reenumerations += 1
             self._paged_ok = None   # may be different firmware now
             self._paged_cmds = None
-            self._page0 = None
             return True
         return False
 
-    # -- raw transfers -------------------------------------------------------
+    # -- transfers -----------------------------------------------------------
 
     # Transient timeouts (errno 60 ETIMEDOUT / 110) happen when the device is
     # briefly busy with a deferred pipeline reset (type switch, pin move, bulk
@@ -325,13 +219,13 @@ class DspiDevice:
     _REACQUIRE_ATTEMPTS = 6
     _REACQUIRE_BACKOFF_S = 0.4
 
-    def _xfer(self, direction, opcode, wvalue, windex, data_or_len):
+    def _xfer(self, direction, request, wvalue, windex, data_or_len):
         bm = BM_VENDOR_IN if direction == "GET" else BM_VENDOR_OUT
         timeouts = 0
         reacquires = 0
         while True:
             try:
-                return self.dev.ctrl_transfer(bm, opcode, wvalue, windex, data_or_len, timeout=self.timeout)
+                return self.dev.ctrl_transfer(bm, request, wvalue, windex, data_or_len, timeout=self.timeout)
             except usb.core.USBError as e:
                 msg = str(e)
                 errno = getattr(e, "errno", None)
@@ -342,7 +236,7 @@ class DspiDevice:
                         time.sleep(self._REACQUIRE_BACKOFF_S)
                         self._reacquire()
                         continue
-                    raise Disconnected(f"device gone during {direction} 0x{opcode:02X} "
+                    raise Disconnected(f"device gone during {direction} 0x{request:02X} "
                                        f"after {reacquires} re-acquire attempts: {msg}") from e
                 # Transient busy window during a deferred reset.
                 if errno in (60, 110) or "timed out" in msg.lower() or "timeout" in msg.lower():
@@ -350,70 +244,22 @@ class DspiDevice:
                         timeouts += 1
                         time.sleep(self._TIMEOUT_BACKOFF_S)
                         continue
-                    raise Timeout(f"{direction} 0x{opcode:02X} timed out after "
+                    raise Timeout(f"{direction} 0x{request:02X} timed out after "
                                   f"{timeouts} retries: {msg}") from e
                 # EPIPE / everything else on a healthy session => protocol stall.
-                raise Stall(opcode, direction, errno, msg) from e
+                raise Stall(request, direction, errno, msg) from e
 
-    def raw_get(self, opcode: int, length: int, wvalue: int = 0, windex: int = VENDOR_IFACE) -> bytes:
-        """Untranslated legacy IN request, whatever the protocol mode."""
-        self.gets += 1
-        return bytes(self._xfer("GET", opcode, wvalue, windex, length))
-
-    def raw_set(self, opcode: int, payload: bytes = b"", wvalue: int = 0, windex: int = VENDOR_IFACE) -> int:
-        """Untranslated legacy OUT request, whatever the protocol mode."""
-        self.sets += 1
-        return self._xfer("SET", opcode, wvalue, windex, payload)
-
-    def _translating(self, windex: int) -> bool:
-        return self.protocol in ("translate", "hybrid") and (windex >> 8) == 0
-
-    def get(self, opcode: int, length: int, wvalue: int = 0, windex: int = VENDOR_IFACE) -> bytes:
-        """Device->host vendor request.  Raises Stall if refused, Timeout if wedged."""
-        if self._translating(windex):
-            from . import legacy_map
-            if self.protocol == "hybrid" and not self._hybrid_paged(opcode, "in", wvalue):
-                return self.raw_get(opcode, length, wvalue)
-            return legacy_map.translate_get(self, opcode, wvalue, length)
-        return self.raw_get(opcode, length, wvalue, windex)
-
-    def set(self, opcode: int, payload: bytes = b"", wvalue: int = 0, windex: int = VENDOR_IFACE) -> int:
-        """Host->device vendor request.  Returns bytes accepted.  Raises Stall if refused."""
-        if self._translating(windex):
-            from . import legacy_map
-            if self.protocol == "hybrid" and not self._hybrid_paged(opcode, "out", wvalue):
-                return self.raw_set(opcode, bytes(payload), wvalue)
-            return legacy_map.translate_set(self, opcode, wvalue, payload)
-        return self.raw_set(opcode, payload, wvalue, windex)
-
-    def _hybrid_paged(self, opcode: int, direction: str, wvalue: int) -> bool:
-        """Hybrid routing: True translates, False sends the old request to page 0 unchanged."""
-        from . import legacy_map
-        name = _legacy_name(opcode) or f"0x{opcode:02X}"
-        paged = legacy_map.routes_paged(self, opcode, direction, wvalue) or not self.page0_alive()
-        if paged and _legacy_name(opcode) is None:
-            raise UnmappedRequest(f"hybrid: old opcode 0x{opcode:02X} has no translation and this "
-                                  f"firmware has no page 0 to send it to")
-        self.note_hybrid(name, paged)
-        return paged
-
-    def page0_alive(self) -> bool:
-        """True while page 0 still answers 1.1.6 opcodes (1.1.6 itself, and builds before the flip).
-        The probe is the old GET_PLATFORM, a read on every firmware that has it."""
-        if self._page0 is None:
-            if self._paged_ok is None:
-                self.protocol_info()
-            if not self._paged_ok:
-                self._page0 = True
-            else:
-                try:
-                    self.raw_get(0x7F, 7)
-                    self._page0 = True
-                except Stall:
-                    self._page0 = False
-        return self._page0
-
-    # -- hybrid bookkeeping --------------------------------------------------
+    def raw_request(self, bm_request_type: int, request: int, wvalue: int, windex: int, data_or_len,
+                    timeout_ms: int | None = None):
+        """One control request sent exactly as given: no page carrier, probe, retry or re-acquire, and a
+        USBError propagates. Only tests/paged_page0.py uses it, to prove requests outside the paged scheme STALL."""
+        if bm_request_type & 0x80:
+            self.gets += 1
+        else:
+            self.sets += 1
+        r = self.dev.ctrl_transfer(bm_request_type, request, wvalue, windex, data_or_len,
+                                   timeout=self.timeout if timeout_ms is None else timeout_ms)
+        return bytes(r) if bm_request_type & 0x80 else r
 
     def paged_commands(self) -> dict:
         """{page: (GET cmd set, SET cmd set)} from SYS.PAGE_LIST / PAGE_COMMANDS, read once per handle.
@@ -437,22 +283,6 @@ class DspiDevice:
         self._paged_cmds = out
         return out
 
-    def note_hybrid(self, name: str, translated: bool):
-        bucket = self.hybrid_counts["translated" if translated else "passed"]
-        bucket[name] = bucket.get(name, 0) + 1
-        self._register_hybrid_summary()
-
-    def hybrid_summary(self) -> str:
-        t, p = self.hybrid_counts["translated"], self.hybrid_counts["passed"]
-        return (f"hybrid: {len(t)} opcodes translated ({sum(t.values())} calls), {len(p)} passed through "
-                f"({sum(p.values())} calls); translated: {', '.join(sorted(t)) or 'none'}")
-
-    def _register_hybrid_summary(self):
-        if not self._hybrid_atexit:
-            self._hybrid_atexit = True
-            atexit.register(lambda: (self.hybrid_counts["translated"] or self.hybrid_counts["passed"])
-                            and print(self.hybrid_summary()))
-
     # -- paged commands ------------------------------------------------------
 
     def resolve(self, cmd) -> CommandInfo:
@@ -464,7 +294,8 @@ class DspiDevice:
         if self._paged_ok is None:
             self.protocol_info()
         if not self._paged_ok:
-            raise ProtocolError("device does not answer SYS.PROTOCOL_INFO; refusing paged requests")
+            raise ProtocolError("device does not answer SYS.PROTOCOL_INFO, so it predates the paged protocol: "
+                                "this harness needs DSPi firmware 1.1.7 or later and sends it nothing else")
 
     def pget(self, cmd, addr: int = 0, length: int | None = None) -> bytes:
         """GET a paged command by PAGE.NAME or ID. Length defaults to the table's fixed reply size."""
@@ -530,85 +361,74 @@ class DspiDevice:
         return {"magic": r[:4].decode(), "major": major, "minor": minor, "page_count": pages,
                 "flags": flags, "max_set": max_set, "max_get": max_get, "reserved": reserved}
 
-    # -- typed GET helpers ---------------------------------------------------
+    # -- typed paged helpers -------------------------------------------------
 
-    def get_u8(self, opcode, wvalue=0) -> int:
-        return self.get(opcode, 1, wvalue)[0]
+    def pget_u8(self, cmd, addr: int = 0) -> int:
+        return self.pget(cmd, addr, 1)[0]
 
-    def get_u16(self, opcode, wvalue=0) -> int:
-        return struct.unpack("<H", self.get(opcode, 2, wvalue))[0]
+    def pget_u16(self, cmd, addr: int = 0) -> int:
+        return struct.unpack("<H", self.pget(cmd, addr, 2))[0]
 
-    def get_u32(self, opcode, wvalue=0) -> int:
-        return struct.unpack("<I", self.get(opcode, 4, wvalue))[0]
+    def pget_u32(self, cmd, addr: int = 0) -> int:
+        return struct.unpack("<I", self.pget(cmd, addr, 4))[0]
 
-    def get_i32(self, opcode, wvalue=0) -> int:
-        return struct.unpack("<i", self.get(opcode, 4, wvalue))[0]
+    def pget_i32(self, cmd, addr: int = 0) -> int:
+        return struct.unpack("<i", self.pget(cmd, addr, 4))[0]
 
-    def get_f32(self, opcode, wvalue=0) -> float:
-        return struct.unpack("<f", self.get(opcode, 4, wvalue))[0]
+    def pget_f32(self, cmd, addr: int = 0) -> float:
+        return struct.unpack("<f", self.pget(cmd, addr, 4))[0]
 
-    def get_str(self, opcode, length=32, wvalue=0) -> bytes:
+    def pget_str(self, cmd, addr: int = 0, length: int = 32) -> bytes:
         """Raw bytes up to the first NUL (caller decodes)."""
-        return self.get(opcode, length, wvalue).split(b"\x00", 1)[0]
+        return self.pget(cmd, addr, length).split(b"\x00", 1)[0]
 
-    def get_ready(self, opcode, length, wvalue=0, retries=3):
-        """GET that must always succeed; retry through wait_ready() on a transient
-        stall/timeout (the busy window after a deferred reset or re-enumeration).
-        Use ONLY for reads with no invalid-param path of their own. Never use it
-        for STALL assertions, where a transient retry would mask the result.
-        """
+    def pset_u8(self, cmd, val: int, addr: int = 0) -> int:
+        return self.pset(cmd, struct.pack("<B", val & 0xFF), addr)
+
+    def pset_u16(self, cmd, val: int, addr: int = 0) -> int:
+        return self.pset(cmd, struct.pack("<H", val & 0xFFFF), addr)
+
+    def pset_u32(self, cmd, val: int, addr: int = 0) -> int:
+        return self.pset(cmd, struct.pack("<I", val & 0xFFFFFFFF), addr)
+
+    def pset_i32(self, cmd, val: int, addr: int = 0) -> int:
+        return self.pset(cmd, struct.pack("<i", val), addr)
+
+    def pset_f32(self, cmd, val: float, addr: int = 0) -> int:
+        return self.pset(cmd, struct.pack("<f", val), addr)
+
+    def pget_ready(self, cmd, addr: int = 0, length: int | None = None, retries: int = 3) -> bytes:
+        """pget that must succeed, retried through wait_ready() across a deferred-reset busy window.
+        Never use it where a refusal is the expected answer: the retry would hide it."""
         for attempt in range(retries):
             try:
-                return self.get(opcode, length, wvalue)
-            except (Stall, Timeout):
+                return self.pget(cmd, addr, length)
+            except (Stall, Timeout, ProtocolError):
                 if attempt == retries - 1:
                     raise
                 self.wait_ready()
                 time.sleep(0.05)
 
-    # -- typed SET helpers ---------------------------------------------------
-
-    def set_u8(self, opcode, val, wvalue=0) -> int:
-        return self.set(opcode, struct.pack("<B", val & 0xFF), wvalue)
-
-    def set_u16(self, opcode, val, wvalue=0) -> int:
-        return self.set(opcode, struct.pack("<H", val & 0xFFFF), wvalue)
-
-    def set_f32(self, opcode, val, wvalue=0) -> int:
-        return self.set(opcode, struct.pack("<f", val), wvalue)
-
-    def set_bytes(self, opcode, payload, wvalue=0) -> int:
-        return self.set(opcode, payload, wvalue)
-
-    # -- liveness ------------------------------------------------------------
-
     def is_alive(self) -> bool:
-        """A GET_PLATFORM that returns the expected shape => device responsive.
-
-        Re-finds the handle first so a re-enumeration (crash recovery) is seen
-        as a fresh, distinct device rather than a silent success on a stale one.
-        """
+        """One SYS.PLATFORM read answered cleanly."""
         try:
-            data = self.get(OP.GET_PLATFORM, 4)
-            return len(data) == 4
-        except (Stall, Disconnected, Timeout):
-            return False
-        except usb.core.USBError:
+            return len(self.pget("SYS.PLATFORM", length=7)) == 7
+        except (Stall, Disconnected, Timeout, ProtocolError, usb.core.USBError):
             return False
 
     def wait_ready(self, timeout_s: float = 4.0, poll_s: float = 0.1) -> bool:
-        """Poll GET_PLATFORM until it answers cleanly. A deferred, mute-bracketed pipeline
-        reset (type switch, pin move, bulk apply, input switch, preset load, factory reset)
-        briefly disables the USB control IRQ, so a transfer then stalls or times out. Only a
-        device that never recovers (a real crash or hang) reports failure.
-        """
+        """Poll SYS.PLATFORM until it answers. A deferred restart (type switch, pin move, bulk apply, preset
+        load) briefly blocks control transfers, so only a device that never recovers reports False."""
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:
-                if len(self.get(OP.GET_PLATFORM, 4)) == 4:
+                if len(self.pget("SYS.PLATFORM", length=7)) == 7:
                     return True
             except Disconnected:
                 return False
+            except ProtocolError:
+                # A probe that STALLed inside the busy window cached "not paged"; probe again.
+                self._paged_ok = None
             except (Stall, Timeout):
                 pass
             time.sleep(poll_s)
