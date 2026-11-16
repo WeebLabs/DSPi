@@ -4193,6 +4193,15 @@ lands on a hot path and the audio path is untouched.
 
 ---
 
+## Vendor Command Overhaul (in progress)
+*Last updated: 2026-11-15*
+
+The vendor opcode space is being rebuilt into pages (page in the `wIndex` high byte, command in `bRequest`) for firmware 1.1.7 beta 1. The design, the old-to-new mapping and the phase plan are in `Documentation/Features/vendor_command_overhaul_plan.md`. Until the flip phase lands, the "Vendor Command Reference" below still describes the live protocol.
+
+**Bench-only wIndex echo (`-DDSPI_WINDEX_ECHO=ON`, OFF by default).** Vendor request 0x4F as an IN transfer returns 16 bytes: the SETUP fields (`bmRequestType`, `bRequest`, `wValue`, `wIndex`, `wLength`) of that request, then those of the last OUT request with the same number. It is intercepted in `tud_vendor_control_xfer_cb` before dispatch. `tools/windex_echo_test.py` uses it to prove a host USB stack delivers the `wIndex` high byte (procedure in `Documentation/Features/windex_echo_test.md`). It never ships and is deleted at the flip.
+
+**Golden capture.** `tools/dspi_test/golden/` holds a byte-for-byte capture of every vendor read on firmware 1.1.6, before and after a scripted set of writes, plus a mask of fields that legitimately vary. Later phases replay it against the rewritten handlers.
+
 ## Vendor Command Reference
 *Last updated: 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim). Previously 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 

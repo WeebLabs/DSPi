@@ -1,0 +1,53 @@
+{
+ "note": "Bytes that legitimately vary between runs. ranges are [start, end) byte offsets, end null = to the end (or to the stride). stride repeats the ranges every N bytes. platform limits an entry to one platform.",
+ "entries": [
+  {"op": "GET_SERIAL", "wvalue": 0, "ranges": [[0, null]], "reason": "per-device serial number"},
+  {"op": "GET_PLATFORM", "wvalue": 0, "ranges": [[1, 3], [4, 7]], "reason": "firmware version fields (major, legacy nibbles, minor, patch, beta)"},
+  {"op": "GET_BUILD_INFO", "wvalue": 0, "ranges": [[0, null]], "reason": "git describe and build date"},
+  {"op": "GET_ALL_PARAMS", "wvalue": 0, "ranges": [[8, 12], [4733, 4736]], "reason": "header fw version; LG Sound Sync runtime present/volume/muted"},
+  {"op": "GET_ALL_PARAMS_CHUNK", "wvalue": 0, "ranges": [[8, 12], [4733, 4736]], "reason": "header fw version; LG Sound Sync runtime present/volume/muted"},
+
+  {"op": "GET_CS_STATUS", "wvalue": 0, "ranges": [[1, 2]], "reason": "last-touched slot: 0 after a fresh boot, 0xFF after any Control Surfaces write"},
+
+  {"op": "GET_STATUS", "wvalue": 0, "ranges": [[0, 4]], "reason": "peak meters"},
+  {"op": "GET_STATUS", "wvalue": 1, "ranges": [[0, 4]], "reason": "peak meters"},
+  {"op": "GET_STATUS", "wvalue": 2, "ranges": [[0, 4]], "reason": "peak meter and CPU loads"},
+  {"op": "GET_STATUS", "wvalue": 3, "ranges": [[0, 4]], "reason": "PDM ring overrun counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 4, "ranges": [[0, 4]], "reason": "PDM ring underrun counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 5, "ranges": [[0, 4]], "reason": "PDM DMA overrun counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 6, "ranges": [[0, 4]], "reason": "PDM DMA underrun counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 8, "ranges": [[0, 4]], "reason": "S/PDIF underrun counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 9, "ranges": [[0, 36]], "platform": "RP2350", "reason": "peak meters and CPU loads"},
+  {"op": "GET_STATUS", "wvalue": 9, "ranges": [[0, 16]], "platform": "RP2040", "reason": "peak meters and CPU loads"},
+  {"op": "GET_STATUS", "wvalue": 10, "ranges": [[0, 4]], "reason": "USB audio packet counter"},
+  {"op": "GET_STATUS", "wvalue": 11, "ranges": [[0, 4]], "reason": "USB alt setting follows whether the host is streaming"},
+  {"op": "GET_STATUS", "wvalue": 16, "ranges": [[0, 4]], "reason": "temperature"},
+  {"op": "GET_STATUS", "wvalue": 17, "ranges": [[0, 4]], "reason": "S/PDIF DMA starvation counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 18, "ranges": [[0, 4]], "reason": "S/PDIF DMA starvation counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 19, "ranges": [[0, 4]], "reason": "S/PDIF DMA starvation counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 20, "ranges": [[0, 4]], "reason": "S/PDIF DMA starvation counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 21, "ranges": [[0, 4]], "reason": "S/PDIF DMA starvation counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 22, "ranges": [[0, 4]], "reason": "USB ring overrun counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 26, "ranges": [[0, 4]], "reason": "output ring underrun episodes since boot"},
+  {"op": "GET_STATUS", "wvalue": 27, "ranges": [[0, 4]], "reason": "output ring drop counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 28, "ranges": [[0, 4]], "reason": "minimum ring prewrite watermark"},
+  {"op": "GET_STATUS", "wvalue": 29, "ranges": [[0, 4]], "reason": "worst input delivery gap watermark"},
+  {"op": "GET_STATUS", "wvalue": 30, "ranges": [[0, 4]], "reason": "worst USB packet gap watermark"},
+  {"op": "GET_STATUS", "wvalue": 31, "ranges": [[0, 4]], "reason": "background over-budget counter since boot"},
+  {"op": "GET_STATUS", "wvalue": 33, "ranges": [[0, 4]], "reason": "soft VCXO trim (clock servo state)"},
+
+  {"op": "GET_BUFFER_STATS", "wvalue": 0, "ranges": [[1, 44]], "reason": "stream flags, per-read sequence number, ring fill telemetry"},
+  {"op": "LIMITER", "wvalue": 128, "ranges": [[0, null]], "reason": "limiter gain-reduction meters"},
+  {"op": "GET_SUBHARM_METER", "wvalue": 0, "ranges": [[0, null]], "reason": "decaying sub peak meters"},
+  {"op": "UPMIX_GET_STATUS", "wvalue": 0, "ranges": [[2, 12]], "reason": "live correlation, balance and steering gains"},
+  {"op": "GET_ADAT_STATUS", "wvalue": 0, "ranges": [[4, 8]], "reason": "ADAT output resync and slip counters since boot"},
+  {"op": "GET_LG_SOUND_SYNC_STATUS", "wvalue": 0, "ranges": [[1, 4]], "reason": "LG Sound Sync runtime present/volume/muted"},
+  {"op": "GET_CS_DISPLAY_STATUS", "wvalue": 0, "ranges": [[4, 6]], "reason": "display I2C NAK counter"},
+
+  {"op": "RTA_GET_STATUS", "wvalue": 0, "ranges": [[1, 2], [3, 4], [8, 16], [22, 24]], "reason": "analyser state, working channel, rates, timings, idle time"},
+  {"op": "RTA_GET_BANDS", "wvalue": "*", "ranges": [[2, 3], [4, 6], [8, 82]], "reason": "frame sequence, age and spectrum levels"},
+  {"op": "RTA_GET_BANDS_ALL", "wvalue": 0, "stride": 82, "ranges": [[2, 3], [4, 6], [8, 82]], "reason": "frame sequence, age and spectrum levels per channel"},
+  {"op": "RTA_GET_BINS", "wvalue": 0, "ranges": [[2, 3], [16, null]], "reason": "frame sequence and bin levels"},
+  {"op": "RTA_GET_BINS", "wvalue": "*", "ranges": [[0, null]], "reason": "bin levels and trailing sequence byte (the offset 0 entry above is narrower)"}
+ ]
+}

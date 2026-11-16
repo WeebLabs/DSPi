@@ -1,0 +1,1075 @@
+# Vendor Command Overhaul Plan
+
+*Last updated: 2026-11-15*
+
+Status: approved by the user on 2026-11-15 with the decisions in section 14. Implementation is in progress. Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
+
+## 1. TL;DR
+
+DSPi has used 246 of its 256 vendor command numbers, and about four are really free. This plan gives the protocol a second dimension so that it cannot run out again, and it tidies the rules at the same time.
+
+Every command gets a two-part address. The page says which subsystem (filters, inputs, presets and so on). The command number says which thing inside that subsystem. The page travels in the high byte of `wIndex`, which no host uses today. That gives 256 pages of 240 usable commands each.
+
+Three rules keep the new space clean.
+
+1. One number per thing. Reading and writing the same setting use the same number, and the transfer direction says which.
+2. `wValue` only says which one (channel, band, slot). It never picks an operation, and it never carries a value. Values go in the payload.
+3. Reads never change anything. Anything that changes the device is a write.
+
+The firmware side becomes a table. Each row names a command, its read and write handlers, its payload sizes and its restrictions. One dispatcher checks length, direction, address and transport before any handler runs. The same table generates the command reference and a machine-readable registry for the host apps, and the device can report it at runtime so hosts detect features without comparing version numbers.
+
+This is a clean break. The new scheme ships in firmware v1.1.7-beta1, the release contributors were told would overhaul the opcodes, and the old numbers stop working in that release. Old hosts send a zero in the `wIndex` high byte, so they land on page 0, which answers nothing.
+
+What it means in practice: every host must be ported for that release. This work delivers the firmware, the test harness and a comprehensive migration guide. It does not change any host app. The refactor is proven without shipping any compatibility code. A byte-for-byte capture of 1.1.6 replies is the reference, and a translation layer inside the test harness lets the existing 173 tests run against the new handlers until they are ported to native paged calls.
+
+## 2. Facts verified for this plan
+
+Each item was checked against the tree at fb9a254 or the named repo.
+
+| Fact | Evidence |
+|---|---|
+| 246 `REQ_*` opcodes are defined, and `MS_VENDOR_CODE` is 0x01 | `firmware/DSPi/config.h` |
+| No handler reads `wIndex`. The only `wIndex` test is the MS OS 2.0 intercept (`wIndex == 7`) | `vendor_commands.c:4574`, `:4781` |
+| Neither the recipient bits nor `wIndex` filter dispatch today | `vendor_commands.c` entry point |
+| `tud_vendor_control_xfer_cb` runs in main-loop context (`tud_task` at `main.c:2181`). Only the EP0 data copy runs in the USB ISR | `main.c`, `tusb_config.h:22` |
+| A zero-length OUT is ACKed at SETUP and never reaches a handler. This is why 34 actions are issued as reads today | `vendor_commands.c` SETUP path |
+| TinyUSB STALLs the status stage when the DATA-stage callback returns false. The current code always returns true | `usbd_control.c:193-202` |
+| UART and I2C frames already carry a 16-bit `wIndex` and an explicit SET or GET type | `uart_control.c:267`, `i2c_control.c:290` |
+| The I2C ISR calls `vendor_is_bulk_set()` | `i2c_control.c:115` |
+| Control Surfaces bindings store nouns, not opcodes. The noun to opcode map is a switch with 51 opcodes | `control_surfaces_nouns.c:552-797` |
+| Notifications carry bulk offsets, never opcodes | `notify.c`, Console `SnapshotCache.swift:64-70` |
+| `WireBulkParams` is V32, 6136 bytes | `bulk_params.h:478`, Console `Constants.swift:725` |
+| UAC1 requests are class-type and never reach the vendor callback | `vendor_commands.c` comment at the MS intercept, `usb_audio.c` |
+| The Console sends `wIndex` 0 on about 126 call sites and 2 on about 153. No site sends anything else | Console `Commands.swift`, `StatsView.swift` |
+| DSPi Link frames carry a 16-bit `wIndex` untouched, but its policy table and routing key on `bRequest` alone | Console `Link/LinkFrames.swift:46-76`, `Link/policy/commands.json` |
+| IN request with `bRequest` 0x10 STALLs on firmware 1.1.6 (0x10 exists only in the SET switch) | `vendor_commands.c:993` |
+
+Corrections to the brief:
+
+- The Console's StatsView mostly sends `wIndex` 0, not 2. Both values have a zero high byte, so every 1.1.6 host lands on page 0.
+- A Windows Console exists (`WeebLabs/DSPi-Console-Windows`, C#, WinUSB). It is not on this machine and was not inspected. iOS and Linux Consoles and DSPi Terminal also exist locally.
+- A separate `DSPi-Link` repo holds a TypeScript client, a web app and an ESP32 bridge. They share the `bRequest`-keyed policy file.
+- `bench/input-batch` has no unique commits. The bench command lives in `stash@{1}` and the untracked `batch_bench.h`.
+- The WebUSB spec (design only, not implemented) reserves `bRequest` 0x02 as `WEBUSB_VENDOR_CODE`. The AC-3 branch claims 0x02 too.
+
+## 3. Addressing model
+
+### 3.1 The request
+
+| Field | Meaning |
+|---|---|
+| `bmRequestType` | Vendor type, interface recipient. `0xC1` is GET and `0x41` is SET. Unchanged |
+| `bRequest` | Command number within the page, `0x10`-`0xFF` |
+| `wIndex` high byte | Page, `0x01`-`0xFF`. Page `0x00` is never used and every request to it is refused |
+| `wIndex` low byte | Interface number, always 2 on USB. UART, I2C and Link send it and the firmware ignores it |
+| `wValue` | Address only. Zero when the command addresses nothing |
+| Payload | Values, little-endian |
+
+In source and docs a command is written `PAGE.NAME`, for example `FILTER.BAND`. Its 16-bit ID is `(page << 8) | cmd`.
+
+### 3.2 Conventions for contributors
+
+These are the rules a new command must follow. The generator in section 8 enforces the mechanical ones.
+
+1. **One number per thing.** A setting that can be read and written is one command with a GET and a SET handler. Never define a pair.
+2. **GET does not change state.** No GET changes configuration, runtime state or flash. Two narrow exceptions exist: a read may refresh a keepalive timer (the RTA auto-off), and a chunked read may take the bulk lock. Clear-on-read is not allowed.
+3. **Anything that changes state is a SET.** This includes actions with no value, which are zero-length SETs. There is no write-as-read in the new pages.
+4. **`wValue` is an address.** It names which instance: a channel, an output, a slot, a band, a byte offset. It never selects an operation, a parameter or a response shape. Two-level addresses pack as `(major << 8) | minor`.
+5. **Values go in the payload.** A GPIO number, a mode and an enable flag are values.
+6. **A new operation gets a new number.** Do not add a selector to an existing command. Numbers are plentiful.
+7. **One command, one shape.** A command has exactly one GET reply layout and one SET payload layout.
+8. **GET and SET are symmetric.** For a read-write command, the GET reply is a valid SET payload. Read-only status and capability data are separate GET-only commands.
+9. **Shapes only grow at the end.** A reply or payload may gain trailing fields in a later page revision. Hosts ask for the length they know, and the device accepts the shorter SET lengths it has ever documented. Any other change of shape needs a new number.
+10. **Numbers are never reused.** A retired command stays in the table as a tombstone.
+11. **`0x00`-`0x0F` are reserved in every page.** 0x01 is the Microsoft OS 2.0 vendor code and 0x02 is set aside for WebUSB. The rest are held for protocol-level use.
+12. **Features own blocks of 16.** Within a page, each feature starts on a `0x_0` boundary and grows upward. Leave the gap.
+13. **A command lives with the state it touches.** The Presets page holds commands about the preset store itself. A feature's own persistence switch stays with the feature.
+14. **Failure is explicit.** A rejected SET STALLs on USB and returns a result code on UART and I2C. The reason is readable from `SYS.LAST_RESULT`. Nothing is silently dropped in the new pages.
+15. **`0xFF` in an index position means "all"** only on a SET, and only on commands flagged for it.
+
+### 3.3 Result codes
+
+One enum covers every command. It replaces the separate `PIN_CONFIG_*`, `PRESET_*` and `FLASH_*` status bytes in the new pages.
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0x00 | `VC_OK` | Done, or accepted for deferred work |
+| 0x10 | `VC_ERR_UNKNOWN` | No such page or command on this build |
+| 0x11 | `VC_ERR_DIRECTION` | Command has no handler for this direction |
+| 0x12 | `VC_ERR_LENGTH` | SET payload length outside the allowed range |
+| 0x13 | `VC_ERR_ADDRESS` | `wValue` out of range |
+| 0x14 | `VC_ERR_VALUE` | A payload field is out of range |
+| 0x15 | `VC_ERR_UNSUPPORTED` | Not available on this platform |
+| 0x16 | `VC_ERR_BLOCKED` | Not allowed on this transport |
+| 0x17 | `VC_ERR_BUSY` | Try again shortly |
+| 0x18 | `VC_ERR_STATE` | Not allowed in the current state (output active, slot empty, feature disabled) |
+| 0x19 | `VC_ERR_PIN_INVALID` | GPIO not usable for this function |
+| 0x1A | `VC_ERR_PIN_IN_USE` | GPIO already claimed |
+
+Codes `0x01`-`0x07` remain the transport-level `CTRL_STATUS_*` values on UART and I2C. For paged commands those transports return the `VC_*` code in the same status byte, so an external controller gets the reason in the response frame. USB hosts see a STALL and may read `SYS.LAST_RESULT`, which is kept per transport.
+
+A deferred command (preset load, flash writes, pin moves) returns `VC_OK` when it passes validation and is queued. Completion keeps its existing channels: notifications, the Control Surfaces status packet and readback. The table marks these commands so the docs and the capability data say so.
+
+## 4. Page map
+
+| Page | Mnemonic | Contents |
+|---|---|---|
+| 0x00 | (none) | Empty. Every request is refused, apart from the Microsoft OS 2.0 descriptor request |
+| 0x01 | `SYS` | Discovery, identity, device name, last result, bootloader, system and stream telemetry |
+| 0x02 | `STORE` | Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters |
+| 0x03 | `INPUT` | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names |
+| 0x04 | `OUTPUT` | Output type and pins, output latency, ADAT TX, DAC hardware mute |
+| 0x05 | `ROUTE` | Matrix, per-output controls, delays, channel names, preamp, master and user volume |
+| 0x06 | `FILTER` | EQ and crossover bands, bypasses |
+| 0x07 | `DYN` | Limiter, leveller, loudness |
+| 0x08 | `FX` | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer |
+| 0x09 | `MEAS` | Level meters, clip flags, spectrum analyser, signal generator |
+| 0x0A | `CS` | Control Surfaces |
+| 0x0B | `XPORT` | UART and I2C control transports |
+| 0x0C | `CLOCK` | I2S clock pins and modes, MCK |
+| 0x0D-0x7F | | Unallocated, for future subsystems |
+| 0x80-0xDF | | Reserved |
+| 0xE0-0xEF | | Private use for forks and ports. Never allocated upstream |
+| 0xF0 | `DIAG` | Bench and diagnostic commands. No stability promise. Present only in bench builds |
+| 0xF1-0xFF | | Reserved |
+
+Changes from the starting map, with reasons:
+
+- **`CLOCK` (0x0C) is new.** BCK pins, clock-pin mode, I2S clock mode and MCK are shared between I2S input and output, so they fit neither page.
+- **`DIAG` (0xF0) is new.** Clock diagnostics, the loop profiler and the loopback counters are unstable bench tools. Keeping them out of the product pages means the stable pages never carry a command that exists only in some builds.
+- **Telemetry counters live in `SYS`, signal measurement in `MEAS`.** Buffer and pipeline statistics describe device health. Meters, the analyser and the generator describe the audio.
+- **There is no `NAME` page.** Every name lives with the thing it names. The device name is in `SYS`, input source names in `INPUT`, channel names in `ROUTE`, preset names in `STORE` and slot names in `CS`. A three-command page would have been the only one organized by data type and not by subsystem.
+
+### 4.1 Experimental branches
+
+`overclock`, `ac3-dts-decode` and the batch bench are experiments for possible future features. They are not merged and they get no reserved numbers. If one is taken up later, it is ported then and takes numbers from the free space in the page it belongs to, which every page has.
+
+`bRequest` 0x02 stays reserved in every page for the WebUSB vendor code, so the WebUSB spec stands as written.
+
+## 5. New command set
+
+Sizes are bytes. "G" is GET, "S" is SET, "S0" is a zero-length action. "Addr" is the `wValue` meaning. Payloads marked "unchanged" keep the 1.1.6 layout from `commands.md`.
+
+### 5.1 `SYS` (0x01)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `PROTOCOL_INFO` | G | none | 16 | See 5.14 |
+| 0x11 | `PAGE_LIST` | G | none | 2 per page | `{page, revision}` for each implemented page |
+| 0x12 | `PAGE_COMMANDS` | G | page | 64 | 256-bit GET bitmap then 256-bit SET bitmap |
+| 0x13 | `COMMAND_INFO` | G | `(page << 8) \| cmd` | 8 | Flags, sizes and address kind from the table |
+| 0x14 | `LAST_RESULT` | G | none | 8 | Last request on this transport: ID, direction, result |
+| 0x20 | `PLATFORM` | G | none | 7 | Unchanged layout |
+| 0x21 | `SERIAL` | G | none | 16 | Unchanged |
+| 0x22 | `BUILD_INFO` | G | none | 64 | Unchanged |
+| 0x23 | `CORE1_MODE` | G | none | 1 | Unchanged |
+| 0x24 | `DEVICE_NAME` | G, S | none | 32, 1-32 | Deferred, flash |
+| 0x30 | `ENTER_BOOTLOADER` | S0 | none | 0 | |
+| 0x40 | `SYSTEM_STATUS` | G | none | 16 | u32 clk_sys Hz, u32 sample rate Hz, u16 core mV, i16 temperature cdeg, u8 cpu0, u8 cpu1, u16 reserved |
+| 0x41 | `USB_AUDIO_STATUS` | G | none | 16 | u32 packets, u32 ring overruns, u32 worst packet gap us, u8 alt, u8 mounted, u16 reserved |
+| 0x42 | `BUFFER_STATS` | G | none | 44 | Unchanged `BufferStatsPacket` |
+| 0x43 | `PIPELINE_STATS` | G | none | 24 | u32 ring underruns, ring drops, min prewrite, input gap us, bg over budget, reserved |
+| 0x44 | `PDM_STATS` | G | none | 16 | u32 ring overruns, ring underruns, DMA overruns, DMA underruns |
+| 0x45 | `SPDIF_TX_STATS` | G | none | 24 | u32 underruns, total starvations, starvations for instances 0-3 |
+| 0x4F | `STATS_RESET` | S | none | 1 | Bitmask. Bit 0 resets watermarks and worst-gap fields |
+
+### 5.2 `STORE` (0x02)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `PRESET_SAVE` | S0 | slot | 0 | Deferred, flash |
+| 0x11 | `PRESET_LOAD` | S0 | slot | 0 | Deferred, restart |
+| 0x12 | `PRESET_DELETE` | S0 | slot | 0 | Deferred, flash |
+| 0x13 | `PRESET_NAME` | G, S | slot | 32, 1-32 | Deferred, flash |
+| 0x14 | `PRESET_ACTIVE` | G | none | 1 | |
+| 0x15 | `DIRECTORY` | G | none | 7 | Unchanged |
+| 0x16 | `STARTUP` | G, S | none | 2 | `{mode, slot}`. Last-active slot is in `DIRECTORY` |
+| 0x20 | `OUTPUT_CONFIG_MODE` | G, S | none | 1 | Deferred, flash |
+| 0x21 | `OUTPUT_CONFIG_SAVE` | S0 | none | 0 | Deferred, flash |
+| 0x30 | `FACTORY_RESET` | S0 | none | 0 | Deferred, restart |
+| 0x40 | `ALL_PARAMS` | G, S | none | 6136 | `WireBulkParams` V32, untouched. Bulk buffer |
+| 0x41 | `ALL_PARAMS_CHUNK` | G, S | byte offset | up to 64 | USB only |
+
+### 5.3 `INPUT` (0x03)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `SOURCE` | G, S | none | 1 | Deferred, restart |
+| 0x11 | `STATUS` | G | none | 12 | u8 source, u8 active channels, u16 reserved, u32 measured rate mHz, i32 VCXO trim ppm x100 |
+| 0x12 | `SOURCE_NAME` | G, S | source ID | 32, 1-32 | Deferred, flash |
+| 0x20 | `SPDIF_RX_STATUS` | G | none | 16 | Unchanged |
+| 0x21 | `SPDIF_RX_CH_STATUS` | G | none | 24 | Unchanged |
+| 0x22 | `SPDIF_RX_PIN` | G, S | input 0-3 | 1 | GPIO, 0xFF resets to default |
+| 0x23 | `SPDIF_RX_ENABLE` | G, S | input 1-3 | 1 | |
+| 0x24 | `SPDIF_RX_CONFIG` | G | none | 6 | Unchanged |
+| 0x30 | `I2S_RX_PIN` | G, S | pair 0-3 | 1 | |
+| 0x31 | `I2S_RX_CHANNELS` | G, S | none | 1 | |
+| 0x32 | `I2S_RX_RATE` | G, S | none | 4 | Selected I2S rate. Live rate is in `SYS.SYSTEM_STATUS` |
+| 0x40 | `ADAT_RX_ENABLE` | G, S | none | 1 | RP2350 |
+| 0x41 | `ADAT_RX_PIN` | G, S | none | 1 | RP2350 |
+| 0x42 | `ADAT_RX_CLOCK_MODE` | G, S | none | 1 | RP2350 |
+| 0x43 | `ADAT_RX_STATUS` | G | none | 20 | RP2350 |
+| 0x50 | `LG_SOUND_SYNC_ENABLE` | G, S | none | 1 | |
+| 0x51 | `LG_SOUND_SYNC_STATUS` | G | none | 16 | |
+
+### 5.4 `OUTPUT` (0x04)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `TYPE` | G, S | slot | 1 | Deferred, restart |
+| 0x11 | `PIN` | G, S | pin output | 1 | Deferred, restart |
+| 0x20 | `LATENCY` | G, S | none | 1 | Requested option ID. Deferred, flash, restart |
+| 0x21 | `LATENCY_STATUS` | G | none | 12 | Unchanged `OutputLatencyStatus` |
+| 0x22 | `LATENCY_OPTIONS` | G | none | 8 per option | Unchanged entries |
+| 0x30 | `ADAT_TX_ENABLE` | G, S | none | 1 | RP2350 |
+| 0x31 | `ADAT_TX_PIN` | G, S | none | 1 | RP2350 |
+| 0x32 | `ADAT_TX_STATUS` | G | none | 8 | RP2350 |
+| 0x40 | `DAC_MUTE_CONFIG` | G, S | none | 16 | Deferred, flash |
+| 0x41 | `DAC_MUTE_TEST` | S0 | none | 0 | |
+
+### 5.5 `ROUTE` (0x05)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `MATRIX_ROUTE` | G, S | `(input << 8) \| output` | 8 | u8 enabled, u8 phase invert, u16 reserved, f32 gain dB |
+| 0x20 | `OUTPUT_ENABLE` | G, S | output | 1 | |
+| 0x21 | `OUTPUT_GAIN` | G, S | output | 4 | |
+| 0x22 | `OUTPUT_MUTE` | G, S | output | 1 | |
+| 0x23 | `OUTPUT_DELAY` | G, S | output | 4 | |
+| 0x24 | `OUTPUT_ENABLE_CONFLICT` | G | output | 1 | Was `GET_CORE1_CONFLICT` |
+| 0x30 | `CHANNEL_DELAY` | G, S | channel | 4 | |
+| 0x31 | `CHANNEL_NAME` | G, S | channel | 32, 1-32 | |
+| 0x40 | `PREAMP` | G, S | input channel | 4 | |
+| 0x50 | `MASTER_VOLUME` | G, S | none | 4 | |
+| 0x51 | `MASTER_VOLUME_MODE` | G, S | none | 1 | Deferred, flash |
+| 0x52 | `MASTER_VOLUME_SAVE` | S0 | none | 0 | Deferred, flash |
+| 0x53 | `MASTER_VOLUME_SAVED` | G | none | 4 | |
+| 0x60 | `USER_VOLUME` | G, S | none | 4 | |
+| 0x61 | `USER_MUTE` | G, S | none | 1 | |
+
+### 5.6 `FILTER` (0x06)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `BAND` | G, S | `(channel << 8) \| band` | 16 | u8 type, u8 bypass, u16 qp_x512, f32 freq, f32 Q, f32 gain dB |
+| 0x11 | `BAND_BYPASS` | G, S | `(channel << 8) \| band` | 1 | |
+| 0x12 | `EQ_BYPASS` | G, S | none | 1 | Master EQ bypass |
+
+`BAND` replaces the write-only 16 or 18 byte `EqParamPacket` and the scalar-at-a-time read. The address moves out of the payload, the Linkwitz `qp` fits inside 16 bytes, and a whole band reads back in one transfer.
+
+### 5.7 `DYN` (0x07)
+
+| Cmd | Name | Dir | Addr | Size |
+|---|---|---|---|---|
+| 0x10 | `LIMITER_ENABLE` | G, S | output (0xFF = all on SET) | 4 (f32, as today) |
+| 0x11 | `LIMITER_THRESHOLD` | G, S | output (0xFF = all on SET) | 4 |
+| 0x12 | `LIMITER_RELEASE` | G, S | output (0xFF = all on SET) | 4 |
+| 0x13 | `LIMITER_LINK_GROUP` | G, S | output (0xFF = all on SET) | 4 (f32, as today) |
+| 0x18 | `LIMITER_METERS` | G | none | 2 per output |
+| 0x19 | `LIMITER_STATUS` | G | none | 4 |
+| 0x20 | `LEVELLER_ENABLE` | G, S | none | unchanged |
+| 0x21 | `LEVELLER_AMOUNT` | G, S | none | unchanged |
+| 0x22 | `LEVELLER_SPEED` | G, S | none | unchanged |
+| 0x23 | `LEVELLER_MAX_GAIN` | G, S | none | unchanged |
+| 0x24 | `LEVELLER_LOOKAHEAD` | G, S | none | unchanged |
+| 0x25 | `LEVELLER_GATE` | G, S | none | unchanged |
+| 0x26 | `LEVELLER_MASKS` | G, S | none | 2 |
+| 0x30 | `LOUDNESS_ENABLE` | G, S | none | unchanged |
+| 0x31 | `LOUDNESS_REF` | G, S | none | unchanged |
+| 0x32 | `LOUDNESS_INTENSITY` | G, S | none | unchanged |
+| 0x33 | `LOUDNESS_MASK` | G, S | none | 2 |
+
+### 5.8 `FX` (0x08)
+
+| Cmd | Name | Dir | Size |
+|---|---|---|---|
+| 0x10-0x15 | `CROSSFEED_ENABLE`, `_PRESET`, `_FREQ`, `_FEED`, `_ITD`, `_OUTPUTS` | G, S | unchanged |
+| 0x20-0x2B | `SUBHARM_ENABLE`, `_LOW`, `_HIGH`, `_TOP`, `_BOOST`, `_MASK`, `_SELECT`, `_DEPTH`, `_HOLD`, `_CEILING`, `_LINK`, `_SOLO` | G, S | unchanged |
+| 0x2E | `SUBHARM_HEADROOM` | G | 4 |
+| 0x2F | `SUBHARM_METER` | G | 2 per output |
+| 0x40-0x46 | `PSYBASS_ENABLE`, `_CUTOFF`, `_HARMONICS`, `_DRIVE`, `_CHARACTER`, `_ORIGINAL`, `_MASK` | G, S | unchanged |
+| 0x60-0x6D | `TUBE_ENABLE`, `_OUTPUT_MASK`, `_TYPE`, `_DRIVE`, `_BIAS`, `_ASYM`, `_HARDNESS`, `_SAG`, `_RECTIFIER`, `_XFMR_ENABLE`, `_XFMR_DAMPING`, `_XFMR_RES`, `_MIX`, `_TRIM` | G, S | 4 (f32, as today) |
+| 0x80 | `UPMIX_CONFIG` | G, S | 44 |
+| 0x81 | `UPMIX_STATUS` | G | 16 |
+| 0x90-0x9D | `UPMIX_ENABLE`, `_CENTER_MODE`, `_SURROUND_MODE`, `_STRENGTH`, `_CENTER_WIDTH`, `_THRESHOLD`, `_ATTACK`, `_RELEASE`, `_DET_HPF`, `_SUR_DELAY`, `_SUR_HPF`, `_SUR_LPF`, `_DECORR`, `_PRESENCE` | G, S | 4 (f32, as today) |
+
+No command in this page takes an address. Tube and upmixer commands are in `TUBE_PARAM_*` and `UPMIX_PARAM_*` order, and the upmixer page block is RP2350 only.
+
+### 5.9 `MEAS` (0x09)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `LEVELS` | G | none | 2N+7 | The combined packet from `GET_STATUS` 9 |
+| 0x11 | `CLIP_FLAGS` | G | none | 4 | Does not clear |
+| 0x12 | `CLIP_CLEAR` | S0 | none | 0 | |
+| 0x20 | `RTA_CONFIG` | G, S | none | 12 | |
+| 0x21 | `RTA_CAPS` | G | none | 16 | |
+| 0x22 | `RTA_BAND_CENTRES` | G | chunk from 0 | up to 64 | |
+| 0x23 | `RTA_BANDS` | G | channel | 82 | Keepalive |
+| 0x24 | `RTA_BINS` | G | byte offset | variable | Keepalive |
+| 0x25 | `RTA_STATUS` | G | none | 24 | |
+| 0x26 | `RTA_BANDS_ALL` | G | none | 82 per live channel | USB only, bulk buffer |
+| 0x28 | `RTA_START` | S0 | none | 0 | |
+| 0x29 | `RTA_STOP` | S0 | none | 0 | |
+| 0x2A | `RTA_RESET` | S0 | none | 0 | Clears averages and peaks |
+| 0x40 | `SIGGEN_CONFIG` | G, S | none | 36 | |
+| 0x41 | `SIGGEN_STATUS` | G | none | 16 | |
+| 0x42 | `SIGGEN_CAPS` | G | none | 8 | |
+| 0x43 | `SIGGEN_TYPE_DESC` | G | type index | 62 | |
+| 0x48 | `SIGGEN_START` | S0 | none | 0 | |
+| 0x49 | `SIGGEN_STOP` | S0 | none | 0 | |
+| 0x4A | `SIGGEN_STOP_NOW` | S0 | none | 0 | |
+
+### 5.10 `CS` (0x0A)
+
+| Cmd | Name | Dir | Addr | Size |
+|---|---|---|---|---|
+| 0x10 | `CAPS` | G | none | 52 |
+| 0x11 | `NOUN_DESC` | G | noun | 12 |
+| 0x12 | `STATUS` | G | none | 41 |
+| 0x13 | `EXT_STATUS` | G | none | 24 |
+| 0x18 | `SAVE` | S0 | none | 0 |
+| 0x19 | `REVERT` | S0 | none | 0 |
+| 0x20 | `BINDING` | G, S | slot | 24 |
+| 0x21 | `SLOT_NAME` | G, S | slot | 32, 1-32 |
+| 0x30 | `IR_CMD` | G, S | sub-slot | 16 |
+| 0x31 | `IR_LEARN_STATUS` | G | none | unchanged |
+| 0x32 | `IR_LEARN_ARM` | S0 | none | 0 |
+| 0x33 | `IR_LEARN_CANCEL` | S0 | none | 0 |
+| 0x40 | `GROUP` | G, S | group | 40 |
+| 0x50 | `MACRO` | G | macro | 132 |
+| 0x51 | `MACRO_HEADER` | G, S | macro | 36 |
+| 0x52 | `MACRO_STEP` | G, S | `(step << 8) \| macro` | 12 |
+| 0x58 | `MACRO_FIRE` | S0 | macro | 0 |
+| 0x59 | `MACRO_CANCEL` | S0 | none | 0 |
+| 0x60 | `AUX_STATE` | G, S | slot | 1 |
+| 0x61 | `AUX_LEVEL` | G, S | slot | 2 |
+| 0x62 | `AUX_ALL` | G | none | 48 |
+| 0x70 | `DISPLAY_CONFIG` | G, S | none | 12 |
+| 0x71 | `DISPLAY_CAPS` | G | none | 4 |
+| 0x72 | `DISPLAY_PAGE` | G, S | display page | 4 |
+| 0x73 | `DISPLAY_STATUS` | G | none | 8 |
+
+### 5.11 `XPORT` (0x0B)
+
+| Cmd | Name | Dir | Size | Notes |
+|---|---|---|---|---|
+| 0x10 | `UART_CONFIG` | G, S | 8 | SET is USB only |
+| 0x11 | `I2C_CONFIG` | G, S | 8 | SET is USB only |
+| 0x12 | `STATUS` | G | 8 | |
+
+### 5.12 `CLOCK` (0x0C)
+
+| Cmd | Name | Dir | Addr | Size | Notes |
+|---|---|---|---|---|---|
+| 0x10 | `I2S_BCK_PIN` | G, S | role 0-1 | 1 | |
+| 0x11 | `I2S_CLOCK_PIN_MODE` | G, S | none | 1 | |
+| 0x12 | `I2S_CLOCK_MODE` | G, S | none | 1 | Deferred, restart |
+| 0x13 | `I2S_SLAVE_STATUS` | G | none | 16 | |
+| 0x20 | `MCK_ENABLE` | G, S | none | 1 | |
+| 0x21 | `MCK_PIN` | G, S | none | 1 | |
+| 0x22 | `MCK_MULTIPLIER` | G, S | none | 1 | |
+
+### 5.13 `DIAG` (0xF0)
+
+| Cmd | Name | Dir | Build flag |
+|---|---|---|---|
+| 0x10 | `CLOCK_DIAG` | G | `DSPI_CLOCK_DIAG` |
+| 0x20 | `LOOPBACK_STATS` | G (8 B) | `DSPI_LOOPBACK` |
+| 0x30-0x33 | `LOOP_PROF_SECTION`, `_JOB`, `_COMMAND`, `_BG_PACE` | G, G, G, G and S | `DSPI_LOOP_PROF` |
+
+A command whose build flag is off is absent from the table. It returns `VC_ERR_UNKNOWN` and does not appear in `PAGE_COMMANDS`. This replaces the "zero-length reply in release builds" behaviour of 0x82.
+
+### 5.14 Discovery
+
+`SYS.PROTOCOL_INFO` reply (16 bytes):
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8[4] | Magic `"DSPi"` |
+| 4 | u8 | Protocol major. 1 for this design. Bumps only on an incompatible change |
+| 5 | u8 | Protocol minor |
+| 6 | u8 | Number of implemented pages |
+| 7 | u8 | Flags. Reserved, 0 |
+| 8 | u16 | Largest non-bulk SET payload (64) |
+| 10 | u16 | Largest non-bulk GET reply |
+| 12 | u32 | Reserved, 0 |
+
+How a host starts a session:
+
+1. Send GET `SYS.PROTOCOL_INFO` (page 0x01, command 0x10).
+2. A reply that starts with the magic means the paged protocol is available. Read `PAGE_LIST` and gate features on page revisions or on `PAGE_COMMANDS` bits.
+3. A STALL means firmware 1.1.6 or older. Such firmware still answers its own `GET_PLATFORM` (`bRequest` 0x7F, `wIndex` 0 or 2), so a host can read the version and offer the update. Never send any other paged command to such a device.
+
+Step 3 matters because old firmware ignores `wIndex` and would run a paged command as whatever legacy opcode shares its number. The probe itself is safe: an IN request with `bRequest` 0x10 has no handler on old firmware and STALLs.
+
+A page revision increases whenever a command is added to the page or a shape grows. Hosts compare revisions or test bits. They never compare firmware versions to decide whether a feature exists.
+
+## 6. Old to new mapping
+
+Kinds used below:
+
+- **Fold.** A SET and GET pair becomes one command. Address and payload unchanged unless noted.
+- **Act.** A write-as-read becomes a SET. The value moves from `wValue` to the payload, or the SET is zero-length.
+- **Split.** A multiplexed command becomes several commands.
+- **Same.** Only the number changes.
+- **Retire.** No new command. Gone in 1.1.7-beta1.
+
+| Old | Old name | Kind | New |
+|---|---|---|---|
+| 0x03 | `OUTPUT_LATENCY` | Split | SET and new 1-byte GET: `OUTPUT.LATENCY`. GET `wValue` 0: `OUTPUT.LATENCY_STATUS`. GET `wValue` 1: `OUTPUT.LATENCY_OPTIONS` |
+| 0x04, 0x05 | `SET/GET_CS_AUX_STATE` | Fold, Split | `CS.AUX_STATE`. GET `wValue` 0xFFFF: `CS.AUX_ALL` |
+| 0x06, 0x07 | `SET/GET_CS_AUX_LEVEL` | Fold | `CS.AUX_LEVEL` |
+| 0x08, 0x09 | `RTA_SET/GET_CONFIG` | Fold | `MEAS.RTA_CONFIG` |
+| 0x0A | `RTA_GET_CAPS` | Split | `wValue` 0: `MEAS.RTA_CAPS`. `wValue` n: `MEAS.RTA_BAND_CENTRES` chunk n-1 |
+| 0x0B | `RTA_GET_BANDS` | Same | `MEAS.RTA_BANDS` |
+| 0x0C | `RTA_GET_BINS` | Same | `MEAS.RTA_BINS` |
+| 0x0D | `RTA_GET_STATUS` | Same | `MEAS.RTA_STATUS` |
+| 0x0E | `RTA_CONTROL` | Act, Split | 0: `MEAS.RTA_STOP`. 1: `MEAS.RTA_START`. 2: `MEAS.RTA_RESET` |
+| 0x0F | `RTA_GET_BANDS_ALL` | Same | `MEAS.RTA_BANDS_ALL` |
+| 0x10, 0x11 | `SET/GET_SUBHARM` | Fold | `FX.SUBHARM_ENABLE` |
+| 0x12, 0x13 | `SET/GET_SUBHARM_LOW` | Fold | `FX.SUBHARM_LOW` |
+| 0x14, 0x15 | `SET/GET_SUBHARM_HIGH` | Fold | `FX.SUBHARM_HIGH` |
+| 0x16, 0x17 | `SET/GET_SUBHARM_BOOST` | Fold | `FX.SUBHARM_BOOST` |
+| 0x18, 0x19 | `SET/GET_SUBHARM_MASK` | Fold | `FX.SUBHARM_MASK` |
+| 0x1A | `GET_SUBHARM_HEADROOM` | Same | `FX.SUBHARM_HEADROOM` |
+| 0x1B, 0x1C | `SET/GET_SUBHARM_TOP` | Fold | `FX.SUBHARM_TOP` |
+| 0x1D, 0x1E | `SET/GET_SUBHARM_SELECT` | Fold | `FX.SUBHARM_SELECT` |
+| 0x1F | `GET_SUBHARM_METER` | Same | `FX.SUBHARM_METER` |
+| 0x20, 0x21 | `SET/GET_CS_GROUP` | Fold | `CS.GROUP` |
+| 0x22 | `SET_CS_MACRO` | Same | `CS.MACRO_HEADER` SET (GET is new) |
+| 0x23 | `GET_CS_MACRO` | Same | `CS.MACRO` |
+| 0x24 | `SET_CS_MACRO_STEP` | Same | `CS.MACRO_STEP` SET (GET is new) |
+| 0x25 | `CS_MACRO_FIRE` | Act, Split | `wValue` = macro: `CS.MACRO_FIRE`. 0xFFFF: `CS.MACRO_CANCEL` |
+| 0x26 | `GET_CS_EXT_STATUS` | Same | `CS.EXT_STATUS` |
+| 0x27, 0x28 | `SET/GET_CS_DISPLAY_CFG` | Fold, Split | `CS.DISPLAY_CONFIG` (12 B both ways). The 4 limit bytes of the old GET: `CS.DISPLAY_CAPS` |
+| 0x29, 0x2A | `SET/GET_CS_DISPLAY_PAGE` | Fold | `CS.DISPLAY_PAGE` |
+| 0x2B | `GET_CS_DISPLAY_STATUS` | Same | `CS.DISPLAY_STATUS` |
+| 0x2C, 0x2D | `SET/GET_SUBHARM_SOLO` | Fold | `FX.SUBHARM_SOLO` |
+| 0x2E, 0x2F | `SET/GET_SUBHARM_LINK` | Fold | `FX.SUBHARM_LINK` |
+| 0x30, 0x31 | `SET/GET_PSYBASS` | Fold | `FX.PSYBASS_ENABLE` |
+| 0x32, 0x33 | `SET/GET_PSYBASS_CUTOFF` | Fold | `FX.PSYBASS_CUTOFF` |
+| 0x34, 0x35 | `SET/GET_PSYBASS_HARMONICS` | Fold | `FX.PSYBASS_HARMONICS` |
+| 0x36, 0x37 | `SET/GET_PSYBASS_DRIVE` | Fold | `FX.PSYBASS_DRIVE` |
+| 0x38, 0x39 | `SET/GET_PSYBASS_CHARACTER` | Fold | `FX.PSYBASS_CHARACTER` |
+| 0x3A, 0x3B | `SET/GET_PSYBASS_ORIGINAL` | Fold | `FX.PSYBASS_ORIGINAL` |
+| 0x3C, 0x3D | `SET/GET_PSYBASS_MASK` | Fold | `FX.PSYBASS_MASK` |
+| 0x3E, 0x3F | `SET/GET_TUBE_PARAM` | Fold, Split | `wValue` index 0-13: `FX.TUBE_*` 0x60-0x6D |
+| 0x42 | `SET_EQ_PARAM` | Same | `FILTER.BAND` SET. Channel and band move to `wValue`, `qp` moves inside the 16 bytes |
+| 0x43 | `GET_EQ_PARAM` | Split | `FILTER.BAND` GET returns the whole band. The 3-bit param selector goes away |
+| 0x44, 0x45 | `SET/GET_PREAMP` | Retire | Use `ROUTE.PREAMP` per channel |
+| 0x46, 0x47 | `SET/GET_BYPASS` | Fold | `FILTER.EQ_BYPASS` |
+| 0x48, 0x49 | `SET/GET_DELAY` | Fold | `ROUTE.CHANNEL_DELAY` |
+| 0x4A, 0x4B | `UPMIX_SET/GET_CONFIG` | Fold | `FX.UPMIX_CONFIG` |
+| 0x4C, 0x4D | `UPMIX_SET/GET_PARAM` | Fold, Split | `wValue` index 0-13: `FX.UPMIX_*` 0x90-0x9D |
+| 0x4E | `UPMIX_GET_STATUS` | Same | `FX.UPMIX_STATUS` |
+| 0x50 | `GET_STATUS` | Split | See 6.1 |
+| 0x51 | `SAVE_PARAMS` | Retire | Use `STORE.PRESET_ACTIVE` then `STORE.PRESET_SAVE` |
+| 0x52 | `SAVE_OUTPUT_CONFIG` | Act | `STORE.OUTPUT_CONFIG_SAVE` |
+| 0x53 | `FACTORY_RESET` | Act | `STORE.FACTORY_RESET` |
+| 0x54, 0x55 | `SET/GET_INPUT_SOURCE_NAME` | Fold | `INPUT.SOURCE_NAME` |
+| 0x56, 0x57 | `SET/GET_DEVICE_NAME` | Fold | `SYS.DEVICE_NAME` |
+| 0x58, 0x59 | `SET/GET_LOUDNESS` | Fold | `DYN.LOUDNESS_ENABLE` |
+| 0x5A, 0x5B | `SET/GET_LOUDNESS_REF` | Fold | `DYN.LOUDNESS_REF` |
+| 0x5C, 0x5D | `SET/GET_LOUDNESS_INTENSITY` | Fold | `DYN.LOUDNESS_INTENSITY` |
+| 0x5E, 0x5F | `SET/GET_CROSSFEED` | Fold | `FX.CROSSFEED_ENABLE` |
+| 0x60, 0x61 | `SET/GET_CROSSFEED_PRESET` | Fold | `FX.CROSSFEED_PRESET` |
+| 0x62, 0x63 | `SET/GET_CROSSFEED_FREQ` | Fold | `FX.CROSSFEED_FREQ` |
+| 0x64, 0x65 | `SET/GET_CROSSFEED_FEED` | Fold | `FX.CROSSFEED_FEED` |
+| 0x66, 0x67 | `SET/GET_CROSSFEED_ITD` | Fold | `FX.CROSSFEED_ITD` |
+| 0x68, 0x69 | `SET/GET_ADAT_INPUT_ENABLE` | Act, Fold | `INPUT.ADAT_RX_ENABLE` |
+| 0x6A, 0x6B | `SET/GET_ADAT_INPUT_PIN` | Act, Fold | `INPUT.ADAT_RX_PIN` |
+| 0x6C, 0x6D | `SET/GET_ADAT_INPUT_CLOCK_MODE` | Act, Fold | `INPUT.ADAT_RX_CLOCK_MODE` |
+| 0x6E | `GET_ADAT_INPUT_STATUS` | Same | `INPUT.ADAT_RX_STATUS` |
+| 0x70, 0x71 | `SET/GET_MATRIX_ROUTE` | Fold | `ROUTE.MATRIX_ROUTE`. Input and output move to `wValue` on SET |
+| 0x72, 0x73 | `SET/GET_OUTPUT_ENABLE` | Fold | `ROUTE.OUTPUT_ENABLE` |
+| 0x74, 0x75 | `SET/GET_OUTPUT_GAIN` | Fold | `ROUTE.OUTPUT_GAIN` |
+| 0x76, 0x77 | `SET/GET_OUTPUT_MUTE` | Fold | `ROUTE.OUTPUT_MUTE` |
+| 0x78, 0x79 | `SET/GET_OUTPUT_DELAY` | Fold | `ROUTE.OUTPUT_DELAY` |
+| 0x7A | `GET_CORE1_MODE` | Same | `SYS.CORE1_MODE` |
+| 0x7B | `GET_CORE1_CONFLICT` | Same | `ROUTE.OUTPUT_ENABLE_CONFLICT` |
+| 0x7C, 0x7D | `SET/GET_OUTPUT_PIN` | Act, Fold | `OUTPUT.PIN`. GPIO moves to the payload |
+| 0x7E | `GET_SERIAL` | Same | `SYS.SERIAL` |
+| 0x7F | `GET_PLATFORM` | Same | `SYS.PLATFORM` |
+| 0x80 | `GET_BUILD_INFO` | Same | `SYS.BUILD_INFO` |
+| 0x81 | `LIMITER` | Split | Index 0-3: `DYN.LIMITER_ENABLE`, `_THRESHOLD`, `_RELEASE`, `_LINK_GROUP`. 0x80: `DYN.LIMITER_METERS`. 0x81: `DYN.LIMITER_STATUS` |
+| 0x82 | `GET_CLOCK_DIAG` | Same | `DIAG.CLOCK_DIAG` |
+| 0x83 | `CLEAR_CLIPS` | Split | Read: `MEAS.CLIP_FLAGS`. Clear: `MEAS.CLIP_CLEAR` |
+| 0x84, 0x85 | `SET/GET_CS_BINDING` | Fold | `CS.BINDING` |
+| 0x86 | `GET_CS_CAPS` | Split | 0xFFFF: `CS.CAPS`. Noun: `CS.NOUN_DESC` |
+| 0x87 | `GET_CS_STATUS` | Same | `CS.STATUS` |
+| 0x88, 0x89 | `SET/GET_I2S_CLOCK_MODE` | Fold | `CLOCK.I2S_CLOCK_MODE` |
+| 0x8A | `GET_I2S_SLAVE_STATUS` | Same | `CLOCK.I2S_SLAVE_STATUS` |
+| 0x8B, 0x8C | `SET/GET_CS_NAME` | Fold | `CS.SLOT_NAME` |
+| 0x8D, 0x8E | `SET/GET_CS_IR_CMD` | Fold | `CS.IR_CMD` |
+| 0x8F | `CS_IR_LEARN` | Act, Split | 1: `CS.IR_LEARN_ARM`. 0: `CS.IR_LEARN_CANCEL`. 2: `CS.IR_LEARN_STATUS` |
+| 0x90 | `PRESET_SAVE` | Act | `STORE.PRESET_SAVE` |
+| 0x91 | `PRESET_LOAD` | Act | `STORE.PRESET_LOAD` |
+| 0x92 | `PRESET_DELETE` | Act | `STORE.PRESET_DELETE` |
+| 0x93, 0x94 | `PRESET_GET/SET_NAME` | Fold | `STORE.PRESET_NAME` |
+| 0x95 | `PRESET_GET_DIR` | Same | `STORE.DIRECTORY` |
+| 0x96, 0x97 | `PRESET_SET/GET_STARTUP` | Fold | `STORE.STARTUP`. GET drops the last-active byte, which `DIRECTORY` already has |
+| 0x98, 0x99 | `SET/GET_OUTPUT_CONFIG_MODE` | Fold | `STORE.OUTPUT_CONFIG_MODE` |
+| 0x9A | `PRESET_GET_ACTIVE` | Same | `STORE.PRESET_ACTIVE` |
+| 0x9B, 0x9C | `SET/GET_CHANNEL_NAME` | Fold | `ROUTE.CHANNEL_NAME` |
+| 0x9D | `CS_SAVE` | Act | `CS.SAVE` |
+| 0x9E | `CS_REVERT` | Act | `CS.REVERT` |
+| 0xA0, 0xA1 | `GET/SET_ALL_PARAMS` | Fold | `STORE.ALL_PARAMS` |
+| 0xA2, 0xA3 | `GET/SET_ALL_PARAMS_CHUNK` | Fold | `STORE.ALL_PARAMS_CHUNK` |
+| 0xA4, 0xA5 | `SIGGEN_SET/GET_CONFIG` | Fold | `MEAS.SIGGEN_CONFIG` |
+| 0xA6 | `SIGGEN_CONTROL` | Act, Split | 0: `MEAS.SIGGEN_STOP`. 1: `MEAS.SIGGEN_START`. 2: `MEAS.SIGGEN_STOP_NOW` |
+| 0xA7 | `SIGGEN_GET_STATUS` | Same | `MEAS.SIGGEN_STATUS` |
+| 0xA8 | `SIGGEN_GET_CAPS` | Split | 0xFFFF: `MEAS.SIGGEN_CAPS`. Type index: `MEAS.SIGGEN_TYPE_DESC` |
+| 0xA9, 0xAA | `SET/GET_SUBHARM_DEPTH` | Fold | `FX.SUBHARM_DEPTH` |
+| 0xAB, 0xAC | `SET/GET_SUBHARM_HOLD` | Fold | `FX.SUBHARM_HOLD` |
+| 0xAD, 0xAE | `SET/GET_SUBHARM_CEILING` | Fold | `FX.SUBHARM_CEILING` |
+| 0xB0 | `GET_BUFFER_STATS` | Same | `SYS.BUFFER_STATS` |
+| 0xB1 | `RESET_BUFFER_STATS` | Act | `SYS.STATS_RESET`. The mask moves to the payload |
+| 0xB2 | `GET_USB_ERROR_STATS` | Retire | Always zero under TinyUSB |
+| 0xB3 | `RESET_USB_ERROR_STATS` | Retire | No-op |
+| 0xB4, 0xB5 | `SET/GET_LEVELLER_ENABLE` | Fold | `DYN.LEVELLER_ENABLE` |
+| 0xB6, 0xB7 | `SET/GET_LEVELLER_AMOUNT` | Fold | `DYN.LEVELLER_AMOUNT` |
+| 0xB8, 0xB9 | `SET/GET_LEVELLER_SPEED` | Fold | `DYN.LEVELLER_SPEED` |
+| 0xBA, 0xBB | `SET/GET_LEVELLER_MAX_GAIN` | Fold | `DYN.LEVELLER_MAX_GAIN` |
+| 0xBC, 0xBD | `SET/GET_LEVELLER_LOOKAHEAD` | Fold | `DYN.LEVELLER_LOOKAHEAD` |
+| 0xBE, 0xBF | `SET/GET_LEVELLER_GATE` | Fold | `DYN.LEVELLER_GATE` |
+| 0xC0, 0xC1 | `SET/GET_OUTPUT_TYPE` | Act, Fold | `OUTPUT.TYPE`. Type moves to the payload |
+| 0xC2, 0xC3 | `SET/GET_I2S_BCK_PIN` | Act, Fold | `CLOCK.I2S_BCK_PIN`. Role stays in `wValue`, GPIO moves to the payload |
+| 0xC4, 0xC5 | `SET/GET_MCK_ENABLE` | Act, Fold | `CLOCK.MCK_ENABLE` |
+| 0xC6, 0xC7 | `SET/GET_MCK_PIN` | Act, Fold | `CLOCK.MCK_PIN` |
+| 0xC8, 0xC9 | `SET/GET_MCK_MULTIPLIER` | Act, Fold | `CLOCK.MCK_MULTIPLIER` |
+| 0xCA, 0xCB | `SET/GET_ADAT_ENABLE` | Act, Fold | `OUTPUT.ADAT_TX_ENABLE` |
+| 0xCC, 0xCD | `SET/GET_ADAT_PIN` | Act, Fold | `OUTPUT.ADAT_TX_PIN` |
+| 0xCE | `GET_ADAT_STATUS` | Same | `OUTPUT.ADAT_TX_STATUS` |
+| 0xD0, 0xD1 | `SET/GET_PREAMP_CH` | Fold | `ROUTE.PREAMP` |
+| 0xD2, 0xD3 | `SET/GET_MASTER_VOLUME` | Fold | `ROUTE.MASTER_VOLUME` |
+| 0xD4, 0xD5 | `SET/GET_MASTER_VOLUME_MODE` | Fold | `ROUTE.MASTER_VOLUME_MODE` |
+| 0xD6 | `SAVE_MASTER_VOLUME` | Act | `ROUTE.MASTER_VOLUME_SAVE` |
+| 0xD7 | `GET_SAVED_MASTER_VOLUME` | Same | `ROUTE.MASTER_VOLUME_SAVED` |
+| 0xD8, 0xD9 | `SET/GET_BAND_BYPASS` | Fold | `FILTER.BAND_BYPASS` |
+| 0xDA, 0xDB | `SET/GET_USER_VOLUME` | Fold | `ROUTE.USER_VOLUME` |
+| 0xDC, 0xDD | `SET/GET_USER_MUTE` | Fold | `ROUTE.USER_MUTE` |
+| 0xDE, 0xDF | `SET/GET_LEVELLER_MASKS` | Fold | `DYN.LEVELLER_MASKS` |
+| 0xE0, 0xE1 | `SET/GET_INPUT_SOURCE` | Fold | `INPUT.SOURCE` |
+| 0xE2 | `GET_SPDIF_RX_STATUS` | Same | `INPUT.SPDIF_RX_STATUS` |
+| 0xE3 | `GET_SPDIF_RX_CH_STATUS` | Same | `INPUT.SPDIF_RX_CH_STATUS` |
+| 0xE4, 0xE5 | `SET/GET_SPDIF_RX_PIN` | Act, Fold | `INPUT.SPDIF_RX_PIN`. Index stays in `wValue`, GPIO moves to the payload |
+| 0xE6, 0xE7 | `SET/GET_LG_SOUND_SYNC_ENABLE` | Fold | `INPUT.LG_SOUND_SYNC_ENABLE` |
+| 0xE8 | `GET_LG_SOUND_SYNC_STATUS` | Same | `INPUT.LG_SOUND_SYNC_STATUS` |
+| 0xE9 | `SET_SPDIF_INPUT_ENABLE` | Act | `INPUT.SPDIF_RX_ENABLE` (GET is new) |
+| 0xEA, 0xEB | `SET/GET_DAC_HW_MUTE_CONFIG` | Fold | `OUTPUT.DAC_MUTE_CONFIG` |
+| 0xEC | `TEST_DAC_HW_MUTE` | Act | `OUTPUT.DAC_MUTE_TEST` |
+| 0xED, 0xEE | `SET/GET_INPUT_RATE` | Fold, Split | `INPUT.I2S_RX_RATE` (selected rate, 4 B both ways). The live rate half of the old GET: `SYS.SYSTEM_STATUS` |
+| 0xEF | `GET_SPDIF_INPUT_CONFIG` | Same | `INPUT.SPDIF_RX_CONFIG` |
+| 0xF0 | `ENTER_BOOTLOADER` | Act | `SYS.ENTER_BOOTLOADER` |
+| 0xF1, 0xF2 | `SET/GET_I2S_RX_PIN` | Act, Fold | `INPUT.I2S_RX_PIN` |
+| 0xF3, 0xF4 | `SET/GET_I2S_INPUT_CHANNELS` | Act, Fold | `INPUT.I2S_RX_CHANNELS` |
+| 0xF5, 0xF6 | `SET/GET_UART_CONFIG` | Fold | `XPORT.UART_CONFIG` |
+| 0xF7, 0xF8 | `SET/GET_I2C_CONFIG` | Fold | `XPORT.I2C_CONFIG` |
+| 0xF9 | `GET_CTRL_IFACE_STATUS` | Same | `XPORT.STATUS` |
+| 0xFA, 0xFB | `SET/GET_LOUDNESS_MASK` | Fold | `DYN.LOUDNESS_MASK` |
+| 0xFC, 0xFD | `SET/GET_CROSSFEED_OUTPUTS` | Fold | `FX.CROSSFEED_OUTPUTS` |
+| 0xFE, 0xFF | `SET/GET_I2S_CLOCK_PIN_MODE` | Act, Fold | `CLOCK.I2S_CLOCK_PIN_MODE` |
+
+The 246 opcodes become about 215 commands in 13 pages, even after every multiplexed command is split. The largest page uses about 60 of its 240 numbers.
+
+### 6.1 `GET_STATUS` (0x50) split
+
+| `wValue` | Field | New home |
+|---|---|---|
+| 0, 1, 2 | Packed peak pairs and CPU | Retire. `MEAS.LEVELS` and `SYS.SYSTEM_STATUS` |
+| 3-6 | PDM ring and DMA counters | `SYS.PDM_STATS` |
+| 7 | Retired | Retire |
+| 8 | S/PDIF underruns | `SYS.SPDIF_TX_STATS` |
+| 9 | Combined meter packet | `MEAS.LEVELS` |
+| 10, 11, 12 | USB packets, alt, mounted | `SYS.USB_AUDIO_STATUS` |
+| 13, 14, 15, 16 | clk_sys, core voltage, sample rate, temperature | `SYS.SYSTEM_STATUS` |
+| 17-21 | S/PDIF DMA starvations | `SYS.SPDIF_TX_STATS` |
+| 22 | USB ring overruns | `SYS.USB_AUDIO_STATUS` |
+| 23 | Active input channels | `INPUT.STATUS` |
+| 24, 25 | Loopback counters | `DIAG.LOOPBACK_STATS` |
+| 26, 27, 28 | Output ring underruns, drops, min prewrite | `SYS.PIPELINE_STATS` |
+| 29 | Worst input delivery gap | `SYS.PIPELINE_STATS` |
+| 30 | Worst USB packet gap | `SYS.USB_AUDIO_STATUS` |
+| 31 | Background over budget | `SYS.PIPELINE_STATS` |
+| 32, 33 | S/PDIF measured rate, VCXO trim | `INPUT.STATUS` |
+| 64 and up | Loop profiler (bench builds) | `DIAG.LOOP_PROF_*` |
+
+A stats screen that makes 25 scalar reads today makes 6 struct reads afterwards.
+
+## 7. Compatibility and migration
+
+### 7.1 Decision: clean break in v1.1.7-beta1
+
+The paged protocol ships in firmware v1.1.7-beta1 (`FW_VERSION_PATCH` 7, `FW_VERSION_BETA` 1). The old opcodes stop working in that release. There is no legacy page, no translation shim in the firmware and no later removal step. Contributors have already been told that 1.1.7 Beta 1 is the release that overhauls the opcodes.
+
+### 7.2 Scope of this work
+
+This work delivers three things:
+
+1. The firmware.
+2. The `tools/dspi_test` harness and the other tools inside this repo, which would otherwise stop working.
+3. A comprehensive migration guide for host maintainers (section 10).
+
+It does not change any host app. DSPi Console (macOS, iOS, Linux, Windows), DSPi Link, DSPi Terminal and the ESP32 front panel are ported by their maintainers from the migration guide. Their repos are read, never edited, so the guide can be concrete about each one.
+
+### 7.3 Page 0 is empty
+
+Page 0 answers nothing. A GET or a SET with a zero `wIndex` high byte STALLs on USB, and UART and I2C return `VC_ERR_UNKNOWN`. Nothing on page 0 is silently ACKed any more. The Microsoft OS 2.0 descriptor request is not a DSPi command and is still served, because Windows needs it to bind WinUSB.
+
+That matters for safety. A 1.1.6 host sends `wIndex` 0 or 2, so all of its requests land on page 0. It cannot change anything on a 1.1.7 device by accident.
+
+The user decided against keeping `GET_PLATFORM` and `ENTER_BOOTLOADER` alive on page 0. The consequences are accepted:
+
+- A 1.1.6 Console that meets 1.1.7 firmware cannot read its version. It reports a communication fault, and the user updates the app by hand.
+- A 1.1.6 Console cannot put 1.1.7 firmware into the bootloader. Going back to 1.1.6 uses the BOOTSEL button.
+
+### 7.4 Hosts meeting the wrong firmware
+
+| Host | Firmware | What happens |
+|---|---|---|
+| 1.1.6 host, any transport | 1.1.7-beta1 | Every request is refused. No state changes |
+| 1.1.7 host | 1.1.6 or older | The `PROTOCOL_INFO` probe STALLs. The host may read the old firmware's own `GET_PLATFORM` (0x7F) and offer the update, and may send its own `ENTER_BOOTLOADER` (0xF0) to start it. It sends no paged command |
+
+The second row is the dangerous direction. Old firmware ignores `wIndex`, so an unprobed paged command would run as whatever old opcode shares its number. Section 5.14 makes the probe mandatory for that reason, and the migration guide repeats it for every transport.
+
+### 7.5 Proving the refactor without a compatibility path
+
+A clean break leaves no old path in the shipped firmware to compare against. Three things provide the regression proof, and none of them ships.
+
+1. **A golden capture of 1.1.6.** Before any code changes, record every GET reply of firmware 1.1.6, in two states: factory defaults, and after a scripted sequence that writes a non-default value to every settable command. A mask list excludes fields that legitimately vary (meters, counters, temperature, serial, build info, version).
+2. **A temporary translation layer in the test harness.** `tools/dspi_test/legacy_map.py` turns each old call (`OP.X`, direction, `wValue`, payload) into the new paged request, using a data file that is the machine-readable form of section 6. It needs only a few adapters: direct, value from `wValue`, packed address and value, and a small custom function for each split command. The existing 173 tests then run against the new handlers without being rewritten. Replaying the golden script through this layer and comparing bytes is the regression proof.
+3. **Old and new side by side during development.** Until the flip phase, page 0 on the working branch still reaches the old switches. Every migrated command can be compared with its original on the same device, in the same state. The flip deletes the old code before anything is released.
+
+The translation layer is scaffolding. After the flip the tests are ported to native paged calls and the layer is deleted (Phase 6). The mapping data file stays, as `Documentation/protocol/legacy_map.json`, because it is also the machine-readable migration table for host maintainers.
+
+Tests that assert an old quirk are the exception to "unchanged". A rejected write is now an error, not a silent drop, and an unknown status selector no longer returns zeros. Those tests are updated to expect the new behaviour and are listed in the phase report.
+
+### 7.6 Release gate for v1.1.7-beta1
+
+The firmware is ready to release when all of these hold:
+
+1. The Phase 0 `wIndex` test has passed on Windows.
+2. The golden replay matches, with every difference explained.
+3. The native paged harness passes on hardware, including the loopback alignment tests.
+4. `FW_VERSION_MAJOR/MINOR/PATCH/BETA` read 1, 1, 7, 1.
+5. The migration guide is complete and checked against each host repo.
+
+Cutting the release itself stays the user's call, through the normal release process.
+
+## 8. Dispatcher and table design
+
+### 8.1 File layout
+
+```
+firmware/DSPi/vendor/
+  vc_core.h / vc_core.c       table types, lookup, validation, dispatch, results
+  vc_usb.c                    tud_vendor_control_xfer_cb, EP0 stages, MS OS 2.0 intercept
+  vc_bulk.c                   bulk buffer lock, ALL_PARAMS, chunk sessions
+  vc_pins.c / vc_pins.h       pin validation helpers (moved from vendor_commands.c)
+  pages/sys.def      + vc_page_sys.c
+  pages/store.def    + vc_page_store.c
+  ... one .def and one .c per page
+```
+
+`vendor_commands.h` stays as the public header, so `uart_control.c`, `i2c_control.c` and the Control Surfaces code keep their include. `vendor_commands.c` keeps the old switches on the working branch until the flip phase and is then deleted, along with every `REQ_*` define.
+
+### 8.2 The table entry
+
+```c
+typedef struct {
+    CtrlSource     src;       // transport of this request
+    uint8_t        arg;       // per-entry constant from the table
+    uint16_t       addr;      // wValue, already range-checked
+    const uint8_t *in;        // SET payload
+    uint16_t       in_len;
+    uint8_t       *out;       // GET reply buffer
+    uint16_t       out_len;   // handler sets for variable-length replies
+} VcCtx;
+
+typedef VcResult (*VcHandler)(VcCtx *c);
+
+typedef struct {
+    uint8_t   cmd;            // command number within the page
+    uint8_t   addr_kind;      // VC_A_NONE, VC_A_OUTPUT, VC_A_CH_BAND, ...
+    uint8_t   set_min;        // SET payload bounds (non-bulk, <= 64)
+    uint8_t   set_max;
+    uint16_t  get_len;        // fixed reply length, or VC_LEN_VAR
+    uint16_t  flags;          // VC_F_*
+    uint8_t   arg;            // lets one handler serve a family
+    VcHandler get;            // NULL = no GET
+    VcHandler set;            // NULL = no SET
+} VcCmd;                      // 20 bytes, const, in flash
+
+typedef struct {
+    uint8_t      page;
+    uint8_t      revision;
+    uint8_t      count;
+    const VcCmd *cmds;
+} VcPage;
+```
+
+Flags the dispatcher enforces:
+
+| Flag | Meaning |
+|---|---|
+| `VC_F_USB_ONLY` | Both directions refused on UART, I2C and internal dispatch |
+| `VC_F_SET_USB_ONLY` | SET refused off USB (transport self-configuration) |
+| `VC_F_BULK` | Payload or reply lives in `bulk_param_buf` under the bulk lock |
+| `VC_F_RP2350` | `VC_ERR_UNSUPPORTED` on RP2040, absent from capability data there |
+| `VC_F_ADDR_ALL` | 0xFF in the index position means "all" on SET |
+
+Flags that only inform the docs and `COMMAND_INFO`:
+
+| Flag | Meaning |
+|---|---|
+| `VC_F_DEFERRED` | Applied by the main loop after the reply |
+| `VC_F_FLASH` | Writes flash, so a short busy window follows |
+| `VC_F_RESTART` | Restarts or mutes the outputs |
+| `VC_F_KEEPALIVE` | The GET refreshes a timer |
+
+There is no write-as-read flag, and no write-as-read command is left in the firmware.
+
+### 8.3 Registration
+
+Each page is an X-macro file. It is the single source for the C table, the command constants, the handler prototypes, the docs and the host registry.
+
+```c
+// pages/filter.def
+VC_PAGE(FILTER, 0x06, 1 /* revision */, "EQ and crossover bands")
+
+VC_CMD(0x10, BAND,        filter_band_get,   filter_band_set,
+       ADDR(CH_BAND), GET(16), SET(16, 16), VC_F_DEFERRED, ARG(0),
+       "One EQ or crossover band")
+VC_CMD(0x11, BAND_BYPASS, filter_bypass_get, filter_bypass_set,
+       ADDR(CH_BAND), GET(1),  SET(1, 1),   VC_F_DEFERRED, ARG(0),
+       "Bypass one band")
+VC_CMD(0x12, EQ_BYPASS,   eq_bypass_get,     eq_bypass_set,
+       ADDR(NONE),    GET(1),  SET(1, 1),   0,             ARG(0),
+       "Master EQ bypass")
+// VC_RESERVED(0x20, "future: per-channel EQ copy")
+```
+
+`vc_core.c` includes every `.def` three times with different macro definitions. The first pass emits `enum { VC_FILTER_BAND = 0x0610, ... }`. The second emits handler prototypes. The third emits the `VcCmd` arrays and the page directory. A fourth pass in a dummy `switch` turns every command number into a `case` label, so a duplicate number fails the build.
+
+This avoids linker-section registration, which is fragile with the custom XIP linker scripts. It also needs no code generation step in the firmware build.
+
+### 8.4 Validation and dispatch
+
+One function does every check, for every transport, before a handler runs.
+
+```c
+VcResult vc_dispatch(CtrlSource src, bool is_get, uint8_t page, uint8_t cmd,
+                     uint16_t addr, const uint8_t *in, uint16_t in_len,
+                     const uint8_t **out, uint16_t *out_len);
+```
+
+Order of checks:
+
+1. Find the page, then the command. Otherwise `VC_ERR_UNKNOWN`.
+2. Direction has a handler. Otherwise `VC_ERR_DIRECTION`.
+3. Platform flag. Otherwise `VC_ERR_UNSUPPORTED`.
+4. Transport flags. Otherwise `VC_ERR_BLOCKED`.
+5. For SET, `set_min <= in_len <= set_max`. Otherwise `VC_ERR_LENGTH`.
+6. Address in range for `addr_kind`, using the platform's channel, output, slot and band counts. Otherwise `VC_ERR_ADDRESS`.
+7. Set the notify source tag, call the handler, clear the tag.
+8. For a fixed-length GET, assert the handler filled `get_len` bytes.
+9. Record `{id, direction, result}` in the per-transport `LAST_RESULT` slot.
+
+Handlers therefore contain only value checks and the actual work. The repeated bounds checks and length checks in today's 246 cases go away.
+
+Lookup is a linear scan of one page, at most about 60 entries, on the control path. No hot code is involved.
+
+Replies go into one static 256-byte buffer owned by `vc_core.c`. It replaces three existing buffers (`resp_buf`, `rta_resp_buf`, `_ext_resp_copy`, 278 bytes together), so BSS does not grow. Anything larger is `VC_F_BULK`.
+
+### 8.5 USB front end
+
+`vc_usb.c` keeps the stage logic and loses every opcode comparison.
+
+- **SETUP.** The MS OS 2.0 intercept runs first, unchanged. Then `page = wIndex >> 8`. Page 0 is refused. Otherwise the entry is looked up and checks 1-6 run at once, so a bad length or address STALLs before any data stage.
+- **GET.** The handler runs and the reply is sent, clamped to `wLength`.
+- **Zero-length SET.** The handler runs at SETUP. This is what makes real actions possible.
+- **SET with data.** The payload is received into the 64-byte buffer, or into `bulk_param_buf` for `VC_F_BULK`. The handler runs at the DATA stage and a failure returns false, which STALLs the status stage.
+- **Bulk and chunk sessions.** The existing lock and session logic moves to `vc_bulk.c` and keys on the `VC_F_BULK` flag and the two `STORE` IDs.
+
+### 8.6 External transports and internal callers
+
+`vendor_dispatch_get()` and `vendor_dispatch_set()` keep their signatures. They already receive `wIndex`, so they take the page from its high byte and call `vc_dispatch()`. Page 0 is refused with `VC_ERR_UNKNOWN`.
+
+`vendor_is_bulk_set()` gains the page. It stays a small standalone function with the two IDs written in, because the I2C ISR calls it and it must not walk the table.
+
+Internal callers get a thin typed wrapper:
+
+```c
+VcResult vc_set(CtrlSource src, uint16_t id, uint16_t addr,
+                const void *payload, uint16_t len);
+```
+
+### 8.7 Invariants the refactor must hold
+
+- **Handlers are moved, not re-sequenced.** Every deferred operation keeps its pending flag and its main-loop path. No handler may apply a change that today goes through `prepare_pipeline_reset()` and `complete_pipeline_reset()` by any shorter route. Output slot alignment depends on it.
+- **The notify source bracket is preserved.** `notify_set_source()` wraps every handler call and is cleared afterwards.
+- **`usb_device.c` in pico-extras is not touched.**
+- **No new notification events.** If one is ever added, it needs both the push and the `notify_peek_next_for` case.
+- **The USB-in-flight guard and the bulk lock keep their semantics.**
+
+## 9. Generated docs and capability data
+
+`scripts/gen_vendor_protocol.py` (standard library only) parses the `.def` files. They are regular enough to read with a small tokenizer, with no C preprocessor needed.
+
+| Output | Use |
+|---|---|
+| Command tables in `Documentation/commands.md` | Written between `<!-- VC:BEGIN page -->` and `<!-- VC:END -->` markers. Prose around them stays hand-written |
+| `Documentation/protocol/dspi_commands.json` | Machine-readable registry: pages, revisions, commands, sizes, address kinds, flags, doc strings |
+| `--check` mode | Fails if the committed docs or JSON differ from the `.def` files, or if a number is duplicated, out of block order, or below 0x10 |
+
+The JSON is what hosts consume. `tools/dspi_test` and `dspi_poke` load it in place of the `config.h` regex. Host maintainers can generate their constants and policy tables from it, which would remove the hand-maintained copies of the opcode list that exist today.
+
+At runtime the device reports the same data through `SYS.PAGE_LIST`, `SYS.PAGE_COMMANDS` and `SYS.COMMAND_INFO`. The bitmaps come straight from the table, so they reflect the platform and the build flags of the firmware that is actually running. No names are stored on the device.
+
+## 10. Impact
+
+### 10.1 Firmware transports
+
+| Transport | Change |
+|---|---|
+| USB | New front end in `vc_usb.c`. Recipient and interface byte unchanged. Page 0 is refused. Bad SETs STALL |
+| UART | No framing change. Page is the `wIndex` high byte, and a client that leaves it at 0 gets errors. Bulk special cases use the new `STORE` IDs. The status byte carries `VC_*` codes. Spec updated, including two existing drifts (bulk size, blocked list) |
+| I2C | Same as UART. `vendor_is_bulk_set()` in the ISR gains a page argument |
+| Control Surfaces | `cs_noun_dispatch()` switches from `REQ_*` to `VC_*` IDs through `vc_set()`. Stored bindings hold nouns, so no flash format change and no `SLOT_DATA_VERSION` bump |
+| Loop profiler | The 256-entry array keyed by `bRequest` becomes keyed by a dense table index. Bench builds only |
+
+### 10.2 Tools in this repo
+
+- **`tools/dspi_test`.** `device.py` is the single choke point. It gains a page argument and loads the JSON registry in place of the `config.h` regex, since the `REQ_*` defines are deleted. The existing tests run through the translation layer until Phase 6 ports them. Three spots depend on opcode values and need care: `crosscut.py:35` (hard-coded free list), the `OPCODE_NAME` map keyed by integer, and the `selftest.py` mocks.
+- **`dspi_poke`.** Accept `PAGE.NAME` and a `--page` option. Its own `config.h` parser is replaced by the registry.
+- **Pollers and benches** (`clkdiag_poll.py`, `ring_health_poll.py`, `latency_bench`, `batch_bench`). Move literals to names from the registry. `loop_prof.py` assumes an 8-bit opcode key and follows the profiler change. `batch_bench` talks to an experimental command that is not ported, so it is left alone.
+
+### 10.3 The migration guide
+
+`Documentation/vendor_protocol_migration.md` is the deliverable for host maintainers. It must be complete enough to port a host without reading firmware source. Its contents:
+
+1. **What changed and why**, in one page.
+2. **The request format.** Every field of the control transfer, with worked byte-level examples for a GET, a SET with payload and a zero-length action.
+3. **Discovery and probing.** The mandatory `PROTOCOL_INFO` probe, what a 1.1.6 device answers, page revisions, `PAGE_COMMANDS` bits, and how to replace version checks and probe-by-STALL with them.
+4. **Errors.** STALL semantics on USB, `LAST_RESULT`, the `VC_*` codes, the status byte on UART and I2C, and how each old `PIN_CONFIG_*`, `PRESET_*` and `FLASH_*` byte maps to a `VC_*` code.
+5. **The full old-to-new table** for all 246 opcodes, with a recipe per row: where the address goes, where the value goes, and what the reply is.
+6. **Every payload**, old layout beside new layout, for every command whose bytes changed. Commands whose bytes are unchanged are listed as such.
+7. **Split commands in detail**: `GET_STATUS`, `LIMITER`, `GET_EQ_PARAM`, the caps selectors, the control actions.
+8. **Retired commands** and the replacement for each.
+9. **Former write-as-reads**: the list of 34, with before and after for each.
+10. **Per-transport notes.** USB on macOS (IOKit), USB on Windows (WinUSB, including the `wIndex` low byte rule and the 4 KB control limit that the chunked bulk command exists for), USB on Linux (usbfs interface claim), WebUSB, UART framing and status byte, I2C framing and status byte.
+11. **What did not change**: bulk parameters, notifications, UAC1, descriptors.
+12. **Per-host appendices**, written from a read-only audit of each repo. Each lists the files and call sites that touch the protocol and the specific changes that host needs.
+
+| Host | Repo |
+|---|---|
+| DSPi Console (macOS) | `/Users/weeblabs/DSPi Console` |
+| DSPi Console (iOS) | `/Users/weeblabs/DSPi-Console-iOS` |
+| DSPi Console (Linux) | `/Users/weeblabs/DSPi-Console-Linux`, `/Users/weeblabs/DSPi Console for Linux` |
+| DSPi Console (Windows) | Not on this machine. Covered by the WinUSB notes and the generic recipe |
+| DSPi Link | `/Users/weeblabs/DSPi-Link` |
+| DSPi Terminal | `/Users/weeblabs/DSPi Terminal` |
+| ESP32 front panel | `/Users/weeblabs/DSPi-ESP32-Front-Panel` |
+
+The machine-readable companions are `Documentation/protocol/dspi_commands.json` (the new command set) and `Documentation/protocol/legacy_map.json` (old to new).
+
+### 10.4 What each kind of host has to do
+
+This is the summary. The guide carries the detail.
+
+- **Every host.** Add the probe. Put the page in the `wIndex` high byte. Renumber. Turn the 34 write-as-reads into SETs. Replace split commands with their new commands. Handle STALL on a rejected SET. Stop using the retired commands.
+- **DSPi Console (macOS).** All requests pass through three functions in `USBDevice.swift` and one `Constants.swift` table, with about 286 call sites. It sends `wIndex` 0 on some calls and 2 on others, which the page byte replaces. It uses three retired opcodes (0x44, 0x45, 0x51).
+- **DSPi Link.** Frames already carry `wIndex`, so the wire format is unchanged. Its policy table, command router keys, poll subscriptions and bulk opcode lists key on `bRequest` and must key on `(page, command)`.
+- **ESP32 front panel.** UART, scalar commands, strict readback. Reply bytes of commands marked Fold or Same are unchanged, so its checks keep their constants.
+
+### 10.5 Experimental branches
+
+`overclock` and `ac3-dts-decode` are not merged, not rebased and not given numbers by this work (section 4.1). Their old opcode numbers no longer exist after the flip. The untracked `batch_bench.h` is left alone.
+
+## 11. Risks and early validation
+
+| Risk | Why it matters | Mitigation |
+|---|---|---|
+| WinUSB alters the `wIndex` high byte on interface-recipient requests | The whole page scheme rides on that byte | Test first, before anything is built on it (11.1). WinUSB is documented to overwrite only the low byte, but that must be seen on hardware |
+| No fallback path in the field | With a clean break, a wrong handler is a broken feature for every user of the beta | Golden replay and on-device A/B before the flip (7.5). Release gate (7.6) |
+| A host is ported from the guide and the guide is wrong or thin | Maintainers cannot be expected to read firmware source | The guide is generated from the same tables as the firmware where possible, and each host appendix is checked against that host's code |
+| A new host sends a paged command to old firmware | Old firmware ignores `wIndex` and would run an unrelated opcode | Mandatory `PROTOCOL_INFO` probe (5.14). The probe number was chosen because it STALLs on 1.1.6 |
+| The harness translation layer hides a firmware bug, or has one of its own | It sits between the tests and the device | It is data-driven from the same mapping file the docs use. Native paged tests per page cross-check it. The on-device A/B in Phase 2 does not go through it. It is deleted in Phase 6 |
+| Slot alignment regression | Hard project constraint | Invariant 8.7. Handlers move verbatim. Review gate on any diff that touches a pending flag or a reset call. Loopback alignment tests in the harness |
+| Flash growth during development | Old switches and new handlers coexist until the flip | Expected and temporary. The size baseline in `scripts/ram_baseline.json` is updated once, after the flip |
+| RAM placement | Firmware is XIP with hot code pinned | The dispatcher and table are cold and stay in flash. Run `check_ram_placement.py` every phase. Nothing new is called from an ISR except `vendor_is_bulk_set()`, which keeps its current shape |
+| RP2040 XIP linker lists | A moved file can drop out of a pull list | Phase 1 checks both linker scripts for references to moved symbols |
+| A bench build reports 1.1.6 while speaking the new protocol | A build that lies about itself confuses every host | The flip phase sets the version to 1.1.7 beta 1 in the same change that removes the old opcodes |
+| Scope creep into payload redesign | Each reshaped payload adds work in every host | Only two payloads are reshaped (`FILTER.BAND`, `ROUTE.MATRIX_ROUTE`). Everything else keeps its bytes |
+
+### 11.1 The `wIndex` test (run by the user on Windows)
+
+A bench build adds one temporary command, compiled only with `-DDSPI_WINDEX_ECHO=ON`. `bRequest` 0x4F as an IN request returns 16 bytes: the SETUP fields of that request, then the SETUP fields of the last OUT request with the same number. It never ships and is deleted at the flip.
+
+`tools/windex_echo_test.py` sends a fixed set of requests and prints PASS or FAIL per row. The step-by-step procedure is in `Documentation/Features/windex_echo_test.md`.
+
+| Check | Send | Pass condition |
+|---|---|---|
+| Interface recipient, IN | `0xC1`, `wIndex` 0x0102, 0x7F02, 0xF002, 0xFF02 | Echo shows the high byte intact |
+| Interface recipient, OUT | `0x41`, same `wIndex` values, zero-length and 4-byte payload | Same |
+| Device recipient, IN and OUT | `0xC0` and `0x40`, same `wIndex` values | Recorded as the fallback result |
+
+The script runs on macOS and Linux too, which checks the firmware and the script before the Windows run.
+
+If WinUSB alters the high byte, the fallback is device-recipient requests (`0xC0` and `0x40`), where `wIndex` is entirely ours. The firmware does not check the recipient today, and the MS OS 2.0 request (`wIndex` 7) stays unambiguous because it lands on page 0. Only if both fail does the page need a different carrier, and the plan returns to the user before going further.
+
+## 12. Phased implementation
+
+Each phase is run by Opus subagents under one orchestrator. The orchestrator assigns files, and no two agents hold the same file in the same phase. A device is attached, so agents run the harness on hardware. Every firmware phase ends with the same gate:
+
+- `cmake --build build-rp2040 --clean-first` and `cmake --build build-rp2350 --clean-first`.
+- `python3 scripts/check_ram_placement.py` on both ELFs.
+- `arm-none-eabi-size` on both ELFs, recorded.
+- `python3 scripts/gen_vendor_protocol.py --check`.
+- `python3 -m tools.dspi_test.selftest` (no hardware).
+- The hardware harness on the attached device.
+- `Documentation/current_architecture.md` updated by one agent at a time.
+
+Each phase is committed once, on `vendor-command-overhaul`, after its gate passes. Only that phase's files are staged. Nothing is pushed, tagged or merged.
+
+### Phase 0. Validation spikes and golden capture
+
+| | |
+|---|---|
+| Work | The echo command and its test script and procedure. The golden capture of 1.1.6: a write script that sets every settable command to a non-default value, a capture of every GET reply before and after it, and the mask list of volatile fields |
+| Files | A bench-only `#ifdef` in `vendor_commands.c` and a CMake option. `tools/windex_echo_test.py`, `Documentation/Features/windex_echo_test.md`. New `tools/dspi_test/golden/` |
+| Output | The echo UF2s for both platforms. The golden files for the attached platform |
+| Gate | The user runs the Windows test and reports the result. Nothing is built on paged addressing until then |
+
+### Phase 1. Core scaffolding and harness
+
+Three agents in parallel.
+
+| Agent | Owns | Work |
+|---|---|---|
+| 1A firmware core | `vendor/vc_core.*`, `vendor/vc_usb.c`, `vendor/vc_bulk.c`, `vendor/vc_pins.*`, `vendor/pages/sys.def`, `vendor/vc_page_sys.c`, empty `.def` and `.c` stubs for every other page, `CMakeLists.txt`, the entry points in `vendor_commands.c` and `.h` | Table types, lookup, validation, results, reply buffer. USB front end that sends other pages to the table. On this branch only, page 0 still reaches the old switches. `SYS` discovery and identity commands. Pin helpers moved out |
+| 1B generator | `scripts/gen_vendor_protocol.py`, `Documentation/protocol/dspi_commands.json` | Generator with `--check` |
+| 1C harness | `tools/dspi_test/device.py`, `tools/dspi_test/legacy_map.py`, `Documentation/protocol/legacy_map.json`, `tools/dspi_test/tests/paged_sys.py` | Paged transport. The translation layer and its mapping data for all 246 opcodes, switchable between "send old" and "translate to paged". Tests for the `SYS` discovery commands |
+
+Output: a development firmware where page 0 behaves exactly as 1.1.6 (same code) and page 1 answers discovery, plus a harness that can drive either.
+
+Verification beyond the gate: the harness in "send old" mode passes on hardware with no changes, and the golden capture replays clean against this build.
+
+### Phase 2. Page migration
+
+Up to five agents in parallel. Each owns one or more pages: the `.def`, the `.c`, and a `tools/dspi_test/tests/paged_<page>.py`. No agent edits `vendor_commands.c`, `CMakeLists.txt`, `vc_core.*` or the harness core. Handler logic is copied out of the old switches, which stay in place on the branch. Hardware runs are serialized by the orchestrator, since there is one device.
+
+| Agent | Pages | Commands (approx.) |
+|---|---|---|
+| 2A | `SYS` telemetry block and device name, `STORE` | 24 |
+| 2B | `INPUT`, `OUTPUT`, `CLOCK`, `XPORT` | 37 |
+| 2C | `ROUTE`, `FILTER`, `DYN` | 36 |
+| 2D | `FX`, `MEAS` | 75 |
+| 2E | `CS`, `DIAG` | 30 |
+
+Inputs for each agent: sections 3, 5, 6 and 8 of this plan, the old case bodies for its opcodes, and the 1A core.
+
+Outputs: filled pages, paged tests, and a list of any helper each agent needed that lives in another agent's file. The orchestrator resolves those between rounds.
+
+Verification beyond the gate:
+
+- **On-device A/B.** For every Fold or Same command, a test reads the old opcode on page 0 and the new command and compares bytes. Both implementations are live in this phase.
+- **Translated harness.** The existing tests for the agent's features pass in "translate to paged" mode.
+- **Golden replay.** The agent's slice of the golden script replays through the translation layer and matches.
+
+### Phase 3. Internal callers and transports
+
+Three agents in parallel. This must finish before the flip, because these files still name `REQ_*` opcodes.
+
+| Agent | Owns | Work |
+|---|---|---|
+| 3A | `control_surfaces_nouns.c` | Noun dispatch through `vc_set()` with `VC_*` IDs. Macro and group paths re-tested |
+| 3B | `uart_control.c`, `i2c_control.c`, `Documentation/Features/control_interfaces_spec.md` | Page-aware bulk handling, `VC_*` status codes, spec refresh including the two drifts |
+| 3C | `loop_prof.c`, `loop_prof.h`, `tools/latency_bench/loop_prof.py` | Profiler keyed by table index, moved to `DIAG` |
+
+### Phase 4. The flip
+
+One agent. It owns `vendor_commands.c` (deleted), `vendor_commands.h`, `config.h`, `vendor/vc_usb.c` and `CMakeLists.txt`.
+
+Work:
+
+- Delete both switches, every `REQ_*` define and the echo command.
+- Refuse every page 0 request.
+- Set `FW_VERSION_PATCH` to 7 and `FW_VERSION_BETA` to 1.
+- Switch the harness default to "translate to paged".
+
+Verification beyond the gate:
+
+- No `REQ_` symbol remains in `firmware/DSPi/`.
+- The full harness passes through the translation layer, with the quirk tests updated and listed.
+- The full golden script replays and matches.
+- A test walks all 256 `bRequest` values on page 0 in both directions and every one is refused.
+- Flash size is recorded and `scripts/ram_baseline.json` is updated once, deliberately.
+
+### Phase 5. Reference documentation and repo tools
+
+Three agents in parallel.
+
+| Agent | Owns | Work |
+|---|---|---|
+| 5A | `Documentation/commands.md`, opcode references in `Documentation/Features/*.md` | `commands.md` restructured by page with generated tables. Old numbers appear only in a pointer to the migration guide |
+| 5B | `tools/dspi_poke/`, `tools/clkdiag_poll.py`, `tools/ring_health_poll.py` | Ported to the registry and paged names |
+| 5C | `tools/latency_bench/` | Ported to paged names |
+
+The final pass on `current_architecture.md` (Vendor Command Reference table, new "Vendor protocol" section, timestamps) follows once 5A is done.
+
+### Phase 6. Port the tests and delete the translation layer
+
+Agents split the 13 test modules in `tools/dspi_test/tests/` between them, one owner per file. Each test is rewritten to call paged commands by name. The paged tests written in Phase 2 are merged into the matching modules.
+
+When every module is ported, one agent deletes `legacy_map.py` and the "send old" mode from `device.py`, and fixes `crosscut.py`, `stress.py` and `selftest.py`. `Documentation/protocol/legacy_map.json` stays as migration data.
+
+Verification: the full native harness passes on hardware, and the golden replay is re-expressed in native calls and still matches.
+
+### Phase 7. Migration guide
+
+One read-only audit agent per host repo in section 10.3, then one writer who owns `Documentation/vendor_protocol_migration.md`. The audits can start as soon as Phase 2 fixes the command set. The guide is finished after Phase 4, when the firmware behaviour is final.
+
+Verification: every row of the old-to-new table is checked against `legacy_map.json` by script. Every byte-level example in the guide is executed against the device.
+
+### Phase 8. Release readiness
+
+Run the section 7.6 gate and report. Cutting the release waits for the user's explicit instruction.
+
+## 13. Departures from the agreed direction
+
+| Departure | Reason |
+|---|---|
+| No write-as-read anywhere. Actions are zero-length SETs, and failure is a STALL plus `LAST_RESULT` | A read that changes state is the same kind of hidden behaviour the overhaul is removing. It also makes every GET safe to probe or dump. The enabling fix is small: run zero-length SETs at SETUP |
+| Page 0 is empty, not a legacy table | The user chose a clean break with no old commands kept |
+| A compatibility layer exists only in the test harness, and only until the tests are ported | It lets the existing tests prove the new handlers, and it ships nothing |
+| Commands start at 0x10 in every page, not just 0x01 reserved | Also covers WebUSB's 0x02 and leaves room for protocol-level use at no real cost |
+| `CLOCK` and `DIAG` pages added, `NAME` page dropped. Private range 0xE0-0xEF added | Section 4 |
+| Parameter-indexed commands (tube, upmixer, limiter) are split per parameter | A parameter index in `wValue` is an operation selector by another name, and it hides the commands from the table and the capability data |
+| Two payloads reshaped (`FILTER.BAND`, `ROUTE.MATRIX_ROUTE`) | Needed for the address-in-`wValue` and GET-equals-SET rules. Limited to two on purpose |
+| The table source is X-macro `.def` files, with JSON generated from them | C consumes them with no build-time generator, and they are trivially machine-readable |
+
+## 14. Decisions
+
+The user answered the open questions on 2026-11-15. Three were left to the designer.
+
+| Question | Decision |
+|---|---|
+| Keep `GET_PLATFORM` and `ENTER_BOOTLOADER` on page 0 | No. Page 0 is empty (7.3) |
+| ESP32 front panel | The maintainer ports from the migration guide. No other hand-off |
+| Windows `wIndex` test | The user runs it (11.1) |
+| Hardware | A device is attached for the whole job. Agents run the harness on it |
+| Reshape `FILTER.BAND` and `ROUTE.MATRIX_ROUTE` | Yes (designer's call). Every host is rewriting these call sites in this release anyway. The new layouts put the address in `wValue`, make the read return exactly what the write accepts, and end the 16-or-18-byte EQ payload. Deferring it would mean a second break later |
+| Limiter value types | Keep float32 for all four limiter parameters (designer's call). The wire values stay exactly as they are in 1.1.6, which matches how tube and upmixer parameters are carried and cannot lose any behaviour. Only the numbering changes |
+| Retirements | Approved. Legacy preamp (0x44, 0x45), `SAVE_PARAMS` (0x51), the USB error stats pair (0xB2, 0xB3) and `GET_STATUS` selectors 0-2 have no new command |
+| `NAME` page | Dropped (designer's call). Each name lives with the thing it names (section 4) |
+| `overclock`, `ac3-dts-decode` | Not merged, not rebased, no reserved numbers |
+| Which hosts block the release | Not applicable. This work delivers firmware, harness and migration guide. Host apps are ported by their maintainers |
+| DSPi Link | The repo is at `/Users/weeblabs/DSPi-Link`, read-only for this work. Its port is covered by a guide appendix |
+| Harness translation layer | Temporary. Tests are ported to native paged calls and the layer is deleted (Phase 6) |
+| Commits | One commit per finished and verified phase, on `vendor-command-overhaul` only. No push, tag or merge |
+
+### 14.1 Still open
+
+None that block the work. The Phase 0 Windows result is the only outstanding input.

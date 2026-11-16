@@ -213,6 +213,10 @@ uint8_t ctrl_status_from_dispatch(CtrlDispatchResult r) {
     }
 }
 
+#ifdef DSPI_WINDEX_ECHO
+#define WINDEX_ECHO_REQ 0x4F   // unassigned in 1.1.6; bench builds only
+#endif
+
 // Internal helpers exported via vendor_send_response() replacement.
 static void vendor_send_response(const void *data, uint16_t len);
 
@@ -4581,6 +4585,22 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
             // bRequest=0x01 can never hit the application dispatcher.
             return false;
         }
+
+#ifdef DSPI_WINDEX_ECHO
+        // Bench only: echo SETUP fields so a host can prove wIndex survives its
+        // USB stack. See Documentation/Features/vendor_command_overhaul_plan.md 11.1.
+        if (req->bRequest == WINDEX_ECHO_REQ) {
+            static uint8_t echo[16];
+            uint8_t *e = (req->bmRequestType_bit.direction == TUSB_DIR_IN) ? echo : echo + 8;
+            e[0] = req->bmRequestType; e[1] = req->bRequest;
+            e[2] = (uint8_t)req->wValue;  e[3] = (uint8_t)(req->wValue >> 8);
+            e[4] = (uint8_t)req->wIndex;  e[5] = (uint8_t)(req->wIndex >> 8);
+            e[6] = (uint8_t)req->wLength; e[7] = (uint8_t)(req->wLength >> 8);
+            if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
+                return tud_control_xfer(rhport, req, echo, sizeof(echo));
+            }
+        }
+#endif
 
         if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
             // Bulk GET streams from bulk_param_buf across many EP0 packets

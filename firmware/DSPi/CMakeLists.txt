@@ -140,6 +140,13 @@ if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
 endif()
 
+# DSPI_WINDEX_ECHO (bench only): vendor request 0x4F echoes its SETUP fields,
+# used once to prove hosts deliver the wIndex high byte. Never ship it.
+option(DSPI_WINDEX_ECHO "Build the wIndex echo probe (vendor request 0x4F)" OFF)
+if (DSPI_WINDEX_ECHO)
+    target_compile_definitions(DSPi PRIVATE DSPI_WINDEX_ECHO=1)
+endif()
+
 # DSPI_LOOP_PROF (bench instrumentation): worst time per main-loop section,
 # read through REQ_GET_STATUS 64+ (loop_prof.h). Release builds leave it OFF.
 option(DSPI_LOOP_PROF "Build the main-loop section profiler (REQ_GET_STATUS 64+)" OFF)
