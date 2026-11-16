@@ -8,8 +8,8 @@
  * device-global in the preset directory (V9+), and processed by a 1 kHz
  * main-loop tick.
  *
- * Every control action is applied by dispatching the SAME vendor command a
- * host would send, through vendor_dispatch_set/get with CTRL_SOURCE_GPIO.
+ * Every control action is applied by dispatching the SAME paged vendor
+ * command a host would send, through vc_set() with CTRL_SOURCE_GPIO.
  * That reuses all existing validation, deferred-apply safety, and host
  * notifications (tagged PARAM_SRC_GPIO); nothing in the apply path is
  * duplicated here.
@@ -104,9 +104,9 @@
  * See Documentation/Features/control_surfaces_aux_spec.md.
  *
  * Caps v19 appends the tube preamp nouns (70-73: TUBE, TUBE_DRIVE,
- * TUBE_TYPE, TUBE_MIX).  All four dispatch through the indexed
- * REQ_SET_TUBE_PARAM, whose payload is a float32 for every parameter kind,
- * the bool and the enum included.  No structure sizes change.
+ * TUBE_TYPE, TUBE_MIX).  All four dispatch through FX.TUBE_*, whose payload
+ * is a float32 for every parameter kind, the bool and the enum included.
+ * No structure sizes change.
  * See Documentation/Features/tube_preamp_spec.md.
  *
  * Caps v20 appends the output limiter nouns (74-78: LIMITER, _THRESHOLD,
@@ -115,7 +115,7 @@
  * See Documentation/Features/output_limiter_spec.md.
  *
  * Caps v22 appends OUTPUT_LATENCY (80), a deferred enum over the output
- * latency options via REQ_OUTPUT_LATENCY.  No structure sizes change.
+ * latency options via OUTPUT.LATENCY.  No structure sizes change.
  *
  * See Documentation/Features/control_surfaces_spec.md.
  */
@@ -919,8 +919,8 @@ extern const CsNounDesc cs_noun_table[CS_NOUN_COUNT];
 float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index);
 
 // Dispatch a resolved absolute target through the shared vendor-command
-// surface.  Returns false only on CTRL_DISPATCH_BUSY (caller retries next
-// tick); OK and ERROR both count as done.
+// surface.  Returns false only on VC_ERR_BUSY (caller retries next tick);
+// VC_OK and every other error count as done.
 bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value);
 
 // Validate a binding's target/index against the noun's addressing kind and

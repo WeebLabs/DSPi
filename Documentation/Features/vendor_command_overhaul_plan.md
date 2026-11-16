@@ -376,7 +376,7 @@ No command in this page takes an address. Tube and upmixer commands are in `TUBE
 |---|---|---|---|
 | 0x10 | `CLOCK_DIAG` | G | `DSPI_CLOCK_DIAG` |
 | 0x20 | `LOOPBACK_STATS` | G (8 B) | `DSPI_LOOPBACK` |
-| 0x30-0x33 | `LOOP_PROF_SECTION`, `_JOB`, `_COMMAND`, `_BG_PACE` | G, G, G, G and S | `DSPI_LOOP_PROF` |
+| 0x30-0x34 | `LOOP_PROF_SECTION`, `_JOB`, `_COMMAND`, `_BG_PACE`, `_RESET` | G, G, G, G and S, S0 | `DSPI_LOOP_PROF` |
 
 A command whose build flag is off is absent from the table. It returns `VC_ERR_UNKNOWN` and does not appear in `PAGE_COMMANDS`. This replaces the "zero-length reply in release builds" behaviour of 0x82.
 
@@ -828,8 +828,7 @@ VC_RESERVED(0xCC, "note")
 - `vc_ids.h` holds the `VC_<MNEM>_<NAME>` constants and can be included anywhere.
 - `vc_page_of(bmRequestType, wIndex)` is the only place the page is derived from a request. The harness has the matching single helper, `paged_windex(page)`.
 - A duplicate number, a number below 0x10, a duplicate name and inconsistent lengths all fail the build.
-- Over USB, `SYS.ENTER_BOOTLOADER` reboots after the status stage completes. Over UART and I2C it reboots at once.
-- Until Phase 3, UART and I2C refuse `VC_F_BULK` commands and cap paged replies at 132 bytes.
+- `SYS.ENTER_BOOTLOADER` reboots after the reply has gone out: after the status stage on USB, and after the response frame on UART and I2C.
 
 ### 8.9 As built (Phase 2)
 
@@ -843,6 +842,17 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - `DIAG.CLOCK_DIAG` is guarded by `#if DSPI_CLOCK_DIAG`, because `config.h` defines the symbol as 0 when the option is off.
 - Every place the new behaviour differs from 1.1.6 is recorded in `vendor_protocol_migration_notes.md`, which feeds the migration guide.
 - The harness has a third mode, hybrid, which sends an old call through the paged commands only when the device has every command it needs. It was used to run the existing tests and the golden replay through each page as it landed.
+
+### 8.10 As built (Phase 3)
+
+- **Transport API.** `vendor/vc_ctrl.h` holds what UART, I2C and internal callers need: `CtrlSource`, `VcResult`, the `CTRL_STATUS_*` codes and the entry points. The transports call `ctrl_dispatch_get()` and `ctrl_dispatch_set()`, which return the wire status byte. The bulk lock and `vendor_is_bulk_set()` live in `vc_bulk.c`.
+- **Status byte on UART and I2C.** 0x00 is OK. 0x01 to 0x07 are transport conditions where the command did not run (busy, bulk lock held, CRC, oversize, bad frame). 0x10 and up is the `VcResult` itself. Any non-zero value is a failure. 0x01, 0x04 and 0x17 are worth a retry.
+- **Reply size.** Both transports carry replies up to the 256-byte reply buffer.
+- **Bulk.** `STORE.ALL_PARAMS` works over UART and I2C with the same zero-copy streaming and lock rules the old opcodes had. `ALL_PARAMS_CHUNK`, `RTA_BANDS_ALL`, `CLOCK_DIAG` and the `XPORT` config SETs stay USB only.
+- **Control Surfaces.** `cs_noun_dispatch()` sends every noun through `vc_set()` with `CTRL_SOURCE_GPIO`. It returns false only on `VC_ERR_BUSY`, which the engine retries on the next tick.
+- **Loop profiler.** `DIAG` 0x30 to 0x34 replace the `GET_STATUS` selectors. Reads no longer clear, and `LOOP_PROF_RESET` does. Per-command times are kept by table index and read by command ID.
+- **Page 0 on the external transports** still reaches the old code through one marked call-through in `vendor_commands.c`, which the flip deletes.
+- **Not exercised on hardware.** No UART or I2C host is available on the bench, so the wire framing, the I2C interrupt path and the deferred reboot on those transports were checked by build, by reading, and by a temporary on-device harness that drove the dispatch entry points as UART and I2C sources.
 
 ## 9. Generated docs and capability data
 

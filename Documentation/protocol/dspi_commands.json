@@ -256,13 +256,13 @@
     {"page": 240, "mnemonic": "DIAG", "revision": 1, "doc": "Bench and diagnostic commands with no stability promise",
      "commands": [
        {"cmd": 16, "name": "CLOCK_DIAG", "id": 61456, "get": true, "set": false, "addr": "NONE", "get_len": "var", "set_min": 0, "set_max": 0, "flags": ["USB_ONLY"], "arg": "0", "build": "DSPI_CLOCK_DIAG", "doc": "Latest 1 Hz ClockDiagPacket snapshot"},
-       {"cmd": 32, "name": "LOOPBACK_STATS", "id": 61472, "get": true, "set": false, "addr": "NONE", "get_len": 8, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOPBACK", "doc": "Loopback capture overflow and underrun frame counts"}
+       {"cmd": 32, "name": "LOOPBACK_STATS", "id": 61472, "get": true, "set": false, "addr": "NONE", "get_len": 8, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOPBACK", "doc": "Loopback capture overflow and underrun frame counts"},
+       {"cmd": 48, "name": "LOOP_PROF_SECTION", "id": 61488, "get": true, "set": false, "addr": "INDEX", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst time of main-loop section wValue (LOOP_PROF_SECTION_LIST)"},
+       {"cmd": 49, "name": "LOOP_PROF_JOB", "id": 61489, "get": true, "set": false, "addr": "INDEX", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst step of background job wValue (BG_JOB_LIST)"},
+       {"cmd": 50, "name": "LOOP_PROF_COMMAND", "id": 61490, "get": true, "set": false, "addr": "PAGE_CMD", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst handler time of paged command wValue, GET and SET together"},
+       {"cmd": 51, "name": "LOOP_PROF_BG_PACE", "id": 61491, "get": true, "set": true, "addr": "NONE", "get_len": 2, "set_min": 2, "set_max": 2, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Background pacing n: above 1, one unit per step on one pass in n; 0 sets 1"},
+       {"cmd": 52, "name": "LOOP_PROF_RESET", "id": 61492, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Zero every section, job and command worst time"}
      ],
-     "reserved": [
-       {"cmd": 48, "note": "loop profiler: section times"},
-       {"cmd": 49, "note": "loop profiler: job times"},
-       {"cmd": 50, "note": "loop profiler: command times"},
-       {"cmd": 51, "note": "loop profiler: background pace"}
-     ]}
+     "reserved": []}
   ]
 }

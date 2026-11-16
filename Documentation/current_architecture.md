@@ -57,7 +57,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-11-16 (vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c). Previously 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
+*Last updated: 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c). Previously 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -102,7 +102,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `input_source_names.h` | Input source name API and table geometry (`INPUT_SOURCE_NAME_LEN` 32, `INPUT_SOURCE_NAME_SLOTS` 8) |
 | `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
 | `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
-| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and vendor handlers by opcode, each a worst time read through `REQ_GET_STATUS` (64+section, 96+job, 256+opcode). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
+| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and paged command handlers, each a worst time since boot or `DIAG.LOOP_PROF_RESET`, read through `DIAG.LOOP_PROF_SECTION`, `_JOB` and `_COMMAND` (see "Vendor Command Overhaul"). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
 | `bg_job.c` / `bg_job.h` | Background jobs: long main-loop work run in budgeted steps between deliveries (`bg_run_one()`), the step budget and the over-budget counter (`REQ_GET_STATUS` 31); see Output Latency "Step budget and background jobs" |
 | `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
 | `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
@@ -1046,7 +1046,7 @@ The consumer buffer pool is gone. Each slot now drains a single **encoded ring**
 Since 2026-07-23 each per-slot record also carries `fill_centi_pct` (uint16, formerly the two pad bytes): sample-granular fill in 0.01% units of the same 16-bucket scale (5000 = 50.00%; values above 10000 are legal, the ring holds more than the legacy capacity). Older firmware reports 0 in this field; the coarse bucket fields are unchanged, so existing Console builds keep working.
 
 ### Output Latency
-*Last updated: 2026-10-26 (idle pump in every producer service; clock servos tick on time). Previously 2026-10-24 (underrun episodes, USB packet gap readout, host stall root cause). Previously 2026-10-23 (option table and low-latency option; module `output_latency.c`; two input delivery points per main-loop pass)*
+*Last updated: 2026-11-16 (profiler reads moved to the DIAG page). Previously 2026-10-26 (idle pump in every producer service; clock servos tick on time). Previously 2026-10-24 (underrun episodes, USB packet gap readout, host stall root cause). Previously 2026-10-23 (option table and low-latency option; module `output_latency.c`; two input delivery points per main-loop pass)*
 
 The output latency setting is how full the slot rings are kept. Every slot shares one write index and one target, so the setting moves every ring output by the same amount and never moves one against another. The host picks it from a fixed table of options (`output_latency.c`), set and read with `REQ_OUTPUT_LATENCY` (0x03). The choice is stored device-globally (directory V23, never in a preset; a factory reset keeps it). The default is 4 ms.
 
@@ -1102,7 +1102,7 @@ A device at 96 kHz runs the 4, 6 and 8 ms options at the ceiling and returns to 
 
 A first attempt counted the queued input toward the target instead, starting the outputs with the ring as low as target minus one block and relying on the queue being delivered within that slack. On S/PDIF it dipped about 100 frames below the target right after every start and underran at 2 ms and below, so it was replaced by the bounds above.
 
-**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into named sections (`LOOP_PROF_SECTION_LIST` in `loop_prof.h`), read through `REQ_GET_STATUS` 64+. Measured on RP2350 with S/PDIF input:
+**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into named sections (`LOOP_PROF_SECTION_LIST` in `loop_prof.h`), read through `DIAG.LOOP_PROF_SECTION` (`REQ_GET_STATUS` 64+ before 2026-11-16). Measured on RP2350 with S/PDIF input:
 - The quiet pass is about 70 to 80 µs. Every section carries a floor of about 53 µs from interrupts landing inside it (the S/PDIF receiver's block check every 4 ms), so any pass can grow by that much.
 - Three tasks ran far longer and were reworked. The spectrum analyser's FINISH ran 530 µs in one call (now a background job in 16-bin chunks; see "Spectrum Analyser"). The loudness table rebuild ran 540 µs on every reference or intensity change (now a background job that builds into the inactive table and swaps when complete; see "Step budget and background jobs"). The idle pump gated at half the target, inside the fill sawtooth at small targets, and spent about 55 µs per pass stamping silence while streaming (now gated on a reader that has passed its writer).
 - After those, single host actions add 20 to 170 µs over the quiet pass (vendor request handling, deferred applies, the first block they affect), with a Control Surfaces binding add or revert the largest at up to about 350 µs.
@@ -1131,7 +1131,7 @@ Jobs today:
 - **Control Surfaces revert** (`control_surfaces.c`). `control_surfaces_revert_begin()` starts it; it runs the reload one slot or table at a time, and the module refuses or defers every write and answers reads with the reverted state while it runs (Control Surfaces "Deferred SET, Apply/Save/Revert").
 - **Loudness rebuild** (`loudness.c`). `loudness_recompute_begin()` starts or restarts it; it builds volume steps into the inactive table until the deadline, swaps when complete, and `loudness_recompute_take_done()` tells the main loop to re-key. Boot keeps the blocking `loudness_recompute_table()`, which runs before any job.
 
-`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (96+job). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
+`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (`DIAG.LOOP_PROF_JOB`, addressed by `BgJobId`). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
 
 **Real-use soaks (2026-10-23, RP2350, `tools/latency_bench/soak.py`).** Each run lasts 15 minutes with the same action seed. The analyser is read every 50 ms while 448 random host actions run (parameter edits, feature toggles, bulk reads, analyser reconfiguration, generator bursts, Control Surfaces binds and reverts). Results with two delivery points (one delivery point in brackets):
 
@@ -2625,6 +2625,14 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 
 ## Memory Layout
 
+> **Paged protocol on UART and I2C (2026-11-16).** The UART `tx_copy` and I2C
+> `resp_small` reply copies grow from 132 to 256 bytes (`VC_REPLY_MAX`) and the
+> page-0 `_ext_resp_copy` sink (132 B) is gone. Its replies now land in the
+> dispatcher's reply buffer. With the deferred-reboot flags, BSS grows by 120 B on
+> RP2040 and 124 B on RP2350. Text shrinks by about 7 KB on both, all flash,
+> because the legacy `vendor_send_response()` is no longer inlined at every call
+> site. `.data` is unchanged.
+
 > **Paged vendor dispatcher (2026-11-16).** `vendor/vc_core.c` adds the
 > 256-byte static reply buffer and 24 bytes of per-transport `LAST_RESULT`
 > state, and `vc_usb.c` one reboot flag. Measured BSS growth is 284 B on
@@ -2683,7 +2691,7 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > 277,644 B plus `.slot_rings` 32 KB / 64 KB; free heap before runtime
 > allocation (`__HeapLimit - end`, now reported by `check_ram_placement.py`)
 > 45,256 B / 82,804 B, leaving about 19 KB / 31 KB after the producer pools.
-*Last updated: 2026-11-16 (paged vendor dispatcher: BSS +284 B RP2040 / +280 B RP2350, see the note above). Previously 2026-10-16 (USB feedback long-window rate, dual-slope servo and diagnostics: `fb_ctrl` grows to 84 B, BSS +56 B both platforms, RAM code +416 B RP2040 / +408 B RP2350, measured `.data` 68,496 B / 96,328 B, inside the 72,704 B / 100,352 B budgets). Previously 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-11-16 (paged protocol on UART and I2C: BSS +120 B RP2040 / +124 B RP2350, text about -7 KB; paged vendor dispatcher: BSS +284 B RP2040 / +280 B RP2350; see the notes above). Previously 2026-10-16 (USB feedback long-window rate, dual-slope servo and diagnostics: `fb_ctrl` grows to 84 B, BSS +56 B both platforms, RAM code +416 B RP2040 / +408 B RP2350, measured `.data` 68,496 B / 96,328 B, inside the 72,704 B / 100,352 B budgets). Previously 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -3149,66 +3157,100 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## External Control Interfaces (UART / I2C Target)
-*Last updated: 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
+*Last updated: 2026-11-16 (paged protocol on UART and I2C: entry points moved to `vendor/`, status byte carries `VC_*` codes, `STORE.ALL_PARAMS` streaming, deferred bootloader reboot). Previously 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
 
 An external microcontroller can drive the entire vendor-command surface over a
 UART or the I2C target (slave) interface, at parity with USB. Full integrator
 detail lives in `Documentation/Features/control_interfaces_spec.md`; this section
 covers the firmware-side structure.
 
-### Orchestrator refactor
+### Entry points (`vendor/vc_ctrl.h`)
+*Last updated: 2026-11-16*
 
-The vendor command surface was made transport-neutral. USB (EP0), UART, and I2C
-each parse their own wire framing into the same `bRequest` / `wValue` / `wIndex` /
-`wLength` shape and call a shared dispatcher in `vendor_commands.c`:
+USB (EP0), UART and I2C each parse their own wire framing into the same
+`bRequest` / `wValue` / `wIndex` / `wLength` shape. The external transports call
+two functions in `vendor/vc_core.c`, from the main loop only.
 
-- `vendor_dispatch_get(CtrlSource, bRequest, wValue, wIndex, wLength, &resp_data, &resp_len)`
-- `vendor_dispatch_set(CtrlSource, bRequest, wValue, wIndex, payload, wLength)`
+- `uint8_t ctrl_dispatch_get(CtrlSource, bRequest, wValue, wIndex, wLength, &resp, &resp_len)`
+- `uint8_t ctrl_dispatch_set(CtrlSource, bRequest, wValue, wIndex, payload, wLength)`
 
-`CtrlSource` is `USB` (0) / `UART` (1) / `I2C` (2). New commands added to the
-SET/GET switches are automatically reachable from every transport with nothing
-per-transport to implement.
+Both return the wire status byte. They refuse `CTRL_SOURCE_USB`, answer
+`CTRL_STATUS_BUSY` while a USB control transfer holds the shared buffers, take
+the page from the `wIndex` high byte (`vc_page_of()`), and send paged requests to
+`vc_dispatch()`, or to the bulk path for `STORE.ALL_PARAMS`. Page 0 still reaches
+the 1.1.6 switches through `vendor_legacy_dispatch_get/set` in
+`vendor_commands.c`, one marked line in each entry point; the flip phase deletes
+that call-through with the switches. `CtrlSource`, `VcResult`, the
+`CTRL_STATUS_*` codes, the bulk lock API and `vendor_is_bulk_set()` live in the
+same header, so nothing a transport needs depends on `vendor_commands.c` or a
+`REQ_*` opcode. `vendor_dispatch_get/set` remain as wrappers that fold the status
+into the coarse `CtrlDispatchResult` for internal callers still on page-0
+opcodes.
 
-**Response sink.** A GET dispatch returns a pointer/length into static storage
-that stays valid until the next dispatch from any transport, so a transport poll
-consumes or copies it before returning. `REQ_GET_ALL_PARAMS` points into
-`bulk_param_buf` and holds the bulk lock until the caller releases it. Every
-other GET is copied into the static `_ext_resp_copy` sink while the handler
-frame is still alive, because an external transport consumes the bytes only
-after the handler returns. That sink is sized by the largest non-bulk GET, so
-it widened from 64 to 132 bytes for `REQ_GET_CS_MACRO`'s `CsMacro`; a longer
-response than that would have to go through the bulk buffer path.
+**Status byte rule.** `0x00` is OK. `0x01`-`0x07` are transport conditions where
+the command never ran (BUSY, BULK_LOCKED, CRC, OVERSIZE, FRAME; ERROR `0x02` and
+BLOCKED `0x03` only on page 0). `0x10` and up is the `VcResult` itself, the same
+code a USB host reads from `SYS.LAST_RESULT`, which is kept per transport.
+Transport conditions are not recorded there. `ctrl_status_transient()` (`0x01`,
+`0x04`, `0x17`) is what both transports retry internally for 50 ms before they
+answer.
 
-**USB SET-in-flight guard.** External dispatch runs from the main loop and is
-refused with `CTRL_DISPATCH_BUSY` (wire `CTRL_STATUS_BUSY`) while a USB control
-SET is mid-transfer, so the two paths never race the same state. The client
-retries the whole request.
+**Reply buffers.** A non-bulk GET reply is at most `VC_REPLY_MAX` (256) bytes in
+the dispatcher's reply buffer, valid until the next dispatch from any transport.
+The UART `tx_copy` and the I2C `resp_small` copies are `VC_REPLY_MAX` bytes, so
+a paged reply is never truncated. The page-0 path copies its replies into the
+same reply buffer (the old 132-byte `_ext_resp_copy` is gone), and its
+`vendor_send_response()` is `noinline`, which saves about 7 KB of flash on both
+platforms.
+
+**Bulk over UART/I2C.** `vendor_is_bulk_set(wIndex, bRequest, wLength)` is the
+single, table-free test the UART parser and the I2C target ISR use to stream a
+SET payload into `bulk_param_buf` under their lock. It accepts a paged
+`STORE.ALL_PARAMS` of 1 to `WIRE_BULK_BUF_SIZE` bytes, so a wrong length reaches
+the handler and fails with `VC_ERR_LENGTH` exactly as on USB, and the page-0
+`0xA1` on one removable line. `vc_bulk_ext_set()` runs the table checks, confirms
+and refreshes ownership with interrupts off (so the I2C ISR's 500 ms stale
+reclaim cannot fire before the handler sets `bulk_params_pending`), runs the
+handler (header check, pending flag), and releases the lock only on success; on
+failure the transport releases it. A GET for which `ctrl_is_bulk_get()` holds
+takes the lock, collects into `bulk_param_buf` and returns a pointer there. The
+transport streams it zero-copy and releases at the end. `vc_bulk_ext_check()`
+admits `VC_F_BULK` off USB only for that command on UART or I2C. The chunk
+command and `MEAS.RTA_BANDS_ALL` carry `VC_F_USB_ONLY` and answer
+`VC_ERR_BLOCKED`.
+
+**USB-only commands.** Off USB, `vc_check()` refuses `VC_F_USB_ONLY` commands in
+both directions and `VC_F_SET_USB_ONLY` SETs with `VC_ERR_BLOCKED`. Today these
+are the XPORT config SETs, `STORE.ALL_PARAMS_CHUNK`, `MEAS.RTA_BANDS_ALL` and
+`DIAG.CLOCK_DIAG`. The old `ctrl_cmd_usb_only()` list is consulted for page 0
+only.
+
+**Bootloader entry.** `SYS.ENTER_BOOTLOADER` from UART or I2C sets a per-source
+flag (`ctrl_reboot_request()`) instead of rebooting in the handler. The UART poll
+reboots once the response frame has left the shift register; the I2C poll
+reboots once the parked response has been read, or after 1 s. Polling stops while
+the reboot is pending.
+
+**USB SET-in-flight guard.** `vendor_usb_busy_begin/end/busy()` (now in
+`vc_core.c`) mark a USB control SET between SETUP and its data stage, or a
+multi-packet paged reply, with a 100 ms stale reclaim. External dispatch answers
+BUSY meanwhile, so the two paths never share the EP0 receive buffer or the reply
+buffer.
 
 **Chunked USB bulk access (0xA2/0xA3, added 2026-07-04).** Windows/WinUSB caps
-control-transfer data stages at 4 KB, so the 5864-byte V16 `WireBulkParams`
-cannot cross a single `0xA0`/`0xA1` transfer on any Windows host (GitHub
-issue #62). `REQ_GET_ALL_PARAMS_CHUNK` (0xA2) and `REQ_SET_ALL_PARAMS_CHUNK`
-(0xA3) move the same payload in `wValue`-offset chunks riding the bulk owner
-lock as a multi-transfer session: GET offset 0 snapshots the struct under the
-lock (all chunks read one coherent image, released at the final chunk's ACK);
-SET chunks land sequentially in `bulk_param_buf` and the final byte hands the
-buffer to the normal `bulk_params_pending` apply. Sessions survive chunk
-SETUPs but are torn down by any other vendor request or the 3 s stale reap;
-both commands are USB-only (refused on UART/I2C, which have no size cap).
-Host migration guide: `Documentation/Features/bulk_params_chunking.md`.
+control-transfer data stages at 4 KB, so the `WireBulkParams` blob cannot cross a
+single control transfer on any Windows host (GitHub issue #62). The chunk
+commands (`STORE.ALL_PARAMS_CHUNK`, and page-0 `0xA2`/`0xA3` until the flip) move
+the same payload in `wValue`-offset chunks riding the bulk owner lock as a
+multi-transfer session; the session logic lives in `vendor/vc_bulk.c`. They are
+USB-only. Host migration guide: `Documentation/Features/bulk_params_chunking.md`.
 
-**bulk_param_buf owner lock.** The single shared bulk buffer is serialized across
-USB/UART/I2C via `vendor_bulk_try_acquire` / `vendor_bulk_release` /
-`vendor_bulk_touch` (IRQ-safe). External owners go stale after 500 ms unless they
-refresh while actively streaming. A contended request returns
-`CTRL_DISPATCH_BULK_LOCKED` (wire `CTRL_STATUS_BULK_LOCKED`).
-
-**USB-only self-config.** `REQ_SET_UART_CONFIG` (`0xF5`) and `REQ_SET_I2C_CONFIG`
-(`0xF7`) are refused on the external transports (`CTRL_DISPATCH_BLOCKED` / wire
-`CTRL_STATUS_BLOCKED`) so an external controller can never reconfigure or lock
-itself out of its own transport. All other commands, including the config GETs,
-the status readback, presets, bulk, and bootloader entry, work on every
-transport.
+**bulk_param_buf owner lock.** `vendor_bulk_try_acquire` / `vendor_bulk_release`
+/ `vendor_bulk_touch` (IRQ-safe, now in `vendor/vc_bulk.c`) serialize the one
+shared bulk buffer across USB, UART and I2C. External owners go stale after
+500 ms without a touch, a USB owner after 3 s. A contended external request
+answers `CTRL_STATUS_BULK_LOCKED`, a contended USB one STALLs with
+`VC_ERR_BUSY`.
 
 ### Transport modules
 
@@ -3223,7 +3265,7 @@ transport.
   no directory version bump or wire change since all prior configs carry 0
   there). They are pushed only when the link is otherwise idle so a response is
   never split; a saturating requester can starve them, and the seq-gap contract
-  (client re-reads `REQ_GET_ALL_PARAMS`) covers recovery. The v1 legacy
+  (client re-reads `STORE.ALL_PARAMS`) covers recovery. The v1 legacy
   master-volume packet is never sent over UART. Enabling/disabling tracks the
   live interface: `up()` activates the UART consumer when `notify_enable` is set,
   `down()` deactivates it.
@@ -3259,9 +3301,9 @@ USB IRQs).
   activation is not wiped by the consumer-table reset inside `notify_init()`).
   `preset_get_ctrl_iface()` supplies the persisted configs to `uart_ctrl_init()`
   / `i2c_ctrl_init()`. A stored config whose pins now collide is quietly kept
-  down (live=false), visible via `REQ_GET_CTRL_IFACE_STATUS`.
+  down (live=false), visible via `XPORT.STATUS`.
 - **Main loop:** `uart_ctrl_poll()` and `i2c_ctrl_poll()` run every iteration.
-- **Deferred config SET:** a USB `0xF5`/`0xF7` sets `ctrl_set_uart_pending` /
+- **Deferred config SET:** a USB `XPORT.UART_CONFIG` / `XPORT.I2C_CONFIG` SET sets `ctrl_set_uart_pending` /
   `ctrl_set_i2c_pending`; the main loop does the live apply first (GPIO/IRQ work,
   tearing the interface down before validating so its own pins are not seen as
   in-use), then persists to the directory **only on** `PIN_CONFIG_SUCCESS`, so a
@@ -3474,8 +3516,8 @@ doing exact-length readback are unaffected until they opt in.
 **Caps v19** (2026-09-18) appends four nouns (70-73) for the tube preamp, with no
 structure or stored-config changes. `TUBE` (enable), `TUBE_DRIVE` (0..24 dB),
 `TUBE_TYPE` (enum, 17 values, 0 = Custom) and `TUBE_MIX` (0..100 % dry/wet) all
-dispatch through the one indexed command `REQ_SET_TUBE_PARAM` (`0x3E`) with the
-parameter index in wValue, so all four carry a float32 payload, the bool and the
+dispatch through their own `FX.TUBE_*` command (`TUBE_ENABLE`, `TUBE_DRIVE`,
+`TUBE_TYPE`, `TUBE_MIX`), and all four carry a float32 payload, the bool and the
 enum included. `noun_count` goes to 74. Display labels are "Tube", "Tube Drive",
 "Tube Type" and "Tube Mix", and the type noun has its own 17-entry short-form
 label table. The authority for the effect is `tube_preamp_spec.md`.
@@ -3576,16 +3618,28 @@ values "0.67 ms" through "8 ms".
 
 ### Dispatcher reuse via `CTRL_SOURCE_GPIO`
 
-Every control action is applied by dispatching the same vendor command a host
-would send, through `vendor_dispatch_set` / `vendor_dispatch_get` with a fourth
-control source, `CTRL_SOURCE_GPIO` (3). This reuses all existing validation,
+*Last updated: 2026-11-16 (dispatch through the paged commands).*
+
+Every control action is applied by dispatching the same paged vendor command a
+host would send, through `vc_set()` with a fourth control source,
+`CTRL_SOURCE_GPIO` (3). This reuses all existing validation,
 deferred pipeline-safe apply (e.g. preset load stops SPDIF RX and fences Core 1),
 and output-slot alignment; nothing in the apply path is duplicated. Dispatches
 are tagged `PARAM_SRC_GPIO` (5), so a knob turn emits the normal `PARAM_CHANGED`
 notification. Because the engine runs from main-loop context it honors the same
-`CTRL_DISPATCH_BUSY` back-pressure (a USB control SET mid-flight); it latches the
-resolved **absolute** target and retries next tick, so a BUSY stall can never
-double-apply a toggle.
+BUSY back-pressure (a USB control SET mid-flight, or a band write still waiting
+for the main loop). `cs_noun_dispatch` returns false only on `VC_ERR_BUSY`; the
+engine latches the resolved **absolute** target and retries next tick, so a BUSY
+stall can never double-apply a toggle. Every other `VcResult` counts as done.
+
+Filter nouns do a read-modify-write into `FILTER.BAND` (address
+`(channel << 8) | band`, 16 bytes) and send the stored `peq_qp_x512` explicitly.
+`FILTER_BYPASS` uses `FILTER.BAND_BYPASS`. Tube nouns use `FX.TUBE_*` and
+limiter nouns use `DYN.LIMITER_*` with the output in the address, all still
+float32. Upmix nouns use `FX.UPMIX_*` on RP2350 only. Preset load, reload and
+save, clip clear, siggen start and stop, and the DAC mute test are zero-length
+SETs. A write to an aux noun during a Control Surfaces revert is dropped before
+dispatch, not retried.
 
 ### 1 kHz tick placement
 
@@ -3638,7 +3692,7 @@ value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
 is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
-*Last updated: 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
+*Last updated: 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`). Previously 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
 
 `REQ_SET_CS_BINDING` requires the full 24-byte payload; a short payload records
 `CS_STATUS_INVALID_VALUE` and is dropped. It otherwise validates only the slot
@@ -3707,7 +3761,7 @@ stored bindings with dirty cleared, a SET sent during a revert is applied after
 it, and binding reads polled across 20 reverts all equal the stored image. A
 revert lasts about a millisecond, shorter than one host read, so on a
 `DSPI_LOOP_PROF` build the test slows background jobs to one unit per 50 passes
-(`REQ_GET_STATUS` 512+n) to land reads mid-revert (159 of them on 2026-10-24).
+(`DIAG.LOOP_PROF_BG_PACE`, `REQ_GET_STATUS` 512+n before 2026-11-16) to land reads mid-revert (159 of them on 2026-10-24).
 
 The per-slot work and the state derived from the whole binding set are split.
 `cs_apply_binding_slot()` releases, validates, claims and seeds one slot, and
@@ -3870,7 +3924,7 @@ are re-validated at fire time and a step that no longer validates (its group
 emptied or re-kinded) is skipped rather than fatal, which makes a torn host
 edit skip-safe. Steps may not fire macros, so there is no nesting.
 
-Every step dispatches through the same `vendor_dispatch_set` / `_get` surface
+Every step dispatches through the same `vc_set()` path
 with `CTRL_SOURCE_GPIO` that a single-target binding uses, honouring the same
 BUSY back-pressure, so a macro that loads a preset or switches input inherits
 the existing deferred, pipeline-safe apply machinery; nothing here adds a path
@@ -4076,8 +4130,8 @@ audio path reads them.
 holding the output and target kind `CS_TARGET_AUX` (5, `target_count` =
 `CS_MAX_BINDINGS`). `CS_NOUN_AUX` (68) is the bool half (BOOL-RW) and
 `CS_NOUN_AUX_LEVEL` (69) the continuous percent 0..100 (CONT-RW, PWM slots
-only). Both dispatch through `vendor_dispatch_set(CTRL_SOURCE_GPIO, ...)` with
-`REQ_SET_CS_AUX_STATE` / `REQ_SET_CS_AUX_LEVEL` like every other noun, so a
+only). Both dispatch through `vc_set(CTRL_SOURCE_GPIO, ...)` with
+`CS.AUX_STATE` / `CS.AUX_LEVEL` like every other noun, so a
 panel toggle and a host write take the same path. The level is 8.8 percent in
 RAM, on the wire and in the noun value, so any `step` is valid and there is no
 rounding nudge. Groups are not supported (a grouped reference or a `CsGroup`
@@ -4202,7 +4256,7 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Command Overhaul (in progress)
-*Last updated: 2026-11-16 (Phase 2: all pages implemented). Previously 2026-11-16 (shared page helpers in `vc_core.h`, Phase 1 dispatcher core); 2026-11-15.*
+*Last updated: 2026-11-16 (Phase 3: loop profiler on the DIAG page). Previously 2026-11-16 (Phase 2: all pages implemented); 2026-11-16 (shared page helpers in `vc_core.h`, Phase 1 dispatcher core); 2026-11-15.*
 
 The vendor opcode space is being rebuilt into pages (page in the `wIndex` high byte, command in `bRequest`) for firmware 1.1.7 beta 1. The design, the old-to-new mapping and the phase plan are in `Documentation/Features/vendor_command_overhaul_plan.md`. Until the flip phase lands, the "Vendor Command Reference" below still describes the live protocol.
 
@@ -4229,10 +4283,21 @@ The vendor opcode space is being rebuilt into pages (page in the `wIndex` high b
   - **MEAS.** `RTA_BANDS`, `RTA_BINS` and `RTA_BANDS_ALL` are keepalives. `RTA_BANDS_ALL` runs in the bulk buffer. `RTA_BINS` is capped at the 256-byte reply buffer.
   - **CS.** Preview SETs stage into the existing `cs_set_*_pending` handoffs and report through `cs_last_status`. Address and length refusals happen in the core and no longer touch the status packet.
   - **XPORT.** Config SETs are USB only. Scalar fields and GPIO range are checked before anything is queued. Ownership checks stay in the deferred apply.
+- **Loop profiler on DIAG (Phase 3, 2026-11-16).** A `DSPI_LOOP_PROF` build adds five DIAG commands, absent (`VC_ERR_UNKNOWN`) otherwise. Every value is the worst time in µs since boot or the last reset, and no read clears it.
+
+  | Cmd | Name | Dir | Address | Payload |
+  |---|---|---|---|---|
+  | 0x30 | `LOOP_PROF_SECTION` | G | section index in `LOOP_PROF_SECTION_LIST` (`INDEX`, checked by the handler) | u32 µs |
+  | 0x31 | `LOOP_PROF_JOB` | G | `BgJobId` in `BG_JOB_LIST` (`INDEX`) | u32 µs |
+  | 0x32 | `LOOP_PROF_COMMAND` | G | command ID `(page << 8) \| cmd` (`PAGE_CMD`); a command not built is `VC_ERR_ADDRESS` | u32 µs, GET and SET together |
+  | 0x33 | `LOOP_PROF_BG_PACE` | G, S | none | u16 n: above 1, each background step does one unit, on one pass in n; a SET of 0 stores 1 |
+  | 0x34 | `LOOP_PROF_RESET` | S (zero-length) | none | zeroes every section, job and command value |
+
+  `vc_run()` times every paged handler, so every transport and internal caller is covered, and passes the ID to `loop_prof_command()`. The per-command storage is one `uint32_t` per command built into the image, indexed by `vc_cmd_index()`: the command's position across the page directory, page by page in table order. The host never sees that index. `loop_prof.c` sizes the array by expanding every `.def` file at compile time, and a page missing from its list fails the build. The array is 744 B on RP2040 and 836 B on RP2350 (186 and 209 commands), against the 1,024 B per-opcode array it replaces; page 0 handlers are no longer profiled. `tools/latency_bench/loop_prof.py` reads it (its CLI resets, waits and prints the window's worst times) and `soak.py` resets before each measured window instead of relying on clear-on-read.
 - **Echo builds.** With `DSPI_WINDEX_ECHO`, an OUT echo on a page other than 0 is ACKed in the echo block, so `tools/windex_echo_test.py` still passes. In those builds 0x4F is shadowed on every page.
 
 ## Vendor Command Reference
-*Last updated: 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim). Previously 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+*Last updated: 2026-11-16 (`REQ_GET_STATUS` loop-profiler selectors removed). Previously 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim). Previously 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 
@@ -4331,7 +4396,7 @@ The vendor opcode space is being rebuilt into pages (page in the `wIndex` high b
 | REQ_UPMIX_SET_PARAM | 0x4C | OUT | Set one upmixer field: `wValue` = `UPMIX_PARAM_*` (0..13; 13 = presence dB), payload = 4-byte LE float (mode/enable rounded to int; RP2350 only, RP2040 STALLs) |
 | REQ_UPMIX_GET_PARAM | 0x4D | IN | Get one upmixer field (`wValue` = `UPMIX_PARAM_*`, returns 4-byte float; RP2040 returns 0.0). Unknown param STALLs |
 | REQ_UPMIX_GET_STATUS | 0x4E | IN | Get 16-byte `UpmixStatus` (active, parked_reason, corr_q14, balance_q14, center/ls/rs gains; RP2040 returns 16 zero bytes). 0x4F reserved |
-| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 31 = background steps over budget since boot; 32 = S/PDIF input measured rate in mHz (0 = none); 33 = soft VCXO commanded trim, ppm × 100, signed int32 (both 2026-11-05); 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24); on `DSPI_LOOP_PROF` bench builds 64+n = worst time in main-loop section n, 96+n = worst step of background job n, 256+op = worst vendor handler time for opcode op, each since its last read, and 512+n sets bench pacing (each background step does one unit, on one pass in n; returns n) (`loop_prof.h`) |
+| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 31 = background steps over budget since boot; 32 = S/PDIF input measured rate in mHz (0 = none); 33 = soft VCXO commanded trim, ppm × 100, signed int32 (both 2026-11-05); 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24). The `DSPI_LOOP_PROF` selectors (64+, 96+, 256+, 512+) are gone; the profiler is read through `DIAG.LOOP_PROF_*` (2026-11-16) |
 | REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
 | REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config and output limiter settings to the directory's device-global blocks (independent mode; was the deprecated REQ_LOAD_PARAMS) |
 | REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |

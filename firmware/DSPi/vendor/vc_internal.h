@@ -16,8 +16,8 @@
 // Defined in vendor_commands.c. The one EP0 SET receive buffer both USB paths use.
 uint8_t *vendor_usb_rx_buf(void);
 
-// Defined in vendor_commands.c. While a USB control transfer holds a shared
-// buffer (EP0 receive, or a multi-packet reply), external dispatch answers BUSY.
+// vc_core.c. While a USB control transfer holds a shared buffer (EP0 receive,
+// or a multi-packet reply), external dispatch answers BUSY.
 void vendor_usb_busy_begin(void);
 void vendor_usb_busy_end(void);
 bool vendor_usb_busy(void);
@@ -28,7 +28,7 @@ bool vc_usb_control_xfer(uint8_t rhport, uint8_t stage, tusb_control_request_t c
 // vc_usb.c: reboot into the bootloader once the current status stage completes.
 void vc_usb_bootloader_after_status(void);
 
-// Defined in vendor_commands.c. True while USB owns the bulk_param_buf lock.
+// vc_bulk.c. True while USB owns the bulk_param_buf lock.
 bool vendor_bulk_usb_holds(void);
 
 // vc_bulk.c: VC_F_BULK routing against the bulk_param_buf lock.
@@ -36,7 +36,14 @@ uint8_t *vc_bulk_buf(void);
 uint16_t vc_bulk_cap(void);
 bool     vc_bulk_usb_acquire(void);
 void     vc_bulk_usb_release(void);
-VcResult vc_bulk_ext_check(CtrlSource src, bool is_get, const VcCmd *e);
+VcResult vc_bulk_ext_check(CtrlSource src, uint16_t id, const VcCmd *e);
+
+// vc_bulk.c: STORE.ALL_PARAMS over UART and I2C. They return the wire status
+// byte, since losing the bulk lock is a transport condition, not a command result.
+uint8_t vc_bulk_ext_get(CtrlSource src, uint8_t page, uint8_t cmd, uint16_t addr,
+                        const uint8_t **out, uint16_t *out_len);
+uint8_t vc_bulk_ext_set(CtrlSource src, uint8_t page, uint8_t cmd, uint16_t addr,
+                        uint16_t len);
 
 // vc_bulk.c: USB stages of a VC_F_BULK request. setup checks and takes the lock,
 // window is where the payload or reply lives, failed and ack drop it.
@@ -58,5 +65,16 @@ extern bool     usb_chunk_set_open;
 extern uint16_t usb_chunk_set_received;
 void usb_chunk_sessions_close(void);
 bool vc_bulk_chunk_continues(uint8_t page, bool is_get, uint8_t bRequest);
+
+// ---- Page 0 call-through, deleted with vendor_commands.c at the flip ----
+// The 1.1.6 opcode switches for UART, I2C and internal callers (vendor_commands.c),
+// and the legacy bulk SET hand-off they use (vc_bulk.c).
+CtrlDispatchResult vendor_legacy_dispatch_get(CtrlSource src, uint8_t bRequest,
+                                              uint16_t wValue, uint16_t wIndex, uint16_t wLength,
+                                              const uint8_t **resp_data, uint16_t *resp_len);
+CtrlDispatchResult vendor_legacy_dispatch_set(CtrlSource src, uint8_t bRequest,
+                                              uint16_t wValue, uint16_t wIndex,
+                                              const uint8_t *payload, uint16_t wLength);
+bool vc_bulk_legacy_handoff(CtrlSource src);
 
 #endif // VC_INTERNAL_H

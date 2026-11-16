@@ -2,7 +2,7 @@
  * i2c_control.h - I2C target (slave) control transport for DSPi
  *
  * Exposes the whole vendor-command surface to an external I2C controller
- * (MCU, SBC) through the transport-neutral dispatcher in vendor_commands.c.
+ * (MCU, SBC) through the transport-neutral dispatcher (vendor/vc_ctrl.h).
  * The device is target-only: it never initiates bus traffic.
  *
  * Wire format (all multi-byte fields little-endian):
@@ -14,7 +14,8 @@
  *
  *   Response (I2C read transactions, resumable at byte granularity):
  *     [status][lenL][lenH][payload...]   then 0xFF padding beyond the end
- *     status is a CTRL_STATUS_* code; len is 0 unless status == OK on a GET.
+ *     status is a CTRL_STATUS_* transport code or the command's VcResult code
+ *     (vendor/vc_ctrl.h); len is 0 unless status == OK on a GET.
  *
  * A read before the main loop has dispatched the request returns a BUSY
  * frame [0x01, 0, 0]; the controller retries the read (a repeated-START
@@ -28,7 +29,7 @@
  * bounded to ISR latency at FIFO boundaries; the device never stretches
  * while waiting on application state (that is what the BUSY frame is for).
  *
- * Interface self-configuration (REQ_SET_I2C_CONFIG / REQ_SET_UART_CONFIG)
+ * Interface self-configuration (XPORT.UART_CONFIG / XPORT.I2C_CONFIG SET)
  * is refused on this transport; it is reachable over USB only.
  */
 
@@ -61,7 +62,7 @@ uint8_t i2c_ctrl_validate(const I2cCtrlConfig *cfg);
 void i2c_ctrl_poll(void);
 
 // True iff the interface is live and `pin` is its SDA or SCL GPIO.
-// Consulted by pin_used_by_fixed_peripheral() in vendor_commands.c.
+// Consulted by pin_used_by_fixed_peripheral() in vendor/vc_pins.c.
 bool i2c_ctrl_owns_pin(uint8_t pin);
 
 // True when the peripheral is up and listening at the configured address.

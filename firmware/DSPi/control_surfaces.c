@@ -9,8 +9,8 @@
  * via the ADC (one per tick, round-robin) with EMA smoothing and unit-aware
  * quantization, and LEDs (on/off or PWM-dimmed) are re-evaluated against
  * their noun's live state on a decimated schedule.  Every resulting change
- * is applied by dispatching the corresponding vendor command through
- * vendor_dispatch_set/get with CTRL_SOURCE_GPIO, so validation,
+ * is applied by dispatching the corresponding paged vendor command through
+ * vc_set() with CTRL_SOURCE_GPIO, so validation,
  * deferred-apply safety, and PARAM_SRC_GPIO host notifications all come
  * from the existing command surface.
  *

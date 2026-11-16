@@ -8,10 +8,10 @@
  */
 
 #include "i2c_control.h"
-#include "vendor_commands.h"
+#include "vc_ctrl.h"
+#include "vc_pins.h"
 #include "usb_audio.h"
 #include "bulk_params.h"
-#include "control_surfaces.h"           // CsMacro sizes resp_small
 #include "control_surfaces_display.h"   // display instance exclusion
 
 #include <string.h>
@@ -21,6 +21,7 @@
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/sync.h"
+#include "pico/bootrom.h"
 
 // Below USB and the audio DMA IRQs; control traffic must never delay audio.
 #define I2C_CTRL_IRQ_PRIORITY  0xC0
@@ -50,9 +51,7 @@ static volatile bool     frame_ready;       // complete frame awaiting dispatch
 
 // --- parked response (written by poll, drained by ISR) ---
 static uint8_t  resp_hdr[I2C_CTRL_RESP_HDR_LEN];
-// Sized with _ext_resp_copy and the UART TX_COPY_MAX for the largest
-// non-bulk GET (the 132-byte CsMacro); the three must move together.
-static uint8_t  resp_small[sizeof(CsMacro)];   // copy of non-bulk GET payloads
+static uint8_t  resp_small[VC_REPLY_MAX];   // copy of non-bulk GET payloads
 static const uint8_t *resp_payload;         // resp_small or bulk_param_buf
 static volatile uint16_t resp_len;
 static volatile bool     resp_ready;
@@ -111,8 +110,9 @@ static void on_receive_byte(uint8_t b) {
             // Header complete: choose where the payload goes.
             uint8_t  type = rx_header[0];
             uint8_t  breq = rx_header[1];
+            uint16_t widx = (uint16_t)(rx_header[4] | (rx_header[5] << 8));
             uint16_t wlen = hdr_wlen(rx_header);
-            if (type == I2C_CTRL_TYPE_SET && vendor_is_bulk_set(breq, wlen)) {
+            if (type == I2C_CTRL_TYPE_SET && vendor_is_bulk_set(widx, breq, wlen)) {
                 if (vendor_bulk_try_acquire(CTRL_SOURCE_I2C)) {
                     rx_bulk = true;
                 } else {
@@ -207,8 +207,8 @@ static void i2c_ctrl_slave_handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 // ----------------------------------------------------------------------------
 
 // Park a response for the controller.  Small GET payloads are copied so the
-// dispatcher's static buffers can be reused by other transports; a bulk GET
-// keeps its pointer into bulk_param_buf under the bulk lock.
+// dispatcher's reply buffer can be reused by other transports (it never exceeds
+// resp_small); a bulk GET keeps its pointer into bulk_param_buf under the lock.
 static void park_response(uint8_t status, const uint8_t *payload,
                           uint16_t len, bool bulk) {
     if (!bulk && len > 0) {
@@ -233,8 +233,20 @@ static void park_response(uint8_t status, const uint8_t *payload,
 static uint32_t bulk_resp_cursor_seen;
 static uint32_t bulk_resp_progress_time;
 
+// Set when a queued SYS.ENTER_BOOTLOADER starts waiting for its reply to be read.
+static uint32_t reboot_wait_start;
+
 void i2c_ctrl_poll(void) {
     if (!live) return;
+
+    // SYS.ENTER_BOOTLOADER: reboot once the controller has read the reply, or
+    // after 1 s if it never does.
+    if (ctrl_reboot_pending(CTRL_SOURCE_I2C)) {
+        if (!reboot_wait_start) reboot_wait_start = time_us_32() | 1u;
+        if (!resp_ready || (uint32_t)(time_us_32() - reboot_wait_start) > 1000000u)
+            reset_usb_boot(0, 0);
+        return;
+    }
 
     // Keep a slow controller's bulk read from being reaped as stale, but
     // only while it is actually draining the response.  A controller that
@@ -297,21 +309,21 @@ void i2c_ctrl_poll(void) {
         return;
     }
 
-    CtrlDispatchResult r;
+    uint8_t st;
     const uint8_t *resp_data = NULL;
     uint16_t rlen = 0;
-    bool bulk_get = (type == I2C_CTRL_TYPE_GET && breq == REQ_GET_ALL_PARAMS);
+    bool bulk_get = (type == I2C_CTRL_TYPE_GET && ctrl_is_bulk_get(widx, breq));
 
     if (type == I2C_CTRL_TYPE_SET) {
-        r = vendor_dispatch_set(CTRL_SOURCE_I2C, breq, wval, widx,
-                                cur_bulk ? NULL : cur_payload, wlen);
+        st = ctrl_dispatch_set(CTRL_SOURCE_I2C, breq, wval, widx,
+                               cur_bulk ? NULL : cur_payload, wlen);
     } else {
-        r = vendor_dispatch_get(CTRL_SOURCE_I2C, breq, wval, widx, wlen,
-                                &resp_data, &rlen);
+        st = ctrl_dispatch_get(CTRL_SOURCE_I2C, breq, wval, widx, wlen,
+                               &resp_data, &rlen);
     }
 
     // Transient contention: retry quietly for a while before surfacing it.
-    if (r == CTRL_DISPATCH_BUSY || r == CTRL_DISPATCH_BULK_LOCKED) {
+    if (ctrl_status_transient(st)) {
         if (!retry_active) {
             retry_active = true;
             retry_start = time_us_32();
@@ -322,16 +334,16 @@ void i2c_ctrl_poll(void) {
     retry_active = false;
     cur_valid = false;
 
-    if (cur_bulk && r != CTRL_DISPATCH_OK) {
+    if (cur_bulk && st != CTRL_STATUS_OK) {
         // Dispatch did not take ownership of the streamed payload.
         vendor_bulk_release(CTRL_SOURCE_I2C);
         cur_bulk = false;
     }
 
-    if (r == CTRL_DISPATCH_OK && type == I2C_CTRL_TYPE_GET) {
+    if (st == CTRL_STATUS_OK && type == I2C_CTRL_TYPE_GET) {
         park_response(CTRL_STATUS_OK, resp_data, rlen, bulk_get);
     } else {
-        park_response(ctrl_status_from_dispatch(r), NULL, 0, false);
+        park_response(st, NULL, 0, false);
     }
 }
 
@@ -423,7 +435,7 @@ uint8_t i2c_ctrl_apply(const I2cCtrlConfig *cfg) {
 }
 
 // Returns the validation status so boot code can record it for
-// REQ_GET_CTRL_IFACE_STATUS.  On failure the interface stays down but keeps
+// XPORT.STATUS.  On failure the interface stays down but keeps
 // its stored config; the status command exposes live=false to the host.
 uint8_t i2c_ctrl_init(const I2cCtrlConfig *cfg) {
     live = false;

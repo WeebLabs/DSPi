@@ -13,7 +13,17 @@ VC_CMD(0x20, LOOPBACK_STATS, diag_loopback_stats_get, VC_NONE,
        NONE, 8, 0, 0, 0, 0, "Loopback capture overflow and underrun frame counts")
 #endif
 
-VC_RESERVED(0x30, "loop profiler: section times")
-VC_RESERVED(0x31, "loop profiler: job times")
-VC_RESERVED(0x32, "loop profiler: command times")
-VC_RESERVED(0x33, "loop profiler: background pace")
+// Worst times are in us since boot or LOOP_PROF_RESET; reads never clear them.
+// Section and job numbers are the order of the lists in loop_prof.h.
+#ifdef DSPI_LOOP_PROF
+VC_CMD(0x30, LOOP_PROF_SECTION, diag_lp_section_get, VC_NONE,
+       INDEX, 4, 0, 0, 0, 0, "Worst time of main-loop section wValue (LOOP_PROF_SECTION_LIST)")
+VC_CMD(0x31, LOOP_PROF_JOB, diag_lp_job_get, VC_NONE,
+       INDEX, 4, 0, 0, 0, 0, "Worst step of background job wValue (BG_JOB_LIST)")
+VC_CMD(0x32, LOOP_PROF_COMMAND, diag_lp_command_get, VC_NONE,
+       PAGE_CMD, 4, 0, 0, 0, 0, "Worst handler time of paged command wValue, GET and SET together")
+VC_CMD(0x33, LOOP_PROF_BG_PACE, diag_lp_bg_pace_get, diag_lp_bg_pace_set,
+       NONE, 2, 2, 2, 0, 0, "Background pacing n: above 1, one unit per step on one pass in n; 0 sets 1")
+VC_CMD(0x34, LOOP_PROF_RESET, VC_NONE, diag_lp_reset_set,
+       NONE, 0, 0, 0, 0, 0, "Zero every section, job and command worst time")
+#endif

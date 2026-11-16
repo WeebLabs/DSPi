@@ -2,7 +2,7 @@
  * uart_control.h - UART control transport for DSPi
  *
  * Lets an external MCU drive the entire vendor-command surface over a UART.
- * The transport-neutral dispatcher (vendor_dispatch_get/set) does the real
+ * The transport-neutral dispatcher (ctrl_dispatch_get/set) does the real
  * work; this module only frames bytes on the wire and pumps them.  Nothing
  * here ever blocks or busy-waits: the ISR moves bytes into a ring, and all
  * parsing, dispatch and TX happen in uart_ctrl_poll() from the main loop, so
@@ -24,14 +24,15 @@
  * set and only at frame boundaries while the link is otherwise idle, so a
  * response is never split by one; clients must accept a 0x40 frame at any
  * point between frames.  A gap in the packets' sequence bytes means events
- * were dropped for this consumer; recover with a full REQ_GET_ALL_PARAMS.
+ * were dropped for this consumer; recover with a full STORE.ALL_PARAMS read.
  *
  * CRC is CRC16-CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, no final
  * XOR) computed over every byte after the sync byte (the type byte through the
  * end of the payload) and transmitted little-endian.  It is accumulated
  * incrementally byte-by-byte in both directions; there is never a lump-sum pass.
  *
- * The status byte uses the CTRL_STATUS_* codes from vendor_commands.h.
+ * The status byte is a CTRL_STATUS_* transport code or, for a request that
+ * reached a command, its VcResult code (vendor/vc_ctrl.h).
  */
 
 #ifndef UART_CONTROL_H
@@ -43,7 +44,7 @@
 
 // Boot-time bring-up from the persisted config.  Same as uart_ctrl_apply but
 // without rollback; call once before the main loop starts.  Returns the
-// PIN_CONFIG_* validation status (recorded for REQ_GET_CTRL_IFACE_STATUS).
+// PIN_CONFIG_* validation status (recorded for XPORT.STATUS).
 uint8_t uart_ctrl_init(const UartCtrlConfig *cfg);
 
 // Reconfigure at runtime (main-loop context only).  Tears the current

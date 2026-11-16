@@ -120,7 +120,7 @@ static VcResult store_factory_reset_set(VcCtx *c) {
     return VC_OK;
 }
 
-// Only the USB bulk path reaches these, with the buffer under the bulk lock.
+// Reached only through the bulk paths (USB, UART, I2C), with the buffer under the bulk lock.
 static VcResult store_all_params_get(VcCtx *c) {
     if (c->out != vc_bulk_buf()) return VC_ERR_BLOCKED;
     bulk_params_collect((WireBulkParams *)c->out);

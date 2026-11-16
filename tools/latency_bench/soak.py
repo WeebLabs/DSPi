@@ -160,24 +160,22 @@ def profile_actions(dev, soak, reps, out):
         for _ in range(reps):
             time.sleep(0.6)
             dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
-            loop_prof.take_sections(dev)
-            loop_prof.take_jobs(dev)
-            loop_prof.take_opcodes(dev)
+            loop_prof.reset(dev)
             try:
                 fn()
             except Stall:
                 pass
             time.sleep(1.0)
             passes.append(status_u32(dev, 29))
-            loop_prof.merge_worst(sect, loop_prof.take_sections(dev))
-            loop_prof.merge_worst(jobs, loop_prof.take_jobs(dev))
-            loop_prof.merge_worst(ops, loop_prof.take_opcodes(dev))
+            loop_prof.merge_worst(sect, loop_prof.sections(dev))
+            loop_prof.merge_worst(jobs, loop_prof.jobs(dev))
+            loop_prof.merge_worst(ops, loop_prof.commands(dev))
         res[name] = dict(worst_us=max(passes), median_us=sorted(passes)[len(passes) // 2],
-                         sections=sect, jobs=jobs, opcodes=ops)
+                         sections=sect, jobs=jobs, commands=ops)
         top = sorted(((v, k) for k, v in sect.items()), reverse=True)[:3]
         top_ops = sorted(((v, k) for k, v in ops.items()), reverse=True)[:2]
         print(f"{name:20s} worst {res[name]['worst_us']:5d} us  median {res[name]['median_us']:5d} us  "
-              f"top sections {top}  top opcodes {top_ops}", flush=True)
+              f"top sections {top}  top commands {top_ops}", flush=True)
     soak.cleanup()
     (out / "action_profile.json").write_text(json.dumps(res, indent=1))
 
@@ -217,8 +215,7 @@ def run(args):
         counters = (26, 27, 22, 8, 10, 31)
         fs = status_u32(dev, 15) or 48000
         gap_limit_us = (st["target_frames"] - st["batch_frames"]) * 1_000_000 // fs
-        for take in (loop_prof.take_sections, loop_prof.take_jobs, loop_prof.take_opcodes):
-            take(dev)                          # the run's profiler worsts start from zero
+        loop_prof.reset(dev)                   # the run's profiler worsts start from zero
         c_prev = [status_u32(dev, w) for w in counters]
         uf_prev = player.underflows if player else 0
         dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
@@ -258,9 +255,9 @@ def run(args):
                     print(json.dumps(ev), flush=True)
                 next_sec += 1
             time.sleep(0.003)
-        # Whole-run worsts; profiler builds only, release builds read 0.
-        prof_worst = dict(sections=loop_prof.take_sections(dev), jobs=loop_prof.take_jobs(dev),
-                          opcodes=loop_prof.take_opcodes(dev))
+        # Whole-run worsts; empty on builds without DSPI_LOOP_PROF.
+        prof_worst = dict(sections=loop_prof.sections(dev), jobs=loop_prof.jobs(dev),
+                          commands=loop_prof.commands(dev))
     finally:
         soak.cleanup()
         if player:

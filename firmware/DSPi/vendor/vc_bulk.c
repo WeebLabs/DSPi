@@ -1,13 +1,15 @@
 /*
- * vc_bulk.c: VC_F_BULK routing for paged commands over the bulk_param_buf
- * lock, and the USB chunk sessions shared by STORE.ALL_PARAMS_CHUNK and the
- * page-0 0xA2/0xA3 opcodes. The lock itself still lives in vendor_commands.c.
+ * vc_bulk.c: the bulk_param_buf lock shared by USB, UART and I2C, VC_F_BULK
+ * routing for paged commands on every transport, and the USB chunk sessions
+ * shared by STORE.ALL_PARAMS_CHUNK and the page-0 0xA2/0xA3 opcodes.
  */
 
 #include "vc_internal.h"
 #include "config.h"
 #include "usb_audio.h"
 #include "bulk_params.h"
+#include "hardware/sync.h"
+#include "pico/time.h"
 
 _Static_assert(WIRE_BULK_BUF_SIZE <= 0xFFFFu, "bulk length must fit a u16 wLength");
 _Static_assert(sizeof(WireBulkParams) <= WIRE_BULK_BUF_SIZE, "chunk offsets index bulk_param_buf");
@@ -17,17 +19,125 @@ _Static_assert(sizeof(WireBulkParams) <= WIRE_BULK_BUF_SIZE, "chunk offsets inde
 uint8_t *vc_bulk_buf(void) { return bulk_param_buf; }
 uint16_t vc_bulk_cap(void) { return (uint16_t)WIRE_BULK_BUF_SIZE; }
 
+// ---- bulk_param_buf lock ----
+// One owner at a time; after a SET is handed over, bulk_params_pending guards the
+// buffer until the main loop has applied it. Owner is CtrlSource + 1, 0 = free.
+#define BULK_OWNER_NONE  0u
+#define BULK_OWNER_USB   ((uint8_t)(CTRL_SOURCE_USB + 1))
+static volatile uint8_t bulk_buf_owner = BULK_OWNER_NONE;
+static uint32_t bulk_owner_since;
+
+static inline uint8_t bulk_owner_for(CtrlSource src) { return (uint8_t)(src + 1); }
+
+// The I2C target ISR acquires when a bulk SET header arrives, racing the main loop.
+// USB gets a longer stale window because EP0 has no refresh hook.
+bool vendor_bulk_try_acquire(CtrlSource src) {
+    uint32_t save = save_and_disable_interrupts();
+    if (bulk_buf_owner != BULK_OWNER_NONE) {
+        uint32_t limit = (bulk_buf_owner == BULK_OWNER_USB) ? 3000000u : 500000u;
+        if ((uint32_t)(time_us_32() - bulk_owner_since) > limit)
+            bulk_buf_owner = BULK_OWNER_NONE;
+    }
+    bool ok = (bulk_buf_owner == BULK_OWNER_NONE && !bulk_params_pending);
+    if (ok) {
+        bulk_buf_owner = bulk_owner_for(src);
+        bulk_owner_since = time_us_32();
+    }
+    restore_interrupts(save);
+    return ok;
+}
+
+void vendor_bulk_release(CtrlSource src) {
+    uint32_t save = save_and_disable_interrupts();
+    if (bulk_buf_owner == bulk_owner_for(src)) bulk_buf_owner = BULK_OWNER_NONE;
+    restore_interrupts(save);
+}
+
+// A slow transport refreshes the stale timer while it streams (a full bulk
+// transfer takes about 0.5 s at 115200 baud).
+void vendor_bulk_touch(CtrlSource src) {
+    if (bulk_buf_owner == bulk_owner_for(src)) bulk_owner_since = time_us_32();
+}
+
+bool vendor_bulk_usb_holds(void) { return bulk_buf_owner == BULK_OWNER_USB; }
+
+// The transports route a SET payload into bulk_param_buf on this answer and the
+// dispatcher reads it back from there, so both must use this one function.
+// A paged length the handler refuses still lands here, so the result code matches USB.
+bool vendor_is_bulk_set(uint16_t wIndex, uint8_t bRequest, uint16_t wLength) {
+    uint16_t id = (uint16_t)((vc_page_of(0x41, wIndex) << 8) | bRequest);
+    if (id == VC_STORE_ALL_PARAMS) return wLength != 0 && wLength <= WIRE_BULK_BUF_SIZE;
+    return id == REQ_SET_ALL_PARAMS && wLength == sizeof(WireBulkParams);   // page 0, until the flip
+}
+
+bool ctrl_is_bulk_get(uint16_t wIndex, uint8_t bRequest) {
+    uint16_t id = (uint16_t)((vc_page_of(0xC1, wIndex) << 8) | bRequest);
+    return id == VC_STORE_ALL_PARAMS ||
+           id == REQ_GET_ALL_PARAMS;   // page 0, until the flip
+}
+
 // USB holds the lock from SETUP to the status ACK (vc_usb.c); the SETUP-stage
 // cleanup in tud_vendor_control_xfer_cb drops it if the host abandons a transfer.
 bool vc_bulk_usb_acquire(void) { return vendor_bulk_try_acquire(CTRL_SOURCE_USB); }
 void vc_bulk_usb_release(void) { vendor_bulk_release(CTRL_SOURCE_USB); }
 
-// PHASE 3 HOOK: UART and I2C stream bulk payloads only for page 0 until
-// vendor_is_bulk_set() and their zero-copy reply paths become page-aware.
-VcResult vc_bulk_ext_check(CtrlSource src, bool is_get, const VcCmd *e) {
-    (void)is_get;
-    if ((e->flags & VC_F_BULK) && src != CTRL_SOURCE_USB) return VC_ERR_BLOCKED;
-    return VC_OK;
+// UART and I2C stream only STORE.ALL_PARAMS (ctrl_dispatch_get/set supply the
+// buffer); internal callers have no bulk buffer. USB-only bulk commands never get here.
+VcResult vc_bulk_ext_check(CtrlSource src, uint16_t id, const VcCmd *e) {
+    if (!(e->flags & VC_F_BULK) || src == CTRL_SOURCE_USB) return VC_OK;
+    if ((src == CTRL_SOURCE_UART || src == CTRL_SOURCE_I2C) && id == VC_STORE_ALL_PARAMS)
+        return VC_OK;
+    return VC_ERR_BLOCKED;
+}
+
+// On OK the reply stays in bulk_param_buf under src's lock for the transport to stream.
+uint8_t vc_bulk_ext_get(CtrlSource src, uint8_t page, uint8_t cmd, uint16_t addr,
+                        const uint8_t **out, uint16_t *out_len) {
+    uint16_t id = (uint16_t)((page << 8) | cmd);
+    const VcCmd *e = NULL;
+    VcResult r = vc_check(src, true, page, cmd, addr, 0, &e);
+    if (r == VC_OK) {
+        if (!vendor_bulk_try_acquire(src)) return CTRL_STATUS_BULK_LOCKED;
+        r = vc_run(src, true, e, id, addr, NULL, 0, bulk_param_buf, vc_bulk_cap(), out, out_len);
+        if (r != VC_OK) vendor_bulk_release(src);
+    }
+    vc_record(src, true, id, addr, r);
+    return (uint8_t)r;
+}
+
+// The payload is already in bulk_param_buf under src's lock. The handler sets
+// bulk_params_pending on OK, so the lock is dropped only then; on failure the
+// transport releases it, keeping release and its own state in one place.
+uint8_t vc_bulk_ext_set(CtrlSource src, uint8_t page, uint8_t cmd, uint16_t addr,
+                        uint16_t len) {
+    uint16_t id = (uint16_t)((page << 8) | cmd);
+    const VcCmd *e = NULL;
+    VcResult r = vc_check(src, false, page, cmd, addr, len, &e);
+    if (r == VC_OK) {
+        // Refreshed with the owner check, so the 500 ms stale reclaim in the I2C
+        // ISR cannot take the buffer before the handler sets bulk_params_pending.
+        uint32_t save = save_and_disable_interrupts();
+        bool owned = (bulk_buf_owner == bulk_owner_for(src));
+        if (owned) bulk_owner_since = time_us_32();
+        restore_interrupts(save);
+        if (!owned) return CTRL_STATUS_BULK_LOCKED;
+        r = vc_run(src, false, e, id, addr, bulk_param_buf, len, NULL, 0, NULL, NULL);
+        if (r == VC_OK) vendor_bulk_release(src);
+    }
+    vc_record(src, false, id, addr, r);
+    return (uint8_t)r;
+}
+
+// Page-0 0xA1 over UART/I2C: owner check and hand-off in one step. Deleted at the flip.
+bool vc_bulk_legacy_handoff(CtrlSource src) {
+    uint32_t save = save_and_disable_interrupts();
+    bool owned = (bulk_buf_owner == bulk_owner_for(src));
+    if (owned) {
+        bulk_params_pending = true;
+        bulk_buf_owner = BULK_OWNER_NONE;
+    }
+    restore_interrupts(save);
+    return owned;
 }
 
 // ---- Chunk sessions ----

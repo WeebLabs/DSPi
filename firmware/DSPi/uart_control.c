@@ -8,17 +8,18 @@
  */
 
 #include "uart_control.h"
-#include "vendor_commands.h"
+#include "vc_ctrl.h"
+#include "vc_pins.h"
 #include "usb_audio.h"
 #include "bulk_params.h"
 #include "notify.h"
 #include "config.h"
-#include "control_surfaces.h"   // CsMacro sizes TX_COPY_MAX
 
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "pico/bootrom.h"
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -35,10 +36,7 @@
 #define RX_RING_SIZE         256u                 // power of two
 #define RX_RING_MASK         (RX_RING_SIZE - 1u)
 #define PAYLOAD_MAX          64u                  // non-bulk SET payload cap
-// Matches the dispatcher's _ext_resp_copy sink and the I2C copy buffer, all
-// sized by the largest non-bulk GET (the 132-byte CsMacro); the three must
-// move together or that GET silently truncates on one transport.
-#define TX_COPY_MAX          ((uint16_t)sizeof(CsMacro))   // GET response copy buffer
+#define TX_COPY_MAX          VC_REPLY_MAX         // GET response copy buffer
 
 #define FRAME_TIMEOUT_US     100000u              // inter-byte mid-frame timeout
 #define DISPATCH_RETRY_US    50000u               // transient-status retry window
@@ -274,7 +272,7 @@ static void header_complete(void) {
     if (rx_is_get) { crc_pos = 0; rx_state = RX_CRC; return; }  // GET: no payload
     if (wLen == 0) { crc_pos = 0; rx_state = RX_CRC; return; }
 
-    if (vendor_is_bulk_set(bReq, wLen)) {
+    if (vendor_is_bulk_set(wIndex, bReq, wLen)) {
         if (vendor_bulk_try_acquire(CTRL_SOURCE_UART)) {
             parser_holds_bulk = true;
             to_bulk = true;                    // stream straight into bulk_param_buf
@@ -381,53 +379,50 @@ static void parse_ring(void) {
 // ---------------------------------------------------------------------------
 
 static void try_dispatch(void) {
-    CtrlDispatchResult res;
+    uint8_t st;
     const uint8_t *rd = NULL;
     uint16_t rl = 0;
 
     if (pending.is_get) {
-        res = vendor_dispatch_get(CTRL_SOURCE_UART, pending.bReq, pending.wValue,
-                                  pending.wIndex, pending.wLen, &rd, &rl);
+        st = ctrl_dispatch_get(CTRL_SOURCE_UART, pending.bReq, pending.wValue,
+                               pending.wIndex, pending.wLen, &rd, &rl);
     } else {
-        // For bulk SET the payload already sits in bulk_param_buf under our lock;
-        // vendor_dispatch_set ignores the payload arg in that case.
-        res = vendor_dispatch_set(CTRL_SOURCE_UART, pending.bReq, pending.wValue,
-                                  pending.wIndex, payload_buf, pending.wLen);
+        // A bulk SET payload already sits in bulk_param_buf under our lock.
+        st = ctrl_dispatch_set(CTRL_SOURCE_UART, pending.bReq, pending.wValue,
+                               pending.wIndex, payload_buf, pending.wLen);
     }
 
     // Transient results retry internally for a short window before giving up.
-    bool retryable = (res == CTRL_DISPATCH_BUSY) ||
-                     (pending.is_get && res == CTRL_DISPATCH_BULK_LOCKED);
-    if (retryable &&
+    if (ctrl_status_transient(st) &&
         (uint32_t)(time_us_32() - pending.retry_start) < DISPATCH_RETRY_US)
         return;  // keep pending; retry on the next poll
 
     uint8_t resp_type = pending.is_get ? UART_RESP_GET : UART_RESP_SET;
 
-    // Bulk SET lock: vendor_dispatch_set releases it on OK; we release on any
-    // non-OK result (including a timed-out BUSY that never touched the lock).
+    // Bulk SET lock: the dispatcher releases it on OK; we release on any
+    // other result (including a timed-out BUSY that never touched the lock).
     if (!pending.is_get) {
-        if (parser_holds_bulk && res != CTRL_DISPATCH_OK)
+        if (parser_holds_bulk && st != CTRL_STATUS_OK)
             vendor_bulk_release(CTRL_SOURCE_UART);
         parser_holds_bulk = false;
     }
 
     pending.active = false;
 
-    if (pending.is_get && res == CTRL_DISPATCH_OK) {
-        if (pending.bReq == REQ_GET_ALL_PARAMS) {
+    if (pending.is_get && st == CTRL_STATUS_OK) {
+        if (ctrl_is_bulk_get(pending.wIndex, pending.bReq)) {
             // Zero-copy stream from bulk_param_buf; the dispatcher handed us the
             // bulk lock, released when the last CRC byte goes out.
             start_tx(resp_type, CTRL_STATUS_OK, rd, rl, true);
         } else {
-            // The dispatcher's static buffer is only valid until the next
-            // dispatch from any transport, so snapshot it now.
+            // The dispatcher's reply is only valid until the next dispatch from
+            // any transport, so snapshot it now. It never exceeds TX_COPY_MAX.
             uint16_t n = (rl > TX_COPY_MAX) ? TX_COPY_MAX : rl;
             memcpy(tx_copy, rd, n);
             start_tx(resp_type, CTRL_STATUS_OK, tx_copy, n, false);
         }
     } else {
-        start_tx_status(resp_type, ctrl_status_from_dispatch(res));
+        start_tx_status(resp_type, st);
     }
 }
 
@@ -558,7 +553,7 @@ uint8_t uart_ctrl_validate(const UartCtrlConfig *cfg) {
 }
 
 // Returns the validation status so boot code can record it for
-// REQ_GET_CTRL_IFACE_STATUS without validating twice.
+// XPORT.STATUS without validating twice.
 uint8_t uart_ctrl_init(const UartCtrlConfig *cfg) {
     g_irq_installed = false;
     g_is_live = false;
@@ -612,6 +607,14 @@ void uart_ctrl_poll(void) {
         abort_frame();
 
     if (tx.active) pump_tx();
+
+    // SYS.ENTER_BOOTLOADER: reboot once its reply has left the shift register.
+    if (ctrl_reboot_pending(CTRL_SOURCE_UART)) {
+        if (!tx.active && !(uart_get_hw(g_uart)->fr & UART_UARTFR_BUSY_BITS))
+            reset_usb_boot(0, 0);
+        return;
+    }
+
     if (pending.active) try_dispatch();
 
     // Parse new bytes only when the transport is otherwise idle.

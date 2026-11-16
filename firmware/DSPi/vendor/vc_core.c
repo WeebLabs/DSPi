@@ -1,6 +1,7 @@
 /*
  * vc_core.c: page directory, lookup, validation, dispatch and LAST_RESULT
- * for the paged vendor protocol. Cold path, runs from flash.
+ * for the paged vendor protocol, and the UART/I2C entry points (vc_ctrl.h).
+ * Cold path, runs from flash.
  */
 
 #include "vc_core.h"
@@ -9,6 +10,10 @@
 #include "audio_input.h"
 #include "control_surfaces.h"
 #include "notify.h"
+#include "pico/time.h"
+#ifdef DSPI_LOOP_PROF
+#include "loop_prof.h"
+#endif
 
 #define X(m) extern const VcPage vc_page_##m;
 VC_PAGE_LIST(X)
@@ -61,6 +66,22 @@ const VcCmd *vc_find_cmd(const VcPage *p, uint8_t cmd) {
     return NULL;
 }
 
+#ifdef DSPI_LOOP_PROF
+int vc_cmd_index(uint16_t id) {
+    int base = 0;
+    for (uint8_t i = 0; i < vc_page_dir_len; i++) {
+        const VcPage *p = vc_page_dir[i];
+        if (p->page == (uint8_t)(id >> 8)) {
+            for (uint8_t k = 0; k < p->count; k++)
+                if (p->cmds[k].cmd == (uint8_t)id) return base + k;
+            return -1;
+        }
+        base += p->count;
+    }
+    return -1;
+}
+#endif
+
 static bool vc_addr_ok(uint8_t kind, uint16_t a, bool is_get) {
     uint8_t hi = (uint8_t)(a >> 8), lo = (uint8_t)a;
     switch (kind) {
@@ -112,7 +133,7 @@ VcResult vc_check(CtrlSource src, bool is_get, uint8_t page, uint8_t cmd,
         if (e->flags & VC_F_USB_ONLY) return VC_ERR_BLOCKED;
         if (!is_get && (e->flags & VC_F_SET_USB_ONLY)) return VC_ERR_BLOCKED;
     }
-    VcResult r = vc_bulk_ext_check(src, is_get, e);
+    VcResult r = vc_bulk_ext_check(src, (uint16_t)((page << 8) | cmd), e);
     if (r != VC_OK) return r;
 
     if (!is_get) {
@@ -139,9 +160,15 @@ VcResult vc_run(CtrlSource src, bool is_get, const VcCmd *e, uint16_t id,
     bool fixed = is_get && e->get_len != VC_LEN_VAR;
     if (fixed) memset(out_buf, 0, e->get_len < out_cap ? e->get_len : out_cap);
 
+#ifdef DSPI_LOOP_PROF
+    uint32_t t0 = time_us_32();
+#endif
     notify_set_source(vc_param_src(src));
     VcResult r = (is_get ? e->get : e->set)(&c);
     notify_set_source(PARAM_SRC_UNKNOWN);
+#ifdef DSPI_LOOP_PROF
+    loop_prof_command(id, time_us_32() - t0);
+#endif
 
     if (out) {
         uint16_t len = fixed ? e->get_len : c.out_len;
@@ -201,12 +228,102 @@ VcResult vc_get(CtrlSource src, uint16_t id, uint16_t addr,
                        NULL, 0, out, out_len);
 }
 
-// The UART/I2C status byte holds only a CtrlDispatchResult; the full code is in SYS.LAST_RESULT.
-CtrlDispatchResult vc_to_ctrl_dispatch(VcResult r) {
+// ---- USB in-flight guard ----
+// Set from SETUP until a USB SET's data stage or a multi-packet reply is done.
+// Stale after 100 ms in case the host aborts the transfer mid-flight.
+static volatile bool usb_busy;
+static uint32_t usb_busy_since;
+
+void vendor_usb_busy_begin(void) {
+    usb_busy_since = time_us_32();
+    usb_busy = true;
+}
+void vendor_usb_busy_end(void) { usb_busy = false; }
+bool vendor_usb_busy(void) {
+    if (!usb_busy) return false;
+    if ((uint32_t)(time_us_32() - usb_busy_since) > 100000u) {
+        usb_busy = false;
+        return false;
+    }
+    return true;
+}
+
+// ---- External transports (UART, I2C) and internal callers ----
+
+uint8_t ctrl_dispatch_get(CtrlSource src, uint8_t bRequest, uint16_t wValue,
+                          uint16_t wIndex, uint16_t wLength,
+                          const uint8_t **resp, uint16_t *resp_len) {
+    *resp = NULL;
+    *resp_len = 0;
+    if (src == CTRL_SOURCE_USB) return CTRL_STATUS_ERROR;   // USB has its own front end
+    if (vendor_usb_busy()) return CTRL_STATUS_BUSY;
+
+    uint8_t page = vc_page_of(0xC1, wIndex);
+    if (page == 0)   // PAGE 0 CALL-THROUGH: deleted at the flip
+        return ctrl_status_from_dispatch(vendor_legacy_dispatch_get(
+            src, bRequest, wValue, wIndex, wLength, resp, resp_len));
+
+    uint8_t st = ctrl_is_bulk_get(wIndex, bRequest)
+        ? vc_bulk_ext_get(src, page, bRequest, wValue, resp, resp_len)
+        : (uint8_t)vc_dispatch(src, true, page, bRequest, wValue, NULL, 0, resp, resp_len);
+    if (st == CTRL_STATUS_OK && wLength && *resp_len > wLength) *resp_len = wLength;
+    return st;
+}
+
+uint8_t ctrl_dispatch_set(CtrlSource src, uint8_t bRequest, uint16_t wValue,
+                          uint16_t wIndex, const uint8_t *payload, uint16_t wLength) {
+    if (src == CTRL_SOURCE_USB) return CTRL_STATUS_ERROR;
+    if (vendor_usb_busy()) return CTRL_STATUS_BUSY;
+
+    uint8_t page = vc_page_of(0x41, wIndex);
+    if (page == 0)   // PAGE 0 CALL-THROUGH: deleted at the flip
+        return ctrl_status_from_dispatch(vendor_legacy_dispatch_set(
+            src, bRequest, wValue, wIndex, payload, wLength));
+
+    if (vendor_is_bulk_set(wIndex, bRequest, wLength))
+        return vc_bulk_ext_set(src, page, bRequest, wValue, wLength);
+    // vc_check() refuses a payload above set_max before any handler reads it.
+    return (uint8_t)vc_dispatch(src, false, page, bRequest, wValue, payload, wLength, NULL, NULL);
+}
+
+CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
+                                       uint16_t wValue, uint16_t wIndex, uint16_t wLength,
+                                       const uint8_t **resp_data, uint16_t *resp_len) {
+    return ctrl_dispatch_from_status(
+        ctrl_dispatch_get(src, bRequest, wValue, wIndex, wLength, resp_data, resp_len));
+}
+
+CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
+                                       uint16_t wValue, uint16_t wIndex,
+                                       const uint8_t *payload, uint16_t wLength) {
+    return ctrl_dispatch_from_status(
+        ctrl_dispatch_set(src, bRequest, wValue, wIndex, payload, wLength));
+}
+
+uint8_t ctrl_status_from_dispatch(CtrlDispatchResult r) {
     switch (r) {
-        case VC_OK:          return CTRL_DISPATCH_OK;
-        case VC_ERR_BLOCKED: return CTRL_DISPATCH_BLOCKED;
-        case VC_ERR_BUSY:    return CTRL_DISPATCH_BUSY;
-        default:             return CTRL_DISPATCH_ERROR;
+        case CTRL_DISPATCH_OK:          return CTRL_STATUS_OK;
+        case CTRL_DISPATCH_BLOCKED:     return CTRL_STATUS_BLOCKED;
+        case CTRL_DISPATCH_BULK_LOCKED: return CTRL_STATUS_BULK_LOCKED;
+        case CTRL_DISPATCH_BUSY:        return CTRL_STATUS_BUSY;
+        default:                        return CTRL_STATUS_ERROR;
     }
 }
+
+CtrlDispatchResult ctrl_dispatch_from_status(uint8_t st) {
+    switch (st) {
+        case CTRL_STATUS_OK:          return CTRL_DISPATCH_OK;
+        case CTRL_STATUS_BUSY:
+        case VC_ERR_BUSY:             return CTRL_DISPATCH_BUSY;
+        case CTRL_STATUS_BLOCKED:
+        case VC_ERR_BLOCKED:          return CTRL_DISPATCH_BLOCKED;
+        case CTRL_STATUS_BULK_LOCKED: return CTRL_DISPATCH_BULK_LOCKED;
+        default:                      return CTRL_DISPATCH_ERROR;
+    }
+}
+
+// ---- Deferred reboot for SYS.ENTER_BOOTLOADER over UART and I2C ----
+static volatile uint8_t ctrl_reboot_mask;
+
+void ctrl_reboot_request(CtrlSource src) { ctrl_reboot_mask |= (uint8_t)(1u << src); }
+bool ctrl_reboot_pending(CtrlSource src) { return (ctrl_reboot_mask >> src) & 1u; }

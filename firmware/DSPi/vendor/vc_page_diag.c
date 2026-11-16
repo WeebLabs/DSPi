@@ -6,6 +6,7 @@
 #include "config.h"
 #include "clock_diag.h"
 #include "loopback.h"
+#include "loop_prof.h"
 
 #if DSPI_CLOCK_DIAG
 // The packet outgrows the 132-byte UART and I2C reply cap, hence VC_F_USB_ONLY.
@@ -22,6 +23,44 @@ _Static_assert(sizeof(ClockDiagPacket) <= VC_REPLY_MAX, "DIAG.CLOCK_DIAG exceeds
 static VcResult diag_loopback_stats_get(VcCtx *c) {
     vc_out_u32(c, 0, loopback_get_overflow_count());
     vc_out_u32(c, 4, loopback_get_underrun_count());
+    return VC_OK;
+}
+#endif
+
+#ifdef DSPI_LOOP_PROF
+static VcResult diag_lp_section_get(VcCtx *c) {
+    if (c->addr >= LOOP_PROF_SECTIONS) return VC_ERR_ADDRESS;
+    vc_out_u32(c, 0, loop_prof_section_worst((uint8_t)c->addr));
+    return VC_OK;
+}
+
+static VcResult diag_lp_job_get(VcCtx *c) {
+    if (c->addr >= BG_JOB_COUNT) return VC_ERR_ADDRESS;
+    vc_out_u32(c, 0, loop_prof_job_worst((uint8_t)c->addr));
+    return VC_OK;
+}
+
+static VcResult diag_lp_command_get(VcCtx *c) {
+    uint32_t us;
+    if (!loop_prof_command_worst(c->addr, &us)) return VC_ERR_ADDRESS;
+    vc_out_u32(c, 0, us);
+    return VC_OK;
+}
+
+static VcResult diag_lp_bg_pace_get(VcCtx *c) {
+    vc_out_u16(c, 0, bg_test_pace);
+    return VC_OK;
+}
+
+static VcResult diag_lp_bg_pace_set(VcCtx *c) {
+    uint16_t n = vc_in_u16(c, 0);
+    bg_test_pace = n ? n : 1;
+    return VC_OK;
+}
+
+static VcResult diag_lp_reset_set(VcCtx *c) {
+    (void)c;
+    loop_prof_reset();
     return VC_OK;
 }
 #endif

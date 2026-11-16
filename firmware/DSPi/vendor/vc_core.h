@@ -11,32 +11,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include "vendor_commands.h"   // CtrlSource, CtrlDispatchResult, PIN_CONFIG_*
+#include "vc_ctrl.h"            // CtrlSource, VcResult
+#include "vendor_commands.h"   // PIN_CONFIG_*
 #include "notify.h"             // ParamSource
 #include "vc_ids.h"
 
 #define VC_PROTOCOL_MAJOR 1
 #define VC_PROTOCOL_MINOR 0
 
-#define VC_REPLY_MAX     256u      // largest non-bulk GET reply
 #define VC_SET_MAX       64u       // largest non-bulk SET payload
 #define VC_LEN_VAR       0xFFFFu   // GET_LEN for a variable-length reply
 #define VC_NUM_SOURCES   (CTRL_SOURCE_GPIO + 1)
-
-typedef enum {
-    VC_OK               = 0x00,
-    VC_ERR_UNKNOWN      = 0x10,
-    VC_ERR_DIRECTION    = 0x11,
-    VC_ERR_LENGTH       = 0x12,
-    VC_ERR_ADDRESS      = 0x13,
-    VC_ERR_VALUE        = 0x14,
-    VC_ERR_UNSUPPORTED  = 0x15,
-    VC_ERR_BLOCKED      = 0x16,
-    VC_ERR_BUSY         = 0x17,
-    VC_ERR_STATE        = 0x18,
-    VC_ERR_PIN_INVALID  = 0x19,
-    VC_ERR_PIN_IN_USE   = 0x1A,
-} VcResult;
 
 // The numeric values reach hosts through SYS.COMMAND_INFO: append only.
 typedef enum {
@@ -103,6 +88,12 @@ static inline uint8_t vc_page_of(uint8_t bmRequestType, uint16_t wIndex) {
 const VcPage *vc_find_page(uint8_t page);   // NULL unless implemented
 const VcCmd  *vc_find_cmd(const VcPage *p, uint8_t cmd);
 
+#ifdef DSPI_LOOP_PROF
+// Position of a built command across the page directory, -1 when not built.
+// Keys the profiler's per-command storage (loop_prof.c); never sent to a host.
+int vc_cmd_index(uint16_t id);
+#endif
+
 // Full dispatch for UART, I2C and internal callers: checks, notify bracket,
 // handler, LAST_RESULT. A GET reply in *out stays valid until the next dispatch.
 VcResult vc_dispatch(CtrlSource src, bool is_get, uint8_t page, uint8_t cmd,
@@ -130,8 +121,6 @@ void vc_last_result(CtrlSource src, uint8_t out[8]);
 
 // The shared static reply buffer (VC_REPLY_MAX bytes).
 uint8_t *vc_reply_buf(void);
-
-CtrlDispatchResult vc_to_ctrl_dispatch(VcResult r);
 
 // The notification tag for a request's transport. Handlers that tag a deferred
 // notification themselves must use this so it matches the dispatcher's bracket.

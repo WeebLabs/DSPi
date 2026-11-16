@@ -4,20 +4,20 @@
  * One row per noun in cs_noun_table (kind, unit, action mask, range,
  * target addressing), one case per noun in cs_noun_get (live read in
  * natural units) and cs_noun_dispatch (map an absolute target onto the
- * existing vendor command a host would send).  The engine in
+ * paged vendor command a host would send).  The engine in
  * control_surfaces.c is unit- and noun-agnostic; everything
  * parameter-specific lives here.
  *
  * Main-loop context only.  Live reads touch main-loop-owned state (or
  * volatile globals published by the audio path); dispatches go through
- * vendor_dispatch_set/get with CTRL_SOURCE_GPIO, so validation, deferred
- * apply, and PARAM_SRC_GPIO notifications come from the shared handlers.
+ * vc_set() with CTRL_SOURCE_GPIO, so validation, deferred apply, and
+ * PARAM_SRC_GPIO notifications come from the shared handlers.
  */
 
 #include "control_surfaces.h"
 #include "control_surfaces_display.h"
 #include "config.h"
-#include "vendor_commands.h"
+#include "vc_core.h"
 #include "usb_audio.h"
 #include "audio_input.h"
 #include "flash_storage.h"
@@ -356,31 +356,34 @@ static const EqParamPacket *cs_filter_recipe(uint8_t ch, uint8_t band) {
     return &filter_recipes[ch][band];
 }
 
-// Read-modify-write one field of a filter through REQ_SET_EQ_PARAM.  The
-// packet is built from the live recipe so the untouched fields round-trip.
-// The EQ handlers share one pending_packet slot; while an apply is still
-// owed, report BUSY so the engine retries instead of overwriting it.
-static bool cs_filter_rmw(uint8_t noun, uint8_t ch, uint8_t band, float value) {
-    if (eq_update_pending) return false;
+// Read-modify-write one field of a band through FILTER.BAND, built from the
+// live recipe so the untouched fields round-trip.  FILTER.BAND has no "keep
+// the stored Qp" form, so the stored LT Qp must be sent back explicitly.
+static VcResult cs_filter_rmw(uint8_t noun, uint8_t ch, uint8_t band, float value) {
     EqParamPacket p = *cs_filter_recipe(ch, band);
-    p.channel = ch;
-    p.band = band;
     p.bypass = (p.bypass == 1) ? 1 : 0;
     switch (noun) {
         case CS_NOUN_FILTER_FREQ:   p.freq = value;            break;
         // gain_db holds fp in Hz for LT; a dB clamp would corrupt it, so
         // report the adjust handled without touching the recipe.
         case CS_NOUN_FILTER_GAIN:
-            if (p.type == FILTER_LINKWITZ_TRANSFORM) return true;
+            if (p.type == FILTER_LINKWITZ_TRANSFORM) return VC_OK;
             p.gain_db = value;         break;
         case CS_NOUN_FILTER_Q:      p.Q = value;               break;
         case CS_NOUN_FILTER_TYPE:   p.type = (uint8_t)value;   break;
-        case CS_NOUN_FILTER_BYPASS: p.bypass = (value >= 0.5f) ? 1 : 0; break;
-        default: return true;
+        default: return VC_OK;
     }
-    CtrlDispatchResult r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_EQ_PARAM,
-                                               0, 0, (const uint8_t *)&p, sizeof(p));
-    return r != CTRL_DISPATCH_BUSY;
+    uint16_t qp = (band < channel_band_counts[ch]) ? peq_qp_x512[ch][band] : 0;
+    uint8_t pkt[16];
+    pkt[0] = p.type;
+    pkt[1] = p.bypass;
+    pkt[2] = (uint8_t)qp;
+    pkt[3] = (uint8_t)(qp >> 8);
+    memcpy(&pkt[4], &p.freq, 4);
+    memcpy(&pkt[8], &p.Q, 4);
+    memcpy(&pkt[12], &p.gain_db, 4);
+    return vc_set(CTRL_SOURCE_GPIO, VC_FILTER_BAND, (uint16_t)((ch << 8) | band),
+                  pkt, sizeof(pkt));
 }
 
 // ---------------------------------------------------------------------------
@@ -551,180 +554,106 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
 // ---------------------------------------------------------------------------
 
 bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) {
-    const uint8_t *rd; uint16_t rl;
-    CtrlDispatchResult r;
+    uint16_t id, addr = 0;
+    float f = value;              // f32 payload (len 4)
+    uint8_t u = (uint8_t)value;   // u8 payload (len 1)
+    uint16_t len = 4;
     switch (noun) {
-        case CS_NOUN_USER_VOLUME:
-        case CS_NOUN_MASTER_VOLUME:
-        case CS_NOUN_LEVELLER_AMOUNT:
-        case CS_NOUN_LOUDNESS_SPL:
-        case CS_NOUN_LOUDNESS_INTENSITY: {
-            float f = value;
-            uint8_t req = (noun == CS_NOUN_USER_VOLUME)   ? REQ_SET_USER_VOLUME
-                        : (noun == CS_NOUN_MASTER_VOLUME) ? REQ_SET_MASTER_VOLUME
-                        : (noun == CS_NOUN_LEVELLER_AMOUNT) ? REQ_SET_LEVELLER_AMOUNT
-                        : (noun == CS_NOUN_LOUDNESS_SPL)  ? REQ_SET_LOUDNESS_REF
-                                                          : REQ_SET_LOUDNESS_INTENSITY;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, req, 0, 0,
-                                    (const uint8_t *)&f, sizeof(f));
-            break;
-        }
-        case CS_NOUN_PREAMP:
-        case CS_NOUN_OUTPUT_GAIN:
-        case CS_NOUN_OUTPUT_DELAY: {
-            float f = value;
-            uint8_t req = (noun == CS_NOUN_PREAMP)      ? REQ_SET_PREAMP_CH
-                        : (noun == CS_NOUN_OUTPUT_GAIN) ? REQ_SET_OUTPUT_GAIN
-                                                        : REQ_SET_OUTPUT_DELAY;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, req, target, 0,
-                                    (const uint8_t *)&f, sizeof(f));
-            break;
-        }
-        case CS_NOUN_PSYBASS_CUTOFF:
-        case CS_NOUN_PSYBASS_HARMONICS:
-        case CS_NOUN_PSYBASS_DRIVE:
-        case CS_NOUN_PSYBASS_CHARACTER:
-        case CS_NOUN_PSYBASS_ORIGINAL: {
-            // Per-parameter float SETs; nouns are contiguous from CUTOFF.
-            static const uint8_t psybass_req[] = {
-                REQ_SET_PSYBASS_CUTOFF, REQ_SET_PSYBASS_HARMONICS,
-                REQ_SET_PSYBASS_DRIVE, REQ_SET_PSYBASS_CHARACTER,
-                REQ_SET_PSYBASS_ORIGINAL,
-            };
-            float f = value;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO,
-                                    psybass_req[noun - CS_NOUN_PSYBASS_CUTOFF],
-                                    0, 0, (const uint8_t *)&f, sizeof(f));
-            break;
-        }
-        case CS_NOUN_SUBHARM_LOW:
-        case CS_NOUN_SUBHARM_HIGH:
-        case CS_NOUN_SUBHARM_BOOST:
-        case CS_NOUN_SUBHARM_TOP:
-        case CS_NOUN_SUBHARM_DEPTH:
-        case CS_NOUN_SUBHARM_HOLD:
-        case CS_NOUN_SUBHARM_CEILING: {
-            // Per-parameter float SETs, indexed from LOW.  The 0 hole is
-            // CS_NOUN_SUBHARM_SELECT, a one-byte enum handled in the default arm.
-            static const uint8_t subharm_req[] = {
-                REQ_SET_SUBHARM_LOW, REQ_SET_SUBHARM_HIGH, REQ_SET_SUBHARM_BOOST,
-                REQ_SET_SUBHARM_TOP, 0, REQ_SET_SUBHARM_DEPTH,
-                REQ_SET_SUBHARM_HOLD, REQ_SET_SUBHARM_CEILING,
-            };
-            float f = value;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO,
-                                    subharm_req[noun - CS_NOUN_SUBHARM_LOW],
-                                    0, 0, (const uint8_t *)&f, sizeof(f));
-            break;
-        }
+        case CS_NOUN_USER_VOLUME:        id = VC_ROUTE_USER_VOLUME;      break;
+        case CS_NOUN_MASTER_VOLUME:      id = VC_ROUTE_MASTER_VOLUME;    break;
+        case CS_NOUN_LEVELLER_AMOUNT:    id = VC_DYN_LEVELLER_AMOUNT;    break;
+        case CS_NOUN_LOUDNESS_SPL:       id = VC_DYN_LOUDNESS_REF;       break;
+        case CS_NOUN_LOUDNESS_INTENSITY: id = VC_DYN_LOUDNESS_INTENSITY; break;
+        case CS_NOUN_PSYBASS_CUTOFF:     id = VC_FX_PSYBASS_CUTOFF;      break;
+        case CS_NOUN_PSYBASS_HARMONICS:  id = VC_FX_PSYBASS_HARMONICS;   break;
+        case CS_NOUN_PSYBASS_DRIVE:      id = VC_FX_PSYBASS_DRIVE;       break;
+        case CS_NOUN_PSYBASS_CHARACTER:  id = VC_FX_PSYBASS_CHARACTER;   break;
+        case CS_NOUN_PSYBASS_ORIGINAL:   id = VC_FX_PSYBASS_ORIGINAL;    break;
+        case CS_NOUN_SUBHARM_LOW:        id = VC_FX_SUBHARM_LOW;         break;
+        case CS_NOUN_SUBHARM_HIGH:       id = VC_FX_SUBHARM_HIGH;        break;
+        case CS_NOUN_SUBHARM_BOOST:      id = VC_FX_SUBHARM_BOOST;       break;
+        case CS_NOUN_SUBHARM_TOP:        id = VC_FX_SUBHARM_TOP;         break;
+        case CS_NOUN_SUBHARM_DEPTH:      id = VC_FX_SUBHARM_DEPTH;       break;
+        case CS_NOUN_SUBHARM_HOLD:       id = VC_FX_SUBHARM_HOLD;        break;
+        case CS_NOUN_SUBHARM_CEILING:    id = VC_FX_SUBHARM_CEILING;     break;
+        case CS_NOUN_PREAMP:       id = VC_ROUTE_PREAMP;       addr = target; break;
+        case CS_NOUN_OUTPUT_GAIN:  id = VC_ROUTE_OUTPUT_GAIN;  addr = target; break;
+        case CS_NOUN_OUTPUT_DELAY: id = VC_ROUTE_OUTPUT_DELAY; addr = target; break;
+        // Tube and limiter take a float32 for every parameter, the bool and
+        // the enum included, so those must not reach the u8 arm below.
         case CS_NOUN_TUBE:
-        case CS_NOUN_TUBE_DRIVE:
-        case CS_NOUN_TUBE_TYPE:
-        case CS_NOUN_TUBE_MIX: {
-            // One indexed command, index in wValue.  The payload is a float32
-            // for every parameter, so the enable and the type must NOT fall
-            // through to the one-byte default arm below.
-            static const uint8_t tube_param[] = {
-                TUBE_PARAM_ENABLED, TUBE_PARAM_DRIVE_DB,
-                TUBE_PARAM_TUBE_TYPE, TUBE_PARAM_MIX_PCT,
-            };
-            float f = (noun == CS_NOUN_TUBE) ? ((value != 0.0f) ? 1.0f : 0.0f)
-                    : (noun == CS_NOUN_TUBE_TYPE) ? (float)(uint8_t)value
-                                                  : value;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_TUBE_PARAM,
-                                    tube_param[noun - CS_NOUN_TUBE], 0,
-                                    (const uint8_t *)&f, sizeof(f));
+            id = VC_FX_TUBE_ENABLE;
+            f = (value != 0.0f) ? 1.0f : 0.0f;
             break;
-        }
+        case CS_NOUN_TUBE_DRIVE: id = VC_FX_TUBE_DRIVE; break;
+        case CS_NOUN_TUBE_TYPE:  id = VC_FX_TUBE_TYPE;  f = (float)(uint8_t)value; break;
+        case CS_NOUN_TUBE_MIX:   id = VC_FX_TUBE_MIX;   break;
         case CS_NOUN_LIMITER:
-        case CS_NOUN_LIMITER_THRESHOLD:
-        case CS_NOUN_LIMITER_RELEASE:
-        case CS_NOUN_LIMITER_LINK: {
-            // One opcode, wValue = (output << 8) | index, float32 payload for
-            // every parameter; the bool and enum must not reach the byte arm.
-            static const uint8_t limiter_param[] = {
-                LIMITER_PARAM_ENABLED, LIMITER_PARAM_THRESHOLD_DB,
-                LIMITER_PARAM_RELEASE_MS, LIMITER_PARAM_LINK_GROUP,
-            };
-            float f = (noun == CS_NOUN_LIMITER) ? ((value >= 0.5f) ? 1.0f : 0.0f)
-                    : (noun == CS_NOUN_LIMITER_LINK) ? (float)(uint8_t)value
-                                                     : value;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_LIMITER,
-                                    (uint16_t)((target << 8) |
-                                               limiter_param[noun - CS_NOUN_LIMITER]),
-                                    0, (const uint8_t *)&f, sizeof(f));
+            id = VC_DYN_LIMITER_ENABLE;
+            addr = target;
+            f = (value >= 0.5f) ? 1.0f : 0.0f;
             break;
-        }
+        case CS_NOUN_LIMITER_THRESHOLD: id = VC_DYN_LIMITER_THRESHOLD; addr = target; break;
+        case CS_NOUN_LIMITER_RELEASE:   id = VC_DYN_LIMITER_RELEASE;   addr = target; break;
+        case CS_NOUN_LIMITER_LINK:
+            id = VC_DYN_LIMITER_LINK_GROUP;
+            addr = target;
+            f = (float)(uint8_t)value;
+            break;
 #if PICO_RP2350
-        case CS_NOUN_UPMIX:
-        case CS_NOUN_UPMIX_CENTER_MODE:
-        case CS_NOUN_UPMIX_SURROUND_MODE:
-        case CS_NOUN_UPMIX_STRENGTH:
-        case CS_NOUN_UPMIX_WIDTH:
-        case CS_NOUN_UPMIX_PRESENCE: {
-            // One float-per-parameter command; wValue selects the parameter.
-            // Nouns are contiguous from UPMIX; enable/mode floats are rounded
-            // and clamped by the handler.
-            static const uint8_t upmix_param[] = {
-                UPMIX_PARAM_ENABLED, UPMIX_PARAM_CENTER_MODE,
-                UPMIX_PARAM_SURROUND_MODE, UPMIX_PARAM_STRENGTH,
-                UPMIX_PARAM_CENTER_WIDTH, UPMIX_PARAM_PRESENCE,
-            };
-            float f = value;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_UPMIX_SET_PARAM,
-                                    upmix_param[noun - CS_NOUN_UPMIX], 0,
-                                    (const uint8_t *)&f, sizeof(f));
-            break;
-        }
+        // The handler rounds and clamps the enable and mode floats.
+        case CS_NOUN_UPMIX:               id = VC_FX_UPMIX_ENABLE;        break;
+        case CS_NOUN_UPMIX_CENTER_MODE:   id = VC_FX_UPMIX_CENTER_MODE;   break;
+        case CS_NOUN_UPMIX_SURROUND_MODE: id = VC_FX_UPMIX_SURROUND_MODE; break;
+        case CS_NOUN_UPMIX_STRENGTH:      id = VC_FX_UPMIX_STRENGTH;      break;
+        case CS_NOUN_UPMIX_WIDTH:         id = VC_FX_UPMIX_CENTER_WIDTH;  break;
+        case CS_NOUN_UPMIX_PRESENCE:      id = VC_FX_UPMIX_PRESENCE;      break;
 #endif
         case CS_NOUN_PRESET_RELOAD:
             // Reload the active preset from flash, discarding unsaved live
             // edits; the same deferred, pipeline-safe path the PRESET noun
             // takes.  Device-global state (master volume in independent
             // mode, output config, CS bindings) is untouched.
-            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_LOAD,
-                                    (uint16_t)preset_get_active(), 0, 1, &rd, &rl);
+            id = VC_STORE_PRESET_LOAD;
+            addr = preset_get_active();
+            len = 0;
             break;
         case CS_NOUN_PRESET_SAVE:
             // Same deferred save a host issues; device-global state (output
             // config in independent mode, CS bindings) keeps its own save path.
-            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_SAVE,
-                                    (uint16_t)preset_get_active(), 0, 1, &rd, &rl);
+            id = VC_STORE_PRESET_SAVE;
+            addr = preset_get_active();
+            len = 0;
             break;
-        case CS_NOUN_OUTPUT_LATENCY: {
+        case CS_NOUN_PRESET:
+            id = VC_STORE_PRESET_LOAD;
+            addr = (uint16_t)value;
+            len = 0;
+            break;
+        case CS_NOUN_OUTPUT_LATENCY:
             // Deferred to the main loop, which writes flash and restarts every
             // output together at the new target.
-            uint8_t id = (uint8_t)((int)value + 1);
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_OUTPUT_LATENCY, 0, 0, &id, 1);
+            id = VC_OUTPUT_LATENCY;
+            u = (uint8_t)((int)value + 1);
+            len = 1;
             break;
-        }
-        case CS_NOUN_PRESET:
-            // Same deferred, pipeline-safe path a host load takes.
-            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_PRESET_LOAD,
-                                    (uint16_t)value, 0, 1, &rd, &rl);
-            break;
-        case CS_NOUN_CLIP:
-            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_CLEAR_CLIPS,
-                                    0, 0, 4, &rd, &rl);
+        case CS_NOUN_CLIP:          id = VC_MEAS_CLIP_CLEAR;       len = 0; break;
+        case CS_NOUN_DAC_MUTE_TEST: id = VC_OUTPUT_DAC_MUTE_TEST;  len = 0; break;
+        case CS_NOUN_SIGGEN:
+            id = (value >= 0.5f) ? VC_MEAS_SIGGEN_START : VC_MEAS_SIGGEN_STOP;
+            len = 0;
             break;
         case CS_NOUN_FILTER_FREQ:
         case CS_NOUN_FILTER_GAIN:
         case CS_NOUN_FILTER_Q:
         case CS_NOUN_FILTER_TYPE:
-            return cs_filter_rmw(noun, target, index, value);
-        case CS_NOUN_FILTER_BYPASS: {
-            // Direct band-bypass command; no RMW needed, but it funnels
-            // through the same pending_packet as REQ_SET_EQ_PARAM.
-            if (eq_update_pending) return false;
-            uint8_t v = (value >= 0.5f) ? 1 : 0;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_BAND_BYPASS,
-                                    (uint16_t)((target << 8) | index), 0, &v, 1);
-            break;
-        }
-        case CS_NOUN_SIGGEN:
-            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_SIGGEN_CONTROL,
-                                    (value >= 0.5f) ? SIGGEN_CTL_START : SIGGEN_CTL_STOP,
-                                    0, 1, &rd, &rl);
+            return cs_filter_rmw(noun, target, index, value) != VC_ERR_BUSY;
+        case CS_NOUN_FILTER_BYPASS:
+            // BUSY while another band write still waits for the main loop.
+            id = VC_FILTER_BAND_BYPASS;
+            addr = (uint16_t)((target << 8) | index);
+            u = (value >= 0.5f) ? 1 : 0;
+            len = 1;
             break;
         case CS_NOUN_MACRO:
             // Direct call, not a vendor command: the sequencer itself then
@@ -741,60 +670,54 @@ bool cs_noun_dispatch(uint8_t noun, uint8_t target, uint8_t index, float value) 
             // Never dispatched directly; the engine routes it at the event
             // sources.  A stray dispatch is a safe no-op.
             return true;
-        case CS_NOUN_DAC_MUTE_TEST:
-            r = vendor_dispatch_get(CTRL_SOURCE_GPIO, REQ_TEST_DAC_HW_MUTE,
-                                    0, 0, 1, &rd, &rl);
-            break;
         case CS_NOUN_OUTPUT_MUTE:
-        case CS_NOUN_OUTPUT_ENABLE: {
-            uint8_t v = (value >= 0.5f) ? 1 : 0;
-            uint8_t req = (noun == CS_NOUN_OUTPUT_MUTE) ? REQ_SET_OUTPUT_MUTE
-                                                        : REQ_SET_OUTPUT_ENABLE;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, req, target, 0, &v, 1);
+        case CS_NOUN_OUTPUT_ENABLE:
+            id = (noun == CS_NOUN_OUTPUT_MUTE) ? VC_ROUTE_OUTPUT_MUTE : VC_ROUTE_OUTPUT_ENABLE;
+            addr = target;
+            u = (value >= 0.5f) ? 1 : 0;
+            len = 1;
             break;
-        }
-        case CS_NOUN_AUX: {
-            // Runtime-only values, but still routed through the command
-            // surface so the host sees a GPIO-tagged NOTIFY_EVT_CS_AUX.
-            uint8_t v = (value >= 0.5f) ? 1 : 0;
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_CS_AUX_STATE, target, 0, &v, 1);
-            break;
-        }
+        case CS_NOUN_AUX:
         case CS_NOUN_AUX_LEVEL: {
+            // Runtime-only values, but still routed through the command
+            // surface so the host sees a GPIO-tagged NOTIFY_EVT_CS_AUX.  A write
+            // during a revert is dropped, not retried: CS.AUX_* answers BUSY there.
+            if (control_surfaces_busy()) return true;
+            if (noun == CS_NOUN_AUX) {
+                u = (value >= 0.5f) ? 1 : 0;
+                return vc_set(CTRL_SOURCE_GPIO, VC_CS_AUX_STATE, target, &u, 1) != VC_ERR_BUSY;
+            }
             float q = value * 256.0f + 0.5f;
             uint16_t lv = (q <= 0.0f) ? 0 : (q >= 25600.0f) ? 25600 : (uint16_t)q;
             uint8_t v[2] = { (uint8_t)(lv & 0xFF), (uint8_t)(lv >> 8) };
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, REQ_SET_CS_AUX_LEVEL, target, 0, v, 2);
-            break;
+            return vc_set(CTRL_SOURCE_GPIO, VC_CS_AUX_LEVEL, target, v, 2) != VC_ERR_BUSY;
         }
-        default: {
-            // Single-byte SETs (bool / enum nouns).
-            uint8_t v = (uint8_t)value;
-            uint8_t req;
+        default:
+            // u8 payload, no address (bool and enum nouns).
+            len = 1;
             switch (noun) {
-                case CS_NOUN_USER_MUTE:        req = REQ_SET_USER_MUTE;          break;
-                case CS_NOUN_LOUDNESS:         req = REQ_SET_LOUDNESS;           break;
-                case CS_NOUN_CROSSFEED:        req = REQ_SET_CROSSFEED;          break;
-                case CS_NOUN_LEVELLER:         req = REQ_SET_LEVELLER_ENABLE;    break;
-                case CS_NOUN_INPUT_SOURCE:     req = REQ_SET_INPUT_SOURCE;       break;
-                case CS_NOUN_EQ_BYPASS:        req = REQ_SET_BYPASS;             break;
-                case CS_NOUN_LG_SYNC:          req = REQ_SET_LG_SOUND_SYNC_ENABLE; break;
-                case CS_NOUN_CROSSFEED_PRESET: req = REQ_SET_CROSSFEED_PRESET;   break;
-                case CS_NOUN_CROSSFEED_ITD:    req = REQ_SET_CROSSFEED_ITD;      break;
-                case CS_NOUN_LEVELLER_SPEED:   req = REQ_SET_LEVELLER_SPEED;     break;
-                case CS_NOUN_LEVELLER_LOOKAHEAD: req = REQ_SET_LEVELLER_LOOKAHEAD; break;
-                case CS_NOUN_PSYBASS:          req = REQ_SET_PSYBASS;            break;
-                case CS_NOUN_SUBHARM:          req = REQ_SET_SUBHARM;            break;
-                case CS_NOUN_SUBHARM_SELECT:   req = REQ_SET_SUBHARM_SELECT;     break;
-                case CS_NOUN_SUBHARM_LINK:     req = REQ_SET_SUBHARM_LINK;       break;
-                case CS_NOUN_SUBHARM_SOLO:     req = REQ_SET_SUBHARM_SOLO;       break;
-                default:                       return true;   // read-only noun
+                case CS_NOUN_USER_MUTE:          id = VC_ROUTE_USER_MUTE;           break;
+                case CS_NOUN_LOUDNESS:           id = VC_DYN_LOUDNESS_ENABLE;       break;
+                case CS_NOUN_CROSSFEED:          id = VC_FX_CROSSFEED_ENABLE;       break;
+                case CS_NOUN_LEVELLER:           id = VC_DYN_LEVELLER_ENABLE;       break;
+                case CS_NOUN_INPUT_SOURCE:       id = VC_INPUT_SOURCE;              break;
+                case CS_NOUN_EQ_BYPASS:          id = VC_FILTER_EQ_BYPASS;          break;
+                case CS_NOUN_LG_SYNC:            id = VC_INPUT_LG_SOUND_SYNC_ENABLE; break;
+                case CS_NOUN_CROSSFEED_PRESET:   id = VC_FX_CROSSFEED_PRESET;       break;
+                case CS_NOUN_CROSSFEED_ITD:      id = VC_FX_CROSSFEED_ITD;          break;
+                case CS_NOUN_LEVELLER_SPEED:     id = VC_DYN_LEVELLER_SPEED;        break;
+                case CS_NOUN_LEVELLER_LOOKAHEAD: id = VC_DYN_LEVELLER_LOOKAHEAD;    break;
+                case CS_NOUN_PSYBASS:            id = VC_FX_PSYBASS_ENABLE;         break;
+                case CS_NOUN_SUBHARM:            id = VC_FX_SUBHARM_ENABLE;         break;
+                case CS_NOUN_SUBHARM_SELECT:     id = VC_FX_SUBHARM_SELECT;         break;
+                case CS_NOUN_SUBHARM_LINK:       id = VC_FX_SUBHARM_LINK;           break;
+                case CS_NOUN_SUBHARM_SOLO:       id = VC_FX_SUBHARM_SOLO;           break;
+                default:                         return true;   // read-only noun
             }
-            r = vendor_dispatch_set(CTRL_SOURCE_GPIO, req, 0, 0, &v, 1);
             break;
-        }
     }
-    return r != CTRL_DISPATCH_BUSY;
+    const void *payload = (len == 4) ? (const void *)&f : (len == 1) ? (const void *)&u : NULL;
+    return vc_set(CTRL_SOURCE_GPIO, id, addr, payload, len) != VC_ERR_BUSY;
 }
 
 // ---------------------------------------------------------------------------

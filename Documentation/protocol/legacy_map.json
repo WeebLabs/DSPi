@@ -232,10 +232,11 @@
   "CLOCK.MCK_MULTIPLIER": {"page": "CLOCK", "cmd": 34, "dir": "GS", "addr": "NONE", "get_len": 1, "set": [1, 1]},
   "DIAG.CLOCK_DIAG": {"page": "DIAG", "cmd": 16, "dir": "G", "addr": "NONE", "get_len": "var", "build": "DSPI_CLOCK_DIAG"},
   "DIAG.LOOPBACK_STATS": {"page": "DIAG", "cmd": 32, "dir": "G", "addr": "NONE", "get_len": 8, "build": "DSPI_LOOPBACK"},
-  "DIAG.LOOP_PROF_SECTION": {"page": "DIAG", "cmd": 48, "dir": "G", "addr": "NONE", "get_len": null, "build": "DSPI_LOOP_PROF"},
-  "DIAG.LOOP_PROF_JOB": {"page": "DIAG", "cmd": 49, "dir": "G", "addr": "NONE", "get_len": null, "build": "DSPI_LOOP_PROF"},
-  "DIAG.LOOP_PROF_COMMAND": {"page": "DIAG", "cmd": 50, "dir": "G", "addr": "NONE", "get_len": null, "build": "DSPI_LOOP_PROF"},
-  "DIAG.LOOP_PROF_BG_PACE": {"page": "DIAG", "cmd": 51, "dir": "GS", "addr": "NONE", "get_len": null, "set": null, "build": "DSPI_LOOP_PROF"}
+  "DIAG.LOOP_PROF_SECTION": {"page": "DIAG", "cmd": 48, "dir": "G", "addr": "INDEX", "get_len": 4, "build": "DSPI_LOOP_PROF"},
+  "DIAG.LOOP_PROF_JOB": {"page": "DIAG", "cmd": 49, "dir": "G", "addr": "INDEX", "get_len": 4, "build": "DSPI_LOOP_PROF"},
+  "DIAG.LOOP_PROF_COMMAND": {"page": "DIAG", "cmd": 50, "dir": "G", "addr": "PAGE_CMD", "get_len": 4, "build": "DSPI_LOOP_PROF"},
+  "DIAG.LOOP_PROF_BG_PACE": {"page": "DIAG", "cmd": 51, "dir": "GS", "addr": "NONE", "get_len": 2, "set": [2, 2], "build": "DSPI_LOOP_PROF"},
+  "DIAG.LOOP_PROF_RESET": {"page": "DIAG", "cmd": 52, "dir": "S0", "addr": "NONE", "build": "DSPI_LOOP_PROF"}
  },
  "opcodes": {
   "OUTPUT_LATENCY": {"code": 3, "old_dir": "W+R", "out": {"kind": "direct", "target": "OUTPUT.LATENCY"}, "in": {"kind": "split", "selector": {"shift": 0, "mask": 65535}, "cases": {"0": {"kind": "direct", "target": "OUTPUT.LATENCY_STATUS", "addr": {"const": 0}}, "1": {"kind": "direct", "target": "OUTPUT.LATENCY_OPTIONS", "addr": {"const": 0}}}, "default": null}},

@@ -169,8 +169,9 @@ if (DSPI_WINDEX_ECHO)
 endif()
 
 # DSPI_LOOP_PROF (bench instrumentation): worst time per main-loop section,
-# read through REQ_GET_STATUS 64+ (loop_prof.h). Release builds leave it OFF.
-option(DSPI_LOOP_PROF "Build the main-loop section profiler (REQ_GET_STATUS 64+)" OFF)
+# background job and paged command, read through DIAG.LOOP_PROF_* (loop_prof.h).
+# Release builds leave it OFF.
+option(DSPI_LOOP_PROF "Build the main-loop profiler (DIAG.LOOP_PROF_*)" OFF)
 if (DSPI_LOOP_PROF)
     target_sources(DSPi PRIVATE loop_prof.c loop_prof.h)
     target_compile_definitions(DSPi PRIVATE DSPI_LOOP_PROF=1)

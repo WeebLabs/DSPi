@@ -25,5 +25,6 @@ from . import paged_dyn       # noqa: F401
 from . import paged_fx        # noqa: F401
 from . import paged_meas      # noqa: F401
 from . import paged_cs        # noqa: F401
+from . import paged_cs_nouns  # noqa: F401
 from . import paged_diag      # noqa: F401
 from . import audio_loopback  # noqa: F401  (group "audio"; opt-in via --audio)

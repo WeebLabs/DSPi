@@ -215,14 +215,16 @@ static VcResult sys_stats_reset_set(VcCtx *c) {
     return VC_OK;
 }
 
-// Over USB the reboot waits for the status stage (vc_usb.c). UART and I2C have
-// no hook after their reply, so they reboot at once, as the legacy opcode did.
+// USB reboots after the status stage (vc_usb.c), UART and I2C after their reply
+// has gone out (their poll loops). Internal callers have no reply to wait for.
 static VcResult sys_enter_bootloader_set(VcCtx *c) {
     if (c->src == CTRL_SOURCE_USB) {
         vc_usb_bootloader_after_status();
-        return VC_OK;
+    } else if (c->src == CTRL_SOURCE_UART || c->src == CTRL_SOURCE_I2C) {
+        ctrl_reboot_request(c->src);
+    } else {
+        reset_usb_boot(0, 0);
     }
-    reset_usb_boot(0, 0);
     return VC_OK;
 }
 
