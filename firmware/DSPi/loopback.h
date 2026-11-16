@@ -38,7 +38,7 @@ extern "C" {
 // (runs in the audio callback); drops on ring overflow and never blocks.
 void loopback_push_slot0(const int32_t *interleaved_s24, uint32_t frames);
 
-// Capture-glitch counters, surfaced via REQ_GET_STATUS.  A dropped or inserted
+// Capture-glitch counters, surfaced via DIAG.LOOPBACK_STATS.  A dropped or inserted
 // frame is indistinguishable from a DSP fault in the captured audio, so the
 // host samples these around a measurement to tell the two apart.
 uint32_t loopback_get_overflow_count(void);   // frames dropped, ring full

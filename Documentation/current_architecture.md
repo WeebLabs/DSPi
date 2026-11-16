@@ -57,7 +57,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c). Previously 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
+*Last updated: 2026-11-16 (vendor protocol flip: `vendor_commands.c/.h` deleted, `vendor/` is the whole vendor protocol). Previously 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c); 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -69,9 +69,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `tusb_config.h` | TinyUSB configuration (disables built-in classes; UAC1 handled by custom driver) |
 | `audio_pipeline.c` | Input-agnostic DSP pipeline (`process_input_block`): loudness, EQ, leveller, matrix mixer, per-output-pair crossfeed, per-output EQ/gain/delay, output encoding, buffer stats |
 | `audio_pipeline.h` | Pipeline entry point, shared buffer declarations (`buf_l`/`buf_r`/`buf_out`), buffer stats API |
-| `vendor_commands.c` | Vendor USB control request handlers (GET/SET dispatch, MCK helpers, diagnostics; pin helpers moved to `vendor/vc_pins.c`). Public entry `vendor_control_xfer_cb(rhport, stage, req)` is invoked from `usb_audio.c`'s UAC1 class driver. |
-| `vendor/` | Paged vendor protocol (overhaul in progress). `vc_core.*` holds the table types, lookup, validation and dispatch. `vc_usb.c` is the EP0 front end for pages other than 0, and `vc_bulk.c` routes bulk-buffer commands. `vc_pins.*` holds the pin validation helpers and `vc_ids.h` the command ID constants. Each page is `pages/<mnem>.def` plus `vc_page_<mnem>.c`. See "Vendor Command Overhaul". |
-| `vendor_commands.h` | Vendor handler declarations and system stats; includes `vendor/vc_pins.h` for the pin helper prototypes. |
+| `vendor/` | The vendor protocol, on every transport. `vc_usb.c` is the EP0 front end: it overrides TinyUSB's `tud_vendor_control_xfer_cb`, serves the MS OS 2.0 descriptor set, and refuses page 0. `vc_core.*` holds the table types, lookup, validation and dispatch, and the UART/I2C entry points (`vc_ctrl.h`). `vc_bulk.c` owns the bulk-buffer lock, bulk routing and the USB chunk sessions. `vc_pins.*` holds the pin validation helpers and `vc_ids.h` the command ID constants. Each page is `pages/<mnem>.def` plus `vc_page_<mnem>.c`. See "Vendor Protocol". |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
 | `dsp_pipeline.h` | Filter storage declarations, delay line API |
 | `dsp_process_rp2040.S` | RP2040-only: hand-optimized ARM assembly biquad (per-sample + block-based) |
@@ -102,7 +100,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `input_source_names.h` | Input source name API and table geometry (`INPUT_SOURCE_NAME_LEN` 32, `INPUT_SOURCE_NAME_SLOTS` 8) |
 | `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
 | `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
-| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and paged command handlers, each a worst time since boot or `DIAG.LOOP_PROF_RESET`, read through `DIAG.LOOP_PROF_SECTION`, `_JOB` and `_COMMAND` (see "Vendor Command Overhaul"). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
+| `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and paged command handlers, each a worst time since boot or `DIAG.LOOP_PROF_RESET`, read through `DIAG.LOOP_PROF_SECTION`, `_JOB` and `_COMMAND` (see "Vendor Protocol"). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
 | `bg_job.c` / `bg_job.h` | Background jobs: long main-loop work run in budgeted steps between deliveries (`bg_run_one()`), the step budget and the over-budget counter (`REQ_GET_STATUS` 31); see Output Latency "Step budget and background jobs" |
 | `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
 | `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
@@ -110,7 +108,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `flash_storage.h` | Flash storage API |
 | `bulk_params.c` | Bulk parameter collect/apply (wire format ↔ live state) |
 | `bulk_params.h` | Wire format structs (`WireBulkParams`), buffer size defines |
-| `config.h` | Global config, data structures, vendor command IDs, channel defs |
+| `config.h` | Global config, data structures, channel defs |
 | `usb_descriptors.c` | Hand-rolled UAC1 configuration descriptor as a packed byte array + TinyUSB `tud_descriptor_*_cb()` callbacks |
 | `usb_descriptors.h` | Descriptor declarations, UAC1 request opcodes, per-alt EP descriptor pointer externs |
 | `dcp_inline.h` | RP2350 DCP (Double Coprocessor) inline assembly wrappers |
@@ -175,16 +173,18 @@ cmake --build build-rp2350 --clean-first   # RP2350 build
 ```
 
 ### Git Build Stamp
-*Last updated: 2026-09-01*
+*Last updated: 2026-11-16 (served by `SYS.BUILD_INFO`). Previously 2026-09-01*
 
 Every build regenerates `<build dir>/DSPi/generated/build_info.h` via the `dspi_build_info` custom target, which runs `scripts/gen_build_info.cmake` at build time (never at configure time, which would go stale). The header defines `BUILD_GIT_DESCRIBE` (`git describe --always --dirty`, clamped from the front to 47 chars so the hash and dirty flag survive) and `BUILD_DATE`. The script writes the header only when the content changes, so dependents recompile only when the hash, dirty state, or date actually moved.
 
-Consumers: `vendor_commands.c` serves the stamp over `REQ_GET_BUILD_INFO` (0x80), and `main.c` embeds it in the UF2's binary info (`bi_program_version_string`) so `picotool info` identifies a build file or a BOOTSEL-mode device. The stamp is provenance for humans; the version reported by `REQ_GET_PLATFORM` remains the only compatibility contract (see `Documentation/Features/firmware_versioning_spec.md`).
+Consumers: `vendor/vc_page_sys.c` serves the stamp over `SYS.BUILD_INFO` (the 1.1.6 `REQ_GET_BUILD_INFO` layout), and `main.c` embeds it in the UF2's binary info (`bi_program_version_string`) so `picotool info` identifies a build file or a BOOTSEL-mode device. The stamp is provenance for humans; the version reported by `SYS.PLATFORM` remains the only compatibility contract (see `Documentation/Features/firmware_versioning_spec.md`).
 
 ### Firmware Version Reporting
-*Last updated: 2026-09-12*
+*Last updated: 2026-11-16 (firmware 1.1.7 beta 1; the version is read through `SYS.PLATFORM`). Previously 2026-09-12*
 
-`config.h` holds the version as four macros: `FW_VERSION_MAJOR`, `FW_VERSION_MINOR`, `FW_VERSION_PATCH`, and `FW_VERSION_BETA`. `FW_VERSION_PACKED` nibble-packs minor and patch for the legacy bytes of `REQ_GET_PLATFORM` and feeds nothing else.
+`config.h` holds the version as four macros: `FW_VERSION_MAJOR`, `FW_VERSION_MINOR`, `FW_VERSION_PATCH`, and `FW_VERSION_BETA`. This tree is 1.1.7 beta 1 (1, 1, 7, 1). `FW_VERSION_PACKED` nibble-packs minor and patch for byte 2 of `SYS.PLATFORM` and feeds nothing else.
+
+`SYS.PLATFORM` (page 0x01, command 0x20) returns the same 7 bytes the 1.1.6 `REQ_GET_PLATFORM` (0x7F) did. Firmware 1.1.7 no longer answers 0x7F, because page 0 answers nothing (see "Vendor Protocol"), so the paragraphs below describe the reply layout, which is unchanged.
 
 `FW_VERSION_BETA` is the pre-release ordinal: 0 means a final release, 1 to 255 mean beta N of that patch. Betas of one patch share the patch number and count upward, so the ordinal is the only field distinguishing them, and it must return to 0 in the commit that gets tagged as final. A final release outranks every beta of its patch, so the comparison key a host must use is `(major, minor, patch, beta == 0 ? 256 : beta)`, not a plain four-field compare.
 
@@ -247,7 +247,7 @@ Defined in `main.c`, function `core0_init()`:
 The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
 
 ### Microsoft OS 2.0 Descriptors (auto-bind WinUSB)
-*Last updated: 2026-04-30*
+*Last updated: 2026-11-16 (intercept now in `vendor/vc_usb.c`; other uses of 0x01 fall through to the paged dispatcher). Previously 2026-04-30*
 
 When the vendor interface is active, DSPi advertises Microsoft OS 2.0 Platform Capability Descriptors so Windows 8.1+ auto-binds `winusb.sys` to the vendor function on first plug-in — no Zadig step required.
 
@@ -262,11 +262,11 @@ When the vendor interface is active, DSPi advertises Microsoft OS 2.0 Platform C
   - Compatible ID Feature Descriptor (20 bytes; `WINUSB\0\0`).
   - Registry Property Feature Descriptor (132 bytes; `DeviceInterfaceGUIDs` REG_MULTI_SZ = `{9D9B8609-E6D1-4FF0-92AF-403119CB7692}`).
 
-**Vendor request handler:** the existing `tud_vendor_control_xfer_cb` in `vendor_commands.c` has a top-of-SETUP dispatch for `bRequest == MS_VENDOR_CODE (0x01)`:
-- IN direction with `wIndex == 7` (per MS OS 2.0 spec — "GET MS OS 2.0 Descriptor Set") → return `desc_ms_os_20`.
-- Anything else with `bRequest == 0x01` (OUT direction, IN with `wIndex == 8` "SET_ALT_ENUMERATION", or unknown wIndex) → STALL.
+**Vendor request handler:** `tud_vendor_control_xfer_cb` in `vendor/vc_usb.c` checks for the descriptor request at SETUP, after the bulk-lock cleanup and before the page lookup:
+- IN direction, `bRequest == MS_VENDOR_CODE (0x01)` and `wIndex == 7` (the MS OS 2.0 "GET MS OS 2.0 Descriptor Set"), on any recipient: return `desc_ms_os_20`.
+- Anything else with `bRequest == 0x01` (OUT direction, IN with `wIndex == 8` "SET_ALT_ENUMERATION", or another wIndex) falls through to the paged dispatcher. Command numbers below 0x10 never exist on any page, so it STALLs with `VC_ERR_UNKNOWN` recorded in `SYS.LAST_RESULT`, and is never ACKed.
 
-The branch sits before both the IN-direction `vendor_handle_get` dispatcher and the OUT-direction generic SET path, so `bRequest = 0x01` can never reach the legacy 0x42+ application-opcode range or be silently ACK'd. The literal 7 and 8 are MS OS 2.0 spec constants — TinyUSB doesn't expose them as named enums.
+This request is not a DSPi command, which is why it is the one thing page 0 still answers. The literals 7 and 8 are MS OS 2.0 spec constants; TinyUSB does not expose them as named enums.
 
 **Host integration:** the host application must use the published GUID with `SetupDiGetClassDevs(&guid, …, DIGCF_DEVICEINTERFACE)` to enumerate DSPi on Windows. libusb 1.0 transparently uses the WinUSB backend behind the scenes; apps can also `WinUsb_Initialize` directly. The GUID is product-line-scoped and must not be changed without coordinated host-side updates and (for already-enumerated machines) re-enumeration via Device Manager → Uninstall device.
 
@@ -327,7 +327,7 @@ The `REQ_GET_CLOCK_DIAG` (0x82) snapshot is a packed little-endian `ClockDiagPac
 **Persistence (compat-breaking).** Wire `WIRE_FORMAT_VERSION=16` (direct 8-input matrix/preamp + 17-channel EQ; no tail-append/version gates; 5864 B). Flash `SLOT_DATA_VERSION=21` (direct layout; the slot spans **2 flash sectors** on RP2350; 1 on RP2040). No migration — pre-version data loads factory defaults.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
+*Last updated: 2026-11-16 (HOST_SET source tag comes from the paged dispatcher's `vc_run()` bracket). Previously 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
@@ -348,7 +348,7 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 | Value | Source | Set by |
 |-------|--------|--------|
 | 0 | UNKNOWN | Default |
-| 1 | HOST_SET | `vendor_handle_set_data` / `vendor_handle_get` brackets in `vendor_commands.c` |
+| 1 | HOST_SET | `vc_run()` bracket around every paged handler run for USB (`vendor/vc_core.c`); UART, I2C and Control Surfaces requests get their own tags there |
 | 2 | BULK_SET | `bulk_params_apply()` |
 | 3 | PRESET | `preset_load()` |
 | 4 | FACTORY | `flash_factory_reset()` |
@@ -356,7 +356,7 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 | 6 | INTERNAL | Firmware-initiated (clamps, auto-recalc) |
 | 7 | UAC1 | UAC1 Feature Unit SET_CUR data-stage handler in `usb_audio.c` (OS volume slider writes via standard audio class control transfers) |
 
-**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in `vendor_commands.c` (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`. **UAC1 Feature Unit VOLUME SET_CUR** (`usb_audio.c` data-stage handler) also emits a PARAM_CHANGED on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1`, so v2 hosts see OS volume slider movements on the same field they already listen to for `REQ_SET_USER_VOLUME` (tagged `PARAM_SRC_HOST_SET`) and LG Sound Sync writes — `audio_state.volume` is shared across all three controllers and the notify field mirrors it source-agnostically, while the distinct source byte lets hosts attribute the change to the right controller. UAC1 Feature Unit MUTE has no notify (no parallel WireBulkParams field — `user_volume.user_mute` represents the *vendor* mute with different gating semantics, not `audio_state.mute`).
+**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in the `vendor/` page handlers (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`. **UAC1 Feature Unit VOLUME SET_CUR** (`usb_audio.c` data-stage handler) also emits a PARAM_CHANGED on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1`, so v2 hosts see OS volume slider movements on the same field they already listen to for `REQ_SET_USER_VOLUME` (tagged `PARAM_SRC_HOST_SET`) and LG Sound Sync writes. `audio_state.volume` is shared across all three controllers and the notify field mirrors it source-agnostically, while the distinct source byte lets hosts attribute the change to the right controller. UAC1 Feature Unit MUTE has no notify (no parallel WireBulkParams field: `user_volume.user_mute` represents the *vendor* mute with different gating semantics, not `audio_state.mute`).
 
 **Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `REQ_GET_ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
@@ -2625,6 +2625,19 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 
 ## Memory Layout
 
+> **Vendor protocol flip (2026-11-16).** Deleting the 1.1.6 opcode switches
+> (`vendor_commands.c`) removes 19,816 B of flash text on RP2040 and
+> 19,616 B on RP2350, all XIP. BSS loses 280 B of switch-only statics (the
+> 82 B RTA and 64 B GET staging buffers, three 16 B reply structs, the
+> stashed request and response state) and gains the 64 B `vc_usb_rx` that
+> replaces `vendor_rx_buf`: net -216 B on RP2040, -220 B on RP2350. RP2350
+> `.data` drops 8 B (one initialized byte plus alignment). Measured
+> (RP2040 / RP2350): `arm-none-eabi-size` text 302,708 -> 282,892 B and
+> 339,980 -> 320,364 B, bss 133,892 -> 133,676 B and 308,344 -> 308,124 B;
+> `.data` 70,088 B / 97,960 B, free RAM 58,380 B / 118,204 B.
+> `scripts/ram_baseline.json` was reset to these figures (it held the
+> pre-XIP numbers of 2026-07-05).
+
 > **Paged protocol on UART and I2C (2026-11-16).** The UART `tx_copy` and I2C
 > `resp_small` reply copies grow from 132 to 256 bytes (`VC_REPLY_MAX`) and the
 > page-0 `_ext_resp_copy` sink (132 B) is gone. Its replies now land in the
@@ -2691,7 +2704,7 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > 277,644 B plus `.slot_rings` 32 KB / 64 KB; free heap before runtime
 > allocation (`__HeapLimit - end`, now reported by `check_ram_placement.py`)
 > 45,256 B / 82,804 B, leaving about 19 KB / 31 KB after the producer pools.
-*Last updated: 2026-11-16 (paged protocol on UART and I2C: BSS +120 B RP2040 / +124 B RP2350, text about -7 KB; paged vendor dispatcher: BSS +284 B RP2040 / +280 B RP2350; see the notes above). Previously 2026-10-16 (USB feedback long-window rate, dual-slope servo and diagnostics: `fb_ctrl` grows to 84 B, BSS +56 B both platforms, RAM code +416 B RP2040 / +408 B RP2350, measured `.data` 68,496 B / 96,328 B, inside the 72,704 B / 100,352 B budgets). Previously 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-11-16 (vendor protocol flip: text -19.8 KB RP2040 / -19.6 KB RP2350, BSS -216 B / -220 B, `ram_baseline.json` reset; paged protocol on UART and I2C: BSS +120 B RP2040 / +124 B RP2350, text about -7 KB; paged vendor dispatcher: BSS +284 B RP2040 / +280 B RP2350; see the notes above). Previously 2026-10-16 (USB feedback long-window rate, dual-slope servo and diagnostics: `fb_ctrl` grows to 84 B, BSS +56 B both platforms, RAM code +416 B RP2040 / +408 B RP2350, measured `.data` 68,496 B / 96,328 B, inside the 72,704 B / 100,352 B budgets). Previously 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -3157,7 +3170,7 @@ Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-
 ---
 
 ## External Control Interfaces (UART / I2C Target)
-*Last updated: 2026-11-16 (paged protocol on UART and I2C: entry points moved to `vendor/`, status byte carries `VC_*` codes, `STORE.ALL_PARAMS` streaming, deferred bootloader reboot). Previously 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
+*Last updated: 2026-11-16 (page 0 refused with `VC_ERR_UNKNOWN`; status codes 0x02 and 0x03 retired). Previously 2026-11-16 (paged protocol on UART and I2C: entry points moved to `vendor/`, status byte carries `VC_*` codes, `STORE.ALL_PARAMS` streaming, deferred bootloader reboot); 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
 
 An external microcontroller can drive the entire vendor-command surface over a
 UART or the I2C target (slave) interface, at parity with USB. Full integrator
@@ -3165,7 +3178,7 @@ detail lives in `Documentation/Features/control_interfaces_spec.md`; this sectio
 covers the firmware-side structure.
 
 ### Entry points (`vendor/vc_ctrl.h`)
-*Last updated: 2026-11-16*
+*Last updated: 2026-11-16 (page 0 call-through and `CtrlDispatchResult` removed)*
 
 USB (EP0), UART and I2C each parse their own wire framing into the same
 `bRequest` / `wValue` / `wIndex` / `wLength` shape. The external transports call
@@ -3177,19 +3190,16 @@ two functions in `vendor/vc_core.c`, from the main loop only.
 Both return the wire status byte. They refuse `CTRL_SOURCE_USB`, answer
 `CTRL_STATUS_BUSY` while a USB control transfer holds the shared buffers, take
 the page from the `wIndex` high byte (`vc_page_of()`), and send paged requests to
-`vc_dispatch()`, or to the bulk path for `STORE.ALL_PARAMS`. Page 0 still reaches
-the 1.1.6 switches through `vendor_legacy_dispatch_get/set` in
-`vendor_commands.c`, one marked line in each entry point; the flip phase deletes
-that call-through with the switches. `CtrlSource`, `VcResult`, the
+`vc_dispatch()`, or to the bulk path for `STORE.ALL_PARAMS`. Page 0 has no
+table, so a page 0 request gets `VC_ERR_UNKNOWN` (0x10), recorded in
+`SYS.LAST_RESULT` like any unknown command. `CtrlSource`, `VcResult`, the
 `CTRL_STATUS_*` codes, the bulk lock API and `vendor_is_bulk_set()` live in the
-same header, so nothing a transport needs depends on `vendor_commands.c` or a
-`REQ_*` opcode. `vendor_dispatch_get/set` remain as wrappers that fold the status
-into the coarse `CtrlDispatchResult` for internal callers still on page-0
-opcodes.
+same header. Internal callers (Control Surfaces) use `vc_set()` / `vc_get()` from
+`vc_core.h` and get the `VcResult` directly.
 
 **Status byte rule.** `0x00` is OK. `0x01`-`0x07` are transport conditions where
-the command never ran (BUSY, BULK_LOCKED, CRC, OVERSIZE, FRAME; ERROR `0x02` and
-BLOCKED `0x03` only on page 0). `0x10` and up is the `VcResult` itself, the same
+the command never ran (BUSY, BULK_LOCKED, CRC, OVERSIZE, FRAME). `0x02` and
+`0x03` were the 1.1.6 ERROR and BLOCKED codes; they are never sent and never reused. `0x10` and up is the `VcResult` itself, the same
 code a USB host reads from `SYS.LAST_RESULT`, which is kept per transport.
 Transport conditions are not recorded there. `ctrl_status_transient()` (`0x01`,
 `0x04`, `0x17`) is what both transports retry internally for 50 ms before they
@@ -4255,33 +4265,36 @@ lands on a hot path and the audio path is untouched.
 
 ---
 
-## Vendor Command Overhaul (in progress)
-*Last updated: 2026-11-16 (Phase 3: loop profiler on the DIAG page). Previously 2026-11-16 (Phase 2: all pages implemented); 2026-11-16 (shared page helpers in `vc_core.h`, Phase 1 dispatcher core); 2026-11-15.*
+## Vendor Protocol
+*Last updated: 2026-11-16 (Phase 4 close: `tools/windex_page_test.py` replaces the echo test). Previously 2026-11-16 (Phase 4 follow-up: finite-value check on every float SET, `save_params_pending` and `flash_save_params()` removed); 2026-11-16 (Phase 4 flip: 1.1.6 opcode space deleted, page 0 refused, firmware 1.1.7 beta 1); 2026-11-16 (Phase 3: loop profiler on the DIAG page); 2026-11-16 (Phase 2: all pages implemented); 2026-11-16 (shared page helpers in `vc_core.h`, Phase 1 dispatcher core); 2026-11-15.*
 
-The vendor opcode space is being rebuilt into pages (page in the `wIndex` high byte, command in `bRequest`) for firmware 1.1.7 beta 1. The design, the old-to-new mapping and the phase plan are in `Documentation/Features/vendor_command_overhaul_plan.md`. Until the flip phase lands, the "Vendor Command Reference" below still describes the live protocol.
+From firmware 1.1.7 beta 1 every vendor command is addressed by a page (the `wIndex` high byte) and a command number (`bRequest`), on USB, UART, I2C and for internal callers alike. The whole implementation is `firmware/DSPi/vendor/`. The design, the old-to-new mapping and the phase plan are in `Documentation/Features/vendor_command_overhaul_plan.md`, and the command list is `Documentation/protocol/dspi_commands.json`, generated from the `.def` files. The "Vendor Command Reference" below describes the 1.1.6 opcode space, which this firmware no longer answers.
 
-**Bench-only wIndex echo (`-DDSPI_WINDEX_ECHO=ON`, OFF by default).** Vendor request 0x4F as an IN transfer returns 16 bytes: the SETUP fields (`bmRequestType`, `bRequest`, `wValue`, `wIndex`, `wLength`) of that request, then those of the last OUT request with the same number. It is intercepted in `tud_vendor_control_xfer_cb` before dispatch. `tools/windex_echo_test.py` uses it to prove a host USB stack delivers the `wIndex` high byte (procedure in `Documentation/Features/windex_echo_test.md`). It never ships and is deleted at the flip.
+**Page 0 answers nothing.** No page 0 table exists, so every page 0 request fails the lookup with `VC_ERR_UNKNOWN` and is recorded in `SYS.LAST_RESULT` for its transport, like any other unknown command. On USB it STALLs at SETUP, so a SET never gets to its data stage. UART and I2C answer status 0x10, and `vc_set()` / `vc_get()` return the same code. A 1.1.6 host sends `wIndex` 0 or 2, so it reaches page 0 for every request and cannot change anything. The only request answered without a page lookup is the Microsoft OS 2.0 descriptor fetch (IN, `bRequest` 0x01, `wIndex` 7), which is not a DSPi command; see "Microsoft OS 2.0 Descriptors". The old `GET_PLATFORM` and `ENTER_BOOTLOADER` are gone with the rest, so a 1.1.6 host can neither read the version nor reboot a 1.1.7 device into the bootloader (BOOTSEL is the way back).
+
+**wIndex page test.** The `DSPI_WINDEX_ECHO` build option and its request 0x4F were deleted at the flip. `tools/windex_page_test.py` checks on 1.1.7 that a host delivers the page byte intact: it sends refused requests to several pages and reads them back through `SYS.LAST_RESULT`. Procedure in `Documentation/Features/windex_page_test.md`.
 
 **Golden capture.** `tools/dspi_test/golden/` holds a byte-for-byte capture of every vendor read on firmware 1.1.6, before and after a scripted set of writes, plus a mask of fields that legitimately vary. Later phases replay it against the rewritten handlers.
 
-**Paged dispatcher (Phase 1, 2026-11-16).** The new protocol lives in `firmware/DSPi/vendor/`. On this branch page 0 still reaches the legacy switches in `vendor_commands.c` unchanged, and every other page goes to the table.
+**Paged dispatcher.** Built in Phase 1 beside the 1.1.6 switches, which the Phase 4 flip deleted.
 
-- **Page derivation.** `vc_page_of(bmRequestType, wIndex)` in `vc_core.h` is the only place a page is computed. `tud_vendor_control_xfer_cb` uses it at every stage, after the bulk-lock cleanup, the MS OS 2.0 intercept and the echo block. `vendor_dispatch_get` / `vendor_dispatch_set` (UART, I2C, Control Surfaces) use it too and keep their signatures. A page other than 0 maps its `VcResult` onto `CtrlDispatchResult` (`VC_ERR_BLOCKED` to BLOCKED, `VC_ERR_BUSY` to BUSY, any other error to ERROR) until Phase 3 widens the status byte.
+- **Page derivation.** `vc_page_of(bmRequestType, wIndex)` in `vc_core.h` is the only place a page is computed. `tud_vendor_control_xfer_cb` (`vc_usb.c`) uses it at every stage, after the bulk-lock cleanup and the MS OS 2.0 intercept. `ctrl_dispatch_get` / `ctrl_dispatch_set` (UART, I2C) and `vc_set` / `vc_get` (Control Surfaces) use it too.
 - **Tables.** Each page is `pages/<mnem>.def` (grammar in the plan, section 8.3) plus `vc_page_<mnem>.c`. The page file defines its handlers and ends with `#define VC_PAGE_DEF "pages/<mnem>.def"` and `#include "vc_page_table.inc"`. The include expands the `.def` into handler prototypes, compile-time checks, a `const VcCmd` array and the exported `const VcPage vc_page_<MNEM>`. A duplicate command number, a number that is also `VC_RESERVED`, a number below 0x10, or an inconsistent length or handler field fails the build. `vc_ids.h` builds the `VC_PAGE_<MNEM>` and `VC_<MNEM>_<NAME>` constants from the same files and can be included anywhere; a duplicate name fails there. `VC_PAGE_LIST` in `vc_ids.h` and the per-page include blocks below it are the only central lists. A page with no commands compiles and is not reported by `SYS.PAGE_LIST`. Tables and dispatcher are cold code in flash.
-- **Dispatch.** `vc_dispatch()` runs the plan's checks in order (lookup, direction, transport flags, SET length, address range for the `VcAddrKind`), sets the notify source tag around the handler, and records `{id, direction, result, wValue}` in a per-`CtrlSource` `LAST_RESULT` slot. A read of `SYS.LAST_RESULT` does not overwrite its own slot, and page-0 requests are not recorded. GET handlers write into one static 256-byte reply buffer, pre-zeroed to the fixed length. A fixed-length GET's length comes from the table, and a variable one sets `out_len`. The `COMMAND_INFO` encodings of the flags (`VC_F_USB_ONLY` 0x01, `SET_USB_ONLY` 0x02, `BULK` 0x04, `DEFERRED` 0x08, `FLASH` 0x10, `RESTART` 0x20, `KEEPALIVE` 0x40) and of the address kinds (the contract's token order from `NONE` = 0 to `INDEX` = 24) are fixed.
-- **USB front end (`vc_usb.c`).** SETUP runs the checks, so a bad request STALLs before any data stage. A GET runs at SETUP and is clamped to `wLength`. A zero-length SET runs at SETUP and then sends the status stage or STALLs. A SET with data lands in the 64-byte `vendor_rx_buf` (shared with page 0) and runs at the DATA stage, where a failure returns false and STALLs the status stage. The existing USB-in-flight guard now also covers a paged GET longer than one EP0 packet, because TinyUSB reads later packets from the reply buffer, so UART, I2C and Control Surfaces answer BUSY in that window for every page.
-- **Bulk.** A `VC_F_BULK` command uses `bulk_param_buf` under the existing lock. Over USB the lock is taken at SETUP and released at the status ACK, on failure, or by the SETUP-stage cleanup. UART and I2C get `VC_ERR_BLOCKED` until Phase 3 makes `vendor_is_bulk_set()` and their zero-copy reply paths page-aware. The lock and the page-0 chunk sessions stay in `vendor_commands.c` for now, because a page-0 case body reads the lock owner directly. The chunk-session exemption in the SETUP cleanup applies to page 0 only.
-- **SYS page (0x01).** `PROTOCOL_INFO`, `PAGE_LIST`, `PAGE_COMMANDS`, `COMMAND_INFO` and `LAST_RESULT` read the tables. `PLATFORM`, `SERIAL`, `BUILD_INFO` and `CORE1_MODE` return the same bytes as legacy 0x7F, 0x7E, 0x80 and 0x7A from the same sources. `ENTER_BOOTLOADER` (0x30) is a zero-length SET. Over USB it reboots at the ACK of its own status stage, and a pending reboot is cleared by the next paged SETUP. Over UART and I2C it reboots at once, as legacy 0xF0 did, since those transports have no hook after their reply.
-- **Pin helpers** moved verbatim from `vendor_commands.c` to `vendor/vc_pins.c` and `vc_pins.h`, which `vendor_commands.h` includes. The formerly static helpers (`pin_used_by_fixed_peripheral*`, `i2s_rx_pair_pin_taken`, `check_i2s_rx_pin`, `default_output_pins`, `PIN_VALID_FOR`) are now exported for the page files.
-- **Shared page helpers.** `vc_core.h` carries what more than one page needs. `vc_param_src()` (defined in `vc_core.c`) maps a `CtrlSource` to the `ParamSource` notification tag; a handler that tags a deferred notification itself (CS aux, RTA config, device and source names) calls it so the tag matches the dispatcher's own bracket. `vc_from_pin_status()` maps `PIN_CONFIG_*` onto `VcResult` (SUCCESS to `VC_OK`, INVALID_PIN to `VC_ERR_PIN_INVALID`, PIN_IN_USE to `VC_ERR_PIN_IN_USE`, INVALID_OUTPUT to `VC_ERR_ADDRESS`, OUTPUT_ACTIVE to `VC_ERR_STATE`, anything else to `VC_ERR_VALUE`) for the INPUT, OUTPUT and CLOCK pin SETs. It lives in `vc_core.h`, not `vc_pins.h`, because `vendor_commands.h` includes `vc_pins.h` and `vc_core.h` includes `vendor_commands.h`. `vc_clampf()` is the float range clamp of the DYN and FX setters; NaN passes through it.
-- **Pages (Phase 2, 2026-11-16).** All 13 pages are implemented in `vendor/vc_page_<mnem>.c`: SYS 0x01, STORE 0x02, INPUT 0x03, OUTPUT 0x04, ROUTE 0x05, FILTER 0x06, DYN 0x07, FX 0x08, MEAS 0x09, CS 0x0A, XPORT 0x0B, CLOCK 0x0C and DIAG 0xF0 (bench builds only). The command list is `Documentation/protocol/dspi_commands.json`, generated from the `.def` files. Each handler uses the same globals, setters, pending flags and main-loop paths as the old case body it replaces, so deferred work (flash writes, pipeline resets, output restarts, pin moves) is sequenced exactly as before and output slot alignment is unaffected. The old switches still serve page 0 until the flip.
+- **Dispatch.** `vc_dispatch()` runs the plan's checks in order (lookup, direction, transport flags, SET length, address range for the `VcAddrKind`), sets the notify source tag around the handler, and records `{id, direction, result, wValue}` in a per-`CtrlSource` `LAST_RESULT` slot. A read of `SYS.LAST_RESULT` does not overwrite its own slot. Page 0 requests are recorded as `VC_ERR_UNKNOWN`. GET handlers write into one static 256-byte reply buffer, pre-zeroed to the fixed length. A fixed-length GET's length comes from the table, and a variable one sets `out_len`. The `COMMAND_INFO` encodings of the flags (`VC_F_USB_ONLY` 0x01, `SET_USB_ONLY` 0x02, `BULK` 0x04, `DEFERRED` 0x08, `FLASH` 0x10, `RESTART` 0x20, `KEEPALIVE` 0x40) and of the address kinds (the contract's token order from `NONE` = 0 to `INDEX` = 24) are fixed.
+- **USB front end (`vc_usb.c`).** `tud_vendor_control_xfer_cb` overrides TinyUSB's weak callback, which receives every vendor-type control request whatever its recipient. SETUP runs the checks, so a bad request STALLs before any data stage. A GET runs at SETUP and is clamped to `wLength`. A zero-length SET runs at SETUP and then sends the status stage or STALLs. A SET with data lands in the 64-byte `vc_usb_rx` buffer and runs at the DATA stage, where a failure returns false and STALLs the status stage. The existing USB-in-flight guard now also covers a paged GET longer than one EP0 packet, because TinyUSB reads later packets from the reply buffer, so UART, I2C and Control Surfaces answer BUSY in that window for every page.
+- **Bulk.** A `VC_F_BULK` command uses `bulk_param_buf` under the existing lock. Over USB the lock is taken at SETUP and released at the status ACK, on failure, or by the SETUP-stage cleanup. UART and I2C stream `STORE.ALL_PARAMS` only; every other bulk command is `VC_ERR_BLOCKED` off USB. The lock, the bulk routing and the USB chunk sessions live in `vc_bulk.c`. The SETUP cleanup keeps a chunk session open only for the next `STORE.ALL_PARAMS_CHUNK` request in the same direction (`vc_bulk_chunk_continues()`).
+- **SYS page (0x01).** `PROTOCOL_INFO`, `PAGE_LIST`, `PAGE_COMMANDS`, `COMMAND_INFO` and `LAST_RESULT` read the tables. `PLATFORM`, `SERIAL`, `BUILD_INFO` and `CORE1_MODE` return the same bytes as the 1.1.6 opcodes 0x7F, 0x7E, 0x80 and 0x7A did, from the same sources. `SYSTEM_STATUS` reads the core voltage and die temperature through `vreg_voltage_to_mv()` and `read_temperature_cdeg()`, static in `vc_page_sys.c`. `ENTER_BOOTLOADER` (0x30) is a zero-length SET. Over USB it reboots at the ACK of its own status stage, and a pending reboot is cleared by the next SETUP. Over UART and I2C the transport reboots once its response frame is out (`ctrl_reboot_request()`).
+- **Pin helpers** live in `vendor/vc_pins.c` and `vc_pins.h`; `control_surfaces.c` includes `vc_pins.h` for `ctrl_iface_check_pin()`. The formerly static helpers (`pin_used_by_fixed_peripheral*`, `i2s_rx_pair_pin_taken`, `check_i2s_rx_pin`, `default_output_pins`, `PIN_VALID_FOR`) are now exported for the page files.
+- **Shared page helpers.** `vc_core.h` carries what more than one page needs. `vc_param_src()` (defined in `vc_core.c`) maps a `CtrlSource` to the `ParamSource` notification tag; a handler that tags a deferred notification itself (CS aux, RTA config, device and source names) calls it so the tag matches the dispatcher's own bracket. `vc_from_pin_status()` maps `PIN_CONFIG_*` onto `VcResult` (SUCCESS to `VC_OK`, INVALID_PIN to `VC_ERR_PIN_INVALID`, PIN_IN_USE to `VC_ERR_PIN_IN_USE`, INVALID_OUTPUT to `VC_ERR_ADDRESS`, OUTPUT_ACTIVE to `VC_ERR_STATE`, anything else to `VC_ERR_VALUE`) for the INPUT, OUTPUT and CLOCK pin SETs. `vc_core.h` takes the `PIN_CONFIG_*` codes from `config.h`. `vc_clampf()` is the float range clamp of the DYN and FX setters; NaN passes through it, so every caller checks `isfinite()` first.
+- **Pages (Phase 2, 2026-11-16).** All 13 pages are implemented in `vendor/vc_page_<mnem>.c`: SYS 0x01, STORE 0x02, INPUT 0x03, OUTPUT 0x04, ROUTE 0x05, FILTER 0x06, DYN 0x07, FX 0x08, MEAS 0x09, CS 0x0A, XPORT 0x0B, CLOCK 0x0C and DIAG 0xF0 (bench builds only). The command list is `Documentation/protocol/dspi_commands.json`, generated from the `.def` files. Each handler uses the same globals, setters, pending flags and main-loop paths as the 1.1.6 case body it replaced, so deferred work (flash writes, pipeline resets, output restarts, pin moves) is sequenced exactly as before and output slot alignment is unaffected.
   - **Actions.** Every former write-as-read is a SET. The old status byte is a `VcResult`. `PIN_CONFIG_*` maps through `vc_from_pin_status()`.
-  - **STORE bulk.** `ALL_PARAMS` and `ALL_PARAMS_CHUNK` are `VC_F_BULK`. The chunk-session state lives in `vc_bulk.c`, shared with the page 0 chunk opcodes. `vc_bulk_chunk_continues()` drives the SETUP-stage cleanup, which closes any session the request does not continue and drops a USB-held lock. A bulk SET validates the header with `vc_bulk_params_check()` and sets `bulk_params_pending` at the DATA stage.
+  - **STORE bulk.** `ALL_PARAMS` and `ALL_PARAMS_CHUNK` are `VC_F_BULK`. The chunk-session state lives in `vc_bulk.c`. `vc_bulk_chunk_continues()` drives the SETUP-stage cleanup, which closes any session the request does not continue and drops a USB-held lock. A bulk SET validates the header with `vc_bulk_params_check()` and sets `bulk_params_pending` at the DATA stage.
   - **SYS telemetry.** `SYSTEM_STATUS`, `USB_AUDIO_STATUS`, `PIPELINE_STATS`, `PDM_STATS` and `SPDIF_TX_STATS` are fixed structs that replace the scalar `REQ_GET_STATUS` selectors. `MEAS.LEVELS` is the old selector 9 packet and `INPUT.STATUS` holds the input-side selectors.
   - **FILTER.** `BAND` and `BAND_BYPASS` stage through `pending_packet`, `pending_eq_qp_x512` and `eq_update_pending`. A write while one is pending returns `VC_ERR_BUSY`.
   - **DYN, FX.** Limiter, tube and upmixer parameters are one command each, served by one get and one set handler per family through the table `ARG`. The upmixer and both ADAT blocks are inside `#if PICO_RP2350`.
-  - **MEAS.** `RTA_BANDS`, `RTA_BINS` and `RTA_BANDS_ALL` are keepalives. `RTA_BANDS_ALL` runs in the bulk buffer. `RTA_BINS` is capped at the 256-byte reply buffer.
+  - **MEAS.** `RTA_BANDS`, `RTA_BINS` and `RTA_BANDS_ALL` are keepalives. `RTA_BANDS_ALL` runs in the bulk buffer, and a static assert in `vc_page_meas.c` keeps every tracked channel's frame inside it. `RTA_BINS` is capped at the 256-byte reply buffer.
   - **CS.** Preview SETs stage into the existing `cs_set_*_pending` handoffs and report through `cs_last_status`. Address and length refusals happen in the core and no longer touch the status packet.
+  - **CLOCK.** `mck_encode()` / `mck_decode()` (0 = 128x, 1 = 256x), static in `vc_page_clock.c`, are the wire and bulk encoding of the MCK multiplier.
   - **XPORT.** Config SETs are USB only. Scalar fields and GPIO range are checked before anything is queued. Ownership checks stay in the deferred apply.
 - **Loop profiler on DIAG (Phase 3, 2026-11-16).** A `DSPI_LOOP_PROF` build adds five DIAG commands, absent (`VC_ERR_UNKNOWN`) otherwise. Every value is the worst time in µs since boot or the last reset, and no read clears it.
 
@@ -4293,11 +4306,16 @@ The vendor opcode space is being rebuilt into pages (page in the `wIndex` high b
   | 0x33 | `LOOP_PROF_BG_PACE` | G, S | none | u16 n: above 1, each background step does one unit, on one pass in n; a SET of 0 stores 1 |
   | 0x34 | `LOOP_PROF_RESET` | S (zero-length) | none | zeroes every section, job and command value |
 
-  `vc_run()` times every paged handler, so every transport and internal caller is covered, and passes the ID to `loop_prof_command()`. The per-command storage is one `uint32_t` per command built into the image, indexed by `vc_cmd_index()`: the command's position across the page directory, page by page in table order. The host never sees that index. `loop_prof.c` sizes the array by expanding every `.def` file at compile time, and a page missing from its list fails the build. The array is 744 B on RP2040 and 836 B on RP2350 (186 and 209 commands), against the 1,024 B per-opcode array it replaces; page 0 handlers are no longer profiled. `tools/latency_bench/loop_prof.py` reads it (its CLI resets, waits and prints the window's worst times) and `soak.py` resets before each measured window instead of relying on clear-on-read.
-- **Echo builds.** With `DSPI_WINDEX_ECHO`, an OUT echo on a page other than 0 is ACKed in the echo block, so `tools/windex_echo_test.py` still passes. In those builds 0x4F is shadowed on every page.
+  `vc_run()` times every paged handler, so every transport and internal caller is covered, and passes the ID to `loop_prof_command()`. The per-command storage is one `uint32_t` per command built into the image, indexed by `vc_cmd_index()`: the command's position across the page directory, page by page in table order. The host never sees that index. `loop_prof.c` sizes the array by expanding every `.def` file at compile time, and a page missing from its list fails the build. The array is 744 B on RP2040 and 836 B on RP2350 (186 and 209 commands), against the 1,024 B per-opcode array it replaced. `tools/latency_bench/loop_prof.py` reads it (its CLI resets, waits and prints the window's worst times) and `soak.py` resets before each measured window instead of relying on clear-on-read.
+- **Non-finite floats (2026-11-16).** A float SET handler refuses a NaN or infinite field with `VC_ERR_VALUE` before it touches any state (`if (!isfinite(v)) return VC_ERR_VALUE;`). That covers ROUTE (matrix gain, output gain, output and channel delay, preamp, master and user volume), FILTER.BAND (freq, Q, gain), the leveller and loudness floats on DYN, and the crossfeed, subharmonic, psychoacoustic bass and upmixer floats on FX. Finite out-of-range values are still clamped as before. `DYN.LIMITER` and `FX.TUBE` refuse NaN on the page and rely on the subsystem setter clamping infinity to the range end. `MEAS.SIGGEN_CONFIG` is sanitised by `siggen_stage_config()`. `STORE.ALL_PARAMS` applies floats as the bulk loader always has, without a finite check except on master volume.
+- **Removed after the flip (2026-11-16).** `save_params_pending`, its main-loop branch and `flash_save_params()` are gone. Only the 1.1.6 `SAVE_PARAMS` opcode ever set the flag, and nothing else called the function. `STORE.PRESET_SAVE` is the save path.
 
 ## Vendor Command Reference
-*Last updated: 2026-11-16 (`REQ_GET_STATUS` loop-profiler selectors removed). Previously 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim). Previously 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+
+> **This table describes the 1.1.6 opcode space, which firmware 1.1.7 no longer answers (see "Vendor Protocol").**
+> The next documentation pass replaces it with the paged command reference.
+
+*Last updated: 2026-11-16 (marked as the 1.1.6 opcode space). Previously 2026-11-16 (`REQ_GET_STATUS` loop-profiler selectors removed). Previously 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim). Previously 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
 **Band-index map (PEQ and crossover share one address space):**
 

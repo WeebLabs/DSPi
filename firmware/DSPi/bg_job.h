@@ -55,7 +55,7 @@ void bg_run_one(void);
 // Longest one step may run at the live latency option and rate, in us.
 uint32_t bg_step_budget_us(void);
 
-// Steps over budget + BG_OVERRUN_MARGIN_US since boot (REQ_GET_STATUS 31);
+// Steps over budget + BG_OVERRUN_MARGIN_US since boot (SYS.PIPELINE_STATS);
 // on DSPI_LOOP_PROF builds each job's worst step is kept too.
 extern volatile uint32_t bg_over_budget_count;
 

@@ -1,35 +1,35 @@
 """
-Native paged tests for the CLOCK page (plan section 5.12), A/B against the 1.1.6 opcodes on page 0.
+Native paged tests for the CLOCK page (plan section 5.12): GET shapes, round trips and refusals.
 Never changed: the I2S clock mode, the clock-pin mode, the role 0 BCK pair and MCK enable. Moved and
 restored: the dormant slave BCK pair (UNIFIED mode only), the MCK pin and multiplier (MCK disabled only).
 """
 
 from ..framework import Skip, test
-from .paged_input import BAD_GPIO, legacy, legacy_act, need_page, parity, try_set, u8
+from .paged_input import BAD_GPIO, MAX_GPIO, need_page, read_len, try_set, u8
 from .paged_sys import _expect_stall
 
 CLOCK = 0x0C
-PIN_SUCCESS = 0x00
 
 
 @test("paged_clock")
-def clock_parity(dev, profile, chk):
-    """Every CLOCK GET matches its 1.1.6 twin."""
+def clock_shapes(dev, profile, chk):
+    """Every CLOCK GET has its table length and a documented value; I2S_SLAVE_STATUS echoes the clock mode."""
     need_page(dev, CLOCK)
     for role in (0, 1):
-        parity(chk, dev, "CLOCK.I2S_BCK_PIN", "GET_I2S_BCK_PIN", 1, addr=role, label=f"[{role}]")
-    parity(chk, dev, "CLOCK.I2S_CLOCK_PIN_MODE", "GET_I2S_CLOCK_PIN_MODE", 1)
-    parity(chk, dev, "CLOCK.I2S_CLOCK_MODE", "GET_I2S_CLOCK_MODE", 1)
-    parity(chk, dev, "CLOCK.MCK_ENABLE", "GET_MCK_ENABLE", 1)
-    parity(chk, dev, "CLOCK.MCK_PIN", "GET_MCK_PIN", 1)
-    parity(chk, dev, "CLOCK.MCK_MULTIPLIER", "GET_MCK_MULTIPLIER", 1)
-    for _ in range(3):
-        new = dev.pget("CLOCK.I2S_SLAVE_STATUS", length=16)
-        old = legacy(dev, "GET_I2S_SLAVE_STATUS", 16)
-        if old is None or new == old:
-            break
-    if old is not None:
-        chk.eq(new, old, "I2S_SLAVE_STATUS == GET_I2S_SLAVE_STATUS")
+        chk.in_range(read_len(chk, dev, "CLOCK.I2S_BCK_PIN", 1, addr=role, label=f"[{role}]")[0], 0, MAX_GPIO - 1,
+                     f"BCK pin role {role} (LRCLK is the next GPIO)")
+    chk.member(read_len(chk, dev, "CLOCK.I2S_CLOCK_PIN_MODE", 1)[0], (0, 1), "clock-pin mode")
+    mode = read_len(chk, dev, "CLOCK.I2S_CLOCK_MODE", 1)[0]
+    chk.member(mode, (0, 1), "I2S clock mode")
+    chk.member(read_len(chk, dev, "CLOCK.MCK_ENABLE", 1)[0], (0, 1), "MCK enable")
+    chk.in_range(read_len(chk, dev, "CLOCK.MCK_PIN", 1)[0], 0, MAX_GPIO, "MCK pin")
+    chk.member(read_len(chk, dev, "CLOCK.MCK_MULTIPLIER", 1)[0], (0, 1), "MCK multiplier code")
+    st = read_len(chk, dev, "CLOCK.I2S_SLAVE_STATUS", 16)
+    chk.in_range(st[0], 0, 3, "slave state")
+    chk.eq(st[1], mode, "I2S_SLAVE_STATUS clock mode == I2S_CLOCK_MODE")
+    chk.eq(st[13:16], bytes(3), "I2S_SLAVE_STATUS reserved")
+    if st[0] != 3:
+        chk.eq(st[4:8], bytes(4), "detected rate is 0 unless LOCKED")
 
 
 @test("paged_clock", mutating=True)
@@ -80,7 +80,7 @@ def refused_writes(dev, profile, chk):
 
 @test("paged_clock", mutating=True)
 def slave_bck_pair_roundtrip(dev, profile, chk):
-    """The dormant slave BCK pair round-trips through both opcodes and restores (UNIFIED mode only)."""
+    """The dormant slave BCK pair round-trips through two moves and restores (UNIFIED mode only)."""
     need_page(dev, CLOCK)
     if u8(dev, "CLOCK.I2S_CLOCK_PIN_MODE") != 0:
         raise Skip("SPLIT clock-pin mode: the slave pair may be live")
@@ -100,13 +100,10 @@ def slave_bck_pair_roundtrip(dev, profile, chk):
         if not moved:
             chk.note("no free pin pair accepted for the slave BCK")
             return
-        chk.eq(u8(dev, "CLOCK.I2S_BCK_PIN", 1), moved[-1], "new GET after SET")
-        old = legacy(dev, "GET_I2S_BCK_PIN", 1, 1)
-        if old is not None:
-            chk.eq(old[0], moved[-1], "GET_I2S_BCK_PIN after new SET")
-            if len(moved) == 2:
-                chk.eq(legacy_act(dev, "SET_I2S_BCK_PIN", (1 << 8) | moved[0]), PIN_SUCCESS, "old SET")
-                chk.eq(u8(dev, "CLOCK.I2S_BCK_PIN", 1), moved[0], "new GET after old SET")
+        chk.eq(u8(dev, "CLOCK.I2S_BCK_PIN", 1), moved[-1], "GET after SET")
+        if len(moved) == 2:
+            dev.pset("CLOCK.I2S_BCK_PIN", bytes([moved[0]]), addr=1)
+            chk.eq(u8(dev, "CLOCK.I2S_BCK_PIN", 1), moved[0], "GET after moving back to the first pair")
     finally:
         dev.pset("CLOCK.I2S_BCK_PIN", bytes([orig]), addr=1)
         chk.eq(u8(dev, "CLOCK.I2S_BCK_PIN", 1), orig, "slave BCK restored")
@@ -114,7 +111,7 @@ def slave_bck_pair_roundtrip(dev, profile, chk):
 
 @test("paged_clock", mutating=True)
 def mck_storage_roundtrip(dev, profile, chk):
-    """MCK multiplier and pin round-trip through both opcodes while MCK is disabled, then restore."""
+    """MCK multiplier and pin round-trip while MCK is disabled, then restore."""
     need_page(dev, CLOCK)
     if u8(dev, "CLOCK.MCK_ENABLE"):
         raise Skip("MCK is running: multiplier and pin left alone")
@@ -123,12 +120,6 @@ def mck_storage_roundtrip(dev, profile, chk):
         for v in (1 - mult, mult):
             dev.pset("CLOCK.MCK_MULTIPLIER", bytes([v]))
             chk.eq(u8(dev, "CLOCK.MCK_MULTIPLIER"), v, f"multiplier -> {v}")
-            old = legacy(dev, "GET_MCK_MULTIPLIER", 1)
-            if old is not None:
-                chk.eq(old[0], v, f"GET_MCK_MULTIPLIER after SET {v}")
-        if legacy(dev, "GET_MCK_MULTIPLIER", 1) is not None:
-            chk.eq(legacy_act(dev, "SET_MCK_MULTIPLIER", 1 - mult), PIN_SUCCESS, "old SET multiplier")
-            chk.eq(u8(dev, "CLOCK.MCK_MULTIPLIER"), 1 - mult, "new GET after old SET")
         gpout = (13, 15, 21) if profile.platform_id == 1 else (21,)
         for cand in (p for p in gpout if p != pin):
             r = try_set(dev, "CLOCK.MCK_PIN", bytes([cand]))
@@ -136,9 +127,6 @@ def mck_storage_roundtrip(dev, profile, chk):
                 chk.eq(r, "VC_ERR_PIN_IN_USE", f"MCK pin {cand} refusal code")
                 continue
             chk.eq(u8(dev, "CLOCK.MCK_PIN"), cand, f"MCK pin -> {cand}")
-            old = legacy(dev, "GET_MCK_PIN", 1)
-            if old is not None:
-                chk.eq(old[0], cand, "GET_MCK_PIN after new SET")
             break
         else:
             chk.note("no other GPOUT pin free for MCK")

@@ -5,7 +5,7 @@ build that enables it; on a standard build every one answers VC_ERR_UNKNOWN.
 
 import struct
 
-from ..device import OP, ProtocolError, Stall
+from ..device import ProtocolError
 from ..framework import Skip, test
 from .paged_sys import _expect_stall
 
@@ -43,36 +43,29 @@ def pdiag_absent_commands_unknown(dev, profile, chk):
 
 
 @test("paged_diag")
-def pdiag_clock_diag_matches_legacy(dev, profile, chk):
-    """DIAG.CLOCK_DIAG returns the same ClockDiagPacket as 0x82; absent, 0x82 is zero-length."""
-    gets = _diag_cmds(dev)
-    try:
-        old = dev.raw_get(OP.GET_CLOCK_DIAG, 256)
-    except Stall:
-        raise Skip("page 0 no longer answers GET_CLOCK_DIAG")
-    if CLOCK_DIAG not in gets:
-        chk.eq(old, b"", "0x82 is zero-length without DSPI_CLOCK_DIAG")
-        return
-    new = dev.pget("DIAG.CLOCK_DIAG", length=256)
-    chk.eq(len(new), len(old), "same packet length")
-    chk.eq(new[:4], old[:4], "version, platform, slot count, PLL lock")
+def pdiag_clock_diag_shape(dev, profile, chk):
+    """DIAG.CLOCK_DIAG carries a ClockDiagPacket for this platform and refuses a non-zero wValue."""
+    if CLOCK_DIAG not in _diag_cmds(dev):
+        raise Skip("not a DSPI_CLOCK_DIAG build: DIAG.CLOCK_DIAG absent")
+    pkt = dev.pget("DIAG.CLOCK_DIAG", length=256)
+    chk.ok(len(pkt) >= 16, f"packet length {len(pkt)}")
+    chk.eq(pkt[0], 1, "format version")
+    chk.eq((pkt[1], pkt[2]), (profile.platform_id, profile.num_spdif), "platform and slot count match the profile")
+    chk.member(pkt[3], (0, 1), "PLL lock flag")
     _expect_stall(chk, lambda: dev.pget("DIAG.CLOCK_DIAG", addr=1, length=256), "VC_ERR_ADDRESS", "wValue 1")
 
 
 @test("paged_diag")
-def pdiag_loopback_stats_matches_legacy(dev, profile, chk):
-    """DIAG.LOOPBACK_STATS carries GET_STATUS 24 and 25; absent, those selectors read zero."""
-    gets = _diag_cmds(dev)
-    try:
-        o24 = struct.unpack("<I", dev.raw_get(OP.GET_STATUS, 4, 24))[0]
-        o25 = struct.unpack("<I", dev.raw_get(OP.GET_STATUS, 4, 25))[0]
-    except Stall:
-        raise Skip("page 0 no longer answers GET_STATUS")
-    if LOOPBACK_STATS not in gets:
-        chk.eq((o24, o25), (0, 0), "GET_STATUS 24/25 read zero without DSPI_LOOPBACK")
-        return
-    over, under = struct.unpack("<II", dev.pget("DIAG.LOOPBACK_STATS"))
-    chk.ok(over >= o24 and under >= o25, f"counters at or past the legacy reads ({over},{under}) vs ({o24},{o25})")
+def pdiag_loopback_stats_shape(dev, profile, chk):
+    """DIAG.LOOPBACK_STATS is two u32 counters that never run backwards; a non-zero wValue is refused."""
+    if LOOPBACK_STATS not in _diag_cmds(dev):
+        raise Skip("not a DSPI_LOOPBACK build: DIAG.LOOPBACK_STATS absent")
+    a = dev.pget("DIAG.LOOPBACK_STATS", length=8)
+    b = dev.pget("DIAG.LOOPBACK_STATS", length=8)
+    chk.eq(len(a), 8, "reply length")
+    (o1, u1), (o2, u2) = struct.unpack("<II", a), struct.unpack("<II", b)
+    chk.ok(o2 >= o1 and u2 >= u1, f"counters never run backwards ({o1},{u1}) then ({o2},{u2})")
+    _expect_stall(chk, lambda: dev.pget("DIAG.LOOPBACK_STATS", addr=1, length=8), "VC_ERR_ADDRESS", "wValue 1")
 
 
 def _loop_prof(dev):

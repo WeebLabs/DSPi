@@ -5,7 +5,7 @@ add_compile_options(-O2)
 
 # Use -O3 for DSP-critical files
 set_source_files_properties(
-    usb_audio.c vendor_commands.c audio_pipeline.c crossfeed.c loudness.c psybass.c leveller.c crossover.c spdif_input.c i2s_input.c input_servo.c lg_sound_sync.c dac_hw_mute.c siggen.c upmix.c adat_output.c adat_input.c
+    usb_audio.c audio_pipeline.c crossfeed.c loudness.c psybass.c leveller.c crossover.c spdif_input.c i2s_input.c input_servo.c lg_sound_sync.c dac_hw_mute.c siggen.c upmix.c adat_output.c adat_input.c
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
@@ -108,8 +108,6 @@ add_executable(DSPi
     upmix.h
     usb_audio.c
     usb_audio.h
-    vendor_commands.c
-    vendor_commands.h
     vendor/vc_core.c
     vendor/vc_core.h
     vendor/vc_ids.h
@@ -154,18 +152,11 @@ if (DSPI_LOOPBACK)
 endif()
 
 # DSPI_CLOCK_DIAG (bench instrumentation): clock/servo/ring diagnostics and
-# the REQ_GET_CLOCK_DIAG (0x82) snapshot read by tools/clkdiag_poll.py.
-# Release builds leave it OFF; 0x82 then answers with zero bytes.
-option(DSPI_CLOCK_DIAG "Build the clock/audio-path diagnostics (vendor GET 0x82)" OFF)
+# the DIAG.CLOCK_DIAG snapshot read by tools/clkdiag_poll.py.
+# Release builds leave it OFF; DIAG.CLOCK_DIAG then does not exist.
+option(DSPI_CLOCK_DIAG "Build the clock/audio-path diagnostics (DIAG.CLOCK_DIAG)" OFF)
 if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
-endif()
-
-# DSPI_WINDEX_ECHO (bench only): vendor request 0x4F echoes its SETUP fields,
-# used once to prove hosts deliver the wIndex high byte. Never ship it.
-option(DSPI_WINDEX_ECHO "Build the wIndex echo probe (vendor request 0x4F)" OFF)
-if (DSPI_WINDEX_ECHO)
-    target_compile_definitions(DSPi PRIVATE DSPI_WINDEX_ECHO=1)
 endif()
 
 # DSPI_LOOP_PROF (bench instrumentation): worst time per main-loop section,

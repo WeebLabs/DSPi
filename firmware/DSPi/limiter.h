@@ -8,7 +8,7 @@
 // Per-output brickwall lookahead peak limiter.  Timing proof, link groups and
 // the silent engage protocol: Documentation/Features/output_limiter_spec.md.
 
-// Parameter indices (REQ_LIMITER wValue low byte; high byte = output).
+// Parameter indices, in the order of DYN.LIMITER_ENABLE..DYN.LIMITER_LINK_GROUP.
 enum {
     LIMITER_PARAM_ENABLED = 0,
     LIMITER_PARAM_THRESHOLD_DB,
@@ -16,8 +16,6 @@ enum {
     LIMITER_PARAM_LINK_GROUP,
     LIMITER_NUM_PARAMS
 };
-#define LIMITER_GET_METER       0x80   // read-only: NUM_OUTPUT_CHANNELS x uint16 GR, 0.01 dB
-#define LIMITER_GET_STATUS      0x81   // read-only: engaged, lookahead, block, num_outputs
 #define LIMITER_ALL_OUTPUTS     0xFF   // SET only: apply to every output
 
 // The delay must be exactly two blocks for the no-overshoot guarantee, and

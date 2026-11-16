@@ -102,7 +102,7 @@ static bool     s_last_muted  = false;
 static int16_t  s_last_applied_vol_index = -1;   /* -1 = none yet */
 
 /* Tracks whether the *current* user_mute state was imposed by LG (vs.
- * set manually by the user via REQ_SET_USER_MUTE).  On leave_present
+ * set manually by the user via ROUTE.USER_MUTE).  On leave_present
  * we clear user_mute only if LG owned it; otherwise the user's
  * deliberate mute is preserved across the demote.  Set true when LG
  * drives user_mute false→true, cleared when LG drives true→false or
@@ -290,7 +290,7 @@ static void enter_present(uint8_t lg_vol, bool lg_mute) {
     s_present = true;
     apply_lg_state(lg_vol, lg_mute);
 
-    /* Track last seen LG vol/mute for REQ_GET_LG_SOUND_SYNC_STATUS, but
+    /* Track last seen LG vol/mute for INPUT.LG_SOUND_SYNC_STATUS, but
      * do not push per-field notifies.  The corresponding user-volume /
      * user-mute changes are notified by update_user_volume() inside
      * apply_lg_state() — pushing additional lg_sound_sync.volume and
@@ -317,7 +317,7 @@ static void enter_present(uint8_t lg_vol, bool lg_mute) {
  * We DO clear LG-imposed mute so the user isn't stuck silent when the
  * TV stops broadcasting Sound Sync (e.g., TV powers off, TOSLINK
  * unplugged).  s_lg_imposed_mute distinguishes mutes LG drove from
- * mutes the user set manually via REQ_SET_USER_MUTE — the latter are
+ * mutes the user set manually via ROUTE.USER_MUTE; the latter are
  * preserved across the demote. */
 static void leave_present(bool restore_host_vol) {
     (void)restore_host_vol;  /* vestigial — see comment above */

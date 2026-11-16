@@ -1,7 +1,7 @@
 /*
  * vc_page_store.c: STORE page (0x02). Command set: vendor_command_overhaul_plan.md
- * section 5.2. Every write is queued for the main loop through the same pending
- * flags the legacy opcodes use; bulk transfers run under the vc_bulk.c lock.
+ * section 5.2. Every write is queued for the main loop through a pending flag;
+ * bulk transfers run under the vc_bulk.c lock.
  */
 
 #include "vc_core.h"

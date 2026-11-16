@@ -23,7 +23,7 @@ with the `DSPI_LOOPBACK` build, which exposes output slot 0 as a USB capture inp
 pip install pyusb           # plus `brew install libusb` on macOS
 ```
 A DSPi plugged in (VID `0x2E8B`, PID `0xFEAA`), not held exclusively by another
-app. Run from the repo root so `config.h` opcode parsing works.
+app. Run from the repo root so the registry and mapping files under `Documentation/protocol/` are found.
 
 ## Run
 
@@ -78,7 +78,8 @@ Exit code is `0` only if there are no `FAIL`/`ERROR` results.
 
 `identity` · `eq` · `dynamics` · `outputs` · `volume` · `inputs` · `diagnostics`
 · `presets` · `crosscut` · `stress` · `rta` (spectrum analyser; needs the
-siggen, one test also needs `--audio`) · `audio` (opt-in, `--audio`)
+siggen, one test also needs `--audio`) · `audio` (opt-in, `--audio`) · `paged_<page>` for each
+page of the paged protocol, plus `paged_page0` (see below)
 
 ## Audio loopback (optional)
 
@@ -180,13 +181,24 @@ numbering in `Documentation/protocol/legacy_map.json`. A refused paged request r
 returns `None` on firmware without the paged dispatcher, and every paged request is refused locally on
 such firmware, because 1.1.6 would run it as the old opcode with the same number.
 
-The legacy `dev.get(OP.X, ...)` and `dev.set(...)` calls have two modes:
+The legacy `dev.get(OP.X, ...)` and `dev.set(...)` calls take the 1.1.6 opcode numbers. `OP` comes
+from `golden/legacy_opcodes.json`, since `config.h` no longer defines them. How those calls reach the
+device depends on the protocol mode:
+
+| Mode | What it is for |
+|---|---|
+| `auto` (default) | Probes `SYS.PROTOCOL_INFO` once when the device is opened. Firmware 1.1.7 and later answers, so `translate` is used. 1.1.6 STALLs the probe harmlessly, so `old` is used |
+| `translate` | Every old call becomes paged commands. The only mode that works on 1.1.7, where page 0 answers nothing |
+| `old` | Old opcodes go to page 0 unchanged. Only for firmware 1.1.6, for example to recapture the golden reference |
+| `hybrid` | Translates an old call when the device has every paged command it needs, otherwise sends it to page 0. Useful only on development builds from before the flip, which had both. On firmware without page 0 it acts as `translate`, and an opcode `legacy_map.json` does not know raises `UnmappedRequest` |
 
 ```bash
-DSPI_TEST_PROTOCOL=old        python3 -m tools.dspi_test.run   # default: old opcodes on page 0
-DSPI_TEST_PROTOCOL=translate  python3 -m tools.dspi_test.run   # old calls become paged commands
+python3 -m tools.dspi_test.run                                 # auto
+DSPI_TEST_PROTOCOL=old  python3 -m tools.dspi_test.run         # force a mode (or protocol= in code)
 python3 -m tools.dspi_test.legacy_map --check                  # validate the mapping data
 ```
+
+`dev.protocol` holds the mode in use and `dev.protocol_auto` says whether it was chosen by the probe.
 
 In translate mode `legacy_map.py` follows `legacy_map.json` (its `_schema` key documents the format).
 Write-as-read commands become SETs and answer the 1.1.6 status byte. A refused OUT write is swallowed,
@@ -195,19 +207,29 @@ capture through the same layer:
 `python -m tools.dspi_test.golden.capture compare ... --transport tools.dspi_test.legacy_map:golden_transport`.
 The layer and the `old` mode are removed in plan Phase 6. The JSON stays as migration data.
 
-`DSPI_TEST_PROTOCOL=hybrid` (or `protocol="hybrid"`) is for the page migration, while page 0 still
-answers. An old call is translated only when every paged command it would use exists on the attached
-device in the needed direction; otherwise it goes to page 0 exactly as in `old` mode. The decision is
-per opcode, per split selector, and per `GET_STATUS` selector. Custom adapters declare what they touch
-in the `uses` list of their JSON entry. What exists is read from `SYS.PAGE_LIST` and
-`SYS.PAGE_COMMANDS` once per handle (not from the registry), so reconnect or make a new `DspiDevice`
-after flashing. A request that would use no paged command at all stays on page 0.
-`dev.hybrid_counts` counts calls per old opcode name, `dev.hybrid_summary()` gives a one-line summary,
-and the summary is printed at exit. For the golden replay use
-`--transport tools.dspi_test.legacy_map:golden_transport_hybrid`.
+In hybrid mode the decision is per opcode, per split selector, and per `GET_STATUS` selector. Custom
+adapters declare what they touch in the `uses` list of their JSON entry. What exists is read from
+`SYS.PAGE_LIST` and `SYS.PAGE_COMMANDS` once per handle (not from the registry), so reconnect or make a
+new `DspiDevice` after flashing. Whether page 0 still answers is probed once, with the old
+`GET_PLATFORM`, the first time a call would go there. `dev.hybrid_counts` counts calls per old opcode
+name and the one-line `dev.hybrid_summary()` is printed at exit. The golden replay's
+`legacy_map:golden_transport_hybrid` routes on its own and does not have the page 0 check, so use
+`golden_transport` against 1.1.7.
 
-`tests/paged_sys.py` holds native tests for the `SYS` discovery commands. They SKIP on firmware without
-the paged dispatcher.
+The `paged_*` groups hold native tests, one module per page. They SKIP on firmware without the paged
+dispatcher.
+
+`paged_page0` proves page 0 is empty. It walks every `bRequest` 0x00-0xFF on page 0: a 4-byte GET, a
+zero-length SET and a 4-byte SET, with interface recipient at `wIndex` 0 and 2 and with device
+recipient at `wIndex` 0 (2,304 requests, a few seconds). Every one must STALL, `SYS.LAST_RESULT` must
+read `VC_ERR_UNKNOWN` for the last, and `STORE.ALL_PARAMS` and `STORE.DIRECTORY` must be unchanged. A
+second test checks that the Microsoft OS 2.0 request (`0xC0`, `bRequest` 0x01, `wIndex` 7) still
+returns the WinUSB descriptor set. On 1.1.6 the walk would run every old opcode, factory reset and
+bootloader included, so it SKIPs unless `SYS.PROTOCOL_INFO` answers, `SYS.PLATFORM` reports 1.1.7 or
+later, and the old `GET_PLATFORM` on page 0 STALLs.
+
+The Windows `wIndex` check is a separate standalone script, `tools/windex_page_test.py`
+(procedure in `Documentation/Features/windex_page_test.md`).
 
 ## Layout
 

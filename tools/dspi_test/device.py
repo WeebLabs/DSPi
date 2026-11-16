@@ -1,7 +1,7 @@
 """
 DspiDevice: the QA suite's single USB vendor-control transport (VID/PID and bmRequestType as in
-tools/dspi_poke). Refusals raise Stall, a vanished device raises Disconnected, OP is parsed from
-config.h, and pget/pset plus the old/translate/hybrid protocol modes are described in README.md.
+tools/dspi_poke). Refusals raise Stall, a vanished device raises Disconnected, OP is the frozen 1.1.6
+opcode table, and pget/pset plus the protocol modes are described in README.md.
 Control-plane only: no audio streaming, no isochronous endpoints.
 """
 
@@ -86,6 +86,11 @@ class ProtocolError(Exception):
     """The device does not speak the paged protocol (SYS.PROTOCOL_INFO STALLed or lacked "DSPi")."""
 
 
+class UnmappedRequest(Exception):
+    """Hybrid mode on firmware without page 0 got an old opcode legacy_map.json does not know.
+    Deliberately not a Stall, so a test cannot mistake it for a device refusal."""
+
+
 # --- Repo files -------------------------------------------------------------
 
 def _find_repo_file(rel: Path) -> Path | None:
@@ -109,8 +114,7 @@ LEGACY_MAP_REL = Path("Documentation") / "protocol" / "legacy_map.json"
 
 def load_opcodes(config_h: Path | None = None) -> dict[str, int]:
     """Parse `#define REQ_FOO 0xNN` lines into {SHORTNAME: opcode}, keys WITHOUT the REQ_ prefix
-    (so tests write `OP.GET_PLATFORM`). Returns {} on failure, which callers must treat as a
-    fatal setup error.
+    (so tests write `OP.GET_PLATFORM`). Returns {} where config.h has none, as from 1.1.7 on.
     """
     path = config_h or _find_config_h()
     if path is None or not path.is_file():
@@ -241,12 +245,23 @@ class LastResult:
 
 
 def _normalise_protocol(p: str | None) -> str:
-    p = (p or os.environ.get("DSPI_TEST_PROTOCOL") or "old").strip().lower()
+    p = (p or os.environ.get("DSPI_TEST_PROTOCOL") or "auto").strip().lower()
     if p in ("old", "send-old", "send_old", "legacy"):
         return "old"
-    if p in ("translate", "paged", "hybrid"):
+    if p in ("translate", "paged", "hybrid", "auto"):
         return "translate" if p == "paged" else p
-    raise ValueError(f"unknown DSPI_TEST_PROTOCOL {p!r} (use old, translate or hybrid)")
+    raise ValueError(f"unknown DSPI_TEST_PROTOCOL {p!r} (use auto, old, translate or hybrid)")
+
+
+_LEGACY_NAMES: dict = {}
+
+
+def _legacy_name(code: int) -> str | None:
+    """1.1.6 name of an old opcode that legacy_map.json translates, None for any other number."""
+    if not _LEGACY_NAMES:
+        from . import legacy_map
+        _LEGACY_NAMES.update({r["code"]: n for n, r in legacy_map.load_map()["opcodes"].items()})
+    return _LEGACY_NAMES.get(code)
 
 
 # --- The device wrapper -----------------------------------------------------
@@ -260,6 +275,7 @@ class DspiDevice:
         self.dev = dev
         self.timeout = timeout_ms
         self.protocol = _normalise_protocol(protocol)
+        self.protocol_auto = self.protocol == "auto"
         self.registry = registry
         # Count every transfer for the report.
         self.gets = 0
@@ -273,9 +289,13 @@ class DspiDevice:
         self.swallowed: list[dict] = []
         self._paged_ok = None   # None until SYS.PROTOCOL_INFO has been probed
         self._paged_cmds = None  # {page: (GET cmds, SET cmds)} read from the device once
+        self._page0 = None      # None until page0_alive() has probed
         # Hybrid routing per old opcode name: calls sent paged vs left on page 0.
         self.hybrid_counts = {"translated": {}, "passed": {}}
         self._hybrid_atexit = False
+        if self.protocol_auto:
+            # The probe STALLs harmlessly on 1.1.6 (plan 5.14), which still needs the old opcodes.
+            self.protocol = "translate" if self.protocol_info() is not None else "old"
         if self.protocol == "hybrid":
             self._register_hybrid_summary()
 
@@ -290,6 +310,7 @@ class DspiDevice:
             self.reenumerations += 1
             self._paged_ok = None   # may be different firmware now
             self._paged_cmds = None
+            self._page0 = None
             return True
         return False
 
@@ -351,8 +372,8 @@ class DspiDevice:
         """Device->host vendor request.  Raises Stall if refused, Timeout if wedged."""
         if self._translating(windex):
             from . import legacy_map
-            if self.protocol == "hybrid":
-                return legacy_map.hybrid_get(self, opcode, wvalue, length)
+            if self.protocol == "hybrid" and not self._hybrid_paged(opcode, "in", wvalue):
+                return self.raw_get(opcode, length, wvalue)
             return legacy_map.translate_get(self, opcode, wvalue, length)
         return self.raw_get(opcode, length, wvalue, windex)
 
@@ -360,10 +381,37 @@ class DspiDevice:
         """Host->device vendor request.  Returns bytes accepted.  Raises Stall if refused."""
         if self._translating(windex):
             from . import legacy_map
-            if self.protocol == "hybrid":
-                return legacy_map.hybrid_set(self, opcode, wvalue, payload)
+            if self.protocol == "hybrid" and not self._hybrid_paged(opcode, "out", wvalue):
+                return self.raw_set(opcode, bytes(payload), wvalue)
             return legacy_map.translate_set(self, opcode, wvalue, payload)
         return self.raw_set(opcode, payload, wvalue, windex)
+
+    def _hybrid_paged(self, opcode: int, direction: str, wvalue: int) -> bool:
+        """Hybrid routing: True translates, False sends the old request to page 0 unchanged."""
+        from . import legacy_map
+        name = _legacy_name(opcode) or f"0x{opcode:02X}"
+        paged = legacy_map.routes_paged(self, opcode, direction, wvalue) or not self.page0_alive()
+        if paged and _legacy_name(opcode) is None:
+            raise UnmappedRequest(f"hybrid: old opcode 0x{opcode:02X} has no translation and this "
+                                  f"firmware has no page 0 to send it to")
+        self.note_hybrid(name, paged)
+        return paged
+
+    def page0_alive(self) -> bool:
+        """True while page 0 still answers 1.1.6 opcodes (1.1.6 itself, and builds before the flip).
+        The probe is the old GET_PLATFORM, a read on every firmware that has it."""
+        if self._page0 is None:
+            if self._paged_ok is None:
+                self.protocol_info()
+            if not self._paged_ok:
+                self._page0 = True
+            else:
+                try:
+                    self.raw_get(0x7F, 7)
+                    self._page0 = True
+                except Stall:
+                    self._page0 = False
+        return self._page0
 
     # -- hybrid bookkeeping --------------------------------------------------
 

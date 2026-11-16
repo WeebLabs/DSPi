@@ -130,7 +130,7 @@ typedef struct __attribute__((packed)) {
 _Static_assert(sizeof(RtaStatus) == 24, "RtaStatus wire size");
 
 // ---------------------------------------------------------------------------
-// Vendor-command surface (handlers in vendor_commands.c)
+// Vendor-command surface (handlers in vendor/vc_page_meas.c)
 // ---------------------------------------------------------------------------
 
 // Validate and stage a config.  False = STALL (bad version/length/tap/order,

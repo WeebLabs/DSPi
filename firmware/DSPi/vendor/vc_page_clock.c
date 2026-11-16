@@ -176,6 +176,10 @@ static VcResult clock_mck_pin_set(VcCtx *c) {
     return vc_from_pin_status(status);
 }
 
+// Wire and bulk encoding of the MCK multiplier: 0 = 128x, 1 = 256x.
+static uint8_t  mck_encode(uint16_t val) { return (val == 256) ? 1 : 0; }
+static uint16_t mck_decode(uint8_t raw)  { return (raw == 1) ? 256 : 128; }
+
 static VcResult clock_mck_mult_get(VcCtx *c) {
     c->out[0] = mck_encode(i2s_mck_multiplier);
     return VC_OK;

@@ -3,6 +3,7 @@
  * Band index map (PEQ 0..count-1, crossover 20..23 on outputs): crossover_filters_spec.md.
  */
 
+#include <math.h>
 #include <stddef.h>
 #include "vc_core.h"
 #include "config.h"
@@ -60,6 +61,7 @@ static VcResult filter_band_set(VcCtx *c) {
         .Q       = vc_in_f32(c, 8),
         .gain_db = vc_in_f32(c, 12),
     };
+    if (!isfinite(p.freq) || !isfinite(p.Q) || !isfinite(p.gain_db)) return VC_ERR_VALUE;
     bool is_peq = p.band < channel_band_counts[p.channel];
     return filter_stage(&p, is_peq ? vc_in_u16(c, 2) : 0);
 }

@@ -1,6 +1,6 @@
 # Vendor Protocol Migration Notes (working file)
 
-*Last updated: 2026-11-16*
+*Last updated: 2026-11-16 (page 0, finite-value rule, `RTA_BINS`, ROUTE delay note)*
 
 Raw material for the host migration guide (`Documentation/vendor_protocol_migration.md`, plan Phase 7). Each entry is a place where the paged protocol in 1.1.7 behaves differently from the 1.1.6 opcode, beyond the renumbering. They were recorded by the agents who ported each page and checked against the device. This file is folded into the guide and then deleted.
 
@@ -11,10 +11,16 @@ Raw material for the host migration guide (`Documentation/vendor_protocol_migrat
 - `wValue` is checked as a whole 16-bit address. 1.1.6 often used only the low byte (0x0100 addressed index 0). A set high byte is now `VC_ERR_ADDRESS`.
 - A command that takes no address requires `wValue` 0. 1.1.6 ignored `wValue` there.
 - A GET for a bad address is `VC_ERR_ADDRESS`. 1.1.6 often answered zeros.
-- NaN and infinite float values are `VC_ERR_VALUE`. 1.1.6 ignored them silently. Out-of-range values that 1.1.6 clamped are still clamped.
+- A NaN or infinite float in a SET is `VC_ERR_VALUE` and stores nothing. This holds in ROUTE (matrix gain, output gain, output and channel delay, preamp, master and user volume), DYN (leveller amount, max gain and gate, loudness reference and intensity), FX (crossfeed cutoff and feed, every subharm and psybass float, every upmix parameter and `UPMIX_CONFIG`) and `FILTER.BAND` (freq, Q, gain). 1.1.6 ignored some of these and stored others.
+- The limiter (`DYN.LIMITER_*`) and tube (`FX.TUBE_*`) setters refuse NaN with `VC_ERR_VALUE` but clamp infinity to the end of the range. `MEAS.SIGGEN_CONFIG` sanitises its floats. The bulk SET (`STORE.ALL_PARAMS`) does not validate floats and stores them as sent.
+- Out-of-range finite values that 1.1.6 clamped are still clamped.
 - Former write-as-read commands (IN transfers that changed state and returned a status byte) are SETs. The status byte is gone. The outcome is ACK or STALL, and the reason is in `SYS.LAST_RESULT`.
 - Old `PIN_CONFIG_*` bytes map to results as follows. 0x01 is `VC_ERR_PIN_INVALID`, 0x02 is `VC_ERR_PIN_IN_USE`, 0x03 is `VC_ERR_ADDRESS`, 0x04 is `VC_ERR_STATE`, 0x05 is `VC_ERR_VALUE`. Per-command exceptions are listed below.
 - Commands for hardware a platform lacks do not exist there and answer `VC_ERR_UNKNOWN`. 1.1.6 on RP2040 answered zeros or 0x03 for ADAT and upmixer opcodes.
+
+## Page 0
+
+Every request with a zero `wIndex` high byte is refused. USB STALLs at SETUP, UART and I2C return status 0x10, and `SYS.LAST_RESULT` records `VC_ERR_UNKNOWN`. Page 0 has no `GET_PLATFORM` and no `ENTER_BOOTLOADER`, so a 1.1.6 host can neither read the version of a 1.1.7 device nor reboot it into the bootloader. The Microsoft OS 2.0 descriptor request (IN, `bRequest` 0x01, `wIndex` 7) is not a DSPi command and is served as before.
 
 ## SYS
 
@@ -99,6 +105,8 @@ Raw material for the host migration guide (`Documentation/vendor_protocol_migrat
 | 0x44, 0x45 | none | Retired. Use `PREAMP` per input channel |
 | 0xD6 | `MASTER_VOLUME_SAVE` | Zero-length SET, no status byte |
 
+A `CHANNEL_DELAY` write to an output channel does not change what `OUTPUT_DELAY` reads back for that output, while an `OUTPUT_DELAY` write updates both. This is unchanged from 1.1.6. Hosts should set output delays through `OUTPUT_DELAY`.
+
 ## FILTER
 
 | Old | New | Difference |
@@ -133,7 +141,7 @@ Raw material for the host migration guide (`Documentation/vendor_protocol_migrat
 | 0x83 | `CLIP_FLAGS`, `CLIP_CLEAR` | Read and clear are two requests. A clip that lands between them is lost |
 | 0x0A | `RTA_CAPS`, `RTA_BAND_CENTRES` | Old `wValue` n (1 and up) is chunk n-1. A chunk past the table is `VC_ERR_ADDRESS` |
 | 0x0B | `RTA_BANDS` | Bad channel is `VC_ERR_ADDRESS`. The read still counts as a keepalive first, as before |
-| 0x0C | `RTA_BINS` | At most 256 bytes per request (1.1.6 sent up to 529 in one). Read in chunks by offset. No frame is `VC_ERR_STATE`. An offset at or past the frame length is `VC_ERR_ADDRESS` |
+| 0x0C | `RTA_BINS` | At most 256 bytes per request (1.1.6 sent up to 529 in one). Read in chunks by offset. Before the first transform the device returns a frame with a zero header and a 0xFF sequence tail, so a host must check the tail. The handler's `VC_ERR_STATE` for a missing frame is not reachable in practice. An offset at or past the frame length is `VC_ERR_ADDRESS` |
 | 0x0E | `RTA_START`, `RTA_STOP`, `RTA_RESET` | Zero-length SETs (old actions 1, 0, 2) |
 | 0x0F | `RTA_BANDS_ALL` | Off USB it is `VC_ERR_BLOCKED`. A held bulk lock is `VC_ERR_BUSY` |
 | 0xA6 | `SIGGEN_START`, `SIGGEN_STOP`, `SIGGEN_STOP_NOW` | Zero-length SETs (old actions 1, 0, 2). Start with no valid config is `VC_ERR_STATE` |

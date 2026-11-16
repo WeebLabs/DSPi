@@ -7,8 +7,9 @@ its enable bit is exercised, and every test puts back what it changed. The upmix
 import math
 import struct
 
-from ..device import OP, Stall
+from ..device import Stall
 from ..framework import Skip, test
+from .paged_route import finite_rule, nonfinite_refused
 from .paged_sys import _bits, _expect_stall, _paged, _registry
 
 FX = 0x08
@@ -28,44 +29,44 @@ def _f32(v):
 
 ENC = {"bool": _u8, "u8": _u8, "u16": _u16, "f32": _f32}
 
-# name, old GET, old SET, kind, (value a, value b), [(written, read back)]
+# name, kind, (value a, value b), [(written, read back)]
 SCALARS = [
-    ("CROSSFEED_ENABLE", OP.GET_CROSSFEED, OP.SET_CROSSFEED, "bool", (1, 0), [(7, 1)]),
-    ("CROSSFEED_PRESET", OP.GET_CROSSFEED_PRESET, OP.SET_CROSSFEED_PRESET, "u8", (2, 3), []),
-    ("CROSSFEED_FREQ", OP.GET_CROSSFEED_FREQ, OP.SET_CROSSFEED_FREQ, "f32", (900.0, 1250.0),
+    ("CROSSFEED_ENABLE", "bool", (1, 0), [(7, 1)]),
+    ("CROSSFEED_PRESET", "u8", (2, 3), []),
+    ("CROSSFEED_FREQ", "f32", (900.0, 1250.0),
      [(100.0, 500.0), (5000.0, 2000.0)]),
-    ("CROSSFEED_FEED", OP.GET_CROSSFEED_FEED, OP.SET_CROSSFEED_FEED, "f32", (4.5, 9.0),
+    ("CROSSFEED_FEED", "f32", (4.5, 9.0),
      [(-3.0, 0.0), (40.0, 15.0)]),
-    ("CROSSFEED_ITD", OP.GET_CROSSFEED_ITD, OP.SET_CROSSFEED_ITD, "bool", (1, 0), [(0x80, 1)]),
-    ("CROSSFEED_OUTPUTS", OP.GET_CROSSFEED_OUTPUTS, OP.SET_CROSSFEED_OUTPUTS, "u8", (1, 2), []),
-    ("SUBHARM_ENABLE", OP.GET_SUBHARM, OP.SET_SUBHARM, "bool", (1, 0), [(5, 1)]),
-    ("SUBHARM_LOW", OP.GET_SUBHARM_LOW, OP.SET_SUBHARM_LOW, "f32", (-12.0, -6.5),
+    ("CROSSFEED_ITD", "bool", (1, 0), [(0x80, 1)]),
+    ("CROSSFEED_OUTPUTS", "u8", (1, 2), []),
+    ("SUBHARM_ENABLE", "bool", (1, 0), [(5, 1)]),
+    ("SUBHARM_LOW", "f32", (-12.0, -6.5),
      [(-99.0, -30.0), (99.0, 12.0)]),
-    ("SUBHARM_HIGH", OP.GET_SUBHARM_HIGH, OP.SET_SUBHARM_HIGH, "f32", (-10.0, 3.0), [(50.0, 12.0)]),
-    ("SUBHARM_TOP", OP.GET_SUBHARM_TOP, OP.SET_SUBHARM_TOP, "f32", (-20.0, -1.5), [(-31.0, -30.0)]),
-    ("SUBHARM_BOOST", OP.GET_SUBHARM_BOOST, OP.SET_SUBHARM_BOOST, "f32", (2.0, 4.5),
+    ("SUBHARM_HIGH", "f32", (-10.0, 3.0), [(50.0, 12.0)]),
+    ("SUBHARM_TOP", "f32", (-20.0, -1.5), [(-31.0, -30.0)]),
+    ("SUBHARM_BOOST", "f32", (2.0, 4.5),
      [(-1.0, 0.0), (7.0, 6.0)]),
-    ("SUBHARM_MASK", OP.GET_SUBHARM_MASK, OP.SET_SUBHARM_MASK, "u16", (0x0005, 0x0102), []),
-    ("SUBHARM_SELECT", OP.GET_SUBHARM_SELECT, OP.SET_SUBHARM_SELECT, "u8", (1, 2), [(9, 2)]),
-    ("SUBHARM_DEPTH", OP.GET_SUBHARM_DEPTH, OP.SET_SUBHARM_DEPTH, "f32", (25.0, 60.0),
+    ("SUBHARM_MASK", "u16", (0x0005, 0x0102), []),
+    ("SUBHARM_SELECT", "u8", (1, 2), [(9, 2)]),
+    ("SUBHARM_DEPTH", "f32", (25.0, 60.0),
      [(-5.0, 0.0), (150.0, 100.0)]),
-    ("SUBHARM_HOLD", OP.GET_SUBHARM_HOLD, OP.SET_SUBHARM_HOLD, "f32", (120.0, 300.0),
+    ("SUBHARM_HOLD", "f32", (120.0, 300.0),
      [(10.0, 50.0), (900.0, 400.0)]),
-    ("SUBHARM_CEILING", OP.GET_SUBHARM_CEILING, OP.SET_SUBHARM_CEILING, "f32", (-12.0, -3.0),
+    ("SUBHARM_CEILING", "f32", (-12.0, -3.0),
      [(-80.0, -40.0), (6.0, 0.0)]),
-    ("SUBHARM_LINK", OP.GET_SUBHARM_LINK, OP.SET_SUBHARM_LINK, "bool", (1, 0), [(2, 1)]),
-    ("SUBHARM_SOLO", OP.GET_SUBHARM_SOLO, OP.SET_SUBHARM_SOLO, "bool", (1, 0), [(3, 1)]),
-    ("PSYBASS_ENABLE", OP.GET_PSYBASS, OP.SET_PSYBASS, "bool", (1, 0), [(9, 1)]),
-    ("PSYBASS_CUTOFF", OP.GET_PSYBASS_CUTOFF, OP.SET_PSYBASS_CUTOFF, "f32", (80.0, 150.0),
+    ("SUBHARM_LINK", "bool", (1, 0), [(2, 1)]),
+    ("SUBHARM_SOLO", "bool", (1, 0), [(3, 1)]),
+    ("PSYBASS_ENABLE", "bool", (1, 0), [(9, 1)]),
+    ("PSYBASS_CUTOFF", "f32", (80.0, 150.0),
      [(5.0, 30.0), (900.0, 300.0)]),
-    ("PSYBASS_HARMONICS", OP.GET_PSYBASS_HARMONICS, OP.SET_PSYBASS_HARMONICS, "f32", (-6.0, 3.0),
+    ("PSYBASS_HARMONICS", "f32", (-6.0, 3.0),
      [(-50.0, -24.0), (20.0, 12.0)]),
-    ("PSYBASS_DRIVE", OP.GET_PSYBASS_DRIVE, OP.SET_PSYBASS_DRIVE, "f32", (6.0, 12.0), [(30.0, 18.0)]),
-    ("PSYBASS_CHARACTER", OP.GET_PSYBASS_CHARACTER, OP.SET_PSYBASS_CHARACTER, "f32", (30.0, 70.0),
+    ("PSYBASS_DRIVE", "f32", (6.0, 12.0), [(30.0, 18.0)]),
+    ("PSYBASS_CHARACTER", "f32", (30.0, 70.0),
      [(-1.0, 0.0), (101.0, 100.0)]),
-    ("PSYBASS_ORIGINAL", OP.GET_PSYBASS_ORIGINAL, OP.SET_PSYBASS_ORIGINAL, "f32", (-12.0, -3.0),
+    ("PSYBASS_ORIGINAL", "f32", (-12.0, -3.0),
      [(-70.0, -60.0), (1.0, 0.0)]),
-    ("PSYBASS_MASK", OP.GET_PSYBASS_MASK, OP.SET_PSYBASS_MASK, "u16", (0x0003, 0x0040), []),
+    ("PSYBASS_MASK", "u16", (0x0003, 0x0040), []),
 ]
 SCALAR = {s[0]: s for s in SCALARS}
 
@@ -92,6 +93,7 @@ TUBE_RESTORE = ["TUBE_OUTPUT_MASK", "TUBE_DRIVE", "TUBE_BIAS", "TUBE_ASYM", "TUB
                 "TUBE_XFMR_RES", "TUBE_MIX", "TUBE_TRIM", "TUBE_TYPE", "TUBE_ENABLE"]
 
 # UPMIX_PARAM_* order: name, test value (enable is never written with a new value).
+# Params 3-12 sit as float32 at UPMIX_CONFIG offset 4 + 4 * (index - 3); presence is byte 3 in 0.5 dB.
 UPMIX = [
     ("UPMIX_ENABLE", None), ("UPMIX_CENTER_MODE", None), ("UPMIX_SURROUND_MODE", None),
     ("UPMIX_STRENGTH", 42.0), ("UPMIX_CENTER_WIDTH", 33.0), ("UPMIX_THRESHOLD", 21.0),
@@ -125,6 +127,16 @@ def _get(dev, n, length=None):
 
 def _set(dev, n, data):
     return dev.pset(_name(n), data)
+
+
+def _upmix_cfg_disagreements(cfg, params):
+    """Fields where UPMIX_CONFIG and the per-parameter UPMIX_* reads describe different values."""
+    vals = [struct.unpack("<f", params[n])[0] for n, _v in UPMIX]
+    bad = [UPMIX[i][0] for i in range(3) if cfg[i] != int(vals[i])]
+    bad += [UPMIX[i][0] for i in range(3, 13) if struct.unpack_from("<f", cfg, 4 + 4 * (i - 3))[0] != vals[i]]
+    if struct.unpack_from("<b", cfg, 3)[0] != round(vals[13] * 2):
+        bad.append("UPMIX_PRESENCE")
+    return bad
 
 
 def _rp2350(profile):
@@ -201,29 +213,39 @@ def fx_page_matches_registry(dev, profile, chk):
 
 
 @test("paged_fx")
-def fx_reads_match_legacy(dev, profile, chk):
-    """Every FX GET is byte-identical to its 1.1.6 opcode (meters compared by shape)."""
+def fx_reads_shape(dev, profile, chk):
+    """Every FX GET has its table size and a well-formed value; UPMIX_CONFIG agrees with the UPMIX_* parameters."""
     _fx(dev)
-    for n, og, _os, kind, _v, _c in SCALARS:
-        chk.eq(_get(dev, n), dev.raw_get(og, len(ENC[kind](0))), f"FX.{n} == old 0x{og:02X}")
-    chk.eq(_get(dev, "SUBHARM_HEADROOM"), dev.raw_get(OP.GET_SUBHARM_HEADROOM, 4), "FX.SUBHARM_HEADROOM")
-    new, old = _get(dev, "SUBHARM_METER", 64), dev.raw_get(OP.GET_SUBHARM_METER, 64)
-    chk.eq(len(new), 2 * profile.num_output_channels, "SUBHARM_METER: one u16 per output")
-    chk.eq(len(new), len(old), "SUBHARM_METER length matches old 0x1F")
-    for i, (n, _v, _c) in enumerate(TUBE):
-        chk.eq(_get(dev, n), dev.raw_get(OP.GET_TUBE_PARAM, 4, wvalue=i), f"FX.{n} == old 0x3F index {i}")
+    for n, kind, _v, _c in SCALARS:
+        r = _get(dev, n)
+        if not chk.eq(len(r), len(ENC[kind](0)), f"FX.{n} length"):
+            continue
+        if kind == "bool":
+            chk.member(r[0], (0, 1), f"FX.{n}")
+        elif kind == "f32":
+            chk.ok(math.isfinite(struct.unpack("<f", r)[0]), f"FX.{n} finite: {r.hex()}")
+    head = _get(dev, "SUBHARM_HEADROOM")
+    chk.ok(len(head) == 4 and math.isfinite(struct.unpack("<f", head)[0]), f"FX.SUBHARM_HEADROOM: {head.hex()}")
+    chk.eq(len(_get(dev, "SUBHARM_METER", 64)), 2 * profile.num_output_channels, "SUBHARM_METER: one u16 per output")
+    for n, _v, _c in TUBE:
+        r = _get(dev, n)
+        chk.ok(len(r) == 4 and math.isfinite(struct.unpack("<f", r)[0]), f"FX.{n}: {r.hex()}")
     if _rp2350(profile):
-        chk.eq(_get(dev, "UPMIX_CONFIG"), dev.raw_get(OP.UPMIX_GET_CONFIG, 44), "FX.UPMIX_CONFIG")
-        for i, (n, _v) in enumerate(UPMIX):
-            chk.eq(_get(dev, n), dev.raw_get(OP.UPMIX_GET_PARAM, 4, wvalue=i), f"FX.{n} == old 0x4D index {i}")
-        new, old = _get(dev, "UPMIX_STATUS"), dev.raw_get(OP.UPMIX_GET_STATUS, 16)
-        chk.eq(new[:2], old[:2], "FX.UPMIX_STATUS active and parked reason")
-        chk.eq(len(new), 16, "UPMIX_STATUS length")
+        cfg = _get(dev, "UPMIX_CONFIG")
+        chk.eq(len(cfg), 44, "UPMIX_CONFIG length")
+        params = _save(dev, [n for n, _v in UPMIX])
+        chk.eq(_upmix_cfg_disagreements(cfg, params), [], "UPMIX_CONFIG fields == UPMIX_* parameters")
+        st = _get(dev, "UPMIX_STATUS")
+        chk.eq(len(st), 16, "UPMIX_STATUS length")
+        chk.member(st[0], (0, 1), "UPMIX_STATUS active")
+        chk.in_range(st[1], 0, 3, "UPMIX_STATUS parked reason")
+        chk.eq(st[0] == 1, st[1] == 0, f"active exactly when not parked: {st[:2].hex()}")
+        chk.eq(st[12:], bytes(4), "UPMIX_STATUS reserved")
 
 
 @test("paged_fx", mutating=True)
-def fx_scalars_roundtrip_both_ways(dev, profile, chk):
-    """Each scalar: new SET reads back through new and old GET, old SET reads back through new GET, clamps hold."""
+def fx_scalars_roundtrip(dev, profile, chk):
+    """Each scalar: two SETs read back exactly, clamps hold, and everything is restored."""
     _fx(dev)
     saved = _save(dev, SCALAR)
     guard = _guard_all(dev)
@@ -232,13 +254,12 @@ def fx_scalars_roundtrip_both_ways(dev, profile, chk):
         masks = [m for _e, m, _z in GUARDS.values() if m in SCALAR]
         order = masks + [n for n in SCALAR if n not in enables + masks] + enables
         for n in order:
-            _n, og, os_, kind, (a, b), clamps = SCALAR[n]
+            _n, kind, (a, b), clamps = SCALAR[n]
             enc = ENC[kind]
             chk.no_stall(lambda: _set(dev, n, enc(a)), f"FX.{n} SET")
-            chk.eq(_get(dev, n), enc(a), f"FX.{n} new GET after new SET")
-            chk.eq(dev.raw_get(og, len(enc(a))), enc(a), f"old 0x{og:02X} after new SET of FX.{n}")
-            dev.raw_set(os_, enc(b))
-            chk.eq(_get(dev, n), enc(b), f"FX.{n} new GET after old SET 0x{os_:02X}")
+            chk.eq(_get(dev, n), enc(a), f"FX.{n} GET after SET {a}")
+            _set(dev, n, enc(b))
+            chk.eq(_get(dev, n), enc(b), f"FX.{n} GET after SET {b}")
             for w, r in clamps:
                 chk.no_stall(lambda: _set(dev, n, enc(w)), f"FX.{n} SET {w}")
                 chk.eq(_get(dev, n), enc(r), f"FX.{n} {w} reads back {r}")
@@ -250,19 +271,18 @@ def fx_scalars_roundtrip_both_ways(dev, profile, chk):
 
 
 @test("paged_fx", mutating=True)
-def fx_tube_split_roundtrip(dev, profile, chk):
-    """Each old 0x3E/0x3F index reaches its own FX.TUBE_* command, both directions, with the same clamps."""
+def fx_tube_roundtrip(dev, profile, chk):
+    """Each FX.TUBE_* command holds its own value through two SETs, clamps, and is restored."""
     _fx(dev)
     names = [n for n, _v, _c in TUBE]
     saved = _save(dev, names)
     guard = _guard_all(dev)
     try:
-        for i, (n, (a, b), clamps) in enumerate(TUBE):
+        for n, (a, b), clamps in TUBE:
             chk.no_stall(lambda: _set(dev, n, _f32(a)), f"FX.{n} SET")
-            chk.eq(_get(dev, n), _f32(a), f"FX.{n} after new SET")
-            chk.eq(dev.raw_get(OP.GET_TUBE_PARAM, 4, wvalue=i), _f32(a), f"old 0x3F[{i}] after new SET of FX.{n}")
-            dev.raw_set(OP.SET_TUBE_PARAM, _f32(b), wvalue=i)
-            chk.eq(_get(dev, n), _f32(b), f"FX.{n} after old 0x3E[{i}]")
+            chk.eq(_get(dev, n), _f32(a), f"FX.{n} after SET {a}")
+            _set(dev, n, _f32(b))
+            chk.eq(_get(dev, n), _f32(b), f"FX.{n} after SET {b}")
             for w, r in clamps:
                 _set(dev, n, _f32(w))
                 chk.eq(_get(dev, n), _f32(r), f"FX.{n} {w} reads back {r}")
@@ -283,6 +303,32 @@ def fx_tube_nan_rejected(dev, profile, chk):
     before = _get(dev, "TUBE_DRIVE")
     _expect_stall(chk, lambda: _set(dev, "TUBE_DRIVE", _f32(math.nan)), "VC_ERR_VALUE", "NaN drive")
     chk.eq(_get(dev, "TUBE_DRIVE"), before, "drive unchanged")
+
+
+@test("paged_fx", mutating=True)
+def fx_nonfinite_refused(dev, profile, chk):
+    """Every tube parameter refuses NaN. Crossfeed, subharm, psybass and upmix floats refuse NaN and infinity."""
+    _fx(dev)
+    if not finite_rule(dev, profile, chk):
+        return
+    nan, inf = _f32(math.nan), _f32(math.inf)
+    for n, _v, _c in TUBE:
+        nonfinite_refused(chk, lambda: _get(dev, n), lambda pl: _set(dev, n, pl), [(nan, "NaN")], f"FX.{n}")
+    both = [(nan, "NaN"), (inf, "infinity")]
+    for n in [s[0] for s in SCALARS if s[1] == "f32"]:
+        nonfinite_refused(chk, lambda: _get(dev, n), lambda pl: _set(dev, n, pl), both, f"FX.{n}")
+    if not _rp2350(profile):
+        return
+    for n, v in UPMIX:
+        if v is not None:
+            nonfinite_refused(chk, lambda: _get(dev, n), lambda pl: _set(dev, n, pl), both, f"FX.{n}")
+    cfg = _get(dev, "UPMIX_CONFIG")
+    cases = []
+    for off, field in ((4, "strength"), (40, "decorr")):
+        for raw, label in both:
+            cases.append((cfg[:off] + raw + cfg[off + 4:], f"{label} {field}"))
+    nonfinite_refused(chk, lambda: _get(dev, "UPMIX_CONFIG"), lambda pl: _set(dev, "UPMIX_CONFIG", pl),
+                      cases, "FX.UPMIX_CONFIG")
 
 
 @test("paged_fx", mutating=True)
@@ -310,7 +356,7 @@ def fx_value_and_length_errors(dev, profile, chk):
 
 @test("paged_fx", mutating=True)
 def fx_upmix_roundtrip(dev, profile, chk):
-    """UPMIX_CONFIG and each old 0x4C/0x4D index round-trip through the new commands; enable is never changed."""
+    """UPMIX_CONFIG and each UPMIX_* parameter round-trip and stay in step with each other; enable is never changed."""
     _fx(dev)
     if not _rp2350(profile):
         _expect_stall(chk, lambda: _get(dev, "UPMIX_CONFIG", 44), "VC_ERR_UNKNOWN", "UPMIX_CONFIG on RP2040")
@@ -324,19 +370,21 @@ def fx_upmix_roundtrip(dev, profile, chk):
         mod = bytearray(cfg)
         struct.pack_into("<f", mod, 4, 37.0)            # strength_pct
         _set(dev, "UPMIX_CONFIG", bytes(mod))
-        chk.eq(dev.raw_get(OP.UPMIX_GET_CONFIG, 44), bytes(mod), "old 0x4B after new UPMIX_CONFIG")
+        chk.eq(_get(dev, "UPMIX_CONFIG"), bytes(mod), "UPMIX_CONFIG after SET")
         chk.eq(_get(dev, "UPMIX_STRENGTH"), _f32(37.0), "UPMIX_STRENGTH follows the config")
-        dev.raw_set(OP.UPMIX_SET_CONFIG, cfg)
-        chk.eq(_get(dev, "UPMIX_CONFIG"), cfg, "new GET after old 0x4A")
-        for i, (n, v) in enumerate(UPMIX):
+        _set(dev, "UPMIX_CONFIG", cfg)
+        chk.eq(_get(dev, "UPMIX_CONFIG"), cfg, "original config written back")
+        for n, v in UPMIX:
             if v is None:
                 chk.no_stall(lambda: _set(dev, n, saved[n]), f"FX.{n} rewrite of its own value")
                 chk.eq(_get(dev, n), saved[n], f"FX.{n} unchanged")
                 continue
             _set(dev, n, _f32(v))
-            chk.eq(dev.raw_get(OP.UPMIX_GET_PARAM, 4, wvalue=i), _f32(v), f"old 0x4D[{i}] after FX.{n}")
-            dev.raw_set(OP.UPMIX_SET_PARAM, _f32(v + 1.0), wvalue=i)
-            chk.eq(_get(dev, n), _f32(v + 1.0), f"FX.{n} after old 0x4C[{i}]")
+            chk.eq(_get(dev, n), _f32(v), f"FX.{n} after SET {v}")
+            chk.eq(_upmix_cfg_disagreements(_get(dev, "UPMIX_CONFIG"), _save(dev, names)), [],
+                   f"UPMIX_CONFIG follows FX.{n}")
+            _set(dev, n, _f32(v + 1.0))
+            chk.eq(_get(dev, n), _f32(v + 1.0), f"FX.{n} after SET {v + 1.0}")
             _set(dev, n, saved[n])
     finally:
         try:

@@ -8,7 +8,7 @@ FACTORY_RESET is only ever sent in shapes the dispatcher refuses before its hand
 import struct
 import time
 
-from ..device import OP, PagedStall, ProtocolError, Stall, Timeout
+from ..device import PagedStall, ProtocolError, Stall, Timeout
 from ..framework import Skip, test
 
 STORE = 0x02
@@ -89,29 +89,33 @@ def _paged_chunks(dev, size=CHUNK):
                     for off in range(0, BULK_LEN, size))
 
 
-def _legacy_chunks(dev, size=CHUNK):
-    return b"".join(dev.raw_get(OP.GET_ALL_PARAMS_CHUNK, min(size, BULK_LEN - off), off)
-                    for off in range(0, BULK_LEN, size))
-
-
 # --- Reads -------------------------------------------------------------------
 
 @test("paged_store")
-def reads_match_legacy(dev, profile, chk):
-    """DIRECTORY, PRESET_ACTIVE, STARTUP, OUTPUT_CONFIG_MODE and every PRESET_NAME equal their 1.1.6 reads."""
+def reads_consistent(dev, profile, chk):
+    """DIRECTORY fields are in range and agree with PRESET_ACTIVE, STARTUP, OUTPUT_CONFIG_MODE and MASTER_VOLUME_MODE."""
     _paged(dev)
-    chk.eq(dev.pget("STORE.DIRECTORY", length=7), dev.raw_get(OP.PRESET_GET_DIR, 7), "DIRECTORY == 0x95")
-    chk.eq(dev.pget("STORE.PRESET_ACTIVE", length=1), dev.raw_get(OP.PRESET_GET_ACTIVE, 1), "PRESET_ACTIVE == 0x9A")
-    chk.eq(dev.pget("STORE.STARTUP", length=2), dev.raw_get(OP.PRESET_GET_STARTUP, 3)[:2], "STARTUP == 0x97[:2]")
-    chk.eq(dev.pget("STORE.OUTPUT_CONFIG_MODE", length=1), dev.raw_get(OP.GET_OUTPUT_CONFIG_MODE, 1),
-           "OUTPUT_CONFIG_MODE == 0x99")
-    for slot in range(PRESET_SLOTS):
-        chk.eq(dev.pget("STORE.PRESET_NAME", slot, 32), dev.raw_get(OP.PRESET_GET_NAME, 32, slot),
-               f"PRESET_NAME {slot} == 0x93")
+    raw = dev.pget("STORE.DIRECTORY", length=7)
+    chk.eq(len(raw), 7, "DIRECTORY length")
     d = _dir(dev)
-    chk.eq(dev.raw_get(OP.PRESET_GET_STARTUP, 3)[2], d["active"], "last-active byte lives in DIRECTORY")
+    chk.eq(d["occupied"] >> PRESET_SLOTS, 0, "no occupied bit above slot 9")
     chk.member(d["startup_mode"], (0, 1), "startup mode")
     chk.in_range(d["default_slot"], 0, PRESET_SLOTS - 1, "default slot")
+    chk.in_range(d["active"], 0, PRESET_SLOTS - 1, "last-active slot")
+    chk.member(d["output_config_mode"], (0, 1), "output config mode")
+    chk.member(d["mv_mode"], (0, 1), "master volume mode")
+    chk.eq(dev.pget("STORE.PRESET_ACTIVE", length=1), bytes([d["active"]]), "PRESET_ACTIVE == DIRECTORY byte 4")
+    chk.eq(dev.pget("STORE.STARTUP", length=2), bytes([d["startup_mode"], d["default_slot"]]),
+           "STARTUP == DIRECTORY bytes 2-3")
+    chk.eq(dev.pget("STORE.OUTPUT_CONFIG_MODE", length=1), bytes([d["output_config_mode"]]),
+           "OUTPUT_CONFIG_MODE == DIRECTORY byte 5")
+    if 0x05 in dev.paged_commands():
+        chk.eq(dev.pget("ROUTE.MASTER_VOLUME_MODE", length=1), bytes([d["mv_mode"]]),
+               "ROUTE.MASTER_VOLUME_MODE == DIRECTORY byte 6")
+    for slot in range(PRESET_SLOTS):
+        name = dev.pget("STORE.PRESET_NAME", slot, 32)
+        chk.eq(len(name), 32, f"PRESET_NAME {slot} length")
+        chk.ok(b"\0" in name, f"PRESET_NAME {slot} is NUL-terminated: {name!r}")
 
 
 @test("paged_store")
@@ -166,32 +170,29 @@ def set_guards(dev, profile, chk):
 # --- Bulk parameters -------------------------------------------------------------
 
 @test("paged_store")
-def all_params_matches_legacy(dev, profile, chk):
-    """STORE.ALL_PARAMS equals 0xA0, and whole-struct reads assembled from paged or 0xA2 chunks equal it."""
+def all_params_reads_agree(dev, profile, chk):
+    """STORE.ALL_PARAMS has the profile's header, and whole-struct reads assembled from paged chunks equal it."""
     _paged(dev)
     for attempt in range(3):
         whole = _bulk(dev)
-        legacy = dev.raw_get(OP.GET_ALL_PARAMS, BULK_LEN)
         paged = _paged_chunks(dev)
         odd = _paged_chunks(dev, 1000)
-        old_chunks = _legacy_chunks(dev)
-        if whole == legacy == paged == odd == old_chunks:
+        if whole == paged == odd:
             break
         chk.note(f"bulk reads disagreed on attempt {attempt} (live change or another host)")
     chk.eq(len(whole), BULK_LEN, "ALL_PARAMS length")
-    chk.eq(whole, legacy, "ALL_PARAMS == 0xA0")
     chk.eq(paged, whole, "2048-byte paged chunks == ALL_PARAMS")
     chk.eq(odd, whole, "1000-byte paged chunks == ALL_PARAMS")
-    chk.eq(old_chunks, whole, "0xA2 chunks == ALL_PARAMS")
     fmt, plat, nch = struct.unpack_from("<BBB", whole)
     chk.eq((fmt, plat, nch), (profile.wire_format_version, profile.platform_id, profile.num_channels), "header")
+    chk.eq(struct.unpack_from("<H", whole, 6)[0], BULK_LEN, "header payload length")
     head = dev.pget("STORE.ALL_PARAMS_CHUNK", 0, 16)
     chk.eq(head, whole[:16], "a short offset-0 chunk is the struct prefix")
 
 
 @test("paged_store", mutating=True)
 def all_params_set_roundtrip(dev, profile, chk):
-    """A paged SET of a snapshot is a fixpoint, whole or chunked, through the new and the 0xA3 chunk paths."""
+    """A paged SET of a snapshot is a fixpoint, whole or chunked at 2048, 1000 and 64 bytes."""
     _paged(dev)
     a = _bulk(dev)
     dev.pset("STORE.ALL_PARAMS", a)
@@ -205,8 +206,8 @@ def all_params_set_roundtrip(dev, profile, chk):
                                                 for o in range(0, BULK_LEN, CHUNK)]),
             ("64-byte paged chunks", lambda: [dev.pset("STORE.ALL_PARAMS_CHUNK", b[o:o + 64], o)
                                               for o in range(0, BULK_LEN, 64)]),
-            ("0xA3 chunks", lambda: [dev.raw_set(OP.SET_ALL_PARAMS_CHUNK, b[o:o + CHUNK], o)
-                                     for o in range(0, BULK_LEN, CHUNK)])):
+            ("1000-byte paged chunks", lambda: [dev.pset("STORE.ALL_PARAMS_CHUNK", b[o:o + 1000], o)
+                                                for o in range(0, BULK_LEN, 1000)])):
         reenum = dev.reenumerations
         send()
         _settle(dev)
@@ -263,27 +264,27 @@ def chunk_errors(dev, profile, chk):
 
 
 @test("paged_store")
-def chunk_sessions_do_not_cross_paths(dev, profile, chk):
-    """A chunk session opened on one path (paged or 0xA2/0xA3) is torn down by a chunk request on the other."""
+def chunk_sessions_closed_by_other_requests(dev, profile, chk):
+    """Any request between two chunks ends the session, and a GET session never continues as a SET or back."""
     _paged(dev)
     whole = _bulk(dev)
     dev.pget("STORE.ALL_PARAMS_CHUNK", 0, CHUNK)
-    chk.stalls(lambda: dev.raw_get(OP.GET_ALL_PARAMS_CHUNK, CHUNK, CHUNK), "0xA2 does not continue a paged GET")
+    dev.pget("SYS.PLATFORM", length=7)
     _expect_stall(chk, lambda: dev.pget("STORE.ALL_PARAMS_CHUNK", CHUNK, CHUNK), "VC_ERR_STATE",
-                  "the paged GET session is gone after the 0xA2 request")
+                  "a GET session is gone after an unrelated request")
 
-    dev.raw_get(OP.GET_ALL_PARAMS_CHUNK, CHUNK, 0)
-    _expect_stall(chk, lambda: dev.pget("STORE.ALL_PARAMS_CHUNK", CHUNK, CHUNK), "VC_ERR_STATE",
-                  "a paged GET does not continue a 0xA2 session")
-    chk.stalls(lambda: dev.raw_get(OP.GET_ALL_PARAMS_CHUNK, CHUNK, CHUNK),
-               "the 0xA2 session is gone after the paged request")
+    dev.pget("STORE.ALL_PARAMS_CHUNK", 0, CHUNK)
+    _expect_stall(chk, lambda: dev.pset("STORE.ALL_PARAMS_CHUNK", whole[CHUNK:2 * CHUNK], CHUNK),
+                  "VC_ERR_STATE", "a SET does not continue a GET session")
 
     dev.pset("STORE.ALL_PARAMS_CHUNK", whole[:CHUNK], 0)
-    chk.stalls(lambda: dev.raw_set(OP.SET_ALL_PARAMS_CHUNK, whole[CHUNK:2 * CHUNK], CHUNK),
-               "0xA3 does not continue a paged SET")
-    dev.raw_set(OP.SET_ALL_PARAMS_CHUNK, whole[:CHUNK], 0)
+    _expect_stall(chk, lambda: dev.pget("STORE.ALL_PARAMS_CHUNK", CHUNK, CHUNK), "VC_ERR_STATE",
+                  "a GET does not continue a SET session")
+
+    dev.pset("STORE.ALL_PARAMS_CHUNK", whole[:CHUNK], 0)
+    dev.pget("SYS.PLATFORM", length=7)
     _expect_stall(chk, lambda: dev.pset("STORE.ALL_PARAMS_CHUNK", whole[CHUNK:2 * CHUNK], CHUNK),
-                  "VC_ERR_STATE", "a paged SET does not continue a 0xA3 session")
+                  "VC_ERR_STATE", "a SET session is gone after an unrelated request")
 
     chk.eq(_bulk(dev), whole, "no half-received chunked SET was applied")
     chk.eq(_paged_chunks(dev), whole, "a fresh paged session still reads the whole struct")
@@ -291,36 +292,57 @@ def chunk_sessions_do_not_cross_paths(dev, profile, chk):
 
 # --- Flash -------------------------------------------------------------------------
 
+def _occupied(dev, slot):
+    return (_ready(dev, lambda: _dir(dev))["occupied"] >> slot) & 1
+
+
+def _drop_scratch(dev, slot):
+    """Delete the scratch preset if a save reached flash; raise naming the slot if it will not go."""
+    dev.wait_ready()
+    _poll(lambda: _occupied(dev, slot), 1, timeout_s=1.0)   # a queued save may still be landing
+    if not _occupied(dev, slot):
+        return
+    dev.pset("STORE.PRESET_DELETE", b"", slot)
+    if not _poll(lambda: _occupied(dev, slot), 0):
+        raise AssertionError(f"scratch preset slot {slot} is still occupied after cleanup: delete it by hand")
+
+
 @test("paged_store", mutating=True, flash=6)
 def preset_lifecycle(dev, profile, chk):
-    """PRESET_SAVE, PRESET_LOAD and PRESET_DELETE on a scratch slot, seen through both protocols, then restored."""
+    """PRESET_SAVE, PRESET_LOAD and PRESET_DELETE on a scratch slot, tracked through DIRECTORY, then restored."""
     _paged(dev)
     scratch = _scratch_slot(dev)
     if scratch is None:
         raise Skip("every preset slot is occupied; no scratch slot to use")
     orig_active = dev.pget("STORE.PRESET_ACTIVE", length=1)[0]
+    saved = False
     try:
+        saved = True
         dev.pset("STORE.PRESET_SAVE", b"", scratch)
         chk.ok(_poll(lambda: _ready(dev, lambda: dev.pget("STORE.PRESET_ACTIVE", length=1))[0], scratch),
                "active became scratch after save")
-        chk.ok(_poll(lambda: (_ready(dev, lambda: _dir(dev))["occupied"] >> scratch) & 1, 1), "scratch occupied")
-        chk.eq(dev.raw_get(OP.PRESET_GET_DIR, 7), dev.pget("STORE.DIRECTORY", length=7), "0x95 agrees")
+        chk.ok(_poll(lambda: _occupied(dev, scratch), 1), "scratch occupied")
+        chk.eq(_dir(dev)["active"], scratch, "DIRECTORY last-active byte follows the save")
         dev.pset("STORE.PRESET_LOAD", b"", scratch)
         dev.wait_ready()
         chk.ok(_poll(lambda: _ready(dev, lambda: dev.pget("STORE.PRESET_ACTIVE", length=1))[0], scratch),
                "active is scratch after load")
         dev.pset("STORE.PRESET_DELETE", b"", scratch)
-        chk.ok(_poll(lambda: (_ready(dev, lambda: _dir(dev))["occupied"] >> scratch) & 1, 0), "scratch freed")
+        chk.ok(_poll(lambda: _occupied(dev, scratch), 0), "scratch freed")
     finally:
-        dev.pset("STORE.PRESET_LOAD", b"", orig_active)
-        dev.wait_ready()
+        try:
+            if saved:
+                _drop_scratch(dev, scratch)
+        finally:
+            dev.pset("STORE.PRESET_LOAD", b"", orig_active)
+            dev.wait_ready()
     chk.ok(_poll(lambda: _ready(dev, lambda: dev.pget("STORE.PRESET_ACTIVE", length=1))[0], orig_active),
            "original slot active again")
 
 
 @test("paged_store", mutating=True, flash=4)
 def preset_name_roundtrip(dev, profile, chk):
-    """PRESET_NAME on a scratch slot: paged and 0x94 writes, paged and 0x93 reads, 31-byte cap, restored."""
+    """PRESET_NAME on a scratch slot: SET persists, a GET reply is a valid SET payload, 31-byte cap, restored."""
     _paged(dev)
     scratch = _scratch_slot(dev)
     if scratch is None:
@@ -330,10 +352,10 @@ def preset_name_roundtrip(dev, profile, chk):
     try:
         dev.pset("STORE.PRESET_NAME", b"QA Paged", scratch)
         chk.ok(_poll(lambda: name().split(b"\x00", 1)[0], b"QA Paged"), "paged SET persisted")
-        chk.eq(dev.raw_get(OP.PRESET_GET_NAME, 32, scratch), name(), "0x93 agrees")
-        dev.pset("STORE.PRESET_NAME", name(), scratch)
-        dev.raw_set(OP.PRESET_SET_NAME, b"QA Legacy", scratch)
-        chk.ok(_poll(lambda: name().split(b"\x00", 1)[0], b"QA Legacy"), "0x94 SET, paged GET")
+        got = name()
+        dev.pset("STORE.PRESET_NAME", got, scratch)
+        dev.wait_ready()
+        chk.ok(_poll(name, got), "a GET reply is a valid SET payload")
         dev.pset("STORE.PRESET_NAME", b"P" * 32, scratch)
         chk.ok(_poll(name, b"P" * 31 + b"\x00"), "32-byte SET keeps 31 + NUL")
     finally:
@@ -344,7 +366,7 @@ def preset_name_roundtrip(dev, profile, chk):
 
 @test("paged_store", mutating=True, flash=3)
 def startup_roundtrip(dev, profile, chk):
-    """STARTUP {mode, slot} round-trips, agrees with 0x96/0x97 both ways, and is restored."""
+    """STARTUP {mode, slot} round-trips, shows in DIRECTORY bytes 2-3, and is restored."""
     _paged(dev)
     get = lambda: _ready(dev, lambda: dev.pget("STORE.STARTUP", length=2))  # noqa: E731
     orig = get()
@@ -352,9 +374,9 @@ def startup_roundtrip(dev, profile, chk):
     try:
         dev.pset("STORE.STARTUP", flipped)
         chk.ok(_poll(get, flipped), "paged SET persisted")
-        chk.eq(dev.raw_get(OP.PRESET_GET_STARTUP, 3)[:2], flipped, "0x97 agrees")
-        dev.raw_set(OP.PRESET_SET_STARTUP, orig)
-        chk.ok(_poll(get, orig), "0x96 SET, paged GET")
+        chk.eq(dev.pget("STORE.DIRECTORY", length=7)[2:4], flipped, "DIRECTORY bytes 2-3 agree")
+        dev.pset("STORE.STARTUP", orig)
+        chk.ok(_poll(get, orig), "paged SET back to the original")
         dev.pset("STORE.STARTUP", get())
         chk.ok(_poll(get, orig), "a GET reply is a valid SET payload")
     finally:
@@ -364,18 +386,18 @@ def startup_roundtrip(dev, profile, chk):
 
 @test("paged_store", mutating=True, flash=5)
 def output_config_mode_and_save(dev, profile, chk):
-    """OUTPUT_CONFIG_MODE round-trips {0,1}, stores 0 for other values, agrees with 0x98/0x99; SAVE leaves it alone."""
+    """OUTPUT_CONFIG_MODE round-trips {0,1}, stores 0 for other values, shows in DIRECTORY; SAVE leaves it alone."""
     _paged(dev)
     get = lambda: _ready(dev, lambda: dev.pget("STORE.OUTPUT_CONFIG_MODE", length=1))[0]  # noqa: E731
     orig = get()
     try:
         dev.pset("STORE.OUTPUT_CONFIG_MODE", b"\x01")
         chk.ok(_poll(get, 1), "mode 1")
-        chk.eq(dev.raw_get(OP.GET_OUTPUT_CONFIG_MODE, 1), b"\x01", "0x99 agrees")
+        chk.eq(_dir(dev)["output_config_mode"], 1, "DIRECTORY byte 5 agrees")
         dev.pset("STORE.OUTPUT_CONFIG_MODE", b"\x05")
-        chk.ok(_poll(get, 0), "mode 5 stores independent, as 0x98 did")
-        dev.raw_set(OP.SET_OUTPUT_CONFIG_MODE, b"\x01")
-        chk.ok(_poll(get, 1), "0x98 SET, paged GET")
+        chk.ok(_poll(get, 0), "mode 5 stores independent")
+        dev.pset("STORE.OUTPUT_CONFIG_MODE", b"\x01")
+        chk.ok(_poll(get, 1), "mode 1 again")
         dev.pset("STORE.OUTPUT_CONFIG_SAVE")
         dev.wait_ready()
         chk.ok(_poll(get, 1), "OUTPUT_CONFIG_SAVE leaves the mode alone")

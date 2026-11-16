@@ -8,14 +8,12 @@ Registry comparisons use Documentation/protocol/dspi_commands.json.
 import json
 import struct
 
-from ..device import (OP, PagedStall, ProtocolError, REGISTRY_REL, Stall, VC_CODES, _find_repo_file)
+from ..device import (PagedStall, ProtocolError, REGISTRY_REL, VC_CODES, _find_repo_file)
 from ..framework import Skip, test
 
 SYS = 0x01
 UNUSED_PAGE = 0xDF          # inside the reserved 0x80-0xDF block, never allocated
 NEVER_SEND = {"ENTER_BOOTLOADER", "FACTORY_RESET", "PRESET_SAVE", "PRESET_LOAD", "PRESET_DELETE"}
-LEGACY_TWINS = [("PLATFORM", "GET_PLATFORM", 7), ("SERIAL", "GET_SERIAL", 16),
-                ("BUILD_INFO", "GET_BUILD_INFO", 64), ("CORE1_MODE", "GET_CORE1_MODE", 1)]
 
 
 def _paged(dev):
@@ -162,18 +160,35 @@ def command_info_missing_command(dev, profile, chk):
 
 
 @test("paged_sys")
-def identity_matches_legacy(dev, profile, chk):
-    """SYS.PLATFORM / SERIAL / BUILD_INFO / CORE1_MODE are byte-identical to their 1.1.6 opcodes."""
+def identity_fields(dev, profile, chk):
+    """SYS.PLATFORM / SERIAL / BUILD_INFO / CORE1_MODE have their table sizes and agree with the profile."""
     _paged(dev)
-    for new, old, n in LEGACY_TWINS:
-        paged = dev.pget(f"SYS.{new}", length=n)
-        chk.eq(len(paged), n, f"SYS.{new} length")
-        try:
-            legacy = dev.raw_get(getattr(OP, old), n)
-        except Stall:
-            chk.note(f"page 0 no longer answers {old}: comparison skipped")
-            continue
-        chk.eq(paged, legacy, f"SYS.{new} == {old}")
+    plat = dev.pget("SYS.PLATFORM", length=7)
+    if chk.eq(len(plat), 7, "SYS.PLATFORM length") and profile is not None:
+        chk.eq((plat[0], plat[1], plat[3], plat[4], plat[5], plat[6]),
+               (profile.platform_id, profile.fw_major, profile.num_output_channels, profile.fw_minor,
+                profile.fw_patch, profile.fw_beta), "platform, version and output count match the profile")
+    # Byte 2 is the low byte of the nibble-packed (major << 8 | minor << 4 | patch) version.
+    chk.eq(plat[2], ((plat[4] << 4) | plat[5]) & 0xFF, "packed version byte")
+    serial = dev.pget("SYS.SERIAL", length=16)
+    chk.eq(len(serial), 16, "SYS.SERIAL length")
+    chk.ok(all(chr(b) in "0123456789ABCDEF" for b in serial), f"serial is 16 upper-case hex digits: {serial!r}")
+    try:
+        desc = dev.dev.serial_number
+    except Exception as e:  # noqa: BLE001
+        chk.note(f"USB serial string descriptor unreadable ({e}): comparison skipped")
+    else:
+        chk.eq(serial.decode("ascii", "replace"), desc, "SYS.SERIAL equals the USB serial string descriptor")
+    bi = dev.pget("SYS.BUILD_INFO", length=64)
+    chk.eq(len(bi), 64, "SYS.BUILD_INFO length")
+    describe, date = bi[:48].split(b"\0")[0], bi[48:].split(b"\0")[0]
+    chk.ok(describe and all(0x20 <= b < 0x7F for b in describe), f"git describe is printable ASCII: {describe!r}")
+    chk.ok(date and all(0x20 <= b < 0x7F for b in date), f"build date is printable ASCII: {date!r}")
+    if profile is not None and profile.build_info:
+        chk.eq(describe.decode("ascii", "replace"), profile.build_info, "git describe matches the profile")
+    core1 = dev.pget("SYS.CORE1_MODE", length=1)
+    chk.eq(len(core1), 1, "SYS.CORE1_MODE length")
+    chk.in_range(core1[0], 0, 2, "core 1 mode is IDLE, PDM or EQ_WORKER")
 
 
 @test("paged_sys")
@@ -260,27 +275,24 @@ def last_result_tracks_requests(dev, profile, chk):
 
 # --- Device name and telemetry (plan 5.1, 6.1) ---------------------------------
 
-# Old GET_STATUS selector -> (SYS command, struct format, offset, how the reads compare).
+# (SYS command, struct format, offset, field, how three successive reads compare).
 # "eq" must match, "up" only grows between reads, "down" only shrinks, "temp" is within 3 C.
-STATUS_FIELDS = {
-    3: ("SYS.PDM_STATS", "<I", 0, "up"), 4: ("SYS.PDM_STATS", "<I", 4, "up"),
-    5: ("SYS.PDM_STATS", "<I", 8, "up"), 6: ("SYS.PDM_STATS", "<I", 12, "up"),
-    8: ("SYS.SPDIF_TX_STATS", "<I", 0, "up"),
-    10: ("SYS.USB_AUDIO_STATUS", "<I", 0, "up"), 11: ("SYS.USB_AUDIO_STATUS", "<B", 12, "eq"),
-    12: ("SYS.USB_AUDIO_STATUS", "<B", 13, "eq"),
-    13: ("SYS.SYSTEM_STATUS", "<I", 0, "eq"), 14: ("SYS.SYSTEM_STATUS", "<H", 8, "eq"),
-    15: ("SYS.SYSTEM_STATUS", "<I", 4, "eq"), 16: ("SYS.SYSTEM_STATUS", "<h", 10, "temp"),
-    17: ("SYS.SPDIF_TX_STATS", "<I", 4, "up"), 18: ("SYS.SPDIF_TX_STATS", "<I", 8, "up"),
-    19: ("SYS.SPDIF_TX_STATS", "<I", 12, "up"), 20: ("SYS.SPDIF_TX_STATS", "<I", 16, "up"),
-    21: ("SYS.SPDIF_TX_STATS", "<I", 20, "up"), 22: ("SYS.USB_AUDIO_STATUS", "<I", 4, "up"),
-    26: ("SYS.PIPELINE_STATS", "<I", 0, "up"), 27: ("SYS.PIPELINE_STATS", "<I", 4, "up"),
-    28: ("SYS.PIPELINE_STATS", "<I", 8, "down"), 29: ("SYS.PIPELINE_STATS", "<I", 12, "up"),
-    30: ("SYS.USB_AUDIO_STATUS", "<I", 8, "up"), 31: ("SYS.PIPELINE_STATS", "<I", 16, "up"),
-}
+STATUS_FIELDS = [
+    ("SYS.PDM_STATS", "<I", 0, "ring overruns", "up"), ("SYS.PDM_STATS", "<I", 4, "ring underruns", "up"),
+    ("SYS.PDM_STATS", "<I", 8, "DMA overruns", "up"), ("SYS.PDM_STATS", "<I", 12, "DMA underruns", "up"),
+    ("SYS.USB_AUDIO_STATUS", "<I", 0, "packets", "up"), ("SYS.USB_AUDIO_STATUS", "<I", 4, "ring overruns", "up"),
+    ("SYS.USB_AUDIO_STATUS", "<I", 8, "worst packet gap", "up"), ("SYS.USB_AUDIO_STATUS", "<B", 12, "alt", "eq"),
+    ("SYS.USB_AUDIO_STATUS", "<B", 13, "mounted", "eq"),
+    ("SYS.SYSTEM_STATUS", "<I", 0, "clk_sys", "eq"), ("SYS.SYSTEM_STATUS", "<I", 4, "sample rate", "eq"),
+    ("SYS.SYSTEM_STATUS", "<H", 8, "core mV", "eq"), ("SYS.SYSTEM_STATUS", "<h", 10, "temperature", "temp"),
+    ("SYS.PIPELINE_STATS", "<I", 0, "ring underruns", "up"), ("SYS.PIPELINE_STATS", "<I", 4, "ring drops", "up"),
+    ("SYS.PIPELINE_STATS", "<I", 8, "min prewrite", "down"), ("SYS.PIPELINE_STATS", "<I", 12, "input gap", "up"),
+    ("SYS.PIPELINE_STATS", "<I", 16, "bg over budget", "up"),
+] + [("SYS.SPDIF_TX_STATS", "<I", 4 * i, f"starvations[{i - 2}]" if i > 1 else ("underruns", "starvations")[i],
+      "up") for i in range(6)]
 TELEMETRY = {"SYS.SYSTEM_STATUS": (16, (14, 16)), "SYS.USB_AUDIO_STATUS": (16, (14, 16)),
              "SYS.BUFFER_STATS": (44, None), "SYS.PIPELINE_STATS": (24, (20, 24)),
              "SYS.PDM_STATS": (16, None), "SYS.SPDIF_TX_STATS": (24, None)}
-_WIDTH_MASK = {"<B": 0xFF, "<H": 0xFFFF}
 
 
 def _has(dev, name):
@@ -297,23 +309,6 @@ def _need(dev, *names):
         raise Skip(f"firmware lacks {', '.join(missing)}")
 
 
-class _NoLegacy(Exception):
-    """Page 0 no longer answers the 1.1.6 opcode, so there is nothing to compare against."""
-
-
-def _old(fn):
-    try:
-        return fn()
-    except Stall as e:
-        raise _NoLegacy(str(e)) from None
-
-
-def _legacy_status(dev, sel, fmt):
-    raw = _old(lambda: dev.raw_get(OP.GET_STATUS, 4, sel))
-    v = struct.unpack("<i" if fmt in ("<h", "<i") else "<I", raw)[0]
-    return v & _WIDTH_MASK[fmt] if fmt in _WIDTH_MASK else v
-
-
 def _bracketed(kind, before, new, after):
     if kind == "eq":
         return before == new == after
@@ -325,37 +320,34 @@ def _bracketed(kind, before, new, after):
 
 
 @test("paged_sys")
-def telemetry_matches_get_status(dev, profile, chk):
-    """Every GET_STATUS selector that moved to a SYS telemetry struct reads the same source."""
-    _need(dev, *sorted({f[0] for f in STATUS_FIELDS.values()}))
-    try:
-        for sel, (name, fmt, off, kind) in STATUS_FIELDS.items():
-            for _ in range(3):
-                before = _legacy_status(dev, sel, fmt)
-                new = struct.unpack_from(fmt, dev.pget(name), off)[0]
-                after = _legacy_status(dev, sel, fmt)
-                if _bracketed(kind, before, new, after):
-                    break
-            chk.ok(_bracketed(kind, before, new, after),
-                   f"GET_STATUS {sel} vs {name}+{off}: old {before}, new {new}, old again {after} ({kind})")
-    except _NoLegacy:
-        chk.note("page 0 no longer answers GET_STATUS: comparison skipped")
+def telemetry_reads_coherent(dev, profile, chk):
+    """Telemetry counters never run backwards, fixed fields hold still and readings are physically plausible."""
+    names = sorted({f[0] for f in STATUS_FIELDS})
+    _need(dev, *names)
+    for _ in range(3):
+        reads = [{n: dev.pget(n) for n in names} for _ in range(3)]
+        vals = [[struct.unpack_from(fmt, r[n], off)[0] for r in reads] for n, fmt, off, _f, _k in STATUS_FIELDS]
+        if all(_bracketed(f[4], *v) for f, v in zip(STATUS_FIELDS, vals)):
+            break
+    for (name, _fmt, off, field, kind), v in zip(STATUS_FIELDS, vals):
+        chk.ok(_bracketed(kind, *v), f"{name}+{off} {field}: three reads {v} ({kind})")
+    st = reads[-1]["SYS.SYSTEM_STATUS"]
+    clk, rate, mv, temp = struct.unpack_from("<IIHh", st)
+    chk.in_range(clk, 100_000_000, 600_000_000, "clk_sys Hz")
+    chk.member(rate, (44100, 48000, 88200, 96000), "sample rate Hz")
+    chk.in_range(mv, 800, 1400, "core voltage mV")
+    chk.in_range(temp, -2000, 10000, "temperature centi-degrees")
+    usb = reads[-1]["SYS.USB_AUDIO_STATUS"]
+    chk.member(usb[13], (0, 1), "mounted flag")
 
 
 @test("paged_sys")
 def telemetry_cpu_loads(dev, profile, chk):
-    """SYS.SYSTEM_STATUS CPU bytes are loads, near the ones GET_STATUS 2 packs beside peak 4."""
+    """SYS.SYSTEM_STATUS CPU bytes are loads in percent."""
     _need(dev, "SYS.SYSTEM_STATUS")
     new = dev.pget("SYS.SYSTEM_STATUS")
     chk.in_range(new[12], 0, 100, "cpu0 load")
     chk.in_range(new[13], 0, 100, "cpu1 load")
-    try:
-        old = _old(lambda: dev.raw_get(OP.GET_STATUS, 4, 2))
-    except _NoLegacy:
-        chk.note("page 0 no longer answers GET_STATUS: comparison skipped")
-        return
-    chk.ok(abs(new[12] - old[2]) <= 20 and abs(new[13] - old[3]) <= 20,
-           f"loads near GET_STATUS 2: new {new[12]}/{new[13]}, old {old[2]}/{old[3]}")
 
 
 @test("paged_sys")
@@ -376,8 +368,8 @@ def telemetry_shapes_and_errors(dev, profile, chk):
 
 
 @test("paged_sys")
-def buffer_stats_matches_legacy(dev, profile, chk):
-    """SYS.BUFFER_STATS is the 0xB0 packet: same header, one sequence counter shared with 0xB0."""
+def buffer_stats_shape(dev, profile, chk):
+    """SYS.BUFFER_STATS: instance count, per-instance ranges, unused blocks zero, one sequence step per read."""
     _need(dev, "SYS.BUFFER_STATS")
     seq = lambda b: struct.unpack_from("<H", b, 2)[0]  # noqa: E731
     new = dev.pget("SYS.BUFFER_STATS", length=44)
@@ -394,17 +386,9 @@ def buffer_stats_matches_legacy(dev, profile, chk):
             chk.eq(new[base:base + 8], bytes(8), f"spdif[{i}] unused instance zero")
     if not new[1] & 0x01:
         chk.eq(new[36:44], bytes(8), "PDM block zero while PDM is off")
-    try:
-        old = _old(lambda: dev.raw_get(OP.GET_BUFFER_STATS, 44))
-        new = dev.pget("SYS.BUFFER_STATS", length=44)
-        old2 = _old(lambda: dev.raw_get(OP.GET_BUFFER_STATS, 44))
-    except _NoLegacy:
-        chk.note("page 0 no longer answers GET_BUFFER_STATS: comparison skipped")
-        return
-    chk.eq(new[0], old[0], "num_spdif == 0xB0")
-    chk.eq(new[1] & 0x01, old[1] & 0x01, "PDM active flag == 0xB0")
-    chk.ok(0 < (seq(new) - seq(old)) & 0xFFFF <= 3 and 0 < (seq(old2) - seq(new)) & 0xFFFF <= 3,
-           f"one sequence counter: 0xB0 {seq(old)}, SYS {seq(new)}, 0xB0 {seq(old2)}")
+    seqs = [seq(new)] + [seq(dev.pget("SYS.BUFFER_STATS", length=44)) for _ in range(3)]
+    chk.ok(all(0 < (b - a) & 0xFFFF <= 3 for a, b in zip(seqs, seqs[1:])),
+           f"each read advances the sequence counter: {seqs}")
 
 
 @test("paged_sys", mutating=True)
@@ -424,15 +408,11 @@ def stats_reset(dev, profile, chk):
         for i in range(data[0]):
             mn, mx = data[4 + i * 8 + 4], data[4 + i * 8 + 5]
             chk.ok(mn <= mx or (mn, mx) == (100, 0), f"spdif[{i}] watermarks coherent after reset ({mn}/{mx})")
-    try:
-        chk.eq(_old(lambda: dev.raw_get(OP.RESET_BUFFER_STATS, 1, 1)), b"\x01", "0xB1 still acks")
-    except _NoLegacy:
-        chk.note("page 0 no longer answers RESET_BUFFER_STATS")
 
 
 @test("paged_sys", mutating=True, flash=6)
 def device_name_roundtrip(dev, profile, chk):
-    """SYS.DEVICE_NAME round-trips, agrees with 0x56/0x57 both ways, keeps 31 bytes, refuses bad sizes and wValue."""
+    """SYS.DEVICE_NAME round-trips, keeps 31 bytes, refuses bad sizes and wValue."""
     _need(dev, "SYS.DEVICE_NAME")
     name = lambda: dev.pget("SYS.DEVICE_NAME", length=32)  # noqa: E731
     orig = name()
@@ -451,12 +431,6 @@ def device_name_roundtrip(dev, profile, chk):
         _expect_stall(chk, lambda: dev.pget("SYS.DEVICE_NAME", addr=1, length=32), "VC_ERR_ADDRESS",
                       "GET wValue 1")
         chk.eq(name(), b"C" * 31 + b"\x00", "refused SETs left the name alone")
-        try:
-            chk.eq(_old(lambda: dev.raw_get(OP.GET_DEVICE_NAME, 32)), name(), "paged SET, 0x57 GET")
-            _old(lambda: dev.raw_set(OP.SET_DEVICE_NAME, b"QA Legacy"))
-            chk.eq(name().split(b"\x00", 1)[0], b"QA Legacy", "0x56 SET, paged GET")
-        except _NoLegacy:
-            chk.note("page 0 no longer answers 0x56/0x57: comparison skipped")
     finally:
         dev.pset("SYS.DEVICE_NAME", orig.split(b"\x00", 1)[0] or b"\x00")
         dev.wait_ready()

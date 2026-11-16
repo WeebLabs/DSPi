@@ -1,15 +1,15 @@
 """
 Native paged tests for the FILTER page (plan section 5.6): BAND, BAND_BYPASS, EQ_BYPASS.
-
-Old opcodes are read with raw_get/raw_set so the A/B comparison never goes through the
-translation layer. Band writes are applied by the main loop, so readback polls briefly.
+Band writes are applied by the main loop, so readback polls briefly.
 """
 
+import math
 import struct
 import time
 
-from ..device import OP, PagedStall, Stall
+from ..device import PagedStall
 from ..framework import Skip, test
+from .paged_route import finite_rule, nonfinite_refused
 from .paged_sys import _expect_stall, _paged
 
 FILTER = 0x06
@@ -38,13 +38,6 @@ def _valid(profile, ch, band):
 
 def _addr(ch, band):
     return (ch << 8) | band
-
-
-def _old_band(dev, ch, band):
-    """The 16-byte BAND layout assembled from the six 1.1.6 GET_EQ_PARAM scalars."""
-    p = [dev.raw_get(OP.GET_EQ_PARAM, 4, (ch << 8) | (band << 3) | i) for i in range(6)]
-    t, byp, qp = (struct.unpack("<I", p[i])[0] for i in (0, 4, 5))
-    return struct.pack("<BBH", t & 0xFF, byp & 0xFF, qp & 0xFFFF) + p[1] + p[2] + p[3]
 
 
 def _band_set(dev, ch, band, payload, retries=20):
@@ -77,34 +70,32 @@ def _sample_bands(profile):
 
 
 @test("paged_filter")
-def band_get_parity_all(dev, profile, chk):
-    """BAND equals the six GET_EQ_PARAM scalars on every channel and band 0-31; refused ones are VC_ERR_ADDRESS."""
+def band_get_all(dev, profile, chk):
+    """Every valid band reads 16 bytes of a well-formed band whose bypass byte equals BAND_BYPASS; the rest are VC_ERR_ADDRESS."""
     _page(dev)
     bad = 0
     for ch in range(profile.num_channels):
         for band in range(32):
             if _valid(profile, ch, band):
-                new = dev.pget("FILTER.BAND", _addr(ch, band))
-                old = _old_band(dev, ch, band)
-                if new != old:
+                r = dev.pget("FILTER.BAND", _addr(ch, band))
+                byp = dev.pget("FILTER.BAND_BYPASS", _addr(ch, band))
+                t, b, _qp, f, q, g = struct.unpack(BAND_FMT, r) if len(r) == 16 else (None,) * 6
+                types_ok = t is not None and (t < 32 if band < XOVER_BASE else (t == 0 or 32 <= t < 64))
+                ok = (types_ok and b in (0, 1) and byp == bytes([b])
+                      and all(math.isfinite(v) for v in (f, q, g)))
+                if not ok:
                     bad += 1
                     if bad <= 4:
-                        chk.ok(False, f"ch{ch} band{band}: paged {new.hex()} != legacy {old.hex()}")
-            else:
-                try:
-                    dev.raw_get(OP.GET_EQ_PARAM, 4, (ch << 8) | (band << 3))
-                    chk.ok(False, f"legacy GET_EQ_PARAM ch{ch} band{band} answered; expected STALL")
-                except Stall:
-                    pass
-                if band in (profile.band_ceiling, XOVER_BASE - 1, XOVER_BASE, XOVER_BASE + XOVER_COUNT):
-                    _expect_stall(chk, lambda: dev.pget("FILTER.BAND", _addr(ch, band)), "VC_ERR_ADDRESS",
-                                  f"BAND ch{ch} band{band}")
-    chk.eq(bad, 0, "BAND mismatches against GET_EQ_PARAM")
+                        chk.ok(False, f"ch{ch} band{band}: BAND {r.hex()} BAND_BYPASS {byp.hex()}")
+            elif band in (profile.band_ceiling, XOVER_BASE - 1, XOVER_BASE, XOVER_BASE + XOVER_COUNT):
+                _expect_stall(chk, lambda: dev.pget("FILTER.BAND", _addr(ch, band)), "VC_ERR_ADDRESS",
+                              f"BAND ch{ch} band{band}")
+    chk.eq(bad, 0, "malformed bands or BAND/BAND_BYPASS disagreements")
 
 
 @test("paged_filter", mutating=True)
 def band_set_roundtrip(dev, profile, chk):
-    """BAND SET reads back through BAND and GET_EQ_PARAM; a legacy 18-byte write reads back through BAND."""
+    """BAND SET reads back exactly (crossover bands read qp 0) and BAND_BYPASS follows the bypass byte."""
     _page(dev)
     saved = {cb: dev.pget("FILTER.BAND", _addr(*cb)) for cb in _sample_bands(profile)}
     try:
@@ -116,17 +107,14 @@ def band_set_roundtrip(dev, profile, chk):
             else:
                 want = struct.pack(BAND_FMT, LR4_HP, 0, 0, 20.0 + i, 0.707, 0.0)
             _band_set(dev, ch, band, want)
-            chk.eq(_wait_band(dev, ch, band, want), want, f"paged readback ch{ch} band{band}")
-            chk.eq(_old_band(dev, ch, band), want, f"legacy readback ch{ch} band{band}")
+            chk.eq(_wait_band(dev, ch, band, want), want, f"readback ch{ch} band{band}")
+            chk.eq(dev.pget("FILTER.BAND_BYPASS", _addr(ch, band)), b"\x00", f"BAND_BYPASS ch{ch} band{band} clear")
 
             t = PEAKING if peq else LR4_HP
-            pkt = struct.pack("<BBBBfff", ch, band, t, 1, 1000.0 + i, 1.5, -3.0 - i)
-            dev.raw_set(OP.SET_EQ_PARAM, pkt + struct.pack("<H", 123))
+            _band_set(dev, ch, band, struct.pack(BAND_FMT, t, 1, 123, 1000.0 + i, 1.5, -3.0 - i))
             want = struct.pack(BAND_FMT, t, 1, 123 if peq else 0, 1000.0 + i, 1.5, -3.0 - i)
-            chk.eq(_wait_band(dev, ch, band, want), want, f"legacy 18-byte write, paged read ch{ch} band{band}")
-            # A 16-byte legacy write keeps the stored qp.
-            dev.raw_set(OP.SET_EQ_PARAM, pkt)
-            chk.eq(_wait_band(dev, ch, band, want), want, f"legacy 16-byte write keeps qp ch{ch} band{band}")
+            chk.eq(_wait_band(dev, ch, band, want), want, f"second write ch{ch} band{band}")
+            chk.eq(dev.pget("FILTER.BAND_BYPASS", _addr(ch, band)), b"\x01", f"BAND_BYPASS ch{ch} band{band} set")
     finally:
         for (ch, band), raw in saved.items():
             _band_set(dev, ch, band, raw)
@@ -175,24 +163,9 @@ def band_errors(dev, profile, chk):
     _expect_stall(chk, lambda: dev.pget("FILTER.EQ_BYPASS", 1), "VC_ERR_ADDRESS", "EQ_BYPASS at wValue 1")
 
 
-@test("paged_filter")
-def band_bypass_get_parity_all(dev, profile, chk):
-    """BAND_BYPASS equals GET_BAND_BYPASS on every valid channel and band."""
-    _page(dev)
-    bad = 0
-    for ch in range(profile.num_channels):
-        for band in range(XOVER_BASE + XOVER_COUNT):
-            if not _valid(profile, ch, band):
-                continue
-            new = dev.pget("FILTER.BAND_BYPASS", _addr(ch, band))
-            old = dev.raw_get(OP.GET_BAND_BYPASS, 1, _addr(ch, band))
-            bad += new != old
-    chk.eq(bad, 0, "BAND_BYPASS mismatches against GET_BAND_BYPASS")
-
-
 @test("paged_filter", mutating=True)
 def band_bypass_roundtrip(dev, profile, chk):
-    """BAND_BYPASS SET keeps the rest of the band; legacy SET_BAND_BYPASS reads back through the paged GET."""
+    """BAND_BYPASS SET normalises to 0 or 1, keeps the rest of the band and reads back through both GETs."""
     _page(dev)
     n_in = profile.num_input_channels
     for ch, band in ((2 % profile.num_channels, 2), (n_in, XOVER_BASE + 1)):
@@ -213,11 +186,7 @@ def band_bypass_roundtrip(dev, profile, chk):
                         time.sleep(0.01)
                 exp = base[:1] + bytes([want]) + base[2:]
                 chk.eq(_wait_band(dev, ch, band, exp), exp, f"ch{ch} band{band} bypass 0x{byte:02X}, rest kept")
-                chk.eq(dev.raw_get(OP.GET_BAND_BYPASS, 1, _addr(ch, band)), bytes([want]), "legacy readback")
-            dev.raw_set(OP.SET_BAND_BYPASS, b"\x01", _addr(ch, band))
-            exp = base[:1] + b"\x01" + base[2:]
-            chk.eq(_wait_band(dev, ch, band, exp), exp, f"ch{ch} band{band} legacy write, paged read")
-            chk.eq(dev.pget("FILTER.BAND_BYPASS", _addr(ch, band)), b"\x01", "BAND_BYPASS after legacy write")
+                chk.eq(dev.pget("FILTER.BAND_BYPASS", _addr(ch, band)), bytes([want]), "BAND_BYPASS readback")
         finally:
             _band_set(dev, ch, band, saved)
             _wait_band(dev, ch, band, saved)
@@ -225,16 +194,37 @@ def band_bypass_roundtrip(dev, profile, chk):
 
 @test("paged_filter", mutating=True)
 def eq_bypass_roundtrip(dev, profile, chk):
-    """EQ_BYPASS matches GET_BYPASS, non-zero bypasses, and the legacy SET reads back through it."""
+    """EQ_BYPASS reads 0 or 1, non-zero bypasses, and the GET reply is a valid SET payload."""
     _page(dev)
     orig = dev.pget("FILTER.EQ_BYPASS")
-    chk.eq(orig, dev.raw_get(OP.GET_BYPASS, 1), "parity")
+    chk.member(orig, (b"\x00", b"\x01"), "current value")
     try:
         for byte, want in ((1, 1), (0, 0), (0xFF, 1), (0, 0)):
             dev.pset("FILTER.EQ_BYPASS", bytes([byte]))
-            chk.eq(dev.pget("FILTER.EQ_BYPASS"), bytes([want]), f"paged 0x{byte:02X}")
-            chk.eq(dev.raw_get(OP.GET_BYPASS, 1), bytes([want]), f"legacy readback 0x{byte:02X}")
-        dev.raw_set(OP.SET_BYPASS, b"\x01")
-        chk.eq(dev.pget("FILTER.EQ_BYPASS"), b"\x01", "legacy write, paged read")
+            chk.eq(dev.pget("FILTER.EQ_BYPASS"), bytes([want]), f"0x{byte:02X}")
+        dev.pset("FILTER.EQ_BYPASS", b"\x01")
+        dev.pset("FILTER.EQ_BYPASS", dev.pget("FILTER.EQ_BYPASS"))
+        chk.eq(dev.pget("FILTER.EQ_BYPASS"), b"\x01", "GET reply written back unchanged")
     finally:
         dev.pset("FILTER.EQ_BYPASS", orig)
+
+
+@test("paged_filter", mutating=True)
+def band_nonfinite_refused(dev, profile, chk):
+    """A NaN or infinite freq, Q or gain in a BAND SET is VC_ERR_VALUE and the band is unchanged."""
+    _page(dev)
+    if not finite_rule(dev, profile, chk):
+        return
+
+    def get(a):
+        time.sleep(0.05)   # a wrongly accepted write would land on the deferred apply
+        return dev.pget("FILTER.BAND", a)
+
+    for ch, band in ((0, 0), (profile.num_input_channels, XOVER_BASE)):
+        a = _addr(ch, band)
+        cur = dev.pget("FILTER.BAND", a)
+        cases = []
+        for off, field in ((4, "freq"), (8, "Q"), (12, "gain")):
+            for v, label in ((math.nan, "NaN"), (math.inf, "infinity")):
+                cases.append((cur[:off] + struct.pack("<f", v) + cur[off + 4:], f"{label} {field}"))
+        nonfinite_refused(chk, lambda: get(a), lambda pl: _band_set(dev, ch, band, pl), cases, f"ch{ch} band{band}")

@@ -19,7 +19,7 @@ typedef enum {
     SPDIF_INPUT_RELOCKING  = 3,   // Signal lost, waiting for re-lock
 } SpdifInputState;
 
-// SPDIF RX status packet (returned by REQ_GET_SPDIF_RX_STATUS, 16 bytes)
+// SPDIF RX status packet (INPUT.SPDIF_RX_STATUS reply, 16 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t  state;              // SpdifInputState enum
     uint8_t  input_source;       // Current active InputSource enum

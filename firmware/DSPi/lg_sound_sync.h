@@ -43,11 +43,11 @@
  * source of truth.  This build defaults the feature ON, so LG TV users
  * get Sound Sync without any setup; a pre-V14 user preset loaded after
  * firmware update will also default to ON.  Disabling per-preset still
- * works via the vendor command + REQ_SAVE_PRESET. */
+ * works via the vendor command + STORE.PRESET_SAVE. */
 #define LG_SOUND_SYNC_DEFAULT_ENABLED  1
 
 /*
- * Aggregate runtime status returned by REQ_GET_LG_SOUND_SYNC_STATUS and
+ * Aggregate runtime status returned by INPUT.LG_SOUND_SYNC_STATUS and
  * mirrored in WireBulkParams.lg_sound_sync (when the wire format is
  * extended in Phase 4 of the implementation plan).
  *
@@ -56,7 +56,7 @@
  */
 typedef struct __attribute__((packed)) {
     uint8_t enabled;        /* User-controlled gate (0 = off, 1 = on).
-                             * Per-preset; persists with REQ_SAVE_PRESET. */
+                             * Per-preset; persists with STORE.PRESET_SAVE. */
     uint8_t present;        /* Detection state (0 = absent, 1 = present).
                              * Read-only — set by the detection state
                              * machine.  Goes 1 only after the signature
@@ -91,7 +91,7 @@ void lg_sound_sync_tick(void);
  * (when transitioning enabled→disabled while present) demotes to absent
  * + restores host volume.  Pushes a PARAM_CHANGED notification on the
  * `enabled` field of WireLgSoundSync.  Does NOT write flash — flash
- * persistence happens on REQ_SAVE_PRESET. */
+ * persistence happens on STORE.PRESET_SAVE. */
 void lg_sound_sync_set_enabled(bool en);
 
 /* Read the live enable flag. */
@@ -117,8 +117,8 @@ void lg_sound_sync_on_preset_loaded(void);
 /* Invalidate the internal "last applied vol_index" coalesce cache so the
  * next LG poll unconditionally re-applies its decoded value, even if it
  * matches what the cache last saw.  Called by any other owner of vol_mul
- * (REQ_SET_USER_VOLUME via update_user_volume()) that bypasses LG —
- * without this, a vendor write that happens to match the LG-cached
+ * (ROUTE.USER_VOLUME via update_user_volume()) that bypasses LG.
+ * Without this, a vendor write that happens to match the LG-cached
  * vol_index would leave the vendor value in place rather than letting
  * LG reassert ownership on its next poll.  Cheap (single int store);
  * safe to call from any main-thread context. */

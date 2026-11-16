@@ -7,7 +7,7 @@
  * Two clock modes (adat_clock_mode, audio_input.h):
  *   MASTER: the incoming stream is locked to our own clock domain (the far
  *           end syncs to DSPi's ADAT output). No rate detection, no servo;
- *           the device rate authority is REQ_SET_INPUT_RATE, as in I2S
+ *           the device rate authority is INPUT.I2S_RX_RATE, as in I2S
  *           master mode. Above 48 kHz the input parks with rate_ok = false.
  *   SLAVE:  external gear owns the clock. The wire rate is acquired by
  *           probing the exact 48/44.1 kHz decoder timings and requiring a
@@ -40,7 +40,7 @@ typedef enum {
     ADAT_INPUT_RELOCKING = 4,   // signal or rate lost; output muted
 } AdatInputState;
 
-// Wire status packet for REQ_GET_ADAT_INPUT_STATUS (20 bytes)
+// Wire status packet for INPUT.ADAT_RX_STATUS (20 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t  state;          // AdatInputState
     uint8_t  clock_mode;     // live adat_clock_mode (0 master / 1 slave)

@@ -136,7 +136,7 @@ def main(argv=None):
 
     profile = build_profile(dev)
     profile.stress_iters = args.stress
-    print(f"Device: {profile.summary()}")
+    print(f"Device: {profile.summary()} | protocol {dev.protocol}")
     print(f"Running {len(cases)} tests"
           + (f" in groups {sorted(groups)}" if groups else "")
           + (" | flash ENABLED" if args.allow_flash else " | flash disabled")

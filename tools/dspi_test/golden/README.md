@@ -83,7 +83,7 @@ listed under "intended" with its reason and is not counted. A plain `compare` ig
 - `SIGGEN_CONTROL` start: it would play a sweep on the outputs.
 - Later-offset `GET_ALL_PARAMS_CHUNK` reads: any other host's request tears the chunk session down.
 - `GET_STATUS` `wValue` 64 and up: loop-profiler builds treat some of them as commands.
-- The bench-only `0x4F` wIndex echo.
+- Request `0x4F`: only a Phase 0 bench build answered it, and that build option has been removed.
 
 The siggen config cannot be put back to its boot value (all zero), because `SIGGEN_SET_CONFIG`
 rejects it. After the first run following a boot it is left at a 1 kHz, -20 dBFS sine, staged and

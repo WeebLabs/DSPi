@@ -6,7 +6,7 @@ semantics:
 
   * Deferred-operation barriers.  A SET arms a pending flag and NO-OPS when the
     request equals the APPLIED state; the main loop applies it later
-    (vendor_commands.c REQ_SET_OUTPUT_TYPE, main.c process_type_switches).
+    (vendor/vc_page_output.c output_type_set, main.c process_type_switches).
     Test 3 deliberately reproduces the pre-barrier bug, so a regression that
     reintroduces fire-and-assume sequencing shows up here rather than as an
     intermittent hardware failure.
@@ -666,7 +666,13 @@ class FakePagedFirmware:
         self._ro("SYS.PIPELINE_STATS", struct.pack("<IIIIII", 31, 32, 33, 34, 35, 0))
         self._rw("SYS.STATS_RESET", 1, check=lambda a, d: _VC["VC_ERR_VALUE"] if d[0] & 0xFE else 0)
         self.cmds[self._id("SYS.STATS_RESET")].glen = None   # SET only
-        self._ro("SYS.BUFFER_STATS", bytes([4, 0, 1, 0]) + bytes(40))
+        self.buffer_stats_seq = 0
+
+        def buffer_stats(c, a):
+            # The firmware bumps the sequence (bytes 2-3) on every read.
+            self.buffer_stats_seq = (self.buffer_stats_seq + 1) & 0xFFFF
+            return bytes([4, 0]) + struct.pack("<H", self.buffer_stats_seq) + bytes(40)
+        self.add("SYS.BUFFER_STATS", 44, None, _NONE, get=buffer_stats)
 
         def device_name(c, a, d):
             self.store[(c.cid, a)] = (bytes(d[:31]) if d[0] else b"").ljust(32, b"\0")
@@ -812,6 +818,9 @@ class FakePagedFirmware:
             self.page0_log.append(("IN" if is_get else "OUT", req, wvalue))
             if self.legacy:
                 return b"\xa5" * data_or_len if is_get else len(data_or_len)
+            if is_get and req == 0x01 and windex == 7:
+                return (b"\x0a\x00\x00\x00" + b"WINUSB\0\0" + bytes(64))[:data_or_len]
+            self.last = (req, 1 if is_get else 0, _VC["VC_ERR_UNKNOWN"], wvalue)
             raise _usbcore.USBError("Pipe error", errno=32)
         self.paged_hits += 1
         if not self.paged:
@@ -1113,6 +1122,67 @@ LM._MAP["default"], saved = bad, LM._MAP["default"]
 errs, _ = LM.check()
 LM._MAP["default"] = saved
 check(any("malformed use" in e for e in errs), "--check rejects a use without a direction")
+
+print("P8. default protocol, hybrid without page 0, and the page 0 walk guard")
+import os as _os
+_env = _os.environ.pop("DSPI_TEST_PROTOCOL", None)
+try:
+    fw = FakePagedFirmware()
+    dv = D.DspiDevice(usb_dev=fw)
+    check(dv.protocol == "translate" and dv.protocol_auto, f"auto picks translate on paged firmware ({dv.protocol})")
+    fw = FakePagedFirmware(paged=False, legacy=True)
+    check(D.DspiDevice(usb_dev=fw).protocol == "old" and fw.page0_hits == 0,
+          "auto picks old where PROTOCOL_INFO STALLs, and the probe sends nothing to page 0")
+    _os.environ["DSPI_TEST_PROTOCOL"] = "hybrid"
+    check(D.DspiDevice(usb_dev=FakePagedFirmware()).protocol == "hybrid", "DSPI_TEST_PROTOCOL overrides auto")
+    check(D.DspiDevice(protocol="old", usb_dev=FakePagedFirmware()).protocol == "old", "argument beats the variable")
+finally:
+    _os.environ.pop("DSPI_TEST_PROTOCOL", None)
+    if _env is not None:
+        _os.environ["DSPI_TEST_PROTOCOL"] = _env
+check(isinstance(OP.GET_PLATFORM, int) and D.load_opcodes() == {},
+      "config.h has no REQ_ defines, so OP comes from golden/legacy_opcodes.json")
+
+fw = FakePagedFirmware()
+dv = D.DspiDevice(protocol="hybrid", usb_dev=fw, registry=fw.registry())
+dv.set_f32(OP.SET_OUTPUT_GAIN, -2.5, wvalue=1)
+check(dv.get_f32(OP.GET_OUTPUT_GAIN, 1) == -2.5 and fw.page0_hits == 0, "hybrid: present targets never probe page 0")
+try:
+    dv.get(OP.GET_LOUDNESS, 1)
+    check(False, "hybrid without page 0: a missing target must be refused by the device")
+except D.PagedStall as s:
+    check(s.result_name == "VC_ERR_UNKNOWN" and fw.page0_hits == 1,
+          f"hybrid without page 0 translates a missing target (one page 0 probe, {fw.page0_hits})")
+for what, fn in (("IN", lambda: dv.get(0x4F, 4)), ("OUT", lambda: dv.set(0x01, b"\x01"))):
+    try:
+        fn()
+        check(False, f"hybrid without page 0: unmapped {what} opcode must raise")
+    except D.UnmappedRequest:
+        check(fw.page0_hits == 1, f"unmapped {what} opcode raises UnmappedRequest, nothing sent to page 0")
+
+from tools.dspi_test.tests import paged_page0 as PG
+v117 = bytes([1, 1, 0x17, 9, 1, 7, 1])
+for label, kw, plat, hits in (("1.1.6 firmware", dict(paged=False, legacy=True), None, 0),
+                              ("paged build that still answers page 0", dict(legacy=True), v117, 1),
+                              ("paged firmware reporting 1.1.6", {}, None, 0)):
+    fw = FakePagedFirmware(**kw)
+    if plat:
+        fw._ro("SYS.PLATFORM", plat)
+    dv = D.DspiDevice(protocol="translate", usb_dev=fw, registry=fw.registry())
+    try:
+        PG.page0_walk_all_stall(dv, None, Check())
+        check(False, f"page 0 walk must refuse {label}")
+    except _Skip:
+        check(fw.page0_hits == hits, f"page 0 walk refuses {label} ({fw.page0_hits} page 0 requests sent)")
+fw = FakePagedFirmware()
+fw._ro("SYS.PLATFORM", v117)
+dv = D.DspiDevice(protocol="translate", usb_dev=fw, registry=fw.registry())
+for fn in (PG.ms_os20_descriptor_served, PG.page0_walk_all_stall):
+    c = Check()
+    fn(dv, None, c)
+    check(not c.failures, f"paged_page0.{fn.__name__} passes on the flipped fake ({c.failures[:2]})")
+check(fw.page0_hits == len(PG._plan()) + 2, f"walk sent every planned request ({fw.page0_hits})")
+check(len(PG._plan()) == 2304 and all(r[2] != 7 for r in PG._plan()), "2,304 requests, MS OS 2.0 not among them")
 
 print("34. envelope alignment finds a burst at a frequency the reference lacks")
 if A.np is None:

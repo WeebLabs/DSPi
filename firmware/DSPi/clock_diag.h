@@ -19,7 +19,7 @@
 #include <stdint.h>
 
 // Latched once-per-second snapshot of every CLKDIAG field, for the read-only
-// REQ_GET_CLOCK_DIAG vendor command (no console backend exists in this build).
+// DIAG.CLOCK_DIAG vendor command (no console backend exists in this build).
 // Packed, little-endian, decoded host-side (scratchpad/clkdiag_poll.py).  ppm
 // fields are centi-ppm (ppm*100); frequencies flagged _mhz are milli-Hz
 // (Hz*1000).  Per-slot arrays are sized NUM_SPDIF_INSTANCES; num_slots reports

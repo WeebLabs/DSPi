@@ -13,7 +13,7 @@
 // when the rate returns.  See Documentation/Features/adat_output_spec.md.
 // ----------------------------------------------------------------------------
 
-// Returned by REQ_GET_ADAT_STATUS (8 bytes, packed).
+// OUTPUT.ADAT_TX_STATUS reply (8 bytes, packed).
 typedef struct __attribute__((packed)) {
     uint8_t  enabled;       // configured enable (persisted intent)
     uint8_t  active;        // stream currently running
@@ -42,7 +42,7 @@ uint8_t adat_output_pin(void);
 bool    adat_output_is_active(void);
 
 // Restore-path acceptability check for the ADAT data GPIO (full ownership
-// check; ADAT's own claim never blocks).  Defined in vendor_commands.c.
+// check; ADAT's own claim never blocks).  Defined in vendor/vc_pins.c.
 bool adat_pin_acceptable(uint8_t pin);
 
 // Rate policy: record the new rate, stop the stream if it left 44.1/48 kHz.

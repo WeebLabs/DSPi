@@ -1,32 +1,29 @@
 {
-  "generated": "2026-07-05",
-  "git_head": "556ffc3",
-  "note": "copy_to_ram baseline before XIP migration",
+  "generated": "2026-11-16",
+  "git_head": "518298a",
+  "note": "XIP build after the vendor protocol flip (firmware 1.1.7 beta 1, uncommitted on top of git_head); ram_image_bytes is .data",
   "rp2040": {
-    "ram_image_bytes": 108692,
-    "time_critical_bytes": 17954,
-    "bss_bytes": 134932,
-    "free_ram_bytes": 10476,
-    "uf2_bytes": 287744,
-    "xip_ctrl_text_bytes": 34456,
+    "ram_image_bytes": 70088,
+    "bss_bytes": 115048,
+    "free_ram_bytes": 58384,
+    "uf2_bytes": 558592,
     "elf_size_totals": {
-      "text": 147928,
+      "text": 283252,
       "data": 0,
-      "bss": 137172,
-      "dec": 285100
+      "bss": 133672,
+      "dec": 416924
     }
   },
   "rp2350": {
-    "ram_image_bytes": 147332,
-    "time_critical_bytes": 23152,
-    "bss_bytes": 291052,
-    "free_ram_bytes": 75540,
-    "uf2_bytes": 296448,
+    "ram_image_bytes": 97960,
+    "bss_bytes": 273036,
+    "free_ram_bytes": 118204,
+    "uf2_bytes": 634368,
     "elf_size_totals": {
-      "text": 151980,
+      "text": 320796,
       "data": 0,
-      "bss": 293372,
-      "dec": 445352
+      "bss": 308124,
+      "dec": 628920
     }
   }
 }

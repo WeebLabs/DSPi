@@ -130,7 +130,7 @@ extern volatile bool i2s_input_restart_pending;
 
 // I2S clock mode: who owns BCK/LRCLK while I2S is the input source.
 // MASTER (default) = the device generates BCK/LRCLK and is the rate
-// authority (selected via REQ_SET_INPUT_RATE).  SLAVE = an external master
+// authority (selected via INPUT.I2S_RX_RATE).  SLAVE = an external master
 // drives BCK/LRCLK (both pins become inputs); the rate is auto-detected
 // from the external clocks and every output is slaved to them (I2S slots
 // edge-driven, SPDIF/ADAT servo rate-matched, MCK forced off).  Has no
@@ -200,7 +200,7 @@ static inline bool i2s_slave_mode_active(void) {
 // ADAT input clock mode: who owns the clock domain of the incoming stream.
 // MASTER (default) = the far end locks to DSPi's ADAT output, so the return
 // stream is already in our clock domain: no rate detection, no servo; the
-// device is the rate authority via REQ_SET_INPUT_RATE (shared with I2S
+// device is the rate authority via INPUT.I2S_RX_RATE (shared with I2S
 // master mode). SLAVE = external gear owns the clock; the wire rate is
 // auto-detected and every output is servo rate-matched to it, exactly like
 // SPDIF input. Has no effect while the input source is not ADAT.
@@ -261,7 +261,7 @@ static inline uint8_t spdif_rx_pin_for_index(uint8_t idx) {
 }
 
 // Factory GPIO for a SPDIF input index; the reset-to-default target for
-// REQ_SET_SPDIF_RX_PIN and the fallback for an unset stored pin.
+// INPUT.SPDIF_RX_PIN and the fallback for an unset stored pin.
 static inline uint8_t spdif_rx_pin_default_for_index(uint8_t idx) {
     switch (idx) {
         case 1:  return PICO_SPDIF_RX_PIN2_DEFAULT;
@@ -301,9 +301,8 @@ static inline uint8_t spdif_rx_active_pin(void) {
 // each active pin must be a valid GPIO, not a clock pin (BCK/LRCLK), not used by
 // a fixed peripheral, and mutually distinct.  The bulk/preset restore paths use
 // this to reject an inconsistent pushed/stored I2S config as a unit before it
-// can reach i2s_input_start().  Defined in vendor_commands.c (alongside the
-// other pin helpers); declared here so the restore paths can call it without
-// pulling in the TinyUSB-heavy vendor_commands.h.
+// can reach i2s_input_start().  Defined in vendor/vc_pins.c (alongside the
+// other pin helpers); declared here so the restore paths need no vendor header.
 // bck2_pin: secondary (slave-pair) clock base when SPLIT clock-pin mode is in
 // force, or 0xFF for none.
 bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
@@ -314,7 +313,7 @@ bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
 // bulk/preset restore paths use this to reject a pushed/stored BCK they would
 // otherwise install raw (BCK/LRCLK are clock OUTPUTS — a collision is driver
 // contention and an invalid GPIO can fault pio_gpio_init()).  Defined in
-// vendor_commands.c; declared here for the same reason as above.
+// vendor/vc_pins.c; declared here for the same reason as above.
 bool i2s_bck_pin_acceptable(uint8_t bck_pin);
 // The same check for the SPLIT-mode slave pair. A DSPI_PLATFORM_PINS build applies the platform's
 // slave-pair rule; the RP2040 and RP2350 check both pairs alike.
@@ -326,19 +325,19 @@ bool i2s_bck_slave_pin_acceptable(uint8_t bck_pin);
 #endif
 
 // True if a restored, enabled MCK may drive `pin` (no other fixed-peripheral
-// owner; MCK's own claim ignored).  Defined in vendor_commands.c.
+// owner; MCK's own claim ignored).  Defined in vendor/vc_pins.c.
 bool i2s_mck_pin_acceptable(uint8_t pin);
 
 // True if SPDIF input `idx` (1..SPDIF_RX_NUM_INPUTS-1) could be enabled right now: its configured
 // GPIO is valid and not claimed by any other function.  Defined in
-// vendor_commands.c (alongside the other pin helpers); declared here so the
+// vendor/vc_pins.c (alongside the other pin helpers); declared here so the
 // bulk/preset restore paths can validate a stored enable before applying it.
 bool spdif_input_enable_acceptable(uint8_t idx);
 
 // True if `pin` could be the ADAT input (RX) GPIO right now: valid GPIO and
 // either the ADAT output's configured pin (the supported loopback self-test,
 // since the RX only listens) or not claimed by any other function.  Defined in
-// vendor_commands.c (RP2350 only); declared here so the bulk/preset restore
+// vendor/vc_pins.c (RP2350 only); declared here so the bulk/preset restore
 // paths can validate a stored ADAT input pin before applying it.
 bool adat_input_pin_acceptable(uint8_t pin);
 

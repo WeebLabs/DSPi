@@ -9,7 +9,7 @@
  * The configuration descriptor is a packed byte array built at compile
  * time. The BOS descriptor and MS OS 2.0 descriptor set live in
  * usb_descriptors.c and are returned via tud_descriptor_bos_cb and the
- * vendor SETUP handler in vendor_commands.c.
+ * vendor SETUP handler in vendor/vc_usb.c.
  */
 
 #ifndef USB_DESCRIPTORS_H

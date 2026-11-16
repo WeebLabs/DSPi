@@ -504,7 +504,7 @@ bool notify_has_pending_for(NotifyConsumer c) {
 
 void notify_reset_queue(void) {
     // USB bus reset: drop the USB consumer's backlog (the host re-syncs
-    // with a full REQ_GET_ALL_PARAMS on reconnect) and clear the global
+    // with a full STORE.ALL_PARAMS read on reconnect) and clear the global
     // source/bulk brackets.  Other consumers' backlogs and the sequence
     // counter are untouched; resetting seq would fake a wrap-around gap
     // for a mid-stream UART consumer.

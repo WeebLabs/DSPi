@@ -1,54 +1,71 @@
 """
-Native paged tests for the OUTPUT page (plan section 5.4), A/B against the 1.1.6 opcodes on page 0.
-
-Output types, output pins, the ADAT output and the DAC mute config are never changed: only GET
-parity, SETs of the current value and refused writes. DAC_MUTE_TEST is never sent zero-length.
+Native paged tests for the OUTPUT page (plan section 5.4). Output types, output pins, the ADAT output and
+the DAC mute config are never changed: only GET shapes and cross-checks, SETs of the current value and
+refused writes. DAC_MUTE_TEST is never sent zero-length.
 """
 
 import struct
 
 from ..framework import test
-from .paged_input import BAD_GPIO, has_cmd, legacy, need_page, parity, try_set, u8
+from .paged_input import BAD_GPIO, MAX_GPIO, has_cmd, need_page, read_len, try_set, u8
 from .paged_sys import _expect_stall
 
 OUTPUT = 0x04
 
 
 @test("paged_output")
-def type_pin_parity(dev, profile, chk):
-    """TYPE and PIN match GET_OUTPUT_TYPE / GET_OUTPUT_PIN for every slot and pin output."""
+def type_pin_shapes(dev, profile, chk):
+    """TYPE is S/PDIF or I2S for every slot and PIN is a distinct GPIO for every pin output."""
     need_page(dev, OUTPUT)
     for s in range(profile.num_spdif):
-        parity(chk, dev, "OUTPUT.TYPE", "GET_OUTPUT_TYPE", 1, addr=s, label=f"[{s}]")
-    for p in range(profile.num_pin_outputs):
-        parity(chk, dev, "OUTPUT.PIN", "GET_OUTPUT_PIN", 1, addr=p, label=f"[{p}]")
+        chk.member(read_len(chk, dev, "OUTPUT.TYPE", 1, addr=s, label=f"[{s}]")[0], (0, 1), f"slot {s} type")
+    pins = [read_len(chk, dev, "OUTPUT.PIN", 1, addr=p, label=f"[{p}]")[0] for p in range(profile.num_pin_outputs)]
+    chk.ok(all(p <= MAX_GPIO for p in pins), f"output pins are GPIOs: {pins}")
+    chk.eq(len(set(pins)), len(pins), f"output pins are distinct: {pins}")
 
 
 @test("paged_output")
-def latency_split_parity(dev, profile, chk):
-    """OUTPUT_LATENCY wValue 0 and 1 reach LATENCY_STATUS and LATENCY_OPTIONS; LATENCY is the request."""
+def latency_status_and_options(dev, profile, chk):
+    """LATENCY_STATUS is 12 bytes with valid IDs; LATENCY_OPTIONS lists 1-7 once each; LATENCY is the request."""
     need_page(dev, OUTPUT)
-    st = parity(chk, dev, "OUTPUT.LATENCY_STATUS", "OUTPUT_LATENCY", 12, wvalue=0)
+    st = read_len(chk, dev, "OUTPUT.LATENCY_STATUS", 12)
+    req, eff, _eff_us, _target, _batch, pending, count, rsv = struct.unpack("<BBHHHBBH", st)
+    chk.in_range(req, 1, 7, "requested option ID")
+    chk.in_range(eff, 1, 7, "effective option ID")
+    chk.member(pending, (0, 1), "pending flag")
+    chk.eq(rsv, 0, "LATENCY_STATUS reserved")
     opts = dev.pget("OUTPUT.LATENCY_OPTIONS", length=256)
-    chk.eq(len(opts), 8 * st[9], "LATENCY_OPTIONS is 8 bytes per option")
-    old = legacy(dev, "OUTPUT_LATENCY", 256, 1)
-    if old is not None:
-        chk.eq(opts, old, "LATENCY_OPTIONS == OUTPUT_LATENCY wValue 1")
-    if not st[8]:
-        chk.eq(u8(dev, "OUTPUT.LATENCY"), st[0], "LATENCY == requested_id with nothing pending")
+    chk.eq(len(opts), 8 * count, "LATENCY_OPTIONS is 8 bytes per option")
+    ids = [opts[i] for i in range(0, len(opts), 8)]
+    chk.eq(sorted(ids), list(range(1, count + 1)), "option IDs are 1..option_count once each")
+    chk.ok(req in ids and eff in ids, f"requested {req} and effective {eff} are listed options")
+    for i in range(0, len(opts), 8):
+        oid, _flags, lat_us, _batch_us, _eff_us = struct.unpack_from("<BBHHH", opts, i)
+        chk.ok(lat_us > 0, f"option {oid} latency_us is set")
+    if not pending:
+        chk.eq(u8(dev, "OUTPUT.LATENCY"), req, "LATENCY == requested_id with nothing pending")
 
 
 @test("paged_output")
-def adat_dac_parity(dev, profile, chk):
-    """ADAT TX and DAC mute GETs match their 1.1.6 twins."""
+def adat_dac_shapes(dev, profile, chk):
+    """DAC mute config and the ADAT TX status have their sizes, zero reserved bytes and echo their config."""
     need_page(dev, OUTPUT)
-    parity(chk, dev, "OUTPUT.DAC_MUTE_CONFIG", "GET_DAC_HW_MUTE_CONFIG", 16)
+    dac = read_len(chk, dev, "OUTPUT.DAC_MUTE_CONFIG", 16)
+    chk.member(dac[0], (0, 1), "DAC mute enabled")
+    chk.member(dac[1], (0, 1), "DAC mute active_low")
+    chk.eq(dac[3], 0, "DAC mute reserved0")
+    chk.eq(dac[8:], bytes(8), "DAC mute reserved")
     if not has_cmd(dev, "OUTPUT.ADAT_TX_ENABLE"):
         chk.note("no ADAT TX commands on this build")
         return
-    parity(chk, dev, "OUTPUT.ADAT_TX_ENABLE", "GET_ADAT_ENABLE", 1)
-    parity(chk, dev, "OUTPUT.ADAT_TX_PIN", "GET_ADAT_PIN", 1)
-    parity(chk, dev, "OUTPUT.ADAT_TX_STATUS", "GET_ADAT_STATUS", 8)
+    en = read_len(chk, dev, "OUTPUT.ADAT_TX_ENABLE", 1)[0]
+    pin = read_len(chk, dev, "OUTPUT.ADAT_TX_PIN", 1)[0]
+    st = read_len(chk, dev, "OUTPUT.ADAT_TX_STATUS", 8)
+    chk.eq((st[0], st[2]), (en, pin), "ADAT_TX_STATUS enabled and pin == ADAT_TX_ENABLE and ADAT_TX_PIN")
+    chk.member(st[1], (0, 1), "ADAT TX active flag")
+    chk.member(st[3], (0, 1), "ADAT TX rate_ok flag")
+    if not en:
+        chk.eq(st[1], 0, "ADAT TX not running while disabled")
 
 
 @test("paged_output", mutating=True)

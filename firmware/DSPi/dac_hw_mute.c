@@ -64,7 +64,7 @@
 #include "audio_input.h"       /* spdif_rx_pin(_ext), spdif_input_enabled, adat_input_* */
 #include "adat_output.h"       /* adat_output_config_enabled, adat_output_pin */
 
-/* External pin-conflict state lives in vendor_commands.c / usb_audio.c.
+/* External pin-conflict state lives in usb_audio.c and the input/output modules.
  * Imported here only for validation; we never write these. */
 extern uint8_t output_pins[];
 extern uint8_t i2s_bck_pin;
@@ -136,8 +136,8 @@ static inline bool unmuted_level(void) {
     return s_cfg.active_low ? true : false;
 }
 
-/* Platform-aware GPIO range check.  Mirrors is_valid_pin() in
- * vendor_commands.c without forcing a circular include. */
+/* Platform-aware GPIO range check.  Mirrors is_valid_gpio_pin() in
+ * vendor/vc_pins.c without forcing a circular include. */
 static inline bool gpio_in_range(uint8_t pin) {
 #ifdef DSPI_PLATFORM_PINS
     return dspi_platform_pin_valid(DSPI_PIN_FN_DAC_MUTE, pin);
@@ -150,7 +150,7 @@ static inline bool gpio_in_range(uint8_t pin) {
 
 /* Return true if `pin` collides with any non-mute pin currently in
  * use by another subsystem.  Mirrors the dependency graph in
- * vendor_commands.c's is_pin_in_use() but excludes mute pins (those
+ * vendor/vc_pins.c's is_pin_in_use() but excludes mute pins (those
  * collisions are checked separately as part of the duplicate-check
  * inside the cfg's pin field).  Done as a private helper because the public
  * is_pin_in_use() includes mute pins, and using it here would
@@ -267,7 +267,7 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
      * MUTED and keep s_lifecycle_asserted set, leaving the release to the
      * completion path (complete_pipeline_reset / complete_flash_write_
      * operation_full).  Same-source re-apply funnels through here for both the
-     * REQ_SET_DAC_HW_MUTE_CONFIG handler and the bulk REQ_SET_ALL_PARAMS
+     * OUTPUT.DAC_MUTE_CONFIG SET handler and the bulk STORE.ALL_PARAMS
      * apply, so both are covered. */
     bool carry_assert = s_lifecycle_asserted && s_pin_claimed;
 

@@ -41,8 +41,7 @@ typedef enum {
 // They share byte 0 of every UART/I2C response with the VcResult codes above.
 #define CTRL_STATUS_OK           0x00
 #define CTRL_STATUS_BUSY         0x01  // a USB transfer holds the shared buffers; retry
-#define CTRL_STATUS_ERROR        0x02  // page 0 only: legacy refusal
-#define CTRL_STATUS_BLOCKED      0x03  // page 0 only: legacy USB-only refusal
+// 0x02 and 0x03 are retired and must never be reused: older hosts give them a meaning.
 #define CTRL_STATUS_BULK_LOCKED  0x04  // bulk buffer owned by another transport; retry
 #define CTRL_STATUS_CRC_ERROR    0x05  // UART frame failed CRC16
 #define CTRL_STATUS_OVERSIZE     0x06  // payload larger than the transport can buffer
@@ -81,25 +80,5 @@ void vendor_bulk_touch(CtrlSource src);
 // SYS.ENTER_BOOTLOADER over UART or I2C: the transport reboots once its reply is out.
 void ctrl_reboot_request(CtrlSource src);
 bool ctrl_reboot_pending(CtrlSource src);
-
-// ---- Coarse results for internal callers still on the page-0 opcodes ----
-typedef enum {
-    CTRL_DISPATCH_OK          = 0,
-    CTRL_DISPATCH_ERROR       = 1,
-    CTRL_DISPATCH_BLOCKED     = 2,
-    CTRL_DISPATCH_BULK_LOCKED = 3,
-    CTRL_DISPATCH_BUSY        = 4,
-} CtrlDispatchResult;
-
-// ctrl_dispatch_get/set with the status folded to a CtrlDispatchResult.
-CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
-                                       uint16_t wValue, uint16_t wIndex, uint16_t wLength,
-                                       const uint8_t **resp_data, uint16_t *resp_len);
-CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
-                                       uint16_t wValue, uint16_t wIndex,
-                                       const uint8_t *payload, uint16_t wLength);
-
-uint8_t ctrl_status_from_dispatch(CtrlDispatchResult r);
-CtrlDispatchResult ctrl_dispatch_from_status(uint8_t st);
 
 #endif // VC_CTRL_H

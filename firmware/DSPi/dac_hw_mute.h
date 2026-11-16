@@ -153,7 +153,7 @@ _Static_assert(sizeof(DacHwMuteConfig) == 16,
  * dac_hw_mute_set_config() on a live config change. */
 void dac_hw_mute_init(const DacHwMuteConfig *cfg);
 
-/* Validate + apply + persist.  Called by REQ_SET_DAC_HW_MUTE_CONFIG
+/* Validate + apply + persist.  Called by the OUTPUT.DAC_MUTE_CONFIG SET
  * and by bulk_params_apply().  Validates:
  *   - enabled ∈ {0,1}
  *   - active_low ∈ {0,1}
@@ -194,7 +194,7 @@ uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg);
  */
 
 /* Snapshot the current live config into *out.  Used by
- * REQ_GET_DAC_HW_MUTE_CONFIG and bulk_params_collect().  Always
+ * OUTPUT.DAC_MUTE_CONFIG GET and bulk_params_collect().  Always
  * succeeds; out is fully populated even when the feature is
  * disabled. */
 void dac_hw_mute_get_config(DacHwMuteConfig *out);
@@ -245,7 +245,7 @@ void dac_hw_mute_release(void);
 /* ----- Diagnostics / vendor test ----- */
 
 /* Returns true iff hardware mute is currently asserted (pins driven
- * to the muted level).  Used by REQ_GET_DAC_HW_MUTE_CONFIG response
+ * to the muted level).  Used by the OUTPUT.DAC_MUTE_CONFIG reply
  * shaping if a future UI wants to display the live state, and by the
  * test helper below.  Cheap (one byte load). */
 bool dac_hw_mute_is_asserted(void);
@@ -276,7 +276,7 @@ uint8_t dac_hw_mute_test_start(void);
 void dac_hw_mute_tick(void);
 
 /* Returns true iff `pin` is currently claimed by this module.  Used
- * by the pin-conflict check (is_pin_in_use in vendor_commands.c) so
+ * by the pin-conflict check (is_pin_in_use in vendor/vc_pins.c) so
  * other pin-setting commands reject the mute pin. */
 bool dac_hw_mute_owns_pin(uint8_t pin);
 

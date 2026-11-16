@@ -12,7 +12,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include "vc_ctrl.h"            // CtrlSource, VcResult
-#include "vendor_commands.h"   // PIN_CONFIG_*
+#include "config.h"             // PIN_CONFIG_*
 #include "notify.h"             // ParamSource
 #include "vc_ids.h"
 

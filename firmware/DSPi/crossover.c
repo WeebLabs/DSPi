@@ -699,7 +699,7 @@ void xover_init_default_filters(void) {
             // CRITICAL: store the WIRE band index (XOVER_BAND_BASE + i), not
             // the local index. Live-edit dispatch in main.c reads p.band to
             // route the update; if a stale local-index leaked into
-            // pending_packet via REQ_SET_BAND_BYPASS we'd misroute the
+            // pending_packet via FILTER.BAND_BYPASS we'd misroute the
             // write to PEQ band 0. See crossover_filters_spec.md for the
             // full discussion.
             r->band     = (uint8_t)(XOVER_BAND_BASE + i);

@@ -71,7 +71,7 @@ static uint32_t pwm_moves = 0;
 
 static uint32_t last_dump_us = 0;
 
-// Latest once-per-second snapshot, served read-only by REQ_GET_CLOCK_DIAG.
+// Latest once-per-second snapshot, served read-only by DIAG.CLOCK_DIAG.
 static ClockDiagPacket g_snapshot;
 
 // tools/clkdiag_poll.py requests 256 bytes; a longer packet is silently truncated.
@@ -206,7 +206,7 @@ void clock_diag_poll(void) {
 
     char a[20], b[20], c[20], d[20];
 
-    // Snapshot header (served by REQ_GET_CLOCK_DIAG).
+    // Snapshot header (served by DIAG.CLOCK_DIAG).
     g_snapshot.version   = 2;
 #if PICO_RP2350
     g_snapshot.platform  = PLATFORM_RP2350;

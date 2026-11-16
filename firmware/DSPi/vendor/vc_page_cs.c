@@ -1,7 +1,7 @@
 /*
  * vc_page_cs.c: CS page (0x0A). Command set: vendor_command_overhaul_plan.md section 5.10.
- * Preview SETs stage into the same single-deep cs_set_*_pending handoffs as the
- * legacy opcodes; the main loop applies them and posts the result to cs_last_status.
+ * Preview SETs stage into the single-deep cs_set_*_pending handoffs; the main
+ * loop applies them and posts the result to cs_last_status.
  */
 
 #include "vc_core.h"

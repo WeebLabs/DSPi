@@ -273,7 +273,7 @@ void i2c_ctrl_poll(void) {
     if (cur_valid && cur_bulk) vendor_bulk_touch(CTRL_SOURCE_I2C);
 
     // Claim a completed frame from the ISR.  Ownership (including a bulk
-    // lock held for a streamed 0xA1 payload) moves to cur_* here, so a new
+    // lock held for a streamed STORE.ALL_PARAMS payload) moves to cur_* here, so a new
     // request arriving mid-dispatch cannot pull state out from under us.
     // Only the bytes the frame actually carries are copied; the IRQ-off
     // window stays sub-microsecond for GETs and short SETs.

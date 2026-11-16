@@ -1,5 +1,6 @@
 """
-Native paged tests for the INPUT page (plan section 5.3), A/B against the 1.1.6 opcodes on page 0.
+Native paged tests for the INPUT page (plan section 5.3): reply shapes, cross-checks between commands that
+describe the same state, round trips and the documented refusals.
 Never switches the input source, clock modes or anything live, and never moves I2S RX pair 1. Writes touch
 only settings that are storage-only while USB is the source (disabled S/PDIF inputs, inactive I2S pairs, the
 I2S rate, the disabled ADAT input pin) and restore them. Helpers here serve paged_output/clock/xport too.
@@ -7,7 +8,7 @@ I2S rate, the disabled ADAT input pin) and restore them. Helpers here serve page
 
 import struct
 
-from ..device import OP, PagedStall, Stall
+from ..device import PagedStall
 from ..framework import Skip, test
 from .paged_sys import _expect_stall, _paged
 
@@ -15,7 +16,7 @@ INPUT = 0x03
 INPUT_USB, INPUT_I2S, INPUT_ADAT = 0, 2, 3
 I2S_RATES = (44100, 48000, 96000)
 BAD_GPIO = 0xFE           # never a valid GPIO; 0xFF is the reset sentinel
-PIN_SUCCESS = 0x00
+MAX_GPIO = 29
 
 
 def need_page(dev, page):
@@ -30,28 +31,11 @@ def has_cmd(dev, name) -> bool:
     return info.cmd in g or info.cmd in s
 
 
-def legacy(dev, opname, n, wvalue=0):
-    """Untranslated page-0 GET, or None once page 0 no longer answers it."""
-    try:
-        return dev.raw_get(getattr(OP, opname), n, wvalue)
-    except Stall:
-        return None
-
-
-def legacy_act(dev, opname, wvalue):
-    """1.1.6 write-as-read: the status byte, or None once page 0 no longer answers it."""
-    r = legacy(dev, opname, 1, wvalue)
-    return r[0] if r else None
-
-
-def parity(chk, dev, name, opname, n, addr=0, wvalue=None, label=""):
-    new = dev.pget(name, addr=addr, length=n)
-    old = legacy(dev, opname, n, addr if wvalue is None else wvalue)
-    if old is None:
-        chk.note(f"page 0 no longer answers {opname}: parity skipped")
-        return new
-    chk.eq(new, old, f"{name}{label} == {opname}")
-    return new
+def read_len(chk, dev, name, n, addr=0, label=""):
+    """GET `name` and check the reply has the table length `n`."""
+    r = dev.pget(name, addr=addr, length=n)
+    chk.eq(len(r), n, f"{name}{label} length")
+    return r
 
 
 def try_set(dev, name, data, addr=0):
@@ -72,72 +56,76 @@ def _source(dev):
 
 
 @test("paged_input")
-def scalar_parity(dev, profile, chk):
-    """Every INPUT GET that keeps a 1.1.6 twin returns the same bytes."""
+def scalar_shapes(dev, profile, chk):
+    """INPUT scalar GETs have their table lengths and values inside the documented ranges."""
     need_page(dev, INPUT)
-    parity(chk, dev, "INPUT.SOURCE", "GET_INPUT_SOURCE", 1)
-    parity(chk, dev, "INPUT.SPDIF_RX_CONFIG", "GET_SPDIF_INPUT_CONFIG", 6)
-    parity(chk, dev, "INPUT.SPDIF_RX_CH_STATUS", "GET_SPDIF_RX_CH_STATUS", 24)
-    parity(chk, dev, "INPUT.I2S_RX_CHANNELS", "GET_I2S_INPUT_CHANNELS", 1)
-    parity(chk, dev, "INPUT.LG_SOUND_SYNC_ENABLE", "GET_LG_SOUND_SYNC_ENABLE", 1)
-    parity(chk, dev, "INPUT.LG_SOUND_SYNC_STATUS", "GET_LG_SOUND_SYNC_STATUS", 16)
+    chk.in_range(read_len(chk, dev, "INPUT.SOURCE", 1)[0], 0, 6, "source")
+    cfg = read_len(chk, dev, "INPUT.SPDIF_RX_CONFIG", 6)
+    n = cfg[0]
+    chk.in_range(n, 1, 4, "S/PDIF RX input count")
+    chk.eq(cfg[1] & 1, 1, "input 0 always enabled")
+    chk.eq(cfg[1] >> n, 0, "no enable bit past the last input")
     for i in range(4):
-        parity(chk, dev, "INPUT.SPDIF_RX_PIN", "GET_SPDIF_RX_PIN", 1, addr=i, label=f"[{i}]")
+        pin = read_len(chk, dev, "INPUT.SPDIF_RX_PIN", 1, addr=i, label=f"[{i}]")[0]
+        chk.in_range(pin, 0, MAX_GPIO, f"S/PDIF RX pin {i}")
+        if i < n:
+            chk.eq(cfg[2 + i], pin, f"SPDIF_RX_CONFIG pin {i} == SPDIF_RX_PIN[{i}]")
+    chk.eq(cfg[2 + n:], bytes(4 - n), "SPDIF_RX_CONFIG pin bytes past the last input")
+    read_len(chk, dev, "INPUT.SPDIF_RX_CH_STATUS", 24)
     pairs = 4 if profile.platform_id == 1 else 1
+    chk.member(read_len(chk, dev, "INPUT.I2S_RX_CHANNELS", 1)[0], tuple(range(2, 2 * pairs + 1, 2)), "I2S channels")
     for p in range(pairs):
-        parity(chk, dev, "INPUT.I2S_RX_PIN", "GET_I2S_RX_PIN", 1, addr=p, label=f"[{p}]")
+        chk.in_range(read_len(chk, dev, "INPUT.I2S_RX_PIN", 1, addr=p, label=f"[{p}]")[0], 0, MAX_GPIO,
+                     f"I2S RX pin {p}")
     for s in range(7):
-        parity(chk, dev, "INPUT.SOURCE_NAME", "GET_INPUT_SOURCE_NAME", 32, addr=s, label=f"[{s}]")
-    rate = dev.pget("INPUT.I2S_RX_RATE", length=4)
-    old = legacy(dev, "GET_INPUT_RATE", 8)
-    if old is not None:
-        chk.eq(rate, old[4:8], "I2S_RX_RATE == GET_INPUT_RATE selected half")
+        chk.ok(b"\0" in read_len(chk, dev, "INPUT.SOURCE_NAME", 32, addr=s, label=f"[{s}]"),
+               f"SOURCE_NAME {s} NUL-terminated")
+    chk.member(struct.unpack("<I", read_len(chk, dev, "INPUT.I2S_RX_RATE", 4))[0], I2S_RATES, "I2S rate")
+    chk.member(read_len(chk, dev, "INPUT.LG_SOUND_SYNC_ENABLE", 1)[0], (0, 1), "LG enable")
     if has_cmd(dev, "INPUT.ADAT_RX_ENABLE"):
-        parity(chk, dev, "INPUT.ADAT_RX_ENABLE", "GET_ADAT_INPUT_ENABLE", 1)
-        parity(chk, dev, "INPUT.ADAT_RX_PIN", "GET_ADAT_INPUT_PIN", 1)
-        parity(chk, dev, "INPUT.ADAT_RX_CLOCK_MODE", "GET_ADAT_INPUT_CLOCK_MODE", 1)
+        chk.member(read_len(chk, dev, "INPUT.ADAT_RX_ENABLE", 1)[0], (0, 1), "ADAT enable")
+        pin = read_len(chk, dev, "INPUT.ADAT_RX_PIN", 1)[0]
+        chk.ok(pin <= MAX_GPIO or pin == 0xFF, f"ADAT RX pin is a GPIO or unset: {pin}")
+        chk.member(read_len(chk, dev, "INPUT.ADAT_RX_CLOCK_MODE", 1)[0], (0, 1), "ADAT clock mode")
     else:
         chk.note("no ADAT RX commands on this build")
 
 
 @test("paged_input")
-def status_packets_parity(dev, profile, chk):
-    """S/PDIF RX and ADAT RX status match their 1.1.6 twins outside the moving fields."""
+def status_packets_agree(dev, profile, chk):
+    """S/PDIF RX, ADAT RX and LG status packets have their sizes and echo the matching config commands."""
     need_page(dev, INPUT)
-    for _ in range(3):
-        new = dev.pget("INPUT.SPDIF_RX_STATUS", length=16)
-        old = legacy(dev, "GET_SPDIF_RX_STATUS", 16)
-        if old is None or new[:12] == old[:12]:
-            break
-    if old is not None:
-        chk.eq(len(new), 16, "SPDIF_RX_STATUS length")
-        chk.eq(new[:12], old[:12], "SPDIF_RX_STATUS stable fields == GET_SPDIF_RX_STATUS")
+    src = _source(dev)
+    st = read_len(chk, dev, "INPUT.SPDIF_RX_STATUS", 16)
+    state, sp_src, _locks, _losses, _rate, _par, fill, rsv = struct.unpack("<BBBBIIHH", st)
+    chk.in_range(state, 0, 3, "S/PDIF RX state")
+    chk.eq(sp_src, src, "SPDIF_RX_STATUS source == INPUT.SOURCE")
+    chk.in_range(fill, 0, 100, "S/PDIF RX FIFO fill")
+    chk.eq(rsv, 0, "SPDIF_RX_STATUS reserved")
+    lg = read_len(chk, dev, "INPUT.LG_SOUND_SYNC_STATUS", 16)
+    chk.eq(lg[0], u8(dev, "INPUT.LG_SOUND_SYNC_ENABLE"), "LG status enabled == LG_SOUND_SYNC_ENABLE")
+    chk.member(lg[1], (0, 1), "LG present flag")
+    chk.eq(lg[4:], bytes(12), "LG status reserved")
     if has_cmd(dev, "INPUT.ADAT_RX_STATUS"):
-        new = dev.pget("INPUT.ADAT_RX_STATUS", length=20)
-        old = legacy(dev, "GET_ADAT_INPUT_STATUS", 20)
-        chk.eq(len(new), 20, "ADAT_RX_STATUS length")
-        if old is not None:
-            chk.eq(new[:8], old[:8], "ADAT_RX_STATUS config and counters == GET_ADAT_INPUT_STATUS")
+        a = read_len(chk, dev, "INPUT.ADAT_RX_STATUS", 20)
+        chk.in_range(a[0], 0, 4, "ADAT RX state")
+        chk.eq(a[1], u8(dev, "INPUT.ADAT_RX_CLOCK_MODE"), "ADAT status clock mode == ADAT_RX_CLOCK_MODE")
+        chk.eq(a[2], u8(dev, "INPUT.ADAT_RX_ENABLE"), "ADAT status enabled == ADAT_RX_ENABLE")
+        chk.eq(a[3], u8(dev, "INPUT.ADAT_RX_PIN"), "ADAT status pin == ADAT_RX_PIN")
+        chk.member(a[4], (0, 1), "ADAT rate_ok flag")
+        chk.eq(a[10:12], b"\0\0", "ADAT status reserved")
 
 
 @test("paged_input")
 def status_struct(dev, profile, chk):
-    """INPUT.STATUS carries the source and GET_STATUS selectors 23, 32 and 33."""
+    """INPUT.STATUS: 12 bytes, source == INPUT.SOURCE, reserved zero, channel count within the input channels."""
     need_page(dev, INPUT)
     st = dev.pget("INPUT.STATUS", length=12)
     chk.eq(len(st), 12, "STATUS length")
-    src, nch, rsv, rate_mhz, trim = struct.unpack("<BBHIi", st)
+    src, nch, rsv, _rate_mhz, _trim = struct.unpack("<BBHIi", st)
     chk.eq(src, _source(dev), "source == INPUT.SOURCE")
     chk.eq(rsv, 0, "reserved")
-    old = legacy(dev, "GET_STATUS", 4, 23)
-    if old is None:
-        chk.note("page 0 no longer answers GET_STATUS: selector parity skipped")
-        return
-    chk.eq(nch, struct.unpack("<I", old)[0], "active channels == GET_STATUS 23")
-    old_rate = struct.unpack("<I", legacy(dev, "GET_STATUS", 4, 32))[0]
-    chk.approx(rate_mhz, old_rate, max(50, old_rate // 10000), "measured rate == GET_STATUS 32")
-    old_trim = struct.unpack("<i", legacy(dev, "GET_STATUS", 4, 33))[0]
-    chk.approx(trim, old_trim, 200, "VCXO trim == GET_STATUS 33")
+    chk.in_range(nch, 0, profile.num_input_channels, "active input channels")
 
 
 @test("paged_input")
@@ -194,7 +182,7 @@ def value_errors_leave_state(dev, profile, chk):
     if profile.platform_id != 1:
         E(chk, lambda: dev.pset("INPUT.I2S_RX_CHANNELS", b"\x04"), "VC_ERR_UNSUPPORTED", "4 channels on RP2040")
     E(chk, lambda: dev.pset("INPUT.SPDIF_RX_PIN", bytes([BAD_GPIO]), addr=0), "VC_ERR_PIN_INVALID", "S/PDIF pin 0xFE")
-    out0 = u8(dev, "OUTPUT.PIN", 0) if has_cmd(dev, "OUTPUT.PIN") else dev.get_u8(OP.GET_OUTPUT_PIN, 0)
+    out0 = u8(dev, "OUTPUT.PIN", 0)
     if u8(dev, "INPUT.SPDIF_RX_PIN", 0) != out0:
         E(chk, lambda: dev.pset("INPUT.SPDIF_RX_PIN", bytes([out0]), addr=0), "VC_ERR_PIN_IN_USE",
           f"S/PDIF input 0 onto output pin {out0}")
@@ -250,20 +238,17 @@ def _require_usb_source(dev):
 
 @test("paged_input", mutating=True)
 def i2s_rate_roundtrip(dev, profile, chk):
-    """I2S_RX_RATE round-trips through the new and old commands (USB source only) and restores."""
+    """I2S_RX_RATE round-trips every documented rate (USB source only) and restores."""
     need_page(dev, INPUT)
     _require_usb_source(dev)
     orig = dev.pget("INPUT.I2S_RX_RATE", length=4)
     try:
         for hz in I2S_RATES:
             dev.pset("INPUT.I2S_RX_RATE", struct.pack("<I", hz))
-            chk.eq(struct.unpack("<I", dev.pget("INPUT.I2S_RX_RATE", length=4))[0], hz, f"new GET after SET {hz}")
-            old = legacy(dev, "GET_INPUT_RATE", 8)
-            if old is not None:
-                chk.eq(struct.unpack_from("<I", old, 4)[0], hz, f"GET_INPUT_RATE after SET {hz}")
-        if legacy(dev, "GET_INPUT_RATE", 8) is not None:
-            dev.raw_set(OP.SET_INPUT_RATE, struct.pack("<I", 44100))
-            chk.eq(struct.unpack("<I", dev.pget("INPUT.I2S_RX_RATE", length=4))[0], 44100, "new GET after old SET")
+            chk.eq(struct.unpack("<I", dev.pget("INPUT.I2S_RX_RATE", length=4))[0], hz, f"GET after SET {hz}")
+        dev.pset("INPUT.I2S_RX_RATE", dev.pget("INPUT.I2S_RX_RATE", length=4))
+        chk.eq(struct.unpack("<I", dev.pget("INPUT.I2S_RX_RATE", length=4))[0], I2S_RATES[-1],
+               "a GET reply is a valid SET payload")
     finally:
         dev.pset("INPUT.I2S_RX_RATE", orig)
         chk.eq(dev.pget("INPUT.I2S_RX_RATE", length=4), orig, "rate restored")
@@ -276,7 +261,7 @@ def _disabled_spdif_input(dev):
 
 @test("paged_input", mutating=True)
 def spdif_rx_pin_disabled_input_roundtrip(dev, profile, chk):
-    """A disabled S/PDIF input's stored pin round-trips through both opcodes, 0xFF resets, and restores."""
+    """A disabled S/PDIF input's stored pin round-trips, shows in SPDIF_RX_CONFIG, 0xFF resets, and restores."""
     need_page(dev, INPUT)
     _require_usb_source(dev)
     idx = _disabled_spdif_input(dev)
@@ -286,12 +271,12 @@ def spdif_rx_pin_disabled_input_roundtrip(dev, profile, chk):
     a, b = [p for p in (19, 18, 17, 16) if p != orig][:2]
     try:
         dev.pset("INPUT.SPDIF_RX_PIN", bytes([a]), addr=idx)
-        chk.eq(u8(dev, "INPUT.SPDIF_RX_PIN", idx), a, f"new GET after SET {a}")
-        old = legacy(dev, "GET_SPDIF_RX_PIN", 1, idx)
-        if old is not None:
-            chk.eq(old[0], a, "GET_SPDIF_RX_PIN after new SET")
-            chk.eq(legacy_act(dev, "SET_SPDIF_RX_PIN", (idx << 8) | b), PIN_SUCCESS, f"old SET {b}")
-            chk.eq(u8(dev, "INPUT.SPDIF_RX_PIN", idx), b, "new GET after old SET")
+        chk.eq(u8(dev, "INPUT.SPDIF_RX_PIN", idx), a, f"GET after SET {a}")
+        cfg = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)
+        if idx < cfg[0]:
+            chk.eq(cfg[2 + idx], a, "SPDIF_RX_CONFIG pin byte agrees")
+        dev.pset("INPUT.SPDIF_RX_PIN", bytes([b]), addr=idx)
+        chk.eq(u8(dev, "INPUT.SPDIF_RX_PIN", idx), b, f"GET after SET {b}")
         dev.pset("INPUT.SPDIF_RX_PIN", b"\xff", addr=idx)
         chk.eq(u8(dev, "INPUT.SPDIF_RX_PIN", idx), (20, 21, 22)[idx - 1], "0xFF restores the default")
     finally:
@@ -301,7 +286,7 @@ def spdif_rx_pin_disabled_input_roundtrip(dev, profile, chk):
 
 @test("paged_input", mutating=True)
 def spdif_rx_enable_roundtrip(dev, profile, chk):
-    """Enabling a disabled optional S/PDIF input and disabling it again (USB source only)."""
+    """Enabling a disabled optional S/PDIF input, disabling it, and enabling it once more (USB source only)."""
     need_page(dev, INPUT)
     _require_usb_source(dev)
     idx = _disabled_spdif_input(dev)
@@ -317,9 +302,9 @@ def spdif_rx_enable_roundtrip(dev, profile, chk):
         chk.eq((dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1] >> idx) & 1, 1, "SPDIF_RX_CONFIG mask bit")
         dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x00", addr=idx)
         chk.eq(u8(dev, "INPUT.SPDIF_RX_ENABLE", idx), 0, "new GET after disable")
-        if legacy(dev, "GET_SPDIF_INPUT_CONFIG", 6) is not None:
-            chk.eq(legacy_act(dev, "SET_SPDIF_INPUT_ENABLE", (idx << 8) | 1), PIN_SUCCESS, "old enable")
-            chk.eq(u8(dev, "INPUT.SPDIF_RX_ENABLE", idx), 1, "new GET after old enable")
+        chk.eq((dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1] >> idx) & 1, 0, "SPDIF_RX_CONFIG mask bit cleared")
+        dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x01", addr=idx)
+        chk.eq(u8(dev, "INPUT.SPDIF_RX_ENABLE", idx), 1, "re-enable after disable")
     finally:
         dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x00", addr=idx)
         chk.eq(u8(dev, "INPUT.SPDIF_RX_ENABLE", idx), 0, "input disabled again")
@@ -327,7 +312,7 @@ def spdif_rx_enable_roundtrip(dev, profile, chk):
 
 @test("paged_input", mutating=True)
 def i2s_rx_pin_inactive_pair_roundtrip(dev, profile, chk):
-    """An inactive I2S RX pair's parked pin round-trips through both opcodes and restores (RP2350)."""
+    """An inactive I2S RX pair's parked pin round-trips through two moves and restores (RP2350)."""
     need_page(dev, INPUT)
     if profile.platform_id != 1:
         raise Skip("RP2040 has one I2S RX pair")
@@ -353,12 +338,10 @@ def i2s_rx_pin_inactive_pair_roundtrip(dev, profile, chk):
         if not moved:
             chk.note("no candidate pin accepted for pair 3")
             return
-        chk.eq(u8(dev, "INPUT.I2S_RX_PIN", pair), moved[-1], "new GET after SET")
-        old = legacy(dev, "GET_I2S_RX_PIN", 1, pair)
-        if old is not None:
-            chk.eq(old[0], moved[-1], "GET_I2S_RX_PIN after new SET")
-            chk.eq(legacy_act(dev, "SET_I2S_RX_PIN", (pair << 8) | moved[0]), PIN_SUCCESS, "old SET")
-            chk.eq(u8(dev, "INPUT.I2S_RX_PIN", pair), moved[0], "new GET after old SET")
+        chk.eq(u8(dev, "INPUT.I2S_RX_PIN", pair), moved[-1], "GET after SET")
+        if len(moved) == 2:
+            dev.pset("INPUT.I2S_RX_PIN", bytes([moved[0]]), addr=pair)
+            chk.eq(u8(dev, "INPUT.I2S_RX_PIN", pair), moved[0], "GET after moving back to the first pin")
     finally:
         dev.pset("INPUT.I2S_RX_PIN", bytes([orig]), addr=pair)
         chk.eq(u8(dev, "INPUT.I2S_RX_PIN", pair), orig, "pair 3 pin restored")
@@ -381,10 +364,8 @@ def adat_rx_pin_disabled_roundtrip(dev, profile, chk):
         if cand is None:
             chk.note("no free pin accepted for the ADAT input")
             return
-        chk.eq(u8(dev, "INPUT.ADAT_RX_PIN"), cand, "new GET after SET")
-        old = legacy(dev, "GET_ADAT_INPUT_PIN", 1)
-        if old is not None:
-            chk.eq(old[0], cand, "GET_ADAT_INPUT_PIN after new SET")
+        chk.eq(u8(dev, "INPUT.ADAT_RX_PIN"), cand, "GET after SET")
+        chk.eq(dev.pget("INPUT.ADAT_RX_STATUS", length=20)[3], cand, "ADAT_RX_STATUS pin byte agrees")
         dev.pset("INPUT.ADAT_RX_PIN", b"\xff")
         chk.eq(u8(dev, "INPUT.ADAT_RX_PIN"), 0xFF, "0xFF clears the pin")
     finally:
@@ -394,7 +375,7 @@ def adat_rx_pin_disabled_roundtrip(dev, profile, chk):
 
 @test("paged_input", mutating=True, flash=3)
 def source_name_roundtrip(dev, profile, chk):
-    """SOURCE_NAME round-trips through the new and old commands and restores (flash)."""
+    """SOURCE_NAME round-trips, keeps 31 bytes, and restores (flash)."""
     need_page(dev, INPUT)
     src = 6
     orig = dev.pget("INPUT.SOURCE_NAME", addr=src, length=32)
@@ -404,12 +385,9 @@ def source_name_roundtrip(dev, profile, chk):
         return dev.pget("INPUT.SOURCE_NAME", addr=src, length=32).split(b"\x00", 1)[0]
     try:
         dev.pset("INPUT.SOURCE_NAME", b"PagedName", addr=src)
-        chk.eq(name(), b"PagedName", "new GET after new SET")
-        old = legacy(dev, "GET_INPUT_SOURCE_NAME", 32, src)
-        if old is not None:
-            chk.eq(old.split(b"\x00", 1)[0], b"PagedName", "old GET after new SET")
-            dev.raw_set(OP.SET_INPUT_SOURCE_NAME, b"OldName", src)
-            chk.eq(name(), b"OldName", "new GET after old SET")
+        chk.eq(name(), b"PagedName", "GET after SET")
+        dev.pset("INPUT.SOURCE_NAME", b"N" * 32, addr=src)
+        chk.eq(name(), b"N" * 31, "32-byte SET keeps 31 + NUL")
     finally:
         dev.pset("INPUT.SOURCE_NAME", orig.split(b"\x00", 1)[0] or b"\x00", addr=src)
         chk.eq(name(), orig.split(b"\x00", 1)[0], "name restored")

@@ -569,7 +569,7 @@ typedef struct __attribute__((packed)) {
 //
 // V10 appends per-slot Control Surfaces names (16 x 32 bytes): user labels for
 // what each physical control is for, set by the host app and readable by
-// external MCUs / other hosts via REQ_GET_CS_NAME.  Slot metadata independent
+// external MCUs / other hosts via CS.SLOT_NAME.  Slot metadata independent
 // of the bindings (a name may exist before its binding and survives binding
 // changes), hence a directory field rather than a cs_config format bump.
 //
@@ -2609,7 +2609,7 @@ static bool dir_load_cache(void) {
         // output_config is unused (boot applies the slot's IO).  Only a device
         // that had the non-default include_pins=0 lands in INDEPENDENT mode and
         // boots to default routing until the user re-saves via
-        // REQ_SAVE_OUTPUT_CONFIG; the device-level SPDIF RX pin is carried into
+        // STORE.OUTPUT_CONFIG_SAVE; the device-level SPDIF RX pin is carried into
         // the block so it survives regardless.
         const PresetDirectory_v3 *v3 = (const PresetDirectory_v3 *)flash_dir;
         const uint8_t *v3_data_start = (const uint8_t *)&v3->startup_mode;
@@ -2838,7 +2838,7 @@ static void dir_sanitize_cs_config(void) {
     // layout, all slots NONE).
     c->version = CS_CONFIG_VERSION;
     // Names (V10): guarantee NUL termination so hand-edited flash can never
-    // leak an unterminated string to REQ_GET_CS_NAME readers.
+    // leak an unterminated string to CS.SLOT_NAME readers.
     for (int s = 0; s < CS_MAX_BINDINGS; s++) {
         dir_cache.cs_names[s][CS_NAME_LEN - 1] = '\0';
     }
@@ -2894,7 +2894,7 @@ static void dir_sanitize_cs_groups(void) {
             memset(grp, 0, sizeof(*grp));
         }
         // Guarantee NUL termination so hand-edited flash can never leak an
-        // unterminated string to REQ_GET_CS_GROUP readers.
+        // unterminated string to CS.GROUP readers.
         grp->name[CS_NAME_LEN - 1] = '\0';
     }
     // Normalize the version byte; a fresh/migrated all-zero block leaves it 0
@@ -3129,7 +3129,7 @@ static void io_config_defaults(FlashOutputConfig *cfg) {
     cfg->adat_input_clock_mode = ADAT_CLOCK_MODE_MASTER;
 }
 
-// Snapshot the live IO globals into cfg (for REQ_SAVE_OUTPUT_CONFIG).
+// Snapshot the live IO globals into cfg (for STORE.OUTPUT_CONFIG_SAVE).
 static void io_config_from_live(FlashOutputConfig *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     for (int i = 0; i < NUM_PIN_OUTPUTS; i++)     cfg->output_pins[i]  = output_pins[i];
@@ -3991,7 +3991,7 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     // Also normalize .channel/.band.  Presets saved before the
     // dsp_init_default_filters() channel/band fix (or by any path that
     // didn't fully populate the recipe) may have these at zero, which would
-    // cause REQ_SET_BAND_BYPASS to misroute writes to slot (0,0).
+    // cause FILTER.BAND_BYPASS to misroute writes to slot (0,0).
     // V18 renumbered the FilterType value space; migrate type values from any
     // pre-V18 slot as they are loaded so existing presets keep their filters.
     bool pre_v18 = (slot->version < 18);
@@ -4304,7 +4304,7 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     // which user volume doesn't have.  When this hook IS taken, route the
     // restore through update_user_volume() so vol_mul + the loudness
     // coefficient pointer + the LG cache invalidation + the v2 notify all
-    // happen via the single funnel — same path REQ_SET_USER_VOLUME uses.
+    // happen via the single funnel, the same path ROUTE.USER_VOLUME uses.
     // The notify's PARAM_CHANGED is suppressed by the surrounding bulk
     // bracket; BULK_INVALIDATED at notify_end_bulk() covers it.
     if (slot->version >= 15) {
@@ -4323,7 +4323,7 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     // existed (matches the model where preset load is a complete state
     // restore).  In either case re-normalize the wire band index
     // (XOVER_BAND_BASE + i) defensively; a stale local index leaking into pending_packet via
-    // REQ_SET_BAND_BYPASS would misroute the next live edit into PEQ band 0.
+    // FILTER.BAND_BYPASS would misroute the next live edit into PEQ band 0.
     if (slot->version >= 16) {
         memcpy((void *)xover_recipes, slot->xover_recipes, sizeof(xover_recipes));
         for (int ch = 0; ch < NUM_CHANNELS; ch++) {
@@ -4792,7 +4792,7 @@ void preset_get_ctrl_iface(UartCtrlConfig *uart_out, I2cCtrlConfig *i2c_out) {
 }
 
 // Control Surfaces persistence.  The getter reads the RAM cache; writes go
-// through preset_set_cs_all below (bindings persist only via REQ_CS_SAVE).
+// through preset_set_cs_all below (bindings persist only via CS.SAVE).
 const CsFlashConfig *preset_stored_cs_config(void) {
     dir_ensure();
     return &dir_cache.cs_config;
@@ -4800,7 +4800,7 @@ const CsFlashConfig *preset_stored_cs_config(void) {
 
 // Control Surfaces IR command table (V11).  Getter reads the RAM cache;
 // preset_set_cs_all persists every Control Surfaces blob together in one
-// directory-sector write (the REQ_CS_SAVE path).  Caller has validated them.
+// directory-sector write (the CS.SAVE path).  Caller has validated them.
 const CsIrConfig *preset_stored_cs_ir_config(void) {
     dir_ensure();
     return &dir_cache.cs_ir;
@@ -4858,7 +4858,7 @@ uint8_t preset_set_cs_all(const CsFlashConfig *cfg, const CsIrConfig *ir,
 }
 
 // Control Surfaces slot names (V10).  Reads the RAM cache; the engine loads
-// its live name table from here at boot and on REQ_CS_REVERT.
+// its live name table from here at boot and on CS.REVERT.
 uint8_t preset_get_cs_name(uint8_t slot, char *name_out) {
     if (slot >= CS_MAX_BINDINGS) return PRESET_ERR_INVALID_SLOT;
     dir_ensure();
@@ -4884,7 +4884,7 @@ float preset_get_saved_master_volume(void) {
     return dir_cache.master_volume_db;
 }
 
-// REQ_SAVE_OUTPUT_CONFIG: snapshot the live IO config and output limiter
+// STORE.OUTPUT_CONFIG_SAVE: snapshot the live IO config and output limiter
 // settings into the directory's device-global blocks and persist.  Accepted in
 // both modes (dormant in WITH_PRESET); also syncs the legacy spdif_rx_pin byte.
 uint8_t preset_save_output_config(void) {
@@ -4984,29 +4984,6 @@ int preset_boot_load(void) {
 // ============================================================================
 // LEGACY API (redirects through preset system)
 // ============================================================================
-
-int flash_save_params(void) {
-    dir_ensure();
-
-    // Determine which slot to save into
-    uint8_t slot = dir_cache.last_active_slot;
-    if (slot >= PRESET_SLOTS) {
-        // No active slot — use slot 0
-        slot = 0;
-    }
-
-    uint8_t result = preset_save(slot);
-    switch (result) {
-        case PRESET_OK:             return FLASH_OK;
-        case PRESET_ERR_FLASH_WRITE: return FLASH_ERR_WRITE;
-        default:                    return FLASH_ERR_WRITE;
-    }
-}
-
-// flash_load_params() (the legacy synchronous "revert to saved") was removed
-// when its only caller — the deprecated REQ_LOAD_PARAMS (0x52) — was repurposed
-// as REQ_SAVE_OUTPUT_CONFIG.  Hosts use the deferred, SPDIF-safe REQ_PRESET_LOAD
-// (0x91) instead.
 
 // Reset the live DSP state to factory defaults.
 // Does NOT modify the directory or active slot tracking.

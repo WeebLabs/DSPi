@@ -74,7 +74,7 @@ typedef enum {
 
 #define SIGGEN_CFG_VERSION  1
 
-// REQ_SIGGEN_SET_CONFIG payload / REQ_SIGGEN_GET_CONFIG response.
+// MEAS.SIGGEN_CONFIG payload and reply.
 // Timing model per type:
 //   continuous (SINE/SQUARE/WHITE/PINK/TONE_PAIR/MULTITONE/ISP):
 //     duration_ms = total play time, 0 = until stopped; repeat/gap unused.
@@ -106,7 +106,7 @@ typedef enum {
     SIGGEN_STATE_FADE_OUT = 4,
 } SiggenState;
 
-// REQ_SIGGEN_GET_STATUS response
+// MEAS.SIGGEN_STATUS reply
 typedef struct __attribute__((packed)) {
     uint8_t  version;        // SIGGEN_CFG_VERSION
     uint8_t  state;          // SiggenState
@@ -126,13 +126,13 @@ typedef struct __attribute__((packed)) {
 #define SIGGEN_STOP_PRESET     3  // preset load / factory reset
 #define SIGGEN_STOP_RECONFIG   4  // SET_CONFIG while running (restart)
 
-// REQ_SIGGEN_CONTROL wValue actions
+// Control actions: MEAS.SIGGEN_STOP, MEAS.SIGGEN_START, MEAS.SIGGEN_STOP_NOW
 #define SIGGEN_CTL_STOP        0  // fade out, then idle
 #define SIGGEN_CTL_START       1  // (re)start with the applied config
 #define SIGGEN_CTL_STOP_NOW    2  // immediate hard stop, no fade
 
-// REQ_SIGGEN_GET_CAPS: wValue = 0xFFFF returns SiggenCapsHeader,
-// wValue = 0..type_count-1 returns that type's SiggenTypeDesc.
+// MEAS.SIGGEN_CAPS returns SiggenCapsHeader; MEAS.SIGGEN_TYPE_DESC at address
+// 0..type_count-1 returns that type's SiggenTypeDesc.
 typedef struct __attribute__((packed)) {
     uint8_t  version;
     uint8_t  type_count;          // SIGGEN_TYPE_COUNT
@@ -169,7 +169,7 @@ typedef struct __attribute__((packed)) {
 } SiggenTypeDesc;                 // 62 bytes
 
 // ---------------------------------------------------------------------------
-// Vendor-command surface (handlers in vendor_commands.c)
+// Vendor-command surface (handlers in vendor/vc_page_meas.c)
 // ---------------------------------------------------------------------------
 
 // Validate + stage a config from a wire payload.  Returns false on invalid

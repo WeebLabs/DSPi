@@ -32,7 +32,7 @@
 // Packet: [ver=2, evt=0x02, flags=0, seq, off_LE, size_LE, src, 0, 0, 0, value...]
 #define NOTIFY_EVT_PARAM_CHANGED     0x02
 
-// v2 bulk-invalidation event.  Host should re-read REQ_GET_ALL_PARAMS.
+// v2 bulk-invalidation event.  Host should re-read STORE.ALL_PARAMS.
 // Packet: [ver=2, evt=0x03, flags=0, seq, src, 0, 0, 0]
 #define NOTIFY_EVT_BULK_INVALIDATED  0x03
 
@@ -75,14 +75,14 @@
 // clock_mode]; rate = 0 unless LOCKED.
 #define NOTIFY_EVT_ADAT_INPUT_STATE  0x0B
 
-// v2 Control Surfaces aux output changed (REQ_SET_CS_AUX_STATE / _LEVEL from
+// v2 Control Surfaces aux output changed (CS.AUX_STATE / CS.AUX_LEVEL from
 // any source, including a bound control).  Both values are sent so a host
 // refreshes the slot in one step; src identifies the origin.
 // Packet (9 bytes): [ver=2, evt=0x0C, flags=0, seq, slot, state,
 // level_q8_LE(2), src]; level is 8.8 percent, 0 on a CS_TYPE_AUX_OUT slot.
 #define NOTIFY_EVT_CS_AUX            0x0C
 
-// v2 spectrum analyser applied a staged REQ_RTA_SET_CONFIG, changed or not.
+// v2 spectrum analyser applied a staged MEAS.RTA_CONFIG, changed or not.
 // Never pushed for frame restarts (preset, rate, input, auto-off/start).
 // Packet (17 bytes): [ver=2, evt=0x0D, flags=0, seq, RtaConfig as applied
 // (12), src]; src is the source of the SET that staged it.
@@ -90,13 +90,13 @@
 
 // 0x0E is held by the ac3-dts-decode branch (SPDIF_FORMAT).
 
-// v2 input source name stored (REQ_SET_INPUT_SOURCE_NAME); name is all zeros
+// v2 input source name stored (INPUT.SOURCE_NAME); name is all zeros
 // when cleared.  src is the SET's dispatch source.
 // Packet (40 bytes): [ver=2, evt=0x0F, flags=0, seq, source_id, src, 0, 0,
 // name(32)]
 #define NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F
 
-// v2 board name stored (REQ_SET_DEVICE_NAME); same layout as 0x0F with
+// v2 board name stored (SYS.DEVICE_NAME); same layout as 0x0F with
 // byte 4 zero.  Packet (40 bytes): [ver=2, evt=0x10, flags=0, seq, 0, src,
 // 0, 0, name(32)]
 #define NOTIFY_EVT_DEVICE_NAME       0x10
@@ -110,8 +110,8 @@
 
 typedef enum {
     PARAM_SRC_UNKNOWN  = 0,  // Default; origin not explicitly marked
-    PARAM_SRC_HOST_SET = 1,  // EP0 REQ_SET_* from host
-    PARAM_SRC_BULK_SET = 2,  // REQ_SET_ALL_PARAMS
+    PARAM_SRC_HOST_SET = 1,  // EP0 vendor SET from host
+    PARAM_SRC_BULK_SET = 2,  // STORE.ALL_PARAMS SET
     PARAM_SRC_PRESET   = 3,  // Preset slot applied
     PARAM_SRC_FACTORY  = 4,  // Factory reset
     PARAM_SRC_GPIO     = 5,  // Hardware control (knobs, encoders, pads)
@@ -206,7 +206,7 @@ void notify_push_device_name(const char *name, ParamSource src);
 // producer catches a consumer's tail, that consumer's oldest entry is
 // force-dropped (counted in notify_consumer_drops) and the push proceeds.
 // Consumers detect their drops from the packet sequence-number gap and
-// recover with a full REQ_GET_ALL_PARAMS read.
+// recover with a full STORE.ALL_PARAMS read.
 // ---------------------------------------------------------------------------
 
 typedef enum {

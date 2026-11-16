@@ -90,7 +90,7 @@ extern volatile uint32_t nominal_feedback_10_14;
 
 // SPDIF Buffer Configuration
 // Slot ring fill scale in 48-frame buckets (16 = 768 frames): the unit of
-// REQ_GET_BUFFER_STATS and of the clock servos' fill error and gains. The rings
+// SYS.BUFFER_STATS and of the clock servos' fill error and gains. The rings
 // themselves track fill to the frame; buckets survive for wire compatibility.
 #define SPDIF_CONSUMER_BUFFER_COUNT 16
 #define SLOT_FILL_FRAMES_PER_BUCKET 48u
@@ -130,353 +130,14 @@ extern volatile uint32_t nominal_feedback_10_14;
 // Microsoft OS 2.0 vendor request code — embedded in the BOS Platform
 // Capability descriptor. Windows 8.1+ uses it as the bRequest in
 // bmRequestType=0xC0 vendor-type GETs to fetch the MS OS 2.0 descriptor
-// set. Reserved for Microsoft; never reuse for application opcodes.
+// set. Reserved for Microsoft; 0x00-0x0F are never commands on any page.
 //
 // Note: 0x01 also happens to be the value of UAC1_REQ_SET_CUR
 // (usb_descriptors.h). They cannot collide because UAC1 SET_CUR is
 // TUSB_REQ_TYPE_CLASS and reaches the audio class handler in usb_audio.c,
 // while MS OS 2.0 requests are TUSB_REQ_TYPE_VENDOR and reach
-// tud_vendor_control_xfer_cb in vendor_commands.c.
+// tud_vendor_control_xfer_cb in vendor/vc_usb.c.
 #define MS_VENDOR_CODE      0x01
-
-// Control Surfaces auxiliary outputs (caps v18); see control_surfaces.h and
-// Documentation/Features/control_surfaces_aux_spec.md.  wValue is the binding
-// slot holding the aux component.  0x01 is MS_VENDOR_CODE above, intercepted
-// in tud_vendor_control_xfer_cb before the application dispatcher sees it;
-// 0x00 and 0x02 stay unallocated; 0x03 is REQ_OUTPUT_LATENCY.
-#define REQ_SET_CS_AUX_STATE        0x04  // wValue = slot, 1 byte 0/1; immediate, runtime
-                                          // only; STALL unless the slot is an aux output
-#define REQ_GET_CS_AUX_STATE        0x05  // wValue = slot: 1 byte (STALL if not an aux);
-                                          // wValue = 0xFFFF: 48 bytes {state[16],
-                                          // level_q8[16] LE}, zeros on non-aux slots
-#define REQ_SET_CS_AUX_LEVEL        0x06  // wValue = slot, 2 bytes 8.8 percent LE, clamped
-                                          // to 100 %; STALL unless a CS_TYPE_AUX_PWM slot
-#define REQ_GET_CS_AUX_LEVEL        0x07  // wValue = slot; 2 bytes 8.8 percent LE (0 on
-                                          // AUX_OUT; STALL if not an aux)
-
-// Spectrum analyser (RTA / FFT).  Documentation/Features/spectrum_analyser_spec.md
-#define REQ_RTA_SET_CONFIG          0x08  // 12-byte RtaConfig; STALL on invalid
-#define REQ_RTA_GET_CONFIG          0x09  // returns RtaConfig (12 B)
-#define REQ_RTA_GET_CAPS            0x0A  // wValue 0 = RtaCaps (16 B); 1.. = band centre chunks
-#define REQ_RTA_GET_BANDS           0x0B  // wValue = channel; returns RtaBandFrame (82 B)
-#define REQ_RTA_GET_BINS            0x0C  // wValue = byte offset into the bin frame
-#define REQ_RTA_GET_STATUS          0x0D  // returns RtaStatus (24 B)
-#define REQ_RTA_CONTROL             0x0E  // wValue = RTA_CTL_*; returns 1 byte
-#define REQ_RTA_GET_BANDS_ALL       0x0F  // USB only: every live channel's RtaBandFrame
-
-// Control Surfaces target groups and macros (caps v9); see control_surfaces.h
-// and Documentation/Features/control_surfaces_groups_macros_spec.md.  0x10-0x1F
-// and 0x2C-0x2F hold the subharmonic synthesizer (below).
-#define REQ_SET_CS_GROUP            0x20  // wValue = group (0-7), payload = 40-byte CsGroup;
-                                          // all-zero record clears the slot
-#define REQ_GET_CS_GROUP            0x21  // wValue = group (0-7); returns 40-byte CsGroup
-#define REQ_SET_CS_MACRO            0x22  // wValue = macro (0-7), payload = 36-byte
-                                          // CsMacroHeaderWire (name + step_count)
-#define REQ_GET_CS_MACRO            0x23  // wValue = macro (0-7); returns 132-byte CsMacro
-#define REQ_SET_CS_MACRO_STEP       0x24  // wValue = (step << 8) | macro, payload = 12-byte
-                                          // CsMacroStep; all-zero record clears the step
-#define REQ_CS_MACRO_FIRE           0x25  // GET; wValue = macro fires it, 0xFFFF cancels the
-                                          // running one; returns 1 status byte
-#define REQ_GET_CS_EXT_STATUS       0x26  // returns 24-byte CsExtStatusPacket
-
-// Control Surfaces I2C display (caps v10); see control_surfaces.h and
-// Documentation/Features/control_surfaces_display_spec.md section 2.4.
-#define REQ_SET_CS_DISPLAY_CFG      0x27  // payload = 12-byte CsDisplayCfg
-#define REQ_GET_CS_DISPLAY_CFG      0x28  // returns 16 bytes: {max_pages,
-                                          // model_count, reserved[2]} + CsDisplayCfg
-#define REQ_SET_CS_DISPLAY_PAGE     0x29  // wValue = page (0-15), payload = 4-byte
-                                          // CsDisplayPage; all-zero record clears it
-#define REQ_GET_CS_DISPLAY_PAGE     0x2A  // wValue = page (0-15); returns 4-byte
-                                          // CsDisplayPage
-#define REQ_GET_CS_DISPLAY_STATUS   0x2B  // returns 8-byte CsDisplayStatus
-
-// Subharmonic synthesizer (dbx-style octave divider; subharm.h).  First
-// application block allocated inside 0x00-0x1F.
-#define REQ_SET_SUBHARM             0x10  // 1 byte 0/1
-#define REQ_GET_SUBHARM             0x11
-#define REQ_SET_SUBHARM_LOW         0x12  // float dB, 24-36 Hz band level
-#define REQ_GET_SUBHARM_LOW         0x13
-#define REQ_SET_SUBHARM_HIGH        0x14  // float dB, 36-56 Hz band level
-#define REQ_GET_SUBHARM_HIGH        0x15
-#define REQ_SET_SUBHARM_BOOST       0x16  // float dB, LF boost bell
-#define REQ_GET_SUBHARM_BOOST       0x17
-#define REQ_SET_SUBHARM_MASK        0x18  // uint16 LE output mask
-#define REQ_GET_SUBHARM_MASK        0x19
-#define REQ_GET_SUBHARM_HEADROOM    0x1A  // float dB: preamp headroom to free
-// The block continues in the free ranges 0x1B-0x1F, 0x2C-0x2F and 0xA9-0xAE.
-#define REQ_SET_SUBHARM_TOP         0x1B  // float dB, 56-80 Hz band level
-#define REQ_GET_SUBHARM_TOP         0x1C
-#define REQ_SET_SUBHARM_SELECT      0x1D  // 1 byte SUBHARM_SELECT_* mode
-#define REQ_GET_SUBHARM_SELECT      0x1E
-#define REQ_GET_SUBHARM_METER       0x1F  // NUM_OUTPUT_CHANNELS x uint16 LE sub peaks
-#define REQ_SET_SUBHARM_SOLO        0x2C  // 1 byte 0/1; runtime only, never persisted
-#define REQ_GET_SUBHARM_SOLO        0x2D
-#define REQ_SET_SUBHARM_LINK        0x2E  // 1 byte 0/1, pair-linked synthesis
-#define REQ_GET_SUBHARM_LINK        0x2F
-#define REQ_SET_SUBHARM_DEPTH       0xA9  // float %, selectivity depth
-#define REQ_GET_SUBHARM_DEPTH       0xAA
-#define REQ_SET_SUBHARM_HOLD        0xAB  // float ms, selectivity hold time
-#define REQ_GET_SUBHARM_HOLD        0xAC
-#define REQ_SET_SUBHARM_CEILING     0xAD  // float dBFS sub ceiling (0 = off)
-#define REQ_GET_SUBHARM_CEILING     0xAE
-
-// Psychoacoustic bass enhancement (missing-fundamental harmonics; psybass.h)
-#define REQ_SET_PSYBASS             0x30
-#define REQ_GET_PSYBASS             0x31
-#define REQ_SET_PSYBASS_CUTOFF      0x32
-#define REQ_GET_PSYBASS_CUTOFF      0x33
-#define REQ_SET_PSYBASS_HARMONICS   0x34
-#define REQ_GET_PSYBASS_HARMONICS   0x35
-#define REQ_SET_PSYBASS_DRIVE       0x36
-#define REQ_GET_PSYBASS_DRIVE       0x37
-#define REQ_SET_PSYBASS_CHARACTER   0x38
-#define REQ_GET_PSYBASS_CHARACTER   0x39
-#define REQ_SET_PSYBASS_ORIGINAL    0x3A
-#define REQ_GET_PSYBASS_ORIGINAL    0x3B
-#define REQ_SET_PSYBASS_MASK        0x3C
-#define REQ_GET_PSYBASS_MASK        0x3D
-
-// Tube preamp emulation (indexed parameter access; tube.h).  One SET/GET pair
-// covers every parameter, so adding one must not add an opcode here.
-#define REQ_SET_TUBE_PARAM          0x3E  // wValue low byte = index (tube.h TUBE_PARAM_*), 4-byte float32 LE
-#define REQ_GET_TUBE_PARAM          0x3F  // wValue low byte = index, returns 4-byte float32 LE
-
-// Output limiter (limiter.h).  One opcode for everything: OUT sets, IN gets.
-// wValue = (output << 8) | index; SET payload and GET reply are float32 LE,
-// except the read-only GET blocks LIMITER_GET_METER / LIMITER_GET_STATUS.
-#define REQ_LIMITER                 0x81
-
-// Output latency option (output_latency.h).  One opcode: OUT sets a 1-byte
-// option ID (unknown IDs are ignored); IN with wValue 0 gets OutputLatencyStatus,
-// wValue 1 the option table as OutputLatencyOptionWire entries, others STALL.
-#define REQ_OUTPUT_LATENCY          0x03
-#define OUTPUT_LATENCY_GET_STATUS   0
-#define OUTPUT_LATENCY_GET_OPTIONS  1
-
-// Vendor Request Commands (EP0 control transfers)
-#define REQ_SET_EQ_PARAM    0x42
-#define REQ_GET_EQ_PARAM    0x43
-#define REQ_SET_PREAMP      0x44
-#define REQ_GET_PREAMP      0x45
-#define REQ_SET_BYPASS      0x46
-#define REQ_GET_BYPASS      0x47
-#define REQ_SET_DELAY       0x48
-#define REQ_GET_DELAY       0x49
-
-// Stereo upmixer (RP2350 only; see upmix.h and
-// Documentation/Features/upmixer_spec.md).  RP2040 SETs STALL (unsupported),
-// GETs return zeros.
-#define REQ_UPMIX_SET_CONFIG        0x4A  // payload = UpmixConfigPacket (44 B)
-#define REQ_UPMIX_GET_CONFIG        0x4B  // returns UpmixConfigPacket
-#define REQ_UPMIX_SET_PARAM         0x4C  // wValue = UPMIX_PARAM_*, payload = float (4 B)
-#define REQ_UPMIX_GET_PARAM         0x4D  // wValue = UPMIX_PARAM_*, returns float
-#define REQ_UPMIX_GET_STATUS        0x4E  // returns UpmixStatus (16 B)
-// 0x4F reserved for future upmixer extensions
-#define REQ_GET_STATUS      0x50
-#define REQ_SAVE_PARAMS     0x51
-// REQ_SAVE_OUTPUT_CONFIG (0x52): persist the live physical IO/output configuration
-// (output pins, output types, I2S MCK/BCK, SPDIF RX pin) and the output limiter
-// settings into the directory's device-global blocks.  Used in
-// OUTPUT_CONFIG_MODE_INDEPENDENT (the "stored independently, like master
-// volume" mode); accepted but dormant in WITH_PRESET mode.  No payload.
-//
-// Reassigned from the former REQ_LOAD_PARAMS — a deprecated synchronous "revert
-// to saved" that ran flash_load_params()->preset_load() in the USB control/IRQ
-// handler without stopping SPDIF RX or fencing Core 1, crashing the device on
-// SPDIF input.  Hosts use the deferred, SPDIF-safe REQ_PRESET_LOAD (0x91) instead.
-#define REQ_SAVE_OUTPUT_CONFIG  0x52
-#define REQ_FACTORY_RESET   0x53
-// Device-global input source names; see Documentation/Features/input_source_names_spec.md.
-#define REQ_SET_INPUT_SOURCE_NAME   0x54  // wValue = source ID, payload = 1-32 byte name (leading NUL clears)
-#define REQ_GET_INPUT_SOURCE_NAME   0x55  // wValue = source ID, returns 32-byte NUL-terminated name (zeros = unnamed)
-// Device-global board name; see Documentation/Features/device_name_spec.md.
-#define REQ_SET_DEVICE_NAME         0x56  // wValue = 0, payload = 1-32 byte name (leading NUL clears)
-#define REQ_GET_DEVICE_NAME         0x57  // wValue = 0, returns 32-byte NUL-terminated name (zeros = unnamed)
-#define REQ_SET_LOUDNESS            0x58
-#define REQ_GET_LOUDNESS            0x59
-#define REQ_SET_LOUDNESS_REF        0x5A
-#define REQ_GET_LOUDNESS_REF        0x5B
-#define REQ_SET_LOUDNESS_INTENSITY  0x5C
-#define REQ_GET_LOUDNESS_INTENSITY  0x5D
-#define REQ_SET_CROSSFEED           0x5E
-#define REQ_GET_CROSSFEED           0x5F
-#define REQ_SET_CROSSFEED_PRESET    0x60
-#define REQ_GET_CROSSFEED_PRESET    0x61
-#define REQ_SET_CROSSFEED_FREQ      0x62
-#define REQ_GET_CROSSFEED_FREQ      0x63
-#define REQ_SET_CROSSFEED_FEED      0x64
-#define REQ_GET_CROSSFEED_FEED      0x65
-#define REQ_SET_CROSSFEED_ITD       0x66
-#define REQ_GET_CROSSFEED_ITD       0x67
-
-// ADAT Input Commands (RP2350 only; state round-trips on RP2040). 0x6F reserved.
-#define REQ_SET_ADAT_INPUT_ENABLE      0x68
-#define REQ_GET_ADAT_INPUT_ENABLE      0x69
-#define REQ_SET_ADAT_INPUT_PIN         0x6A  // wValue = GPIO; PIN_RESET_TO_DEFAULT
-                                             // clears to unset (only while disabled)
-#define REQ_GET_ADAT_INPUT_PIN         0x6B  // returns uint8_t (0xFF = unset)
-#define REQ_SET_ADAT_INPUT_CLOCK_MODE  0x6C
-#define REQ_GET_ADAT_INPUT_CLOCK_MODE  0x6D
-#define REQ_GET_ADAT_INPUT_STATUS      0x6E
-
-// Matrix Mixer Commands
-#define REQ_SET_MATRIX_ROUTE        0x70
-#define REQ_GET_MATRIX_ROUTE        0x71
-#define REQ_SET_OUTPUT_ENABLE       0x72
-#define REQ_GET_OUTPUT_ENABLE       0x73
-#define REQ_SET_OUTPUT_GAIN         0x74
-#define REQ_GET_OUTPUT_GAIN         0x75
-#define REQ_SET_OUTPUT_MUTE         0x76
-#define REQ_GET_OUTPUT_MUTE         0x77
-#define REQ_SET_OUTPUT_DELAY        0x78
-#define REQ_GET_OUTPUT_DELAY        0x79
-
-// Core 1 Mode Query Commands
-#define REQ_GET_CORE1_MODE          0x7A
-#define REQ_GET_CORE1_CONFLICT      0x7B
-
-// Pin Configuration Commands
-#define REQ_SET_OUTPUT_PIN          0x7C  // wValue = (GPIO<<8)|output_index;
-                                          // GPIO = PIN_RESET_TO_DEFAULT restores the default
-#define REQ_GET_OUTPUT_PIN          0x7D
-
-// Device Identification Commands
-#define REQ_GET_SERIAL              0x7E
-#define REQ_GET_PLATFORM            0x7F
-#define REQ_GET_BUILD_INFO          0x80  // 64-byte git-describe/date blob; provenance for
-                                          // humans only, no software may gate on it
-
-// Clock / audio-path diagnostics: the packed ClockDiagPacket latched by the
-// 1 Hz clock_diag poll.  Zero-length unless built with -DDSPI_CLOCK_DIAG=ON,
-// or when the packet does not fit the requesting transport (UART/I2C).
-#define REQ_GET_CLOCK_DIAG          0x82
-
-// Clip Detection Commands
-#define REQ_CLEAR_CLIPS             0x83
-
-// Control Surfaces Commands (physical controls/indicators on user GPIOs).
-// See control_surfaces.h and Documentation/Features/control_surfaces_spec.md.
-#define REQ_SET_CS_BINDING          0x84  // wValue = slot (0-15), payload = 24-byte CsBinding
-#define REQ_GET_CS_BINDING          0x85  // wValue = slot, returns 24-byte CsBinding
-#define REQ_GET_CS_CAPS             0x86  // wValue = 0xFFFF: header + type table; wValue = noun: 12-byte noun descriptor
-#define REQ_GET_CS_STATUS           0x87  // returns 41-byte CsStatusPacket
-// 0x88-0x8A reserved (claimed by the I2S slave-mode branch)
-#define REQ_SET_CS_NAME             0x8B  // wValue = slot (0-15), payload = 1-32 byte name (a single
-                                          // NUL byte clears it); apply-live-only preview, deferred,
-                                          // result via REQ_GET_CS_STATUS
-#define REQ_GET_CS_NAME             0x8C  // wValue = slot, returns 32-byte NUL-terminated live name
-#define REQ_SET_CS_IR_CMD           0x8D  // wValue = sub-slot (0-15), payload = 16-byte IrCommand;
-                                          // apply-live-only preview, deferred to the main loop
-#define REQ_GET_CS_IR_CMD           0x8E  // wValue = sub-slot, returns 16-byte IrCommand
-#define REQ_CS_IR_LEARN             0x8F  // GET; wValue 1 = arm, 0 = cancel (each returns 1 status
-                                          // byte), 2 = read result (returns 8-byte
-                                          // {state, protocol, 0, 0, code_le32})
-
-// Preset System Commands
-#define REQ_PRESET_SAVE             0x90
-#define REQ_PRESET_LOAD             0x91
-#define REQ_PRESET_DELETE           0x92
-#define REQ_PRESET_GET_NAME         0x93
-#define REQ_PRESET_SET_NAME         0x94
-#define REQ_PRESET_GET_DIR          0x95
-#define REQ_PRESET_SET_STARTUP      0x96
-#define REQ_PRESET_GET_STARTUP      0x97
-// Output-config persistence mode (was REQ_PRESET_SET/GET_INCLUDE_PINS).  Selects
-// whether the physical IO/output config travels with presets or is device-global.
-#define REQ_SET_OUTPUT_CONFIG_MODE  0x98  // payload = uint8_t mode (see OUTPUT_CONFIG_MODE_*)
-#define REQ_GET_OUTPUT_CONFIG_MODE  0x99  // returns uint8_t mode
-#define REQ_PRESET_GET_ACTIVE       0x9A
-#define REQ_SET_CHANNEL_NAME        0x9B
-#define REQ_GET_CHANNEL_NAME        0x9C
-// Control Surfaces persistence (whole live config: bindings + IR commands +
-// slot names).
-#define REQ_CS_SAVE                 0x9D  // GET; persists the whole live CS config in one flash
-                                          // write; deferred, result via REQ_GET_CS_STATUS
-#define REQ_CS_REVERT               0x9E  // GET; discards the live preview and re-applies the
-                                          // stored config; deferred, result via REQ_GET_CS_STATUS
-
-// Bulk parameter transfer
-#define REQ_GET_ALL_PARAMS          0xA0
-#define REQ_SET_ALL_PARAMS          0xA1
-
-// Chunked bulk-params access (USB-only).  Works around the Windows/WinUSB
-// 4 KB control-transfer cap that the full WireBulkParams (5864 B at V16)
-// cannot cross (GitHub issue #62).  wValue = byte offset, wLength = chunk
-// size.  GET: offset 0 snapshots the struct under the bulk lock, later
-// offsets read the snapshot out; the lock frees after the final chunk.
-// SET: chunks must be sequential from offset 0; the normal deferred apply
-// fires when the last byte lands.  UART and I2C have no size cap and use
-// plain 0xA0/0xA1; these two commands are refused on those transports.
-#define REQ_GET_ALL_PARAMS_CHUNK    0xA2
-#define REQ_SET_ALL_PARAMS_CHUNK    0xA3
-
-// Test signal generator (see siggen.h and
-// Documentation/Features/test_signals_spec.md).  0xA9-0xAF reserved for
-// future generator extensions.
-#define REQ_SIGGEN_SET_CONFIG       0xA4  // payload = SiggenConfig (36 B)
-#define REQ_SIGGEN_GET_CONFIG       0xA5  // returns SiggenConfig
-#define REQ_SIGGEN_CONTROL          0xA6  // wValue = SIGGEN_CTL_*; returns status byte
-#define REQ_SIGGEN_GET_STATUS       0xA7  // returns SiggenStatus (16 B)
-#define REQ_SIGGEN_GET_CAPS         0xA8  // wValue = type index / 0xFFFF = header
-
-// I2S Output Configuration Commands
-#define REQ_SET_OUTPUT_TYPE         0xC0
-#define REQ_GET_OUTPUT_TYPE         0xC1
-#define REQ_SET_I2S_BCK_PIN         0xC2  // wValue = (role<<8)|GPIO; GPIO =
-                                          // PIN_RESET_TO_DEFAULT restores the role's default
-#define REQ_GET_I2S_BCK_PIN         0xC3
-#define REQ_SET_MCK_ENABLE          0xC4
-#define REQ_GET_MCK_ENABLE          0xC5
-#define REQ_SET_MCK_PIN             0xC6  // wValue = GPIO; PIN_RESET_TO_DEFAULT
-                                          // restores PICO_I2S_MCK_PIN
-#define REQ_GET_MCK_PIN             0xC7
-#define REQ_SET_MCK_MULTIPLIER      0xC8
-#define REQ_GET_MCK_MULTIPLIER      0xC9
-
-// ADAT Bulk Output Commands (RP2350 only; RP2040 SETs return
-// PIN_CONFIG_INVALID_OUTPUT, GETs return zeros).  The ADAT stream carries all
-// 8 post-gain output channels; it only runs at 44.1/48 kHz and auto-suspends
-// at higher rates (see adat_output.h).
-#define REQ_SET_ADAT_ENABLE         0xCA  // wValue = 0/1, returns status byte
-#define REQ_GET_ADAT_ENABLE         0xCB  // returns uint8_t configured enable
-#define REQ_SET_ADAT_PIN            0xCC  // wValue = GPIO, returns status byte; GPIO =
-                                          // PIN_RESET_TO_DEFAULT restores PICO_ADAT_PIN
-#define REQ_GET_ADAT_PIN            0xCD  // returns uint8_t
-#define REQ_GET_ADAT_STATUS         0xCE  // returns AdatStatus (8 B)
-
-// Buffer statistics
-#define REQ_GET_BUFFER_STATS        0xB0
-#define REQ_RESET_BUFFER_STATS      0xB1
-#define REQ_GET_USB_ERROR_STATS     0xB2
-#define REQ_RESET_USB_ERROR_STATS   0xB3
-
-// Volume Leveller Commands
-#define REQ_SET_LEVELLER_ENABLE     0xB4
-#define REQ_GET_LEVELLER_ENABLE     0xB5
-#define REQ_SET_LEVELLER_AMOUNT     0xB6
-#define REQ_GET_LEVELLER_AMOUNT     0xB7
-#define REQ_SET_LEVELLER_SPEED      0xB8
-#define REQ_GET_LEVELLER_SPEED      0xB9
-#define REQ_SET_LEVELLER_MAX_GAIN   0xBA
-#define REQ_GET_LEVELLER_MAX_GAIN   0xBB
-#define REQ_SET_LEVELLER_LOOKAHEAD  0xBC
-#define REQ_GET_LEVELLER_LOOKAHEAD  0xBD
-#define REQ_SET_LEVELLER_GATE       0xBE
-#define REQ_GET_LEVELLER_GATE       0xBF
-#define REQ_SET_LEVELLER_MASKS      0xDE  // 2 bytes: [detector_mask, apply_mask]
-#define REQ_GET_LEVELLER_MASKS      0xDF
-
-// Per-Channel Preamp Commands
-#define REQ_SET_PREAMP_CH           0xD0  // wValue = channel index (0=L, 1=R), payload = float dB
-#define REQ_GET_PREAMP_CH           0xD1  // wValue = channel index, returns float dB
-
-// Master Volume Commands
-#define REQ_SET_MASTER_VOLUME       0xD2  // payload = float dB (-128 mute sentinel, -127..0 range)
-#define REQ_GET_MASTER_VOLUME       0xD3  // returns float dB
-#define REQ_SET_MASTER_VOLUME_MODE  0xD4  // payload = uint8_t mode (see MASTER_VOLUME_MODE_*)
-#define REQ_GET_MASTER_VOLUME_MODE  0xD5  // returns uint8_t mode
-#define REQ_SAVE_MASTER_VOLUME      0xD6  // no payload, stores live master vol to directory
-#define REQ_GET_SAVED_MASTER_VOLUME 0xD7  // returns float dB from directory's independent field
 
 // Master Volume Constants
 #define MASTER_VOL_MUTE_DB          (-128.0f)  // Sentinel value: true -inf (mute)
@@ -484,128 +145,27 @@ extern volatile uint32_t nominal_feedback_10_14;
 #define MASTER_VOL_MAX_DB           (0.0f)     // Unity gain (no attenuation)
 #define MASTER_VOL_DEFAULT_DB       (-20.0f)   // Power-on / fresh-device default
 
-// User Volume Commands.  Mirror UAC1 host volume/mute, but as a vendor channel
-// so non-USB controllers (e.g. Console while SPDIF input is active, an external
-// hardware control surface) can drive the same value the OS slider would.
-// Same `audio_state.volume` / `audio_state.mute` fields are touched, so a vendor
-// SET is observable via UAC1 GET_CUR and vice versa — single source of truth for
-// "user-perceived volume", which is what loudness compensation keys against.
-//
-// SET always applies (no input-source guard): writes audio_state.volume and
-// drives apply_vol_index_to_audio() so vol_mul + the loudness coefficient table
-// move together.  Caller-side convention (e.g. "Console only writes when USB
-// input is inactive") is enforced by the caller, not the firmware.
-#define REQ_SET_USER_VOLUME         0xDA  // payload = float dB (clamped to [-CENTER_VOLUME_INDEX, 0])
-#define REQ_GET_USER_VOLUME         0xDB  // returns float dB (audio_state.volume / 256)
-#define REQ_SET_USER_MUTE           0xDC  // payload = uint8_t (0/1)
-#define REQ_GET_USER_MUTE           0xDD  // returns uint8_t (0/1)
-
 // Master Volume Persistence Modes
-// Mode 0 (default): master volume is independent of presets. REQ_SAVE_MASTER_VOLUME
+// Mode 0 (default): master volume is independent of presets. ROUTE.MASTER_VOLUME_SAVE
 //   stores it in the directory sector; it's applied at boot and on factory reset.
 //   Preset save/load does not touch it.
 // Mode 1: master volume is part of the preset. Saved with the preset, restored on
-//   preset load — same as the old include_master_volume=1 behavior.
+//   preset load.
 #define MASTER_VOLUME_MODE_INDEPENDENT   0
 #define MASTER_VOLUME_MODE_WITH_PRESET   1
 
 // Output (Physical IO) Configuration Persistence Modes
 // Governs the device's physical IO/routing: output pins, output types (SPDIF/I2S),
 // I2S MCK/BCK, and the SPDIF RX pin.  Same 0/1 convention as the master-volume
-// modes, so the legacy include_pins directory byte (default 1) maps straight onto
-// it with no value migration.
-// Mode 1 (WITH_PRESET, default): IO config travels with presets — stored in each
-//   slot, applied on load.  (Today's behavior.)
-// Mode 0 (INDEPENDENT): IO config is device-global — REQ_SAVE_OUTPUT_CONFIG stores
+// modes, so the include_pins directory byte (default 1) maps straight onto it.
+// Mode 1 (WITH_PRESET, default): IO config travels with presets, stored in each
+//   slot and applied on load.
+// Mode 0 (INDEPENDENT): IO config is device-global.  STORE.OUTPUT_CONFIG_SAVE stores
 //   it in the directory; it is applied at boot and preset load/factory reset never
 //   touch it.  Mirrors the master-volume independent mode.
 #define OUTPUT_CONFIG_MODE_INDEPENDENT   0
 #define OUTPUT_CONFIG_MODE_WITH_PRESET   1
 
-// Per-Band Bypass Commands
-// wValue = (channel << 8) | band; payload = uint8_t (1 = bypass, anything else = active)
-#define REQ_SET_BAND_BYPASS         0xD8
-#define REQ_GET_BAND_BYPASS         0xD9
-
-// DAC Hardware Mute Commands (board-level — see dac_hw_mute.h)
-#define REQ_SET_DAC_HW_MUTE_CONFIG  0xEA  // payload = 16-byte DacHwMuteConfig
-#define REQ_GET_DAC_HW_MUTE_CONFIG  0xEB  // returns 16-byte DacHwMuteConfig
-#define REQ_TEST_DAC_HW_MUTE        0xEC  // no payload; pulses mute ~1s
-
-// Audio Input Source Commands
-#define REQ_SET_INPUT_SOURCE        0xE0  // payload = uint8_t (InputSource enum)
-#define REQ_GET_INPUT_SOURCE        0xE1  // returns uint8_t
-#define REQ_GET_SPDIF_RX_STATUS     0xE2  // returns 16-byte status struct (Phase 2)
-#define REQ_GET_SPDIF_RX_CH_STATUS  0xE3  // returns 24-byte IEC 60958 channel status (Phase 2)
-#define REQ_SET_SPDIF_RX_PIN        0xE4  // wValue = (index<<8)|GPIO; index 0..3 selects the
-                                          // SPDIF input (old hosts send wValue=pin => index 0).
-                                          // GPIO = PIN_RESET_TO_DEFAULT restores that input's
-                                          // default. Returns status byte.
-#define REQ_GET_SPDIF_RX_PIN        0xE5  // wValue = index (0..3); returns that input's GPIO
-#define REQ_SET_SPDIF_INPUT_ENABLE  0xE9  // wValue = (index<<8)|enable; index 1..3, enable 0/1.
-                                          // Enables/disables an optional SPDIF input. Returns status byte.
-#define REQ_GET_SPDIF_INPUT_CONFIG  0xEF  // returns 6 bytes: count, enable mask (bit0=input1),
-                                          // then the GPIO for inputs 0..3
-
-// I2S Input Commands. The device is the rate authority while I2S input is
-// active (the external source slaves to our BCK/LRCLK), so the sample rate
-// is selected by command instead of detected.
-#define REQ_SET_INPUT_RATE          0xED  // payload = uint32_t Hz (44100/48000/96000)
-#define REQ_GET_INPUT_RATE          0xEE  // returns 2x uint32_t {current Hz, selected I2S Hz}
-#define REQ_SET_I2S_RX_PIN          0xF1  // wValue = (pair<<8)|GPIO; pair 0..3 selects the
-                                          // stereo pair (old hosts send wValue=pin => pair 0).
-                                          // GPIO = PIN_RESET_TO_DEFAULT restores that pair's
-                                          // default. Returns status byte.
-#define REQ_GET_I2S_RX_PIN          0xF2  // wValue = pair (0..3); returns that pair's GPIO
-// I2S input channel count (RP2350 multichannel input: 2/4/6/8 -> 1..4 stereo pairs).
-#define REQ_SET_I2S_INPUT_CHANNELS  0xF3  // wValue = channel count (2/4/6/8); returns status byte
-#define REQ_GET_I2S_INPUT_CHANNELS  0xF4  // returns uint8_t (active count)
-
-// I2S Clock Mode Commands. Slave mode makes BCK/LRCLK inputs driven by an
-// external master; the incoming rate is auto-detected (44.1/48/96 kHz) rather
-// than commanded. Only meaningful while the input source is I2S; in master
-// mode (default) the device drives the clocks and REQ_SET_INPUT_RATE selects
-// the rate. SET is deferred: the change applies in the main loop, not live.
-#define REQ_SET_I2S_CLOCK_MODE      0x88  // payload = uint8_t (0=master, 1=slave); deferred apply
-#define REQ_GET_I2S_CLOCK_MODE      0x89  // returns uint8_t live mode (pending change not reflected)
-#define REQ_GET_I2S_SLAVE_STATUS    0x8A  // returns 16-byte I2sSlaveStatusPacket
-
-// I2S clock-pin mode: whether master and slave clock modes share one BCK/LRCLK
-// pair (UNIFIED, legacy behavior) or each have their own (SPLIT: master keeps
-// i2s_bck_pin, slave listens on i2s_bck_pin_slave; LRCLK = BCK + 1 in both).
-// The slave-role pin itself is set via REQ_SET_I2S_BCK_PIN with role = 1 in
-// wValue's high byte.  See Documentation/Features/clock_pins_spec.md.
-#define REQ_SET_I2S_CLOCK_PIN_MODE  0xFE  // wValue = 0 unified / 1 split; returns PIN_CONFIG_* status
-#define REQ_GET_I2S_CLOCK_PIN_MODE  0xFF  // returns uint8_t live mode
-
-// LG Sound Sync (optical) Commands.  Per-preset feature: gate is stored in
-// PresetSlot, vendor SET only updates live state — flash persistence happens
-// on REQ_SAVE_PRESET (matching loudness/crossfeed/leveller toggle semantics).
-// See Documentation/Features/lg_sound_sync_spec.md.
-#define REQ_SET_LG_SOUND_SYNC_ENABLE  0xE6  // payload = uint8_t (0 = off, 1 = on)
-#define REQ_GET_LG_SOUND_SYNC_ENABLE  0xE7  // returns uint8_t
-#define REQ_GET_LG_SOUND_SYNC_STATUS  0xE8  // returns 16-byte LgSoundSyncStatus
-
-// System
-#define REQ_ENTER_BOOTLOADER        0xF0
-
-// External control interfaces (UART / I2C target).  SETs are USB-only:
-// the dispatcher rejects them when they arrive over UART or I2C so an
-// external controller can never reconfigure (and lock itself out of) its
-// own transport.  See Documentation/Features/control_interfaces_spec.md.
-#define REQ_SET_UART_CONFIG         0xF5  // payload = UartCtrlConfig (8 bytes); USB-only
-#define REQ_GET_UART_CONFIG         0xF6  // returns UartCtrlConfig (live)
-#define REQ_SET_I2C_CONFIG          0xF7  // payload = I2cCtrlConfig (8 bytes); USB-only
-#define REQ_GET_I2C_CONFIG          0xF8  // returns I2cCtrlConfig (live)
-#define REQ_GET_CTRL_IFACE_STATUS   0xF9  // returns CtrlIfaceStatus (8 bytes)
-
-// Loudness output-channel mask (bit k = compensate output k; see loudness.h)
-#define REQ_SET_LOUDNESS_MASK       0xFA  // payload = uint16 LE mask
-#define REQ_GET_LOUDNESS_MASK       0xFB  // returns uint16 LE mask
-
-// Crossfeed output-pair mask (bit p = crossfeed on output pair p; see crossfeed.h)
-#define REQ_SET_CROSSFEED_OUTPUTS   0xFC  // payload = uint8 pair mask
-#define REQ_GET_CROSSFEED_OUTPUTS   0xFD  // returns uint8 pair mask
 
 // UART control interface configuration.  Fixed 8N1 framing (the wire CRC16
 // covers integrity, so parity adds nothing); only the baud rate is
@@ -631,8 +191,8 @@ typedef struct __attribute__((packed)) {
     uint8_t reserved[4];
 } I2cCtrlConfig;
 
-// REQ_GET_CTRL_IFACE_STATUS response.  last_status is the result of the most
-// recent REQ_SET_*_CONFIG (PIN_CONFIG_* code); live reflects whether the
+// XPORT.STATUS reply.  last_status is the result of the most recent
+// XPORT.UART_CONFIG or XPORT.I2C_CONFIG SET (PIN_CONFIG_* code); live reflects whether the
 // interface is actually up (differs from config.enabled after a boot-time
 // pin collision kept it down).
 typedef struct __attribute__((packed)) {
@@ -683,21 +243,21 @@ typedef struct __attribute__((packed)) {
 
 // Firmware version.  The packed form squeezes minor and patch into one nibble
 // each (plain nibble packing, not BCD; no carry), so each caps at 15.  It only
-// feeds the legacy bytes of REQ_GET_PLATFORM; see
+// feeds byte 2 of SYS.PLATFORM; see
 // Documentation/Features/firmware_versioning_spec.md.
 #define FW_VERSION_MAJOR            1
 #define FW_VERSION_MINOR            1
-#define FW_VERSION_PATCH            6
+#define FW_VERSION_PATCH            7
 #define FW_VERSION_PACKED           ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
 
 // Pre-release ordinal: 0 = final release, 1..255 = beta N of this patch.  Betas
 // share their patch number, so this byte is the only thing telling two of them
 // apart; it must be zeroed in the same commit that tags the final release.
-#define FW_VERSION_BETA             0
+#define FW_VERSION_BETA             1
 
 // Universal "reset to default" escape hatch for every single-pin SET command
-// (REQ_SET_OUTPUT_PIN, REQ_SET_I2S_BCK_PIN, REQ_SET_MCK_PIN, REQ_SET_ADAT_PIN,
-// REQ_SET_SPDIF_RX_PIN, REQ_SET_ADAT_INPUT_PIN, REQ_SET_I2S_RX_PIN).  Sending
+// (OUTPUT.PIN, CLOCK.I2S_BCK_PIN, CLOCK.MCK_PIN, OUTPUT.ADAT_TX_PIN,
+// INPUT.SPDIF_RX_PIN, INPUT.ADAT_RX_PIN, INPUT.I2S_RX_PIN).  Sending
 // this value as the pin byte restores the platform default for the addressed
 // target; the mapped default then passes through the command's normal
 // validation, so a reset can still fail with PIN_IN_USE etc.  0xFF is not a
@@ -739,7 +299,7 @@ typedef struct __attribute__((packed)) {
 //   RP2040: GPIO 21 → clk_gpout0 is the only DSPi-friendly choice.
 //           GPIOs 23–25 are also CLK_GPOUTn-capable but reserved on the
 //           DSPi board (control / SMPS / LED) and rejected by
-//           is_valid_gpio_pin() in vendor_commands.c.
+//           is_valid_gpio_pin() in vendor/vc_pins.c.
 //   RP2350: GPIO 13 → clk_gpout0 is the legacy DSPi default and remains
 //           the cleanest pick.  GPIO 15 → clk_gpout1 also exists but
 //           collides with I2S LRCLK whenever any output is set to I2S.
@@ -882,8 +442,8 @@ typedef struct __attribute__((packed)) {
 // Band indices in [channel_band_counts[ch] .. XOVER_BAND_BASE) are rejected
 // by the vendor handlers today.
 //
-// NOTE: REQ_GET_EQ_PARAM packs the band index into a 5-bit wValue field
-// (bits[7:3]); XOVER_BAND_BASE + MAX_XOVER_BANDS - 1 (= 23) must stay <= 31.
+// NOTE: a band index travels as one byte (the low byte of FILTER.BAND's
+// address, the CS binding index), so TOTAL_BAND_INDICES must stay <= 256.
 #define XOVER_BAND_BASE   20
 #define MAX_XOVER_BANDS   4
 #define TOTAL_BAND_INDICES (XOVER_BAND_BASE + MAX_XOVER_BANDS)  // 24
@@ -984,15 +544,6 @@ typedef struct {
     OutputChannel outputs[NUM_OUTPUT_CHANNELS];
 } MatrixMixer;
 
-// Matrix Route Packet (for vendor commands)
-typedef struct __attribute__((packed)) {
-    uint8_t input;          // 0-1 (USB L/R); 0-7 on RP2350 8-channel USB mode
-    uint8_t output;         // 0-8
-    uint8_t enabled;        // 0 or 1
-    uint8_t phase_invert;   // 0 or 1
-    float gain_db;          // -inf to +12dB
-} MatrixRoutePacket;
-
 #if PICO_RP2350
 typedef struct {
     // Biquad coefficients
@@ -1020,7 +571,7 @@ typedef struct {
 
 // FilterType value-space contract.  These values are persisted in flash
 // (PresetSlot.filter_recipes/.xover_recipes) and sent over USB (WireBandParams,
-// REQ_SET/GET_EQ_PARAM), so NEVER renumber an existing value without bumping
+// FILTER.BAND), so NEVER renumber an existing value without bumping
 // SLOT_DATA_VERSION + WIRE_FORMAT_VERSION and providing a migration (see
 // remap_filter_type_pre_v18() in flash_storage.c).  The space is partitioned:
 //
@@ -1123,39 +674,9 @@ typedef struct {
     uint16_t peaks[NUM_CHANNELS];
     uint8_t cpu0_load;
     uint8_t cpu1_load;
-    uint32_t clip_flags;         // Per-channel clip latch bitmask (sticky, cleared by REQ_CLEAR_CLIPS).
+    uint32_t clip_flags;         // Per-channel clip latch bitmask (sticky, cleared by MEAS.CLIP_CLEAR).
                                  // 32-bit: NUM_CHANNELS can exceed 16 (17 on RP2350: 8 in + 9 out).
 } SystemStatusPacket;
-
-// ----------------------------------------------------------------------------
-// VENDOR COMMAND PACKET STRUCTURES
-// ----------------------------------------------------------------------------
-
-typedef struct __attribute__((packed)) {
-    uint8_t cmd;
-    uint8_t channel;
-    uint8_t band;
-    uint8_t reserved;
-    uint8_t data[60];
-} VendorCmdPacket;
-
-typedef struct __attribute__((packed)) {
-    uint8_t cmd;
-    uint8_t result;
-    uint8_t reserved[2];
-    union {
-        struct __attribute__((packed)) {
-            uint16_t peaks[NUM_CHANNELS];
-            uint8_t cpu0_load;
-            uint8_t cpu1_load;
-        } status;
-        EqParamPacket eq_param;
-        float preamp_db;
-        float delay_ms;
-        uint8_t bypass;
-        uint8_t raw[60];
-    };
-} VendorRespPacket;
 
 // Buffer Statistics Wire Format — fits in a single 64-byte control transfer
 typedef struct __attribute__((packed)) {
@@ -1188,7 +709,7 @@ typedef struct __attribute__((packed)) {
     PdmBufferStats pdm;
 } BufferStatsPacket;             // 4 + 32 + 8 = 44 bytes
 
-// REQ_OUTPUT_LATENCY replies.  The effective option and its target depend on
+// OUTPUT.LATENCY_STATUS reply.  The effective option and its target depend on
 // the active source and rate; the requested ID is what both re-derive from.
 typedef struct __attribute__((packed)) {
     uint8_t  requested_id;       // stored OutputLatencyId
@@ -1197,7 +718,7 @@ typedef struct __attribute__((packed)) {
     uint16_t target_frames;      // live slot ring fill target
     uint16_t batch_frames;       // stream-input batch at the current rate
     uint8_t  pending;            // 1 until a SET has fully applied
-    uint8_t  option_count;       // entries in the OUTPUT_LATENCY_GET_OPTIONS reply
+    uint8_t  option_count;       // entries in the OUTPUT.LATENCY_OPTIONS reply
     uint16_t reserved;
 } OutputLatencyStatus;           // 12 bytes
 

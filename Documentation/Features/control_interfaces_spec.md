@@ -361,7 +361,7 @@ Byte 0 of every UART and I2C response is the status. It holds one of two kinds o
 | `0x06` | `CTRL_STATUS_OVERSIZE` | The payload is larger than the transport can hold: 64 bytes, or the bulk buffer for `STORE.ALL_PARAMS` |
 | `0x07` | `CTRL_STATUS_FRAME_ERROR` | I2C only. The write was truncated, too long, or had an unknown type |
 
-Codes `0x02` and `0x03` belonged to the 1.1.6 protocol. Firmware 1.1.7 never sends them on a paged request, so a client that receives `0x02` in answer to its `SYS.PROTOCOL_INFO` probe is talking to old firmware.
+Codes `0x02` and `0x03` belonged to the 1.1.6 protocol. Firmware 1.1.7 never sends them, and the numbers stay reserved and are never reused. A client that receives `0x02` in answer to its `SYS.PROTOCOL_INFO` probe is talking to old firmware.
 
 **Command results, `0x10` and up.** The request reached the dispatcher, and this is its answer. It is the same code a USB host reads from `SYS.LAST_RESULT` after a STALL.
 

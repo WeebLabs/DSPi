@@ -1,6 +1,6 @@
 /*
  * vc_page_fx.c: FX page (0x08). Command set: vendor_command_overhaul_plan.md section 5.8.
- * Clamps, pending flags and notifications match the legacy opcodes they replace.
+ * Clamps, pending flags and notifications match the 1.1.6 behaviour of each setting.
  */
 
 #include <stddef.h>
@@ -53,6 +53,7 @@ static VcResult fx_crossfeed_float_get(VcCtx *c) {
 
 static VcResult fx_crossfeed_float_set(VcCtx *c) {
     float val = vc_in_f32(c, 0);
+    if (!isfinite(val)) return VC_ERR_VALUE;
     if (c->arg == 0) {
         val = vc_clampf(val, CROSSFEED_FREQ_MIN, CROSSFEED_FREQ_MAX);
         crossfeed_config.custom_fc = val;
@@ -108,11 +109,14 @@ static VcResult fx_float_get(VcCtx *c, const FxFloatParam *p) {
     return VC_OK;
 }
 
-static void fx_float_set(VcCtx *c, const FxFloatParam *p, volatile bool *pending) {
-    float val = vc_clampf(vc_in_f32(c, 0), p->min, p->max);
+static VcResult fx_float_set(VcCtx *c, const FxFloatParam *p, volatile bool *pending) {
+    float raw = vc_in_f32(c, 0);
+    if (!isfinite(raw)) return VC_ERR_VALUE;
+    float val = vc_clampf(raw, p->min, p->max);
     *p->field = val;
     *pending = true;
     notify_param_write(p->wire, sizeof(float), &val);
+    return VC_OK;
 }
 
 // ---- Subharmonic synth ----
@@ -136,8 +140,7 @@ static VcResult fx_subharm_float_get(VcCtx *c) {
 }
 
 static VcResult fx_subharm_float_set(VcCtx *c) {
-    fx_float_set(c, &fx_subharm_floats[c->arg], &subharm_update_pending);
-    return VC_OK;
+    return fx_float_set(c, &fx_subharm_floats[c->arg], &subharm_update_pending);
 }
 
 static VcResult fx_subharm_enable_get(VcCtx *c) {
@@ -237,8 +240,7 @@ static VcResult fx_psybass_float_get(VcCtx *c) {
 }
 
 static VcResult fx_psybass_float_set(VcCtx *c) {
-    fx_float_set(c, &fx_psybass_floats[c->arg], &psybass_update_pending);
-    return VC_OK;
+    return fx_float_set(c, &fx_psybass_floats[c->arg], &psybass_update_pending);
 }
 
 static VcResult fx_psybass_enable_get(VcCtx *c) {
@@ -299,6 +301,12 @@ static VcResult fx_upmix_config_get(VcCtx *c) {
 static VcResult fx_upmix_config_set(VcCtx *c) {
     UpmixConfigPacket pkt;
     memcpy(&pkt, c->in, sizeof(pkt));
+    const float f[] = { pkt.strength_pct, pkt.center_width_pct, pkt.corr_threshold_pct,
+                        pkt.attack_ms, pkt.release_ms, pkt.detector_hpf_hz,
+                        pkt.surround_delay_ms, pkt.surround_hpf_hz, pkt.surround_lpf_hz,
+                        pkt.decorr_pct };
+    for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
+        if (!isfinite(f[i])) return VC_ERR_VALUE;
     upmix_config.enabled       = (pkt.enabled != 0);
     upmix_config.center_mode   = upmix_clamp_center_mode(pkt.center_mode);
     upmix_config.surround_mode = (pkt.surround_mode <= 2) ? pkt.surround_mode : 2;
@@ -351,6 +359,7 @@ static VcResult fx_upmix_param_get(VcCtx *c) {
 // Mode and enable values are rounded; float ranges are clamped at recompute.
 static VcResult fx_upmix_param_set(VcCtx *c) {
     float v = vc_in_f32(c, 0);
+    if (!isfinite(v)) return VC_ERR_VALUE;
     switch (c->arg) {
         case UPMIX_PARAM_ENABLED:
             upmix_config.enabled = (v != 0.0f);

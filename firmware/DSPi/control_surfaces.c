@@ -39,7 +39,7 @@
 #include "control_surfaces_ir.h"
 #include "control_surfaces_display.h"
 #include "config.h"
-#include "vendor_commands.h"
+#include "vc_pins.h"
 #include "flash_storage.h"
 #include "audio_input.h"
 #include "notify.h"
@@ -96,7 +96,7 @@
 #define CS_ADC_PIN_FIRST      26
 #define CS_ADC_PIN_LAST       28
 
-// Deferred SET handoff (vendor_commands.c writes, main.c consumes)
+// Deferred SET handoff (vendor/vc_page_cs.c writes, main.c consumes)
 volatile bool    cs_set_binding_pending = false;
 uint8_t          cs_set_binding_slot = 0;
 CsBinding        cs_set_binding_val;
@@ -136,7 +136,7 @@ CsMacroStep      cs_set_macro_step_val;
 
 // ---------------------------------------------------------------------------
 // Type capability table; the per-noun half lives in control_surfaces_nouns.c.
-// REQ_GET_CS_CAPS serves these verbatim, so host UIs and the firmware can
+// CS.CAPS and CS.NOUN_DESC serve these verbatim, so host UIs and the firmware can
 // never disagree about which type/noun/action combinations are legal.
 // ---------------------------------------------------------------------------
 
@@ -311,7 +311,7 @@ typedef struct {
 static CsGroupConfig s_groups;                   // live group table
 
 // Aux output value carry (caps v18).  A same-type re-apply of an aux slot and
-// REQ_CS_REVERT stash the live on/off flag and level here so the pin never
+// CS.REVERT stash the live on/off flag and level here so the pin never
 // snaps back to its boot value; cs_seed_runtime consumes the entry.
 typedef struct { uint8_t type; uint8_t on; uint16_t level; } CsAuxCarry;
 static CsAuxCarry s_aux_carry[CS_MAX_BINDINGS];
@@ -1174,7 +1174,7 @@ static void cs_tick_pot(uint8_t slot) {
     const CsNounDesc *nd = &cs_noun_table[b->noun];
     CsRuntime *rt = &s_rt[slot];
     // The ADC input mux is unguarded; safe only because every ADC user (this
-    // tick, the temperature read in vendor_commands.c) runs serialized in the
+    // tick, the temperature read in vendor/vc_page_sys.c) runs serialized in the
     // core0 main loop.  Do not move either to ISR/timer context.
     adc_select_input(b->gpio[0] - CS_ADC_PIN_FIRST);
     uint16_t raw = adc_read();
@@ -2531,7 +2531,7 @@ static void cs_reset_groups_macros(void) {
 }
 
 // The reload from the directory cache, one unit at a time: boot runs it from
-// CS_RL_RESET straight through, REQ_CS_REVERT from CS_RL_STASH as a background
+// CS_RL_RESET straight through, CS.REVERT from CS_RL_STASH as a background
 // job (bg_job.h). While the job runs, binding and IR reads answer from the
 // stored image; every other host-readable table changes within one unit.
 enum {
@@ -2683,7 +2683,7 @@ void control_surfaces_revert_begin(void) {
 bool control_surfaces_busy(void) { return bg_job_active(&s_revert_job); }
 
 void control_surfaces_tick(void) {
-    // A macro fired by the host (REQ_CS_MACRO_FIRE) must run with zero
+    // A macro fired by the host (CS.MACRO_FIRE) must run with zero
     // bindings active, so the sequencer keeps the tick alive too.
     if (!s_any_active && s_macro_run == 0xFF) return;
     uint64_t now = time_us_64();

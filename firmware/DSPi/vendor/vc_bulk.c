@@ -1,7 +1,6 @@
 /*
  * vc_bulk.c: the bulk_param_buf lock shared by USB, UART and I2C, VC_F_BULK
- * routing for paged commands on every transport, and the USB chunk sessions
- * shared by STORE.ALL_PARAMS_CHUNK and the page-0 0xA2/0xA3 opcodes.
+ * routing on every transport, and the USB chunk sessions of STORE.ALL_PARAMS_CHUNK.
  */
 
 #include "vc_internal.h"
@@ -66,14 +65,11 @@ bool vendor_bulk_usb_holds(void) { return bulk_buf_owner == BULK_OWNER_USB; }
 // A paged length the handler refuses still lands here, so the result code matches USB.
 bool vendor_is_bulk_set(uint16_t wIndex, uint8_t bRequest, uint16_t wLength) {
     uint16_t id = (uint16_t)((vc_page_of(0x41, wIndex) << 8) | bRequest);
-    if (id == VC_STORE_ALL_PARAMS) return wLength != 0 && wLength <= WIRE_BULK_BUF_SIZE;
-    return id == REQ_SET_ALL_PARAMS && wLength == sizeof(WireBulkParams);   // page 0, until the flip
+    return id == VC_STORE_ALL_PARAMS && wLength != 0 && wLength <= WIRE_BULK_BUF_SIZE;
 }
 
 bool ctrl_is_bulk_get(uint16_t wIndex, uint8_t bRequest) {
-    uint16_t id = (uint16_t)((vc_page_of(0xC1, wIndex) << 8) | bRequest);
-    return id == VC_STORE_ALL_PARAMS ||
-           id == REQ_GET_ALL_PARAMS;   // page 0, until the flip
+    return (uint16_t)((vc_page_of(0xC1, wIndex) << 8) | bRequest) == VC_STORE_ALL_PARAMS;
 }
 
 // USB holds the lock from SETUP to the status ACK (vc_usb.c); the SETUP-stage
@@ -128,62 +124,41 @@ uint8_t vc_bulk_ext_set(CtrlSource src, uint8_t page, uint8_t cmd, uint16_t addr
     return (uint8_t)r;
 }
 
-// Page-0 0xA1 over UART/I2C: owner check and hand-off in one step. Deleted at the flip.
-bool vc_bulk_legacy_handoff(CtrlSource src) {
-    uint32_t save = save_and_disable_interrupts();
-    bool owned = (bulk_buf_owner == bulk_owner_for(src));
-    if (owned) {
-        bulk_params_pending = true;
-        bulk_buf_owner = BULK_OWNER_NONE;
-    }
-    restore_interrupts(save);
-    return owned;
-}
-
 // ---- Chunk sessions ----
 // A session spans several EP0 transfers and keeps the USB bulk lock between
-// them. Only a request on the path that opened it continues it; anything else
-// reaching tud_vendor_control_xfer_cb closes it (see vc_bulk_chunk_continues).
+// them. Any other request reaching tud_vendor_control_xfer_cb closes it
+// (see vc_bulk_chunk_continues).
 
-bool     usb_chunk_get_open = false;   // snapshot parked in bulk_param_buf
-bool     usb_chunk_get_done = false;   // final chunk queued; release at ACK
-bool     usb_chunk_set_open = false;
-uint16_t usb_chunk_set_received = 0;   // next expected byte offset
-static bool vc_chunk_paged = false;    // the open session belongs to STORE.ALL_PARAMS_CHUNK
+static bool     usb_chunk_get_open = false;   // snapshot parked in bulk_param_buf
+static bool     usb_chunk_get_done = false;   // final chunk queued; release at ACK
+static bool     usb_chunk_set_open = false;
+static uint16_t usb_chunk_set_received = 0;   // next expected byte offset
 
 void usb_chunk_sessions_close(void) {
     usb_chunk_get_open = false;
     usb_chunk_get_done = false;
     usb_chunk_set_open = false;
     usb_chunk_set_received = 0;
-    vc_chunk_paged = false;
 }
 
-bool vc_bulk_chunk_continues(uint8_t page, bool is_get, uint8_t bRequest) {
-    if (page == 0) {
-        return !vc_chunk_paged &&
-               ((bRequest == REQ_GET_ALL_PARAMS_CHUNK && usb_chunk_get_open) ||
-                (bRequest == REQ_SET_ALL_PARAMS_CHUNK && usb_chunk_set_open));
-    }
-    if ((uint16_t)((page << 8) | bRequest) != VC_STORE_ALL_PARAMS_CHUNK) return false;
-    return vc_chunk_paged && (is_get ? usb_chunk_get_open : usb_chunk_set_open);
+bool vc_bulk_chunk_continues(uint16_t id, bool is_get) {
+    if (id != VC_STORE_ALL_PARAMS_CHUNK) return false;
+    return is_get ? usb_chunk_get_open : usb_chunk_set_open;
 }
 
 // Offset 0 (re)opens a session under the lock; later offsets must continue the
-// paged session the lock still guards.
+// session the lock still guards.
 static VcResult vc_chunk_open(bool is_get) {
     if (!vendor_bulk_usb_holds() && !vendor_bulk_try_acquire(CTRL_SOURCE_USB))
         return VC_ERR_BUSY;
     usb_chunk_sessions_close();
-    vc_chunk_paged = true;
     if (is_get) usb_chunk_get_open = true;
     else        usb_chunk_set_open = true;
     return VC_OK;
 }
 
 static bool vc_chunk_live(bool is_get) {
-    return vc_chunk_paged && vendor_bulk_usb_holds() &&
-           (is_get ? usb_chunk_get_open : usb_chunk_set_open);
+    return vendor_bulk_usb_holds() && (is_get ? usb_chunk_get_open : usb_chunk_set_open);
 }
 
 // The GET handler replies in place: vc_bulk_usb_window() points c->out at the

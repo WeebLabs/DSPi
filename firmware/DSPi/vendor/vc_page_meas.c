@@ -1,6 +1,6 @@
 /*
  * vc_page_meas.c: MEAS page (0x09). Command set: vendor_command_overhaul_plan.md section 5.9.
- * Replies match the legacy opcodes byte for byte; RTA_BINS replies stop at the reply buffer.
+ * Replies keep their 1.1.6 layouts byte for byte; RTA_BINS replies stop at the reply buffer.
  */
 
 #include "vc_core.h"
@@ -9,6 +9,7 @@
 #include "notify.h"
 #include "rta.h"
 #include "siggen.h"
+#include "bulk_params.h"
 
 // ---- Meters and clip flags ----
 
@@ -157,6 +158,8 @@ _Static_assert(sizeof(SiggenConfig) == 36 && sizeof(SiggenStatus) == 16 &&
                sizeof(SiggenCapsHeader) == 8 && sizeof(SiggenTypeDesc) == 62,
                "MEAS siggen reply sizes are in pages/meas.def");
 _Static_assert(2 * NUM_CHANNELS + 7 <= VC_REPLY_MAX, "MEAS.LEVELS must fit the reply buffer");
+_Static_assert(RTA_MAX_TRACKED * sizeof(RtaBandFrame) <= WIRE_BULK_BUF_SIZE,
+               "MEAS.RTA_BANDS_ALL must fit bulk_param_buf");
 
 #define VC_PAGE_DEF "pages/meas.def"
 #include "vc_page_table.inc"

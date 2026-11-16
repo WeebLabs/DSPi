@@ -1,12 +1,15 @@
 /*
- * vc_usb.c: EP0 front end for paged vendor requests (page != 0). Runs in
+ * vc_usb.c: EP0 front end for every vendor-type control request. Runs in
  * tud_task (main loop). Stage rules: plan section 8.5.
  */
 
 #include "vc_internal.h"
+#include "config.h"
+#include "usb_descriptors.h"
 #include "pico/bootrom.h"
 
 static bool vc_usb_reboot_pending;
+static uint8_t vc_usb_rx[VC_USB_RX_MAX] __attribute__((aligned(4)));
 
 void vc_usb_bootloader_after_status(void) { vc_usb_reboot_pending = true; }
 
@@ -66,7 +69,7 @@ static bool vc_usb_setup(uint8_t rhport, tusb_control_request_t const *req,
 
     uint16_t cap;
     uint8_t *rx = bulk ? vc_bulk_usb_window(id, req->wValue, req->wLength, &cap)
-                       : vendor_usb_rx_buf();
+                       : vc_usb_rx;
     vendor_usb_busy_begin();
     return tud_control_xfer(rhport, req, rx, req->wLength);
 }
@@ -79,7 +82,7 @@ static bool vc_usb_set_data(tusb_control_request_t const *req, uint8_t page, uin
     if (r == VC_OK) {
         uint16_t cap;
         const uint8_t *in = bulk ? vc_bulk_usb_window(id, req->wValue, req->wLength, &cap)
-                                 : vendor_usb_rx_buf();
+                                 : vc_usb_rx;
         r = vc_run(CTRL_SOURCE_USB, false, e, id, req->wValue, in, req->wLength,
                    NULL, 0, NULL, NULL);
     }
@@ -89,12 +92,31 @@ static bool vc_usb_set_data(tusb_control_request_t const *req, uint8_t page, uin
     return r == VC_OK;   // false STALLs the status stage
 }
 
-bool vc_usb_control_xfer(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req) {
+// Overrides TinyUSB's weak callback, which receives every vendor-type control
+// request whatever its recipient. Page 0 has no table, so vc_check() refuses it
+// at SETUP with VC_ERR_UNKNOWN, before any data stage.
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req) {
     uint8_t page = vc_page_of(req->bmRequestType, req->wIndex);
     bool is_get = req->bmRequestType_bit.direction == TUSB_DIR_IN;
     uint16_t id = (uint16_t)((page << 8) | req->bRequest);
 
-    if (stage == CONTROL_STAGE_SETUP) return vc_usb_setup(rhport, req, page, is_get, id);
+    if (stage == CONTROL_STAGE_SETUP) {
+        // A new SETUP ends any earlier transfer, so drop a USB-held bulk lock the
+        // host abandoned. Only the next request of an open chunk session keeps it.
+        if (!vc_bulk_chunk_continues(id, is_get)) {
+            vendor_bulk_release(CTRL_SOURCE_USB);
+            usb_chunk_sessions_close();
+        }
+        vendor_usb_busy_end();
+
+        // Microsoft OS 2.0 descriptor set, which Windows needs to bind WinUSB. Not a
+        // DSPi command: any other use of this code falls through and is refused.
+        if (req->bRequest == MS_VENDOR_CODE && is_get && req->wIndex == 7) {
+            return tud_control_xfer(rhport, req, (void *)(uintptr_t)desc_ms_os_20,
+                                    (uint16_t)desc_ms_os_20_len);
+        }
+        return vc_usb_setup(rhport, req, page, is_get, id);
+    }
 
     if (stage == CONTROL_STAGE_DATA) {
         return is_get ? true : vc_usb_set_data(req, page, id);

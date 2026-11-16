@@ -245,7 +245,7 @@ typedef struct __attribute__((packed)) {
 // See Documentation/Features/lg_sound_sync_spec.md for protocol decoding,
 // the detection hysteresis, and the host volume integration.  The struct
 // layout intentionally matches LgSoundSyncStatus (lg_sound_sync.h) so the
-// vendor REQ_GET_LG_SOUND_SYNC_STATUS response and the WireBulkParams
+// INPUT.LG_SOUND_SYNC_STATUS reply and the WireBulkParams
 // section share one source of truth — no parallel field-list to drift.
 typedef struct __attribute__((packed)) {
     uint8_t  enabled;                // 0/1 — user gate, honored on bulk SET
@@ -484,7 +484,6 @@ typedef struct __attribute__((packed)) {
 // anchors or per-section version gates; every section is always present.
 // bulk_params_apply() rejects any payload whose format_version != current or
 // whose length != sizeof(WireBulkParams).
-#define WIRE_BULK_PARAMS_MIN_SIZE   WIRE_BULK_PARAMS_SIZE
 
 // Shared bulk transfer buffer size.  Every writer bounds itself by
 // sizeof(WireBulkParams); the RTA bands-all response is asserted to fit.

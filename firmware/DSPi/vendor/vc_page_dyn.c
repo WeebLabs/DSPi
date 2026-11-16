@@ -2,6 +2,7 @@
  * vc_page_dyn.c: DYN page. Command set: vendor_command_overhaul_plan.md section 5.7.
  */
 
+#include <math.h>
 #include <stddef.h>
 #include "vc_core.h"
 #include "config.h"
@@ -66,7 +67,9 @@ static VcResult dyn_lev_amount_get(VcCtx *c) {
 }
 
 static VcResult dyn_lev_amount_set(VcCtx *c) {
-    float val = vc_clampf(vc_in_f32(c, 0), LEVELLER_AMOUNT_MIN, LEVELLER_AMOUNT_MAX);
+    float raw = vc_in_f32(c, 0);
+    if (!isfinite(raw)) return VC_ERR_VALUE;
+    float val = vc_clampf(raw, LEVELLER_AMOUNT_MIN, LEVELLER_AMOUNT_MAX);
     leveller_config.amount = val;
     leveller_update_pending = true;
     notify_param_write(offsetof(WireBulkParams, leveller.amount), sizeof(float), &val);
@@ -93,7 +96,9 @@ static VcResult dyn_lev_max_gain_get(VcCtx *c) {
 }
 
 static VcResult dyn_lev_max_gain_set(VcCtx *c) {
-    float val = vc_clampf(vc_in_f32(c, 0), LEVELLER_MAX_GAIN_MIN, LEVELLER_MAX_GAIN_MAX);
+    float raw = vc_in_f32(c, 0);
+    if (!isfinite(raw)) return VC_ERR_VALUE;
+    float val = vc_clampf(raw, LEVELLER_MAX_GAIN_MIN, LEVELLER_MAX_GAIN_MAX);
     leveller_config.max_gain_db = val;
     leveller_update_pending = true;
     notify_param_write(offsetof(WireBulkParams, leveller.max_gain_db), sizeof(float), &val);
@@ -120,7 +125,9 @@ static VcResult dyn_lev_gate_get(VcCtx *c) {
 }
 
 static VcResult dyn_lev_gate_set(VcCtx *c) {
-    float val = vc_clampf(vc_in_f32(c, 0), LEVELLER_GATE_MIN, LEVELLER_GATE_MAX);
+    float raw = vc_in_f32(c, 0);
+    if (!isfinite(raw)) return VC_ERR_VALUE;
+    float val = vc_clampf(raw, LEVELLER_GATE_MIN, LEVELLER_GATE_MAX);
     leveller_config.gate_threshold_db = val;
     leveller_update_pending = true;
     notify_param_write(offsetof(WireBulkParams, leveller.gate_threshold_db), sizeof(float), &val);
@@ -173,7 +180,9 @@ static VcResult dyn_loud_ref_get(VcCtx *c) {
 }
 
 static VcResult dyn_loud_ref_set(VcCtx *c) {
-    float val = vc_clampf(vc_in_f32(c, 0), LOUDNESS_REF_SPL_MIN, LOUDNESS_REF_SPL_MAX);
+    float raw = vc_in_f32(c, 0);
+    if (!isfinite(raw)) return VC_ERR_VALUE;
+    float val = vc_clampf(raw, LOUDNESS_REF_SPL_MIN, LOUDNESS_REF_SPL_MAX);
     loudness_ref_spl = val;
     loudness_recompute_pending = true;
     notify_param_write(offsetof(WireBulkParams, global.loudness_ref_spl), sizeof(float), &val);
@@ -186,7 +195,9 @@ static VcResult dyn_loud_intensity_get(VcCtx *c) {
 }
 
 static VcResult dyn_loud_intensity_set(VcCtx *c) {
-    float val = vc_clampf(vc_in_f32(c, 0), LOUDNESS_INTENSITY_MIN, LOUDNESS_INTENSITY_MAX);
+    float raw = vc_in_f32(c, 0);
+    if (!isfinite(raw)) return VC_ERR_VALUE;
+    float val = vc_clampf(raw, LOUDNESS_INTENSITY_MIN, LOUDNESS_INTENSITY_MAX);
     loudness_intensity_pct = val;
     loudness_recompute_pending = true;
     notify_param_write(offsetof(WireBulkParams, global.loudness_intensity_pct), sizeof(float), &val);

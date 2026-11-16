@@ -48,7 +48,6 @@
 #include "notify.h"
 #include "usb_audio_ring.h"
 #include "usb_feedback_controller.h"
-#include "vendor_commands.h"
 #include "audio_input.h"
 #include "lg_sound_sync.h"
 #include "loopback.h"   // DSPI_LOOPBACK capture driver (self-guarded; empty otherwise)
@@ -111,7 +110,6 @@ volatile bool stream_restart_resync_pending = false;
 //     from bleeding through when delay length changes.
 volatile bool preset_load_pending = false;
 volatile uint8_t pending_preset_load_slot = 0;
-volatile bool save_params_pending = false;   // Legacy REQ_SAVE_PARAMS (deferred)
 volatile bool preset_save_pending = false;
 volatile uint8_t pending_preset_save_slot = 0;
 volatile uint16_t preset_delete_mask = 0;  // Bitmask of slots pending delete
@@ -169,13 +167,13 @@ DacHwMuteConfig flash_set_dac_hw_mute_val = {0};
 // time.  Synchronous (1 s busy-wait) so it must defer to main loop.
 volatile bool dac_hw_mute_test_pending = false;
 
-// Deferred REQ_SAVE_MASTER_VOLUME — captures current live master_volume_db
+// Deferred ROUTE.MASTER_VOLUME_SAVE: captures current live master_volume_db
 // into the directory's independent field.  Value is read at dispatch time.
 volatile bool flash_save_master_volume_pending = false;
 
 // Deferred UART / I2C control-interface config (USB-only commands).  Main
 // loop validates, applies live (GPIO/IRQ work), and persists to the
-// directory; the status bytes back REQ_GET_CTRL_IFACE_STATUS.
+// directory; the status bytes back XPORT.STATUS.
 volatile bool ctrl_set_uart_pending = false;
 UartCtrlConfig ctrl_set_uart_val;
 volatile uint8_t ctrl_uart_last_status = PIN_CONFIG_SUCCESS;
@@ -223,10 +221,8 @@ volatile bool user_mute = false;
 // drain/arm logic, xfer_cb wiring).
 // ----------------------------------------------------------------------------
 
-// Legacy flag retained for back-compat with vendor_commands.c's existing
-// bracket around REQ_SET_MASTER_VOLUME.  Under v2, the source tag
-// (notify_set_source) carries the origin, but we keep this symbol alive
-// so the existing dispatch code still links.  Reading it is now a no-op.
+// Set around the ROUTE.MASTER_VOLUME handler's update (vendor/vc_page_route.c).
+// Nothing reads it: the notify source tag carries the origin.
 volatile bool notify_master_vol_host_initiated = false;
 
 // Defined in the UAC1 CLASS DRIVER section below.
@@ -802,8 +798,7 @@ uint32_t usb_audio_ring_overrun_count(void) {
 }
 
 // Derive Core 1 mode from current output enable state.
-// (Moved from vendor_commands.c during the Phase 1 TinyUSB migration — still
-// needed by main.c and flash_storage.c for preset-load Core 1 transitions.)
+// Used by main.c and flash_storage.c for preset-load Core 1 transitions.
 Core1Mode derive_core1_mode(void) {
     if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS - 1].enabled)
         return CORE1_MODE_PDM;
@@ -1338,7 +1333,7 @@ static bool uac1_handle_ep_get(uint8_t rhport, tusb_control_request_t const *req
 static bool uac1_driver_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const *req) {
     // Note: vendor-type requests never reach this callback.  TinyUSB routes
     // them directly to tud_vendor_control_xfer_cb (usbd.c:727-730) without
-    // consulting class drivers.  See vendor_commands.c for the vendor dispatch.
+    // consulting class drivers.  See vendor/vc_usb.c for the vendor dispatch.
 
     if (stage == CONTROL_STAGE_SETUP) {
         // --- Standard requests on our interfaces ---

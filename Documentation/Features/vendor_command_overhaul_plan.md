@@ -1,6 +1,6 @@
 # Vendor Command Overhaul Plan
 
-*Last updated: 2026-11-15*
+*Last updated: 2026-11-16 (8.11 As built, Phase 4 follow-ups, 11.1, Phase 4 and 6 text). Previously 2026-11-15*
 
 Status: approved by the user on 2026-11-15 with the decisions in section 14. Implementation is in progress. Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
 
@@ -854,6 +854,22 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - **Page 0 on the external transports** still reaches the old code through one marked call-through in `vendor_commands.c`, which the flip deletes.
 - **Not exercised on hardware.** No UART or I2C host is available on the bench, so the wire framing, the I2C interrupt path and the deferred reboot on those transports were checked by build, by reading, and by a temporary on-device harness that drove the dispatch entry points as UART and I2C sources.
 
+### 8.11 As built (Phase 4)
+
+- **Version.** `config.h` reads 1.1.7 beta 1 (`FW_VERSION_PATCH` 7, `FW_VERSION_BETA` 1). `SYS.PLATFORM` returns the platform byte, then 1, 0x17, the output count, 1, 7, 1.
+- **Deleted.** `vendor_commands.c` and `vendor_commands.h` (both switches, `vendor_send_response`, the scalar shim, the page 0 call-through), every `REQ_*` define in `config.h`, `MatrixRoutePacket`, the unused `VendorCmdPacket` and `VendorRespPacket`, `OUTPUT_LATENCY_GET_*`, `LIMITER_GET_METER` / `LIMITER_GET_STATUS`, `WIRE_BULK_PARAMS_MIN_SIZE`, `CtrlDispatchResult` with `vendor_dispatch_get/set` and its two converters, `CTRL_STATUS_ERROR` (0x02) and `CTRL_STATUS_BLOCKED` (0x03), `vc_bulk_legacy_handoff()`, and the `DSPI_WINDEX_ECHO` option with its request 0x4F. Codes 0x02 and 0x03 stay reserved on UART and I2C and are never reused.
+- **USB entry.** `tud_vendor_control_xfer_cb` lives in `vendor/vc_usb.c`. At SETUP it closes any chunk session the request does not continue, drops a USB-held bulk lock, clears the in-flight guard, serves the MS OS 2.0 descriptor set (IN, `bRequest` 0x01, `wIndex` 7, any recipient, exactly as 1.1.6 did), and sends everything else to the paged front end. The EP0 receive buffer is `vc_usb_rx` in the same file.
+- **Page 0 is refused, not special-cased.** There is no page 0 table, so `vc_check()` returns `VC_ERR_UNKNOWN` and the request is recorded in `SYS.LAST_RESULT` for its transport. USB STALLs at SETUP, so no data stage is ever accepted. UART and I2C return status 0x10, and `vc_set()` / `vc_get()` return the code. Other uses of `bRequest` 0x01 also fall through and are refused the same way, since no page has a command below 0x10.
+- **Moved.** `vreg_voltage_to_mv()` and `read_temperature_cdeg()` are static in `vc_page_sys.c`, `mck_encode()` / `mck_decode()` static in `vc_page_clock.c`, the `usb_audio_ring_overrun_count()` prototype is in `usb_audio.h`, and the `RTA_BANDS_ALL` fits-the-bulk-buffer assert is in `vc_page_meas.c`. `vc_core.h` includes `config.h` directly.
+- **Chunk sessions** are static to `vc_bulk.c` and serve `STORE.ALL_PARAMS_CHUNK` only. `vc_bulk_chunk_continues(id, is_get)` keeps a session open across SETUPs for the next request in the same direction.
+- **Size.** Flash text falls by 19.8 KB (RP2040) and 19.6 KB (RP2350). BSS falls by 216 B and 220 B. `scripts/ram_baseline.json` holds the new figures.
+- **Dead save path removed.** `save_params_pending` lost its last setter at the flip. The flag, its main-loop branch and `flash_save_params()` are deleted.
+- **Finite-value checks.** A NaN or infinite float SET is refused with `VC_ERR_VALUE` and stores nothing in ROUTE (matrix gain, output gain, output delay, channel delay), DYN (leveller amount, max gain and gate, loudness reference and intensity), FX (crossfeed cutoff and feed, every subharm and psybass float, every upmix parameter and `UPMIX_CONFIG`) and `FILTER.BAND` (freq, Q, gain). The limiter and tube setters refuse NaN and clamp infinity. The siggen config sanitises its floats. The bulk SET stores floats raw. The handlers as copied from 1.1.6 stored a NaN output gain or channel delay.
+- **Harness auto mode.** `device.py` probes `SYS.PROTOCOL_INFO` and selects `translate` on paged firmware and `old` on 1.1.6. `DSPI_TEST_PROTOCOL` still forces a mode.
+- **Page 0 test.** `tests/paged_page0.py` walks every `bRequest` on page 0 (both recipients, GET and both SET shapes) and checks that each one STALLs and leaves the parameters and directory unchanged, and that the MS OS 2.0 request is still served. It refuses to run unless the firmware provably has no page 0.
+- **Paged tests stand alone.** The 14 `tests/paged_*.py` modules no longer send old opcodes. Their A/B halves are replaced by assertions against the spec, and new tests cover the finite-value rule. Each of those first proves the rule on one `ROUTE.OUTPUT_GAIN` write and sends no further non-finite value if it fails.
+- **Windows test.** The echo build is gone. `tools/windex_page_test.py` runs against the normal firmware (11.1).
+
 ## 9. Generated docs and capability data
 
 `scripts/gen_vendor_protocol.py` (standard library only) parses the `.def` files. They are regular enough to read with a small tokenizer, with no C preprocessor needed.
@@ -946,17 +962,15 @@ This is the summary. The guide carries the detail.
 
 ### 11.1 The `wIndex` test (run by the user on Windows)
 
-A bench build adds one temporary command, compiled only with `-DDSPI_WINDEX_ECHO=ON`. `bRequest` 0x4F as an IN request returns 16 bytes: the SETUP fields of that request, then the SETUP fields of the last OUT request with the same number. It never ships and is deleted at the flip.
-
-`tools/windex_echo_test.py` sends a fixed set of requests and prints PASS or FAIL per row. The step-by-step procedure is in `Documentation/Features/windex_echo_test.md`.
+`tools/windex_page_test.py` runs against the normal 1.1.7 firmware. No bench build is needed. It sends requests to command 0xEE, which no page defines, so the device refuses each one and changes nothing. After each request it reads `SYS.LAST_RESULT`, which records the page, command, `wValue`, direction and result of the last request on that transport, and checks them against what was sent. Every request carries its own `wValue`, so a stale record cannot pass. The script refuses to run on 1.1.6, which ignores the page byte. The step-by-step procedure is in `Documentation/Features/windex_page_test.md`.
 
 | Check | Send | Pass condition |
 |---|---|---|
-| Interface recipient, IN | `0xC1`, `wIndex` 0x0102, 0x7F02, 0xF002, 0xFF02 | Echo shows the high byte intact |
-| Interface recipient, OUT | `0x41`, same `wIndex` values, zero-length and 4-byte payload | Same |
-| Device recipient, IN and OUT | `0xC0` and `0x40`, same `wIndex` values | Recorded as the fallback result |
+| Discovery | `SYS.PROTOCOL_INFO` on page 0x01, then the same read on page 0x00 | The first answers `DSPi`, the second is refused |
+| Interface recipient, IN and OUT | A GET, a zero-length SET and a 4-byte SET (`0xC1` and `0x41`) to command 0xEE on pages 0x02, 0x55, 0x7F, 0xAA, 0xF1 and 0xFF | `LAST_RESULT` shows the page byte intact |
+| Device recipient, IN and OUT | `0xC0` and `0x40`, the same requests | Recorded as the fallback result |
 
-The script runs on macOS and Linux too, which checks the firmware and the script before the Windows run.
+The script runs on macOS and Linux too, which checks the firmware and the script before the Windows run. On macOS against 1.1.7 beta 1 both recipients pass with every field exact.
 
 If WinUSB alters the high byte, the fallback is device-recipient requests (`0xC0` and `0x40`), where `wIndex` is entirely ours. The firmware does not check the recipient today, and the MS OS 2.0 request (`wIndex` 7) stays unambiguous because it lands on page 0. Only if both fail does the page need a different carrier, and the plan returns to the user before going further.
 
@@ -1038,7 +1052,8 @@ Work:
 - Delete both switches, every `REQ_*` define and the echo command.
 - Refuse every page 0 request.
 - Set `FW_VERSION_PATCH` to 7 and `FW_VERSION_BETA` to 1.
-- Switch the harness default to "translate to paged".
+- Switch the harness default to "translate to paged". As built, the harness probes the firmware and picks the mode itself (8.11).
+- Make the native paged tests independent of page 0. Their old-opcode A/B halves become spec assertions.
 
 Verification beyond the gate:
 
@@ -1062,7 +1077,7 @@ The final pass on `current_architecture.md` (Vendor Command Reference table, new
 
 ### Phase 6. Port the tests and delete the translation layer
 
-Agents split the 13 test modules in `tools/dspi_test/tests/` between them, one owner per file. Each test is rewritten to call paged commands by name. The paged tests written in Phase 2 are merged into the matching modules.
+Agents split the 13 older test modules in `tools/dspi_test/tests/` (the ones that still call old opcode names through the translation layer) between them, one owner per file. Each test is rewritten to call paged commands by name. The paged tests written in Phase 2 no longer depend on old opcodes since Phase 4, and are merged into the matching modules.
 
 When every module is ported, one agent deletes `legacy_map.py` and the "send old" mode from `device.py`, and fixes `crosscut.py`, `stress.py` and `selftest.py`. `Documentation/protocol/legacy_map.json` stays as migration data.
 

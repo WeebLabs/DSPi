@@ -15,7 +15,7 @@ static inline bool is_filter_flat(const EqParamPacket *p) {
     // band rather than producing garbage. The most important case this defends
     // against is a crossover filter type (FILTER_XOVER_FIRST..FILTER_XOVER_LAST)
     // ending up in a PEQ band slot via a host bug or a mis-routed
-    // REQ_SET_EQ_PARAM / bulk apply / preset load: on the RP2350 SVF path the
+    // FILTER.BAND / bulk apply / preset load: on the RP2350 SVF path the
     // unknown type leaves the output mix coefficients zeroed (svm0=svm1=svm2=0),
     // and the band would output silence at low fc. Treat as bypass instead,
     // recipe round-trips. (An undefined value in the reserved PEQ padding falls

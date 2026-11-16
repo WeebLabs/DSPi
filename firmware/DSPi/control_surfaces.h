@@ -20,7 +20,7 @@
  * addressed by a channel/band target.  A binding is valid iff its action is
  * in both masks, its target/index address an existing channel/band, and its
  * pins pass the shared conflict checks.  Hosts read the same tables via
- * REQ_GET_CS_CAPS, so new types/nouns/actions appear in the UI without
+ * CS.CAPS and CS.NOUN_DESC, so new types/nouns/actions appear in the UI without
  * host-side hardcoding.
  *
  * Format v2 (config version 2, caps version 2): bindings are 24 bytes and
@@ -32,10 +32,10 @@
  *
  * Caps v3 adds the IR remote component: one CS_TYPE_IR binding holds the
  * receiver GPIO and up to CS_MAX_IR_COMMANDS learned remote buttons live in
- * a separate command table (commands 0x8D-0x8F), each dispatching through
+ * a separate command table (CS.IR_CMD and CS.IR_LEARN_*), each dispatching through
  * the same noun/action machinery as a physical button.  Binding, IR command
- * and slot-name SETs are apply-live-only previews; REQ_CS_SAVE persists the
- * whole live config and REQ_CS_REVERT reloads the stored one.
+ * and slot-name SETs are apply-live-only previews; CS.SAVE persists the
+ * whole live config and CS.REVERT reloads the stored one.
  *
  * Caps v4 adds the stereo upmixer, psychoacoustic bass, output delay, and
  * preset-reload nouns, plus the CS_UNIT_MS unit (8.8 milliseconds) the
@@ -409,7 +409,7 @@ typedef enum {
 #define CS_IR_PROTO_HASH   4
 #define CS_IR_PROTO_COUNT  5
 
-// Learn state (CsStatusPacket.ir_learn_state / REQ_CS_IR_LEARN result read)
+// Learn state (CsStatusPacket.ir_learn_state / CS.IR_LEARN_STATUS)
 #define CS_IR_LEARN_IDLE     0
 #define CS_IR_LEARN_ARMED    1   // listening; next decoded press is captured
 #define CS_IR_LEARN_DONE     2   // result available (protocol + code)
@@ -421,8 +421,8 @@ typedef enum {
 // for.  Same 32-byte convention as preset and channel names.  Names are
 // slot metadata, independent of the binding: they survive binding changes
 // and slot clears, and may be set before a binding exists.  Like bindings
-// and IR commands, a name SET is an apply-live-only preview; REQ_CS_SAVE
-// persists and REQ_CS_REVERT restores the stored names.
+// and IR commands, a name SET is an apply-live-only preview; CS.SAVE
+// persists and CS.REVERT restores the stored names.
 #define CS_NAME_LEN      32
 
 // ---------------------------------------------------------------------------
@@ -436,13 +436,13 @@ typedef enum {
 // the flags below.  noun / action / event / target / index / step / range
 // must be 0.  The live on/off flag and level are runtime values in RAM.
 #define CS_AUX_X_BOOT_ON    0x01  // boot with the output on (else off)
-#define CS_AUX_X_BOOT_SAVED 0x02  // REQ_CS_SAVE folds the live on/off flag and
+#define CS_AUX_X_BOOT_SAVED 0x02  // CS.SAVE folds the live on/off flag and
                                   // level into BOOT_ON / value before writing
 #define CS_AUX_X_LINEAR     0x04  // AUX_PWM: linear duty instead of the squared
                                   // perceptual curve (fans, heaters)
 #define CS_AUX_X_MASK       0x07
 
-// One binding; 24 bytes, identical on the wire (REQ_SET/GET_CS_BINDING
+// One binding; 24 bytes, identical on the wire (CS.BINDING
 // payload) and in flash.  value/step/range encoding follows the noun's unit
 // (CS_UNIT_*); bool/enum values are plain integers.
 // A CS_TYPE_IR binding is a container: gpio[0] is the receiver pin, INVERT
@@ -477,7 +477,7 @@ typedef struct __attribute__((packed)) {
     uint8_t reserved2;     // write 0
 } CsBinding;
 
-// One IR remote command; 16 bytes, identical on the wire (REQ_SET/GET_CS_IR_CMD
+// One IR remote command; 16 bytes, identical on the wire (CS.IR_CMD
 // payload) and in flash.  Semantically a button-shaped binding: the same noun /
 // action / target / value / step rules apply (actions INC/DEC/TOGGLE/SET/
 // TRIGGER/MOMENTARY; flags WRAP and REPEAT), fired by the learned code instead
@@ -516,7 +516,7 @@ typedef struct __attribute__((packed)) {
     IrCommand cmds[CS_MAX_IR_COMMANDS];
 } CsIrConfig;              // 260 bytes
 
-// One target group; 40 bytes, identical on the wire (REQ_SET/GET_CS_GROUP
+// One target group; 40 bytes, identical on the wire (CS.GROUP
 // payload) and in flash.  target_kind 0 marks the slot empty (the record
 // must then be all-zero).  member_mask bit N = channel N of the kind's
 // space; 32-bit because the RP2350 DSP-channel space exceeds 16.
@@ -536,7 +536,7 @@ typedef struct __attribute__((packed)) {
     CsGroup  groups[CS_MAX_GROUPS];
 } CsGroupConfig;           // 324 bytes
 
-// One macro step; 12 bytes, identical on the wire (REQ_SET_CS_MACRO_STEP
+// One macro step; 12 bytes, identical on the wire (CS.MACRO_STEP
 // payload) and in flash.  A stripped button-shaped binding: actions SET /
 // TOGGLE / INC / DEC / TRIGGER, flags WRAP | GROUP, fired by the sequencer
 // after pre_delay (10 ms units).  All-zero = empty step (skipped).
@@ -568,7 +568,7 @@ typedef struct __attribute__((packed)) {
     CsMacro  macros[CS_MAX_MACROS];
 } CsMacroConfig;           // 1060 bytes
 
-// REQ_SET_CS_MACRO payload: name + step count only.  Steps are SET one at a
+// CS.MACRO_HEADER payload: name + step count only.  Steps are SET one at a
 // time (the whole 132-byte CsMacro exceeds the 64-byte vendor SET buffer);
 // hosts should write steps first and the header last so a concurrent fire
 // never sees step_count exceed the written steps.
@@ -579,7 +579,7 @@ typedef struct __attribute__((packed)) {
 } CsMacroHeaderWire;       // 36 bytes
 
 // Display configuration; 12 bytes, identical on the wire
-// (REQ_SET/GET_CS_DISPLAY_CFG payload) and inside CsDisplayFlash.
+// (CS.DISPLAY_CONFIG payload) and inside CsDisplayFlash.
 typedef struct __attribute__((packed)) {
     uint8_t  mode;          // CS_DMODE_*
     uint8_t  home_page;     // page slot shown in FIXED mode
@@ -591,7 +591,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  reserved[2];   // write 0
 } CsDisplayCfg;             // 12 bytes
 
-// One display page; 4 bytes, wire (REQ_SET/GET_CS_DISPLAY_PAGE) and flash.
+// One display page; 4 bytes, wire (CS.DISPLAY_PAGE) and flash.
 // All-zero = empty slot.  Rendering is generic from the noun's kind/unit.
 typedef struct __attribute__((packed)) {
     uint8_t noun;           // CsNoun to show
@@ -610,7 +610,7 @@ typedef struct __attribute__((packed)) {
     CsDisplayPage pages[CS_MAX_DISPLAY_PAGES];
 } CsDisplayFlash;           // 80 bytes
 
-// REQ_GET_CS_DISPLAY_STATUS response.
+// CS.DISPLAY_STATUS reply.
 typedef struct __attribute__((packed)) {
     uint8_t  init_state;    // 0 down, 1 initializing, 2 live, 3 error/backoff
     uint8_t  current_page;  // shown page slot (0xFF = none/synthesized overlay)
@@ -620,7 +620,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  reserved[2];
 } CsDisplayStatus;          // 8 bytes
 
-// REQ_GET_CS_EXT_STATUS response.  Group/macro validity mirrors slot_status
+// CS.EXT_STATUS reply.  Group/macro validity mirrors slot_status
 // semantics; macro_running is 0xFF when the sequencer is idle.
 typedef struct __attribute__((packed)) {
     uint8_t max_groups;        // CS_MAX_GROUPS
@@ -633,8 +633,8 @@ typedef struct __attribute__((packed)) {
     uint8_t macro_status[CS_MAX_MACROS];   // worst step validity
 } CsExtStatusPacket;       // 24 bytes
 
-// Capability descriptors (REQ_GET_CS_CAPS).  wValue = 0xFFFF returns the
-// header + type table; wValue = noun index returns that noun's descriptor.
+// Capability descriptors.  CS.CAPS returns the header + type table;
+// CS.NOUN_DESC returns one noun's descriptor.
 typedef struct __attribute__((packed)) {
     uint16_t actions;      // CS_ACT_BIT mask this component can drive
     uint8_t  pin_count;    // GPIOs consumed (1 or 2)
@@ -671,7 +671,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  dflags;       // CS_NDF_*
 } CsNounDesc;              // 12 bytes
 
-// REQ_GET_CS_STATUS response.  last_status / last_slot report the most
+// CS.STATUS reply.  last_status / last_slot report the most
 // recent deferred SET of any CS kind (binding, name, IR command, save,
 // revert); IR command slots are reported as 0x80 | sub-slot.
 typedef struct __attribute__((packed)) {
@@ -704,7 +704,7 @@ typedef struct __attribute__((packed)) {
                                         // this GPIO+event pair
 #define CS_STATUS_BUSY            0x1B  // a previous SET is still queued for
                                         // apply, or a revert is running; retry
-#define CS_STATUS_FLASH_ERROR     0x1C  // directory persist failed (REQ_CS_SAVE)
+#define CS_STATUS_FLASH_ERROR     0x1C  // directory persist failed (CS.SAVE)
 #define CS_STATUS_IR_IN_USE       0x1D  // another slot already holds the IR
                                         // component (one receiver per device)
 #define CS_STATUS_NO_IR           0x1E  // IR command/learn needs a live
@@ -748,7 +748,7 @@ uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *b);
 // pin_used_by_fixed_peripheral so no other subsystem can take a CS pin.
 bool control_surfaces_owns_pin(uint8_t pin);
 
-// Live config (the persistence source for REQ_CS_SAVE) and read-only
+// Live config (the persistence source for CS.SAVE) and read-only
 // accessors for the vendor GET handlers.
 const CsFlashConfig *control_surfaces_config(void);
 const CsIrConfig *control_surfaces_ir_config(void);
@@ -792,17 +792,17 @@ uint8_t control_surfaces_macro_fire(uint8_t idx);
 void    control_surfaces_macro_cancel(void);
 
 // Validate and apply the display config / one page (all-zero page clears the
-// slot).  Live-only previews under the shared dirty flag; REQ_CS_SAVE
-// persists, REQ_CS_REVERT restores.  Returns PIN_CONFIG_* / CS_STATUS_*.
+// slot).  Live-only previews under the shared dirty flag; CS.SAVE
+// persists, CS.REVERT restores.  Returns PIN_CONFIG_* / CS_STATUS_*.
 uint8_t control_surfaces_apply_display_cfg(const CsDisplayCfg *c);
 uint8_t control_surfaces_apply_display_page(uint8_t idx, const CsDisplayPage *p);
 
-// Live display config (persistence source for REQ_CS_SAVE) and GET accessors.
+// Live display config (persistence source for CS.SAVE) and GET accessors.
 const CsDisplayFlash *control_surfaces_display_flash(void);
 const CsDisplayPage *control_surfaces_get_display_page(uint8_t idx);  // NULL if bad
 void control_surfaces_get_display_status(CsDisplayStatus *out);
 
-// Live tables (persistence sources for REQ_CS_SAVE) and read-only accessors
+// Live tables (persistence sources for CS.SAVE) and read-only accessors
 // for the vendor GET handlers.
 const CsGroupConfig *control_surfaces_group_config(void);
 const CsMacroConfig *control_surfaces_macro_config(void);
@@ -822,7 +822,7 @@ uint8_t  control_surfaces_aux_state(uint8_t slot);        // 0 if not an aux
 uint16_t control_surfaces_aux_level(uint8_t slot);        // 8.8 percent; 0 if not an aux
 bool     control_surfaces_set_aux_state(uint8_t slot, uint8_t state);
 bool     control_surfaces_set_aux_level(uint8_t slot, uint16_t level_q8);  // clamps to 100 %
-// Call immediately before REQ_CS_SAVE persists: folds the live on/off flag
+// Call immediately before CS.SAVE persists: folds the live on/off flag
 // and level into the boot fields of every CS_AUX_X_BOOT_SAVED slot.
 void control_surfaces_aux_prepare_save(void);
 
@@ -842,33 +842,33 @@ bool control_surfaces_busy(void);
 bool control_surfaces_dirty(void);
 void control_surfaces_set_dirty(bool dirty);
 
-// Learn result snapshot for the REQ_CS_IR_LEARN result read:
+// Learn result snapshot for CS.IR_LEARN_STATUS:
 // {state, protocol, 0, 0, code_le32}, 8 bytes.
 void control_surfaces_get_ir_learn(uint8_t out[8]);
 
 // Deferred SET (written by the vendor handler, consumed by the main loop;
 // same shape as ctrl_set_uart_pending).  cs_last_status / cs_last_slot feed
-// REQ_GET_CS_STATUS and report both binding and name SETs.
+// CS.STATUS and report both binding and name SETs.
 extern volatile bool    cs_set_binding_pending;
 extern uint8_t          cs_set_binding_slot;
 extern CsBinding        cs_set_binding_val;
 extern volatile uint8_t cs_last_status;
 extern volatile uint8_t cs_last_slot;
 
-// Deferred slot-name SET (REQ_SET_CS_NAME); live-only preview like the
+// Deferred slot-name SET (CS.SLOT_NAME); live-only preview like the
 // binding SET, consumed in the main loop for the shared status channel.
 extern volatile bool    cs_set_name_pending;
 extern uint8_t          cs_set_name_slot;
 extern char             cs_set_name_val[CS_NAME_LEN];
 
-// Deferred IR-command SET (REQ_SET_CS_IR_CMD); same single-deep handoff
+// Deferred IR-command SET (CS.IR_CMD); same single-deep handoff
 // shape as the binding SET.  Results land in cs_last_status with
 // cs_last_slot = 0x80 | sub-slot, plus the per-sub-slot status array.
 extern volatile bool    cs_set_ir_cmd_pending;
 extern uint8_t          cs_set_ir_cmd_slot;
 extern IrCommand        cs_set_ir_cmd_val;
 
-// Deferred group / macro SETs (REQ_SET_CS_GROUP / _CS_MACRO /
+// Deferred group / macro SETs (CS.GROUP / CS.MACRO_HEADER /
 // _CS_MACRO_STEP); same single-deep handoff shape as the binding SET.
 // Results land in cs_last_status with cs_last_slot = 0x40 | group or
 // 0x60 | macro.
@@ -883,7 +883,7 @@ extern uint8_t          cs_set_macro_step_slot;   // macro index
 extern uint8_t          cs_set_macro_step_idx;    // step index
 extern CsMacroStep      cs_set_macro_step_val;
 
-// Deferred display SETs (REQ_SET_CS_DISPLAY_CFG / _PAGE); same single-deep
+// Deferred display SETs (CS.DISPLAY_CONFIG / CS.DISPLAY_PAGE); same single-deep
 // handoff shape.  Results land in cs_last_status with cs_last_slot =
 // 0x50 | page (0x50 alone for the cfg).
 extern volatile bool    cs_set_disp_cfg_pending;
@@ -892,14 +892,14 @@ extern volatile bool    cs_set_disp_page_pending;
 extern uint8_t          cs_set_disp_page_slot;
 extern CsDisplayPage    cs_set_disp_page_val;
 
-// Deferred save / revert (REQ_CS_SAVE / REQ_CS_REVERT).  Save persists the
+// Deferred save / revert (CS.SAVE / CS.REVERT).  Save persists the
 // whole live CS config (bindings + IR commands + slot names + groups +
 // macros + display) in one directory write; revert re-applies the
 // stored config.  Results land in cs_last_status (cs_last_slot = 0xFF).
 extern volatile bool    cs_save_pending;
 extern volatile bool    cs_revert_pending;
 
-// Learn control (REQ_CS_IR_LEARN): op 1 = arm, anything else = cancel.
+// Learn control (CS.IR_LEARN_ARM / CS.IR_LEARN_CANCEL): op 1 = arm, anything else = cancel.
 // Direct call; every dispatch transport runs on the core0 main loop.
 // Returns PIN_CONFIG_SUCCESS or CS_STATUS_NO_IR (arm without a live IR
 // component).  Completion is pushed on the notify EP and readable via

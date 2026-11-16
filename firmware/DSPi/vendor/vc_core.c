@@ -255,14 +255,10 @@ uint8_t ctrl_dispatch_get(CtrlSource src, uint8_t bRequest, uint16_t wValue,
                           const uint8_t **resp, uint16_t *resp_len) {
     *resp = NULL;
     *resp_len = 0;
-    if (src == CTRL_SOURCE_USB) return CTRL_STATUS_ERROR;   // USB has its own front end
+    if (src == CTRL_SOURCE_USB) return VC_ERR_BLOCKED;   // USB has its own front end
     if (vendor_usb_busy()) return CTRL_STATUS_BUSY;
 
     uint8_t page = vc_page_of(0xC1, wIndex);
-    if (page == 0)   // PAGE 0 CALL-THROUGH: deleted at the flip
-        return ctrl_status_from_dispatch(vendor_legacy_dispatch_get(
-            src, bRequest, wValue, wIndex, wLength, resp, resp_len));
-
     uint8_t st = ctrl_is_bulk_get(wIndex, bRequest)
         ? vc_bulk_ext_get(src, page, bRequest, wValue, resp, resp_len)
         : (uint8_t)vc_dispatch(src, true, page, bRequest, wValue, NULL, 0, resp, resp_len);
@@ -272,54 +268,14 @@ uint8_t ctrl_dispatch_get(CtrlSource src, uint8_t bRequest, uint16_t wValue,
 
 uint8_t ctrl_dispatch_set(CtrlSource src, uint8_t bRequest, uint16_t wValue,
                           uint16_t wIndex, const uint8_t *payload, uint16_t wLength) {
-    if (src == CTRL_SOURCE_USB) return CTRL_STATUS_ERROR;
+    if (src == CTRL_SOURCE_USB) return VC_ERR_BLOCKED;
     if (vendor_usb_busy()) return CTRL_STATUS_BUSY;
 
     uint8_t page = vc_page_of(0x41, wIndex);
-    if (page == 0)   // PAGE 0 CALL-THROUGH: deleted at the flip
-        return ctrl_status_from_dispatch(vendor_legacy_dispatch_set(
-            src, bRequest, wValue, wIndex, payload, wLength));
-
     if (vendor_is_bulk_set(wIndex, bRequest, wLength))
         return vc_bulk_ext_set(src, page, bRequest, wValue, wLength);
     // vc_check() refuses a payload above set_max before any handler reads it.
     return (uint8_t)vc_dispatch(src, false, page, bRequest, wValue, payload, wLength, NULL, NULL);
-}
-
-CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
-                                       uint16_t wValue, uint16_t wIndex, uint16_t wLength,
-                                       const uint8_t **resp_data, uint16_t *resp_len) {
-    return ctrl_dispatch_from_status(
-        ctrl_dispatch_get(src, bRequest, wValue, wIndex, wLength, resp_data, resp_len));
-}
-
-CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
-                                       uint16_t wValue, uint16_t wIndex,
-                                       const uint8_t *payload, uint16_t wLength) {
-    return ctrl_dispatch_from_status(
-        ctrl_dispatch_set(src, bRequest, wValue, wIndex, payload, wLength));
-}
-
-uint8_t ctrl_status_from_dispatch(CtrlDispatchResult r) {
-    switch (r) {
-        case CTRL_DISPATCH_OK:          return CTRL_STATUS_OK;
-        case CTRL_DISPATCH_BLOCKED:     return CTRL_STATUS_BLOCKED;
-        case CTRL_DISPATCH_BULK_LOCKED: return CTRL_STATUS_BULK_LOCKED;
-        case CTRL_DISPATCH_BUSY:        return CTRL_STATUS_BUSY;
-        default:                        return CTRL_STATUS_ERROR;
-    }
-}
-
-CtrlDispatchResult ctrl_dispatch_from_status(uint8_t st) {
-    switch (st) {
-        case CTRL_STATUS_OK:          return CTRL_DISPATCH_OK;
-        case CTRL_STATUS_BUSY:
-        case VC_ERR_BUSY:             return CTRL_DISPATCH_BUSY;
-        case CTRL_STATUS_BLOCKED:
-        case VC_ERR_BLOCKED:          return CTRL_DISPATCH_BLOCKED;
-        case CTRL_STATUS_BULK_LOCKED: return CTRL_DISPATCH_BULK_LOCKED;
-        default:                      return CTRL_DISPATCH_ERROR;
-    }
 }
 
 // ---- Deferred reboot for SYS.ENTER_BOOTLOADER over UART and I2C ----

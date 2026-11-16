@@ -90,7 +90,7 @@ typedef enum {
     I2S_SLAVE_LOCKED    = 3,   // locked to a supported external rate
 } I2sSlaveState;
 
-// Wire status packet for REQ_GET_I2S_SLAVE_STATUS (16 bytes)
+// Wire status packet for CLOCK.I2S_SLAVE_STATUS (16 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t  state;           // I2sSlaveState
     uint8_t  clock_mode;      // live i2s_clock_mode

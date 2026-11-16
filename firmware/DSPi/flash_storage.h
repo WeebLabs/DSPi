@@ -8,7 +8,7 @@
 #include "control_surfaces.h"   // CsFlashConfig (stored in PresetDirectory)
 #include "input_source_names.h" // INPUT_SOURCE_NAME_LEN (stored in PresetDirectory)
 
-// Legacy result codes (used by flash_save_params and the preset/boot API)
+// Legacy result codes (returned by preset_boot_load)
 #define FLASH_OK            0
 #define FLASH_ERR_WRITE     1
 #define FLASH_ERR_NO_DATA   2
@@ -17,9 +17,6 @@
 // ============================================================================
 // LEGACY API (now redirects through the preset system)
 // ============================================================================
-
-// Save current live state to the active preset slot (or slot 0 if none active).
-int flash_save_params(void);
 
 // Reset live state to factory defaults.  Does NOT erase presets.
 // The active preset slot is unchanged (still selected, now running defaults).
@@ -128,13 +125,13 @@ void preset_get_ctrl_iface(UartCtrlConfig *uart_out, I2cCtrlConfig *i2c_out);
 
 // Control Surfaces bindings (board-level, directory-stored, V7+), read in
 // place from the RAM cache: valid until the next directory write, main loop
-// only.  Bindings persist only through preset_set_cs_all below (REQ_CS_SAVE).
+// only.  Bindings persist only through preset_set_cs_all below (CS.SAVE).
 const CsFlashConfig *preset_stored_cs_config(void);
 
 // Control Surfaces IR command table (board-level, directory-stored, V11+),
 // read in place like the bindings.  preset_set_cs_all persists bindings,
 // IR commands, slot names, groups, macros, the display blob and the aux output
-// table together in one directory-sector write (the REQ_CS_SAVE path);
+// table together in one directory-sector write (the CS.SAVE path);
 // synchronous and main-loop only, caller has validated all seven.  Returns
 // PRESET_OK or PRESET_ERR_*.
 const CsIrConfig *preset_stored_cs_ir_config(void);

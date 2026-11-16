@@ -1,6 +1,6 @@
 /*
  * vc_page_sys.c: SYS page (0x01). Discovery, identity, device name, bootloader
- * and telemetry. Identity and BUFFER_STATS match the legacy opcodes byte for byte.
+ * and telemetry. Identity and BUFFER_STATS keep their 1.1.6 reply layouts byte for byte.
  */
 
 #include "vc_core.h"
@@ -18,10 +18,80 @@
 #include "pico/audio_spdif.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
+#include "hardware/adc.h"
 
-// Defined in vendor_commands.c.
-extern uint16_t vreg_voltage_to_mv(enum vreg_voltage voltage);
-extern int16_t read_temperature_cdeg(void);
+// Convert vreg voltage enum to millivolts
+static uint16_t vreg_voltage_to_mv(enum vreg_voltage voltage) {
+    // Voltage enum values map to specific voltages
+    // See hardware/vreg.h for the full table
+    static const uint16_t voltage_table[] = {
+#if !PICO_RP2040
+        550,  // VREG_VOLTAGE_0_55 = 0b00000
+        600,  // VREG_VOLTAGE_0_60 = 0b00001
+        650,  // VREG_VOLTAGE_0_65 = 0b00010
+        700,  // VREG_VOLTAGE_0_70 = 0b00011
+        750,  // VREG_VOLTAGE_0_75 = 0b00100
+        800,  // VREG_VOLTAGE_0_80 = 0b00101
+#endif
+        850,  // VREG_VOLTAGE_0_85 = 0b00110
+        900,  // VREG_VOLTAGE_0_90 = 0b00111
+        950,  // VREG_VOLTAGE_0_95 = 0b01000
+        1000, // VREG_VOLTAGE_1_00 = 0b01001
+        1050, // VREG_VOLTAGE_1_05 = 0b01010
+        1100, // VREG_VOLTAGE_1_10 = 0b01011
+        1150, // VREG_VOLTAGE_1_15 = 0b01100
+        1200, // VREG_VOLTAGE_1_20 = 0b01101
+        1250, // VREG_VOLTAGE_1_25 = 0b01110
+        1300, // VREG_VOLTAGE_1_30 = 0b01111
+#if !PICO_RP2040
+        1350, // VREG_VOLTAGE_1_35 = 0b10000
+        1400, // VREG_VOLTAGE_1_40 = 0b10001
+        1500, // VREG_VOLTAGE_1_50 = 0b10010
+        1600, // VREG_VOLTAGE_1_60 = 0b10011
+        1650, // VREG_VOLTAGE_1_65 = 0b10100
+        1700, // VREG_VOLTAGE_1_70 = 0b10101
+        1800, // VREG_VOLTAGE_1_80 = 0b10110
+        1900, // VREG_VOLTAGE_1_90 = 0b10111
+        2000, // VREG_VOLTAGE_2_00 = 0b11000
+        2350, // VREG_VOLTAGE_2_35 = 0b11001
+        2500, // VREG_VOLTAGE_2_50 = 0b11010
+        2650, // VREG_VOLTAGE_2_65 = 0b11011
+        2800, // VREG_VOLTAGE_2_80 = 0b11100
+        3000, // VREG_VOLTAGE_3_00 = 0b11101
+        3150, // VREG_VOLTAGE_3_15 = 0b11110
+        3300, // VREG_VOLTAGE_3_30 = 0b11111
+#endif
+    };
+
+#if PICO_RP2040
+    // RP2040: offset by 6 entries (0.55-0.80V not available)
+    uint8_t index = (voltage >= 6) ? (voltage - 6) : 0;
+#else
+    uint8_t index = voltage;
+#endif
+
+    if (index < sizeof(voltage_table) / sizeof(voltage_table[0])) {
+        return voltage_table[index];
+    }
+    return 1100; // Default fallback
+}
+
+// Read ADC temperature sensor and return temperature in centi-degrees C
+// Formula from SDK docs (same for RP2040/RP2350):
+// T = 27 - (ADC_Voltage - 0.706) / 0.001721
+static int16_t read_temperature_cdeg(void) {
+    const float conversion_factor = 3.3f / 4095.0f;
+
+    // Temperature sensor channel: auto-detects based on chip variant
+    // RP2040, RP2350A (QFN-60): channel 4
+    // RP2350B (QFN-80): channel 8
+    adc_select_input(NUM_ADC_CHANNELS - 1);
+    uint16_t adc_raw = adc_read();
+    float voltage = adc_raw * conversion_factor;
+    float temp_c = 27.0f - (voltage - 0.706f) / 0.001721f;
+
+    return (int16_t)(temp_c * 100.0f); // Convert to centi-degrees
+}
 
 static uint8_t sys_implemented_pages(void) {
     uint8_t n = 0;

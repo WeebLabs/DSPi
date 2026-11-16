@@ -36,7 +36,7 @@
 #include "hardware/sync.h"    // __dmb()
 #include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
 
-// LgSoundSyncStatus (lg_sound_sync.h, used by REQ_GET_LG_SOUND_SYNC_STATUS)
+// LgSoundSyncStatus (lg_sound_sync.h, used by INPUT.LG_SOUND_SYNC_STATUS)
 // and WireLgSoundSync (this file's WireBulkParams section) must have
 // identical wire layout — bulk_params_collect() field-copies between them
 // and the host SDK consumes both via the same parser.  If they ever drift
@@ -909,7 +909,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     lg_sound_sync_set_enabled(in->lg_sound_sync.enabled != 0);
 
     // User volume + mute (V9+ payloads).  Routed through update_user_volume()
-    // so the same clamp/encode/apply funnel runs as on REQ_SET_USER_VOLUME
+    // so the same clamp/encode/apply funnel runs as on ROUTE.USER_VOLUME
     // (vol_mul + loudness coefficient pointer move together, LG cache is
     // invalidated).  user_mute is a plain bool so the apply is just a
     // store + notify_param_write, suppressed by the bulk bracket.

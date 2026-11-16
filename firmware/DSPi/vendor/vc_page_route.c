@@ -28,6 +28,7 @@ static VcResult route_matrix_set(VcCtx *c) {
     uint8_t input = (uint8_t)(c->addr >> 8), output = (uint8_t)c->addr;
     uint8_t enabled = vc_in_u8(c, 0), phase = vc_in_u8(c, 1);
     float gain_db = vc_in_f32(c, 4);
+    if (!isfinite(gain_db)) return VC_ERR_VALUE;
 
     MatrixCrosspoint *xp = &matrix_mixer.crosspoints[input][output];
     xp->enabled = enabled;
@@ -100,6 +101,7 @@ static VcResult route_out_gain_get(VcCtx *c) {
 static VcResult route_out_gain_set(VcCtx *c) {
     uint8_t out = (uint8_t)c->addr;
     float db = vc_in_f32(c, 0);
+    if (!isfinite(db)) return VC_ERR_VALUE;
     matrix_mixer.outputs[out].gain_db = db;
     matrix_mixer.outputs[out].gain_linear = powf(10.0f, db / 20.0f);
     notify_param_write(route_out_wire_off(out, offsetof(WireOutputChannel, gain_db)),
@@ -128,6 +130,7 @@ static VcResult route_out_delay_get(VcCtx *c) {
 static VcResult route_out_delay_set(VcCtx *c) {
     uint8_t out = (uint8_t)c->addr;
     float ms = vc_in_f32(c, 0);
+    if (!isfinite(ms)) return VC_ERR_VALUE;
     if (ms < 0) ms = 0;
     matrix_mixer.outputs[out].delay_ms = ms;
     channel_delays_ms[CH_OUT_1 + out] = ms;
@@ -156,6 +159,7 @@ static VcResult route_ch_delay_get(VcCtx *c) {
 static VcResult route_ch_delay_set(VcCtx *c) {
     uint8_t ch = (uint8_t)c->addr;
     float ms = vc_in_f32(c, 0);
+    if (!isfinite(ms)) return VC_ERR_VALUE;
     if (ms < 0) ms = 0;
     channel_delays_ms[ch] = ms;
     dsp_update_delay_samples((float)audio_state.freq);

@@ -1,13 +1,13 @@
 """
 Native paged tests for the Control Surfaces page (plan section 5.10). CS.REVERT is only sent in
-shapes the dispatcher refuses (a 1.1.6 revert drops stored non-button bindings). Preview writes
-use empty records and claim no GPIO; CS.SAVE runs only once every record matches the snapshot.
+shapes the dispatcher refuses (a revert drops stored non-button bindings). Preview writes use empty
+records and claim no GPIO; CS.SAVE runs only once every record matches the snapshot.
 """
 
 import struct
 import time
 
-from ..device import OP, PagedStall, ProtocolError, Stall
+from ..device import ProtocolError, Stall
 from ..framework import Skip, test
 from .paged_sys import _expect_stall, _registry
 
@@ -64,20 +64,6 @@ def _settle(dev, timeout_s=3.0):
     return None
 
 
-def _same(chk, new_fn, old_fn, msg, tries=3):
-    """New and old reads equal; retried because live status bytes may move between reads."""
-    for _ in range(tries):
-        try:
-            b = old_fn()
-        except Stall:
-            chk.note(f"{msg}: page 0 no longer answers; comparison skipped")
-            return True
-        a = new_fn()
-        if a == b:
-            return chk.ok(True, msg)
-    return chk.eq(a, b, msg)
-
-
 def _snapshot(dev, lim):
     def rng(cmd, n, addr=lambda i: i):
         return [dev.pget(cmd, addr=addr(i)) for i in range(n)]
@@ -90,6 +76,71 @@ def _snapshot(dev, lim):
 def _name_payload(raw32):
     name = bytes(raw32).split(b"\0")[0]
     return name if name else b"\0"
+
+
+def _put_record(dev, name, payload, addr, tag):
+    """Preview SET; None once CS.STATUS reports it applied, else what went wrong."""
+    try:
+        dev.pset(name, payload, addr=addr)
+    except Stall as e:
+        return f"{name} @0x{addr:04X} refused ({e})"
+    st = _settle(dev)
+    if st is None or (st["last"], st["slot"]) != (0, tag):
+        return f"{name} @0x{addr:04X} not applied: {st and (hex(st['last']), hex(st['slot']))}"
+    return None
+
+
+def _snapshot_diff(snap, after):
+    out = []
+    for k, v in snap.items():
+        if isinstance(v, list):
+            out += [f"{k}[{i}]" for i, (a, b) in enumerate(zip(v, after[k])) if a != b]
+        elif v != after[k]:
+            out.append(k)
+    return out
+
+
+def restore_preview(dev, lim, snap):
+    """Rewrite every CS record that differs from `snap`, then CS.SAVE so the preview is clean.
+    Raises AssertionError naming what is left (SAVE is then never sent); returns the final CS.STATUS."""
+    errors = []
+
+    def fix(name, cur, want, addr, tag, payload=None):
+        if cur != want:
+            e = _put_record(dev, name, want if payload is None else payload, addr, tag)
+            if e:
+                errors.append(e)
+    for i in range(lim["slots"]):
+        fix("CS.BINDING", dev.pget("CS.BINDING", addr=i), snap["binding"][i], i, i)
+        fix("CS.SLOT_NAME", dev.pget("CS.SLOT_NAME", addr=i), snap["name"][i], i, i, _name_payload(snap["name"][i]))
+    for i in range(lim["ir"]):
+        fix("CS.IR_CMD", dev.pget("CS.IR_CMD", addr=i), snap["ir"][i], i, 0x80 | i)
+    for g in range(lim["groups"]):
+        fix("CS.GROUP", dev.pget("CS.GROUP", addr=g), snap["group"][g], g, 0x40 | g)
+    for m in range(lim["macros"]):
+        if dev.pget("CS.MACRO", addr=m) == snap["macro"][m]:
+            continue
+        fix("CS.MACRO_HEADER", dev.pget("CS.MACRO_HEADER", addr=m), snap["macro"][m][:33] + bytes(3), m, 0x60 | m)
+        for k in range(lim["steps"]):
+            a = (k << 8) | m
+            fix("CS.MACRO_STEP", dev.pget("CS.MACRO_STEP", addr=a), snap["macro"][m][36 + 12 * k:48 + 12 * k],
+                a, 0x60 | m)
+    for p in range(lim["pages"]):
+        fix("CS.DISPLAY_PAGE", dev.pget("CS.DISPLAY_PAGE", addr=p), snap["page"][p], p, 0x50 | p)
+    fix("CS.DISPLAY_CONFIG", dev.pget("CS.DISPLAY_CONFIG"), snap["display"], 0, 0x50)
+    left = _snapshot_diff(snap, _snapshot(dev, lim))
+    if left:
+        raise AssertionError(f"CS preview left dirty, CS.SAVE not sent: {left} differ from the pre-test snapshot"
+                             + (f"; restore errors: {errors}" if errors else ""))
+    st = _status(dev)
+    if st["dirty"]:
+        dev.pset("CS.SAVE")
+        time.sleep(0.3)
+        dev.wait_ready()
+        st = _settle(dev, timeout_s=5.0)
+        if st is None or st["dirty"]:
+            raise AssertionError(f"CS.SAVE of the restored records left the preview dirty: {st and st['raw'].hex()}")
+    return st
 
 
 @test("paged_cs")
@@ -113,54 +164,60 @@ def pcs_command_info_matches_registry(dev, profile, chk):
 
 
 @test("paged_cs")
-def pcs_reads_match_legacy(dev, profile, chk):
-    """Every CS GET is byte-identical to its 1.1.6 opcode, including each former selector."""
+def pcs_reads_shape(dev, profile, chk):
+    """Every CS GET has its table size; MACRO agrees with MACRO_HEADER + MACRO_STEP, AUX_ALL with AUX_STATE/LEVEL."""
     _paged(dev)
     lim = _limits(dev)
-    _same(chk, lambda: dev.pget("CS.CAPS"), lambda: dev.raw_get(OP.GET_CS_CAPS, 52, 0xFFFF), "CAPS == 0x86 @0xFFFF")
+    chk.eq(len(dev.pget("CS.CAPS")), 52, "CAPS length")
     for n in range(lim["nouns"]):
-        _same(chk, lambda: dev.pget("CS.NOUN_DESC", addr=n), lambda: dev.raw_get(OP.GET_CS_CAPS, 12, n),
-              f"NOUN_DESC {n} == 0x86 @{n}")
-    _same(chk, lambda: dev.pget("CS.STATUS"), lambda: dev.raw_get(OP.GET_CS_STATUS, 41), "STATUS == 0x87")
-    _same(chk, lambda: dev.pget("CS.EXT_STATUS"), lambda: dev.raw_get(OP.GET_CS_EXT_STATUS, 24),
-          "EXT_STATUS == 0x26")
-    _same(chk, lambda: dev.pget("CS.IR_LEARN_STATUS"), lambda: dev.raw_get(OP.CS_IR_LEARN, 8, 2),
-          "IR_LEARN_STATUS == 0x8F @2")
+        d = dev.pget("CS.NOUN_DESC", addr=n)
+        if chk.eq(len(d), 12, f"NOUN_DESC {n} length"):
+            lo, hi = struct.unpack_from("<hh", d, 4)
+            chk.ok(lo <= hi, f"NOUN_DESC {n} min_q {lo} <= max_q {hi}")
+    st = dev.pget("CS.STATUS")
+    chk.eq(len(st), 41, "STATUS length")
+    chk.member(st[3], (0, 1), "STATUS dirty flag")
+    chk.eq(len(dev.pget("CS.EXT_STATUS")), 24, "EXT_STATUS length")
+    chk.ok(len(dev.pget("CS.IR_LEARN_STATUS")) > 0, "IR_LEARN_STATUS answers")
+    aux_all = dev.pget("CS.AUX_ALL")
+    chk.eq(len(aux_all), 48, "AUX_ALL length")
     for s in range(lim["slots"]):
-        _same(chk, lambda: dev.pget("CS.BINDING", addr=s), lambda: dev.raw_get(OP.GET_CS_BINDING, 24, s),
-              f"BINDING {s}")
-        _same(chk, lambda: dev.pget("CS.SLOT_NAME", addr=s), lambda: dev.raw_get(OP.GET_CS_NAME, 32, s),
-              f"SLOT_NAME {s}")
-        try:
-            old = dev.raw_get(OP.GET_CS_AUX_STATE, 1, s), dev.raw_get(OP.GET_CS_AUX_LEVEL, 2, s)
-        except Stall:
-            old = None
-        if old is None:
+        b = dev.pget("CS.BINDING", addr=s)
+        chk.eq(len(b), 24, f"BINDING {s} length")
+        nm = dev.pget("CS.SLOT_NAME", addr=s)
+        chk.ok(len(nm) == 32 and b"\0" in nm, f"SLOT_NAME {s} is 32 NUL-terminated bytes: {nm!r}")
+        if b[0] in AUX_TYPES:
+            chk.eq(dev.pget("CS.AUX_STATE", addr=s), aux_all[s:s + 1], f"AUX_STATE {s} == AUX_ALL")
+            chk.eq(dev.pget("CS.AUX_LEVEL", addr=s), aux_all[16 + 2 * s:18 + 2 * s], f"AUX_LEVEL {s} == AUX_ALL")
+        else:
             _expect_stall(chk, lambda: dev.pget("CS.AUX_STATE", addr=s), "VC_ERR_STATE", f"AUX_STATE {s}, not an aux")
             _expect_stall(chk, lambda: dev.pget("CS.AUX_LEVEL", addr=s), "VC_ERR_STATE", f"AUX_LEVEL {s}, not an aux")
-        else:
-            chk.eq((dev.pget("CS.AUX_STATE", addr=s), dev.pget("CS.AUX_LEVEL", addr=s)), old, f"AUX {s}")
-    _same(chk, lambda: dev.pget("CS.AUX_ALL"), lambda: dev.raw_get(OP.GET_CS_AUX_STATE, 48, 0xFFFF),
-          "AUX_ALL == 0x05 @0xFFFF")
     for i in range(lim["ir"]):
-        _same(chk, lambda: dev.pget("CS.IR_CMD", addr=i), lambda: dev.raw_get(OP.GET_CS_IR_CMD, 16, i), f"IR_CMD {i}")
+        chk.eq(len(dev.pget("CS.IR_CMD", addr=i)), 16, f"IR_CMD {i} length")
     for g in range(lim["groups"]):
-        _same(chk, lambda: dev.pget("CS.GROUP", addr=g), lambda: dev.raw_get(OP.GET_CS_GROUP, 40, g), f"GROUP {g}")
+        chk.eq(len(dev.pget("CS.GROUP", addr=g)), 40, f"GROUP {g} length")
     for m in range(lim["macros"]):
-        old = dev.raw_get(OP.GET_CS_MACRO, 132, m)
-        chk.eq(dev.pget("CS.MACRO", addr=m), old, f"MACRO {m}")
-        chk.eq(dev.pget("CS.MACRO_HEADER", addr=m), old[:33] + bytes(3), f"MACRO_HEADER {m} == header, reserved 0")
+        mac = dev.pget("CS.MACRO", addr=m)
+        chk.eq(len(mac), 132, f"MACRO {m} length")
+        chk.eq(dev.pget("CS.MACRO_HEADER", addr=m), mac[:33] + bytes(3), f"MACRO_HEADER {m} == header, reserved 0")
         for k in range(lim["steps"]):
-            chk.eq(dev.pget("CS.MACRO_STEP", addr=(k << 8) | m), old[36 + 12 * k:48 + 12 * k],
+            chk.eq(dev.pget("CS.MACRO_STEP", addr=(k << 8) | m), mac[36 + 12 * k:48 + 12 * k],
                    f"MACRO_STEP {k} of macro {m}")
-    old = dev.raw_get(OP.GET_CS_DISPLAY_CFG, 16)
-    chk.eq(dev.pget("CS.DISPLAY_CAPS"), old[:4], "DISPLAY_CAPS == 0x28 bytes 0-3")
-    chk.eq(dev.pget("CS.DISPLAY_CONFIG"), old[4:], "DISPLAY_CONFIG == 0x28 bytes 4-15")
+    caps = dev.pget("CS.DISPLAY_CAPS")
+    chk.eq(len(caps), 4, "DISPLAY_CAPS length")
+    chk.eq(caps[2:], b"\0\0", "DISPLAY_CAPS reserved")
+    cfg = dev.pget("CS.DISPLAY_CONFIG")
+    chk.eq(len(cfg), 12, "DISPLAY_CONFIG length")
+    chk.ok(cfg[1] < caps[0], f"DISPLAY_CONFIG home page {cfg[1]} below the page count {caps[0]}")
+    chk.eq(cfg[10:], b"\0\0", "DISPLAY_CONFIG reserved")
     for p in range(lim["pages"]):
-        _same(chk, lambda: dev.pget("CS.DISPLAY_PAGE", addr=p), lambda: dev.raw_get(OP.GET_CS_DISPLAY_PAGE, 4, p),
-              f"DISPLAY_PAGE {p}")
-    _same(chk, lambda: dev.pget("CS.DISPLAY_STATUS"), lambda: dev.raw_get(OP.GET_CS_DISPLAY_STATUS, 8),
-          "DISPLAY_STATUS == 0x2B")
+        chk.eq(len(dev.pget("CS.DISPLAY_PAGE", addr=p)), 4, f"DISPLAY_PAGE {p} length")
+    ds = dev.pget("CS.DISPLAY_STATUS")
+    chk.eq(len(ds), 8, "DISPLAY_STATUS length")
+    chk.in_range(ds[0], 0, 3, "display init state")
+    chk.ok(ds[1] < caps[0] or ds[1] == 0xFF, f"display current page {ds[1]}")
+    chk.ok(ds[3] < caps[1], f"display model {ds[3]} below the model count {caps[1]}")
+    chk.eq(ds[6:], b"\0\0", "DISPLAY_STATUS reserved")
 
 
 @test("paged_cs")
@@ -213,7 +270,7 @@ def pcs_length_and_direction(dev, profile, chk):
 
 @test("paged_cs")
 def pcs_ir_learn_and_macro_actions(dev, profile, chk):
-    """IR_LEARN_CANCEL while idle, MACRO_FIRE of an empty macro and MACRO_CANCEL succeed as no-ops, old and new."""
+    """IR_LEARN_CANCEL while idle, MACRO_FIRE of an empty macro and MACRO_CANCEL succeed as no-ops, twice over."""
     _paged(dev)
     lim = _limits(dev)
     if dev.pget("CS.IR_LEARN_STATUS")[0] != 0:
@@ -225,27 +282,22 @@ def pcs_ir_learn_and_macro_actions(dev, profile, chk):
     if not empty:
         raise Skip("no macro with zero steps")
     before = _status(dev)["raw"]
-    chk.eq(dev.pset("CS.IR_LEARN_CANCEL"), 0, "IR_LEARN_CANCEL accepted")
-    chk.eq(dev.raw_get(OP.CS_IR_LEARN, 1, 0), b"\x01", "old 0x8F @0 acknowledges")
-    chk.eq(dev.pget("CS.IR_LEARN_STATUS")[0], 0, "learn still idle")
-    try:
-        r = dev.raw_get(OP.CS_IR_LEARN, 8, 3)
-        chk.ok(False, f"old 0x8F @3 should STALL, got {r!r}")
-    except Stall:
-        chk.ok(True, "old 0x8F @3 STALLs")
+    for k in (1, 2):
+        chk.eq(dev.pset("CS.IR_LEARN_CANCEL"), 0, f"IR_LEARN_CANCEL accepted ({k})")
+        chk.eq(dev.pget("CS.IR_LEARN_STATUS")[0], 0, f"learn still idle ({k})")
     m = empty[-1]
     chk.eq(dev.pset("CS.MACRO_FIRE", addr=m), 0, f"MACRO_FIRE of empty macro {m}")
     chk.eq(dev.pget("CS.EXT_STATUS")[3], 0xFF, "an empty macro never runs")
     chk.eq(dev.pset("CS.MACRO_CANCEL"), 0, "MACRO_CANCEL while idle")
-    chk.eq(dev.raw_get(OP.CS_MACRO_FIRE, 1, m), b"\x01", f"old 0x25 @{m} acknowledges")
-    chk.eq(dev.raw_get(OP.CS_MACRO_FIRE, 1, 0xFFFF), b"\x01", "old 0x25 @0xFFFF acknowledges")
+    chk.eq(dev.pset("CS.MACRO_FIRE", addr=m), 0, f"MACRO_FIRE of empty macro {m} again")
+    chk.eq(dev.pset("CS.MACRO_CANCEL"), 0, "MACRO_CANCEL again")
     chk.eq(dev.pget("CS.EXT_STATUS"), ext, "EXT_STATUS unchanged")
     chk.eq(_status(dev)["raw"], before, "CS.STATUS unchanged")
 
 
 @test("paged_cs", mutating=True)
 def pcs_rejections_report_status(dev, profile, chk):
-    """AUX SETs on a non-aux slot and IR_LEARN_ARM without a receiver STALL and post the reason, old and new.
+    """AUX SETs on a non-aux slot and IR_LEARN_ARM without a receiver STALL with VC_ERR_STATE and post the reason.
 
     Leaves CS.STATUS last_status/last_slot on the last rejection (runtime only, nothing stored);
     pcs_preview_roundtrip_and_save ends on a SAVE result when flash tests run.
@@ -261,11 +313,12 @@ def pcs_rejections_report_status(dev, profile, chk):
         _expect_stall(chk, lambda: dev.pset(name, payload, addr=s), "VC_ERR_STATE", f"{name} on empty slot {s}")
         st = _status(dev)
         chk.eq((st["last"], st["slot"]), (INVALID_AUX, s), f"{name} posts INVALID_AUX for slot {s}")
-    # 1.1.6 ACKs every OUT on USB, so the old opcode reports the refusal through the status only.
-    s2 = free[-2] if len(free) > 1 else s   # another empty slot, so the post is visibly the old opcode's
-    dev.raw_set(OP.SET_CS_AUX_STATE, b"\x00", s2)
-    st = _status(dev)
-    chk.eq((st["last"], st["slot"]), (INVALID_AUX, s2), "old SET_CS_AUX_STATE posts INVALID_AUX")
+    if len(free) > 1:
+        s2 = free[-2]   # another empty slot, so the post visibly names the new slot
+        _expect_stall(chk, lambda: dev.pset("CS.AUX_STATE", b"\x01", addr=s2), "VC_ERR_STATE",
+                      f"CS.AUX_STATE on empty slot {s2}")
+        st = _status(dev)
+        chk.eq((st["last"], st["slot"]), (INVALID_AUX, s2), f"the post follows the latest slot {s2}")
     if TYPE_IR in types:
         chk.note("an IR receiver binding exists: IR_LEARN_ARM not sent")
         return
@@ -277,7 +330,7 @@ def pcs_rejections_report_status(dev, profile, chk):
 
 @test("paged_cs", mutating=True, flash=1)
 def pcs_preview_roundtrip_and_save(dev, profile, chk):
-    """Preview SETs on empty records round-trip old and new, are restored, then CS.SAVE of identical content clears dirty."""
+    """Preview SETs on empty records round-trip, are restored in every outcome, then CS.SAVE of identical content clears dirty."""
     _paged(dev)
     lim = _limits(dev)
     st0 = _status(dev)
@@ -298,89 +351,56 @@ def pcs_preview_roundtrip_and_save(dev, profile, chk):
     sub, grp, mac, page = (last_free(snap["ir"], 16), last_free(snap["group"], 40),
                            last_free(snap["macro"], 132), last_free(snap["page"], 4))
 
-    def put(name, payload, addr, tag, old_op=None):
-        if old_op is None:
-            dev.pset(name, payload, addr=addr)
-        else:
-            dev.raw_set(old_op, payload, addr)
-        st = _settle(dev)
-        chk.ok(st is not None and (st["last"], st["slot"]) == (0, tag),
-               f"{name} @0x{addr:04X} applied: {st and (hex(st['last']), hex(st['slot']))}")
+    def put(name, payload, addr, tag):
+        err = _put_record(dev, name, payload, addr, tag)
+        chk.ok(err is None, err or "")
 
     try:
         rec = bytes([0, 17, 0, 0, 0, 0, 0, 1]) + bytes(16)   # CS_TYPE_NONE: stored, never claims a pin
         put("CS.BINDING", rec, slot, slot)
         chk.eq(dev.pget("CS.BINDING", addr=slot), rec, "BINDING round trip")
-        chk.eq(dev.raw_get(OP.GET_CS_BINDING, 24, slot), rec, "BINDING visible through 0x85")
         rec2 = bytes([0, 18]) + rec[2:]
-        put("CS.BINDING", rec2, slot, slot, OP.SET_CS_BINDING)
-        chk.eq(dev.pget("CS.BINDING", addr=slot), rec2, "old 0x84 write visible through BINDING")
+        put("CS.BINDING", rec2, slot, slot)
+        chk.eq(dev.pget("CS.BINDING", addr=slot), rec2, "a second BINDING write replaces the record")
 
         put("CS.SLOT_NAME", b"PagedName", slot, slot)
         chk.eq(dev.pget("CS.SLOT_NAME", addr=slot), b"PagedName".ljust(32, b"\0"), "SLOT_NAME round trip")
-        chk.eq(dev.raw_get(OP.GET_CS_NAME, 32, slot), b"PagedName".ljust(32, b"\0"), "SLOT_NAME through 0x8C")
         put("CS.SLOT_NAME", b"A" * 32, slot, slot)
         chk.eq(dev.pget("CS.SLOT_NAME", addr=slot), b"A" * 31 + b"\0", "32-byte name keeps a NUL terminator")
-        put("CS.SLOT_NAME", b"OldName", slot, slot, OP.SET_CS_NAME)
-        chk.eq(dev.pget("CS.SLOT_NAME", addr=slot), b"OldName".ljust(32, b"\0"), "old 0x8B write visible")
+        put("CS.SLOT_NAME", b"Short", slot, slot)
+        chk.eq(dev.pget("CS.SLOT_NAME", addr=slot), b"Short".ljust(32, b"\0"), "a shorter name clears the old tail")
 
         put("CS.IR_CMD", IR_REC, sub, 0x80 | sub)
         chk.eq(dev.pget("CS.IR_CMD", addr=sub), IR_REC, "IR_CMD round trip")
-        chk.eq(dev.raw_get(OP.GET_CS_IR_CMD, 16, sub), IR_REC, "IR_CMD through 0x8E")
 
         put("CS.GROUP", GROUP_REC, grp, 0x40 | grp)
         chk.eq(dev.pget("CS.GROUP", addr=grp), GROUP_REC, "GROUP round trip")
-        chk.eq(dev.raw_get(OP.GET_CS_GROUP, 40, grp), GROUP_REC, "GROUP through 0x21")
-        old_grp = GROUP_REC[:8] + b"OldGrp".ljust(32, b"\0")
-        put("CS.GROUP", old_grp, grp, 0x40 | grp, OP.SET_CS_GROUP)
-        chk.eq(dev.pget("CS.GROUP", addr=grp), old_grp, "old 0x20 write visible through GROUP")
+        grp2 = GROUP_REC[:8] + b"OtherGrp".ljust(32, b"\0")
+        put("CS.GROUP", grp2, grp, 0x40 | grp)
+        chk.eq(dev.pget("CS.GROUP", addr=grp), grp2, "a second GROUP write replaces the record")
 
         put("CS.MACRO_STEP", STEP0, mac, 0x60 | mac)
-        chk.eq(dev.pget("CS.MACRO_STEP", addr=mac), STEP0, "MACRO_STEP round trip")
-        put("CS.MACRO_STEP", STEP1, (1 << 8) | mac, 0x60 | mac, OP.SET_CS_MACRO_STEP)
-        chk.eq(dev.pget("CS.MACRO_STEP", addr=(1 << 8) | mac), STEP1, "old 0x24 write visible through MACRO_STEP")
+        chk.eq(dev.pget("CS.MACRO_STEP", addr=mac), STEP0, "MACRO_STEP 0 round trip")
+        put("CS.MACRO_STEP", STEP1, (1 << 8) | mac, 0x60 | mac)
+        chk.eq(dev.pget("CS.MACRO_STEP", addr=(1 << 8) | mac), STEP1, "MACRO_STEP 1 round trip")
         hdr = struct.pack("<32sBBBB", b"PagedMacro", 0, 0, 0, 0)
         put("CS.MACRO_HEADER", hdr, mac, 0x60 | mac)
         chk.eq(dev.pget("CS.MACRO_HEADER", addr=mac), hdr, "MACRO_HEADER round trip")
         m = dev.pget("CS.MACRO", addr=mac)
-        chk.eq((m[:36], m[36:48], m[48:60]), (hdr, STEP0, STEP1), "MACRO carries header and steps")
-        chk.eq(dev.raw_get(OP.GET_CS_MACRO, 132, mac), m, "MACRO through 0x23")
+        chk.eq((m[:36], m[36:48], m[48:60], m[60:]), (hdr, STEP0, STEP1, bytes(72)),
+               "MACRO is MACRO_HEADER followed by every MACRO_STEP")
 
         put("CS.DISPLAY_PAGE", PAGE_REC, page, 0x50 | page)
         chk.eq(dev.pget("CS.DISPLAY_PAGE", addr=page), PAGE_REC, "DISPLAY_PAGE round trip")
-        chk.eq(dev.raw_get(OP.GET_CS_DISPLAY_PAGE, 4, page), PAGE_REC, "DISPLAY_PAGE through 0x2A")
 
         cfg = bytearray(snap["display"])
         cfg[6] ^= 1                                   # brightness, one step
         put("CS.DISPLAY_CONFIG", bytes(cfg), 0, 0x50)
         chk.eq(dev.pget("CS.DISPLAY_CONFIG"), bytes(cfg), "DISPLAY_CONFIG round trip")
-        chk.eq(dev.raw_get(OP.GET_CS_DISPLAY_CFG, 16)[4:], bytes(cfg), "DISPLAY_CONFIG through 0x28")
-        put("CS.DISPLAY_CONFIG", snap["display"], 0, 0x50, OP.SET_CS_DISPLAY_CFG)
-        chk.eq(dev.pget("CS.DISPLAY_CONFIG"), snap["display"], "old 0x27 write visible")
+        chk.eq(dev.pget("CS.DISPLAY_CAPS")[0], lim["pages"], "DISPLAY_CAPS unchanged by a config write")
+        chk.eq(_status(dev)["dirty"], 1, "the preview is marked dirty")
     finally:
-        put("CS.BINDING", snap["binding"][slot], slot, slot)
-        put("CS.SLOT_NAME", _name_payload(snap["name"][slot]), slot, slot)
-        put("CS.IR_CMD", snap["ir"][sub], sub, 0x80 | sub)
-        put("CS.GROUP", snap["group"][grp], grp, 0x40 | grp)
-        put("CS.MACRO_HEADER", snap["macro"][mac][:36], mac, 0x60 | mac)
-        for k in range(lim["steps"]):
-            step = snap["macro"][mac][36 + 12 * k:48 + 12 * k]
-            if dev.pget("CS.MACRO_STEP", addr=(k << 8) | mac) != step:
-                put("CS.MACRO_STEP", step, (k << 8) | mac, 0x60 | mac)
-        put("CS.DISPLAY_PAGE", snap["page"][page], page, 0x50 | page)
-        put("CS.DISPLAY_CONFIG", snap["display"], 0, 0x50)
-
-    after = _snapshot(dev, lim)
-    diff = [k for k in snap if snap[k] != after[k]]
-    if diff:
-        chk.ok(False, f"records differ from the snapshot after restore ({diff}); CS.SAVE NOT sent, preview left dirty")
-        return
-    chk.ok(True, "every CS record equals the pre-test snapshot")
-    chk.eq(_status(dev)["dirty"], 1, "restored preview is still marked dirty")
-    chk.eq(dev.pset("CS.SAVE"), 0, "CS.SAVE accepted")
-    time.sleep(0.3)
-    dev.wait_ready()
-    st = _settle(dev, timeout_s=5.0)
-    chk.ok(st is not None and (st["last"], st["slot"], st["dirty"]) == (0, 0xFF, 0),
-           f"SAVE completes clean: {st and (hex(st['last']), hex(st['slot']), st['dirty'])}")
+        st = restore_preview(dev, lim, snap)
+    chk.ok((st["last"], st["slot"], st["dirty"]) == (0, 0xFF, 0),
+           f"SAVE completes clean: {(hex(st['last']), hex(st['slot']), st['dirty'])}")
     chk.eq(_snapshot(dev, lim), snap, "records unchanged by the SAVE")

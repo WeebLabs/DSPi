@@ -330,8 +330,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     //   1. UAC1 host MUTE control (audio_state.mute) — USB-gated so the OS
     //      mute key can't silence SPDIF playback.  Host volume is likewise
     //      parked by audio_set_volume() when source != USB.
-    //   2. REQ_SET_USER_MUTE vendor channel (user_mute) — always honored, no
-    //      input-source guard.  Symmetric with REQ_SET_USER_VOLUME's
+    //   2. ROUTE.USER_MUTE vendor channel (user_mute): always honored, no
+    //      input-source guard.  Symmetric with ROUTE.USER_VOLUME's
     //      always-apply contract: an external control surface that mutes via
     //      the vendor channel expects audio to actually go silent.
     //
@@ -1738,7 +1738,7 @@ static bool slot_ring_fill(uint slot, uint32_t *fill_frames) {
 }
 
 void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, uint *playing) {
-    // Bucket mapping keeps REQ_GET_BUFFER_STATS byte-compatible:
+    // Bucket mapping keeps SYS.BUFFER_STATS byte-compatible:
     // prepared = fill buckets, free = capacity minus fill, playing = enabled.
     uint32_t fill;
     if (!slot_ring_fill(slot, &fill)) {
@@ -1760,7 +1760,7 @@ void get_slot_consumer_stats(uint slot, uint *cons_free, uint *cons_prepared, ui
 
 DSP_TIME_CRITICAL
 uint get_slot_consumer_fill(uint slot) {
-    // Bucket units (0..16): the legacy scale of REQ_GET_BUFFER_STATS.
+    // Bucket units (0..16): the scale of SYS.BUFFER_STATS.
     uint32_t fill;
     if (!slot_ring_fill(slot, &fill)) return 0;
     uint buckets = fill / SLOT_FILL_FRAMES_PER_BUCKET;

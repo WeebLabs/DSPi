@@ -60,7 +60,7 @@
 #include "pico/binary_info.h"
 #include "build_info.h"
 
-// Same stamp REQ_GET_BUILD_INFO reports, embedded in the UF2's binary info
+// Same stamp SYS.BUILD_INFO reports, embedded in the UF2's binary info
 // so `picotool info` can identify a build file or a BOOTSEL-mode device.
 bi_decl(bi_program_version_string(BUILD_GIT_DESCRIBE));
 
@@ -188,7 +188,7 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     // Keep the global rate coherent for device-initiated changes (SPDIF
     // lock, I2S rate select). The USB host path already wrote it; for the
     // other sources everything downstream (loudness/crossfeed/leveller
-    // recompute handlers, REQ_GET_STATUS) reads audio_state.freq.
+    // recompute handlers, SYS.SYSTEM_STATUS) reads audio_state.freq.
     audio_state.freq = new_freq;
     rta_restart();
 
@@ -727,7 +727,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
 
     // Regenerate default channel names for slots whose type is changing.
     // Only overwrite names that still match the OLD default — user customisations
-    // are preserved by string-inequality.  RAM-only; persisted on REQ_PRESET_SAVE.
+    // are preserved by string-inequality.  RAM-only; persisted on STORE.PRESET_SAVE.
     for (int slot = 0; slot < NUM_SPDIF_INSTANCES; slot++) {
         if (current_types[slot] == target_types[slot]) continue;
         for (int side = 0; side < 2; side++) {
@@ -1920,7 +1920,7 @@ void core0_init() {
     // External control interfaces (UART / I2C target).  Deliberately last:
     // after preset_boot_load() (persisted config available), after every
     // audio pin claim above (a stored control config whose pins now collide
-    // is quietly kept down, visible via REQ_GET_CTRL_IFACE_STATUS), and
+    // is quietly kept down, visible via XPORT.STATUS), and
     // after notify_init() so the UART bring-up's notify-consumer activation
     // is not wiped by the consumer-table reset.  Both interfaces ship
     // disabled.
@@ -1928,7 +1928,7 @@ void core0_init() {
         UartCtrlConfig ucfg;
         I2cCtrlConfig  icfg;
         preset_get_ctrl_iface(&ucfg, &icfg);
-        // Record the boot validation results so REQ_GET_CTRL_IFACE_STATUS is
+        // Record the boot validation results so XPORT.STATUS is
         // truthful when a stored config's pins now collide (live stays 0).
         ctrl_uart_last_status = uart_ctrl_init(&ucfg);
         ctrl_i2c_last_status  = i2c_ctrl_init(&icfg);
@@ -1936,7 +1936,7 @@ void core0_init() {
 
     // Control Surfaces (physical controls/indicators on user GPIOs).  Last of
     // all: after every other pin claim (a stored binding whose pins now
-    // collide is kept down, visible via REQ_GET_CS_STATUS) and after
+    // collide is kept down, visible via CS.STATUS) and after
     // notify_init so its dispatched writes notify normally.  Pot/switch
     // boot-sync dispatches fire from the first main-loop ticks, not here.
     control_surfaces_init();
@@ -2396,8 +2396,8 @@ int main(void) {
             if (!control_surfaces_busy()) {
                 // Control Surfaces binding SET (deferred).  Live-only preview:
                 // apply does the GPIO/ADC claims but no flash; a successful apply
-                // just marks the live config dirty.  REQ_CS_SAVE persists the
-                // whole config later; REQ_CS_REVERT discards the preview.
+                // just marks the live config dirty.  CS.SAVE persists the
+                // whole config later; CS.REVERT discards the preview.
                 if (cs_set_binding_pending) {
                     CsBinding b;
                     uint8_t slot;
@@ -2639,7 +2639,7 @@ int main(void) {
                 // Notification offset points into the WireCrossoverConfig
                 // section, NOT eq[].  Apps receiving PARAM_CHANGED can
                 // distinguish the section by offset; bulk readers see the
-                // same byte position they got from REQ_GET_ALL_PARAMS.
+                // same byte position they got from STORE.ALL_PARAMS.
                 WireBandParams wbp;
                 memset(&wbp, 0, sizeof(wbp));
                 wbp.type    = (uint8_t)p.type;
@@ -2844,7 +2844,6 @@ int main(void) {
         //  - Delay line bleed-through when delay length changes between presets
         {
             extern volatile bool preset_load_pending;
-            extern volatile bool save_params_pending;
             extern volatile bool preset_save_pending;
             extern volatile uint8_t pending_preset_load_slot;
             extern volatile uint8_t pending_preset_save_slot;
@@ -2962,20 +2961,6 @@ int main(void) {
                         __dmb();
                         rate_change_pending = true;
                     }
-                }
-            }
-
-            if (save_params_pending) {
-                save_params_pending = false;
-                __dmb();
-
-                // Legacy REQ_SAVE_PARAMS compatibility path.  Keep this on the
-                // same robust flash-write flow as preset save.
-                prepare_flash_write_operation();
-                int status = flash_save_params();
-                complete_flash_write_operation_full();
-                if (status != FLASH_OK) {
-                    printf("flash_save_params failed: err=%d\n", status);
                 }
             }
 
@@ -3226,7 +3211,7 @@ int main(void) {
             // Apply the received parameters.  Pin config is applied only in
             // with-preset mode (output_config_mode == 1); in independent mode the
             // device-global IO is left to apply_output_config_from_mode / the
-            // explicit REQ_SAVE_OUTPUT_CONFIG, so a bulk push doesn't stomp it.
+            // explicit STORE.OUTPUT_CONFIG_SAVE, so a bulk push doesn't stomp it.
             uint16_t _occ; uint8_t _m, _d, _la, oc_mode, _mv_mode;
             preset_get_directory(&_occ, &_m, &_d, &_la, &oc_mode, &_mv_mode);
             int err = bulk_params_apply((const WireBulkParams *)bulk_param_buf,
@@ -3549,7 +3534,7 @@ int main(void) {
                 // ALL input channels, including the multichannel extras (2..7),
                 // so 4/6/8-ch I2S and USB inputs relabel ("USB 3" -> "I2S 3"),
                 // not just the stereo pair.  Custom names are preserved by
-                // string-inequality.  RAM-only; persisted on REQ_PRESET_SAVE.
+                // string-inequality.  RAM-only; persisted on STORE.PRESET_SAVE.
                 {
                     extern uint8_t output_types[];
                     for (int ch = 0; ch < NUM_INPUT_CHANNELS; ch++) {
@@ -3667,7 +3652,7 @@ int main(void) {
 
                 // Notify host that the active input source has changed.
                 // Source tag carries through from the SET dispatcher if
-                // this came from REQ_SET_INPUT_SOURCE.
+                // this came from INPUT.SOURCE.
                 uint8_t wire_src = (uint8_t)active_input_source;
                 notify_param_write(offsetof(WireBulkParams, input_config.input_source),
                                    1, &wire_src);
@@ -3684,7 +3669,7 @@ int main(void) {
         // preset load) while that input is the live source; restart picks up
         // the new GPIO via spdif_rx_active_pin(). RX library teardown is too
         // heavy for USB ISR context, so we run stop/start here.
-        // Persistence is now slot-scoped (REQ_PRESET_SAVE) — no flash
+        // Persistence is slot-scoped (STORE.PRESET_SAVE), so no flash
         // write happens here.
         extern volatile bool spdif_rx_pin_change_pending;
         if (spdif_rx_pin_change_pending) {

@@ -21,7 +21,7 @@ void process_input_block(uint32_t sample_count);
 // Number of active input channels for the current input source: the USB alt's
 // channel count, the I2S input channel count, or the stereo pair for S/PDIF;
 // clamped to NUM_INPUT_CHANNELS.  Single source of truth for the DSP pipeline's
-// input dimension AND the host-visible status (REQ_GET_STATUS), so the two can
+// input dimension AND the host-visible status (INPUT.STATUS), so the two can
 // never disagree about how many inputs are live.
 uint8_t active_input_channel_count(void);
 
@@ -83,7 +83,7 @@ extern int32_t buf_l[192], buf_r[192];
 extern int32_t buf_out[NUM_OUTPUT_CHANNELS][192];
 #endif
 
-// Buffer statistics helpers (used by vendor_commands.c and pipeline)
+// Buffer statistics helpers (used by the vendor/ handlers and pipeline)
 uint get_slot_consumer_fill(uint slot);
 // Sample-granular fill in buffer units (0..16) for the clock servo;
 // negative when no valid reading exists (type switch, slot not running).
@@ -97,13 +97,13 @@ bool slot_fill_at_target(uint slot);
 // slot 0 to the target, so the outputs start on it; 0 means wait for the start.
 uint32_t producer_block_bounds(uint32_t *min_frames);
 
-// Ring health (REQ_GET_STATUS 27/28): blocks refused by group admission
+// Ring health (SYS.PIPELINE_STATS): blocks refused by group admission
 // (cumulative), and the lowest enabled-slot fill seen just before a write, in
 // frames (UINT32_MAX = none since reset_buffer_watermarks()).
 extern volatile uint32_t output_ring_drops;
 extern volatile uint32_t output_ring_min_prewrite;
 // Worst gap between input deliveries since reset_buffer_watermarks(), in
-// microseconds (REQ_GET_STATUS 29): how long a stream input can go unread, which
+// microseconds (SYS.PIPELINE_STATS): how long a stream input can go unread, which
 // bounds the usable latency margin. Marked by each pipeline_service_producer().
 extern volatile uint32_t input_delivery_worst_gap_us;
 void input_delivery_mark(void);

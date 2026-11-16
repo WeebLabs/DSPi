@@ -160,7 +160,7 @@ typedef struct {
     float presence_db;         // centre presence bell (Syn-style), both centre modes
 } UpmixConfig;
 
-// Wire image of UpmixConfig for REQ_UPMIX_SET/GET_CONFIG (44 bytes).
+// Wire image of UpmixConfig for FX.UPMIX_CONFIG (44 bytes).
 // presence_q1 (V26+, was reserved) carries presence_db in 0.5 dB steps
 // (int8, dB * 2, -24..+24); older V25 hosts wrote 0 = 0 dB, so the byte is
 // backward-compatible in both directions and no struct size changes.
@@ -182,8 +182,8 @@ typedef struct __attribute__((packed)) {
 } UpmixConfigPacket;
 _Static_assert(sizeof(UpmixConfigPacket) == 44, "UpmixConfigPacket wire size");
 
-// Parameter ids for REQ_UPMIX_SET/GET_PARAM (wValue).  All values travel as a
-// 4-byte float; mode/enable params are rounded to integer on SET.
+// Parameter ids, in the order of FX.UPMIX_ENABLE..FX.UPMIX_PRESENCE.  All values
+// travel as a 4-byte float; mode/enable params are rounded to integer on SET.
 enum {
     UPMIX_PARAM_ENABLED       = 0,
     UPMIX_PARAM_CENTER_MODE   = 1,
@@ -212,7 +212,7 @@ static inline float upmix_presence_decode(int8_t q1) {
     return 0.5f * (float)q1;
 }
 
-// Live telemetry for REQ_UPMIX_GET_STATUS (16 bytes)
+// Live telemetry for FX.UPMIX_STATUS (16 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t active;            // 1 = processing this packet stream
     uint8_t parked_reason;     // 0 = active, 1 = disabled, 2 = input not stereo,

@@ -37,7 +37,7 @@ extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
 extern volatile uint8_t usb_input_channels;
 
 // Longest gap between audio-carrying host packets since reset_buffer_watermarks(),
-// in microseconds (REQ_GET_STATUS 30), unlike wValue 8 not capped at 50 ms:
+// in microseconds (SYS.USB_AUDIO_STATUS).  Unlike spdif_underruns it is not capped at 50 ms:
 // a host that stops sending without closing the stream shows here.
 extern volatile uint32_t usb_audio_worst_packet_gap_us;
 
@@ -50,10 +50,10 @@ extern volatile float master_volume_db;
 extern volatile float master_volume_linear;
 extern volatile int32_t master_volume_q15;
 
-// Vendor-channel user mute (REQ_SET_USER_MUTE).  Separate from audio_state.mute
+// Vendor-channel user mute (ROUTE.USER_MUTE).  Separate from audio_state.mute
 // because the two have different gating semantics: UAC1 mute is USB-gated by the
 // audio pipeline (the OS mute key must not silence SPDIF playback), whereas the
-// vendor channel always applies — symmetric with REQ_SET_USER_VOLUME's
+// vendor channel always applies, symmetric with ROUTE.USER_VOLUME's
 // always-apply contract.  Pipeline ORs them: muted = (audio_state.mute &&
 // host_active) || user_mute.  audio_state.volume IS shared with UAC1 because the
 // volume value itself is source-agnostic (the gating is inside the apply call,
@@ -183,7 +183,7 @@ extern volatile bool dac_hw_mute_test_pending;
 extern volatile bool flash_set_spdif_rx_pin_pending;
 
 // External control interface (UART / I2C) config apply+persist, deferred to
-// the main loop.  Last-status bytes feed REQ_GET_CTRL_IFACE_STATUS.
+// the main loop.  Last-status bytes feed XPORT.STATUS.
 extern volatile bool ctrl_set_uart_pending;
 extern UartCtrlConfig ctrl_set_uart_val;
 extern volatile uint8_t ctrl_uart_last_status;
@@ -191,7 +191,6 @@ extern volatile bool ctrl_set_i2c_pending;
 extern I2cCtrlConfig ctrl_set_i2c_val;
 extern volatile uint8_t ctrl_i2c_last_status;
 
-extern volatile bool save_params_pending;
 extern volatile bool preset_save_pending;
 extern volatile bool preset_load_pending;
 extern volatile bool factory_reset_pending;
@@ -214,8 +213,11 @@ extern volatile bool sync_started;
 #define CENTER_VOLUME_INDEX 60
 
 // ----------------------------------------------------------------------------
-// SHARED HELPERS (defined in usb_audio.c, called from vendor_commands.c)
+// SHARED HELPERS (defined in usb_audio.c, called from the vendor/ handlers)
 // ----------------------------------------------------------------------------
+
+// Ring buffer accessor (audio_ring is static in usb_audio.c)
+uint32_t usb_audio_ring_overrun_count(void);
 
 void update_preamp(uint8_t ch, float db);
 void update_master_volume(float db);
@@ -262,8 +264,8 @@ bool audio_set_volume(int16_t volume);
 void audio_thaw_host_volume(void);
 
 // Push a master-volume change to the host over the interrupt IN endpoint.
-// Called internally from update_master_volume(); vendor_commands.c brackets
-// its update_master_volume() call with notify_master_vol_host_initiated so
+// Called internally from update_master_volume(); the ROUTE.MASTER_VOLUME
+// handler (vendor/vc_page_route.c) brackets its update_master_volume() call with notify_master_vol_host_initiated so
 // the echo-suppression #define (NOTIFY_SUPPRESS_HOST_ECHO) can distinguish
 // host-originated from device-originated changes.  Only sets pending state;
 // the actual xfer fires from usb_notify_tick() (main loop) or xfer_cb.

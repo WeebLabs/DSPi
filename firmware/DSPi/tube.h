@@ -12,7 +12,7 @@
 // (shared published coeffs, per-output state, output mask).
 // Design: Documentation/Features/tube_preamp_spec.md.
 
-// Indexed parameter ids (REQ_SET/GET_TUBE_PARAM wValue).  Wire/flash order.
+// Indexed parameter ids, in the order of FX.TUBE_ENABLE..FX.TUBE_TRIM.  Wire/flash order.
 enum {
     TUBE_PARAM_ENABLED = 0,
     TUBE_PARAM_OUTPUT_MASK,

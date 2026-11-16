@@ -9,7 +9,7 @@ import time
 
 from ..device import PagedStall, Stall
 from ..framework import Skip, test
-from .paged_cs import AUX_TYPES, PENDING, _limits, _paged, _settle, _snapshot, _status
+from .paged_cs import AUX_TYPES, PENDING, _limits, _paged, _settle, _snapshot, _status, restore_preview
 
 # CsNoun numbers (control_surfaces.h).
 MASTER_VOLUME, USER_MUTE, PRESET, CLIP, LEVELLER_SPEED = 1, 2, 6, 8, 14
@@ -395,28 +395,8 @@ def pcsn_macro_noun_dispatch(dev, profile, chk):
         _case_preset(c, "PRESET_RELOAD TRIGGER", PRESET_RELOAD, TRIGGER)
         _case_preset(c, "PRESET SET active slot", PRESET, SET)
     finally:
-        mac, grp = c.mac, c.grp
-        c.put("CS.MACRO_HEADER", snap["macro"][mac][:36], mac, 0x60 | mac)
-        for k in range(lim["steps"]):
-            stp = snap["macro"][mac][36 + 12 * k:48 + 12 * k]
-            if dev.pget("CS.MACRO_STEP", addr=(k << 8) | mac) != stp:
-                c.put("CS.MACRO_STEP", stp, (k << 8) | mac, 0x60 | mac)
-        if dev.pget("CS.GROUP", addr=grp) != snap["group"][grp]:
-            c.put("CS.GROUP", snap["group"][grp], grp, 0x40 | grp)
         for label, v in c.seen:
             chk.note(f"observed {label}: {v}")
-
-    after = _snapshot(dev, lim)
-    diff = [k for k in snap if snap[k] != after[k]]
-    if diff:
-        chk.ok(False, f"records differ from the snapshot after restore ({diff}); CS.SAVE NOT sent, preview left dirty")
-        return
-    chk.ok(True, "every CS record equals the pre-test snapshot")
-    if _status(dev)["dirty"]:
-        chk.eq(dev.pset("CS.SAVE"), 0, "CS.SAVE accepted")
-        time.sleep(0.3)
-        dev.wait_ready()
-        st = _settle(dev, timeout_s=5.0)
-        chk.ok(st is not None and (st["last"], st["slot"], st["dirty"]) == (0, 0xFF, 0),
-               f"SAVE completes clean: {st and (hex(st['last']), hex(st['slot']), st['dirty'])}")
+        st = restore_preview(dev, lim, snap)
+    chk.ok((st["last"], st["dirty"]) == (0, 0), f"preview restored and saved clean: {st['raw'][:4].hex()}")
     chk.eq(_snapshot(dev, lim), snap, "records unchanged by the SAVE")

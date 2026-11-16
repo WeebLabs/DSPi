@@ -70,7 +70,7 @@
 static int32_t loopback_ring[RING_FRAMES * 2];
 static volatile uint32_t ring_head;          /* next frame to write (producer) */
 static volatile uint32_t ring_tail;          /* next frame to read  (consumer) */
-/* Glitch counters, read by the host via REQ_GET_STATUS to tell a capture
+/* Glitch counters, read by the host via DIAG.LOOPBACK_STATS to tell a capture
  * dropout from a DSP fault; both discontinuities look identical in the audio. */
 static volatile uint32_t ring_overflow_count; /* frames dropped, ring full     */
 static volatile uint32_t ring_underrun_count; /* silence packets sent, ring dry */
