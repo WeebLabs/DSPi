@@ -195,6 +195,17 @@ capture through the same layer:
 `python -m tools.dspi_test.golden.capture compare ... --transport tools.dspi_test.legacy_map:golden_transport`.
 The layer and the `old` mode are removed in plan Phase 6. The JSON stays as migration data.
 
+`DSPI_TEST_PROTOCOL=hybrid` (or `protocol="hybrid"`) is for the page migration, while page 0 still
+answers. An old call is translated only when every paged command it would use exists on the attached
+device in the needed direction; otherwise it goes to page 0 exactly as in `old` mode. The decision is
+per opcode, per split selector, and per `GET_STATUS` selector. Custom adapters declare what they touch
+in the `uses` list of their JSON entry. What exists is read from `SYS.PAGE_LIST` and
+`SYS.PAGE_COMMANDS` once per handle (not from the registry), so reconnect or make a new `DspiDevice`
+after flashing. A request that would use no paged command at all stays on page 0.
+`dev.hybrid_counts` counts calls per old opcode name, `dev.hybrid_summary()` gives a one-line summary,
+and the summary is printed at exit. For the golden replay use
+`--transport tools.dspi_test.legacy_map:golden_transport_hybrid`.
+
 `tests/paged_sys.py` holds native tests for the `SYS` discovery commands. They SKIP on firmware without
 the paged dispatcher.
 

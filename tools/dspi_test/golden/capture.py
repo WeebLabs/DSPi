@@ -399,6 +399,41 @@ def diff_lists(ref, got, mask):
     return out
 
 
+def load_intended(path=HERE / "intended.json", platform=None):
+    if not Path(path).is_file():
+        return []
+    entries = json.loads(Path(path).read_text())["entries"]
+    return [m for m in entries if m.get("platform") in (None, platform)]
+
+
+def intended_match(intended, label, d):
+    """The intended.json entry explaining one request's whole difference list d, or None."""
+    if "@" not in label or len(d) != 1 or d[0][0] is not None:
+        return None
+    op, wv = _split_key(label.split()[-1])
+    _, exp, got = d[0]
+    for m in intended:
+        if (m["op"] == op and m["wvalue"] == wv and m["old"] in ("any", exp)
+                and m["new"] == got):
+            return m
+    return None
+
+
+def split_intended(sections, intended):
+    """(unexplained sections, [(section, label, diff, entry)]) with intended differences moved out."""
+    rest, hits = [], []
+    for name, diffs in sections:
+        keep = []
+        for label, d in diffs:
+            m = intended_match(intended, label, d)
+            if m:
+                hits.append((name, label, d, m))
+            else:
+                keep.append((label, d))
+        rest.append((name, keep))
+    return rest, hits
+
+
 def compare_runs(ref, got, mask):
     sections = []
     sections.append(("baseline", diff_lists(ref["baseline"], got["baseline"], mask)))
@@ -533,7 +568,15 @@ def cmd_compare(args):
         raise SystemExit("script file changed since the reference was captured (use --force)")
     g.force_io = args.force
     res = g.sequence(bytes.fromhex(ref["baseline_bulk"]))
-    n = print_diffs(compare_runs(ref, res, g.mask))
+    sections = compare_runs(ref, res, g.mask)
+    # Intended changes are excused only on a translating run; plain 1.1.6-style firmware must match.
+    intended = load_intended(platform=ref["platform"]) if TRANSPORT is not legacy_transport else []
+    sections, hits = split_intended(sections, intended)
+    n = print_diffs(sections)
+    if hits:
+        print(f"intended: {len(hits)} difference(s) listed in intended.json")
+        for name, label, d, m in hits:
+            print(f"  {name:8s} {label}: reply expected {d[0][1]} got {d[0][2]} ({m['reason']})")
     ok_restore = report_restore(res)
     print(f"compare: {n} unexplained difference(s) against {args.ref} ({ref['fw']} {ref['build_info']})")
     return 1 if n else (0 if ok_restore else 3)

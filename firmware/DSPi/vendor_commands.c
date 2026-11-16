@@ -189,29 +189,11 @@ static inline bool vendor_is_bulk_get(uint8_t bRequest) {
 _Static_assert(RTA_MAX_TRACKED * sizeof(RtaBandFrame) <= WIRE_BULK_BUF_SIZE,
                "REQ_RTA_GET_BANDS_ALL must fit bulk_param_buf");
 
-// --- Chunked bulk-params sessions (USB only; see 0xA2/0xA3 in config.h) ---
-// A session spans multiple EP0 control transfers, so the bulk lock must
-// survive intervening chunk SETUPs; the SETUP-stage USB-owner cleanup
-// exempts chunk requests while a session is open.  Abandoned sessions are
-// torn down by the first non-chunk vendor request or the 3 s stale reap.
-static bool     usb_chunk_get_open = false;   // snapshot parked in bulk_param_buf
-static bool     usb_chunk_get_done = false;   // final chunk queued; release at ACK
-static bool     usb_chunk_set_open = false;
-static uint16_t usb_chunk_set_received = 0;   // next expected byte offset
+bool vendor_bulk_usb_holds(void) { return bulk_buf_owner == BULK_OWNER_USB; }
 
-static void usb_chunk_sessions_close(void) {
-    usb_chunk_get_open = false;
-    usb_chunk_get_done = false;
-    usb_chunk_set_open = false;
-    usb_chunk_set_received = 0;
-}
-
-// True while `req` continues an open chunk session (so the SETUP cleanup
-// must not drop the USB-held bulk lock underneath it).
-static bool usb_chunk_session_continues(uint8_t bRequest) {
-    return (bRequest == REQ_GET_ALL_PARAMS_CHUNK && usb_chunk_get_open) ||
-           (bRequest == REQ_SET_ALL_PARAMS_CHUNK && usb_chunk_set_open);
-}
+// Chunked bulk-params sessions (0xA2/0xA3 and STORE.ALL_PARAMS_CHUNK) live in
+// vendor/vc_bulk.c. Abandoned ones are torn down by the next vendor request
+// that does not continue them, or by the 3 s stale reap.
 
 // Shared CtrlDispatchResult to CTRL_STATUS_* wire mapping for the external
 // transports (one definition so UART and I2C can never disagree).
@@ -4333,12 +4315,12 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     if (stage == CONTROL_STAGE_SETUP) {
         // EP0 transfers are strictly serialized: a new SETUP means any prior
         // USB control transfer is over, so drop a USB-held bulk lock (covers
-        // host-aborted 0xA0/0xA1 transfers whose ACK never fired).  Chunked
-        // sessions (0xA2/0xA3) intentionally span SETUPs and keep the lock;
-        // any other vendor request tears an open session down.
-        if (bulk_buf_owner == BULK_OWNER_USB &&
-            !(page == 0 && usb_chunk_session_continues(req->bRequest))) {
-            bulk_buf_owner = BULK_OWNER_NONE;
+        // host-aborted bulk transfers whose ACK never fired).  Chunk sessions
+        // span SETUPs and keep the lock; any request that does not continue
+        // one, including a chunk request on the other path, closes it.
+        if (!vc_bulk_chunk_continues(page, req->bmRequestType_bit.direction == TUSB_DIR_IN,
+                                     req->bRequest)) {
+            if (bulk_buf_owner == BULK_OWNER_USB) bulk_buf_owner = BULK_OWNER_NONE;
             usb_chunk_sessions_close();
         }
         usb_set_in_flight = false;

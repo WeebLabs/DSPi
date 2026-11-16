@@ -1,1 +1,37 @@
 VC_PAGE(ROUTE, 0x05, 1, "Matrix, per-output controls, delays, channel names, preamp, master and user volume")
+
+VC_CMD(0x10, MATRIX_ROUTE, route_matrix_get, route_matrix_set,
+       IN_OUT, 8, 8, 8, 0, 0, "One crosspoint: u8 enabled, u8 phase invert, u16 reserved, f32 gain dB")
+
+VC_CMD(0x20, OUTPUT_ENABLE, route_out_enable_get, route_out_enable_set,
+       OUTPUT, 1, 1, 1, 0, 0, "Output enable; an enable that collides with the core 1 mode is VC_ERR_STATE")
+VC_CMD(0x21, OUTPUT_GAIN, route_out_gain_get, route_out_gain_set,
+       OUTPUT, 4, 4, 4, 0, 0, "Output gain, f32 dB")
+VC_CMD(0x22, OUTPUT_MUTE, route_out_mute_get, route_out_mute_set,
+       OUTPUT, 1, 1, 1, 0, 0, "Output mute, byte stored as sent")
+VC_CMD(0x23, OUTPUT_DELAY, route_out_delay_get, route_out_delay_set,
+       OUTPUT, 4, 4, 4, 0, 0, "Output delay, f32 ms, negative clamps to 0")
+VC_CMD(0x24, OUTPUT_ENABLE_CONFLICT, route_out_conflict_get, VC_NONE,
+       OUTPUT, 1, 0, 0, 0, 0, "1 when enabling this output would collide with the core 1 mode")
+
+VC_CMD(0x30, CHANNEL_DELAY, route_ch_delay_get, route_ch_delay_set,
+       CHANNEL, 4, 4, 4, 0, 0, "Channel delay, f32 ms, negative clamps to 0")
+VC_CMD(0x31, CHANNEL_NAME, route_ch_name_get, route_ch_name_set,
+       CHANNEL, 32, 1, 32, 0, 0, "Channel name, 32 bytes NUL padded; SET stores at most 31")
+
+VC_CMD(0x40, PREAMP, route_preamp_get, route_preamp_set,
+       INPUT, 4, 4, 4, 0, 0, "Input channel preamp, f32 dB, non-finite is VC_ERR_VALUE")
+
+VC_CMD(0x50, MASTER_VOLUME, route_master_vol_get, route_master_vol_set,
+       NONE, 4, 4, 4, 0, 0, "Master volume ceiling, f32 dB, clamped to -128..0 (-128 mutes)")
+VC_CMD(0x51, MASTER_VOLUME_MODE, route_master_mode_get, route_master_mode_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_FLASH, 0, "0 independent, 1 per preset; other values store 0")
+VC_CMD(0x52, MASTER_VOLUME_SAVE, VC_NONE, route_master_save_set,
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH, 0, "Save the live master volume as the independent value")
+VC_CMD(0x53, MASTER_VOLUME_SAVED, route_master_saved_get, VC_NONE,
+       NONE, 4, 0, 0, 0, 0, "Saved independent master volume, f32 dB")
+
+VC_CMD(0x60, USER_VOLUME, route_user_vol_get, route_user_vol_set,
+       NONE, 4, 4, 4, 0, 0, "User volume, f32 dB, clamped to -60..0, 1/256 dB steps")
+VC_CMD(0x61, USER_MUTE, route_user_mute_get, route_user_mute_set,
+       NONE, 1, 1, 1, 0, 0, "User mute, non-zero mutes")

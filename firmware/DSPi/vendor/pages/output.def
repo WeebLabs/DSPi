@@ -1,1 +1,27 @@
 VC_PAGE(OUTPUT, 0x04, 1, "Output type and pins, output latency, ADAT TX, DAC hardware mute")
+
+VC_CMD(0x10, TYPE, output_type_get, output_type_set,
+       SLOT, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "Type of one output slot, 0 S/PDIF or 1 I2S")
+VC_CMD(0x11, PIN, output_pin_get, output_pin_set,
+       PIN_OUTPUT, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "GPIO of one pin output; 0xFF restores its default")
+
+VC_CMD(0x20, LATENCY, output_latency_get_h, output_latency_set_h,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Requested output latency option ID")
+VC_CMD(0x21, LATENCY_STATUS, output_latency_status_get, VC_NONE,
+       NONE, 12, 0, 0, 0, 0, "Requested and effective latency, ring target, batch, pending flag, option count")
+VC_CMD(0x22, LATENCY_OPTIONS, output_latency_options_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, 0, 0, "Every latency option, 8 bytes each, with its effective latency now")
+
+#if PICO_RP2350
+VC_CMD(0x30, ADAT_TX_ENABLE, output_adat_tx_enable_get, output_adat_tx_enable_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "ADAT output enable")
+VC_CMD(0x31, ADAT_TX_PIN, output_adat_tx_pin_get, output_adat_tx_pin_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "ADAT output GPIO; 0xFF restores the default")
+VC_CMD(0x32, ADAT_TX_STATUS, output_adat_tx_status_get, VC_NONE,
+       NONE, 8, 0, 0, 0, 0, "ADAT output status packet")
+#endif
+
+VC_CMD(0x40, DAC_MUTE_CONFIG, output_dac_mute_config_get, output_dac_mute_config_set,
+       NONE, 16, 16, 16, VC_F_DEFERRED | VC_F_FLASH, 0, "DAC hardware mute pin, polarity and timing")
+VC_CMD(0x41, DAC_MUTE_TEST, VC_NONE, output_dac_mute_test_set,
+       NONE, 0, 0, 0, VC_F_DEFERRED, 0, "Pulse the DAC hardware mute pin for about one second")

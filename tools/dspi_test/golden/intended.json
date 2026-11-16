@@ -1,0 +1,7 @@
+{
+ "note": "Intended protocol changes. compare reports a matching difference under 'intended' instead of counting it, but only with a non-default --transport. old is the reference reply (hex, STALL, ACK) or any; new is the reply the new firmware gives. platform limits an entry to one platform.",
+ "entries": [
+  {"op": "GET_CORE1_CONFLICT", "wvalue": 9, "platform": "RP2350", "old": "00", "new": "STALL",
+   "reason": "a read past the last output returned 0 in 1.1.6 and is now VC_ERR_ADDRESS"}
+ ]
+}

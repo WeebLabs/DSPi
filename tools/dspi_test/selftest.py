@@ -17,6 +17,7 @@ semantics:
 
     python3 -m tools.dspi_test.selftest      # exit 0 = all good
 """
+import json
 import pathlib
 import re
 import struct
@@ -590,8 +591,10 @@ class FakePagedFirmware:
     """A pyusb-shaped device running the paged dispatcher rules of the phase 1 contract over a
     representative command set. Page 0 always STALLs, as after the flip."""
 
-    def __init__(self, paged=True):
+    def __init__(self, paged=True, legacy=False):
         self.paged = paged
+        self.legacy = legacy        # page 0 answers like 1.1.6 (0xA5 fill), as before the flip
+        self.page0_log = []
         self.cmds = {}
         self.store = {}
         self.actions = []
@@ -661,7 +664,16 @@ class FakePagedFirmware:
         self._ro("SYS.PDM_STATS", struct.pack("<IIII", 11, 12, 13, 14))
         self._ro("SYS.SPDIF_TX_STATS", struct.pack("<IIIIII", 21, 22, 23, 24, 25, 26))
         self._ro("SYS.PIPELINE_STATS", struct.pack("<IIIIII", 31, 32, 33, 34, 35, 0))
-        self._rw("SYS.STATS_RESET", 1)
+        self._rw("SYS.STATS_RESET", 1, check=lambda a, d: _VC["VC_ERR_VALUE"] if d[0] & 0xFE else 0)
+        self.cmds[self._id("SYS.STATS_RESET")].glen = None   # SET only
+        self._ro("SYS.BUFFER_STATS", bytes([4, 0, 1, 0]) + bytes(40))
+
+        def device_name(c, a, d):
+            self.store[(c.cid, a)] = (bytes(d[:31]) if d[0] else b"").ljust(32, b"\0")
+            return 0
+        self.add("SYS.DEVICE_NAME", 32, (1, 32), _NONE, None, device_name)
+        self.add("STORE.ALL_PARAMS", 6136, (1, 6136), _NONE, None,
+                 lambda c, a, d: self.store.__setitem__((c.cid, a), bytes(d)) or 0)
         self._act("STORE.PRESET_SAVE", range(10))
         self._ro("STORE.PRESET_ACTIVE", b"\x02")
         self._ro("STORE.DIRECTORY", bytes([0x05, 0, 1, 3, 2, 1, 0]))
@@ -797,6 +809,9 @@ class FakePagedFirmware:
         is_get = bool(bm & 0x80)
         if page == 0:
             self.page0_hits += 1
+            self.page0_log.append(("IN" if is_get else "OUT", req, wvalue))
+            if self.legacy:
+                return b"\xa5" * data_or_len if is_get else len(data_or_len)
             raise _usbcore.USBError("Pipe error", errno=32)
         self.paged_hits += 1
         if not self.paged:
@@ -943,6 +958,13 @@ dv.set_f32(OP.SET_TUBE_PARAM, 2.0, wvalue=20)
 check(len(dv.swallowed) == n0 + 1, "unknown tube index on OUT is swallowed")
 dv.set_f32(OP.SET_TUBE_PARAM, 2.5, wvalue=0x103)
 check(dv.get_f32(OP.GET_TUBE_PARAM, 3) == 2.5, "tube index uses the low byte only")
+n0 = len(dv.swallowed)
+try:
+    dv.set_f32(OP.UPMIX_SET_PARAM, 0.5, wvalue=14)
+    check(False, "UPMIX_SET_PARAM index 14 must STALL")
+except Stall as st:
+    check(not isinstance(st, D.PagedStall) and st.direction == "SET" and len(dv.swallowed) == n0,
+          "unlisted OUT selector under out_stall raise STALLs, as in 1.1.6")
 
 print("P5. translate: custom adapters")
 gs = lambda wv, n=4: dv.get(OP.GET_STATUS, n, wv)  # noqa: E731
@@ -987,6 +1009,16 @@ check(dv.get(OP.SAVE_PARAMS, 1) == b"\x00" and fw.actions[-1] == ("STORE.PRESET_
       "SAVE_PARAMS saves the active slot")
 check(dv.get(OP.GET_USB_ERROR_STATS, 24) == bytes(24) and dv.get(OP.RESET_USB_ERROR_STATS, 1) == b"\x01",
       "retired USB error stats")
+n0 = len(dv.swallowed)
+dv.set(OP.SET_ALL_PARAMS, bytes(64))
+check(len(dv.swallowed) == n0 + 1, "SET_ALL_PARAMS of 64 bytes is swallowed, as 1.1.6 ignored it")
+try:
+    dv.set(OP.SET_ALL_PARAMS, bytes(100))
+    check(False, "SET_ALL_PARAMS of 100 bytes must STALL")
+except Stall:
+    check(True, "SET_ALL_PARAMS of 100 bytes STALLs, as in 1.1.6")
+dv.set(OP.SET_ALL_PARAMS, bytes(range(256)) * 23 + bytes(248))
+check(fw.stored("STORE.ALL_PARAMS")[:4] == bytes([0, 1, 2, 3]), "SET_ALL_PARAMS reaches STORE.ALL_PARAMS")
 check(LM.golden_transport(dv, "IN", OP.GET_OUTPUT_GAIN, 3, 4) == struct.pack("<f", -6.5)
       and LM.golden_transport(dv, "OUT", OP.SET_OUTPUT_GAIN, 3, struct.pack("<f", 0.0)) == 4,
       "golden_transport matches capture.py's TRANSPORT contract")
@@ -996,7 +1028,7 @@ check(kinds_hit == {n["kind"] for r in LM.load_map()["opcodes"].values() for d i
                     for n in LM._walk(r[d])}, "every adapter kind in the map is exercised above")
 customs_hit = {"get_status", "get_eq_param", "set_eq_param", "set_matrix_route", "get_matrix_route",
                "get_input_rate", "preset_get_startup", "cs_display_cfg", "clear_clips", "set_preamp_legacy",
-               "save_params", "usb_error_stats", "reset_usb_error_stats"}
+               "save_params", "usb_error_stats", "reset_usb_error_stats", "set_all_params"}
 check(customs_hit == set(LM.CUSTOM), f"every custom function is exercised ({set(LM.CUSTOM) - customs_hit})")
 
 print("P6. legacy_map --check and paged_sys against the fake")
@@ -1022,6 +1054,65 @@ try:
     check(False, "paged_sys must SKIP on firmware without the dispatcher")
 except _Skip:
     check(True, "paged_sys SKIPs on firmware without the dispatcher")
+
+print("P7. hybrid: translate only what the firmware implements, pass the rest to page 0")
+
+
+def _hybrid_dev(drop=(), **kw):
+    fw = FakePagedFirmware(legacy=True, **kw)
+    for name in drop:
+        del fw.cmds[LM.target_id(name)]
+    return fw, D.DspiDevice(protocol="hybrid", usb_dev=fw, registry=fw.registry())
+
+
+def _routed(fw, fn):
+    n0 = fw.page0_hits
+    r = fn()
+    return ("page0" if fw.page0_hits > n0 else "paged"), r
+
+
+fw, dv = _hybrid_dev(drop=("STORE.DIRECTORY",))
+check(D.DspiDevice(protocol="hybrid", usb_dev=fw).protocol == "hybrid", "hybrid is a protocol mode")
+dv.set_f32(OP.SET_OUTPUT_GAIN, -1.5, wvalue=2)
+check(fw.page0_hits == 0 and fw.stored("ROUTE.OUTPUT_GAIN", 2) == struct.pack("<f", -1.5),
+      "OUT whose target exists is translated")
+check(_routed(fw, lambda: dv.get_f32(OP.GET_OUTPUT_GAIN, 2)) == ("paged", -1.5), "IN whose target exists")
+check(_routed(fw, lambda: dv.get(OP.GET_LOUDNESS, 1))[0] == "page0", "missing target passes through")
+check(_routed(fw, lambda: dv.set_u8(OP.SET_LOUDNESS, 1))[0] == "page0"
+      and fw.page0_log[-1] == ("OUT", OP.SET_LOUDNESS, 0), "missing SET target passes through unchanged")
+check(_routed(fw, lambda: dv.get(OP.LIMITER, 4, (2 << 8) | 1))[0] == "paged", "split case present: translated")
+check(_routed(fw, lambda: dv.get(OP.LIMITER, 18, 0x80))[0] == "page0", "split case absent (METERS): page 0")
+check(_routed(fw, lambda: dv.get(OP.LIMITER, 4, 0x07))[0] == "page0", "selector 1.1.6 refused: page 0 decides")
+check(_routed(fw, lambda: dv.get(OP.GET_STATUS, 4, 3))[0] == "paged", "GET_STATUS selector with its struct present")
+check(_routed(fw, lambda: dv.get(OP.GET_STATUS, 4, 24))[0] == "page0", "GET_STATUS selector with DIAG absent")
+check(_routed(fw, lambda: dv.get(OP.GET_STATUS, 4, 7))[0] == "page0", "a request using no paged command stays old")
+check(_routed(fw, lambda: dv.get(OP.PRESET_GET_STARTUP, 3))[0] == "page0",
+      "custom with one of its uses missing passes through")
+check(_routed(fw, lambda: dv.get(OP.GET_INPUT_RATE, 8))[0] == "paged", "custom with all uses present")
+check(_routed(fw, lambda: dv.get(OP.SET_MCK_MULTIPLIER, 1, 1))[0] == "paged", "write-as-read with its SET present")
+check(_routed(fw, lambda: dv.get(OP.SET_ADAT_PIN, 1, 4))[0] == "page0", "write-as-read with its SET absent")
+before = fw.paged_hits
+dv.get(OP.GET_LOUDNESS, 1)
+check(fw.paged_hits == before, "the PAGE_LIST / PAGE_COMMANDS read is cached on the handle")
+check(_routed(fw, lambda: LM.golden_transport_hybrid(dv, "IN", OP.GET_PLATFORM, 0, 7))[0] == "paged"
+      and _routed(fw, lambda: LM.golden_transport_hybrid(dv, "OUT", OP.SET_LOUDNESS, 0, b"\x01"))[0] == "page0",
+      "golden_transport_hybrid routes the same way")
+t, ps = dv.hybrid_counts["translated"], dv.hybrid_counts["passed"]
+check(t.get("GET_OUTPUT_GAIN") == 1 and ps.get("GET_LOUDNESS") == 2 and "LIMITER" in t and "LIMITER" in ps,
+      f"per-opcode counters ({t}, {ps})")
+summ = dv.hybrid_summary()
+check(summ.startswith("hybrid: ") and "GET_PLATFORM" in summ and "GET_LOUDNESS" not in summ.split("translated:")[1],
+      f"summary line: {summ}")
+fw3 = FakePagedFirmware(paged=False, legacy=True)
+dv3 = D.DspiDevice(protocol="hybrid", usb_dev=fw3)
+check(dv3.get(OP.GET_PLATFORM, 7) == b"\xa5" * 7 and dv3.paged_commands() == {},
+      "hybrid on firmware without the dispatcher behaves as old mode")
+bad = json.loads(json.dumps(LM.load_map()))
+bad["opcodes"]["GET_INPUT_RATE"]["in"]["uses"] = ["SYS.SYSTEM_STATUS"]
+LM._MAP["default"], saved = bad, LM._MAP["default"]
+errs, _ = LM.check()
+LM._MAP["default"] = saved
+check(any("malformed use" in e for e in errs), "--check rejects a use without a direction")
 
 print("34. envelope alignment finds a burst at a frequency the reference lacks")
 if A.np is None:

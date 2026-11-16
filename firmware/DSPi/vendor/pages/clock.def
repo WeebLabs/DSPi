@@ -1,1 +1,17 @@
 VC_PAGE(CLOCK, 0x0C, 1, "I2S clock pins and modes, MCK")
+
+VC_CMD(0x10, I2S_BCK_PIN, clock_bck_pin_get, clock_bck_pin_set,
+       ROLE, 1, 1, 1, VC_F_DEFERRED, 0, "BCK GPIO of role 0 master or unified, 1 slave (LRCLK is BCK + 1); 0xFF restores the default")
+VC_CMD(0x11, I2S_CLOCK_PIN_MODE, clock_pin_mode_get, clock_pin_mode_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "0 one clock pair for both modes, 1 a separate slave pair")
+VC_CMD(0x12, I2S_CLOCK_MODE, clock_i2s_mode_get, clock_i2s_mode_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "I2S clock mode, 0 master or 1 slave")
+VC_CMD(0x13, I2S_SLAVE_STATUS, clock_i2s_slave_status_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "I2S slave clock lock state and measured rate")
+
+VC_CMD(0x20, MCK_ENABLE, clock_mck_enable_get, clock_mck_enable_set,
+       NONE, 1, 1, 1, 0, 0, "MCK output enable")
+VC_CMD(0x21, MCK_PIN, clock_mck_pin_get, clock_mck_pin_set,
+       NONE, 1, 1, 1, 0, 0, "MCK GPIO, a clk_gpout pin; 0xFF restores the default")
+VC_CMD(0x22, MCK_MULTIPLIER, clock_mck_mult_get, clock_mck_mult_set,
+       NONE, 1, 1, 1, 0, 0, "MCK multiplier, 0 for 128x or 1 for 256x")

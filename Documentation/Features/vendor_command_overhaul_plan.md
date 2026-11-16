@@ -188,7 +188,7 @@ Sizes are bytes. "G" is GET, "S" is SET, "S0" is a zero-length action. "Addr" is
 | 0x21 | `OUTPUT_CONFIG_SAVE` | S0 | none | 0 | Deferred, flash |
 | 0x30 | `FACTORY_RESET` | S0 | none | 0 | Deferred, restart |
 | 0x40 | `ALL_PARAMS` | G, S | none | 6136 | `WireBulkParams` V32, untouched. Bulk buffer |
-| 0x41 | `ALL_PARAMS_CHUNK` | G, S | byte offset | up to 64 | USB only |
+| 0x41 | `ALL_PARAMS_CHUNK` | G, S | byte offset | 1 to the rest of the struct | USB only, bulk buffer. WinUSB hosts use 4096 or less per chunk |
 
 ### 5.3 `INPUT` (0x03)
 
@@ -305,7 +305,7 @@ No command in this page takes an address. Tube and upmixer commands are in `TUBE
 | 0x20 | `RTA_CONFIG` | G, S | none | 12 | |
 | 0x21 | `RTA_CAPS` | G | none | 16 | |
 | 0x22 | `RTA_BAND_CENTRES` | G | chunk from 0 | up to 64 | |
-| 0x23 | `RTA_BANDS` | G | channel | 82 | Keepalive |
+| 0x23 | `RTA_BANDS` | G | channel at the configured tap | 82 | Keepalive |
 | 0x24 | `RTA_BINS` | G | byte offset | variable | Keepalive |
 | 0x25 | `RTA_STATUS` | G | none | 24 | |
 | 0x26 | `RTA_BANDS_ALL` | G | none | 82 per live channel | USB only, bulk buffer |
@@ -830,6 +830,19 @@ VC_RESERVED(0xCC, "note")
 - A duplicate number, a number below 0x10, a duplicate name and inconsistent lengths all fail the build.
 - Over USB, `SYS.ENTER_BOOTLOADER` reboots after the status stage completes. Over UART and I2C it reboots at once.
 - Until Phase 3, UART and I2C refuse `VC_F_BULK` commands and cap paged replies at 132 bytes.
+
+### 8.9 As built (Phase 2)
+
+All 13 pages are implemented: 206 commands on RP2350 release builds, with the old switches still serving page 0 beside them.
+
+- `vc_core.h` carries the helpers more than one page needs: `vc_param_src()`, `vc_from_pin_status()` and `vc_clampf()`.
+- `STORE.ALL_PARAMS` and `STORE.ALL_PARAMS_CHUNK` run in the bulk buffer. The chunk-session state moved to `vc_bulk.c` and is shared with the old 0xA2 and 0xA3 paths, so a session opened on one path is closed by a request on the other.
+- A bulk SET checks its header before it queues the apply, so a snapshot the main loop would refuse now fails at the status stage.
+- `FILTER.BAND` and `FILTER.BAND_BYPASS` return `VC_ERR_BUSY` while an earlier band write is still waiting for the main loop. The old opcodes overwrote the single pending slot.
+- `MEAS.RTA_BINS` returns at most 256 bytes per request.
+- `DIAG.CLOCK_DIAG` is guarded by `#if DSPI_CLOCK_DIAG`, because `config.h` defines the symbol as 0 when the option is off.
+- Every place the new behaviour differs from 1.1.6 is recorded in `vendor_protocol_migration_notes.md`, which feeds the migration guide.
+- The harness has a third mode, hybrid, which sends an old call through the paged commands only when the device has every command it needs. It was used to run the existing tests and the golden replay through each page as it landed.
 
 ## 9. Generated docs and capability data
 

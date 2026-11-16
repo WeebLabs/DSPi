@@ -1,8 +1,8 @@
 """
-Native paged tests for the SYS discovery and identity commands (contract and plan section 5.1).
-
-Every test SKIPs on firmware without the paged dispatcher. ENTER_BOOTLOADER is never sent,
-in either direction. Registry comparisons use Documentation/protocol/dspi_commands.json.
+Native paged tests for the SYS page (plan sections 5.1 and 6.1): discovery, identity, device name and
+telemetry. Every test SKIPs on firmware without the paged dispatcher or the command it covers.
+ENTER_BOOTLOADER is never sent, in either direction. The device name test writes flash.
+Registry comparisons use Documentation/protocol/dspi_commands.json.
 """
 
 import json
@@ -256,3 +256,208 @@ def last_result_tracks_requests(dev, profile, chk):
     chk.eq(second, first, "reading LAST_RESULT does not record itself")
     raw = dev.pget(0x0114, length=8)
     chk.eq(raw[6:8], b"\x00\x00", "reserved bytes")
+
+
+# --- Device name and telemetry (plan 5.1, 6.1) ---------------------------------
+
+# Old GET_STATUS selector -> (SYS command, struct format, offset, how the reads compare).
+# "eq" must match, "up" only grows between reads, "down" only shrinks, "temp" is within 3 C.
+STATUS_FIELDS = {
+    3: ("SYS.PDM_STATS", "<I", 0, "up"), 4: ("SYS.PDM_STATS", "<I", 4, "up"),
+    5: ("SYS.PDM_STATS", "<I", 8, "up"), 6: ("SYS.PDM_STATS", "<I", 12, "up"),
+    8: ("SYS.SPDIF_TX_STATS", "<I", 0, "up"),
+    10: ("SYS.USB_AUDIO_STATUS", "<I", 0, "up"), 11: ("SYS.USB_AUDIO_STATUS", "<B", 12, "eq"),
+    12: ("SYS.USB_AUDIO_STATUS", "<B", 13, "eq"),
+    13: ("SYS.SYSTEM_STATUS", "<I", 0, "eq"), 14: ("SYS.SYSTEM_STATUS", "<H", 8, "eq"),
+    15: ("SYS.SYSTEM_STATUS", "<I", 4, "eq"), 16: ("SYS.SYSTEM_STATUS", "<h", 10, "temp"),
+    17: ("SYS.SPDIF_TX_STATS", "<I", 4, "up"), 18: ("SYS.SPDIF_TX_STATS", "<I", 8, "up"),
+    19: ("SYS.SPDIF_TX_STATS", "<I", 12, "up"), 20: ("SYS.SPDIF_TX_STATS", "<I", 16, "up"),
+    21: ("SYS.SPDIF_TX_STATS", "<I", 20, "up"), 22: ("SYS.USB_AUDIO_STATUS", "<I", 4, "up"),
+    26: ("SYS.PIPELINE_STATS", "<I", 0, "up"), 27: ("SYS.PIPELINE_STATS", "<I", 4, "up"),
+    28: ("SYS.PIPELINE_STATS", "<I", 8, "down"), 29: ("SYS.PIPELINE_STATS", "<I", 12, "up"),
+    30: ("SYS.USB_AUDIO_STATUS", "<I", 8, "up"), 31: ("SYS.PIPELINE_STATS", "<I", 16, "up"),
+}
+TELEMETRY = {"SYS.SYSTEM_STATUS": (16, (14, 16)), "SYS.USB_AUDIO_STATUS": (16, (14, 16)),
+             "SYS.BUFFER_STATS": (44, None), "SYS.PIPELINE_STATS": (24, (20, 24)),
+             "SYS.PDM_STATS": (16, None), "SYS.SPDIF_TX_STATS": (24, None)}
+_WIDTH_MASK = {"<B": 0xFF, "<H": 0xFFFF}
+
+
+def _has(dev, name):
+    """True when the attached firmware implements the GET or SET of `name`."""
+    info = dev.resolve(name)
+    gets, sets = dev.paged_commands().get(info.page, ((), ()))
+    return info.cmd in gets or info.cmd in sets
+
+
+def _need(dev, *names):
+    _paged(dev)
+    missing = [n for n in names if not _has(dev, n)]
+    if missing:
+        raise Skip(f"firmware lacks {', '.join(missing)}")
+
+
+class _NoLegacy(Exception):
+    """Page 0 no longer answers the 1.1.6 opcode, so there is nothing to compare against."""
+
+
+def _old(fn):
+    try:
+        return fn()
+    except Stall as e:
+        raise _NoLegacy(str(e)) from None
+
+
+def _legacy_status(dev, sel, fmt):
+    raw = _old(lambda: dev.raw_get(OP.GET_STATUS, 4, sel))
+    v = struct.unpack("<i" if fmt in ("<h", "<i") else "<I", raw)[0]
+    return v & _WIDTH_MASK[fmt] if fmt in _WIDTH_MASK else v
+
+
+def _bracketed(kind, before, new, after):
+    if kind == "eq":
+        return before == new == after
+    if kind == "up":
+        return before <= new <= after
+    if kind == "down":
+        return before >= new >= after
+    return abs(new - before) <= 300 and abs(new - after) <= 300
+
+
+@test("paged_sys")
+def telemetry_matches_get_status(dev, profile, chk):
+    """Every GET_STATUS selector that moved to a SYS telemetry struct reads the same source."""
+    _need(dev, *sorted({f[0] for f in STATUS_FIELDS.values()}))
+    try:
+        for sel, (name, fmt, off, kind) in STATUS_FIELDS.items():
+            for _ in range(3):
+                before = _legacy_status(dev, sel, fmt)
+                new = struct.unpack_from(fmt, dev.pget(name), off)[0]
+                after = _legacy_status(dev, sel, fmt)
+                if _bracketed(kind, before, new, after):
+                    break
+            chk.ok(_bracketed(kind, before, new, after),
+                   f"GET_STATUS {sel} vs {name}+{off}: old {before}, new {new}, old again {after} ({kind})")
+    except _NoLegacy:
+        chk.note("page 0 no longer answers GET_STATUS: comparison skipped")
+
+
+@test("paged_sys")
+def telemetry_cpu_loads(dev, profile, chk):
+    """SYS.SYSTEM_STATUS CPU bytes are loads, near the ones GET_STATUS 2 packs beside peak 4."""
+    _need(dev, "SYS.SYSTEM_STATUS")
+    new = dev.pget("SYS.SYSTEM_STATUS")
+    chk.in_range(new[12], 0, 100, "cpu0 load")
+    chk.in_range(new[13], 0, 100, "cpu1 load")
+    try:
+        old = _old(lambda: dev.raw_get(OP.GET_STATUS, 4, 2))
+    except _NoLegacy:
+        chk.note("page 0 no longer answers GET_STATUS: comparison skipped")
+        return
+    chk.ok(abs(new[12] - old[2]) <= 20 and abs(new[13] - old[3]) <= 20,
+           f"loads near GET_STATUS 2: new {new[12]}/{new[13]}, old {old[2]}/{old[3]}")
+
+
+@test("paged_sys")
+def telemetry_shapes_and_errors(dev, profile, chk):
+    """Telemetry GETs have their table lengths and zero reserved bytes; SETs and wValue 1 are refused."""
+    _paged(dev)
+    present = [n for n in TELEMETRY if _has(dev, n)]
+    if not present:
+        raise Skip("firmware has no SYS telemetry command")
+    for name in present:
+        n, reserved = TELEMETRY[name]
+        raw = dev.pget(name, length=n)
+        chk.eq(len(raw), n, f"{name} length")
+        if reserved:
+            chk.eq(raw[reserved[0]:reserved[1]], bytes(reserved[1] - reserved[0]), f"{name} reserved bytes")
+        _expect_stall(chk, lambda: dev.pset(name, b"\x00"), "VC_ERR_DIRECTION", f"SET {name}")
+        _expect_stall(chk, lambda: dev.pget(name, addr=1, length=n), "VC_ERR_ADDRESS", f"{name} at wValue 1")
+
+
+@test("paged_sys")
+def buffer_stats_matches_legacy(dev, profile, chk):
+    """SYS.BUFFER_STATS is the 0xB0 packet: same header, one sequence counter shared with 0xB0."""
+    _need(dev, "SYS.BUFFER_STATS")
+    seq = lambda b: struct.unpack_from("<H", b, 2)[0]  # noqa: E731
+    new = dev.pget("SYS.BUFFER_STATS", length=44)
+    chk.eq(len(new), 44, "length")
+    if profile is not None:
+        chk.eq(new[0], profile.num_spdif, "num_spdif matches the profile")
+    for i in range(4):
+        base = 4 + i * 8
+        free, prep, playing, fill, mn, mx = new[base:base + 6]
+        chk.in_range(free, 0, 16, f"spdif[{i}] consumer_free")
+        chk.member(playing, (0, 1), f"spdif[{i}] consumer_playing")
+        chk.in_range(fill, 0, 100, f"spdif[{i}] fill_pct")
+        if i >= new[0]:
+            chk.eq(new[base:base + 8], bytes(8), f"spdif[{i}] unused instance zero")
+    if not new[1] & 0x01:
+        chk.eq(new[36:44], bytes(8), "PDM block zero while PDM is off")
+    try:
+        old = _old(lambda: dev.raw_get(OP.GET_BUFFER_STATS, 44))
+        new = dev.pget("SYS.BUFFER_STATS", length=44)
+        old2 = _old(lambda: dev.raw_get(OP.GET_BUFFER_STATS, 44))
+    except _NoLegacy:
+        chk.note("page 0 no longer answers GET_BUFFER_STATS: comparison skipped")
+        return
+    chk.eq(new[0], old[0], "num_spdif == 0xB0")
+    chk.eq(new[1] & 0x01, old[1] & 0x01, "PDM active flag == 0xB0")
+    chk.ok(0 < (seq(new) - seq(old)) & 0xFFFF <= 3 and 0 < (seq(old2) - seq(new)) & 0xFFFF <= 3,
+           f"one sequence counter: 0xB0 {seq(old)}, SYS {seq(new)}, 0xB0 {seq(old2)}")
+
+
+@test("paged_sys", mutating=True)
+def stats_reset(dev, profile, chk):
+    """SYS.STATS_RESET bit 0 reseeds the watermarks; mask 0 is a no-op; undefined bits and bad sizes are refused."""
+    _need(dev, "SYS.STATS_RESET")
+    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x02"), "VC_ERR_VALUE", "undefined bit 1")
+    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x81"), "VC_ERR_VALUE", "bit 0 with bit 7")
+    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET"), "VC_ERR_LENGTH", "zero-length SET")
+    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x01\x00"), "VC_ERR_LENGTH", "2-byte SET")
+    _expect_stall(chk, lambda: dev.pset("SYS.STATS_RESET", b"\x01", addr=1), "VC_ERR_ADDRESS", "wValue 1")
+    _expect_stall(chk, lambda: dev.pget("SYS.STATS_RESET", length=1), "VC_ERR_DIRECTION", "GET")
+    chk.no_stall(lambda: dev.pset("SYS.STATS_RESET", b"\x00"), "mask 0 accepted")
+    chk.no_stall(lambda: dev.pset("SYS.STATS_RESET", b"\x01"), "bit 0 accepted")
+    if _has(dev, "SYS.BUFFER_STATS"):
+        data = dev.pget("SYS.BUFFER_STATS", length=44)
+        for i in range(data[0]):
+            mn, mx = data[4 + i * 8 + 4], data[4 + i * 8 + 5]
+            chk.ok(mn <= mx or (mn, mx) == (100, 0), f"spdif[{i}] watermarks coherent after reset ({mn}/{mx})")
+    try:
+        chk.eq(_old(lambda: dev.raw_get(OP.RESET_BUFFER_STATS, 1, 1)), b"\x01", "0xB1 still acks")
+    except _NoLegacy:
+        chk.note("page 0 no longer answers RESET_BUFFER_STATS")
+
+
+@test("paged_sys", mutating=True, flash=6)
+def device_name_roundtrip(dev, profile, chk):
+    """SYS.DEVICE_NAME round-trips, agrees with 0x56/0x57 both ways, keeps 31 bytes, refuses bad sizes and wValue."""
+    _need(dev, "SYS.DEVICE_NAME")
+    name = lambda: dev.pget("SYS.DEVICE_NAME", length=32)  # noqa: E731
+    orig = name()
+    chk.eq(len(orig), 32, "GET is 32 bytes")
+    try:
+        dev.pset("SYS.DEVICE_NAME", b"QA Paged")
+        got = name()
+        chk.eq(got.split(b"\x00", 1)[0], b"QA Paged", "paged SET, paged GET")
+        dev.pset("SYS.DEVICE_NAME", got)
+        chk.eq(name(), got, "a GET reply is a valid SET payload")
+        dev.pset("SYS.DEVICE_NAME", b"C" * 32)
+        chk.eq(name(), b"C" * 31 + b"\x00", "32-byte SET keeps 31 + NUL")
+        _expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME", b"D" * 33), "VC_ERR_LENGTH", "33-byte SET")
+        _expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME"), "VC_ERR_LENGTH", "zero-length SET")
+        _expect_stall(chk, lambda: dev.pset("SYS.DEVICE_NAME", b"x", addr=1), "VC_ERR_ADDRESS", "SET wValue 1")
+        _expect_stall(chk, lambda: dev.pget("SYS.DEVICE_NAME", addr=1, length=32), "VC_ERR_ADDRESS",
+                      "GET wValue 1")
+        chk.eq(name(), b"C" * 31 + b"\x00", "refused SETs left the name alone")
+        try:
+            chk.eq(_old(lambda: dev.raw_get(OP.GET_DEVICE_NAME, 32)), name(), "paged SET, 0x57 GET")
+            _old(lambda: dev.raw_set(OP.SET_DEVICE_NAME, b"QA Legacy"))
+            chk.eq(name().split(b"\x00", 1)[0], b"QA Legacy", "0x56 SET, paged GET")
+        except _NoLegacy:
+            chk.note("page 0 no longer answers 0x56/0x57: comparison skipped")
+    finally:
+        dev.pset("SYS.DEVICE_NAME", orig.split(b"\x00", 1)[0] or b"\x00")
+        dev.wait_ready()
+    chk.eq(name(), orig, "name restored")

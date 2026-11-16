@@ -93,7 +93,7 @@ static bool vc_addr_ok(uint8_t kind, uint16_t a, bool is_get) {
     }
 }
 
-static ParamSource vc_param_src(CtrlSource src) {
+ParamSource vc_param_src(CtrlSource src) {
     switch (src) {
         case CTRL_SOURCE_UART: return PARAM_SRC_UART;
         case CTRL_SOURCE_I2C:  return PARAM_SRC_I2C;
@@ -201,7 +201,7 @@ VcResult vc_get(CtrlSource src, uint16_t id, uint16_t addr,
                        NULL, 0, out, out_len);
 }
 
-// Phase 3 extends the UART/I2C status byte to carry the VcResult itself.
+// The UART/I2C status byte holds only a CtrlDispatchResult; the full code is in SYS.LAST_RESULT.
 CtrlDispatchResult vc_to_ctrl_dispatch(VcResult r) {
     switch (r) {
         case VC_OK:          return CTRL_DISPATCH_OK;

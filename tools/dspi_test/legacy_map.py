@@ -1,5 +1,4 @@
 """Temporary translation of 1.1.6 vendor requests into paged commands (deleted in plan Phase 6).
-
 Driven by Documentation/protocol/legacy_map.json, whose "_schema" key documents every field. Adapter
 kinds: direct, act_value, act_addr, act_packed, split (by wValue selector) and custom (functions here).
 Run `python -m tools.dspi_test.legacy_map --check` to validate the map against the plan and registry.
@@ -47,6 +46,8 @@ def target_id(name: str) -> int:
 
 class _Unmapped(Exception):
     """1.1.6 did not handle this request (unknown opcode, direction or selector)."""
+
+    stall = False   # set where an out_stall "raise" object refused it: 1.1.6 STALLed, not ACKed
 
 
 # --- small pieces of the adapters --------------------------------------------
@@ -143,7 +144,12 @@ def translate_get(dev, code: int, wvalue: int, length: int) -> bytes:
 def _run_out(dev, code: int, e: dict, wvalue: int, data: bytes):
     kind = e["kind"]
     if kind == "split":
-        return _run_out(dev, code, _case(e, wvalue), wvalue, data)
+        try:
+            case = _case(e, wvalue)
+        except _Unmapped as u:
+            u.stall = e.get("out_stall") == "raise"
+            raise
+        return _run_out(dev, code, case, wvalue, data)
     if kind == "custom":
         return CUSTOM[e["fn"]](dev, e, wvalue, data)
     if kind != "direct":
@@ -156,7 +162,7 @@ def _run_out(dev, code: int, e: dict, wvalue: int, data: bytes):
 def translate_set(dev, code: int, wvalue: int, data: bytes = b"") -> int:
     """An old OUT write sent as paged SETs. Refusals are swallowed and logged, as 1.1.6 ACKed them."""
     data = bytes(data)
-    _, rec = _by_code().get(code, (None, {}))
+    name, rec = _by_code().get(code, (None, {}))
     e = rec.get("out")
     if e is not None and len(data) > MAX_CONTROL_PAYLOAD and not e.get("bulk"):
         raise Stall(code, "SET", None, "oversized payload (1.1.6 STALLed it at SETUP)")
@@ -165,6 +171,8 @@ def translate_set(dev, code: int, wvalue: int, data: bytes = b"") -> int:
             raise _Unmapped("no OUT handler in 1.1.6")
         _run_out(dev, code, e, wvalue, data)
     except _Unmapped as u:
+        if u.stall:
+            raise Stall(code, "SET", None, f"legacy {name or hex(code)}: {u}") from None
         _swallow(dev, code, wvalue, str(u))
     except PagedStall as s:
         if e.get("out_stall") == "raise":
@@ -178,6 +186,86 @@ def golden_transport(dev, direction, code, wvalue, data):
     if direction in ("IN", "R", "WR"):
         return translate_get(dev, code, wvalue, data)
     return translate_set(dev, code, wvalue, data)
+
+
+# --- hybrid mode: translate only what the attached firmware implements ------------
+
+def _use(u: str) -> tuple[str, str]:
+    name, _, d = u.partition(":")
+    return name, d
+
+
+def _status_uses(e: dict, wvalue: int) -> list[tuple[str, str]]:
+    sel = str(wvalue)
+    if wvalue in e["levels_raw"] or sel in e["peaks"]:
+        return [("MEAS.LEVELS", "G")]
+    if sel in e["peak_cpu"]:
+        return [("MEAS.LEVELS", "G"), (e["peak_cpu"][sel][1], "G")]
+    if sel in e["fields"]:
+        return [(e["fields"][sel][0], "G")]
+    return []
+
+
+def required(e: dict, direction: str, wvalue: int) -> list[tuple[str, str]]:
+    """(PAGE.NAME, G or S) pairs one old request uses. Raises _Unmapped for a selector 1.1.6 refused."""
+    k = e["kind"]
+    if k == "split":
+        return required(_case(e, wvalue), direction, wvalue)
+    if k == "custom":
+        return _status_uses(e, wvalue) if e["fn"] == "get_status" else [_use(u) for u in e["uses"]]
+    if k == "direct":
+        return [(e["target"], "G" if direction == "in" else "S")]
+    return [(e["target"], "S")]
+
+
+def routes_paged(dev, code: int, direction: str, wvalue: int) -> bool:
+    """True when every command this old request needs exists on the device (direction "in" or "out")."""
+    _, rec = _by_code().get(code, (None, {}))
+    e = rec.get(direction)
+    if e is None:
+        return False
+    try:
+        need = required(e, direction, wvalue)
+    except _Unmapped:
+        return False
+    if not need:
+        return False   # nothing paged to exercise, so the old opcode answers
+    have = dev.paged_commands()
+    for name, d in need:
+        tid = target_id(name)
+        gets, sets = have.get(tid >> 8, ((), ()))
+        if (tid & 0xFF) not in (gets if d == "G" else sets):
+            return False
+    return True
+
+
+def _note(dev, code, translated):
+    note = getattr(dev, "note_hybrid", None)
+    if note:
+        note(_by_code().get(code, (f"0x{code:02X}",))[0], translated)
+
+
+def hybrid_get(dev, code: int, wvalue: int, length: int) -> bytes:
+    if routes_paged(dev, code, "in", wvalue):
+        _note(dev, code, True)
+        return translate_get(dev, code, wvalue, length)
+    _note(dev, code, False)
+    return dev.raw_get(code, length, wvalue)
+
+
+def hybrid_set(dev, code: int, wvalue: int, data: bytes = b"") -> int:
+    if routes_paged(dev, code, "out", wvalue):
+        _note(dev, code, True)
+        return translate_set(dev, code, wvalue, data)
+    _note(dev, code, False)
+    return dev.raw_set(code, bytes(data), wvalue)
+
+
+def golden_transport_hybrid(dev, direction, code, wvalue, data):
+    """As golden_transport, but requests whose commands the firmware lacks go to page 0 unchanged."""
+    if direction in ("IN", "R", "WR"):
+        return hybrid_get(dev, code, wvalue, data)
+    return hybrid_set(dev, code, wvalue, data)
 
 
 # --- custom adapters ------------------------------------------------------------
@@ -310,6 +398,15 @@ def _save_params(dev, e, wvalue, length):
     return b"\x00"
 
 
+@custom("set_all_params", ["STORE.ALL_PARAMS"])
+def _set_all_params(dev, e, wvalue, data):
+    if len(data) <= MAX_CONTROL_PAYLOAD:
+        raise _Unmapped("bulk SET of 64 bytes or fewer (1.1.6 ACKed and ignored it)")
+    if len(data) != e["len"]:
+        raise Stall(0xA1, "SET", None, "bulk SET of the wrong length (1.1.6 STALLed it at SETUP)")
+    _set(dev, "STORE.ALL_PARAMS", data)   # 1.1.6 ignored wValue here
+
+
 @custom("usb_error_stats", [])
 def _usb_error_stats(dev, e, wvalue, length):
     return bytes(24)
@@ -341,7 +438,7 @@ def _needs(e: dict, direction: str) -> list[tuple[str, str]]:
         elif k.startswith("act_"):
             out.append((n["target"], "S"))
         elif k == "custom":
-            out += [(t, "") for t in n["targets"]]
+            out += [_use(u) for u in n.get("uses", [])]
     return out
 
 
@@ -440,8 +537,13 @@ def check(registry_path=None, verbose=False) -> tuple[list[str], list[str]]:
                     fn = CUSTOM.get(n["fn"])
                     if fn is None:
                         errors.append(f"{name}.{d}: custom {n['fn']} not defined")
-                    elif set(fn.targets) != set(n["targets"]):
-                        errors.append(f"{name}.{d}: custom {n['fn']} targets differ from the JSON")
+                    elif not isinstance(n.get("uses"), list):
+                        errors.append(f"{name}.{d}: custom {n['fn']} has no uses list")
+                    elif set(fn.targets) != {_use(u)[0] for u in n["uses"]}:
+                        errors.append(f"{name}.{d}: custom {n['fn']} uses differ from the code")
+                    for u in n.get("uses", []):
+                        if not re.fullmatch(r"\w+\.\w+:[GS]", u):
+                            errors.append(f"{name}.{d}: malformed use {u!r} (want PAGE.NAME:G or :S)")
                 if n.get("status") and n["status"] not in m["status_families"]:
                     errors.append(f"{name}.{d}: unknown status family {n['status']}")
 

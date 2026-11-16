@@ -1,1 +1,42 @@
 VC_PAGE(INPUT, 0x03, 1, "Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names")
+
+VC_CMD(0x10, SOURCE, input_source_get, input_source_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "Active input source; a SET switches source on the main loop")
+VC_CMD(0x11, STATUS, input_status_get, VC_NONE,
+       NONE, 12, 0, 0, 0, 0, "Active source, active channels, measured S/PDIF rate in mHz, VCXO trim in ppm x100")
+VC_CMD(0x12, SOURCE_NAME, input_source_name_get_h, input_source_name_set_h,
+       SOURCE, 32, 1, 32, VC_F_DEFERRED | VC_F_FLASH, 0, "User name of one input source; a leading NUL clears it")
+
+VC_CMD(0x20, SPDIF_RX_STATUS, input_spdif_rx_status_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "S/PDIF receiver status packet")
+VC_CMD(0x21, SPDIF_RX_CH_STATUS, input_spdif_rx_ch_status_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "S/PDIF channel status bytes")
+VC_CMD(0x22, SPDIF_RX_PIN, input_spdif_rx_pin_get, input_spdif_rx_pin_set,
+       SPDIF_RX, 1, 1, 1, VC_F_DEFERRED, 0, "GPIO of one S/PDIF input; 0xFF restores its default")
+VC_CMD(0x23, SPDIF_RX_ENABLE, input_spdif_rx_enable_get, input_spdif_rx_enable_set,
+       SPDIF_RX, 1, 1, 1, 0, 0, "Enable of optional S/PDIF input 1-3")
+VC_CMD(0x24, SPDIF_RX_CONFIG, input_spdif_rx_config_get, VC_NONE,
+       NONE, 6, 0, 0, 0, 0, "Input count, enable mask over all inputs, then one GPIO per input")
+
+VC_CMD(0x30, I2S_RX_PIN, input_i2s_rx_pin_get, input_i2s_rx_pin_set,
+       I2S_PAIR, 1, 1, 1, VC_F_DEFERRED, 0, "Data GPIO of one I2S RX stereo pair; 0xFF restores its default")
+VC_CMD(0x31, I2S_RX_CHANNELS, input_i2s_rx_channels_get, input_i2s_rx_channels_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "I2S input channel count, 2, 4, 6 or 8")
+VC_CMD(0x32, I2S_RX_RATE, input_i2s_rx_rate_get, input_i2s_rx_rate_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED | VC_F_RESTART, 0, "Selected I2S and ADAT master rate in Hz: 44100, 48000 or 96000")
+
+#if PICO_RP2350
+VC_CMD(0x40, ADAT_RX_ENABLE, input_adat_rx_enable_get, input_adat_rx_enable_set,
+       NONE, 1, 1, 1, 0, 0, "ADAT input enable")
+VC_CMD(0x41, ADAT_RX_PIN, input_adat_rx_pin_get, input_adat_rx_pin_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "ADAT input GPIO; 0xFF clears it while the input is disabled")
+VC_CMD(0x42, ADAT_RX_CLOCK_MODE, input_adat_rx_clock_mode_get, input_adat_rx_clock_mode_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "ADAT input clock mode, 0 master or 1 slave")
+VC_CMD(0x43, ADAT_RX_STATUS, input_adat_rx_status_get, VC_NONE,
+       NONE, 20, 0, 0, 0, 0, "ADAT input status packet")
+#endif
+
+VC_CMD(0x50, LG_SOUND_SYNC_ENABLE, input_lg_enable_get, input_lg_enable_set,
+       NONE, 1, 1, 1, 0, 0, "LG Sound Sync decoding enable")
+VC_CMD(0x51, LG_SOUND_SYNC_STATUS, input_lg_status_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "LG Sound Sync status packet")

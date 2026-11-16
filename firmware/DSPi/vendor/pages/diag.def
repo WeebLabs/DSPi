@@ -1,1 +1,19 @@
+// Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.8.
+// Every command here exists only in the bench build that enables it.
 VC_PAGE(DIAG, 0xF0, 1, "Bench and diagnostic commands with no stability promise")
+
+// config.h defines DSPI_CLOCK_DIAG as 0 when it is off, so this one needs #if.
+#if DSPI_CLOCK_DIAG
+VC_CMD(0x10, CLOCK_DIAG, diag_clock_diag_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, VC_F_USB_ONLY, 0, "Latest 1 Hz ClockDiagPacket snapshot")
+#endif
+
+#ifdef DSPI_LOOPBACK
+VC_CMD(0x20, LOOPBACK_STATS, diag_loopback_stats_get, VC_NONE,
+       NONE, 8, 0, 0, 0, 0, "Loopback capture overflow and underrun frame counts")
+#endif
+
+VC_RESERVED(0x30, "loop profiler: section times")
+VC_RESERVED(0x31, "loop profiler: job times")
+VC_RESERVED(0x32, "loop profiler: command times")
+VC_RESERVED(0x33, "loop profiler: background pace")

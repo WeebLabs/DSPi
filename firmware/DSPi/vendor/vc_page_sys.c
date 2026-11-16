@@ -1,6 +1,6 @@
 /*
- * vc_page_sys.c: SYS page (0x01). Discovery, identity and bootloader.
- * PLATFORM, SERIAL, BUILD_INFO and CORE1_MODE match the legacy opcodes byte for byte.
+ * vc_page_sys.c: SYS page (0x01). Discovery, identity, device name, bootloader
+ * and telemetry. Identity and BUFFER_STATS match the legacy opcodes byte for byte.
  */
 
 #include "vc_core.h"
@@ -10,6 +10,18 @@
 #include "usb_descriptors.h"
 #include "pdm_generator.h"
 #include "pico/bootrom.h"
+#include "usb_audio.h"
+#include "audio_pipeline.h"
+#include "bg_job.h"
+#include "input_source_names.h"
+#include "notify.h"
+#include "pico/audio_spdif.h"
+#include "hardware/clocks.h"
+#include "hardware/vreg.h"
+
+// Defined in vendor_commands.c.
+extern uint16_t vreg_voltage_to_mv(enum vreg_voltage voltage);
+extern int16_t read_temperature_cdeg(void);
 
 static uint8_t sys_implemented_pages(void) {
     uint8_t n = 0;
@@ -96,6 +108,110 @@ static VcResult sys_build_info_get(VcCtx *c) {
 
 static VcResult sys_core1_mode_get(VcCtx *c) {
     c->out[0] = (uint8_t)core1_mode;
+    return VC_OK;
+}
+
+static VcResult sys_device_name_get(VcCtx *c) {
+    device_name_get((char *)c->out);
+    return VC_OK;
+}
+
+// Staged here, written to flash by the main loop with the source names.
+static VcResult sys_device_name_set(VcCtx *c) {
+    device_name_stage(c->in, c->in_len, vc_param_src(c->src));
+    return VC_OK;
+}
+
+static VcResult sys_system_status_get(VcCtx *c) {
+    vc_out_u32(c, 0, clock_get_hz(clk_sys));
+    vc_out_u32(c, 4, audio_state.freq);
+    vc_out_u16(c, 8, vreg_voltage_to_mv(vreg_get_voltage()));
+    vc_out_u16(c, 10, (uint16_t)read_temperature_cdeg());
+    vc_out_u8(c, 12, global_status.cpu0_load);
+    vc_out_u8(c, 13, global_status.cpu1_load);
+    return VC_OK;
+}
+
+static VcResult sys_usb_audio_status_get(VcCtx *c) {
+    vc_out_u32(c, 0, usb_audio_packets);
+    vc_out_u32(c, 4, usb_audio_ring_overrun_count());
+    vc_out_u32(c, 8, usb_audio_worst_packet_gap_us);
+    vc_out_u8(c, 12, (uint8_t)usb_audio_alt_set);
+    vc_out_u8(c, 13, (uint8_t)usb_audio_mounted);
+    return VC_OK;
+}
+
+static VcResult sys_buffer_stats_get(VcCtx *c) {
+    BufferStatsPacket pkt;
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.num_spdif = NUM_SPDIF_INSTANCES;
+    pkt.flags = (pdm_enabled ? 0x01 : 0) | (sync_started ? 0x02 : 0);
+    pkt.sequence = buffer_stats_sequence++;
+
+    uint consumer_capacity = SPDIF_CONSUMER_BUFFER_COUNT;
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        uint cons_free, cons_prepared, playing;
+        get_slot_consumer_stats(i, &cons_free, &cons_prepared, &playing);
+        pkt.spdif[i].consumer_free = (uint8_t)cons_free;
+        pkt.spdif[i].consumer_prepared = (uint8_t)cons_prepared;
+        pkt.spdif[i].consumer_playing = (uint8_t)playing;
+        // Occupied buffers, so hidden staging buffers count toward the fill.
+        uint cons_fill = (cons_free > consumer_capacity) ? 0 : (consumer_capacity - cons_free);
+        pkt.spdif[i].consumer_fill_pct = (uint8_t)(cons_fill * 100 / consumer_capacity);
+        pkt.spdif[i].consumer_min_fill_pct = spdif_consumer_min_fill_pct[i];
+        pkt.spdif[i].consumer_max_fill_pct = spdif_consumer_max_fill_pct[i];
+        // 0.01 % of the 768-frame scale; above 100 % when the ring holds more.
+        uint32_t fill_frames;
+        if (get_slot_consumer_fill_frames(i, &fill_frames)) {
+            uint32_t centi = fill_frames * 10000u / 768u;
+            pkt.spdif[i].fill_centi_pct = (centi > 65535u) ? 65535u : (uint16_t)centi;
+        }
+    }
+
+    if (pdm_enabled) {
+        pkt.pdm.dma_fill_pct = pdm_get_dma_fill_pct();
+        pkt.pdm.dma_min_fill_pct = pdm_dma_min_fill_pct;
+        pkt.pdm.dma_max_fill_pct = pdm_dma_max_fill_pct;
+        pkt.pdm.ring_fill_pct = pdm_get_ring_fill_pct();
+        pkt.pdm.ring_min_fill_pct = pdm_ring_min_fill_pct;
+        pkt.pdm.ring_max_fill_pct = pdm_ring_max_fill_pct;
+    }
+    vc_reply(c, &pkt, sizeof(pkt));
+    return VC_OK;
+}
+_Static_assert(sizeof(BufferStatsPacket) == 44, "SYS.BUFFER_STATS GET_LEN");
+
+static VcResult sys_pipeline_stats_get(VcCtx *c) {
+    vc_out_u32(c, 0, (uint32_t)overruns);
+    vc_out_u32(c, 4, output_ring_drops);
+    vc_out_u32(c, 8, output_ring_min_prewrite);
+    vc_out_u32(c, 12, input_delivery_worst_gap_us);
+    vc_out_u32(c, 16, bg_over_budget_count);
+    return VC_OK;
+}
+
+static VcResult sys_pdm_stats_get(VcCtx *c) {
+    vc_out_u32(c, 0, pdm_ring_overruns);
+    vc_out_u32(c, 4, pdm_ring_underruns);
+    vc_out_u32(c, 8, pdm_dma_overruns);
+    vc_out_u32(c, 12, pdm_dma_underruns);
+    return VC_OK;
+}
+
+static VcResult sys_spdif_tx_stats_get(VcCtx *c) {
+    vc_out_u32(c, 0, spdif_underruns);
+    vc_out_u32(c, 4, audio_spdif_get_dma_starvations());
+    for (uint i = 0; i < 4; i++)
+        vc_out_u32(c, (uint16_t)(8 + 4 * i), audio_spdif_get_dma_starvations_instance(i));
+    return VC_OK;
+}
+
+#define SYS_STATS_RESET_WATERMARKS 0x01u
+
+static VcResult sys_stats_reset_set(VcCtx *c) {
+    uint8_t mask = vc_in_u8(c, 0);
+    if (mask & (uint8_t)~SYS_STATS_RESET_WATERMARKS) return VC_ERR_VALUE;
+    if (mask & SYS_STATS_RESET_WATERMARKS) reset_buffer_watermarks();
     return VC_OK;
 }
 

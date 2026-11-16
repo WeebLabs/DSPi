@@ -29,20 +29,25 @@ static bool vc_usb_setup(uint8_t rhport, tusb_control_request_t const *req,
         return false;
     }
     bool bulk = (e->flags & VC_F_BULK) != 0;
-    if (bulk && !vc_bulk_usb_acquire()) {
-        vc_record(CTRL_SOURCE_USB, is_get, id, req->wValue, VC_ERR_BUSY);
-        return false;
+    if (bulk) {
+        r = vc_bulk_usb_setup(id, is_get, req->wValue, req->wLength);
+        if (r != VC_OK) {
+            vc_bulk_usb_failed(id, is_get, true);
+            vc_record(CTRL_SOURCE_USB, is_get, id, req->wValue, r);
+            return false;
+        }
     }
 
     if (is_get) {
-        uint8_t *buf = bulk ? vc_bulk_buf() : vc_reply_buf();
-        uint16_t cap = bulk ? vc_bulk_cap() : (uint16_t)VC_REPLY_MAX;
+        uint8_t *buf = vc_reply_buf();
+        uint16_t cap = (uint16_t)VC_REPLY_MAX;
+        if (bulk) buf = vc_bulk_usb_window(id, req->wValue, req->wLength, &cap);
         const uint8_t *out;
         uint16_t len;
         r = vc_run(CTRL_SOURCE_USB, true, e, id, req->wValue, NULL, 0, buf, cap, &out, &len);
         vc_record(CTRL_SOURCE_USB, true, id, req->wValue, r);
         if (r != VC_OK) {
-            if (bulk) vc_bulk_usb_release();
+            if (bulk) vc_bulk_usb_failed(id, true, false);
             return false;
         }
         if (len > req->wLength) len = req->wLength;
@@ -59,7 +64,9 @@ static bool vc_usb_setup(uint8_t rhport, tusb_control_request_t const *req,
         return tud_control_status(rhport, req);
     }
 
-    uint8_t *rx = bulk ? vc_bulk_buf() : vendor_usb_rx_buf();
+    uint16_t cap;
+    uint8_t *rx = bulk ? vc_bulk_usb_window(id, req->wValue, req->wLength, &cap)
+                       : vendor_usb_rx_buf();
     vendor_usb_busy_begin();
     return tud_control_xfer(rhport, req, rx, req->wLength);
 }
@@ -70,13 +77,15 @@ static bool vc_usb_set_data(tusb_control_request_t const *req, uint8_t page, uin
                           req->wValue, req->wLength, &e);
     bool bulk = (r == VC_OK) && (e->flags & VC_F_BULK);
     if (r == VC_OK) {
-        const uint8_t *in = bulk ? vc_bulk_buf() : vendor_usb_rx_buf();
+        uint16_t cap;
+        const uint8_t *in = bulk ? vc_bulk_usb_window(id, req->wValue, req->wLength, &cap)
+                                 : vendor_usb_rx_buf();
         r = vc_run(CTRL_SOURCE_USB, false, e, id, req->wValue, in, req->wLength,
                    NULL, 0, NULL, NULL);
     }
     vendor_usb_busy_end();
     vc_record(CTRL_SOURCE_USB, false, id, req->wValue, r);
-    if (r != VC_OK && bulk) vc_bulk_usb_release();
+    if (r != VC_OK && bulk) vc_bulk_usb_failed(id, false, false);
     return r == VC_OK;   // false STALLs the status stage
 }
 
@@ -93,7 +102,7 @@ bool vc_usb_control_xfer(uint8_t rhport, uint8_t stage, tusb_control_request_t c
 
     if (stage == CONTROL_STAGE_ACK) {
         vendor_usb_busy_end();
-        if (vc_usb_is_bulk(page, req->bRequest)) vc_bulk_usb_release();
+        if (vc_usb_is_bulk(page, req->bRequest)) vc_bulk_usb_ack(id, is_get);
         if (!is_get && vc_usb_reboot_pending) {
             vc_usb_reboot_pending = false;
             reset_usb_boot(0, 0);

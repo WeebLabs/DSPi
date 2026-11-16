@@ -1,1 +1,38 @@
 VC_PAGE(DYN, 0x07, 1, "Limiter, leveller, loudness")
+
+VC_CMD(0x10, LIMITER_ENABLE, dyn_limiter_get, dyn_limiter_set,
+       OUTPUT_ALL, 4, 4, 4, 0, 0, "Limiter enable as f32 (non-zero enables); linked outputs follow")
+VC_CMD(0x11, LIMITER_THRESHOLD, dyn_limiter_get, dyn_limiter_set,
+       OUTPUT_ALL, 4, 4, 4, 0, 1, "Limiter threshold, f32 dB, clamped to -30..0")
+VC_CMD(0x12, LIMITER_RELEASE, dyn_limiter_get, dyn_limiter_set,
+       OUTPUT_ALL, 4, 4, 4, 0, 2, "Limiter release, f32 ms, clamped to 10..1000")
+VC_CMD(0x13, LIMITER_LINK_GROUP, dyn_limiter_get, dyn_limiter_set,
+       OUTPUT_ALL, 4, 4, 4, 0, 3, "Limiter link group as f32, rounded and clamped to 0..4 (0 unlinked)")
+VC_CMD(0x18, LIMITER_METERS, dyn_limiter_meters_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, 0, 0, "Gain reduction per output, u16 in 0.01 dB")
+VC_CMD(0x19, LIMITER_STATUS, dyn_limiter_status_get, VC_NONE,
+       NONE, 4, 0, 0, 0, 0, "u8 engaged, u8 lookahead samples, u8 block samples, u8 output count")
+
+VC_CMD(0x20, LEVELLER_ENABLE, dyn_lev_enable_get, dyn_lev_enable_set,
+       NONE, 1, 1, 1, 0, 0, "Leveller enable, non-zero enables")
+VC_CMD(0x21, LEVELLER_AMOUNT, dyn_lev_amount_get, dyn_lev_amount_set,
+       NONE, 4, 4, 4, 0, 0, "Leveller amount, f32 percent, clamped")
+VC_CMD(0x22, LEVELLER_SPEED, dyn_lev_speed_get, dyn_lev_speed_set,
+       NONE, 1, 1, 1, 0, 0, "Leveller speed index; out of range is VC_ERR_VALUE")
+VC_CMD(0x23, LEVELLER_MAX_GAIN, dyn_lev_max_gain_get, dyn_lev_max_gain_set,
+       NONE, 4, 4, 4, 0, 0, "Leveller maximum gain, f32 dB, clamped")
+VC_CMD(0x24, LEVELLER_LOOKAHEAD, dyn_lev_lookahead_get, dyn_lev_lookahead_set,
+       NONE, 1, 1, 1, 0, 0, "Leveller lookahead, non-zero enables")
+VC_CMD(0x25, LEVELLER_GATE, dyn_lev_gate_get, dyn_lev_gate_set,
+       NONE, 4, 4, 4, 0, 0, "Leveller gate threshold, f32 dB, clamped")
+VC_CMD(0x26, LEVELLER_MASKS, dyn_lev_masks_get, dyn_lev_masks_set,
+       NONE, 2, 2, 2, 0, 0, "Leveller u8 detector mask, u8 apply mask")
+
+VC_CMD(0x30, LOUDNESS_ENABLE, dyn_loud_enable_get, dyn_loud_enable_set,
+       NONE, 1, 1, 1, 0, 0, "Loudness compensation enable, non-zero enables")
+VC_CMD(0x31, LOUDNESS_REF, dyn_loud_ref_get, dyn_loud_ref_set,
+       NONE, 4, 4, 4, 0, 0, "Loudness reference SPL, f32, clamped")
+VC_CMD(0x32, LOUDNESS_INTENSITY, dyn_loud_intensity_get, dyn_loud_intensity_set,
+       NONE, 4, 4, 4, 0, 0, "Loudness intensity, f32 percent, clamped")
+VC_CMD(0x33, LOUDNESS_MASK, dyn_loud_mask_get, dyn_loud_mask_set,
+       NONE, 2, 2, 2, 0, 0, "Loudness output mask, u16")

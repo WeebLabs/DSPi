@@ -18,6 +18,7 @@ way it found it.
 | `legacy_opcodes.json` | The 1.1.6 opcode table, frozen so the tool keeps working after `config.h` is renumbered |
 | `capture.py` | Capture, compare and selfcheck |
 | `mask.json` | Byte ranges that legitimately vary (meters, counters, temperature, serial, versions), each with a reason |
+| `intended.json` | Intended protocol changes (`op`, `wvalue`, `old` reply or `any`, `new` reply, `reason`), excused only on a translating `compare` |
 | `rp2350_1.1.6.json` | The reference capture |
 
 ## Sequence
@@ -47,6 +48,10 @@ python -m tools.dspi_test.golden.capture capture --selfcheck     # lists bytes t
 each one as section, request, byte offset, expected and got. `--transport module:function`
 replaces the legacy transport (signature `(dev, direction, code, wvalue, data)`), which is how a
 later phase replays this script through the paged translation layer.
+
+With a non-default `--transport`, a request whose whole difference matches an `intended.json` entry is
+listed under "intended" with its reason and is not counted. A plain `compare` ignores the file, so
+1.1.6-style firmware must still match the reference exactly.
 
 ## Tiers
 
@@ -99,3 +104,7 @@ Recapture on real 1.1.6 firmware, then compare the firmware under test:
 3. Flash the firmware under test and run `compare`.
 
 The reference was last recaptured this way on 2026-11-16.
+
+Run `compare` on a freshly booted device. `GET_CS_STATUS` byte 0 holds the last Control
+Surfaces status, so a test that ran earlier in the same boot can leave a value there that
+the reference does not have.

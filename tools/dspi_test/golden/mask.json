@@ -9,6 +9,7 @@
 
   {"op": "GET_CS_STATUS", "wvalue": 0, "ranges": [[1, 2]], "reason": "last-touched slot: 0 after a fresh boot, 0xFF after any Control Surfaces write"},
 
+  {"op": "SIGGEN_GET_STATUS", "wvalue": 0, "ranges": [[4, 6], [10, 11]], "reason": "history since boot: set once the generator has run"},
   {"op": "GET_STATUS", "wvalue": 0, "ranges": [[0, 4]], "reason": "peak meters"},
   {"op": "GET_STATUS", "wvalue": 1, "ranges": [[0, 4]], "reason": "peak meters"},
   {"op": "GET_STATUS", "wvalue": 2, "ranges": [[0, 4]], "reason": "peak meter and CPU loads"},

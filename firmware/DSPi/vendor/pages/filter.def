@@ -1,1 +1,9 @@
 VC_PAGE(FILTER, 0x06, 1, "EQ and crossover bands, bypasses")
+
+VC_CMD(0x10, BAND, filter_band_get, filter_band_set,
+       CH_BAND, 16, 16, 16, VC_F_DEFERRED, 0,
+       "One PEQ or crossover band: u8 type, u8 bypass, u16 qp_x512, f32 freq, f32 Q, f32 gain dB")
+VC_CMD(0x11, BAND_BYPASS, filter_band_bypass_get, filter_band_bypass_set,
+       CH_BAND, 1, 1, 1, VC_F_DEFERRED, 0, "Bypass one band, exactly 1 bypasses")
+VC_CMD(0x12, EQ_BYPASS, filter_eq_bypass_get, filter_eq_bypass_set,
+       NONE, 1, 1, 1, 0, 0, "Master EQ bypass, non-zero bypasses")

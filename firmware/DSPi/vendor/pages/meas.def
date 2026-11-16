@@ -1,1 +1,45 @@
+// Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.8.
 VC_PAGE(MEAS, 0x09, 1, "Level meters, clip flags, spectrum analyser, signal generator")
+
+VC_CMD(0x10, LEVELS, meas_levels_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, 0, 0, "Peaks per channel (u16 each), cpu0, cpu1, u32 clip flags, active input count")
+VC_CMD(0x11, CLIP_FLAGS, meas_clip_flags_get, VC_NONE,
+       NONE, 4, 0, 0, 0, 0, "Latched clip flags (u32); reading does not clear them")
+VC_CMD(0x12, CLIP_CLEAR, VC_NONE, meas_clip_clear_set,
+       NONE, 0, 0, 0, 0, 0, "Clear the latched clip flags")
+
+VC_CMD(0x20, RTA_CONFIG, meas_rta_config_get, meas_rta_config_set,
+       NONE, 12, 12, 12, VC_F_DEFERRED, 0, "Analyser config (RtaConfig); applied by the main loop")
+VC_CMD(0x21, RTA_CAPS, meas_rta_caps_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "Analyser capabilities (RtaCaps)")
+VC_CMD(0x22, RTA_BAND_CENTRES, meas_rta_band_centres_get, VC_NONE,
+       INDEX, VC_LEN_VAR, 0, 0, 0, 0, "Band centre table chunk n: up to 32 u16 Hz values")
+VC_CMD(0x23, RTA_BANDS, meas_rta_bands_get, VC_NONE,
+       INDEX, 82, 0, 0, VC_F_KEEPALIVE, 0, "Latest band frame for one channel at the tap (RtaBandFrame)")
+VC_CMD(0x24, RTA_BINS, meas_rta_bins_get, VC_NONE,
+       OFFSET, VC_LEN_VAR, 0, 0, VC_F_KEEPALIVE, 0, "Published bin frame from a byte offset, read in chunks")
+VC_CMD(0x25, RTA_STATUS, meas_rta_status_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Analyser status (RtaStatus); not a keepalive")
+VC_CMD(0x26, RTA_BANDS_ALL, meas_rta_bands_all_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, VC_F_USB_ONLY | VC_F_BULK | VC_F_KEEPALIVE, 0, "Band frames of every live channel, back to back")
+VC_CMD(0x28, RTA_START, VC_NONE, meas_rta_control_set,
+       NONE, 0, 0, 0, 0, RTA_CTL_START, "Start the analyser")
+VC_CMD(0x29, RTA_STOP, VC_NONE, meas_rta_control_set,
+       NONE, 0, 0, 0, 0, RTA_CTL_STOP, "Stop the analyser")
+VC_CMD(0x2A, RTA_RESET, VC_NONE, meas_rta_control_set,
+       NONE, 0, 0, 0, 0, RTA_CTL_RESET_AVG, "Clear averages and peaks")
+
+VC_CMD(0x40, SIGGEN_CONFIG, meas_siggen_config_get, meas_siggen_config_set,
+       NONE, 36, 36, 36, 0, 0, "Signal generator config (SiggenConfig); restarts a running generator")
+VC_CMD(0x41, SIGGEN_STATUS, meas_siggen_status_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "Signal generator status (SiggenStatus)")
+VC_CMD(0x42, SIGGEN_CAPS, meas_siggen_caps_get, VC_NONE,
+       NONE, 8, 0, 0, 0, 0, "Signal generator capabilities header (SiggenCapsHeader)")
+VC_CMD(0x43, SIGGEN_TYPE_DESC, meas_siggen_type_desc_get, VC_NONE,
+       INDEX, 62, 0, 0, 0, 0, "Description of one signal type (SiggenTypeDesc)")
+VC_CMD(0x48, SIGGEN_START, VC_NONE, meas_siggen_control_set,
+       NONE, 0, 0, 0, 0, SIGGEN_CTL_START, "Start, or restart, with the applied config")
+VC_CMD(0x49, SIGGEN_STOP, VC_NONE, meas_siggen_control_set,
+       NONE, 0, 0, 0, 0, SIGGEN_CTL_STOP, "Fade out, then stop")
+VC_CMD(0x4A, SIGGEN_STOP_NOW, VC_NONE, meas_siggen_control_set,
+       NONE, 0, 0, 0, 0, SIGGEN_CTL_STOP_NOW, "Stop at once, no fade")

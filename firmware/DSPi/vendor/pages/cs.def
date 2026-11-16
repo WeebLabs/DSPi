@@ -1,1 +1,61 @@
+// Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.8.
+// Deferred SETs only stage the record; the result arrives through CS.STATUS.
 VC_PAGE(CS, 0x0A, 1, "Control Surfaces")
+
+VC_CMD(0x10, CAPS, cs_caps_get, VC_NONE,
+       NONE, 52, 0, 0, 0, 0, "Capability header and component type table")
+VC_CMD(0x11, NOUN_DESC, cs_noun_desc_get, VC_NONE,
+       CS_NOUN, 12, 0, 0, 0, 0, "Descriptor of one noun")
+VC_CMD(0x12, STATUS, cs_status_get, VC_NONE,
+       NONE, 41, 0, 0, 0, 0, "Last deferred result, dirty flag, per-slot and IR status")
+VC_CMD(0x13, EXT_STATUS, cs_ext_status_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Group and macro limits, validity and the running macro")
+
+VC_CMD(0x18, SAVE, VC_NONE, cs_save_set,
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Persist the whole live configuration")
+VC_CMD(0x19, REVERT, VC_NONE, cs_revert_set,
+       NONE, 0, 0, 0, VC_F_DEFERRED, 0, "Discard the live preview and re-apply the stored configuration")
+
+VC_CMD(0x20, BINDING, cs_binding_get, cs_binding_set,
+       CS_SLOT, 24, 24, 24, VC_F_DEFERRED, 0, "One binding, live preview")
+VC_CMD(0x21, SLOT_NAME, cs_slot_name_get, cs_slot_name_set,
+       CS_SLOT, 32, 1, 32, VC_F_DEFERRED, 0, "Slot name, NUL padded; a single NUL clears it")
+
+VC_CMD(0x30, IR_CMD, cs_ir_cmd_get, cs_ir_cmd_set,
+       CS_SUB, 16, 16, 16, VC_F_DEFERRED, 0, "One IR command, live preview")
+VC_CMD(0x31, IR_LEARN_STATUS, cs_ir_learn_status_get, VC_NONE,
+       NONE, 8, 0, 0, 0, 0, "Learn state, protocol and the last learned code")
+VC_CMD(0x32, IR_LEARN_ARM, VC_NONE, cs_ir_learn_set,
+       NONE, 0, 0, 0, 0, 1, "Arm IR learn on the live receiver")
+VC_CMD(0x33, IR_LEARN_CANCEL, VC_NONE, cs_ir_learn_set,
+       NONE, 0, 0, 0, 0, 0, "Cancel IR learn")
+
+VC_CMD(0x40, GROUP, cs_group_get, cs_group_set,
+       CS_GROUP, 40, 40, 40, VC_F_DEFERRED, 0, "One target group, live preview")
+
+VC_CMD(0x50, MACRO, cs_macro_get, VC_NONE,
+       CS_MACRO, 132, 0, 0, 0, 0, "Whole macro: header and every step")
+VC_CMD(0x51, MACRO_HEADER, cs_macro_header_get, cs_macro_header_set,
+       CS_MACRO, 36, 36, 36, VC_F_DEFERRED, 0, "Macro name and step count")
+VC_CMD(0x52, MACRO_STEP, cs_macro_step_get, cs_macro_step_set,
+       CS_MACRO_STEP, 12, 12, 12, VC_F_DEFERRED, 0, "One macro step, address (step << 8) | macro")
+VC_CMD(0x58, MACRO_FIRE, VC_NONE, cs_macro_fire_set,
+       CS_MACRO, 0, 0, 0, VC_F_DEFERRED, 0, "Run a macro; an empty macro is a no-op")
+VC_CMD(0x59, MACRO_CANCEL, VC_NONE, cs_macro_cancel_set,
+       NONE, 0, 0, 0, 0, 0, "Stop the running macro")
+
+VC_CMD(0x60, AUX_STATE, cs_aux_state_get, cs_aux_set,
+       CS_SLOT, 1, 1, 1, 0, 0, "Aux output on or off")
+VC_CMD(0x61, AUX_LEVEL, cs_aux_level_get, cs_aux_set,
+       CS_SLOT, 2, 2, 2, 0, 1, "Aux PWM level, 8.8 percent, clamped to 100")
+VC_CMD(0x62, AUX_ALL, cs_aux_all_get, VC_NONE,
+       NONE, 48, 0, 0, 0, 0, "16 state bytes then 16 levels; non-aux slots read zero")
+
+VC_CMD(0x70, DISPLAY_CONFIG, cs_display_config_get, cs_display_config_set,
+       NONE, 12, 12, 12, VC_F_DEFERRED, 0, "Display mode, timing, brightness and flags")
+VC_CMD(0x71, DISPLAY_CAPS, cs_display_caps_get, VC_NONE,
+       NONE, 4, 0, 0, 0, 0, "Display page count and model count")
+VC_CMD(0x72, DISPLAY_PAGE, cs_display_page_get, cs_display_page_set,
+       CS_PAGE, 4, 4, 4, VC_F_DEFERRED, 0, "One display page; all zero is empty")
+VC_CMD(0x73, DISPLAY_STATUS, cs_display_status_get, VC_NONE,
+       NONE, 8, 0, 0, 0, 0, "Link state, shown page, live model and I2C NAK count")

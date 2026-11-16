@@ -11,7 +11,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include "vendor_commands.h"   // CtrlSource, CtrlDispatchResult
+#include "vendor_commands.h"   // CtrlSource, CtrlDispatchResult, PIN_CONFIG_*
+#include "notify.h"             // ParamSource
 #include "vc_ids.h"
 
 #define VC_PROTOCOL_MAJOR 1
@@ -132,6 +133,22 @@ uint8_t *vc_reply_buf(void);
 
 CtrlDispatchResult vc_to_ctrl_dispatch(VcResult r);
 
+// The notification tag for a request's transport. Handlers that tag a deferred
+// notification themselves must use this so it matches the dispatcher's bracket.
+ParamSource vc_param_src(CtrlSource src);
+
+// PIN_CONFIG_* (config.h) to the result a pin SET reports.
+static inline VcResult vc_from_pin_status(uint8_t status) {
+    switch (status) {
+        case PIN_CONFIG_SUCCESS:        return VC_OK;
+        case PIN_CONFIG_INVALID_PIN:    return VC_ERR_PIN_INVALID;
+        case PIN_CONFIG_PIN_IN_USE:     return VC_ERR_PIN_IN_USE;
+        case PIN_CONFIG_INVALID_OUTPUT: return VC_ERR_ADDRESS;
+        case PIN_CONFIG_OUTPUT_ACTIVE:  return VC_ERR_STATE;
+        default:                        return VC_ERR_VALUE;
+    }
+}
+
 // ---- Payload and reply helpers for handlers (little-endian, unaligned-safe) ----
 
 static inline uint8_t vc_in_u8(const VcCtx *c, uint16_t off) { return c->in[off]; }
@@ -151,6 +168,13 @@ static inline void vc_out_u16(VcCtx *c, uint16_t off, uint16_t v) {
 }
 static inline void vc_out_u32(VcCtx *c, uint16_t off, uint32_t v) { memcpy(c->out + off, &v, 4); }
 static inline void vc_out_f32(VcCtx *c, uint16_t off, float v) { memcpy(c->out + off, &v, 4); }
+
+// NaN passes through unclamped; handlers that must refuse it check first.
+static inline float vc_clampf(float v, float lo, float hi) {
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return v;
+}
 
 // Copy a whole reply; also sets out_len, so it serves variable-length replies.
 static inline void vc_reply(VcCtx *c, const void *data, uint16_t len) {

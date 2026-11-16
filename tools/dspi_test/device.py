@@ -1,29 +1,13 @@
 """
-device.py — DspiDevice: thin, test-oriented wrapper around USB vendor control
-transfers to a connected DSPi.
-
-This is the single transport layer for the QA suite.  It mirrors the conventions
-in tools/dspi_poke/dspi_poke.py (same VID/PID, same bmRequestType bytes) but adds:
-
-  * Typed get_*/set_* helpers (u8/u16/u32/i32/f32) with little-endian packing.
-  * STALL detection: a control transfer that the firmware refuses (handler
-    `return false`, oversized payload, or unknown opcode) shows up as a libusb
-    pipe error.  We translate that into a `Stall` exception so tests can assert
-    "this should STALL" / "this must NOT STALL".
-  * Disconnect detection: a vanished device raises `Disconnected` (distinct from
-    a STALL) so the runner can abort loudly instead of mislabelling a crash as a
-    failed assertion.
-  * `OP`: the canonical opcode map, parsed from firmware/DSPi/config.h so the
-    suite never drifts from the firmware's `#define REQ_* 0xNN` table.
-  * Paged commands (`pget`/`pset`, by `PAGE.NAME` or numeric ID) and a protocol
-    mode: "old" sends legacy opcodes to page 0, "translate" routes them through
-    legacy_map.py.  Select with DSPI_TEST_PROTOCOL=old|translate or `protocol=`.
-
+DspiDevice: the QA suite's single USB vendor-control transport (VID/PID and bmRequestType as in
+tools/dspi_poke). Refusals raise Stall, a vanished device raises Disconnected, OP is parsed from
+config.h, and pget/pset plus the old/translate/hybrid protocol modes are described in README.md.
 Control-plane only: no audio streaming, no isochronous endpoints.
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -124,11 +108,9 @@ LEGACY_MAP_REL = Path("Documentation") / "protocol" / "legacy_map.json"
 # --- Opcode table (parsed from config.h, single source of truth) ------------
 
 def load_opcodes(config_h: Path | None = None) -> dict[str, int]:
-    """Parse `#define REQ_FOO 0xNN` lines into {SHORTNAME: opcode}.
-
-    Keys are stored WITHOUT the REQ_ prefix (e.g. "GET_PLATFORM") so tests can
-    write `OP.GET_PLATFORM`.  Returns {} on failure (callers should treat an
-    empty map as a fatal setup error).
+    """Parse `#define REQ_FOO 0xNN` lines into {SHORTNAME: opcode}, keys WITHOUT the REQ_ prefix
+    (so tests write `OP.GET_PLATFORM`). Returns {} on failure, which callers must treat as a
+    fatal setup error.
     """
     path = config_h or _find_config_h()
     if path is None or not path.is_file():
@@ -262,9 +244,9 @@ def _normalise_protocol(p: str | None) -> str:
     p = (p or os.environ.get("DSPI_TEST_PROTOCOL") or "old").strip().lower()
     if p in ("old", "send-old", "send_old", "legacy"):
         return "old"
-    if p in ("translate", "paged"):
-        return "translate"
-    raise ValueError(f"unknown DSPI_TEST_PROTOCOL {p!r} (use old or translate)")
+    if p in ("translate", "paged", "hybrid"):
+        return "translate" if p == "paged" else p
+    raise ValueError(f"unknown DSPI_TEST_PROTOCOL {p!r} (use old, translate or hybrid)")
 
 
 # --- The device wrapper -----------------------------------------------------
@@ -274,7 +256,7 @@ class DspiDevice:
         dev = usb_dev if usb_dev is not None else usb.core.find(idVendor=VID, idProduct=PID)
         if dev is None:
             raise Disconnected(
-                f"no DSPi at {VID:04X}:{PID:04X} — is it plugged in and not held by another app?")
+                f"no DSPi at {VID:04X}:{PID:04X}. Is it plugged in and not held by another app?")
         self.dev = dev
         self.timeout = timeout_ms
         self.protocol = _normalise_protocol(protocol)
@@ -290,6 +272,12 @@ class DspiDevice:
         # so legacy_map swallows the STALL and records it here instead.
         self.swallowed: list[dict] = []
         self._paged_ok = None   # None until SYS.PROTOCOL_INFO has been probed
+        self._paged_cmds = None  # {page: (GET cmds, SET cmds)} read from the device once
+        # Hybrid routing per old opcode name: calls sent paged vs left on page 0.
+        self.hybrid_counts = {"translated": {}, "passed": {}}
+        self._hybrid_atexit = False
+        if self.protocol == "hybrid":
+            self._register_hybrid_summary()
 
     def _reacquire(self) -> bool:
         try:
@@ -301,6 +289,7 @@ class DspiDevice:
             self.dev = d
             self.reenumerations += 1
             self._paged_ok = None   # may be different firmware now
+            self._paged_cmds = None
             return True
         return False
 
@@ -309,7 +298,7 @@ class DspiDevice:
     # Transient timeouts (errno 60 ETIMEDOUT / 110) happen when the device is
     # briefly busy with a deferred pipeline reset (type switch, pin move, bulk
     # apply) during which it disables the USB control IRQ.  These are NOT stalls
-    # and NOT crashes — retry a few times before giving up.
+    # and NOT crashes, so retry a few times before giving up.
     _TIMEOUT_RETRIES = 4
     _TIMEOUT_BACKOFF_S = 0.15
     _REACQUIRE_ATTEMPTS = 6
@@ -325,7 +314,7 @@ class DspiDevice:
             except usb.core.USBError as e:
                 msg = str(e)
                 errno = getattr(e, "errno", None)
-                # ENODEV: a re-enumeration staled the handle — re-acquire & retry.
+                # ENODEV: a re-enumeration staled the handle. Re-acquire and retry.
                 if errno == 19 or "No such device" in msg or "no device" in msg.lower():
                     if reacquires < self._REACQUIRE_ATTEMPTS:
                         reacquires += 1
@@ -356,12 +345,14 @@ class DspiDevice:
         return self._xfer("SET", opcode, wvalue, windex, payload)
 
     def _translating(self, windex: int) -> bool:
-        return self.protocol == "translate" and (windex >> 8) == 0
+        return self.protocol in ("translate", "hybrid") and (windex >> 8) == 0
 
     def get(self, opcode: int, length: int, wvalue: int = 0, windex: int = VENDOR_IFACE) -> bytes:
         """Device->host vendor request.  Raises Stall if refused, Timeout if wedged."""
         if self._translating(windex):
             from . import legacy_map
+            if self.protocol == "hybrid":
+                return legacy_map.hybrid_get(self, opcode, wvalue, length)
             return legacy_map.translate_get(self, opcode, wvalue, length)
         return self.raw_get(opcode, length, wvalue, windex)
 
@@ -369,8 +360,50 @@ class DspiDevice:
         """Host->device vendor request.  Returns bytes accepted.  Raises Stall if refused."""
         if self._translating(windex):
             from . import legacy_map
+            if self.protocol == "hybrid":
+                return legacy_map.hybrid_set(self, opcode, wvalue, payload)
             return legacy_map.translate_set(self, opcode, wvalue, payload)
         return self.raw_set(opcode, payload, wvalue, windex)
+
+    # -- hybrid bookkeeping --------------------------------------------------
+
+    def paged_commands(self) -> dict:
+        """{page: (GET cmd set, SET cmd set)} from SYS.PAGE_LIST / PAGE_COMMANDS, read once per handle.
+        Empty on firmware without the dispatcher. A failed read is not cached, so it is retried."""
+        if self._paged_cmds is not None:
+            return self._paged_cmds
+        if self._paged_ok is None:
+            self.protocol_info()
+        if not self._paged_ok:
+            self._paged_cmds = {}
+            return self._paged_cmds
+        try:
+            pl = self.pget(0x0111, length=256)
+            out = {}
+            for page in pl[0::2]:
+                bm = self.pget(0x0112, page, 64)
+                bits = [{i for i in range(256) if bm[half + i // 8] >> (i % 8) & 1} for half in (0, 32)]
+                out[page] = (frozenset(bits[0]), frozenset(bits[1]))
+        except (Stall, Timeout):
+            return {}
+        self._paged_cmds = out
+        return out
+
+    def note_hybrid(self, name: str, translated: bool):
+        bucket = self.hybrid_counts["translated" if translated else "passed"]
+        bucket[name] = bucket.get(name, 0) + 1
+        self._register_hybrid_summary()
+
+    def hybrid_summary(self) -> str:
+        t, p = self.hybrid_counts["translated"], self.hybrid_counts["passed"]
+        return (f"hybrid: {len(t)} opcodes translated ({sum(t.values())} calls), {len(p)} passed through "
+                f"({sum(p.values())} calls); translated: {', '.join(sorted(t)) or 'none'}")
+
+    def _register_hybrid_summary(self):
+        if not self._hybrid_atexit:
+            self._hybrid_atexit = True
+            atexit.register(lambda: (self.hybrid_counts["translated"] or self.hybrid_counts["passed"])
+                            and print(self.hybrid_summary()))
 
     # -- paged commands ------------------------------------------------------
 
@@ -408,7 +441,10 @@ class DspiDevice:
             raise self._paged_stall(info, "SET", addr, e) from e
 
     def _paged_stall(self, info: CommandInfo, direction: str, addr: int, e: Stall) -> PagedStall:
-        lr = self.last_result()
+        try:
+            lr = self.last_result()
+        except Timeout:
+            lr = None
         # LAST_RESULT is per transport, so another USB host can overwrite it.
         ok = lr is not None and lr.cmd_id == info.id and lr.direction == direction and lr.wvalue == addr
         return PagedStall(info.id, direction, addr, e.errno, f"{info.name} refused",
@@ -470,8 +506,7 @@ class DspiDevice:
     def get_ready(self, opcode, length, wvalue=0, retries=3):
         """GET that must always succeed; retry through wait_ready() on a transient
         stall/timeout (the busy window after a deferred reset or re-enumeration).
-
-        Use ONLY for reads that have no invalid-param path of their own — never
+        Use ONLY for reads with no invalid-param path of their own. Never use it
         for STALL assertions, where a transient retry would mask the result.
         """
         for attempt in range(retries):
@@ -514,13 +549,10 @@ class DspiDevice:
             return False
 
     def wait_ready(self, timeout_s: float = 4.0, poll_s: float = 0.1) -> bool:
-        """Poll GET_PLATFORM until it answers cleanly.
-
-        Operations that defer a mute-bracketed pipeline reset (output-type switch,
-        pin move, bulk apply, input switch, preset load, factory reset) briefly
-        disable the USB control IRQ; a transfer in that window stalls or times out.
-        That is expected and transient — tolerate it here and only report failure
-        if the device never recovers (a real crash/hang).
+        """Poll GET_PLATFORM until it answers cleanly. A deferred, mute-bracketed pipeline
+        reset (type switch, pin move, bulk apply, input switch, preset load, factory reset)
+        briefly disables the USB control IRQ, so a transfer then stalls or times out. Only a
+        device that never recovers (a real crash or hang) reports failure.
         """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:

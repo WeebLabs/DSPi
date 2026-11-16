@@ -1,1 +1,29 @@
 VC_PAGE(STORE, 0x02, 1, "Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters")
+
+VC_CMD(0x10, PRESET_SAVE, VC_NONE, store_preset_save_set,
+       PRESET, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Save the live state to a slot and make it active")
+VC_CMD(0x11, PRESET_LOAD, VC_NONE, store_preset_load_set,
+       PRESET, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Load a slot; an empty slot loads factory defaults")
+VC_CMD(0x12, PRESET_DELETE, VC_NONE, store_preset_delete_set,
+       PRESET, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Erase a slot")
+VC_CMD(0x13, PRESET_NAME, store_preset_name_get, store_preset_name_set,
+       PRESET, 32, 1, 32, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Slot name, NUL padded; a SET keeps at most 31 bytes")
+VC_CMD(0x14, PRESET_ACTIVE, store_preset_active_get, VC_NONE,
+       NONE, 1, 0, 0, 0, 0, "Active slot")
+VC_CMD(0x15, DIRECTORY, store_directory_get, VC_NONE,
+       NONE, 7, 0, 0, 0, 0, "Occupied mask u16, startup mode, default slot, last active, IO config mode, master volume mode")
+VC_CMD(0x16, STARTUP, store_startup_get, store_startup_set,
+       NONE, 2, 2, 2, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Startup mode and default slot")
+
+VC_CMD(0x20, OUTPUT_CONFIG_MODE, store_output_config_mode_get, store_output_config_mode_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "IO config persistence: 0 independent, 1 with preset; other values store 0")
+VC_CMD(0x21, OUTPUT_CONFIG_SAVE, VC_NONE, store_output_config_save_set,
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Persist the live IO config to the device-wide block")
+
+VC_CMD(0x30, FACTORY_RESET, VC_NONE, store_factory_reset_set,
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Erase every preset and restore factory defaults")
+
+VC_CMD(0x40, ALL_PARAMS, store_all_params_get, store_all_params_set,
+       NONE, 6136, 0, 0, VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams V32; a SET must be the whole struct")
+VC_CMD(0x41, ALL_PARAMS_CHUNK, store_all_params_chunk_get, store_all_params_chunk_set,
+       OFFSET, VC_LEN_VAR, 0, 0, VC_F_USB_ONLY | VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams in pieces at a byte offset, sequential from 0")

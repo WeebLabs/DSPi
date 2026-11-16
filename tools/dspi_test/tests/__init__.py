@@ -14,4 +14,16 @@ from . import presets         # noqa: F401
 from . import control_surfaces  # noqa: F401
 from . import stress          # noqa: F401
 from . import paged_sys       # noqa: F401
+from . import paged_store     # noqa: F401
+from . import paged_input     # noqa: F401
+from . import paged_output    # noqa: F401
+from . import paged_clock     # noqa: F401
+from . import paged_xport     # noqa: F401
+from . import paged_route     # noqa: F401
+from . import paged_filter    # noqa: F401
+from . import paged_dyn       # noqa: F401
+from . import paged_fx        # noqa: F401
+from . import paged_meas      # noqa: F401
+from . import paged_cs        # noqa: F401
+from . import paged_diag      # noqa: F401
 from . import audio_loopback  # noqa: F401  (group "audio"; opt-in via --audio)

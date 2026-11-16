@@ -1,1 +1,123 @@
+// Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.8.
 VC_PAGE(FX, 0x08, 1, "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer")
+
+VC_CMD(0x10, CROSSFEED_ENABLE, fx_crossfeed_enable_get, fx_crossfeed_enable_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Crossfeed on or off (u8 bool)")
+VC_CMD(0x11, CROSSFEED_PRESET, fx_crossfeed_preset_get, fx_crossfeed_preset_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Crossfeed preset (u8, 0 to CROSSFEED_PRESET_CUSTOM)")
+VC_CMD(0x12, CROSSFEED_FREQ, fx_crossfeed_float_get, fx_crossfeed_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, 0, "Custom preset cutoff in Hz (f32, clamped)")
+VC_CMD(0x13, CROSSFEED_FEED, fx_crossfeed_float_get, fx_crossfeed_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, 1, "Custom preset feed level in dB (f32, clamped)")
+VC_CMD(0x14, CROSSFEED_ITD, fx_crossfeed_itd_get, fx_crossfeed_itd_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Interaural time delay on or off (u8 bool)")
+VC_CMD(0x15, CROSSFEED_OUTPUTS, fx_crossfeed_outputs_get, fx_crossfeed_outputs_set,
+       NONE, 1, 1, 1, 0, 0, "Output pairs crossfeed applies to (u8 mask, masked to the slot count)")
+
+VC_CMD(0x20, SUBHARM_ENABLE, fx_subharm_enable_get, fx_subharm_enable_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Subharmonic synth on or off (u8 bool)")
+VC_CMD(0x21, SUBHARM_LOW, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_LOW, "24-36 Hz band level in dB (f32, clamped)")
+VC_CMD(0x22, SUBHARM_HIGH, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_HIGH, "36-56 Hz band level in dB (f32, clamped)")
+VC_CMD(0x23, SUBHARM_TOP, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_TOP, "56-80 Hz band level in dB (f32, clamped)")
+VC_CMD(0x24, SUBHARM_BOOST, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_BOOST, "LF boost in dB (f32, clamped)")
+VC_CMD(0x25, SUBHARM_MASK, fx_subharm_mask_get, fx_subharm_mask_set,
+       NONE, 2, 2, 2, 0, 0, "Outputs the synth feeds (u16 mask)")
+VC_CMD(0x26, SUBHARM_SELECT, fx_subharm_select_get, fx_subharm_select_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Selectivity mode (u8, clamped to SUBHARM_SELECT_MODE_MAX)")
+VC_CMD(0x27, SUBHARM_DEPTH, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_DEPTH, "Selectivity depth in percent (f32, clamped)")
+VC_CMD(0x28, SUBHARM_HOLD, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_HOLD, "Selectivity hold in ms (f32, clamped)")
+VC_CMD(0x29, SUBHARM_CEILING, fx_subharm_float_get, fx_subharm_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_SH_CEILING, "Output ceiling in dBFS (f32, clamped)")
+VC_CMD(0x2A, SUBHARM_LINK, fx_subharm_link_get, fx_subharm_link_set,
+       NONE, 1, 1, 1, 0, 0, "Link output pairs (u8 bool)")
+VC_CMD(0x2B, SUBHARM_SOLO, fx_subharm_solo_get, fx_subharm_solo_set,
+       NONE, 1, 1, 1, 0, 0, "Monitor the synth alone (u8 bool, never persisted)")
+VC_CMD(0x2E, SUBHARM_HEADROOM, fx_subharm_headroom_get, VC_NONE,
+       NONE, 4, 0, 0, 0, 0, "Worst-case gain of the current settings in dB (f32)")
+VC_CMD(0x2F, SUBHARM_METER, fx_subharm_meter_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, 0, 0, "Synth output level per output (u16 each, 0 to 32767)")
+
+VC_CMD(0x40, PSYBASS_ENABLE, fx_psybass_enable_get, fx_psybass_enable_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Psychoacoustic bass on or off (u8 bool)")
+VC_CMD(0x41, PSYBASS_CUTOFF, fx_psybass_float_get, fx_psybass_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_PB_CUTOFF, "Cutoff in Hz (f32, clamped)")
+VC_CMD(0x42, PSYBASS_HARMONICS, fx_psybass_float_get, fx_psybass_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_PB_HARMONICS, "Harmonic mix level in dB (f32, clamped)")
+VC_CMD(0x43, PSYBASS_DRIVE, fx_psybass_float_get, fx_psybass_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_PB_DRIVE, "Odd-path drive in dB (f32, clamped)")
+VC_CMD(0x44, PSYBASS_CHARACTER, fx_psybass_float_get, fx_psybass_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_PB_CHARACTER, "Even to odd character in percent (f32, clamped)")
+VC_CMD(0x45, PSYBASS_ORIGINAL, fx_psybass_float_get, fx_psybass_float_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, FX_PB_ORIGINAL, "Original low-band level in dB (f32, clamped)")
+VC_CMD(0x46, PSYBASS_MASK, fx_psybass_mask_get, fx_psybass_mask_set,
+       NONE, 2, 2, 2, 0, 0, "Outputs psychoacoustic bass applies to (u16 mask)")
+
+VC_CMD(0x60, TUBE_ENABLE, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_ENABLED, "Tube preamp on or off (f32)")
+VC_CMD(0x61, TUBE_OUTPUT_MASK, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, 0, TUBE_PARAM_OUTPUT_MASK, "Outputs the tube applies to (f32, rounded to u16)")
+VC_CMD(0x62, TUBE_TYPE, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_TUBE_TYPE, "Tube type (f32, rounded and clamped); a stock type also rewrites its row")
+VC_CMD(0x63, TUBE_DRIVE, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_DRIVE_DB, "Drive in dB (f32, clamped)")
+VC_CMD(0x64, TUBE_BIAS, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_BIAS_PCT, "Bias in percent (f32, clamped)")
+VC_CMD(0x65, TUBE_ASYM, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_ASYM_DB, "Asymmetry in dB (f32, clamped)")
+VC_CMD(0x66, TUBE_HARDNESS, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_HARDNESS_PCT, "Hardness in percent (f32, clamped)")
+VC_CMD(0x67, TUBE_SAG, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_SAG_PCT, "Sag in percent (f32, clamped)")
+VC_CMD(0x68, TUBE_RECTIFIER, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_RECTIFIER, "Rectifier type (f32, rounded and clamped)")
+VC_CMD(0x69, TUBE_XFMR_ENABLE, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_XFMR_ENABLED, "Output transformer on or off (f32)")
+VC_CMD(0x6A, TUBE_XFMR_DAMPING, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_XFMR_DAMPING, "Transformer damping (f32, clamped)")
+VC_CMD(0x6B, TUBE_XFMR_RES, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_XFMR_RES_HZ, "Transformer resonance in Hz (f32, clamped)")
+VC_CMD(0x6C, TUBE_MIX, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_MIX_PCT, "Wet mix in percent (f32, clamped)")
+VC_CMD(0x6D, TUBE_TRIM, fx_tube_get, fx_tube_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, TUBE_PARAM_TRIM_DB, "Output trim in dB (f32, clamped)")
+
+#if PICO_RP2350
+VC_CMD(0x80, UPMIX_CONFIG, fx_upmix_config_get, fx_upmix_config_set,
+       NONE, 44, 44, 44, VC_F_DEFERRED, 0, "Whole upmixer config (UpmixConfigPacket)")
+VC_CMD(0x81, UPMIX_STATUS, fx_upmix_status_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "Live upmixer telemetry (UpmixStatus)")
+VC_CMD(0x90, UPMIX_ENABLE, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ENABLED, "Upmixer on or off (f32)")
+VC_CMD(0x91, UPMIX_CENTER_MODE, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_CENTER_MODE, "Centre mode (f32, rounded and clamped)")
+VC_CMD(0x92, UPMIX_SURROUND_MODE, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SURROUND_MODE, "Surround mode (f32, rounded and clamped to 0-2)")
+VC_CMD(0x93, UPMIX_STRENGTH, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_STRENGTH, "Strength in percent (f32)")
+VC_CMD(0x94, UPMIX_CENTER_WIDTH, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_CENTER_WIDTH, "Centre width in percent (f32)")
+VC_CMD(0x95, UPMIX_THRESHOLD, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_THRESHOLD, "Correlation threshold in percent (f32)")
+VC_CMD(0x96, UPMIX_ATTACK, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ATTACK, "Steering attack in ms (f32)")
+VC_CMD(0x97, UPMIX_RELEASE, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_RELEASE, "Steering release in ms (f32)")
+VC_CMD(0x98, UPMIX_DET_HPF, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_DET_HPF, "Detector high-pass in Hz (f32)")
+VC_CMD(0x99, UPMIX_SUR_DELAY, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_DELAY, "Surround delay in ms (f32)")
+VC_CMD(0x9A, UPMIX_SUR_HPF, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_HPF, "Surround high-pass in Hz (f32)")
+VC_CMD(0x9B, UPMIX_SUR_LPF, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_LPF, "Surround low-pass in Hz (f32)")
+VC_CMD(0x9C, UPMIX_DECORR, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_DECORR, "Surround decorrelation in percent (f32)")
+VC_CMD(0x9D, UPMIX_PRESENCE, fx_upmix_param_get, fx_upmix_param_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_PRESENCE, "Centre presence in dB (f32)")
+#endif
