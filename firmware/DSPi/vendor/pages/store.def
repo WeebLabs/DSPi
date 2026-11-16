@@ -1,0 +1,1 @@
+VC_PAGE(STORE, 0x02, 1, "Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters")

@@ -570,6 +570,459 @@ for name in solo_writers:
 check(solo_writers == ["subharm_solo"],
       f"only subharm_solo enables monitor solo (got {solo_writers})")
 
+# --- Paged transport and the legacy translation layer (vendor command overhaul) ---------
+
+import usb.core as _usbcore
+from tools.dspi_test import device as D
+from tools.dspi_test import legacy_map as LM
+
+_VC = D.VC_CODES
+_NONE = None
+
+
+class _Cmd:
+    def __init__(self, cid, name, glen=None, srange=None, addrs=_NONE, get=None, set_=None):
+        self.cid, self.name, self.glen, self.srange = cid, name, glen, srange
+        self.addrs, self.get, self.set = addrs, get, set_
+
+
+class FakePagedFirmware:
+    """A pyusb-shaped device running the paged dispatcher rules of the phase 1 contract over a
+    representative command set. Page 0 always STALLs, as after the flip."""
+
+    def __init__(self, paged=True):
+        self.paged = paged
+        self.cmds = {}
+        self.store = {}
+        self.actions = []
+        self.page0_hits = 0
+        self.paged_hits = 0
+        self.last = (0, 0, 0, 0)
+        self.corrupt_last = False
+        self.cs_busy = False
+        self.clips = 0x05
+        self._build()
+
+    # -- table ---------------------------------------------------------------
+    def _id(self, name):
+        return LM.target_id(name)
+
+    def add(self, name, glen=None, srange=None, addrs=_NONE, get=None, set_=None):
+        cid = self._id(name)
+        self.cmds[cid] = _Cmd(cid, name, glen, srange, addrs, get, set_)
+        return cid
+
+    def stored(self, name, addr=0, n=None):
+        c = self.cmds[self._id(name)]
+        return self.store.get((c.cid, addr), bytes(n if n is not None else (c.glen or 0)))
+
+    def put(self, name, data, addr=0):
+        self.store[(self._id(name), addr)] = bytes(data)
+
+    def _rw(self, name, n, addrs=_NONE, check=None):
+        def s(c, a, d):
+            if check:
+                r = check(a, d)
+                if r:
+                    return r
+            self.store[(c.cid, a)] = bytes(d)
+            return 0
+        return self.add(name, n, (n, n), addrs, None, s)
+
+    def _act(self, name, addrs=_NONE, check=None):
+        def s(c, a, d):
+            if check:
+                r = check(a, d)
+                if r:
+                    return r
+            self.actions.append((name, a))
+            return 0
+        return self.add(name, None, (0, 0), addrs, None, s)
+
+    def _ro(self, name, value, addrs=_NONE):
+        return self.add(name, len(value), None, addrs, get=lambda c, a: value)
+
+    def _build(self):
+        for n in ("SYS.PROTOCOL_INFO", "SYS.PAGE_LIST", "SYS.PAGE_COMMANDS", "SYS.COMMAND_INFO", "SYS.LAST_RESULT"):
+            self.add(n, get=getattr(self, "_" + n.split(".")[1].lower()))
+        self.cmds[self._id("SYS.PAGE_LIST")].glen = "var"
+        self.cmds[self._id("SYS.PROTOCOL_INFO")].glen = 16
+        self.cmds[self._id("SYS.PAGE_COMMANDS")].glen = 64
+        self.cmds[self._id("SYS.PAGE_COMMANDS")].addrs = "PAGE"
+        self.cmds[self._id("SYS.COMMAND_INFO")].glen = 8
+        self.cmds[self._id("SYS.COMMAND_INFO")].addrs = "PAGE_CMD"
+        self.cmds[self._id("SYS.LAST_RESULT")].glen = 8
+        self._ro("SYS.PLATFORM", bytes([1, 1, 0x16, 9, 1, 6, 0]))
+        self._ro("SYS.SERIAL", b"0123456789ABCDEF")
+        self._ro("SYS.BUILD_INFO", b"v1.1.7-fake".ljust(48, b"\0") + b"2026-11-16".ljust(16, b"\0"))
+        self._ro("SYS.CORE1_MODE", b"\x02")
+        self._ro("SYS.SYSTEM_STATUS", struct.pack("<IIHhBBH", 307200000, 48000, 1100, -512, 37, 12, 0))
+        self._ro("SYS.USB_AUDIO_STATUS", struct.pack("<IIIBBH", 1000, 3, 1250, 1, 1, 0))
+        self._ro("SYS.PDM_STATS", struct.pack("<IIII", 11, 12, 13, 14))
+        self._ro("SYS.SPDIF_TX_STATS", struct.pack("<IIIIII", 21, 22, 23, 24, 25, 26))
+        self._ro("SYS.PIPELINE_STATS", struct.pack("<IIIIII", 31, 32, 33, 34, 35, 0))
+        self._rw("SYS.STATS_RESET", 1)
+        self._act("STORE.PRESET_SAVE", range(10))
+        self._ro("STORE.PRESET_ACTIVE", b"\x02")
+        self._ro("STORE.DIRECTORY", bytes([0x05, 0, 1, 3, 2, 1, 0]))
+        self._rw("STORE.STARTUP", 2)
+        self.put("STORE.STARTUP", b"\x01\x03")
+        self._act("STORE.OUTPUT_CONFIG_SAVE")
+        self._ro("INPUT.STATUS", struct.pack("<BBHIi", 1, 2, 0, 47999123, -250))
+        self._rw("INPUT.SPDIF_RX_PIN", 1, range(4))
+
+        def spdif_en(a, d):
+            return _VC["VC_ERR_STATE"] if a == 2 and d[0] == 0 else 0
+        self._rw("INPUT.SPDIF_RX_ENABLE", 1, range(1, 4), spdif_en)
+        self._rw("INPUT.I2S_RX_RATE", 4)
+        self.put("INPUT.I2S_RX_RATE", struct.pack("<I", 96000))
+
+        def out_pin(a, d):
+            if d[0] in (23, 24, 25):
+                return _VC["VC_ERR_PIN_INVALID"]
+            if any(self.stored("OUTPUT.PIN", o, 1)[0] == d[0] for o in range(5) if o != a):
+                return _VC["VC_ERR_PIN_IN_USE"]
+            return 0
+        self._rw("OUTPUT.PIN", 1, range(5), out_pin)
+        for o in range(5):
+            self.put("OUTPUT.PIN", bytes([6 + o]), o)
+        self._rw("ROUTE.OUTPUT_GAIN", 4, range(9))
+        self._rw("ROUTE.MATRIX_ROUTE", 8, "IN_OUT")
+        self._rw("ROUTE.PREAMP", 4, range(8))
+
+        def band(a, d):
+            return _VC["VC_ERR_ADDRESS"] if (a & 0xFF) not in list(range(10)) + [20, 21, 22, 23] else 0
+        self._rw("FILTER.BAND", 16, "CH_BAND", band)
+        self.cmds[self._id("FILTER.BAND")].get = (
+            lambda c, a: None if band(a, b"") else self.store.get((c.cid, a), bytes(16)))
+        for n in ("ENABLE", "THRESHOLD", "RELEASE", "LINK_GROUP"):
+            self._rw("DYN.LIMITER_" + n, 4, "OUTPUT_ALL")
+        self._ro("DYN.LIMITER_STATUS", bytes([0, 32, 16, 9]))
+        self._rw("FX.TUBE_DRIVE", 4)
+        self._ro("MEAS.LEVELS", b"".join(struct.pack("<H", 100 * (ch + 1)) for ch in range(17))
+                 + bytes([41, 7]) + struct.pack("<I", 0x05) + b"\x02")
+
+        def clip_get(c, a):
+            return struct.pack("<I", self.clips)
+        self.add("MEAS.CLIP_FLAGS", 4, None, _NONE, clip_get)
+
+        def clip_clear(c, a, d):
+            self.clips = 0
+            return 0
+        self.add("MEAS.CLIP_CLEAR", None, (0, 0), _NONE, None, clip_clear)
+        for n in ("RTA_START", "RTA_STOP", "RTA_RESET"):
+            self._act("MEAS." + n)
+        self._act("CS.SAVE", check=lambda a, d: _VC["VC_ERR_BUSY"] if self.cs_busy else 0)
+        self._ro("CS.CAPS", bytes(range(52)))
+        self._ro("CS.NOUN_DESC", bytes(12), range(81))
+        self._ro("CS.DISPLAY_CAPS", bytes([16, 9, 0, 0]))
+        self._rw("CS.DISPLAY_CONFIG", 12)
+        self.put("CS.DISPLAY_CONFIG", bytes(range(1, 13)))
+        self._rw("CLOCK.MCK_MULTIPLIER", 1, _NONE, lambda a, d: _VC["VC_ERR_VALUE"] if d[0] > 1 else 0)
+
+    # -- SYS discovery handlers -------------------------------------------------
+    def _pages(self):
+        return sorted({cid >> 8 for cid in self.cmds})
+
+    def _protocol_info(self, c, a):
+        return b"DSPi" + struct.pack("<BBBBHHI", 1, 0, len(self._pages()), 0, 64, 256, 0)
+
+    def _page_list(self, c, a):
+        return b"".join(bytes([p, 1]) for p in self._pages())
+
+    def _page_commands(self, c, a):
+        if a not in self._pages():
+            return None
+        g, s = bytearray(32), bytearray(32)
+        for cid, cmd in self.cmds.items():
+            if cid >> 8 == a:
+                n = cid & 0xFF
+                if cmd.get or cmd.glen:
+                    g[n // 8] |= 1 << (n % 8)
+                if cmd.set:
+                    s[n // 8] |= 1 << (n % 8)
+        return bytes(g + s)
+
+    def _command_info(self, c, a):
+        cmd = self.cmds.get(a)
+        if cmd is None:
+            return None
+        has_get = bool(cmd.get or cmd.glen)
+        gl = 0xFFFF if cmd.glen == "var" else (cmd.glen or 0) if has_get else 0
+        smin, smax = cmd.srange or (0, 0)
+        kind = self.KINDS.index(self._kind(cmd))
+        return struct.pack("<HHBBBB", 0, gl, smin, smax, kind, (1 if has_get else 0) | (2 if cmd.set else 0))
+
+    def _last_result(self, c, a):
+        cid, d, res, wv = self.last
+        if self.corrupt_last:
+            cid ^= 0x0101
+        return struct.pack("<HBBHH", cid, d, res, wv, 0)
+
+    KINDS = ["NONE", "INDEX", "PAGE", "PAGE_CMD", "IN_OUT", "CH_BAND", "OUTPUT_ALL"]
+
+    @staticmethod
+    def _kind(c):
+        return "NONE" if c.addrs is _NONE else c.addrs if isinstance(c.addrs, str) else "INDEX"
+
+    def registry(self):
+        """The dspi_commands.json shape for the SYS page of this fake."""
+        cmds = []
+        for cid, c in sorted(self.cmds.items()):
+            if cid >> 8 != 1:
+                continue
+            has_get = bool(c.get or c.glen)
+            kind = self._kind(c)
+            cmds.append({"cmd": cid & 0xFF, "name": c.name.split(".")[1], "id": cid, "get": has_get,
+                         "set": bool(c.set), "addr": kind, "get_len": c.glen if has_get else None,
+                         "set_min": (c.srange or (0, 0))[0], "set_max": (c.srange or (0, 0))[1],
+                         "flags": [], "arg": "0", "build": None, "doc": ""})
+        return {"protocol": {"major": 1, "minor": 0},
+                "pages": [{"page": 1, "mnemonic": "SYS", "revision": 1, "doc": "", "commands": cmds,
+                           "reserved": []}]}
+
+    # -- pyusb surface ----------------------------------------------------------
+    def _addr_ok(self, cmd, a, is_set):
+        k = cmd.addrs
+        if k is _NONE:
+            return a == 0
+        if isinstance(k, range):
+            return a in k
+        if k == "OUTPUT_ALL":
+            return a < 9 or (is_set and a == 0xFF)
+        return True
+
+    def ctrl_transfer(self, bm, req, wvalue, windex, data_or_len, timeout=None):
+        page = windex >> 8
+        is_get = bool(bm & 0x80)
+        if page == 0:
+            self.page0_hits += 1
+            raise _usbcore.USBError("Pipe error", errno=32)
+        self.paged_hits += 1
+        if not self.paged:
+            raise _usbcore.USBError("Pipe error", errno=32)
+        cid = (page << 8) | req
+        cmd = self.cmds.get(cid)
+        res, reply = 0, None
+        if cmd is None:
+            res = _VC["VC_ERR_UNKNOWN"]
+        elif is_get and not (cmd.get or cmd.glen):
+            res = _VC["VC_ERR_DIRECTION"]
+        elif not is_get and not cmd.set:
+            res = _VC["VC_ERR_DIRECTION"]
+        elif not is_get and not (cmd.srange[0] <= len(data_or_len) <= cmd.srange[1]):
+            res = _VC["VC_ERR_LENGTH"]
+        elif not self._addr_ok(cmd, wvalue, not is_get):
+            res = _VC["VC_ERR_ADDRESS"]
+        elif is_get:
+            reply = cmd.get(cmd, wvalue) if cmd.get else self.store.get((cid, wvalue), bytes(cmd.glen))
+            if reply is None:
+                res = _VC["VC_ERR_ADDRESS"]
+        else:
+            res = cmd.set(cmd, wvalue, bytes(data_or_len))
+        if cid != D.SYS_LAST_RESULT:
+            self.last = (cid, 1 if is_get else 0, res, wvalue)
+        if res:
+            raise _usbcore.USBError("Pipe error", errno=32)
+        return bytes(reply)[:data_or_len] if is_get else len(data_or_len)
+
+
+def _paged_dev(**kw):
+    fw = FakePagedFirmware(**kw)
+    return fw, D.DspiDevice(protocol="translate", usb_dev=fw, registry=fw.registry())
+
+
+print("P1. paged transport: addressing, LAST_RESULT, PROTOCOL_INFO and the old-firmware guard")
+fw, dv = _paged_dev()
+check(D.paged_windex(0x06) == 0x0602, "page rides in the wIndex high byte, interface 2 low")
+pi = dv.protocol_info()
+check(pi is not None and pi["magic"] == "DSPi" and pi["max_set"] == 64, f"protocol_info parsed: {pi}")
+check(dv.pget("SYS.PLATFORM")[:2] == b"\x01\x01", "pget by name uses the registry length")
+check(dv.pget(0x0120, length=4) == bytes([1, 1, 0x16, 9]), "pget by numeric ID, truncated")
+try:
+    dv.pset("SYS.PLATFORM")
+    check(False, "SET to a GET-only command must STALL")
+except D.PagedStall as s:
+    check(s.result_name == "VC_ERR_DIRECTION" and isinstance(s, Stall), f"typed stall carries the code ({s})")
+fw.corrupt_last = True
+try:
+    dv.pget("ROUTE.OUTPUT_GAIN", addr=50)
+except D.PagedStall as s:
+    check(s.result is None, "a LAST_RESULT for another request is not trusted")
+fw.corrupt_last = False
+lr = dv.last_result()
+check(lr is not None and lr.cmd_id == LM.target_id("ROUTE.OUTPUT_GAIN") and lr.wvalue == 50,
+      f"last_result decodes ID, direction and wValue ({lr})")
+old_fw, old_dv = _paged_dev(paged=False)
+check(old_dv.protocol_info() is None, "protocol_info is None where PROTOCOL_INFO STALLs")
+try:
+    old_dv.get(OP.GET_OUTPUT_GAIN, 4, 0)
+    check(False, "translate mode must refuse firmware without the dispatcher")
+except D.ProtocolError:
+    check(old_fw.paged_hits == 1, f"only the probe reached the old firmware ({old_fw.paged_hits})")
+check(D.DspiDevice(protocol="old", usb_dev=fw).protocol == "old", "explicit protocol argument wins")
+check(len(D.load_legacy_opcodes()) == 246 and D.load_opcodes(Path("/nonexistent/config.h")) == {},
+      "OP falls back to golden/legacy_opcodes.json when config.h has no REQ_ defines")
+
+print("P2. translate: direct, on_stall and the swallowed OUT rejections")
+fw, dv = _paged_dev()
+dv.set_f32(OP.SET_OUTPUT_GAIN, -6.5, wvalue=3)
+check(dv.get_f32(OP.GET_OUTPUT_GAIN, 3) == -6.5, "direct OUT then IN round trip")
+n0 = len(dv.swallowed)
+check(dv.set_f32(OP.SET_OUTPUT_GAIN, 1.0, wvalue=40) == 4 and len(dv.swallowed) == n0 + 1
+      and dv.swallowed[-1]["result"] == "VC_ERR_ADDRESS", "refused OUT returns normally and is logged")
+try:
+    dv.get(OP.GET_OUTPUT_GAIN, 4, 40)
+    check(False, "a refused direct GET raises by default")
+except Stall:
+    check(True, "a refused direct GET raises by default")
+fw.put("INPUT.SPDIF_RX_PIN", b"\x14", 1)
+check(dv.get_u8(OP.GET_SPDIF_RX_PIN, 1) == 0x14 and dv.get(OP.GET_SPDIF_RX_PIN, 1, 4) == b"\x00",
+      "documented 1.1.6 zero-fill for a bad index (on_stall)")
+try:
+    dv.set(OP.SET_OUTPUT_GAIN, bytes(65), 0)
+    check(False, "oversized non-bulk OUT must STALL")
+except Stall:
+    check(True, "oversized non-bulk OUT STALLs as 1.1.6 did at SETUP")
+check(dv.set(0x01, b"\x01") == 1 and dv.swallowed[-1]["why"].startswith("no OUT"), "unknown OUT is ACKed")
+try:
+    dv.get(0x4F, 4)
+    check(False, "unknown IN opcode must STALL")
+except Stall:
+    check(True, "unknown IN opcode STALLs")
+
+print("P3. translate: write-as-read adapters and their status bytes")
+check(dv.get(OP.SET_MCK_MULTIPLIER, 1, 1) == b"\x00" and fw.stored("CLOCK.MCK_MULTIPLIER") == b"\x01",
+      "act_value success")
+check(dv.get(OP.SET_MCK_MULTIPLIER, 1, 0x101) == b"\x01", "act_value u8_sat keeps 0x101 out of range (0x01)")
+check(dv.get(OP.RESET_BUFFER_STATS, 1, 1) == b"\x01" and fw.stored("SYS.STATS_RESET") == b"\x01",
+      "act_value ack1 with the mask in the payload")
+check(dv.get(OP.PRESET_SAVE, 1, 3) == b"\x00" and fw.actions[-1] == ("STORE.PRESET_SAVE", 3), "act_addr success")
+check(dv.get(OP.PRESET_SAVE, 1, 12) == b"\x01", "act_addr VC_ERR_ADDRESS -> PRESET_ERR_INVALID_SLOT")
+check(dv.get(OP.CS_SAVE, 1, 0) == b"\x01", "ack1 success byte")
+fw.cs_busy = True
+try:
+    dv.get(OP.CS_SAVE, 1, 0)
+    check(False, "an ack1 refusal must STALL")
+except D.PagedStall as s:
+    check(s.result_name == "VC_ERR_BUSY", "an ack1 refusal STALLs, as in 1.1.6")
+fw.cs_busy = False
+check(dv.get(OP.SET_OUTPUT_PIN, 1, (12 << 8) | 1) == b"\x00" and fw.stored("OUTPUT.PIN", 1) == b"\x0c",
+      "act_packed: output in the low byte, GPIO in the high byte")
+check(dv.get(OP.SET_OUTPUT_PIN, 1, (24 << 8) | 1) == b"\x01", "PIN_INVALID -> 0x01")
+check(dv.get(OP.SET_OUTPUT_PIN, 1, (8 << 8) | 1) == b"\x02", "PIN_IN_USE -> 0x02")
+check(dv.get(OP.SET_OUTPUT_PIN, 1, (12 << 8) | 9) == b"\x03", "ADDRESS -> INVALID_OUTPUT 0x03")
+check(dv.get(OP.SET_SPDIF_INPUT_ENABLE, 1, (3 << 8) | 0x40) == b"\x00"
+      and fw.stored("INPUT.SPDIF_RX_ENABLE", 3) == b"\x01", "bool encoding of a non-zero enable")
+check(dv.get(OP.SET_SPDIF_INPUT_ENABLE, 1, (2 << 8) | 0) == b"\x02", "status override STATE -> 0x02")
+fw.corrupt_last = True
+try:
+    dv.get(OP.SET_OUTPUT_PIN, 1, (24 << 8) | 1)
+    check(False, "an unreadable reason must not be guessed")
+except Stall:
+    check(True, "an unreadable LAST_RESULT raises instead of inventing a status")
+fw.corrupt_last = False
+
+print("P4. translate: split adapters")
+check(dv.get(OP.RTA_CONTROL, 1, 1) == b"\x01" and fw.actions[-1] == ("MEAS.RTA_START", 0), "RTA_CONTROL 1")
+try:
+    dv.get(OP.RTA_CONTROL, 1, 7)
+    check(False, "unlisted selector must STALL")
+except Stall:
+    check(True, "unlisted IN selector STALLs, as in 1.1.6")
+dv.set_f32(OP.LIMITER, -3.0, wvalue=(4 << 8) | 1)
+check(fw.stored("DYN.LIMITER_THRESHOLD", 4) == struct.pack("<f", -3.0), "LIMITER OUT index 1, output 4")
+check(dv.get_f32(OP.LIMITER, (4 << 8) | 1) == -3.0, "LIMITER IN index 1")
+dv.set_f32(OP.LIMITER, 1.0, wvalue=0xFF00)
+check(fw.stored("DYN.LIMITER_ENABLE", 0xFF) == struct.pack("<f", 1.0), "LIMITER 0xFF output reaches OUTPUT_ALL")
+check(dv.get(OP.LIMITER, 4, 0x0381) == bytes([0, 32, 16, 9]), "LIMITER status ignores the output byte")
+check(dv.get(OP.GET_CS_CAPS, 52, 0xFFFF) == bytes(range(52)) and len(dv.get(OP.GET_CS_CAPS, 12, 5)) == 12,
+      "GET_CS_CAPS 0xFFFF and noun")
+n0 = len(dv.swallowed)
+dv.set_f32(OP.SET_TUBE_PARAM, 2.0, wvalue=20)
+check(len(dv.swallowed) == n0 + 1, "unknown tube index on OUT is swallowed")
+dv.set_f32(OP.SET_TUBE_PARAM, 2.5, wvalue=0x103)
+check(dv.get_f32(OP.GET_TUBE_PARAM, 3) == 2.5, "tube index uses the low byte only")
+
+print("P5. translate: custom adapters")
+gs = lambda wv, n=4: dv.get(OP.GET_STATUS, n, wv)  # noqa: E731
+check(gs(0) == struct.pack("<HH", 100, 200), "GET_STATUS 0 peaks")
+check(gs(2) == struct.pack("<HBB", 500, 37, 12), "GET_STATUS 2 peak and CPU loads")
+check(gs(3) == struct.pack("<I", 11) and gs(21) == struct.pack("<I", 26), "PDM and S/PDIF counters")
+check(gs(11) == b"\x01\0\0\0" and gs(13) == struct.pack("<I", 307200000), "USB alt, clk_sys")
+check(gs(16) == struct.pack("<i", -512) and gs(33) == struct.pack("<i", -250), "signed fields sign-extend")
+check(gs(23) == b"\x02\0\0\0" and gs(29) == struct.pack("<I", 34), "INPUT.STATUS and PIPELINE_STATS")
+check(gs(24) == bytes(4) and gs(7) == bytes(4) and gs(50) == bytes(4), "absent DIAG, retired and unknown -> 0")
+check(len(gs(9, 64)) == 41 and gs(9, 10) == dv.pget("MEAS.LEVELS", length=64)[:10], "GET_STATUS 9 is MEAS.LEVELS")
+band = struct.pack("<BBHfff", 11, 0, 900, 50.0, 0.7, 25.0)
+fw.put("FILTER.BAND", band, (9 << 8) | 4)
+pkt = bytes([9, 4, 3, 1]) + struct.pack("<fff", 1000.0, 2.0, -3.0)
+dv.set(OP.SET_EQ_PARAM, pkt)
+got = fw.stored("FILTER.BAND", (9 << 8) | 4)
+check(got == bytes([3, 1]) + struct.pack("<H", 900) + pkt[4:], "16-byte SET_EQ_PARAM keeps the stored qp")
+dv.set(OP.SET_EQ_PARAM, pkt + struct.pack("<H", 1234))
+check(fw.stored("FILTER.BAND", (9 << 8) | 4)[2:4] == struct.pack("<H", 1234), "18-byte SET_EQ_PARAM sets qp")
+eq = lambda p: dv.get(OP.GET_EQ_PARAM, 4, (9 << 8) | (4 << 3) | p)  # noqa: E731
+check([eq(0), eq(1), eq(4), eq(5), eq(6)] == [b"\x03\0\0\0", struct.pack("<f", 1000.0), b"\x01\0\0\0",
+                                              struct.pack("<I", 1234), bytes(4)], "GET_EQ_PARAM params")
+try:
+    dv.get(OP.GET_EQ_PARAM, 4, (9 << 8) | (12 << 3))
+    check(False, "a band in the reserved gap must STALL")
+except Stall:
+    check(True, "GET_EQ_PARAM on a reserved band STALLs, as in 1.1.6")
+dv.set(OP.SET_MATRIX_ROUTE, bytes([1, 2, 1, 1]) + struct.pack("<f", -4.0))
+check(fw.stored("ROUTE.MATRIX_ROUTE", 0x0102) == bytes([1, 1, 0, 0]) + struct.pack("<f", -4.0),
+      "SET_MATRIX_ROUTE moves input and output to the address")
+check(dv.get(OP.GET_MATRIX_ROUTE, 8, 0x0102) == bytes([1, 2, 1, 1]) + struct.pack("<f", -4.0),
+      "GET_MATRIX_ROUTE rebuilds the 1.1.6 packet")
+check(dv.get(OP.GET_INPUT_RATE, 8) == struct.pack("<II", 48000, 96000), "GET_INPUT_RATE from two commands")
+check(dv.get(OP.PRESET_GET_STARTUP, 3) == bytes([1, 3, 2]), "PRESET_GET_STARTUP adds last-active")
+check(dv.get(OP.GET_CS_DISPLAY_CFG, 16) == bytes([16, 9, 0, 0]) + bytes(range(1, 13)), "GET_CS_DISPLAY_CFG")
+check(dv.get(OP.CLEAR_CLIPS, 4) == struct.pack("<I", 5) and fw.clips == 0, "CLEAR_CLIPS reads then clears")
+dv.set_f32(OP.SET_PREAMP, -2.0)
+check(all(fw.stored("ROUTE.PREAMP", ch) == struct.pack("<f", -2.0) for ch in range(8)),
+      "legacy SET_PREAMP fans out to all 8 inputs")
+check(dv.get_f32(OP.GET_PREAMP) == -2.0, "legacy GET_PREAMP reads input 0")
+check(dv.get(OP.SAVE_PARAMS, 1) == b"\x00" and fw.actions[-1] == ("STORE.PRESET_SAVE", 2),
+      "SAVE_PARAMS saves the active slot")
+check(dv.get(OP.GET_USB_ERROR_STATS, 24) == bytes(24) and dv.get(OP.RESET_USB_ERROR_STATS, 1) == b"\x01",
+      "retired USB error stats")
+check(LM.golden_transport(dv, "IN", OP.GET_OUTPUT_GAIN, 3, 4) == struct.pack("<f", -6.5)
+      and LM.golden_transport(dv, "OUT", OP.SET_OUTPUT_GAIN, 3, struct.pack("<f", 0.0)) == 4,
+      "golden_transport matches capture.py's TRANSPORT contract")
+check(fw.page0_hits == 0, f"translate mode sent nothing to page 0 ({fw.page0_hits})")
+kinds_hit = {"direct", "act_value", "act_addr", "act_packed", "split", "custom"}
+check(kinds_hit == {n["kind"] for r in LM.load_map()["opcodes"].values() for d in ("in", "out") if d in r
+                    for n in LM._walk(r[d])}, "every adapter kind in the map is exercised above")
+customs_hit = {"get_status", "get_eq_param", "set_eq_param", "set_matrix_route", "get_matrix_route",
+               "get_input_rate", "preset_get_startup", "cs_display_cfg", "clear_clips", "set_preamp_legacy",
+               "save_params", "usb_error_stats", "reset_usb_error_stats"}
+check(customs_hit == set(LM.CUSTOM), f"every custom function is exercised ({set(LM.CUSTOM) - customs_hit})")
+
+print("P6. legacy_map --check and paged_sys against the fake")
+errs, notes = LM.check()
+check(errs == [], f"legacy_map check clean ({errs[:3]})")
+from tools.dspi_test.framework import Check, Skip as _Skip
+from tools.dspi_test.tests import paged_sys as PS
+for name in [n for n in dir(PS) if callable(getattr(PS, n)) and getattr(getattr(PS, n), "__module__", "")
+             == PS.__name__ and not n.startswith("_")]:
+    fn = getattr(PS, name)
+    if fn.__code__.co_argcount != 3:
+        continue
+    c = Check()
+    try:
+        fn(dv, None, c)
+        check(not c.failures, f"paged_sys.{name} passes on the fake ({c.failures[:2]})")
+    except _Skip as s:
+        check(False, f"paged_sys.{name} skipped on the fake: {s}")
+fw2, dv2 = _paged_dev(paged=False)
+c = Check()
+try:
+    PS.protocol_info_fields(dv2, None, c)
+    check(False, "paged_sys must SKIP on firmware without the dispatcher")
+except _Skip:
+    check(True, "paged_sys SKIPs on firmware without the dispatcher")
+
 print("34. envelope alignment finds a burst at a frequency the reference lacks")
 if A.np is None:
     print("  (numpy missing: skipped)")

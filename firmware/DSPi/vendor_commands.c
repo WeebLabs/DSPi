@@ -12,6 +12,8 @@
  */
 
 #include "vendor_commands.h"
+#include "vc_core.h"
+#include "vc_internal.h"
 #include "usb_audio.h"
 #include "audio_input.h"
 #include "spdif_input.h"
@@ -92,8 +94,8 @@ static uint16_t _ext_resp_len;
 // invoking the SET/GET handlers (HOST_SET for USB, UART/I2C for external).
 static ParamSource _dispatch_src = PARAM_SRC_HOST_SET;
 
-// A USB control SET is between SETUP and DATA/ACK: the USB ISR may still be
-// writing vendor_rx_buf / bulk_param_buf, and vendor_last_* is live.
+// A USB control SET is between SETUP and DATA/ACK (vendor_rx_buf, bulk_param_buf
+// and vendor_last_* are live), or a paged GET is streaming the vc reply buffer.
 // External dispatch must wait it out (BUSY).  Stale after 100 ms in case the
 // host aborts the transfer mid-flight.
 static volatile bool usb_set_in_flight = false;
@@ -107,6 +109,16 @@ static bool usb_set_busy(void) {
     }
     return true;
 }
+
+// The paged front end (vendor/vc_usb.c) shares the receive buffer and this guard.
+uint8_t *vendor_usb_rx_buf(void) { return vendor_rx_buf; }
+void vendor_usb_busy_begin(void) {
+    usb_set_in_flight  = true;
+    usb_set_setup_time = time_us_32();
+}
+void vendor_usb_busy_end(void) { usb_set_in_flight = false; }
+bool vendor_usb_busy(void) { return usb_set_busy(); }
+_Static_assert(sizeof(vendor_rx_buf) == VC_USB_RX_MAX, "vc_usb.c sizes SETs by VC_USB_RX_MAX");
 
 // bulk_param_buf ownership.  The buffer is shared by all transports for both
 // 0xA0 collect-and-stream and 0xA1 receive-then-apply; exactly one owner at
@@ -357,235 +369,7 @@ uint16_t mck_decode(uint8_t raw)  { return (raw == 1) ? 256 : 128; }
 // integer dividers with GPOUT.  See audio_i2s_multi.c MCK section for the
 // reference table.
 
-// ----------------------------------------------------------------------------
-// PIN VALIDATION HELPERS (moved from usb_audio.c)
-// ----------------------------------------------------------------------------
-
-// Platform defaults for each pin output, in output_pins[] order (same values
-// as the initializer in usb_audio.c).  REQ_SET_OUTPUT_PIN maps the
-// PIN_RESET_TO_DEFAULT sentinel through this table.
-static const uint8_t default_output_pins[NUM_PIN_OUTPUTS] = {
-#if PICO_RP2350
-    PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
-    PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
-#else
-    PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_PDM_PIN
-#endif
-};
-
-bool is_valid_gpio_pin(uint8_t pin) {
-#ifdef DSPI_PLATFORM_PINS
-    return dspi_platform_pin_valid(DSPI_PIN_FN_ANY, pin);
-#else
-    // GPIO 16/17 are general-purpose again since the debug UART was removed;
-    // when the UART control interface claims them, is_pin_in_use() covers it.
-    if (pin >= 23 && pin <= 25) return false;   // Power/LED
-#if PICO_RP2350
-    return pin <= 29;
-#else
-    return pin <= 28;
-#endif
-#endif
-}
-
-// A pin's validity for one function. On the RP2040 and RP2350 this is is_valid_gpio_pin() itself;
-// a DSPI_PLATFORM_PINS build applies the platform's rule for that function (platform_pins.h).
-#ifdef DSPI_PLATFORM_PINS
-#define PIN_VALID_FOR(fn, pin) dspi_platform_pin_valid(fn, pin)
-#else
-#define PIN_VALID_FOR(fn, pin) is_valid_gpio_pin(pin)
-#endif
-
-// Pin claimed by a "fixed" peripheral other than MCK (outputs, SPDIF RX, ADAT,
-// DAC mute, control pins).  Excludes the I2S clocks and RX data pins, whose
-// use-dependent rules the callers below apply.
-static bool pin_used_by_fixed_peripheral_except_mck(uint8_t pin, uint8_t exclude_output) {
-    for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
-        if (i == exclude_output) continue;
-        if (output_pins[i] == pin) return true;
-    }
-#if PICO_RP2350
-    // ADAT data pin: claimed only while ADAT is config-enabled (mirrors MCK).
-    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
-    // ADAT input pin: claimed only while the input is enabled (mirrors above).
-    // Direction-agnostic; the TX-pin-sharing exception lives at the ADAT-input
-    // validation sites, not here.
-    if (adat_input_enabled && pin == adat_input_pin) return true;
-#endif
-    if (pin == spdif_rx_pin) return true;                     // SPDIF RX input 1 (always claimed)
-    // Optional SPDIF inputs: a pin is claimed only while that input is
-    // enabled; a disabled input's stored pin is invisible to conflict checks.
-    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++)
-        if (spdif_input_enabled(i) && pin == spdif_rx_pin_for_index(i)) return true;
-    if (dac_hw_mute_owns_pin(pin)) return true;               // DAC hardware-mute
-    if (uart_ctrl_owns_pin(pin)) return true;                 // UART control (if live)
-    if (i2c_ctrl_owns_pin(pin)) return true;                  // I2C control (if live)
-    if (control_surfaces_owns_pin(pin)) return true;         // Control Surfaces (live bindings)
-    return false;
-}
-
-// The full fixed-peripheral set: the above plus an enabled MCK.
-static bool pin_used_by_fixed_peripheral(uint8_t pin, uint8_t exclude_output) {
-    if (i2s_mck_enabled && pin == i2s_mck_pin) return true;   // MCK (if enabled)
-    return pin_used_by_fixed_peripheral_except_mck(pin, exclude_output);
-}
-
-bool is_pin_in_use(uint8_t pin, uint8_t exclude) {
-    if (pin_used_by_fixed_peripheral(pin, exclude)) return true;
-    // I2S BCK/LRCLK: reserved only while the clocks actually run (any I2S output,
-    // or I2S is the active input).  In SPLIT clock-pin mode this claims both the
-    // master and the slave pair; the dormant pair is one deferred mode flip away
-    // from being driven/read.  A general caller (e.g. assigning a pin output) may
-    // legitimately use these GPIOs when no I2S path is live.
-    bool i2s_clocks_in_use = (active_input_source == INPUT_SOURCE_I2S);
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_I2S) {
-            i2s_clocks_in_use = true;
-            break;  // All I2S slots share the same BCK/LRCLK
-        }
-    }
-    if (i2s_clocks_in_use && i2s_clock_pin_claimed(pin)) return true;
-    // I2S RX data pins for every active (by count) stereo pair.
-    for (int p = 0; p < i2s_input_channels / 2 && p < I2S_RX_MAX_PAIRS; p++)
-        if (pin == i2s_rx_pin[p]) return true;
-    return false;
-}
-
-// True if `pin` is the data pin of one of the first `n_pairs` I2S RX pairs other
-// than `exclude_pair`.  Inactive pairs' parked pins reserve nothing, so every
-// path that raises the active count must re-check with the new count.
-static bool i2s_rx_pair_pin_taken(uint8_t pin, uint8_t exclude_pair, uint8_t n_pairs) {
-    for (int q = 0; q < n_pairs && q < I2S_RX_MAX_PAIRS; q++)
-        if (q != exclude_pair && i2s_rx_pin[q] == pin)
-            return true;
-    return false;
-}
-
-// PIN_CONFIG_* status for `pin` on I2S RX `pair` when `n_pairs` pairs are active.
-// The BCK/LRCLK clocks count as ALWAYS claimed, so a clash cannot first surface
-// on the switch INTO I2S.
-static uint8_t check_i2s_rx_pin(uint8_t pin, uint8_t pair, uint8_t n_pairs) {
-    if (!PIN_VALID_FOR(DSPI_PIN_FN_I2S_RX, pin))              return PIN_CONFIG_INVALID_PIN;
-    if (i2s_clock_pin_claimed(pin))                           return PIN_CONFIG_PIN_IN_USE;
-    if (pin_used_by_fixed_peripheral(pin, 0xFF))             return PIN_CONFIG_PIN_IN_USE;
-    if (i2s_rx_pair_pin_taken(pin, pair, n_pairs))           return PIN_CONFIG_PIN_IN_USE;
-    return PIN_CONFIG_SUCCESS;
-}
-
-// True if optional SPDIF input `idx` (1..2) could be enabled right now: its
-// configured GPIO is valid and not claimed by any other function.  While idx is
-// disabled its own pin is not reserved by pin_used_by_fixed_peripheral(), so
-// there is no self-conflict.  The bulk/preset restore paths and the enable
-// command (REQ_SET_SPDIF_INPUT_ENABLE) share this single check.
-bool spdif_input_enable_acceptable(uint8_t idx) {
-    if (idx == 0 || idx >= SPDIF_RX_NUM_INPUTS) return false;
-    uint8_t pin = spdif_rx_pin_for_index(idx);
-    return PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, pin) && !is_pin_in_use(pin, 0xFF);
-}
-
-// Validate a proposed I2S RX data-pin SET (the first `n_pairs` entries of
-// `pins[]` are the pairs that will be active) against the given effective
-// `bck_pin`: each active pin must be a valid GPIO, not a clock pin (BCK/LRCLK),
-// not used by a fixed peripheral, and mutually distinct.  The bulk/preset
-// restore paths use this to reject an inconsistent pushed/stored I2S config as a
-// unit before it can reach i2s_input_start().  `bck_pin` is the master clock
-// base to check against.  `bck2_pin` is the secondary (slave-pair)
-// clock base when SPLIT clock-pin mode is in force, or 0xFF for none; data
-// pins must avoid both pairs.
-bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
-                               uint8_t bck_pin, uint8_t bck2_pin) {
-    if (n_pairs > I2S_RX_MAX_PAIRS) return false;
-    for (uint8_t p = 0; p < n_pairs; p++) {
-        uint8_t pin = pins[p];
-        if (!PIN_VALID_FOR(DSPI_PIN_FN_I2S_RX, pin)) return false;
-        if (pin == bck_pin || pin == (uint8_t)(bck_pin + 1)) return false;
-        if (bck2_pin != 0xFF &&
-            (pin == bck2_pin || pin == (uint8_t)(bck2_pin + 1))) return false;
-        if (pin_used_by_fixed_peripheral(pin, 0xFF)) return false;
-        for (uint8_t q = 0; q < p; q++)
-            if (pins[q] == pin) return false;   // mutual distinctness
-    }
-    return true;
-}
-
-// True if `bck_pin` is acceptable as the I2S clock base (LRCLK = bck_pin + 1):
-// both GPIOs valid, and neither collides with a fixed peripheral (a pin output,
-// MCK, SPDIF RX, or DAC mute).  BCK/LRCLK are push-pull clock OUTPUTS, so a
-// collision means two drivers contending on one pad (worse than the input-only
-// RX pins) and an invalid GPIO can fault pio_gpio_init() — the bulk/preset
-// restore paths use this to reject a pushed/stored BCK they would otherwise
-// install raw.  The BCK-vs-I2S-RX-data-pin direction is intentionally NOT
-// re-checked here: it is covered by i2s_rx_pin_set_acceptable() (the RX set is
-// validated against the installed BCK), and checking it here against the
-// not-yet-restored RX pins would spuriously reject a valid stored config.  No
-// "reject while an I2S output is active" guard (cf. REQ_SET_I2S_BCK_PIN): a
-// restore installs the output config and the clock pair together as one set.
-#ifdef DSPI_PLATFORM_PINS
-static bool i2s_bck_pair_acceptable(uint8_t fn, uint8_t bck_pin) {
-#else
-bool i2s_bck_pin_acceptable(uint8_t bck_pin) {
-#endif
-    uint8_t lrck = (uint8_t)(bck_pin + 1);
-    if (!PIN_VALID_FOR(fn, bck_pin) || !PIN_VALID_FOR(fn, lrck)) return false;
-    if (pin_used_by_fixed_peripheral(bck_pin, 0xFF)) return false;
-    if (pin_used_by_fixed_peripheral(lrck, 0xFF)) return false;
-    return true;
-}
-#ifdef DSPI_PLATFORM_PINS
-bool i2s_bck_pin_acceptable(uint8_t bck_pin) {
-    return i2s_bck_pair_acceptable(DSPI_PIN_FN_I2S_CLK, bck_pin);
-}
-bool i2s_bck_slave_pin_acceptable(uint8_t bck_pin) {
-    return i2s_bck_pair_acceptable(DSPI_PIN_FN_I2S_CLK_SLAVE, bck_pin);
-}
-#endif
-
-// True if an enabled MCK may drive `pin` in a restore: valid and owned by no
-// other fixed peripheral.  Ignores MCK's own claim so a kept pin passes.  The
-// later BCK check covers the clock pair against MCK; RX data pins check MCK.
-bool i2s_mck_pin_acceptable(uint8_t pin) {
-    return PIN_VALID_FOR(DSPI_PIN_FN_MCK, pin) && !pin_used_by_fixed_peripheral_except_mck(pin, 0xFF);
-}
-
-#if PICO_RP2350
-// True if `pin` is acceptable as the ADAT data GPIO for the bulk/preset
-// restore paths.  ADAT is a push-pull output driver, so a collision with any
-// owned pin is driver contention; ADAT's own current claim never blocks it.
-bool adat_pin_acceptable(uint8_t pin) {
-    if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_OUT, pin)) return false;
-    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
-    return !is_pin_in_use(pin, 0xFF);
-}
-
-// True if `pin` is acceptable as the ADAT input (RX) GPIO for the bulk/preset
-// restore paths.  The RX only listens (input-enable, no funcsel), so sharing
-// the ADAT TX pin is the supported zero-hardware loopback self-test; any other
-// owned pin is a conflict.  The share applies only while ADAT output is enabled:
-// a disabled output's stored pin is free for anything else to take.
-bool adat_input_pin_acceptable(uint8_t pin) {
-    if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_IN, pin)) return false;
-    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
-#ifdef DSPI_PLATFORM_PINS
-    // A platform build's ADAT input may share S/PDIF input 1's pin, its one receiver input; DSPi runs
-    // one input source at a time.
-    if (pin == spdif_rx_pin) return true;
-#endif
-    return !is_pin_in_use(pin, 0xFF);
-}
-#endif
-
-// PIN_CONFIG_* status for claiming `pin` as a UART/I2C control-interface
-// GPIO.  Like check_i2s_rx_pin, the I2S BCK/LRCLK pair is treated as ALWAYS
-// claimed: control pins are long-lived, so they must avoid the clock pair
-// even while no I2S path is currently running (otherwise the clash surfaces
-// only when an output switches to I2S or the input switches to I2S and the
-// clocks stomp the live control link).
-uint8_t ctrl_iface_check_pin(uint8_t pin) {
-    if (!is_valid_gpio_pin(pin))                              return PIN_CONFIG_INVALID_PIN;
-    if (i2s_clock_pin_claimed(pin))                           return PIN_CONFIG_PIN_IN_USE;
-    if (is_pin_in_use(pin, 0xFF))                             return PIN_CONFIG_PIN_IN_USE;
-    return PIN_CONFIG_SUCCESS;
-}
+// Pin validation helpers live in vendor/vc_pins.c.
 
 // ----------------------------------------------------------------------------
 // VENDOR SET HANDLER (moved from usb_audio.c)
@@ -4544,6 +4328,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
     _vendor_rhport       = rhport;
     _vendor_current_req  = req;
     _dispatch_src        = PARAM_SRC_HOST_SET;
+    uint8_t page = vc_page_of(req->bmRequestType, req->wIndex);
 
     if (stage == CONTROL_STAGE_SETUP) {
         // EP0 transfers are strictly serialized: a new SETUP means any prior
@@ -4552,7 +4337,7 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
         // sessions (0xA2/0xA3) intentionally span SETUPs and keep the lock;
         // any other vendor request tears an open session down.
         if (bulk_buf_owner == BULK_OWNER_USB &&
-            !usb_chunk_session_continues(req->bRequest)) {
+            !(page == 0 && usb_chunk_session_continues(req->bRequest))) {
             bulk_buf_owner = BULK_OWNER_NONE;
             usb_chunk_sessions_close();
         }
@@ -4599,8 +4384,18 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
             if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
                 return tud_control_xfer(rhport, req, echo, sizeof(echo));
             }
+            if (page != 0) {
+                // ACK paged OUT echoes here; the paged front end would STALL them.
+                if (req->wLength == 0) return tud_control_status(rhport, req);
+                if (req->wLength > sizeof(vendor_rx_buf)) return false;
+                vendor_usb_busy_begin();
+                return tud_control_xfer(rhport, req, vendor_rx_buf, req->wLength);
+            }
         }
 #endif
+
+        // Paged protocol. Page 0 below is the legacy 1.1.6 opcode space.
+        if (page != 0) return vc_usb_control_xfer(rhport, stage, req);
 
         if (req->bmRequestType_bit.direction == TUSB_DIR_IN) {
             // Bulk GET streams from bulk_param_buf across many EP0 packets
@@ -4691,6 +4486,16 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
         return false;
     }
 
+    if (page != 0) {
+#ifdef DSPI_WINDEX_ECHO
+        if (req->bRequest == WINDEX_ECHO_REQ) {
+            vendor_usb_busy_end();   // DATA or ACK of an echo handled at SETUP
+            return true;
+        }
+#endif
+        return vc_usb_control_xfer(rhport, stage, req);
+    }
+
     if (stage == CONTROL_STAGE_DATA) {
         // SET data received — run the legacy command dispatcher.
         if (req->bmRequestType_bit.direction == TUSB_DIR_OUT) {
@@ -4760,6 +4565,19 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
                                        const uint8_t **resp_data, uint16_t *resp_len) {
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;  // USB uses the TinyUSB path
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
+
+    uint8_t page = vc_page_of(0xC1, wIndex);
+    if (page != 0) {
+        const uint8_t *out;
+        uint16_t out_len;
+        VcResult r = vc_dispatch(src, true, page, bRequest, wValue, NULL, 0, &out, &out_len);
+        if (r != VC_OK) return vc_to_ctrl_dispatch(r);
+        if (wLength && out_len > wLength) out_len = wLength;
+        *resp_data = out;
+        *resp_len  = out_len;
+        return CTRL_DISPATCH_OK;
+    }
+
     if (ctrl_cmd_usb_only(bRequest)) return CTRL_DISPATCH_BLOCKED;
 
     bool bulk = (bRequest == REQ_GET_ALL_PARAMS);
@@ -4798,9 +4616,15 @@ CtrlDispatchResult vendor_dispatch_get(CtrlSource src, uint8_t bRequest,
 CtrlDispatchResult vendor_dispatch_set(CtrlSource src, uint8_t bRequest,
                                        uint16_t wValue, uint16_t wIndex,
                                        const uint8_t *payload, uint16_t wLength) {
-    (void)wIndex;   // SET handlers carry sub-params in wValue only (matches USB)
     if (src == CTRL_SOURCE_USB) return CTRL_DISPATCH_ERROR;
     if (usb_set_busy())         return CTRL_DISPATCH_BUSY;
+
+    uint8_t page = vc_page_of(0x41, wIndex);
+    if (page != 0) {
+        return vc_to_ctrl_dispatch(vc_dispatch(src, false, page, bRequest, wValue,
+                                               payload, wLength, NULL, NULL));
+    }
+
     if (ctrl_cmd_usb_only(bRequest)) return CTRL_DISPATCH_BLOCKED;
 
     if (bRequest == REQ_SET_ALL_PARAMS) {

@@ -83,3 +83,19 @@ later phase replays this script through the paged translation layer.
 The siggen config cannot be put back to its boot value (all zero), because `SIGGEN_SET_CONFIG`
 rejects it. After the first run following a boot it is left at a 1 kHz, -20 dBFS sine, staged and
 never started.
+
+## When the reference goes stale
+
+The capture includes device-global settings that the script does not write, such as
+the UART config and the stored Control Surfaces bindings. If those are changed on
+the bench device (for example from DSPi Console), `compare` reports them as
+differences that have nothing to do with the firmware under test.
+
+Recapture on real 1.1.6 firmware, then compare the firmware under test:
+
+1. Build the reference from the Phase 0 commit (7571871) into its own build
+   directory and flash it.
+2. Run `capture --out tools/dspi_test/golden/rp2350_1.1.6.json --allow-flash --allow-reconfig`.
+3. Flash the firmware under test and run `compare`.
+
+The reference was last recaptured this way on 2026-11-16.

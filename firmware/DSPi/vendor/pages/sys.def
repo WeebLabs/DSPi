@@ -1,0 +1,25 @@
+// Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.3.
+VC_PAGE(SYS, 0x01, 1, "Discovery, identity, device name, last result, bootloader, system and stream telemetry")
+
+VC_CMD(0x10, PROTOCOL_INFO, sys_protocol_info_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "Protocol magic, version, page count and transfer limits")
+VC_CMD(0x11, PAGE_LIST, sys_page_list_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, 0, 0, "Page number and revision of every implemented page")
+VC_CMD(0x12, PAGE_COMMANDS, sys_page_commands_get, VC_NONE,
+       PAGE, 64, 0, 0, 0, 0, "GET then SET bitmaps of the commands a page implements")
+VC_CMD(0x13, COMMAND_INFO, sys_command_info_get, VC_NONE,
+       PAGE_CMD, 8, 0, 0, 0, 0, "Flags, sizes and address kind of one command")
+VC_CMD(0x14, LAST_RESULT, sys_last_result_get, VC_NONE,
+       NONE, 8, 0, 0, 0, 0, "Result of the last request on this transport")
+
+VC_CMD(0x20, PLATFORM, sys_platform_get, VC_NONE,
+       NONE, 7, 0, 0, 0, 0, "Platform and firmware version, same bytes as legacy GET_PLATFORM")
+VC_CMD(0x21, SERIAL, sys_serial_get, VC_NONE,
+       NONE, 16, 0, 0, 0, 0, "USB serial number string")
+VC_CMD(0x22, BUILD_INFO, sys_build_info_get, VC_NONE,
+       NONE, 64, 0, 0, 0, 0, "Git describe and build date")
+VC_CMD(0x23, CORE1_MODE, sys_core1_mode_get, VC_NONE,
+       NONE, 1, 0, 0, 0, 0, "Current core 1 mode")
+
+VC_CMD(0x30, ENTER_BOOTLOADER, VC_NONE, sys_enter_bootloader_set,
+       NONE, 0, 0, 0, 0, 0, "Reboot into the USB bootloader after the status stage")

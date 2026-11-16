@@ -1,0 +1,12 @@
+VC_PAGE(ROUTE, 0x05, 2, "Matrix, outputs, volume")
+
+VC_CMD(0x10, MATRIX_ROUTE, route_matrix_get, route_matrix_set, IN_OUT, 8, 8, 8, VC_F_DEFERRED, 0, "u8 enabled, u8 invert, u16 reserved, f32 gain dB")
+// Output family: one handler pair, field selected by ARG.
+VC_CMD(0x20, OUTPUT_ENABLE, route_out_field_get, route_out_field_set, OUTPUT_ALL, 1, 1, 1, 0, ROUTE_FIELD_ENABLE, "Output enable, 0xFF = all outputs on SET")
+VC_CMD(0x21, OUTPUT_GAIN,   route_out_field_get, route_out_field_set, OUTPUT_ALL, 4, 4, 4, 0, ROUTE_FIELD_GAIN,   "Output gain dB, f32")
+VC_CMD(0x22, OUTPUT_MUTE,   route_out_field_get, route_out_field_set, OUTPUT_ALL, 1, 1, 1, 0, ROUTE_FIELD_MUTE,   "Output mute | 0 or 1")
+#if PICO_RP2350
+VC_CMD(0x30, UPMIX_ENABLE,  route_upmix_get,     route_upmix_set,     NONE, 1, 1, 1, 0, 3, "Stereo upmixer enable")
+VC_RESERVED(0x31, "upmixer tuning")
+#endif
+VC_CMD(0x50, MASTER_VOLUME, route_master_get,    route_master_set,    NONE, 4, 4, 4, 0, 0x00, "Master volume ceiling dB, f32")

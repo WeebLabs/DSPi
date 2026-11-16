@@ -1,0 +1,1 @@
+VC_PAGE(CLOCK, 0x0C, 1, "I2S clock pins and modes, MCK")

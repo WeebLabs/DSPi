@@ -110,6 +110,27 @@ add_executable(DSPi
     usb_audio.h
     vendor_commands.c
     vendor_commands.h
+    vendor/vc_core.c
+    vendor/vc_core.h
+    vendor/vc_ids.h
+    vendor/vc_internal.h
+    vendor/vc_usb.c
+    vendor/vc_bulk.c
+    vendor/vc_pins.c
+    vendor/vc_pins.h
+    vendor/vc_page_sys.c
+    vendor/vc_page_store.c
+    vendor/vc_page_input.c
+    vendor/vc_page_output.c
+    vendor/vc_page_route.c
+    vendor/vc_page_filter.c
+    vendor/vc_page_dyn.c
+    vendor/vc_page_fx.c
+    vendor/vc_page_meas.c
+    vendor/vc_page_cs.c
+    vendor/vc_page_xport.c
+    vendor/vc_page_clock.c
+    vendor/vc_page_diag.c
     usb_descriptors.c
     usb_descriptors.h
     usb_feedback_controller.c
@@ -191,6 +212,7 @@ pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/adat_input.pio)
 
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
     ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 

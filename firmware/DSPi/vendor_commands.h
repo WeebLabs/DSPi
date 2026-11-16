@@ -50,6 +50,9 @@ typedef enum {
     CTRL_DISPATCH_BUSY        = 4,  // USB control SET in flight; retry next poll
 } CtrlDispatchResult;
 
+// The page is the wIndex high byte (vc_page_of).  Page 0 runs the legacy
+// opcode switches; any other page goes to vc_dispatch() in vendor/vc_core.c.
+
 // Dispatch a GET from an external transport.  wLength caps the response size
 // (0 = uncapped).  On CTRL_DISPATCH_OK, *resp_data/*resp_len point at the
 // response; the storage is static and stays valid until the next dispatch
@@ -98,16 +101,8 @@ uint8_t ctrl_status_from_dispatch(CtrlDispatchResult r);
 uint16_t vreg_voltage_to_mv(enum vreg_voltage voltage);
 int16_t read_temperature_cdeg(void);
 
-// Pin validation helpers
-bool is_valid_gpio_pin(uint8_t pin);
-bool is_pin_in_use(uint8_t pin, uint8_t exclude);
-// Full acceptability check for a UART/I2C control-interface GPIO (validity,
-// I2S clock pair always claimed, live peripherals).  Returns PIN_CONFIG_*.
-uint8_t ctrl_iface_check_pin(uint8_t pin);
-// adat_pin_acceptable() is declared in adat_output.h (lightweight, so the
-// restore paths can call it without pulling TinyUSB in) and defined here.
-// i2s_rx_pin_set_acceptable() is declared in audio_input.h (lightweight, so the
-// restore paths can call it without pulling TinyUSB in) and defined here.
+// Pin validation helpers (vendor/vc_pins.c)
+#include "vc_pins.h"
 
 // MCK encode/decode for wire and flash persistence
 uint8_t  mck_encode(uint16_t val);

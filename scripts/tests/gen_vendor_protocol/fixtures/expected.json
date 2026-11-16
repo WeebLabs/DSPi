@@ -1,0 +1,38 @@
+{
+  "protocol": {"major": 1, "minor": 0},
+  "pages": [
+    {"page": 1, "mnemonic": "SYS", "revision": 1, "doc": "System, discovery and identity",
+     "commands": [
+       {"cmd": 16, "name": "PROTOCOL_INFO", "id": 272, "get": true, "set": false, "addr": "NONE", "get_len": 16, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": null, "doc": "Protocol version, page count and size limits"},
+       {"cmd": 17, "name": "PAGE_LIST", "id": 273, "get": true, "set": false, "addr": "NONE", "get_len": "var", "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": null, "doc": "2 bytes per implemented page: {page, revision}"},
+       {"cmd": 18, "name": "PAGE_COMMANDS", "id": 274, "get": true, "set": false, "addr": "PAGE", "get_len": 64, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": null, "doc": "GET bitmap, then SET bitmap, 256 bits each"},
+       {"cmd": 19, "name": "COMMAND_INFO", "id": 275, "get": true, "set": false, "addr": "PAGE_CMD", "get_len": 8, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": null, "doc": "Flags, sizes, address kind"},
+       {"cmd": 32, "name": "PLATFORM", "id": 288, "get": true, "set": false, "addr": "NONE", "get_len": 7, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": null, "doc": "Unchanged 1.1.6 GET_PLATFORM layout"},
+       {"cmd": 36, "name": "DEVICE_NAME", "id": 292, "get": true, "set": true, "addr": "NONE", "get_len": 32, "set_min": 1, "set_max": 32, "flags": ["DEFERRED", "FLASH"], "arg": "0", "build": null, "doc": "Device name, stored in flash, 1-32 bytes"},
+       {"cmd": 48, "name": "ENTER_BOOTLOADER", "id": 304, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 0, "set_max": 0, "flags": ["USB_ONLY"], "arg": "0", "build": null, "doc": "Reboot to the bootloader after the status stage"},
+       {"cmd": 96, "name": "CLOCK_DIAG", "id": 352, "get": true, "set": false, "addr": "NONE", "get_len": 48, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_CLOCK_DIAG", "doc": "Clock diagnostics, see http://example.invalid/a,b"}
+     ],
+     "reserved": [
+       {"cmd": 31, "note": "future: protocol-level discovery"}
+     ]},
+    {"page": 2, "mnemonic": "STORE", "revision": 1, "doc": "Presets and bulk parameters",
+     "commands": [
+       {"cmd": 16, "name": "PRESET_SAVE", "id": 528, "get": false, "set": true, "addr": "PRESET", "get_len": null, "set_min": 0, "set_max": 0, "flags": ["DEFERRED", "FLASH"], "arg": "0", "build": null, "doc": "Save live state to a preset slot"},
+       {"cmd": 64, "name": "ALL_PARAMS", "id": 576, "get": true, "set": true, "addr": "NONE", "get_len": 6136, "set_min": 0, "set_max": 0, "flags": ["USB_ONLY", "BULK"], "arg": "0", "build": null, "doc": "WireBulkParams, bulk buffer"},
+       {"cmd": 65, "name": "ALL_PARAMS_CHUNK", "id": 577, "get": true, "set": true, "addr": "OFFSET", "get_len": "var", "set_min": 1, "set_max": 64, "flags": ["USB_ONLY"], "arg": "0", "build": null, "doc": "Chunked access to the bulk buffer"}
+     ],
+     "reserved": []},
+    {"page": 5, "mnemonic": "ROUTE", "revision": 2, "doc": "Matrix, outputs, volume",
+     "commands": [
+       {"cmd": 16, "name": "MATRIX_ROUTE", "id": 1296, "get": true, "set": true, "addr": "IN_OUT", "get_len": 8, "set_min": 8, "set_max": 8, "flags": ["DEFERRED"], "arg": "0", "build": null, "doc": "u8 enabled, u8 invert, u16 reserved, f32 gain dB"},
+       {"cmd": 32, "name": "OUTPUT_ENABLE", "id": 1312, "get": true, "set": true, "addr": "OUTPUT_ALL", "get_len": 1, "set_min": 1, "set_max": 1, "flags": [], "arg": "ROUTE_FIELD_ENABLE", "build": null, "doc": "Output enable, 0xFF = all outputs on SET"},
+       {"cmd": 33, "name": "OUTPUT_GAIN", "id": 1313, "get": true, "set": true, "addr": "OUTPUT_ALL", "get_len": 4, "set_min": 4, "set_max": 4, "flags": [], "arg": "ROUTE_FIELD_GAIN", "build": null, "doc": "Output gain dB, f32"},
+       {"cmd": 34, "name": "OUTPUT_MUTE", "id": 1314, "get": true, "set": true, "addr": "OUTPUT_ALL", "get_len": 1, "set_min": 1, "set_max": 1, "flags": [], "arg": "ROUTE_FIELD_MUTE", "build": null, "doc": "Output mute | 0 or 1"},
+       {"cmd": 48, "name": "UPMIX_ENABLE", "id": 1328, "get": true, "set": true, "addr": "NONE", "get_len": 1, "set_min": 1, "set_max": 1, "flags": [], "arg": "3", "build": "PICO_RP2350", "doc": "Stereo upmixer enable"},
+       {"cmd": 80, "name": "MASTER_VOLUME", "id": 1360, "get": true, "set": true, "addr": "NONE", "get_len": 4, "set_min": 4, "set_max": 4, "flags": [], "arg": "0", "build": null, "doc": "Master volume ceiling dB, f32"}
+     ],
+     "reserved": [
+       {"cmd": 49, "note": "upmixer tuning"}
+     ]}
+  ]
+}

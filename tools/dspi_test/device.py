@@ -15,16 +15,22 @@ in tools/dspi_poke/dspi_poke.py (same VID/PID, same bmRequestType bytes) but add
     failed assertion.
   * `OP`: the canonical opcode map, parsed from firmware/DSPi/config.h so the
     suite never drifts from the firmware's `#define REQ_* 0xNN` table.
+  * Paged commands (`pget`/`pset`, by `PAGE.NAME` or numeric ID) and a protocol
+    mode: "old" sends legacy opcodes to page 0, "translate" routes them through
+    legacy_map.py.  Select with DSPI_TEST_PROTOCOL=old|translate or `protocol=`.
 
 Control-plane only: no audio streaming, no isochronous endpoints.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import struct
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -42,6 +48,23 @@ VENDOR_IFACE = 2
 BM_VENDOR_IN = 0xC1   # device -> host (vendor | interface)
 BM_VENDOR_OUT = 0x41  # host   -> device
 
+SYS_PAGE = 0x01
+SYS_PROTOCOL_INFO = 0x0110
+SYS_LAST_RESULT = 0x0114
+PROTOCOL_MAGIC = b"DSPi"
+
+VC_RESULTS = {
+    0x00: "VC_OK", 0x10: "VC_ERR_UNKNOWN", 0x11: "VC_ERR_DIRECTION", 0x12: "VC_ERR_LENGTH",
+    0x13: "VC_ERR_ADDRESS", 0x14: "VC_ERR_VALUE", 0x15: "VC_ERR_UNSUPPORTED", 0x16: "VC_ERR_BLOCKED",
+    0x17: "VC_ERR_BUSY", 0x18: "VC_ERR_STATE", 0x19: "VC_ERR_PIN_INVALID", 0x1A: "VC_ERR_PIN_IN_USE",
+}
+VC_CODES = {v: k for k, v in VC_RESULTS.items()}
+
+
+def paged_windex(page: int) -> int:
+    """The one place the page carrier is defined (plan 11.1 may move it off wIndex)."""
+    return ((page & 0xFF) << 8) | VENDOR_IFACE
+
 
 # --- Exceptions -------------------------------------------------------------
 
@@ -55,6 +78,18 @@ class Stall(Exception):
         super().__init__(f"STALL on {direction} 0x{opcode:02X}: {message}")
 
 
+class PagedStall(Stall):
+    """A paged request STALLed. `result` is the VC_* code from SYS.LAST_RESULT, None if unreadable."""
+
+    def __init__(self, cmd_id, direction, addr, errno, message, result=None):
+        self.cmd_id = cmd_id
+        self.addr = addr
+        self.result = result
+        self.result_name = VC_RESULTS.get(result, f"0x{result:02X}") if result is not None else None
+        why = f" [{self.result_name}]" if self.result_name else ""
+        super().__init__(cmd_id, direction, errno, f"addr 0x{addr:04X}{why}: {message}")
+
+
 class Disconnected(Exception):
     """The device vanished from the bus (crash / re-enumeration / unplug)."""
 
@@ -63,10 +98,13 @@ class Timeout(Exception):
     """A transfer kept timing out even after retries (device wedged, not a stall)."""
 
 
-# --- Opcode table (parsed from config.h, single source of truth) ------------
+class ProtocolError(Exception):
+    """The device does not speak the paged protocol (SYS.PROTOCOL_INFO STALLed or lacked "DSPi")."""
 
-def _find_config_h() -> Path | None:
-    rel = Path("firmware") / "DSPi" / "config.h"
+
+# --- Repo files -------------------------------------------------------------
+
+def _find_repo_file(rel: Path) -> Path | None:
     for start in (Path(__file__).resolve().parent, Path.cwd().resolve()):
         for parent in (start, *start.parents):
             cand = parent / rel
@@ -74,6 +112,16 @@ def _find_config_h() -> Path | None:
                 return cand
     return None
 
+
+def _find_config_h() -> Path | None:
+    return _find_repo_file(Path("firmware") / "DSPi" / "config.h")
+
+
+REGISTRY_REL = Path("Documentation") / "protocol" / "dspi_commands.json"
+LEGACY_MAP_REL = Path("Documentation") / "protocol" / "legacy_map.json"
+
+
+# --- Opcode table (parsed from config.h, single source of truth) ------------
 
 def load_opcodes(config_h: Path | None = None) -> dict[str, int]:
     """Parse `#define REQ_FOO 0xNN` lines into {SHORTNAME: opcode}.
@@ -94,7 +142,16 @@ def load_opcodes(config_h: Path | None = None) -> dict[str, int]:
     return out
 
 
-_OPCODES = load_opcodes()
+def load_legacy_opcodes() -> dict[str, int]:
+    """The frozen 1.1.6 table, used once the flip removes REQ_* from config.h."""
+    path = Path(__file__).resolve().parent / "golden" / "legacy_opcodes.json"
+    try:
+        return {k.upper(): int(v) for k, v in json.loads(path.read_text())["opcodes"].items()}
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+_OPCODES = load_opcodes() or load_legacy_opcodes()
 # Attribute access: OP.GET_PLATFORM == 0x7F
 OP = SimpleNamespace(**_OPCODES)
 # Reverse map for labelling in reports/errors.
@@ -105,16 +162,123 @@ def opcode_label(opcode: int) -> str:
     return OPCODE_NAME.get(opcode, f"0x{opcode:02X}")
 
 
+# --- Paged command metadata -------------------------------------------------
+
+@dataclass(frozen=True)
+class CommandInfo:
+    page: int
+    cmd: int
+    name: str            # PAGE.NAME
+    has_get: bool
+    has_set: bool
+    addr: str            # contract ADDR_KIND token, "?" when unknown
+    get_len: object      # int, "var" or None
+    source: str          # "registry", "legacy_map" or "numeric"
+
+    @property
+    def id(self) -> int:
+        return (self.page << 8) | self.cmd
+
+
+_REGISTRY_CACHE: dict = {}
+
+
+def load_registry(path=None) -> dict[str, CommandInfo]:
+    """{PAGE.NAME: CommandInfo} from dspi_commands.json; {} when the file is absent or unreadable."""
+    if isinstance(path, dict):
+        return _registry_from_json(path)
+    key = str(path) if path else "default"
+    if key not in _REGISTRY_CACHE:
+        p = Path(path) if path else _find_repo_file(REGISTRY_REL)
+        try:
+            _REGISTRY_CACHE[key] = _registry_from_json(json.loads(p.read_text())) if p else {}
+        except (OSError, ValueError, KeyError, TypeError):
+            _REGISTRY_CACHE[key] = {}
+    return _REGISTRY_CACHE[key]
+
+
+def _registry_from_json(doc: dict) -> dict[str, CommandInfo]:
+    out = {}
+    for pg in doc.get("pages", []):
+        for c in pg.get("commands", []):
+            name = f"{pg['mnemonic']}.{c['name']}"
+            out[name] = CommandInfo(pg["page"], c["cmd"], name, bool(c.get("get")), bool(c.get("set")),
+                                    c.get("addr", "?"), c.get("get_len"), "registry")
+    return out
+
+
+_CATALOG_CACHE: dict = {}
+
+
+def load_catalog() -> dict[str, CommandInfo]:
+    """The plan section 5 numbering kept in legacy_map.json, the fallback for names."""
+    if "c" not in _CATALOG_CACHE:
+        p = _find_repo_file(LEGACY_MAP_REL)
+        out = {}
+        try:
+            doc = json.loads(p.read_text()) if p else {}
+            pages = doc.get("pages", {})
+            for name, c in doc.get("commands", {}).items():
+                out[name] = CommandInfo(pages[c["page"]], c["cmd"], name, "G" in c["dir"], "S" in c["dir"],
+                                        c.get("addr", "?"), c.get("get_len"), "legacy_map")
+        except (OSError, ValueError, KeyError, TypeError):
+            out = {}
+        _CATALOG_CACHE["c"] = out
+    return _CATALOG_CACHE["c"]
+
+
+def resolve_command(cmd, registry=None) -> CommandInfo:
+    """Numeric IDs always resolve. Names try the registry first, then the legacy_map catalog."""
+    if isinstance(cmd, CommandInfo):
+        return cmd
+    if isinstance(cmd, int):
+        if not 0 <= cmd <= 0xFFFF:
+            raise ValueError(f"command ID out of range: {cmd:#x}")
+        for table in (load_registry(registry), load_catalog()):
+            for info in table.values():
+                if info.id == cmd:
+                    return info
+        return CommandInfo(cmd >> 8, cmd & 0xFF, f"0x{cmd:04X}", True, True, "?", None, "numeric")
+    name = str(cmd).upper()
+    for table in (load_registry(registry), load_catalog()):
+        if name in table:
+            return table[name]
+    raise KeyError(f"unknown paged command {cmd!r} (not in dspi_commands.json or legacy_map.json)")
+
+
+@dataclass(frozen=True)
+class LastResult:
+    cmd_id: int
+    direction: str       # "SET" or "GET"
+    result: int
+    wvalue: int
+
+    @property
+    def result_name(self) -> str:
+        return VC_RESULTS.get(self.result, f"0x{self.result:02X}")
+
+
+def _normalise_protocol(p: str | None) -> str:
+    p = (p or os.environ.get("DSPI_TEST_PROTOCOL") or "old").strip().lower()
+    if p in ("old", "send-old", "send_old", "legacy"):
+        return "old"
+    if p in ("translate", "paged"):
+        return "translate"
+    raise ValueError(f"unknown DSPI_TEST_PROTOCOL {p!r} (use old or translate)")
+
+
 # --- The device wrapper -----------------------------------------------------
 
 class DspiDevice:
-    def __init__(self, timeout_ms: int = 1500):
-        dev = usb.core.find(idVendor=VID, idProduct=PID)
+    def __init__(self, timeout_ms: int = 1500, protocol: str | None = None, usb_dev=None, registry=None):
+        dev = usb_dev if usb_dev is not None else usb.core.find(idVendor=VID, idProduct=PID)
         if dev is None:
             raise Disconnected(
                 f"no DSPi at {VID:04X}:{PID:04X} — is it plugged in and not held by another app?")
         self.dev = dev
         self.timeout = timeout_ms
+        self.protocol = _normalise_protocol(protocol)
+        self.registry = registry
         # Count every transfer for the report.
         self.gets = 0
         self.sets = 0
@@ -122,6 +286,10 @@ class DspiDevice:
         # handle; we re-acquire and continue.  Counted because frequent
         # re-enumerations on benign commands are themselves a finding.
         self.reenumerations = 0
+        # Translated OUT writes the firmware refused. 1.1.6 ACKed these silently,
+        # so legacy_map swallows the STALL and records it here instead.
+        self.swallowed: list[dict] = []
+        self._paged_ok = None   # None until SYS.PROTOCOL_INFO has been probed
 
     def _reacquire(self) -> bool:
         try:
@@ -132,6 +300,7 @@ class DspiDevice:
         if d is not None:
             self.dev = d
             self.reenumerations += 1
+            self._paged_ok = None   # may be different firmware now
             return True
         return False
 
@@ -176,15 +345,106 @@ class DspiDevice:
                 # EPIPE / everything else on a healthy session => protocol stall.
                 raise Stall(opcode, direction, errno, msg) from e
 
-    def get(self, opcode: int, length: int, wvalue: int = 0, windex: int = VENDOR_IFACE) -> bytes:
-        """Device->host vendor request.  Raises Stall if refused, Timeout if wedged."""
+    def raw_get(self, opcode: int, length: int, wvalue: int = 0, windex: int = VENDOR_IFACE) -> bytes:
+        """Untranslated legacy IN request, whatever the protocol mode."""
         self.gets += 1
         return bytes(self._xfer("GET", opcode, wvalue, windex, length))
 
-    def set(self, opcode: int, payload: bytes = b"", wvalue: int = 0, windex: int = VENDOR_IFACE) -> int:
-        """Host->device vendor request.  Returns bytes accepted.  Raises Stall if refused."""
+    def raw_set(self, opcode: int, payload: bytes = b"", wvalue: int = 0, windex: int = VENDOR_IFACE) -> int:
+        """Untranslated legacy OUT request, whatever the protocol mode."""
         self.sets += 1
         return self._xfer("SET", opcode, wvalue, windex, payload)
+
+    def _translating(self, windex: int) -> bool:
+        return self.protocol == "translate" and (windex >> 8) == 0
+
+    def get(self, opcode: int, length: int, wvalue: int = 0, windex: int = VENDOR_IFACE) -> bytes:
+        """Device->host vendor request.  Raises Stall if refused, Timeout if wedged."""
+        if self._translating(windex):
+            from . import legacy_map
+            return legacy_map.translate_get(self, opcode, wvalue, length)
+        return self.raw_get(opcode, length, wvalue, windex)
+
+    def set(self, opcode: int, payload: bytes = b"", wvalue: int = 0, windex: int = VENDOR_IFACE) -> int:
+        """Host->device vendor request.  Returns bytes accepted.  Raises Stall if refused."""
+        if self._translating(windex):
+            from . import legacy_map
+            return legacy_map.translate_set(self, opcode, wvalue, payload)
+        return self.raw_set(opcode, payload, wvalue, windex)
+
+    # -- paged commands ------------------------------------------------------
+
+    def resolve(self, cmd) -> CommandInfo:
+        return resolve_command(cmd, self.registry)
+
+    def _require_paged(self):
+        # 1.1.6 ignores wIndex and would run a paged command as the old opcode
+        # with the same number (0x53 is FACTORY_RESET), so probe first (plan 5.14).
+        if self._paged_ok is None:
+            self.protocol_info()
+        if not self._paged_ok:
+            raise ProtocolError("device does not answer SYS.PROTOCOL_INFO; refusing paged requests")
+
+    def pget(self, cmd, addr: int = 0, length: int | None = None) -> bytes:
+        """GET a paged command by PAGE.NAME or ID. Length defaults to the table's fixed reply size."""
+        info = self.resolve(cmd)
+        self._require_paged()
+        if length is None:
+            length = info.get_len if isinstance(info.get_len, int) and info.get_len > 0 else 256
+        self.gets += 1
+        try:
+            return bytes(self._xfer("GET", info.cmd, addr, paged_windex(info.page), length))
+        except Stall as e:
+            raise self._paged_stall(info, "GET", addr, e) from e
+
+    def pset(self, cmd, data: bytes = b"", addr: int = 0) -> int:
+        """SET a paged command by PAGE.NAME or ID. Raises PagedStall carrying the VC_* reason."""
+        info = self.resolve(cmd)
+        self._require_paged()
+        self.sets += 1
+        try:
+            return self._xfer("SET", info.cmd, addr, paged_windex(info.page), bytes(data))
+        except Stall as e:
+            raise self._paged_stall(info, "SET", addr, e) from e
+
+    def _paged_stall(self, info: CommandInfo, direction: str, addr: int, e: Stall) -> PagedStall:
+        lr = self.last_result()
+        # LAST_RESULT is per transport, so another USB host can overwrite it.
+        ok = lr is not None and lr.cmd_id == info.id and lr.direction == direction and lr.wvalue == addr
+        return PagedStall(info.id, direction, addr, e.errno, f"{info.name} refused",
+                          lr.result if ok else None)
+
+    def last_result(self) -> LastResult | None:
+        """SYS.LAST_RESULT, or None where it STALLs (firmware without the dispatcher)."""
+        if self._paged_ok is None:
+            self.protocol_info()
+        if not self._paged_ok:
+            return None
+        try:
+            self.gets += 1
+            r = bytes(self._xfer("GET", SYS_LAST_RESULT & 0xFF, 0, paged_windex(SYS_PAGE), 8))
+        except Stall:
+            return None
+        if len(r) < 6:
+            return None
+        cmd_id, dirb, res, wv = struct.unpack_from("<HBBH", r)
+        return LastResult(cmd_id, "GET" if dirb == 1 else "SET", res, wv)
+
+    def protocol_info(self) -> dict | None:
+        """Probe SYS.PROTOCOL_INFO: None on a STALL (1.1.6 or older), parsed fields otherwise."""
+        try:
+            self.gets += 1
+            r = bytes(self._xfer("GET", SYS_PROTOCOL_INFO & 0xFF, 0, paged_windex(SYS_PAGE), 16))
+        except Stall:
+            self._paged_ok = False
+            return None
+        if len(r) < 16 or r[:4] != PROTOCOL_MAGIC:
+            self._paged_ok = False
+            raise ProtocolError(f"SYS.PROTOCOL_INFO without the DSPi magic: {r.hex()}")
+        major, minor, pages, flags, max_set, max_get, reserved = struct.unpack_from("<BBBBHHI", r, 4)
+        self._paged_ok = True
+        return {"magic": r[:4].decode(), "major": major, "minor": minor, "page_count": pages,
+                "flags": flags, "max_set": max_set, "max_get": max_get, "reserved": reserved}
 
     # -- typed GET helpers ---------------------------------------------------
 

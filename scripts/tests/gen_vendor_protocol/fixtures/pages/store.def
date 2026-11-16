@@ -1,0 +1,4 @@
+VC_PAGE(STORE, 0x02, 1, "Presets and bulk parameters")
+VC_CMD(0x10, PRESET_SAVE, VC_NONE, store_preset_save_set, PRESET, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH, 0, "Save live state to a preset slot")
+VC_CMD(0x40, ALL_PARAMS, store_all_get, store_all_set, NONE, 6136, 0, 0, VC_F_BULK|VC_F_USB_ONLY, 0, "WireBulkParams, bulk buffer")
+VC_CMD(0x41, ALL_PARAMS_CHUNK, store_chunk_get, store_chunk_set, OFFSET, VC_LEN_VAR, 1, 64, VC_F_USB_ONLY, 0, "Chunked access to the bulk buffer")

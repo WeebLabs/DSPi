@@ -716,8 +716,6 @@ Flags the dispatcher enforces:
 | `VC_F_USB_ONLY` | Both directions refused on UART, I2C and internal dispatch |
 | `VC_F_SET_USB_ONLY` | SET refused off USB (transport self-configuration) |
 | `VC_F_BULK` | Payload or reply lives in `bulk_param_buf` under the bulk lock |
-| `VC_F_RP2350` | `VC_ERR_UNSUPPORTED` on RP2040, absent from capability data there |
-| `VC_F_ADDR_ALL` | 0xFF in the index position means "all" on SET |
 
 Flags that only inform the docs and `COMMAND_INFO`:
 
@@ -768,7 +766,7 @@ Order of checks:
 
 1. Find the page, then the command. Otherwise `VC_ERR_UNKNOWN`.
 2. Direction has a handler. Otherwise `VC_ERR_DIRECTION`.
-3. Platform flag. Otherwise `VC_ERR_UNSUPPORTED`.
+3. (Platform and build conditions are resolved at compile time. A command that is not built is simply unknown.)
 4. Transport flags. Otherwise `VC_ERR_BLOCKED`.
 5. For SET, `set_min <= in_len <= set_max`. Otherwise `VC_ERR_LENGTH`.
 6. Address in range for `addr_kind`, using the platform's channel, output, slot and band counts. Otherwise `VC_ERR_ADDRESS`.
@@ -812,6 +810,26 @@ VcResult vc_set(CtrlSource src, uint16_t id, uint16_t addr,
 - **`usb_device.c` in pico-extras is not touched.**
 - **No new notification events.** If one is ever added, it needs both the push and the `notify_peek_next_for` case.
 - **The USB-in-flight guard and the bulk lock keep their semantics.**
+
+### 8.8 As built (Phase 1)
+
+The grammar below is what the `.def` files actually use. It replaces the wrapped `ADDR(...)`, `GET(...)`, `SET(...)` form sketched in 8.3.
+
+```
+VC_PAGE(MNEM, 0xPP, REV, "one line description")
+VC_CMD(0xCC, NAME, get_fn, set_fn, ADDR_KIND, GET_LEN, SET_MIN, SET_MAX, FLAGS, ARG, "one line doc")
+VC_RESERVED(0xCC, "note")
+```
+
+- `get_fn` or `set_fn` is `VC_NONE` when the command has no handler for that direction. `GET_LEN` is a byte count, `VC_LEN_VAR`, or 0.
+- Address kinds are bare tokens such as `NONE`, `OUTPUT`, `OUTPUT_ALL`, `CH_BAND`, `IN_OUT`, `CS_SLOT`, `OFFSET`. `OUTPUT_ALL` accepts 0xFF on a SET, which replaces the `VC_F_ADDR_ALL` flag.
+- Platform and build limits are whole-line `#if PICO_RP2350` or `#ifdef DSPI_X` blocks around entries, with no `#else` and no nesting. A command outside its build does not exist and answers `VC_ERR_UNKNOWN`. This replaces the `VC_F_RP2350` flag.
+- Each page's table lives in its own `vc_page_<mnem>.c`, which includes `vc_page_table.inc` last. Implementing a page means editing that file and its `.def` and nothing else.
+- `vc_ids.h` holds the `VC_<MNEM>_<NAME>` constants and can be included anywhere.
+- `vc_page_of(bmRequestType, wIndex)` is the only place the page is derived from a request. The harness has the matching single helper, `paged_windex(page)`.
+- A duplicate number, a number below 0x10, a duplicate name and inconsistent lengths all fail the build.
+- Over USB, `SYS.ENTER_BOOTLOADER` reboots after the status stage completes. Over UART and I2C it reboots at once.
+- Until Phase 3, UART and I2C refuse `VC_F_BULK` commands and cap paged replies at 132 bytes.
 
 ## 9. Generated docs and capability data
 

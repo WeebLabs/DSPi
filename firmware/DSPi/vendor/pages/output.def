@@ -1,0 +1,1 @@
+VC_PAGE(OUTPUT, 0x04, 1, "Output type and pins, output latency, ADAT TX, DAC hardware mute")

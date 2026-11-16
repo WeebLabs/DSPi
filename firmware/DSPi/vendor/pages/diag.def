@@ -1,0 +1,1 @@
+VC_PAGE(DIAG, 0xF0, 1, "Bench and diagnostic commands with no stability promise")

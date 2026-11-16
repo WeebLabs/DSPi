@@ -13,4 +13,5 @@ from . import rta             # noqa: F401
 from . import presets         # noqa: F401
 from . import control_surfaces  # noqa: F401
 from . import stress          # noqa: F401
+from . import paged_sys       # noqa: F401
 from . import audio_loopback  # noqa: F401  (group "audio"; opt-in via --audio)

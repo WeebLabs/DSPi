@@ -168,11 +168,42 @@ are matched by the name substring `DSPi`; the harness disambiguates them by dire
   the dead `LOAD_PARAMS` was repurposed as `REQ_SAVE_OUTPUT_CONFIG`, a safe
   action covered by `output_config_save`.)
 
+## Paged protocol and the translation layer
+
+*Added 2026-11-16 for the vendor command overhaul (`Documentation/Features/vendor_command_overhaul_plan.md`).*
+
+`DspiDevice` speaks both protocols. Paged commands go through `dev.pget(cmd, addr=0, length=None)` and
+`dev.pset(cmd, data=b"", addr=0)`, where `cmd` is a name such as `"FILTER.BAND"` or a numeric ID such as
+`0x0610`. Names resolve through `Documentation/protocol/dspi_commands.json`, then through the plan
+numbering in `Documentation/protocol/legacy_map.json`. A refused paged request raises `PagedStall` (a
+`Stall`) whose `result_name` is the `VC_*` code read back from `SYS.LAST_RESULT`. `dev.protocol_info()`
+returns `None` on firmware without the paged dispatcher, and every paged request is refused locally on
+such firmware, because 1.1.6 would run it as the old opcode with the same number.
+
+The legacy `dev.get(OP.X, ...)` and `dev.set(...)` calls have two modes:
+
+```bash
+DSPI_TEST_PROTOCOL=old        python3 -m tools.dspi_test.run   # default: old opcodes on page 0
+DSPI_TEST_PROTOCOL=translate  python3 -m tools.dspi_test.run   # old calls become paged commands
+python3 -m tools.dspi_test.legacy_map --check                  # validate the mapping data
+```
+
+In translate mode `legacy_map.py` follows `legacy_map.json` (its `_schema` key documents the format).
+Write-as-read commands become SETs and answer the 1.1.6 status byte. A refused OUT write is swallowed,
+as 1.1.6 ACKed it, and logged in `dev.swallowed`. `legacy_map.golden_transport` replays the golden
+capture through the same layer:
+`python -m tools.dspi_test.golden.capture compare ... --transport tools.dspi_test.legacy_map:golden_transport`.
+The layer and the `old` mode are removed in plan Phase 6. The JSON stays as migration data.
+
+`tests/paged_sys.py` holds native tests for the `SYS` discovery commands. They SKIP on firmware without
+the paged dispatcher.
+
 ## Layout
 
 | File | Role |
 |---|---|
-| `device.py` | `DspiDevice` USB transport; typed get/set; STALL/Timeout/Disconnect handling; opcode map. |
+| `device.py` | `DspiDevice` USB transport; typed get/set; paged `pget`/`pset`; STALL/Timeout/Disconnect handling; opcode map. |
+| `legacy_map.py` | Temporary translation of 1.1.6 requests into paged commands, and its `--check`. |
 | `profile.py` | `PlatformProfile` — probes the device for counts/ceilings (platform-adaptive). |
 | `lifecycle.py` | Snapshot & restore. |
 | `framework.py` | Test registry, `Check` assertions, `Runner`, reports, catalog. |

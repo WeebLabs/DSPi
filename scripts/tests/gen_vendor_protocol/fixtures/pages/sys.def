@@ -1,0 +1,17 @@
+// SYS page fixture: discovery, identity, one conditional diagnostic.
+VC_PAGE(SYS, 0x01, 1, "System, discovery and identity")
+
+VC_CMD(0x10, PROTOCOL_INFO, sys_protocol_info_get, VC_NONE, NONE, 16, 0, 0, 0, 0, "Protocol version, page count and size limits")
+VC_CMD(0x11, PAGE_LIST,     sys_page_list_get,     VC_NONE, NONE, VC_LEN_VAR, 0, 0, 0, 0, "2 bytes per implemented page: {page, revision}")
+VC_CMD(0x12, PAGE_COMMANDS, sys_page_commands_get, VC_NONE, PAGE, 64, 0, 0, 0, 0, "GET bitmap, then SET bitmap, 256 bits each")
+VC_CMD(0x13, COMMAND_INFO,  sys_command_info_get,  VC_NONE, PAGE_CMD, 8, 0, 0, 0, 0, "Flags, sizes, address kind")
+VC_RESERVED(0x1F, "future: protocol-level discovery")
+VC_CMD(0x20, PLATFORM,      sys_platform_get,      VC_NONE, NONE, 7, 0, 0, 0, 0, "Unchanged 1.1.6 GET_PLATFORM layout")
+VC_CMD(0x24, DEVICE_NAME,   sys_device_name_get,   sys_device_name_set,
+       NONE, 32, 1, 32,
+       VC_F_DEFERRED | VC_F_FLASH, 0,
+       "Device name, stored in flash, 1-32 bytes")   // multi-line entry
+VC_CMD(0x30, ENTER_BOOTLOADER, VC_NONE, sys_enter_bootloader_set, NONE, 0, 0, 0, VC_F_USB_ONLY, 0, "Reboot to the bootloader after the status stage")
+#ifdef DSPI_CLOCK_DIAG
+VC_CMD(0x60, CLOCK_DIAG,    sys_clock_diag_get,    VC_NONE, NONE, 48, 0, 0, 0, 0, "Clock diagnostics, see http://example.invalid/a,b")
+#endif
