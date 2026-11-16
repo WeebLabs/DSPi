@@ -2,6 +2,8 @@
 
 *Written 2026-10-23 as a handover note. Updated the same day: Fixes 1, 2 and 3 implemented and verified (see "Status and measured results" and "Fix 3 integrated"). All code is uncommitted on local branch `bench/input-batch`.*
 
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+
 ## TL;DR
 
 A low-latency mode means feeding the DSP pipeline smaller batches of audio (for example 16 frames instead of 48) and holding less audio in the output rings. Smaller batches cost more CPU because every call to `process_input_block()` pays a fixed setup cost before it touches a single sample. On RP2350 with a realistic 4-way active setup, that fixed cost is about 39 us per call on core 0. At 16 frames that adds about 7.7 percentage points of core 0 load over today's 48-frame batches.

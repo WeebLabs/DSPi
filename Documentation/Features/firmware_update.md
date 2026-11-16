@@ -1,5 +1,7 @@
 # Firmware Update via USB
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## Overview
 
 The DSPi firmware exposes a vendor command that reboots the device into the RP2040/RP2350 USB mass storage bootloader (BOOTSEL mode). Once in bootloader mode, the device appears as a USB drive. Dragging a `.uf2` firmware file onto this drive writes it to flash and reboots into the new firmware.
@@ -8,23 +10,27 @@ This allows firmware updates without physical access to the BOOTSEL button on th
 
 ## Vendor Command
 
-### REQ_ENTER_BOOTLOADER (0xF0)
+### `SYS.ENTER_BOOTLOADER`
 
-Reboots the device into UF2 bootloader mode.
+Reboots the device into UF2 bootloader mode. It is a zero-length SET in the paged protocol (see `../commands.md`).
+
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `SYS.ENTER_BOOTLOADER` | 0x01 | 0x30 | SET (zero-length) | none (0) | SET 0 |
 
 | Field | Value |
 |-------|-------|
-| bmRequestType | `0xC1` (device-to-host, vendor, interface) |
-| bRequest | `0xF0` |
-| wValue | `0x0000` (unused) |
-| wIndex | `0x0002` (vendor interface number) |
-| wLength | `1` |
-| Response | 1-byte success (`0x01`), then device disconnects |
+| bmRequestType | `0x41` (host-to-device, vendor, interface) |
+| bRequest | `0x30` |
+| wValue | `0x0000` |
+| wIndex | `0x0102` (page 0x01 in the high byte, vendor interface 2 in the low byte) |
+| wLength | `0` |
+| Response | None. The status stage is ACKed, then the device disconnects |
 
 **Behavior:**
-1. Device sends the 1-byte ACK response
-2. Device waits ~100ms for the USB response to reach the host
-3. Device reboots into the ROM USB bootloader
+1. Device ACKs the status stage of the zero-length SET
+2. Device reboots as soon as the status stage completes. Over UART and I2C it reboots after the response frame has gone out
+3. Device enters the ROM USB bootloader
 4. The original USB device disappears from the bus
 5. A new USB mass storage device appears (the RP2040/RP2350 bootloader)
 6. The host can now write a `.uf2` file to the drive
@@ -46,9 +52,9 @@ VENDOR_INTERFACE = 2
 def enter_bootloader(dev):
     """Reboot DSPi into UF2 bootloader mode."""
     try:
-        dev.ctrl_transfer(0xC1, 0xF0, 0, VENDOR_INTERFACE, 1)
+        dev.ctrl_transfer(0x41, 0x30, 0, (0x01 << 8) | VENDOR_INTERFACE, b"")
     except usb.core.USBError:
-        # Expected — device disconnects after responding
+        # Expected if the device disconnects before the call returns
         pass
     print("Device is rebooting into bootloader mode...")
 
@@ -70,17 +76,17 @@ import IOKit.usb
 
 func enterBootloader(device: USBDevice) {
     let request = USBDeviceRequest(
-        bmRequestType: 0xC1,
-        bRequest: 0xF0,
+        bmRequestType: 0x41,
+        bRequest: 0x30,             // SYS.ENTER_BOOTLOADER
         wValue: 0,
-        wIndex: 2,       // vendor interface
-        wLength: 1
+        wIndex: (0x01 << 8) | 2,    // page SYS, vendor interface 2
+        wLength: 0
     )
 
-    // Send the command — expect the device to disconnect
+    // Send the command. Expect the device to disconnect.
     do {
-        let response = try device.sendControlRequest(request)
-        // response[0] == 0x01 means success
+        try device.sendControlRequest(request)
+        // No reply bytes. Success is the ACK of the status stage.
     } catch {
         // Expected: device disconnected during or after response
     }
@@ -99,10 +105,10 @@ const VENDOR_INTERFACE = 2;
 function enterBootloader(device) {
     device.open();
 
-    // bmRequestType 0xC1 = device-to-host, vendor, interface
-    device.controlTransfer(0xC1, 0xF0, 0, VENDOR_INTERFACE, 1, (err, data) => {
+    // bmRequestType 0x41 = host-to-device, vendor, interface. wIndex carries page 0x01 (SYS).
+    device.controlTransfer(0x41, 0x30, 0, (0x01 << 8) | VENDOR_INTERFACE, Buffer.alloc(0), (err) => {
         if (err) {
-            // Expected — device disconnects
+            // Expected if the device disconnects first
             console.log('Device rebooting into bootloader...');
         } else {
             console.log('Bootloader command accepted, device will disconnect');
@@ -119,20 +125,19 @@ function enterBootloader(device) {
 #define VENDOR_INTERFACE 2
 
 int enter_bootloader(libusb_device_handle *handle) {
-    uint8_t buf[1];
     int ret = libusb_control_transfer(
         handle,
-        0xC1,           // bmRequestType: device-to-host, vendor, interface
-        0xF0,           // bRequest: REQ_ENTER_BOOTLOADER
-        0x0000,         // wValue: unused
-        VENDOR_INTERFACE,
-        buf,
-        1,              // wLength
+        0x41,           // bmRequestType: host-to-device, vendor, interface
+        0x30,           // bRequest: SYS.ENTER_BOOTLOADER
+        0x0000,         // wValue: no address
+        (0x01 << 8) | VENDOR_INTERFACE,   // wIndex: page SYS, interface 2
+        NULL,
+        0,              // wLength: zero-length SET
         1000            // timeout_ms
     );
 
-    // ret may be negative (device disconnected) — that's expected
-    if (ret == 1 && buf[0] == 0x01) {
+    // ret may be negative if the device disconnected first. That is expected.
+    if (ret == 0) {
         printf("Bootloader command accepted\n");
     }
     // Device will disconnect regardless
@@ -165,7 +170,7 @@ def update_firmware(uf2_path):
 
     # Step 2: Send the bootloader command
     try:
-        dev.ctrl_transfer(0xC1, 0xF0, 0, VENDOR_INTERFACE, 1)
+        dev.ctrl_transfer(0x41, 0x30, 0, (0x01 << 8) | VENDOR_INTERFACE, b"")
     except usb.core.USBError:
         pass  # Expected disconnect
 
@@ -223,9 +228,10 @@ After entering bootloader mode, the device's USB VID/PID changes to the RP2040/R
 ### Error handling
 
 The `ctrl_transfer` call may:
-- **Return 1 byte (`0x01`)**: Command accepted, device will reboot in ~100ms
-- **Throw a USB error / return negative**: The device disconnected before the response completed — this is normal and expected. Treat it as success.
-- **Timeout**: The device didn't respond at all — something is wrong. The device may be in a bad state. A physical power cycle or BOOTSEL button press may be needed.
+- **Return 0 (ACK)**: Command accepted. The device reboots as soon as the status stage completes.
+- **Throw a USB error / return negative**: The device disconnected before the call returned. This is normal and expected. Treat it as success.
+- **STALL**: The request was refused, for example with a non-zero `wValue` or a non-empty payload. `SYS.LAST_RESULT` gives the reason.
+- **Timeout**: The device didn't respond at all. Something is wrong. The device may be in a bad state. A physical power cycle or BOOTSEL button press may be needed.
 
 ### No confirmation prompt
 
@@ -237,8 +243,8 @@ This command cannot brick the device. The RP2040/RP2350 ROM bootloader is in per
 
 ## Firmware Implementation
 
-**Request ID:** `REQ_ENTER_BOOTLOADER` (`0xF0`) in `firmware/DSPi/config.h`
+**Command:** `SYS.ENTER_BOOTLOADER` (page 0x01, command 0x30) in `firmware/DSPi/vendor/pages/sys.def`. Firmware 1.1.6 and older used opcode 0xF0 as an IN request instead.
 
-**Handler:** `firmware/DSPi/usb_audio.c` vendor request handler
+**Handler:** `sys_enter_bootloader_set()` in `firmware/DSPi/vendor/vc_page_sys.c`. On USB it arms the reboot and `firmware/DSPi/vendor/vc_usb.c` performs it after the status stage.
 
 **Mechanism:** Calls `reset_usb_boot(0, 0)` from `pico/bootrom.h`. The first argument is a GPIO pin mask for activity LED (0 = none). The second argument is a disable mask for bootloader interfaces (0 = enable all).

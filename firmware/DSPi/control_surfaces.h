@@ -4,7 +4,7 @@
  * A Control Surface binding attaches one physical component (push button,
  * toggle switch, potentiometer, rotary encoder, LED, PWM-dimmed LED) to one
  * firmware parameter (a "noun") through one operation (an "action").
- * Bindings are configured via vendor commands 0x84-0x87, persisted
+ * Bindings are configured through the CS page (CS.BINDING, CS.SAVE), persisted
  * device-global in the preset directory (V9+), and processed by a 1 kHz
  * main-loop tick.
  *
@@ -60,13 +60,13 @@
  *
  * Caps v9 adds target groups (8 named channel sets a binding or macro step
  * addresses as a unit via CS_FLAG_GROUP) and macros (8 step sequences fired
- * through the CS_NOUN_MACRO noun), commands 0x20-0x26, directory V18.
+ * through the CS_NOUN_MACRO noun), CS.GROUP and CS.MACRO_*, directory V18.
  * CsBinding/IrCommand/CsStatusPacket are unchanged; the caps header's three
  * reserved bytes become max_groups/max_macros/max_macro_steps.
  * See Documentation/Features/control_surfaces_groups_macros_spec.md.
  *
  * Caps v10 adds the I2C display component (CS_TYPE_DISPLAY container,
- * commands 0x27-0x2B, directory V19), IR command group support
+ * CS.DISPLAY_*, directory V19), IR command group support
  * (IrCommand.flags accepts CS_FLAG_GROUP), and nouns 53-56 (CPU_LOAD,
  * DISPLAY_PAGE, DISPLAY_EDIT, PAGE_VALUE).  The caps type table grows by
  * one row (the documented self-describing mechanism); every fixed-offset
@@ -99,7 +99,7 @@
  * it: an auxiliary output is a component in a binding slot (CS_TYPE_AUX_OUT
  * on/off, CS_TYPE_AUX_PWM dimmable) that owns its GPIO, name, invert sense,
  * delays and boot values.  Nouns 68-69 keep their numbers but target the
- * slot; commands 0x04-0x07 carry the slot and an 8.8 level; NOTIFY_EVT_CS_AUX
+ * slot; CS.AUX_STATE and CS.AUX_LEVEL carry the slot and an 8.8 level; NOTIFY_EVT_CS_AUX
  * grows to 9 bytes.  Directory V21 drops the V20 table.
  * See Documentation/Features/control_surfaces_aux_spec.md.
  *
@@ -140,7 +140,7 @@ typedef enum {
     CS_TYPE_IR      = 7,   // IR remote receiver (1 GPIO); a container slot
                            // whose commands live in the IrCommand table
     CS_TYPE_DISPLAY = 8,   // I2C character/OLED display (2 GPIOs: SDA, SCL);
-                           // a container slot, content configured via 0x27-0x2A
+                           // a container slot, content configured via CS.DISPLAY_*
     CS_TYPE_AUX_OUT = 9,   // auxiliary on/off output (1 GPIO, output); owns the
                            // pin a control switches through CS_NOUN_AUX
     CS_TYPE_AUX_PWM = 10,  // auxiliary dimmable output (1 GPIO, PWM slice);

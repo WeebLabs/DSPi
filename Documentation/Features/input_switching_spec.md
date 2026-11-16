@@ -1,5 +1,7 @@
 # Input Source Switching Specification
 
+*Last updated: 2026-11-16 (sections 2, 3, 5, 9, 10, 11 and 14: host interface on the paged protocol of firmware 1.1.7, current source list)*
+
 ## 1. Overview
 
 DSPi supports switchable audio input sources. The device defaults to USB audio input but can be switched at runtime to receive audio from an S/PDIF optical/coaxial input. The input source is selectable via vendor USB control transfers and is persisted in the user preset system.
@@ -41,24 +43,17 @@ S/PDIF RX ──────────┘         |
 
 The `InputSource` enum is defined in `audio_input.h`:
 
-```c
-typedef enum {
-    INPUT_SOURCE_USB   = 0,
-    INPUT_SOURCE_SPDIF = 1,
-    // Future: INPUT_SOURCE_I2S = 2, INPUT_SOURCE_ADAT = 3
-} InputSource;
-
-#define INPUT_SOURCE_MAX    INPUT_SOURCE_SPDIF   // Highest valid value
-```
+This document was written when only USB and S/PDIF existed. The enum has since grown, and the current values are:
 
 | Value | Name | Description |
 |-------|------|-------------|
 | 0 | `INPUT_SOURCE_USB` | USB Audio Class 1 isochronous input (default) |
-| 1 | `INPUT_SOURCE_SPDIF` | S/PDIF optical/coaxial receiver input |
-| 2 | *(reserved)* | Future: I2S input |
-| 3 | *(reserved)* | Future: ADAT input |
+| 1 | `INPUT_SOURCE_SPDIF` | S/PDIF input 1 (always enabled) |
+| 2 | `INPUT_SOURCE_I2S` | I2S input (`i2s_input_spec.md`) |
+| 3 | `INPUT_SOURCE_ADAT` | ADAT input, RP2350 only, selectable once enabled (`adat_input_spec.md`) |
+| 4, 5, 6 | `INPUT_SOURCE_SPDIF2` to `INPUT_SOURCE_SPDIF4` | Optional S/PDIF inputs 2 to 4, selectable once enabled (`SPDIF_input_spec.md`) |
 
-Values above `INPUT_SOURCE_MAX` (currently 1) are rejected by the firmware. The validation function is:
+`INPUT_SOURCE_MAX` is `INPUT_SOURCE_SPDIF4` (6). Values above it are rejected by the firmware. The validation function is:
 
 ```c
 static inline bool input_source_valid(uint8_t src) {
@@ -70,33 +65,37 @@ static inline bool input_source_valid(uint8_t src) {
 
 ## 3. Vendor Command Reference
 
-All commands use USB EP0 vendor control transfers on the vendor interface (interface 2).
+All commands use USB EP0 vendor control transfers on the vendor interface (interface 2), in the paged protocol of firmware 1.1.7 (`../commands.md`). The commands below are on the INPUT page (0x03).
 
 - **bmRequestType:** `0x41` (Host-to-Device SET) or `0xC1` (Device-to-Host GET)
-- **wIndex:** `2` (vendor interface number)
+- **bRequest:** the command number in the table
+- **wIndex:** `(page << 8) | 2`, so `0x0302` for every command here
+- **wValue:** the address in the table, 0 where there is none
+- **Result:** a SET that is accepted ACKs. A rejected SET, or a GET for a bad address, STALLs. The reason is readable from `SYS.LAST_RESULT`.
 - **Timeout:** 1000 ms recommended for all commands
 
 ### Command summary
 
-| Code | Command | Direction | Payload | Description |
-|------|---------|-----------|---------|-------------|
-| 0xE0 | `REQ_SET_INPUT_SOURCE` | OUT | 1 byte | Switch input source |
-| 0xE1 | `REQ_GET_INPUT_SOURCE` | IN | 1 byte | Query current input source |
-| 0xE2 | `REQ_GET_SPDIF_RX_STATUS` | IN | 16 bytes | Query S/PDIF receiver state |
-| 0xE3 | `REQ_GET_SPDIF_RX_CH_STATUS` | IN | 24 bytes | Query IEC 60958 channel status |
-| 0xE4 | `REQ_SET_SPDIF_RX_PIN` | OUT (immediate) | wValue=pin, 1-byte response | Change SPDIF RX GPIO pin |
-| 0xE5 | `REQ_GET_SPDIF_RX_PIN` | IN | 1 byte | Query SPDIF RX GPIO pin |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `INPUT.SOURCE` | 0x03 | 0x10 | GET, SET | none (0) | GET 1, SET 1 | Switch or query the input source |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | none (0) | GET 12 | Active source, active channel count, measured S/PDIF rate, VCXO trim |
+| `INPUT.SPDIF_RX_STATUS` | 0x03 | 0x20 | GET | none (0) | GET 16 | S/PDIF receiver state |
+| `INPUT.SPDIF_RX_CH_STATUS` | 0x03 | 0x21 | GET | none (0) | GET 24 | IEC 60958 channel status |
+| `INPUT.SPDIF_RX_PIN` | 0x03 | 0x22 | GET, SET | S/PDIF input 0-3 | GET 1, SET 1 | S/PDIF RX GPIO pin |
+
+In firmware 1.1.6 these were opcodes 0xE0 (SET source), 0xE1 (GET source), 0xE2, 0xE3, 0xE4 (pin SET, issued as an IN transfer that returned a status byte) and 0xE5 (pin GET). The optional S/PDIF inputs, their enables and `INPUT.SPDIF_RX_CONFIG` are in `SPDIF_input_spec.md`.
 
 ---
 
-### 3.1 REQ_SET_INPUT_SOURCE (0xE0)
+### 3.1 `INPUT.SOURCE` SET
 
 | Field | Value |
 |-------|-------|
 | **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xE0` |
-| **wValue** | Unused (0) |
-| **wIndex** | Vendor interface number (2) |
+| **bRequest** | `0x10` |
+| **wValue** | 0 |
+| **wIndex** | `0x0302` (page 0x03, interface 2) |
 | **wLength** | 1 |
 | **Payload** | 1 byte: `InputSource` enum value |
 
@@ -104,48 +103,54 @@ All commands use USB EP0 vendor control transfers on the vendor interface (inter
 
 | Offset | Size | Field | Values |
 |--------|------|-------|--------|
-| 0 | 1 | `source` | `0` = USB, `1` = S/PDIF |
+| 0 | 1 | `source` | An `InputSource` value, 0 to 6 (section 2) |
 
 #### Firmware behavior
 
-1. Reads 1 byte from the vendor receive buffer.
-2. Validates the value with `input_source_valid()`. Invalid values (> 1) are silently ignored.
-3. If the value equals the current `active_input_source`, the command is a no-op.
-4. Otherwise, sets `pending_input_source` and raises the `input_source_change_pending` flag.
-5. The USB control transfer completes immediately (empty ACK). The actual hardware switch is deferred to the next main loop iteration.
+1. Reads 1 byte from the payload.
+2. Validates the value with `input_source_valid()`. A value above 6 is refused with `VC_ERR_VALUE`.
+3. If the value equals the current `active_input_source`, the command succeeds and does nothing.
+4. ADAT on RP2040 is refused with `VC_ERR_UNSUPPORTED`. A disabled optional S/PDIF input or a disabled ADAT input is refused with `VC_ERR_STATE`.
+5. Otherwise, sets `pending_input_source` and raises the `input_source_change_pending` flag.
+6. The USB control transfer completes immediately (empty ACK). The actual hardware switch is deferred to the next main loop iteration.
 
-**This command is non-blocking.** Unlike the older `REQ_SET_AUDIO_SOURCE` (0x80) from the legacy SPDIF input API, the 0xE0 command returns immediately. The app should poll `REQ_GET_SPDIF_RX_STATUS` (0xE2) to track the switch progress.
+**This command is non-blocking.** Unlike the older `SET_AUDIO_SOURCE` (0x80) from the legacy SPDIF input API, it returns immediately. The app should poll `INPUT.SPDIF_RX_STATUS` to track the switch progress.
 
 #### Failure behavior
 
 | Condition | Result |
 |-----------|--------|
-| Invalid source value (> 1) | Silently ignored, no action |
-| Already on requested source | No-op, immediate return |
-| Payload too short (0 bytes) | Silently ignored |
+| Invalid source value (> 6) | STALL, `VC_ERR_VALUE`. No action |
+| ADAT on RP2040 | STALL, `VC_ERR_UNSUPPORTED` |
+| Optional S/PDIF or ADAT input not enabled | STALL, `VC_ERR_STATE` |
+| Already on requested source | ACK, no action |
+| Payload not exactly 1 byte | STALL, `VC_ERR_LENGTH` |
+| Non-zero `wValue` | STALL, `VC_ERR_ADDRESS` |
 | Multiple rapid switches | Last-write-wins (each new value overwrites `pending_input_source`) |
+
+In firmware 1.1.6 the invalid value, disabled input and short payload cases were all ignored silently.
 
 #### Raw USB transfer
 
 ```
 bmRequestType: 0x41  (OUT | Vendor | Interface)
-bRequest:      0xE0
+bRequest:      0x10
 wValue:        0x0000
-wIndex:        0x0002
+wIndex:        0x0302
 wLength:       0x0001
 Data:          [0x01]    <-- Switch to S/PDIF
 ```
 
 ---
 
-### 3.2 REQ_GET_INPUT_SOURCE (0xE1)
+### 3.2 `INPUT.SOURCE` GET
 
 | Field | Value |
 |-------|-------|
 | **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xE1` |
-| **wValue** | Unused (0) |
-| **wIndex** | Vendor interface number (2) |
+| **bRequest** | `0x10` |
+| **wValue** | 0 |
+| **wIndex** | `0x0302` |
 | **wLength** | 1 |
 | **Response** | 1 byte: `InputSource` enum value |
 
@@ -153,31 +158,33 @@ Data:          [0x01]    <-- Switch to S/PDIF
 
 | Offset | Size | Field | Values |
 |--------|------|-------|--------|
-| 0 | 1 | `source` | `0` = USB, `1` = S/PDIF |
+| 0 | 1 | `source` | An `InputSource` value (section 2) |
 
 Returns the current `active_input_source`. This reflects the source that was most recently activated, not any pending switch. During the brief interval between a SET command and the main loop processing it, this may still return the old source.
+
+The same byte is offset 0 of `INPUT.STATUS`, which also carries the active input channel count (offset 1), the measured S/PDIF rate in mHz (u32 at offset 4) and the VCXO trim in ppm x100 (i32 at offset 8).
 
 #### Raw USB transfer
 
 ```
 bmRequestType: 0xC1  (IN | Vendor | Interface)
-bRequest:      0xE1
+bRequest:      0x10
 wValue:        0x0000
-wIndex:        0x0002
+wIndex:        0x0302
 wLength:       0x0001
 Response:      [0x00]    <-- Currently on USB
 ```
 
 ---
 
-### 3.3 REQ_GET_SPDIF_RX_STATUS (0xE2)
+### 3.3 `INPUT.SPDIF_RX_STATUS`
 
 | Field | Value |
 |-------|-------|
 | **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xE2` |
-| **wValue** | Unused (0) |
-| **wIndex** | Vendor interface number (2) |
+| **bRequest** | `0x20` |
+| **wValue** | 0 |
+| **wIndex** | `0x0302` |
 | **wLength** | 16 |
 | **Response** | 16 bytes: `SpdifRxStatusPacket` |
 
@@ -249,14 +256,14 @@ Data:   02 01 03 00  80 BB 00 00  00 00 00 00  32 00 00 00
 
 ---
 
-### 3.4 REQ_GET_SPDIF_RX_CH_STATUS (0xE3)
+### 3.4 `INPUT.SPDIF_RX_CH_STATUS`
 
 | Field | Value |
 |-------|-------|
 | **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xE3` |
-| **wValue** | Unused (0) |
-| **wIndex** | Vendor interface number (2) |
+| **bRequest** | `0x21` |
+| **wValue** | 0 |
+| **wIndex** | `0x0302` |
 | **wLength** | 24 |
 | **Response** | 24 bytes: IEC 60958-3 channel status |
 
@@ -273,44 +280,45 @@ Returns the raw 24-byte (192-bit) IEC 60958-3 channel status block captured from
 
 ---
 
-### 3.5 REQ_SET_SPDIF_RX_PIN (0xE4)
+### 3.5 `INPUT.SPDIF_RX_PIN` SET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT, immediate response) |
-| **bRequest** | `0xE4` |
-| **wValue** | New GPIO pin number |
-| **wIndex** | Vendor interface number (2) |
-| **wLength** | 1 (response) |
-| **Response** | 1 byte: status code |
+| **Direction** | Host -> Device (OUT) |
+| **bRequest** | `0x22` |
+| **wValue** | S/PDIF input index, 0 for S/PDIF input 1 (0-3) |
+| **wIndex** | `0x0302` |
+| **wLength** | 1 |
+| **Payload** | 1 byte: new GPIO pin number, or `0xFF` to restore the input's default pin |
 
-Changes the GPIO pin used for S/PDIF receiver input. This is a device-level setting stored in the preset directory (not per-preset).
+Changes the GPIO pin used for an S/PDIF receiver input. This is a device-level setting, not per-preset (section 5.5).
 
-**This is an immediate-response SET command** -- the response byte is returned directly, not via the standard empty-ACK pattern. Use a device-to-host (IN) transfer type despite the SET semantics.
+There is no status byte. 1.1.6 issued this command as an IN transfer that returned one, and 1.1.7 takes it as an ordinary SET. Success is an ACK. A refusal STALLs, and `SYS.LAST_RESULT` gives the reason.
 
-#### Status codes
+#### Results
 
-| Value | Name | Description |
-|-------|------|-------------|
-| 0 | `SUCCESS` | Pin changed (or was already set to this value) |
-| 1 | `INVALID_PIN` | Not a valid GPIO pin |
-| 2 | `PIN_IN_USE` | Pin is already assigned to an output or other function |
-| 3 | `OUTPUT_ACTIVE` | Cannot change while S/PDIF input is active |
+| Result | Meaning |
+|--------|---------|
+| `VC_OK` | Pin changed (or was already set to this value) |
+| `VC_ERR_PIN_INVALID` | Not a GPIO usable for S/PDIF RX |
+| `VC_ERR_PIN_IN_USE` | Pin is already assigned to an output or other function (checked only while that input is enabled) |
+| `VC_ERR_ADDRESS` | Input index out of range |
+| `VC_ERR_LENGTH` | Payload not exactly 1 byte |
 
-**Important:** The pin cannot be changed while S/PDIF is the active input source (`active_input_source == INPUT_SOURCE_SPDIF`). Switch to USB first, change the pin, then switch back.
+**The active input can be changed in place.** When the addressed input is the active source, the firmware hot-swaps the receiver to the new pin on the main loop. An earlier version of this document described an `OUTPUT_ACTIVE` (3) refusal here. The firmware has not refused it since the pin became hot-swappable, so a host does not need to switch to USB first.
 
-### 3.6 REQ_GET_SPDIF_RX_PIN (0xE5)
+### 3.6 `INPUT.SPDIF_RX_PIN` GET
 
 | Field | Value |
 |-------|-------|
 | **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xE5` |
-| **wValue** | Unused (0) |
-| **wIndex** | Vendor interface number (2) |
+| **bRequest** | `0x22` |
+| **wValue** | S/PDIF input index (0-3) |
+| **wIndex** | `0x0302` |
 | **wLength** | 1 |
 | **Response** | 1 byte: GPIO pin number |
 
-Returns the GPIO pin currently configured for S/PDIF receiver input. Default: GPIO 5 (`PICO_SPDIF_RX_PIN_DEFAULT`).
+Returns the GPIO pin currently configured for the addressed S/PDIF receiver input. Default for input 1: GPIO 5 (`PICO_SPDIF_RX_PIN_DEFAULT`). A bad index STALLs with `VC_ERR_ADDRESS`.
 
 ---
 
@@ -334,7 +342,7 @@ typedef struct __attribute__((packed)) {
 } WireInputConfig;               // 16 bytes
 ```
 
-**Important:** On bulk SET (0xA1), the `spdif_rx_pin` field is **informational only** and is NOT applied. Pin changes require the dedicated `REQ_SET_SPDIF_RX_PIN` (0xE4) command. The `input_source` field IS applied (deferred to main loop, same as the individual SET command).
+**Important:** On bulk SET (`STORE.ALL_PARAMS`), the `spdif_rx_pin` field is **informational only** and is NOT applied. Pin changes require the dedicated `INPUT.SPDIF_RX_PIN` command. The `input_source` field IS applied (deferred to main loop, same as the individual SET command).
 
 ### 4.2 Hex byte layout
 
@@ -379,16 +387,15 @@ The `WireInputConfig` section is the last section in the packet, appended after 
 | V2-V6 | No | Input source unchanged (stays at current value) |
 | V7+ | Yes | `input_source` parsed and applied (deferred to main loop) |
 
-**On GET (0xA0):** The firmware always populates `WireInputConfig` with current values and sets `format_version = 7`. The total response size is **2912 bytes**.
+**On GET (`STORE.ALL_PARAMS`):** The firmware always populates `WireInputConfig` with current values and sets `format_version = 7`. The total response size is **2912 bytes**.
 
-**On SET (0xA1):** If the incoming `format_version` < 7, the `WireInputConfig` section is not present and the input source remains at its current value. If `format_version` >= 7, the `input_source` is validated and (if different from current) queued for switching.
+**On SET (`STORE.ALL_PARAMS`):** If the incoming `format_version` < 7, the `WireInputConfig` section is not present and the input source remains at its current value. If `format_version` >= 7, the `input_source` is validated and (if different from current) queued for switching.
 
 ### 4.5 Bulk transfer commands
 
-| Command | Code | Direction | Total size | Description |
-|---------|------|-----------|------------|-------------|
-| `REQ_GET_ALL_PARAMS` | 0xA0 | Device -> Host | 2912 bytes | Returns full `WireBulkParams` |
-| `REQ_SET_ALL_PARAMS` | 0xA1 | Host -> Device | 2912 bytes | Applies full `WireBulkParams` to live state |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | GET returns the full `WireBulkParams`, SET applies it to live state. The sizes are those of the current wire format (V32). The 2912 bytes this section describes were V7 |
 
 ---
 
@@ -411,7 +418,7 @@ The following fields are appended to the `PresetSlot` struct after `master_volum
 
 ### 5.3 Save behavior
 
-When `REQ_PRESET_SAVE` (0x90) is issued, the current active input source is always saved:
+When `STORE.PRESET_SAVE` is issued, the current active input source is always saved:
 
 ```
 slot->input_source = active_input_source;
@@ -419,7 +426,7 @@ slot->input_source = active_input_source;
 
 ### 5.4 Load behavior
 
-When `REQ_PRESET_LOAD` (0x91) is issued:
+When `STORE.PRESET_LOAD` is issued:
 
 | Slot version | Behavior |
 |-------------|----------|
@@ -427,15 +434,15 @@ When `REQ_PRESET_LOAD` (0x91) is issued:
 | V12 and earlier | The input source is left at its current value. No switch occurs. |
 | Unconfigured (empty) slot | Factory defaults applied. Input source set to USB (0). |
 
-The switch is deferred to the main loop (same mechanism as the `REQ_SET_INPUT_SOURCE` vendor command), so the preset load completes quickly and the mute/switch/unmute sequence runs asynchronously.
+The switch is deferred to the main loop (same mechanism as the `INPUT.SOURCE` vendor command), so the preset load completes quickly and the mute/switch/unmute sequence runs asynchronously.
 
 ### 5.5 SPDIF RX pin storage
 
-The S/PDIF RX pin is a **device-level** setting, not per-preset. It is stored in the `PresetDirectory` structure (flash sector 0), not in individual preset slots. Changing the RX pin via `REQ_SET_SPDIF_RX_PIN` (0xE4) triggers a deferred directory flash write.
+The S/PDIF RX pin is a **device-level** setting, not per-preset. It is stored in the `PresetDirectory` structure (flash sector 0), not in individual preset slots. Changing the RX pin via `INPUT.SPDIF_RX_PIN` changes RAM only. The pin persists through `STORE.OUTPUT_CONFIG_SAVE` in independent mode, or with a preset save in with-preset mode (`output_config_independent_load.md`).
 
 ### 5.6 Factory defaults
 
-Applied when loading an empty slot or on factory reset (`REQ_FACTORY_RESET` / 0x53):
+Applied when loading an empty slot or on factory reset (`STORE.FACTORY_RESET`):
 
 | Parameter | Default value |
 |-----------|---------------|
@@ -448,10 +455,12 @@ Applied when loading an empty slot or on factory reset (`REQ_FACTORY_RESET` / 0x
 
 ### 6.1 USB to S/PDIF
 
+`SOURCE` and `SPDIF_RX_STATUS` in the diagrams are `INPUT.SOURCE` and `INPUT.SPDIF_RX_STATUS`.
+
 ```
 App                          Firmware (USB IRQ)           Firmware (Main Loop)
  |                                |                            |
- |-- SET 0xE0 [0x01] ----------->|                            |
+ |-- SET SOURCE [0x01] --------->|                            |
  |<-------- empty ACK -----------|                            |
  |                                |  pending_input_source = 1  |
  |                                |  input_source_change_pending = true
@@ -463,7 +472,7 @@ App                          Firmware (USB IRQ)           Firmware (Main Loop)
  |                                |              4. spdif_input_start() -> RX HW claimed
  |                                |              5. (output stays muted, waiting for lock)
  |                                |                            |
- |-- GET 0xE2 ------------------>|                            |
+ |-- GET SPDIF_RX_STATUS ------->|                            |
  |<-- state=ACQUIRING -----------|              ...polling for lock...
  |                                |                            |
  |                                |              SPDIF lock acquired:
@@ -471,7 +480,7 @@ App                          Firmware (USB IRQ)           Firmware (Main Loop)
  |                                |              7. Wait for FIFO fill (>= 25%)
  |                                |              8. complete_pipeline_reset() -> unmute
  |                                |                            |
- |-- GET 0xE2 ------------------>|                            |
+ |-- GET SPDIF_RX_STATUS ------->|                            |
  |<-- state=LOCKED, rate=48000 --|              Audio flowing:
  |                                |              SPDIF FIFO -> decode -> preamp -> DSP -> outputs
 ```
@@ -481,7 +490,7 @@ App                          Firmware (USB IRQ)           Firmware (Main Loop)
 ```
 App                          Firmware (USB IRQ)           Firmware (Main Loop)
  |                                |                            |
- |-- SET 0xE0 [0x00] ----------->|                            |
+ |-- SET SOURCE [0x00] --------->|                            |
  |<-------- empty ACK -----------|                            |
  |                                |  pending_input_source = 0  |
  |                                |  input_source_change_pending = true
@@ -494,7 +503,7 @@ App                          Firmware (USB IRQ)           Firmware (Main Loop)
  |                                |              5. usb_audio_flush_ring() -> discard stale data
  |                                |              6. complete_pipeline_reset() -> unmute
  |                                |                            |
- |-- GET 0xE1 ------------------>|                            |
+ |-- GET SOURCE ---------------->|                            |
  |<-- [0x00] (USB) --------------|              Audio flowing:
  |                                |              USB packets -> decode -> preamp -> DSP -> outputs
 ```
@@ -556,8 +565,8 @@ The host operating system sees no difference in the USB device. There is no re-e
 | **Multiple rapid switches** | Each SET overwrites `pending_input_source`. The main loop processes only the most recent value (last-write-wins). |
 | **Switch while preset is loading** | The preset load's own mute period covers the switch. No double-mute. |
 | **Boot with SPDIF preset, no source** | Output silence until a source is connected. Device is fully operational otherwise. |
-| **SET with same source as current** | No-op. No mute, no hardware change. |
-| **SET SPDIF RX pin while SPDIF active** | Rejected with status `OUTPUT_ACTIVE` (3). Switch to USB first. |
+| **SET with same source as current** | ACK, nothing happens. No mute, no hardware change. |
+| **SET SPDIF RX pin while SPDIF active** | Accepted. The receiver hot-swaps to the new pin on the main loop. |
 
 ---
 
@@ -573,20 +582,20 @@ This section provides practical code examples for integrating input source switc
 #include <string.h>
 #include <stdio.h>
 
-// Vendor command codes
-#define REQ_SET_INPUT_SOURCE        0xE0
-#define REQ_GET_INPUT_SOURCE        0xE1
-#define REQ_GET_SPDIF_RX_STATUS     0xE2
-#define REQ_GET_SPDIF_RX_CH_STATUS  0xE3
-#define REQ_SET_SPDIF_RX_PIN        0xE4
-#define REQ_GET_SPDIF_RX_PIN        0xE5
-
-// Bulk transfer commands
-#define REQ_GET_ALL_PARAMS          0xA0
-#define REQ_SET_ALL_PARAMS          0xA1
-
-// Vendor interface number
+// Paged protocol: page in the wIndex high byte, command in bRequest
 #define VENDOR_INTF                 2
+#define PAGE_STORE                  0x02
+#define PAGE_INPUT                  0x03
+#define WINDEX(page)                ((uint16_t)(((page) << 8) | VENDOR_INTF))
+
+// INPUT page commands
+#define INPUT_SOURCE                0x10   // GET, SET
+#define INPUT_SPDIF_RX_STATUS       0x20   // GET
+#define INPUT_SPDIF_RX_CH_STATUS    0x21   // GET
+#define INPUT_SPDIF_RX_PIN          0x22   // GET, SET; wValue = S/PDIF input index
+
+// STORE page bulk command
+#define STORE_ALL_PARAMS            0x40   // GET, SET
 
 // InputSource enum values
 #define INPUT_SOURCE_USB            0
@@ -611,15 +620,15 @@ typedef struct __attribute__((packed)) {
 } SpdifRxStatus;  // 16 bytes
 ```
 
-### 10.2 Read current input source (GET 0xE1)
+### 10.2 Read current input source (`INPUT.SOURCE` GET)
 
 ```c
 int get_input_source(libusb_device_handle *dev, uint8_t *source_out) {
     int ret = libusb_control_transfer(dev,
         LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_GET_INPUT_SOURCE,
-        0,              // wValue (unused)
-        VENDOR_INTF,    // wIndex
+        INPUT_SOURCE,
+        0,              // wValue (no address)
+        WINDEX(PAGE_INPUT),
         source_out,     // 1-byte buffer
         1,              // wLength
         1000);          // timeout ms
@@ -629,20 +638,20 @@ int get_input_source(libusb_device_handle *dev, uint8_t *source_out) {
                *source_out == INPUT_SOURCE_SPDIF ? "S/PDIF" : "USB");
         return 0;  // success
     }
-    fprintf(stderr, "GET_INPUT_SOURCE failed: %s\n", libusb_error_name(ret));
+    fprintf(stderr, "INPUT.SOURCE GET failed: %s\n", libusb_error_name(ret));
     return -1;
 }
 ```
 
-### 10.3 Switch input source (SET 0xE0)
+### 10.3 Switch input source (`INPUT.SOURCE` SET)
 
 ```c
 int set_input_source(libusb_device_handle *dev, uint8_t source) {
     int ret = libusb_control_transfer(dev,
         LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_SET_INPUT_SOURCE,
-        0,              // wValue (unused)
-        VENDOR_INTF,    // wIndex
+        INPUT_SOURCE,
+        0,              // wValue (no address)
+        WINDEX(PAGE_INPUT),
         &source,        // 1-byte payload
         1,              // wLength
         1000);          // timeout ms
@@ -652,20 +661,21 @@ int set_input_source(libusb_device_handle *dev, uint8_t source) {
                source == INPUT_SOURCE_SPDIF ? "S/PDIF" : "USB");
         return 0;
     }
-    fprintf(stderr, "SET_INPUT_SOURCE failed: %s\n", libusb_error_name(ret));
+    // A STALL (LIBUSB_ERROR_PIPE) means the device refused it; SYS.LAST_RESULT has the reason.
+    fprintf(stderr, "INPUT.SOURCE SET failed: %s\n", libusb_error_name(ret));
     return -1;
 }
 ```
 
-### 10.4 Poll S/PDIF receiver status (GET 0xE2)
+### 10.4 Poll S/PDIF receiver status (`INPUT.SPDIF_RX_STATUS`)
 
 ```c
 int get_spdif_rx_status(libusb_device_handle *dev, SpdifRxStatus *status_out) {
     int ret = libusb_control_transfer(dev,
         LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_GET_SPDIF_RX_STATUS,
+        INPUT_SPDIF_RX_STATUS,
         0,                            // wValue
-        VENDOR_INTF,                  // wIndex
+        WINDEX(PAGE_INPUT),           // wIndex
         (uint8_t *)status_out,        // 16-byte buffer
         sizeof(SpdifRxStatus),        // wLength = 16
         1000);
@@ -673,7 +683,7 @@ int get_spdif_rx_status(libusb_device_handle *dev, SpdifRxStatus *status_out) {
     if (ret == (int)sizeof(SpdifRxStatus)) {
         return 0;  // success
     }
-    fprintf(stderr, "GET_SPDIF_RX_STATUS failed: %s\n", libusb_error_name(ret));
+    fprintf(stderr, "INPUT.SPDIF_RX_STATUS failed: %s\n", libusb_error_name(ret));
     return -1;
 }
 
@@ -780,33 +790,32 @@ Recommended UI layout for an input source selector:
 Implementation steps:
 
 1. **On app startup / device connect:**
-   - `GET 0xE1` to read the current source, OR parse the `input_source` field from a bulk GET (0xA0).
-   - `GET 0xE5` to read the S/PDIF RX pin.
-   - `GET 0xE2` to read the initial S/PDIF status.
+   - GET `INPUT.SOURCE` to read the current source, OR parse the `input_source` field from a bulk GET (`STORE.ALL_PARAMS`).
+   - GET `INPUT.SPDIF_RX_PIN` (`wValue` 0) to read the S/PDIF RX pin.
+   - GET `INPUT.SPDIF_RX_STATUS` to read the initial S/PDIF status.
    - Set the radio button to match the current source.
 
 2. **When the user selects a different source:**
-   - `SET 0xE0` with the new source value.
+   - SET `INPUT.SOURCE` with the new source value. A STALL means the source cannot be selected (section 3.1).
    - Disable the radio buttons momentarily (prevent double-clicks).
-   - Start polling `GET 0xE2` at 200 ms intervals.
+   - Start polling `INPUT.SPDIF_RX_STATUS` at 200 ms intervals.
    - When the status shows `LOCKED` (if switching to S/PDIF) or `INACTIVE` (if switching to USB), update the UI and re-enable the radio buttons.
 
 3. **Background status polling (optional):**
-   - While S/PDIF is the active source, poll `GET 0xE2` at 500 ms intervals to keep the status panel updated.
+   - While S/PDIF is the active source, poll `INPUT.SPDIF_RX_STATUS` at 500 ms intervals to keep the status panel updated.
    - If `state` changes to `RELOCKING`, display a "Signal Lost" warning.
    - If `parity_errors` is increasing, display a "Signal Quality" warning.
    - Stop polling when USB is the active source (status will always be `INACTIVE`).
 
 4. **Pin change flow:**
-   - Verify current source is USB (GET 0xE1). If S/PDIF is active, prompt the user to switch to USB first.
-   - `SET 0xE4` with `wValue = new_pin`. Check the 1-byte response for status code.
-   - On success, update the displayed pin number.
+   - SET `INPUT.SPDIF_RX_PIN` with `wValue` = input index and the new pin as the 1-byte payload. The active input hot-swaps, so there is no need to switch to USB first.
+   - On an ACK, update the displayed pin number. On a STALL, read `SYS.LAST_RESULT` and show the reason (section 3.5).
 
 ### 10.7 Handle bulk params with WireInputConfig
 
 When using bulk parameter transfers for configuration backup/restore, the `WireInputConfig` section must be handled correctly.
 
-#### Reading (GET 0xA0)
+#### Reading (`STORE.ALL_PARAMS` GET)
 
 ```c
 #define WIRE_INPUT_CONFIG_OFFSET  2896  // Byte offset in WireBulkParams
@@ -814,7 +823,7 @@ When using bulk parameter transfers for configuration backup/restore, the `WireI
 
 // After receiving the full bulk response:
 uint8_t bulk_buf[WIRE_BULK_PARAMS_SIZE];
-int ret = /* ... GET 0xA0 ... */;
+int ret = /* ... GET STORE.ALL_PARAMS ... */;
 
 // Check format version (byte 0 of header)
 uint8_t format_version = bulk_buf[0];
@@ -832,7 +841,7 @@ if (format_version >= 7) {
 }
 ```
 
-#### Writing (SET 0xA1)
+#### Writing (`STORE.ALL_PARAMS` SET)
 
 ```c
 // When constructing a V7 bulk SET payload:
@@ -849,12 +858,12 @@ bulk_buf[WIRE_INPUT_CONFIG_OFFSET]     = INPUT_SOURCE_SPDIF;  // input_source
 bulk_buf[WIRE_INPUT_CONFIG_OFFSET + 1] = 5;                   // spdif_rx_pin (informational only)
 // bytes 2-15 are reserved (already zero from memset)
 
-// Send the complete 2912-byte payload via SET 0xA1
+// Send the complete 2912-byte payload via SET STORE.ALL_PARAMS
 ```
 
 **Important notes for bulk SET:**
 - The `spdif_rx_pin` field is informational only. It is read on GET but not applied on SET.
-- The `input_source` field IS applied on SET: it triggers the same deferred switch mechanism as `REQ_SET_INPUT_SOURCE` (0xE0).
+- The `input_source` field IS applied on SET: it triggers the same deferred switch mechanism as `INPUT.SOURCE`.
 - If `format_version` < 7 in a SET payload, the input source remains unchanged.
 - Bulk SET always applies the input source regardless of any directory-level flags (there is no "include_input_source" flag).
 
@@ -864,24 +873,22 @@ bulk_buf[WIRE_INPUT_CONFIG_OFFSET + 1] = 5;                   // spdif_rx_pin (i
 
 ### Old apps with new firmware
 
-Apps that do not know about the 0xE0-0xE5 commands will never send them. The device boots with USB as the default input source and remains there. All pre-existing vendor commands continue to function identically. Bulk GET responses grow from 2896 bytes (V6) to 2912 bytes (V7); old apps that request 2896 bytes via `wLength` will receive only that many bytes (USB control transfers truncate to the requested length).
+Firmware 1.1.7 answers only the paged protocol, so an app written for 1.1.6 opcodes cannot drive it at all (`vendor_command_overhaul_plan.md` section 7). The rest of this subsection describes the V6 to V7 transition within the 1.1.6 opcode space. Apps that did not know about the 0xE0-0xE5 commands never sent them. The device boots with USB as the default input source and remains there. All pre-existing vendor commands continue to function identically. Bulk GET responses grow from 2896 bytes (V6) to 2912 bytes (V7); old apps that request 2896 bytes via `wLength` will receive only that many bytes (USB control transfers truncate to the requested length).
 
 ### New apps with old firmware
 
-Apps that send `REQ_SET_INPUT_SOURCE` (0xE0) or `REQ_GET_INPUT_SOURCE` (0xE1) to firmware that does not support them will receive a USB STALL response. Apps should handle this gracefully:
+Every firmware that speaks the paged protocol has `INPUT.SOURCE`. A host that gates features on the command table checks the command's GET bit in `SYS.PAGE_COMMANDS` for page 0x03. Firmware 1.1.6 and older does not answer the paged protocol at all, and a host must not send it paged commands (`vendor_command_overhaul_plan.md` section 5.14).
 
 ```c
-// Probe for input switching support
+// After SYS.PROTOCOL_INFO has confirmed the paged protocol:
 uint8_t source;
 int ret = libusb_control_transfer(dev,
     LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-    REQ_GET_INPUT_SOURCE, 0, VENDOR_INTF, &source, 1, 1000);
+    INPUT_SOURCE, 0, WINDEX(PAGE_INPUT), &source, 1, 1000);
 
 if (ret == 1) {
-    // Input switching supported — show source selector UI
     show_input_source_selector(source);
 } else {
-    // Not supported — hide input source controls
     hide_input_source_selector();
 }
 ```
@@ -896,17 +903,17 @@ Bulk SET payloads with `format_version` < 7 do not contain the `WireInputConfig`
 
 ### Migration from legacy SPDIF input API (0x80-0x82)
 
-The earlier S/PDIF input API used different vendor command codes:
+The earlier S/PDIF input API used different vendor command codes. Its successors were opcodes 0xE0 to 0xE2 in firmware 1.1.6 and are paged commands in 1.1.7:
 
-| Old command | Old code | New equivalent | New code | Notes |
-|-------------|----------|----------------|----------|-------|
-| `REQ_SET_AUDIO_SOURCE` | 0x80 | `REQ_SET_INPUT_SOURCE` | 0xE0 | New command is non-blocking (deferred) |
-| `REQ_GET_AUDIO_SOURCE` | 0x81 | `REQ_GET_INPUT_SOURCE` | 0xE1 | Same semantics |
-| `REQ_GET_SPDIF_IN_STATUS` | 0x82 | `REQ_GET_SPDIF_RX_STATUS` | 0xE2 | Different struct layout (16 bytes, not 20) |
+| Old command | Old code | 1.1.6 code | 1.1.7 command | Notes |
+|-------------|----------|------------|---------------|-------|
+| `SET_AUDIO_SOURCE` | 0x80 | 0xE0 | `INPUT.SOURCE` SET | New command is non-blocking (deferred) |
+| `GET_AUDIO_SOURCE` | 0x81 | 0xE1 | `INPUT.SOURCE` GET | Same semantics |
+| `GET_SPDIF_IN_STATUS` | 0x82 | 0xE2 | `INPUT.SPDIF_RX_STATUS` | Different struct layout (16 bytes, not 20) |
 
 Key differences from the legacy API:
-- **0xE0 is non-blocking.** The old 0x80 blocked until the switch completed (up to 510 ms). The new 0xE0 returns immediately and the app polls 0xE2 for progress.
-- **0xE2 returns a different struct.** The old 0x82 returned a 20-byte `SpdifInStatus` with `c_bits[5]`. The new 0xE2 returns a 16-byte `SpdifRxStatusPacket` with additional fields (`lock_count`, `loss_count`, `fifo_fill_pct`). Channel status bytes are now queried separately via 0xE3.
+- **The source SET is non-blocking.** The old 0x80 blocked until the switch completed (up to 510 ms). `INPUT.SOURCE` returns immediately and the app polls `INPUT.SPDIF_RX_STATUS` for progress.
+- **The status read returns a different struct.** The old 0x82 returned a 20-byte `SpdifInStatus` with `c_bits[5]`. `INPUT.SPDIF_RX_STATUS` returns a 16-byte `SpdifRxStatusPacket` with additional fields (`lock_count`, `loss_count`, `fifo_fill_pct`). Channel status bytes are queried separately via `INPUT.SPDIF_RX_CH_STATUS`.
 - **Persistence.** The old API did not persist the input source. The new API saves it per-preset (V13+).
 
 ---
@@ -976,11 +983,10 @@ When S/PDIF is active, the device's operating sample rate is determined by the S
 
 ## 14. Request Code Summary
 
-| Code | Command | Direction | Data | Description |
-|------|---------|-----------|------|-------------|
-| 0xE0 | `REQ_SET_INPUT_SOURCE` | OUT | 1 byte: source (0=USB, 1=SPDIF) | Switch input source (deferred) |
-| 0xE1 | `REQ_GET_INPUT_SOURCE` | IN | 1 byte: source | Query current input source |
-| 0xE2 | `REQ_GET_SPDIF_RX_STATUS` | IN | 16 bytes: SpdifRxStatusPacket | Query S/PDIF receiver status |
-| 0xE3 | `REQ_GET_SPDIF_RX_CH_STATUS` | IN | 24 bytes: channel status | Query IEC 60958 channel status |
-| 0xE4 | `REQ_SET_SPDIF_RX_PIN` | OUT (imm.) | wValue=pin, 1-byte response | Change S/PDIF RX GPIO pin |
-| 0xE5 | `REQ_GET_SPDIF_RX_PIN` | IN | 1 byte: GPIO pin | Query S/PDIF RX GPIO pin |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `INPUT.SOURCE` | 0x03 | 0x10 | GET, SET | none (0) | GET 1, SET 1 | Switch input source (deferred) or query it |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | none (0) | GET 12 | Source, active channels, S/PDIF rate in mHz, VCXO trim |
+| `INPUT.SPDIF_RX_STATUS` | 0x03 | 0x20 | GET | none (0) | GET 16 | `SpdifRxStatusPacket` |
+| `INPUT.SPDIF_RX_CH_STATUS` | 0x03 | 0x21 | GET | none (0) | GET 24 | IEC 60958 channel status |
+| `INPUT.SPDIF_RX_PIN` | 0x03 | 0x22 | GET, SET | S/PDIF input 0-3 | GET 1, SET 1 | GPIO in the payload, 0xFF restores the default |

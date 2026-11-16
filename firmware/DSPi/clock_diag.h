@@ -20,13 +20,13 @@
 
 // Latched once-per-second snapshot of every CLKDIAG field, for the read-only
 // DIAG.CLOCK_DIAG vendor command (no console backend exists in this build).
-// Packed, little-endian, decoded host-side (scratchpad/clkdiag_poll.py).  ppm
+// Packed, little-endian, decoded host-side (tools/clkdiag_poll.py).  ppm
 // fields are centi-ppm (ppm*100); frequencies flagged _mhz are milli-Hz
 // (Hz*1000).  Per-slot arrays are sized NUM_SPDIF_INSTANCES; num_slots reports
 // the live count.  Tearing is acceptable (diagnostics; filled from the main
 // loop, memcpy'd from the control transfer).
 typedef struct __attribute__((packed)) {
-    uint8_t  version;            // format version (=1)
+    uint8_t  version;            // format version (=2)
     uint8_t  platform;           // PLATFORM_RP2040 / PLATFORM_RP2350
     uint8_t  num_slots;          // NUM_SPDIF_INSTANCES
     uint8_t  pll_lock;           // sys PLL locked

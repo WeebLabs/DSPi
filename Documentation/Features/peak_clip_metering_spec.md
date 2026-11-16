@@ -1,5 +1,7 @@
 # DSPi Peak, Clip & CPU Metering - Developer Reference
 
+*Last updated: 2026-11-16 (vendor commands, reply layout and channel layout for the paged protocol of firmware 1.1.7)*
+
 This document provides a complete specification for implementing real-time level meters, clip (OVER) indicators, and CPU load displays in control software for DSPi. All communication occurs via USB vendor control transfers on interface 2.
 
 ---
@@ -9,10 +11,10 @@ This document provides a complete specification for implementing real-time level
 DSPi provides three categories of real-time metering data, all updated once per audio block (~1-4 ms depending on sample rate and block size):
 
 - **Peak Levels** — Per-channel instantaneous block peak, `uint16_t` in Q15 format (0-32767 maps to 0.0-1.0 full scale). No decay or hold — the host application is responsible for ballistics.
-- **Clip Flags** — Per-channel sticky OVER indicators. A `uint16_t` bitmask where each bit latches when the corresponding channel's block peak exceeds the clip threshold. Bits accumulate until explicitly cleared by the host.
+- **Clip Flags:** Per-channel sticky OVER indicators. A `uint32_t` bitmask where each bit latches when the corresponding channel's block peak exceeds the clip threshold. Bits accumulate until explicitly cleared by the host.
 - **CPU Load** — Per-core and combined system load as `uint8_t` percentages (0-100). Budget-based measurement where 100% means processing consumes the full audio time budget (underrun imminent).
 
-All metering data is read via `REQ_GET_STATUS` (0x50). Clip flags are cleared via `REQ_CLEAR_CLIPS` (0x83).
+All metering data is read with one `MEAS.LEVELS` request. Clip flags are cleared with `MEAS.CLIP_CLEAR`. Both are paged commands (`../commands.md`).
 
 ---
 
@@ -20,28 +22,29 @@ All metering data is read via `REQ_GET_STATUS` (0x50). Clip flags are cleared vi
 
 Peak and clip metering covers all input and output channels. The channel count and index mapping are platform-dependent:
 
-### RP2350 (11 Channels)
+### RP2350 (17 Channels)
+
+Inputs are first-class channels (unified channel model). Indices 0-7 are the inputs. The active input count is 2, 4, 6 or 8, and an inactive input reports peak 0.
 
 | Index | Constant | Description | Peak Source |
 |-------|----------|-------------|-------------|
-| 0 | `CH_MASTER_LEFT` | Input left (post-preamp, post-master EQ) | Core 0 |
-| 1 | `CH_MASTER_RIGHT` | Input right (post-preamp, post-master EQ) | Core 0 |
-| 2 | `CH_OUT_1` | S/PDIF 1 left | Core 0 |
-| 3 | `CH_OUT_2` | S/PDIF 1 right | Core 0 |
-| 4 | `CH_OUT_3` | S/PDIF 2 left | Core 1 (EQ worker) or Core 0 (single-core) |
-| 5 | `CH_OUT_4` | S/PDIF 2 right | Core 1 (EQ worker) or Core 0 (single-core) |
-| 6 | `CH_OUT_5` | S/PDIF 3 left | Core 1 (EQ worker) or Core 0 (single-core) |
-| 7 | `CH_OUT_6` | S/PDIF 3 right | Core 1 (EQ worker) or Core 0 (single-core) |
-| 8 | `CH_OUT_7` | S/PDIF 4 left | Core 1 (EQ worker) or Core 0 (single-core) |
-| 9 | `CH_OUT_8` | S/PDIF 4 right | Core 1 (EQ worker) or Core 0 (single-core) |
-| 10 | `CH_OUT_9_PDM` | PDM subwoofer | Core 0 (single-core or PDM mode) |
+| 0-7 | (inputs) | Input channels 1-8. 0 and 1 are the stereo pair | Core 0 |
+| 8 | `CH_OUT_1` | S/PDIF 1 left | Core 0 |
+| 9 | `CH_OUT_2` | S/PDIF 1 right | Core 0 |
+| 10 | `CH_OUT_3` | S/PDIF 2 left | Core 1 (EQ worker) or Core 0 (single-core) |
+| 11 | `CH_OUT_4` | S/PDIF 2 right | Core 1 (EQ worker) or Core 0 (single-core) |
+| 12 | `CH_OUT_5` | S/PDIF 3 left | Core 1 (EQ worker) or Core 0 (single-core) |
+| 13 | `CH_OUT_6` | S/PDIF 3 right | Core 1 (EQ worker) or Core 0 (single-core) |
+| 14 | `CH_OUT_7` | S/PDIF 4 left | Core 1 (EQ worker) or Core 0 (single-core) |
+| 15 | `CH_OUT_8` | S/PDIF 4 right | Core 1 (EQ worker) or Core 0 (single-core) |
+| 16 | `CH_OUT_9_PDM` | PDM subwoofer | Core 0 (single-core or PDM mode) |
 
 ### RP2040 (7 Channels)
 
 | Index | Constant | Description | Peak Source |
 |-------|----------|-------------|-------------|
-| 0 | `CH_MASTER_LEFT` | Input left | Core 0 |
-| 1 | `CH_MASTER_RIGHT` | Input right | Core 0 |
+| 0 | (input) | Input left | Core 0 |
+| 1 | (input) | Input right | Core 0 |
 | 2 | `CH_OUT_1` | S/PDIF 1 left | Core 0 |
 | 3 | `CH_OUT_2` | S/PDIF 1 right | Core 0 |
 | 4 | `CH_OUT_3` | S/PDIF 2 left | Core 1 (EQ worker) or Core 0 (single-core) |
@@ -52,81 +55,55 @@ Peak and clip metering covers all input and output channels. The channel count a
 
 - **Disabled outputs** report peak 0 and never set clip flags.
 - **PDM in EQ_WORKER mode** is mutually exclusive — the PDM channel reports peak 0 when Core 1 is running the EQ worker.
-- The channel index used in the peak array matches the EQ channel index used in `REQ_SET_EQ_PARAM` and the bit position in `clip_flags`.
+- The channel index used in the peak array matches the EQ channel index in the `FILTER.BAND` address and the bit position in `clip_flags`.
 
 ---
 
 ## Vendor Commands
 
-All commands use the standard DSPi vendor control transfer format:
+All three are paged commands. Page 0x09 (`MEAS`) travels in the `wIndex` high byte and the interface number 2 in the low byte, so `wIndex` is `0x0902`. A refused request STALLs, and `SYS.LAST_RESULT` gives the reason (`../commands.md`).
 
-- **bmRequestType:** `0xC1` (Device→Host GET) or `0x41` (Host→Device SET)
-- **wIndex:** `2` (vendor interface number)
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | none (0) | GET var | `2 * NUM_CHANNELS + 7` bytes: 41 on RP2350, 21 on RP2040 |
+| `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | GET | none (0) | GET 4 | u32 `clip_flags`. Reading does not clear |
+| `MEAS.CLIP_CLEAR` | 0x09 | 0x12 | SET (zero-length) | none (0) | SET 0 | Clears every clip flag |
+
 - **Timeout:** Recommended 1000 ms
 
 ---
 
-### REQ_GET_STATUS (0x50) — Read Metering Data
+### `MEAS.LEVELS`: Read Metering Data
 
-**Direction:** Device → Host (GET)
-
-The response format depends on `wValue`. For metering, use **wValue=9** — it returns all data in a single transfer.
-
----
-
-#### wValue=9: Combined Status (Recommended)
-
-Returns all peaks, CPU loads, and clip flags in one response.
+Returns all peaks, CPU loads, clip flags and the active input count in one response. These are the same bytes as the 1.1.6 `GET_STATUS` selector 9.
 
 | Field | Value |
 |-------|-------|
 | bmRequestType | 0xC1 (IN) |
-| bRequest | 0x50 |
-| wValue | 9 |
-| wIndex | 2 |
-| wLength | `NUM_CHANNELS * 2 + 4` (base) or `NUM_CHANNELS * 2 + 5` (extended) |
+| bRequest | 0x10 |
+| wValue | 0 |
+| wIndex | 0x0902 |
+| wLength | `NUM_CHANNELS * 2 + 7` (RP2350: 41, RP2040: 21) |
 
-**Response size:** The firmware checks `wLength` and adapts the response:
-- Base (`wLength = NUM_CHANNELS * 2 + 4`): RP2350: 26 bytes, RP2040: 18 bytes
-- Extended (`wLength >= NUM_CHANNELS * 2 + 5`): RP2350: 27 bytes, RP2040: 19 bytes (includes `cpu_system_load`)
-
-**Backward compatibility:** The firmware only includes `cpu_system_load` when the host requests enough bytes. Old apps requesting `NUM_CHANNELS * 2 + 4` bytes receive exactly that — no trailing byte, no size mismatch. New apps request `NUM_CHANNELS * 2 + 5` to get the extra byte.
-
-**Response layout (RP2350, 27 bytes):**
+**Response layout (RP2350, 41 bytes):**
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
-| 0 | 2 | uint16_t LE | `peaks[0]` | Input left peak |
-| 2 | 2 | uint16_t LE | `peaks[1]` | Input right peak |
-| 4 | 2 | uint16_t LE | `peaks[2]` | S/PDIF 1 L peak |
-| 6 | 2 | uint16_t LE | `peaks[3]` | S/PDIF 1 R peak |
-| 8 | 2 | uint16_t LE | `peaks[4]` | S/PDIF 2 L peak |
-| 10 | 2 | uint16_t LE | `peaks[5]` | S/PDIF 2 R peak |
-| 12 | 2 | uint16_t LE | `peaks[6]` | S/PDIF 3 L peak |
-| 14 | 2 | uint16_t LE | `peaks[7]` | S/PDIF 3 R peak |
-| 16 | 2 | uint16_t LE | `peaks[8]` | S/PDIF 4 L peak |
-| 18 | 2 | uint16_t LE | `peaks[9]` | S/PDIF 4 R peak |
-| 20 | 2 | uint16_t LE | `peaks[10]` | PDM sub peak |
-| 22 | 1 | uint8_t | `cpu0_load` | Core 0 CPU load (0-100%) |
-| 23 | 1 | uint8_t | `cpu1_load` | Core 1 CPU load (0-100%) |
-| 24 | 2 | uint16_t LE | `clip_flags` | Per-channel clip bitmask |
-| 26 | 1 | uint8_t | `cpu_system_load` | max(cpu0, cpu1) (0-100%) |
+| 0 | 34 | uint16_t LE [17] | `peaks[0..16]` | Peaks in channel-index order (table above) |
+| 34 | 1 | uint8_t | `cpu0_load` | Core 0 CPU load (0-100%) |
+| 35 | 1 | uint8_t | `cpu1_load` | Core 1 CPU load (0-100%) |
+| 36 | 4 | uint32_t LE | `clip_flags` | Per-channel clip bitmask |
+| 40 | 1 | uint8_t | `active_inputs` | Live active input channel count |
 
-**Response layout (RP2040, 19 bytes):**
+**Response layout (RP2040, 21 bytes):**
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
-| 0 | 2 | uint16_t LE | `peaks[0]` | Input left peak |
-| 2 | 2 | uint16_t LE | `peaks[1]` | Input right peak |
-| 4 | 2 | uint16_t LE | `peaks[2]` | S/PDIF 1 L peak |
-| 6 | 2 | uint16_t LE | `peaks[3]` | S/PDIF 1 R peak |
-| 8 | 2 | uint16_t LE | `peaks[4]` | S/PDIF 2 L peak |
-| 10 | 2 | uint16_t LE | `peaks[5]` | S/PDIF 2 R peak |
-| 12 | 2 | uint16_t LE | `peaks[6]` | PDM sub peak |
+| 0 | 14 | uint16_t LE [7] | `peaks[0..6]` | Peaks in channel-index order (table above) |
 | 14 | 1 | uint8_t | `cpu0_load` | Core 0 CPU load (0-100%) |
 | 15 | 1 | uint8_t | `cpu1_load` | Core 1 CPU load (0-100%) |
-| 16 | 2 | uint16_t LE | `clip_flags` | Per-channel clip bitmask |
-| 18 | 1 | uint8_t | `cpu_system_load` | max(cpu0, cpu1) (0-100%) |
+| 16 | 4 | uint32_t LE | `clip_flags` | Per-channel clip bitmask |
+| 20 | 1 | uint8_t | `active_inputs` | Live active input channel count |
 
 **Generic parsing formula:**
 
@@ -134,72 +111,38 @@ Returns all peaks, CPU loads, and clip flags in one response.
 peaks[i]        = bytes[i*2] | (bytes[i*2+1] << 8)    for i in 0..NUM_CHANNELS-1
 cpu0_load       = bytes[NUM_CHANNELS * 2]
 cpu1_load       = bytes[NUM_CHANNELS * 2 + 1]
-clip_flags      = bytes[NUM_CHANNELS * 2 + 2] | (bytes[NUM_CHANNELS * 2 + 3] << 8)
-cpu_system_load = bytes[NUM_CHANNELS * 2 + 4]   // only present if response length == NUM_CHANNELS*2+5
+clip_flags      = u32 LE at bytes[NUM_CHANNELS * 2 + 2]
+active_inputs   = bytes[NUM_CHANNELS * 2 + 6]
 ```
 
 ---
 
-#### wValue=0..2: Legacy 4-Byte Status (Individual Queries)
+### Retired: 1.1.6 `GET_STATUS` selectors
 
-These return a `uint32_t` (4 bytes, little-endian) via a compact control transfer. Useful for lightweight polling of specific channel pairs.
+The 1.1.6 scalar selectors are gone. Their data now comes from struct reads.
 
-| wValue | Bytes 0-1 | Bytes 2-3 |
-|--------|-----------|-----------|
-| 0 | `peaks[0]` (Input L) | `peaks[1]` (Input R) |
-| 1 | `peaks[2]` (Out 1 L) | `peaks[3]` (Out 1 R) |
-| 2 | `peaks[4]` (Out 2 L) | byte 2: `cpu0_load`, byte 3: `cpu1_load` |
+| 1.1.6 selector | Now |
+|---|---|
+| 0, 1, 2 (packed peak pairs and CPU) | Retired. Use `MEAS.LEVELS` |
+| 3-6 (PDM ring and DMA counters) | `SYS.PDM_STATS` offsets 0, 4, 8, 12 |
+| 7 | Retired, always read 0 |
+| 8 (`spdif_underruns`) | `SYS.SPDIF_TX_STATS` offset 0 |
+| 10 (USB audio packets) | `SYS.USB_AUDIO_STATUS` offset 0 (u32) |
+| 11, 12 (alt setting, mounted) | `SYS.USB_AUDIO_STATUS` offsets 12 and 13 (u8 each) |
+| 13 (clk_sys Hz) | `SYS.SYSTEM_STATUS` offset 0 (u32) |
+| 14 (core voltage mV) | `SYS.SYSTEM_STATUS` offset 8 (u16) |
+| 15 (sample rate Hz) | `SYS.SYSTEM_STATUS` offset 4 (u32) |
+| 16 (temperature, centi-degrees C) | `SYS.SYSTEM_STATUS` offset 10 (i16) |
 
----
-
-#### wValue=3..8: Debug Counters
-
-These return a `uint32_t` counter value:
-
-| wValue | Counter | Description |
-|--------|---------|-------------|
-| 3 | `pdm_ring_overruns` | Core 0 couldn't push PDM sample (ring full) |
-| 4 | `pdm_ring_underruns` | Core 1 needed PDM sample but ring empty |
-| 5 | `pdm_dma_overruns` | Core 1 PDM write caught up to DMA read |
-| 6 | `pdm_dma_underruns` | Core 1 PDM write fell behind DMA read |
-| 7 | (retired) | Always 0. The index is kept so later wValues keep their numbers |
-| 8 | `spdif_underruns` | USB packet gap > 2 ms (consumer likely starved) |
+`SYS.SYSTEM_STATUS` (page 0x01, command 0x40, 16 bytes) also carries `cpu0_load` and `cpu1_load` at offsets 12 and 13. `SYS.PDM_STATS` is page 0x01, command 0x44, 16 bytes. `SYS.USB_AUDIO_STATUS` is page 0x01, command 0x41, 16 bytes.
 
 ---
 
-#### wValue=10..16: System Diagnostics
+### `MEAS.CLIP_FLAGS` and `MEAS.CLIP_CLEAR`: Read and Clear Clip Flags
 
-| wValue | Returns | Description |
-|--------|---------|-------------|
-| 10 | `uint32_t` | USB audio packet count |
-| 11 | `uint32_t` | Last USB alt setting selected |
-| 12 | `uint32_t` | USB audio mounted state |
-| 13 | `uint32_t` | System clock frequency (Hz) |
-| 14 | `uint32_t` | Core voltage (mV) |
-| 15 | `uint32_t` | Current sample rate (Hz) |
-| 16 | `uint32_t` | Die temperature (centi-degrees C) |
+`MEAS.CLIP_FLAGS` returns the current 4-byte `clip_flags` and leaves them set. `MEAS.CLIP_CLEAR` is a zero-length SET (`bmRequestType` 0x41, `bRequest` 0x12, `wIndex` 0x0902, `wLength` 0) that resets them to 0. It has no reply data.
 
----
-
-### REQ_CLEAR_CLIPS (0x83) — Clear Clip Flags
-
-**Direction:** Device → Host (GET — returns data then clears)
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC1 (IN) |
-| bRequest | 0x83 |
-| wValue | 0 (unused) |
-| wIndex | 2 |
-| wLength | 2 |
-
-**Response (2 bytes):**
-
-| Offset | Size | Type | Field | Description |
-|--------|------|------|-------|-------------|
-| 0 | 2 | uint16_t LE | `clip_flags` | Clip flags that were set before clearing |
-
-**Behavior:** Atomic read-then-clear. Returns the current `clip_flags` value, then resets it to 0. This gives the host an acknowledgment of which channels had clipped since the last clear.
+**Behavior:** Read and clear are two requests. 1.1.6 opcode 0x83 did both atomically. A clip that lands between the read and the clear is lost, so a host that needs every event should read `clip_flags` from `MEAS.LEVELS` on every poll and clear only on user action.
 
 ---
 
@@ -288,26 +231,11 @@ A signal at exactly 0 dBFS that passes through EQ with all-flat settings will **
 
 ### Bitmask Layout
 
-`clip_flags` is a `uint16_t` where bit *N* corresponds to channel index *N*:
-
-```
-Bit  0: CH_MASTER_LEFT    (Input L)
-Bit  1: CH_MASTER_RIGHT   (Input R)
-Bit  2: CH_OUT_1           (S/PDIF 1 L)
-Bit  3: CH_OUT_2           (S/PDIF 1 R)
-Bit  4: CH_OUT_3           (S/PDIF 2 L)
-Bit  5: CH_OUT_4           (S/PDIF 2 R)
-Bit  6: CH_OUT_5 / PDM     (RP2350: S/PDIF 3 L, RP2040: PDM Sub)
-Bit  7: CH_OUT_6           (RP2350: S/PDIF 3 R)
-Bit  8: CH_OUT_7           (RP2350: S/PDIF 4 L)
-Bit  9: CH_OUT_8           (RP2350: S/PDIF 4 R)
-Bit 10: CH_OUT_9_PDM       (RP2350: PDM Sub)
-Bits 11-15: unused (always 0)
-```
+`clip_flags` is a `uint32_t` where bit *N* corresponds to channel index *N* in the channel layout above. On RP2350 bits 0-7 are the inputs, bits 8-15 the S/PDIF outputs and bit 16 the PDM sub. On RP2040 bits 0-1 are the inputs, bits 2-5 the S/PDIF outputs and bit 6 the PDM sub. Higher bits are always 0.
 
 **Valid bits mask:**
-- RP2350: `0x07FF` (bits 0-10)
-- RP2040: `0x007F` (bits 0-6)
+- RP2350: `0x0001FFFF` (bits 0-16)
+- RP2040: `0x0000007F` (bits 0-6)
 
 ### Sticky Behavior
 
@@ -316,15 +244,16 @@ Clip flags follow the **IEC 60268-18 sticky OVER indicator** pattern:
 1. A bit is **set** when any sample in a processing block exceeds the clip threshold on that channel.
 2. Bits **accumulate** — once set, a bit stays set across subsequent blocks regardless of whether clipping continues.
 3. The firmware **never autonomously clears** clip flags.
-4. The host must explicitly call `REQ_CLEAR_CLIPS` (0x83) to reset the bitmask.
+4. The host must explicitly send `MEAS.CLIP_CLEAR` to reset the bitmask.
 
 This design ensures that brief clipping events (even a single sample in a single block) are reliably detected by the host, regardless of the polling interval.
 
 ### Recommended Clear Strategy
 
 ```c
-// Option 1: Clear-on-read — always clear after reading, display for minimum hold time
-uint16_t flags = clear_clips(handle);
+// Option 1: Clear after each read, display for minimum hold time.
+// A clip between the read and the clear is lost (two requests).
+uint32_t flags = read_and_clear_clips(handle);
 for (int ch = 0; ch < num_channels; ch++) {
     if (flags & (1 << ch)) {
         clip_hold_timer[ch] = 2000;  // Show OVER for 2 seconds
@@ -332,7 +261,7 @@ for (int ch = 0; ch < num_channels; ch++) {
 }
 
 // Option 2: Manual clear — user presses a button to acknowledge
-// Only call REQ_CLEAR_CLIPS when the user clicks the clip indicator
+// Only send MEAS.CLIP_CLEAR when the user clicks the clip indicator
 ```
 
 ---
@@ -375,14 +304,14 @@ load_q8 = load_q8 - (load_q8 >> 3) + (inst_q8 >> 3)
 - **PDM mode:** Accumulates active microseconds over 48-sample windows (one audio sample at 48 kHz = ~20.8 us per sigma-delta modulation cycle), normalized to a 1 ms budget.
 - **Idle mode:** Reports 0.
 
-**`cpu_system_load` — Combined:**
-- `max(cpu0_load, cpu1_load)`, computed after each Core 0 metering update.
+**System load (computed by the host):**
+- `max(cpu0_load, cpu1_load)`. The firmware does not report a combined byte, so the host computes it from the two per-core values.
 - Single number to watch for overall headroom. When this approaches 100%, the system is near its processing limit.
 
 ### Interpreting CPU Load
 
-| `cpu_system_load` | Meaning |
-|-------------------|---------|
+| System load | Meaning |
+|-------------|---------|
 | 0-50% | Comfortable headroom |
 | 50-75% | Moderate load, consider disabling unused outputs |
 | 75-90% | High load, may see occasional underruns at higher sample rates |
@@ -391,7 +320,7 @@ load_q8 = load_q8 - (load_q8 >> 3) + (inst_q8 >> 3)
 
 ### Core 1 Mode Context
 
-The meaning of `cpu1_load` depends on which mode Core 1 is running. Query `REQ_GET_CORE1_MODE` (0x7A) to determine the current mode:
+The meaning of `cpu1_load` depends on which mode Core 1 is running. Query `SYS.CORE1_MODE` (page 0x01, command 0x23, 1 byte) to determine the current mode.
 
 | Mode | Value | `cpu1_load` Meaning |
 |------|-------|---------------------|
@@ -413,48 +342,45 @@ PDM and EQ_WORKER are mutually exclusive — enabling any output beyond pair 1 a
 #include <stdio.h>
 #include <math.h>
 
-#define REQ_GET_STATUS   0x50
-#define REQ_CLEAR_CLIPS  0x83
+// Paged protocol: bRequest = command, wIndex = (page << 8) | interface.
+#define PAGE_MEAS        0x09
+#define MEAS_LEVELS      0x10
+#define MEAS_CLIP_FLAGS  0x11
+#define MEAS_CLIP_CLEAR  0x12
 #define VENDOR_INTF      2
+#define WINDEX(page)     (((page) << 8) | VENDOR_INTF)
 
-// Platform-adaptive channel count — detect via REQ_GET_PLATFORM (0x7F)
-// or simply request the maximum and use the actual transfer length.
-#define MAX_CHANNELS     11
-#define MAX_STATUS_SIZE  (MAX_CHANNELS * 2 + 5)  // 27 bytes
+// Request the largest reply and derive the channel count from the length.
+#define MAX_CHANNELS     17
+#define MAX_STATUS_SIZE  (MAX_CHANNELS * 2 + 7)  // 41 bytes
 
 typedef struct {
     uint16_t peaks[MAX_CHANNELS];
     uint8_t  cpu0_load;
     uint8_t  cpu1_load;
-    uint8_t  cpu_system_load;
-    uint16_t clip_flags;
-    int      num_channels;  // Actual channel count (derived from transfer length)
+    uint8_t  cpu_system_load;   // computed here: max(cpu0, cpu1)
+    uint32_t clip_flags;
+    uint8_t  active_inputs;
+    int      num_channels;      // derived from the transfer length
 } MeterStatus;
 
 int read_meter_status(libusb_device_handle *handle, MeterStatus *out) {
     uint8_t buf[MAX_STATUS_SIZE];
     int ret = libusb_control_transfer(handle,
         LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_GET_STATUS,
-        9,              // wValue = 9 (combined status)
-        VENDOR_INTF,    // wIndex
+        MEAS_LEVELS,
+        0,                      // wValue: no address
+        WINDEX(PAGE_MEAS),      // wIndex 0x0902
         buf,
         MAX_STATUS_SIZE,
         1000);
 
     if (ret < 0) return ret;
 
-    // Response is NUM_CHANNELS*2 + 4 bytes (legacy) or +5 bytes (with cpu_system_load).
-    // Derive channel count from response length, accounting for both formats.
-    bool has_system_load = false;
-    int num_channels;
-    if ((ret - 5) > 0 && ((ret - 5) % 2) == 0) {
-        num_channels = (ret - 5) / 2;
-        has_system_load = true;
-    } else {
-        num_channels = (ret - 4) / 2;
-    }
-    if (num_channels < 1 || num_channels > MAX_CHANNELS) return -1;
+    // Response is NUM_CHANNELS*2 + 7 bytes.
+    if (ret < 9 || ((ret - 7) % 2) != 0) return -1;
+    int num_channels = (ret - 7) / 2;
+    if (num_channels > MAX_CHANNELS) return -1;
 
     out->num_channels = num_channels;
     for (int i = 0; i < num_channels; i++) {
@@ -463,14 +389,11 @@ int read_meter_status(libusb_device_handle *handle, MeterStatus *out) {
     int offset = num_channels * 2;
     out->cpu0_load  = buf[offset];
     out->cpu1_load  = buf[offset + 1];
-    out->clip_flags = buf[offset + 2] | (buf[offset + 3] << 8);
-
-    // cpu_system_load is appended after clip_flags (backward-compatible extension)
-    if (has_system_load)
-        out->cpu_system_load = buf[offset + 4];
-    else
-        out->cpu_system_load = (out->cpu0_load > out->cpu1_load)
-                             ? out->cpu0_load : out->cpu1_load;
+    out->clip_flags = (uint32_t)buf[offset + 2] | ((uint32_t)buf[offset + 3] << 8) |
+                      ((uint32_t)buf[offset + 4] << 16) | ((uint32_t)buf[offset + 5] << 24);
+    out->active_inputs = buf[offset + 6];
+    out->cpu_system_load = (out->cpu0_load > out->cpu1_load)
+                         ? out->cpu0_load : out->cpu1_load;
 
     return 0;
 }
@@ -529,75 +452,91 @@ void update_meters(libusb_device_handle *handle) {
 ### Clearing Clips on User Action
 
 ```c
-uint16_t clear_clips(libusb_device_handle *handle) {
-    uint8_t buf[2] = {0};
+// Zero-length SET. A refused request STALLs (ret < 0).
+int clear_clips(libusb_device_handle *handle) {
+    return libusb_control_transfer(handle,
+        LIBUSB_ENDPOINT_OUT | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
+        MEAS_CLIP_CLEAR,
+        0, WINDEX(PAGE_MEAS),
+        NULL, 0,
+        1000);
+}
+
+// Two requests: a clip that lands between them is lost.
+uint32_t read_and_clear_clips(libusb_device_handle *handle) {
+    uint8_t buf[4] = {0};
     int ret = libusb_control_transfer(handle,
         LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_CLEAR_CLIPS,
-        0, VENDOR_INTF,
-        buf, 2,
+        MEAS_CLIP_FLAGS,
+        0, WINDEX(PAGE_MEAS),
+        buf, 4,
         1000);
-    if (ret == 2) {
-        return buf[0] | (buf[1] << 8);  // Returns flags that were set before clearing
-    }
+    clear_clips(handle);
+    if (ret == 4)
+        return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+               ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
     return 0;
 }
 
 // Example: user clicks the clip indicator
 void on_clip_indicator_clicked(libusb_device_handle *handle) {
-    uint16_t cleared = clear_clips(handle);
+    uint32_t cleared = read_and_clear_clips(handle);
     // Reset all clip hold timers
     memset(clip_hold, 0, sizeof(clip_hold));
-    printf("Cleared clips on channels: 0x%04X\n", cleared);
+    printf("Cleared clips on channels: 0x%08X\n", cleared);
 }
 ```
 
 ### Detecting Platform and Channel Count
 
 ```c
-#define REQ_GET_PLATFORM 0x7F
+#define PAGE_SYS      0x01
+#define SYS_PLATFORM  0x20
 
 int get_num_channels(libusb_device_handle *handle) {
-    uint8_t platform;
+    uint8_t platform[7];
     int ret = libusb_control_transfer(handle,
         LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_GET_PLATFORM,
-        0, VENDOR_INTF,
-        &platform, 1,
+        SYS_PLATFORM,
+        0, WINDEX(PAGE_SYS),
+        platform, sizeof(platform),
         1000);
-    if (ret == 1) {
-        return (platform == 1) ? 11 : 7;  // 1=RP2350, 0=RP2040
+    if (ret >= 1) {
+        return (platform[0] == 1) ? 17 : 7;  // 1=RP2350, 0=RP2040
     }
     return -1;
 }
 ```
 
-Alternatively, parse the response length from `REQ_GET_STATUS` wValue=9 as shown in the `read_meter_status()` example — no separate platform query needed.
+Alternatively, parse the response length of `MEAS.LEVELS` as shown in the `read_meter_status()` example. No separate platform query is needed.
 
 ### Reading Debug Counters
 
 ```c
-uint32_t read_status_counter(libusb_device_handle *handle, uint16_t wValue) {
-    uint32_t val = 0;
-    int ret = libusb_control_transfer(handle,
-        LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-        REQ_GET_STATUS,
-        wValue, VENDOR_INTF,
-        (uint8_t *)&val, 4,
-        1000);
-    return (ret == 4) ? val : 0;
+static uint32_t u32_at(const uint8_t *b, int off) {
+    return (uint32_t)b[off] | ((uint32_t)b[off + 1] << 8) |
+           ((uint32_t)b[off + 2] << 16) | ((uint32_t)b[off + 3] << 24);
 }
 
-// Example: read all buffer health counters
+static int sys_get(libusb_device_handle *handle, uint8_t cmd, uint8_t *buf, int len) {
+    return libusb_control_transfer(handle,
+        LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
+        cmd, 0, WINDEX(PAGE_SYS), buf, len, 1000);
+}
+
+// Example: read all buffer health counters (three struct reads)
 void print_buffer_health(libusb_device_handle *handle) {
-    printf("SPDIF overruns:      %u\n", read_status_counter(handle, 7));
-    printf("SPDIF underruns:     %u\n", read_status_counter(handle, 8));
-    printf("PDM ring overruns:   %u\n", read_status_counter(handle, 3));
-    printf("PDM ring underruns:  %u\n", read_status_counter(handle, 4));
-    printf("PDM DMA overruns:    %u\n", read_status_counter(handle, 5));
-    printf("PDM DMA underruns:   %u\n", read_status_counter(handle, 6));
-    printf("Sample rate:         %u Hz\n", read_status_counter(handle, 15));
-    printf("Temperature:         %.1f C\n", read_status_counter(handle, 16) / 100.0f);
+    uint8_t tx[24], pdm[16], sys[16];
+    if (sys_get(handle, 0x45, tx, 24) != 24) return;    // SYS.SPDIF_TX_STATS
+    if (sys_get(handle, 0x44, pdm, 16) != 16) return;   // SYS.PDM_STATS
+    if (sys_get(handle, 0x40, sys, 16) != 16) return;   // SYS.SYSTEM_STATUS
+    printf("USB packet gaps:     %u\n", u32_at(tx, 0));   // gaps of 2 to 50 ms
+    printf("PDM ring overruns:   %u\n", u32_at(pdm, 0));
+    printf("PDM ring underruns:  %u\n", u32_at(pdm, 4));
+    printf("PDM DMA overruns:    %u\n", u32_at(pdm, 8));
+    printf("PDM DMA underruns:   %u\n", u32_at(pdm, 12));
+    printf("Sample rate:         %u Hz\n", u32_at(sys, 4));
+    printf("Temperature:         %.1f C\n", (int16_t)(sys[10] | (sys[11] << 8)) / 100.0f);
 }
 ```
 
@@ -613,7 +552,7 @@ void print_buffer_health(libusb_device_handle *handle) {
 | Background health check | 1000-5000 ms | For logging or diagnostics, not real-time display. |
 | Inactive/minimized UI | Pause polling | No metering traffic when the user isn't looking. |
 
-**USB bandwidth:** Each wValue=9 poll is a single USB control transfer (8-byte setup + 19-27 byte data phase). At 50 Hz, this is ~1.75 KB/s — negligible compared to audio isochronous traffic.
+**USB bandwidth:** Each `MEAS.LEVELS` poll is a single USB control transfer (8-byte setup + 21-41 byte data phase). At 50 Hz, this is ~1.75 KB/s. That is negligible compared to audio isochronous traffic.
 
 ---
 
@@ -637,7 +576,7 @@ CPU load values are automatically scaled to the new sample rate's budget. The sa
 
 ### S/PDIF Input Mode (RP2350 Only)
 
-Metering works identically regardless of whether the input source is USB or S/PDIF. The same `REQ_GET_STATUS` command returns the same format. During an input source switch (via `REQ_SET_AUDIO_SOURCE`), metering briefly reflects the mute period (peaks drop to 0, then resume with the new source).
+Metering works identically regardless of whether the input source is USB or S/PDIF. The same `MEAS.LEVELS` command returns the same format. During an input source switch (via `INPUT.SOURCE`), metering briefly reflects the mute period (peaks drop to 0, then resume with the new source).
 
 ### Dual-Core Processing
 
@@ -649,9 +588,9 @@ When Core 1 is running as the EQ worker, peaks for its assigned outputs are comp
 
 | Feature | RP2040 | RP2350 |
 |---------|--------|--------|
-| Channel count | 7 | 11 |
-| wValue=9 response size | 18 or 19 bytes | 26 or 27 bytes |
-| Valid `clip_flags` bits | 0x007F (bits 0-6) | 0x07FF (bits 0-10) |
+| Channel count | 7 | 17 |
+| `MEAS.LEVELS` response size | 21 bytes | 41 bytes |
+| Valid `clip_flags` bits | 0x0000007F (bits 0-6) | 0x0001FFFF (bits 0-16) |
 | Internal peak format | Q28 → Q15 via `>> 13` | float → Q15 via `* 32767` |
 | Clip threshold | `(1<<28) + 268` (~+0.001 dB) | `1.001f` (~+0.009 dB) |
 | Core 1 EQ outputs | 2-3 (1 S/PDIF pair) | 2-7 (3 S/PDIF pairs) |
@@ -663,13 +602,10 @@ Both platforms expose identical vendor command interfaces and response formats (
 
 ## Backward Compatibility
 
-- The `cpu_system_load` byte was added in firmware v1.1.2, **appended after `clip_flags`** to preserve the existing byte layout. The firmware checks `wLength` and only includes it when the host requests `NUM_CHANNELS * 2 + 5` bytes. To detect firmware support:
-  - Request `NUM_CHANNELS * 2 + 5` bytes — if the firmware supports `cpu_system_load`, the last byte contains it
-  - Request `NUM_CHANNELS * 2 + 4` bytes — the firmware omits the extra byte, returning exactly the base layout
-  - Older firmware (pre-v1.1.2) returns `NUM_CHANNELS * 2 + 4` bytes regardless of `wLength`; compute system load client-side as `max(cpu0, cpu1)`
-- The first `NUM_CHANNELS * 2 + 4` bytes of the response are **layout-identical** across all firmware versions. Existing apps that request this size are unaffected by the new firmware.
-- `REQ_CLEAR_CLIPS` (0x83) was added in firmware v1.1.1. Older firmware will STALL. Handle gracefully.
-- The legacy wValue=0..2 responses are unchanged across all firmware versions.
+- Every paged firmware (1.1.7 and later) has `MEAS.LEVELS`, `MEAS.CLIP_FLAGS` and `MEAS.CLIP_CLEAR`. Firmware 1.1.6 and older does not answer the paged protocol (`vendor_command_overhaul_plan.md` section 5.14).
+- `MEAS.LEVELS` returns the same bytes as the 1.1.6 `GET_STATUS` selector 9, so a parser for that packet works unchanged.
+- There is no `cpu_system_load` byte. Compute `max(cpu0_load, cpu1_load)` on the host.
+- A future page revision may append fields to `MEAS.LEVELS`. Hosts should parse the fields they know and ignore the rest.
 
 ---
 
@@ -677,12 +613,12 @@ Both platforms expose identical vendor command interfaces and response formats (
 
 | Symptom | Likely Cause | Check |
 |---------|-------------|-------|
-| All peaks stuck at 0 | No audio playing, or all outputs disabled | Verify output enables (`REQ_GET_OUTPUT_ENABLE`), confirm audio stream is active |
+| All peaks stuck at 0 | No audio playing, or all outputs disabled | Verify output enables (`ROUTE.OUTPUT_ENABLE`), confirm audio stream is active |
 | Peaks present but clip never triggers | Signal below threshold | Clip only triggers above +0.009 dB. A 0 dBFS signal through flat EQ will not clip. |
 | Clip triggers on output but not input | EQ boost causing output to exceed unity | Check per-output EQ settings, add negative preamp to compensate |
 | `cpu0_load` jumps when Core 1 outputs enabled | (Should not happen with v1.1.2+) | Verify firmware version. Older firmware had a bug where Core 0 wait time inflated its load. |
-| `cpu_system_load` near 100% | DSP pipeline near capacity | Disable unused outputs, reduce EQ bands, or lower sample rate |
-| `cpu1_load` is 0 but outputs 2+ are enabled | Core 1 is not in EQ_WORKER mode | Check `REQ_GET_CORE1_MODE`. If IDLE, outputs 2+ are processed single-core on Core 0. |
+| System load (max of the two cores) near 100% | DSP pipeline near capacity | Disable unused outputs, reduce EQ bands, or lower sample rate |
+| `cpu1_load` is 0 but outputs 2+ are enabled | Core 1 is not in EQ_WORKER mode | Check `SYS.CORE1_MODE`. If IDLE, outputs 2+ are processed single-core on Core 0. |
 | Meters update slowly | Poll interval too long | Reduce polling interval to 20-50 ms for responsive metering |
 | Peaks don't reach 32767 at full scale | Normal — Q15 clips at 32767 | 32767 represents 1.0 (0 dBFS). Signals above unity are clamped. |
 | Clip flags set but peaks show < 32767 | Peak is clamped, clip threshold is above the peak range | The clip threshold (~1.001) is above the peak display range (1.0 → 32767). A brief clip can set the flag even if the clamped peak reads 32767. |
@@ -691,12 +627,13 @@ Both platforms expose identical vendor command interfaces and response formats (
 
 ## Request Code Summary
 
-| Code | Command | Direction | wValue | Data Size | Description |
-|------|---------|-----------|--------|-----------|-------------|
-| 0x50 | `REQ_GET_STATUS` | IN | 9 | 18-19 or 26-27 bytes | All peaks + CPU load + clip flags [+ system load] |
-| 0x50 | `REQ_GET_STATUS` | IN | 0 | 4 bytes | Input L/R peaks |
-| 0x50 | `REQ_GET_STATUS` | IN | 1 | 4 bytes | Output 1 L/R peaks |
-| 0x50 | `REQ_GET_STATUS` | IN | 2 | 4 bytes | Output 2 L peak + CPU loads |
-| 0x50 | `REQ_GET_STATUS` | IN | 3-8 | 4 bytes | Debug counters |
-| 0x50 | `REQ_GET_STATUS` | IN | 10-16 | 4 bytes | System diagnostics |
-| 0x83 | `REQ_CLEAR_CLIPS` | IN | 0 | 2 bytes | Read-then-clear clip flags |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | none (0) | GET var | All peaks, CPU loads, clip flags, active input count |
+| `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | GET | none (0) | GET 4 | Clip flags, not cleared |
+| `MEAS.CLIP_CLEAR` | 0x09 | 0x12 | SET (zero-length) | none (0) | SET 0 | Clear clip flags |
+| `SYS.SYSTEM_STATUS` | 0x01 | 0x40 | GET | none (0) | GET 16 | clk_sys, sample rate, core mV, temperature, CPU loads |
+| `SYS.USB_AUDIO_STATUS` | 0x01 | 0x41 | GET | none (0) | GET 16 | USB packets, ring overruns, worst gap, alt, mounted |
+| `SYS.PDM_STATS` | 0x01 | 0x44 | GET | none (0) | GET 16 | PDM ring and DMA counters |
+| `SYS.SPDIF_TX_STATS` | 0x01 | 0x45 | GET | none (0) | GET 24 | USB audio packet gaps of 2 to 50 ms and output DMA starvations |
+| `SYS.CORE1_MODE` | 0x01 | 0x23 | GET | none (0) | GET 1 | Core 1 mode |

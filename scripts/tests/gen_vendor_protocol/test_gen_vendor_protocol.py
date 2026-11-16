@@ -109,6 +109,34 @@ class Docs(unittest.TestCase):
     def test_no_markers_is_noop(self):
         self.assertEqual(g.rewrite_doc_blocks("plain\n", self.pages), ("plain\n", 0))
 
+    def test_index_block(self):
+        src = ("## 3. ROUTE (0x05)\n\n## 4. Not a page\n\n"
+               "<!-- VC:BEGIN INDEX -->\nstale\n<!-- VC:END INDEX -->\n")
+        new, n = g.rewrite_doc_blocks(src, self.pages)
+        self.assertEqual(n, 1)
+        self.assertNotIn("stale", new)
+        rows = [r for r in new.splitlines() if r.startswith("| ") and not r.startswith("| Name")]
+        names = [r.split(" | ")[0][2:] for r in rows]
+        self.assertEqual(names, sorted(names))
+        self.assertEqual(len(rows), sum(len(p["commands"]) for p in self.pages))
+        self.assertIn("| UPMIX_ENABLE | [`ROUTE.UPMIX_ENABLE`](#3-route-0x05) | `0x0530` | RP2350 only |", rows)
+        self.assertIn("| CLOCK_DIAG | `SYS.CLOCK_DIAG` | `0x0160` | `DSPI_CLOCK_DIAG` |", rows)
+        self.assertIn("| PRESET_SAVE | `STORE.PRESET_SAVE` | `0x0210` |  |", rows)
+        self.assertEqual(g.rewrite_doc_blocks(new, self.pages), (new, 1))
+
+    def test_index_same_name_sorts_by_page(self):
+        pages = [g.parse_def_text('VC_PAGE(BBB, 0x0B, 1, "b")\n' + cmd(name="STATUS"), "b.def"),
+                 g.parse_def_text('VC_PAGE(AAA, 0x0C, 1, "a")\n' + cmd(name="STATUS"), "a.def"),
+                 g.parse_def_text('VC_PAGE(CCC, 0x03, 1, "c")\n' + cmd(name="STATUS")
+                                  + cmd(num="0x11", name="ALPHA"), "c.def")]
+        rows = g.render_index_table(pages, {"AAA": "x"})[2:]
+        self.assertEqual([r.split(" | ")[1] for r in rows],
+                         ["`CCC.ALPHA`", "`CCC.STATUS`", "`BBB.STATUS`", "[`AAA.STATUS`](#x)"])
+
+    def test_page_anchors(self):
+        text = "## 6. SYS (0x01)\n### 6.1 SYS (0x02)\n## 18. DIAG (0xF0) \n## Notes\n"
+        self.assertEqual(g.page_anchors(text), {"SYS": "6-sys-0x01", "DIAG": "18-diag-0xf0"})
+
     def test_marker_errors(self):
         bad = {
             "<!-- VC:BEGIN NOPE -->\n<!-- VC:END NOPE -->\n": "unknown page NOPE",
@@ -163,7 +191,8 @@ class BadInput(unittest.TestCase):
             (HDR + cmd(name="foo"), "uppercase identifier", 2),
             (HDR + cmd(get="0x12"), "C identifier", 2),
             ('VC_PAGE(test, 0x0A, 1, "x")\n', "uppercase identifier", 1),
-            ('VC_PAGE(PAGES, 0x0A, 1, "x")\n', "reserved for the docs", 1),
+            ('VC_PAGE(PAGES, 0x0A, 1, "x")\n', "reserved for a docs block", 1),
+            ('VC_PAGE(INDEX, 0x0A, 1, "x")\n', "reserved for a docs block", 1),
             ('VC_PAGE(TEST, 0, 1, "x")\n', "page number 0", 1),
             (HDR + cmd(doc='"say \\"hi\\""'), "no double quotes", 2),
             (HDR + cmd(doc='"say "hi" now"'), "no double quotes", 2),

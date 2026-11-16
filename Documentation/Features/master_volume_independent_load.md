@@ -1,6 +1,6 @@
 # Master Volume on Preset Load — Independent-Mode Behavior
 
-*Last updated: 2026-05-27*
+*Last updated: 2026-11-16 (command name on the paged protocol of firmware 1.1.7)*
 
 ## Summary
 
@@ -47,8 +47,8 @@ independent value (which is a mode-0 concept and has no meaning in mode 1).
 Previously, `apply_master_volume_from_mode()` in `firmware/DSPi/flash_storage.c`
 was called unconditionally on every load path, including runtime `preset_load()`
 and inside `apply_factory_defaults()`. In independent mode that helper applied
-`dir_cache.master_volume_db` — the last value persisted by
-`REQ_SAVE_MASTER_VOLUME` (0xD6).
+`dir_cache.master_volume_db`, the last value persisted by
+`ROUTE.MASTER_VOLUME_SAVE` (1.1.6 opcode 0xD6).
 
 Net effect: **every runtime preset load (empty or occupied) snapped the live
 master volume to the last-saved directory value**, even though the user may have

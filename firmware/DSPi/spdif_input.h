@@ -71,10 +71,10 @@ SpdifInputState spdif_input_get_state(void);
 // Get detected sample rate (0 if not locked)
 uint32_t spdif_input_get_sample_rate(void);
 
-// Get status packet for vendor command response (0xE2)
+// Get status packet for INPUT.SPDIF_RX_STATUS
 void spdif_input_get_status(SpdifRxStatusPacket *out);
 
-// Get IEC 60958 channel status bytes for vendor command response (0xE3)
+// Get IEC 60958 channel status bytes for INPUT.SPDIF_RX_CH_STATUS
 // out must point to at least 24 bytes
 void spdif_input_get_channel_status(uint8_t *out_24_bytes);
 

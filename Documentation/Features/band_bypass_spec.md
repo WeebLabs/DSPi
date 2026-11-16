@@ -1,6 +1,6 @@
 # Per-Band Bypass — Implementation Spec for Host Apps
 
-*Last updated: 2026-05-04*
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
 *Firmware version introduced: 1.1.4 (post-master-volume)*
 *Both platforms (RP2040 and RP2350)*
 
@@ -13,7 +13,7 @@ This spec is for app/host developers who need to read, write, persist, and displ
 Each EQ band on every channel has a user-controllable **bypass** flag. When set, that single band is removed from the signal path with sample-accurate transition (the audio inner loop simply skips it). When all bands on a channel are bypassed, the entire channel skips EQ processing.
 
 Per-band bypass is **distinct** from:
-- **Master EQ bypass** (`REQ_SET_BYPASS` / `bypass_master_eq`) — bypasses *all* EQ on *all* channels, a single global toggle.
+- **Master EQ bypass** (`FILTER.EQ_BYPASS` / `bypass_master_eq`). It bypasses *all* EQ on *all* channels, a single global toggle.
 - **Auto-bypass** of `FILTER_FLAT` filters or peaking/shelf filters with `|gain_db| < 0.01` — done internally by `dsp_compute_coefficients()` to save CPU. Auto-bypass and user-bypass share the same internal `Biquad.bypass` flag, so neither overrides the other: if either is true, the band is skipped.
 
 The user's freq/Q/gain/type values are **preserved** when a band is bypassed — un-bypassing returns the band exactly to its previous response.
@@ -22,7 +22,25 @@ The user's freq/Q/gain/type values are **preserved** when a band is bypassed —
 
 ## 2. Wire formats
 
-### 2.1 `EqParamPacket` (vendor SET/GET, also stored in flash presets)
+### 2.1 `FILTER.BAND` payload (vendor SET and GET)
+
+The `FILTER.BAND` command carries one band in 16 bytes. The channel and band are in `wValue` as `(channel << 8) | band`, not in the payload.
+
+```c
+// FILTER.BAND SET payload and GET reply, 16 bytes, little-endian
+uint8_t  type;       // FilterType enum
+uint8_t  bypass;     // 1 = bypassed, anything else = active. SEE 0xFF SAFETY.
+uint16_t qp_x512;    // Linkwitz Transform target Q (peq_filters.md), ignored by other types
+float    freq;       // Hz
+float    Q;          // 0.1 .. 20
+float    gain_db;    // dB
+```
+
+The bypass byte sits at **offset 1**, the same place as in `WireBandParams` (2.2). The two layouts are byte-identical apart from the meaning of bytes 2-3.
+
+### 2.1a `EqParamPacket` (firmware recipe, also stored in flash presets)
+
+The firmware keeps each band as an `EqParamPacket`. It is not on the vendor wire any more, but it is the preset-slot storage format:
 
 ```c
 typedef struct __attribute__((packed)) {
@@ -36,9 +54,9 @@ typedef struct __attribute__((packed)) {
 } EqParamPacket;        // 16 bytes
 ```
 
-The bypass byte sits at **offset 3**. This is the same byte that older firmware called `reserved`. Older host code that explicitly zeroed the struct continues to work unchanged (zero = active). See **§5 0xFF Safety** for the contract.
+Here the bypass byte sits at **offset 3**. This is the same byte that older firmware called `reserved`. See **§5 0xFF Safety** for the contract.
 
-### 2.2 `WireBandParams` (bulk-params payload, REQ_GET_ALL_PARAMS / REQ_SET_ALL_PARAMS)
+### 2.2 `WireBandParams` (bulk-params payload, `STORE.ALL_PARAMS`)
 
 ```c
 typedef struct __attribute__((packed)) {
@@ -79,35 +97,35 @@ That offset value is also exactly what the firmware sends on the **device→host
 
 ---
 
-## 3. Vendor-command opcodes
+## 3. Vendor commands
 
-All are control transfers on the vendor interface (`bInterfaceNumber = VENDOR_INTERFACE_NUMBER`).
+All are paged control transfers on the vendor interface: the page goes in the `wIndex` high byte, the command in `bRequest`, and `wValue` is the address (see `../commands.md`). A rejected SET STALLs, and the reason is readable from `SYS.LAST_RESULT`.
 
-| Opcode | Direction | wValue | Payload (host→dev) | Returns (dev→host) | Notes |
-|--------|-----------|--------|--------------------|--------------------|-------|
-| `0x42` `REQ_SET_EQ_PARAM` | OUT | 0 | `EqParamPacket` (16 B) | — | Whole band; `bypass` byte rides along. |
-| `0x43` `REQ_GET_EQ_PARAM` | IN  | `(ch<<8)\|(band<<4)\|param` | — | 4 bytes (LE) | `param=0` type, `1` freq, `2` Q, `3` gain_db, **`4` bypass** (returns 0 or 1 in low byte; high 3 bytes = 0). |
-| `0xD8` `REQ_SET_BAND_BYPASS` | OUT | `(ch<<8)\|band` | 1 byte | — | `1` = bypass; anything else = active. Preserves freq/Q/gain. |
-| `0xD9` `REQ_GET_BAND_BYPASS` | IN  | `(ch<<8)\|band` | — | 1 byte | Returns 0 or 1 (always normalized). |
-| `0xA0` `REQ_GET_ALL_PARAMS` | IN | … | — | `WireBulkParams` (2912 B) | Bulk fetch; bypass bytes are normalized 0/1. |
-| `0xA1` `REQ_SET_ALL_PARAMS` | OUT | … | `WireBulkParams` (2912 B) | — | Bulk apply; intake normalizes `!=1` → 0. |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | Whole band (2.1). The `bypass` byte rides along. A GET returns bypass as 0 or 1 |
+| `FILTER.BAND_BYPASS` | 0x06 | 0x11 | GET, SET | `(channel << 8) \| band` | GET 1, SET 1 | `1` = bypass, anything else = active. Preserves freq/Q/gain/qp. A GET returns 0 or 1 |
+| `FILTER.EQ_BYPASS` | 0x06 | 0x12 | GET, SET | none (0) | GET 1, SET 1 | Master EQ bypass, non-zero bypasses |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | Bulk snapshot. GET bypass bytes are normalized 0/1. SET intake normalizes `!=1` to 0 |
 
-### 3.1 `REQ_SET_EQ_PARAM` (existing opcode — recommended for full-band updates)
+A channel past the end, a band in the reserved gap, or a crossover band on an input channel is refused with `VC_ERR_ADDRESS` in both directions. `FILTER.BAND` and `FILTER.BAND_BYPASS` share one pending slot. A SET of either that arrives while an earlier one is still waiting for the main loop is refused with `VC_ERR_BUSY` and changes nothing, so retry after a short delay.
 
-If your host already sends a full `EqParamPacket` for every UI change, just populate the new `bypass` field. The firmware will:
-1. memcpy the packet into `pending_packet`.
-2. Normalize: `pending_packet.bypass = (pending_packet.bypass == 1) ? 1 : 0`.
+### 3.1 `FILTER.BAND` (recommended for full-band updates)
+
+If your host already sends a full band for every UI change, just populate the `bypass` field. The firmware will:
+1. Copy the band into `pending_packet`.
+2. Normalize: `pending_packet.bypass = (bypass == 1) ? 1 : 0`.
 3. Defer to the main loop, which calls `dsp_compute_coefficients()` and updates `channel_bypassed[ch]`.
 4. Emit a notify-shadow update so other connected hosts see the new state.
 
-### 3.2 `REQ_SET_BAND_BYPASS` (new — recommended for toggle UI)
+### 3.2 `FILTER.BAND_BYPASS` SET (recommended for toggle UI)
 
 Cheaper round-trip when the user is just clicking a "bypass" button:
 - 1-byte payload vs. 16-byte packet.
-- Preserves whatever freq/Q/gain are currently in the firmware — no risk of clobbering an in-flight edit.
-- The firmware reads its own current recipe, sets `bypass`, and dispatches through the same eq_update_pending path — so all the same Core 1 synchronization, channel_bypassed recalc, and notify-shadow logic runs.
+- Preserves whatever freq/Q/gain/qp are currently in the firmware. There is no risk of clobbering stored parameters.
+- The firmware reads its own current recipe, sets `bypass`, and dispatches through the same eq_update_pending path. All the same Core 1 synchronization, channel_bypassed recalc, and notify-shadow logic runs.
 
-### 3.3 `REQ_GET_BAND_BYPASS` (new — explicit single-byte query)
+### 3.3 `FILTER.BAND_BYPASS` GET (explicit single-byte query)
 
 When you only need to display the bypass state, this avoids a 16-byte transfer. Always returns exactly `0` or `1` (the firmware normalizes), so you can blindly cast to `bool`.
 
@@ -134,7 +152,7 @@ Factory reset re-initializes `filter_recipes` from `dsp_init_default_filters()`,
 
 ### Why this matters
 
-The byte at offset 3 of `EqParamPacket` (and offset 1 of `WireBandParams`) was named `reserved` in earlier firmware. Some host implementations may:
+The bypass byte (offset 1 of the `FILTER.BAND` payload and of `WireBandParams`, offset 3 of `EqParamPacket`) was named `reserved` in earlier firmware. Some host implementations may:
 - `memset(&pkt, 0xFF, sizeof(pkt))` and then populate fields, leaving `reserved` as `0xFF`.
 - Send legacy structs over the wire that happen to have non-zero garbage at that offset.
 - Pass through bytes from another protocol layer that uses `0xFF` as a "missing" sentinel.
@@ -144,24 +162,23 @@ If the firmware accepted "any non-zero value means bypass," any of those scenari
 ### What this means for your host code
 
 **Reading bypass state:**
-- `REQ_GET_BAND_BYPASS` always returns `0` or `1`. Treat as boolean.
-- `REQ_GET_EQ_PARAM` (param=4) returns 4 bytes; only the low byte is meaningful and is `0` or `1`.
-- `WireBandParams.bypass` from `REQ_GET_ALL_PARAMS` is always `0` or `1` (firmware normalizes during collect).
+- `FILTER.BAND_BYPASS` GET always returns `0` or `1`. Treat as boolean.
+- The bypass byte (offset 1) of a `FILTER.BAND` GET is always `0` or `1`.
+- `WireBandParams.bypass` from `STORE.ALL_PARAMS` GET is always `0` or `1` (firmware normalizes during collect).
 
 **Writing bypass state:**
-- Write **`0`** for active and **`1`** for bypass. Never write `0xFF` or any other value to mean "bypass" — the firmware will treat it as active and you'll get a confusing GET that returns `0`.
-- When constructing an `EqParamPacket` or `WireBandParams`, **explicitly set the bypass byte** rather than relying on a memset. Example C:
+- Write **`0`** for active and **`1`** for bypass. Never write `0xFF` or any other value to mean "bypass". The firmware will treat it as active and you'll get a confusing GET that returns `0`.
+- When constructing a `FILTER.BAND` payload or a `WireBandParams`, **explicitly set the bypass byte** rather than relying on a memset. Example C:
   ```c
-  EqParamPacket pkt = {0};   // good: bypass starts at 0 (active)
-  pkt.channel = ch;
-  pkt.band    = b;
-  pkt.type    = FILTER_PEAKING;
-  pkt.bypass  = ui_state.bypassed ? 1 : 0;  // explicit
-  pkt.freq    = 1000.0f;
+  uint8_t pkt[16] = {0};     // good: bypass starts at 0 (active)
+  pkt[0] = FILTER_PEAKING;   // type
+  pkt[1] = ui_state.bypassed ? 1 : 0;  // bypass, explicit
+  // pkt[2..3] qp_x512, pkt[4..15] freq, Q, gain_db as f32 LE
+  // wValue = (ch << 8) | b
   ...
   ```
-  Avoid `memset(&pkt, 0xFF, sizeof(pkt))` — you'll then need to remember to clear `bypass` explicitly, and the safer pattern is just to start from zero.
-- **Bulk SET (`REQ_SET_ALL_PARAMS`):** always set `WireBandParams.reserved[2]` to `{0, 0}`. Future firmware may use those bytes for additional flags.
+  Avoid `memset(&pkt, 0xFF, sizeof(pkt))`. You'll then need to remember to clear `bypass` explicitly, and the safer pattern is just to start from zero.
+- **Bulk SET (`STORE.ALL_PARAMS`):** always set `WireBandParams.reserved[2]` to `{0, 0}`, except that a Linkwitz Transform band carries its `qp` there (`peq_filters.md`).
 
 **Cross-protocol guards (Python / Rust / TS examples):**
 ```python
@@ -189,7 +206,7 @@ const decodeBypass = (byte: number): boolean => byte === 1;
 ### 6.1 Initial load on connect
 
 ```
-1. REQ_GET_ALL_PARAMS  → parse into local cache.
+1. STORE.ALL_PARAMS GET  → parse into local cache.
 2. For each (ch, b):
        cache.bands[ch][b].bypass = (wire.eq[ch][b].bypass == 1);
 3. Render UI from cache.
@@ -199,7 +216,8 @@ const decodeBypass = (byte: number): boolean => byte === 1;
 
 ```
 1. cache.bands[ch][b].bypass = !cache.bands[ch][b].bypass;
-2. REQ_SET_BAND_BYPASS  wValue=(ch<<8)|band  payload=cache ? 1 : 0
+2. FILTER.BAND_BYPASS SET  wValue=(ch<<8)|band  payload=cache ? 1 : 0
+   (on VC_ERR_BUSY, retry shortly)
 3. (Optional) wait for the notify echo to confirm; or trust the SET and update UI immediately.
 ```
 
@@ -212,14 +230,14 @@ The firmware will internally:
 ### 6.3 User edits freq/Q/gain on an already-bypassed band
 
 You have two valid choices:
-- **Preserve bypass (recommended):** continue sending `bypass=1` in the `EqParamPacket`. The user explicitly bypassed this band; their parameter edits are pre-staged for when they un-bypass.
+- **Preserve bypass (recommended):** continue sending `bypass=1` in the `FILTER.BAND` payload. The user explicitly bypassed this band; their parameter edits are pre-staged for when they un-bypass.
 - **Un-bypass on edit:** send `bypass=0`. Trade-off: the user can't tweak filters with the audio bypassed for A/B comparison.
 
 DSPi's reference app uses preserve.
 
 ### 6.4 Listening for state changes from other hosts
 
-The notification endpoint (bulk EP `0x83`) sends a `notify_param_write(offset, len, data)` whenever any param changes. For per-band bypass updates triggered by `REQ_SET_EQ_PARAM` or `REQ_SET_BAND_BYPASS`, the firmware sends the **entire `WireBandParams`** (16 bytes) at offset:
+The notification endpoint (bulk EP `0x83`) sends a `notify_param_write(offset, len, data)` whenever any param changes. For per-band bypass updates triggered by `FILTER.BAND` or `FILTER.BAND_BYPASS`, the firmware sends the **entire `WireBandParams`** (16 bytes) at offset:
 ```c
 offsetof(WireBulkParams, eq) + (ch * WIRE_MAX_BANDS + b) * sizeof(WireBandParams)
 = 360 + (ch * 12 + b) * 16
@@ -232,14 +250,14 @@ So your host's notify dispatcher should:
 
 ### 6.5 Preset save/load UX
 
-- Preset save (`REQ_PRESET_SAVE`): no special handling — bypass state is captured automatically.
-- Preset load (`REQ_PRESET_LOAD`): firmware emits a bulk-params changed notification and the new `WireBulkParams` becomes the truth. Re-render your EQ UI from the new wire data; in particular, **update bypass indicators** since they may have changed.
+- Preset save (`STORE.PRESET_SAVE`): no special handling. Bypass state is captured automatically.
+- Preset load (`STORE.PRESET_LOAD`): firmware emits a bulk-params changed notification and the new `WireBulkParams` becomes the truth. Re-render your EQ UI from the new wire data; in particular, **update bypass indicators** since they may have changed.
 
 ### 6.6 Display recommendations
 
 - A bypassed band's frequency response curve should be drawn as flat (or hidden) in the EQ visualization, even though the freq/Q/gain values are still set. This matches what the audio actually does.
 - Show a clear "bypassed" indicator on the band control (icon, dimmed handle, strikethrough on the gain readout, etc.) so users know why their adjustments don't change the curve.
-- "Bypass all bands" / "Solo this band" are convenient bulk operations — implement client-side by sending one `REQ_SET_BAND_BYPASS` per band. There is no server-side bulk opcode.
+- "Bypass all bands" / "Solo this band" are convenient bulk operations. Implement them client-side by sending one `FILTER.BAND_BYPASS` SET per band, retrying on `VC_ERR_BUSY`. There is no server-side bulk command.
 
 ---
 
@@ -247,9 +265,9 @@ So your host's notify dispatcher should:
 
 ```
 host SET (one of three paths):
-   REQ_SET_EQ_PARAM       → vendor_commands.c: memcpy → pending_packet, normalize
-   REQ_SET_BAND_BYPASS    → vendor_commands.c: clone live recipe, set bypass, → pending_packet
-   REQ_SET_ALL_PARAMS     → bulk_params.c: per-band normalize → filter_recipes, then full recompute
+   FILTER.BAND            → vendor/vc_page_filter.c: build recipe from wValue + payload, normalize → pending_packet
+   FILTER.BAND_BYPASS     → vendor/vc_page_filter.c: clone live recipe, set bypass, → pending_packet
+   STORE.ALL_PARAMS       → bulk_params.c: per-band normalize → filter_recipes, then full recompute
 
 main.c eq_update_pending handler:
    filter_recipes[ch][b] = pending_packet
@@ -292,21 +310,19 @@ The single line `if (bq->bypass) continue;` already existed in every DSP inner l
 |-----------------------|-----------------------------|--------------|
 | **Old host + Old firmware** | No / No | Status quo. |
 | **Old host + New firmware** | No / Yes | Host sends 0 (or 0xFF) in the `reserved` byte → firmware normalizes to 0 → bands stay active. Identical to old behavior. |
-| **New host + Old firmware** | Yes / No | Host sends `bypass=1` → byte stored in `reserved` → old firmware ignores it. Bypass UI in the new host appears non-functional. Host should detect firmware version (`REQ_GET_FW_VERSION`-equivalent) and gray out the UI. |
+| **New host + Old firmware** | Yes / No | Host sends `bypass=1` → byte stored in `reserved` → old firmware ignores it. Bypass UI in the new host appears non-functional. Host should detect the firmware version (`GET_PLATFORM` on 1.1.6, `SYS.PLATFORM` on 1.1.7) and gray out the UI. |
 | **New host + New firmware** | Yes / Yes | Works as designed. |
 
-**Detecting firmware support from the host:** there is no dedicated capability bit. Two practical detection methods:
-1. **Vendor-command probe:** issue `REQ_GET_BAND_BYPASS` for `(ch=0, b=0)`. Old firmware will STALL (unknown opcode); new firmware returns 1 byte. Catch the STALL in your USB error handler.
-2. **Build version check:** the firmware publishes BCD version via existing identification commands. Per-band bypass landed in 1.1.4. Compare and gate your UI accordingly.
+**Detecting firmware support from the host:** every firmware that speaks the paged protocol (1.1.7 and later) has `FILTER.BAND_BYPASS`. A host that gates features on the command table checks the command's GET bit in `SYS.PAGE_COMMANDS` for page 0x06. Firmware 1.1.6 and older does not answer the paged protocol at all (`vendor_command_overhaul_plan.md` section 5.14). Per-band bypass landed in 1.1.4, so the matrix above matters only to hosts that still speak the 1.1.6 protocol.
 
 ---
 
 ## 9. Things not to do
 
-- **Don't write `0xFF` to mean bypass.** It will silently mean "active." See §5.
+- **Don't write `0xFF` to mean bypass.** It will mean "active" with no error. See §5.
 - **Don't write `2` thinking it might be a future "phase-invert + bypass" code.** Write `0` or `1`. Future firmware may extend semantics; the strict `== 1` rule is the only forward-compatible signal you can rely on today.
-- **Don't assume `EqParamPacket` and `WireBandParams` are memcpy-compatible.** They differ in the leading bytes (`channel`/`band` vs. nothing). Marshal field-by-field.
-- **Don't try to bypass the master EQ by setting all bands' bypass.** The user-bypass flag is per-band; there is a separate `REQ_SET_BYPASS` (0x46) opcode for the master toggle. Setting all bands gives the same audio result but costs N×M control transfers and triggers N×M coefficient recomputes.
+- **Don't assume `EqParamPacket` and `WireBandParams` are memcpy-compatible.** They differ in the leading bytes (`channel`/`band` vs. nothing). Marshal field-by-field. The `FILTER.BAND` payload, by contrast, has the `WireBandParams` layout.
+- **Don't try to bypass the master EQ by setting all bands' bypass.** The user-bypass flag is per-band; there is a separate `FILTER.EQ_BYPASS` command for the master toggle. Setting all bands gives the same audio result but costs N×M control transfers and triggers N×M coefficient recomputes.
 - **Don't change `WireBandParams.reserved[2]` to non-zero.** It's reserved for future extension; the firmware ignores it today, but a future version may interpret it. Future-you will thank you.
 - **Don't poll bypass state.** Use the notify endpoint (§6.4) — the firmware pushes updates whenever any host changes a band.
 
@@ -315,12 +331,11 @@ The single line `if (bq->bypass) continue;` already existed in every DSP inner l
 ## 10. Quick reference card
 
 ```
-Set:    REQ_SET_BAND_BYPASS  0xD8   wValue=(ch<<8)|band   payload=u8 (0 or 1)
-Get:    REQ_GET_BAND_BYPASS  0xD9   wValue=(ch<<8)|band   returns=u8 (always 0 or 1)
-Whole:  REQ_SET_EQ_PARAM     0x42   wValue=0              payload=EqParamPacket (16 B)
-Bulk:   REQ_SET_ALL_PARAMS   0xA1   wValue=0              payload=WireBulkParams (2912 B)
+Toggle: FILTER.BAND_BYPASS  page 0x06 cmd 0x11  wValue=(ch<<8)|band  SET u8 (0 or 1), GET u8 (always 0 or 1)
+Whole:  FILTER.BAND         page 0x06 cmd 0x10  wValue=(ch<<8)|band  16 B both ways, bypass at offset 1
+Bulk:   STORE.ALL_PARAMS    page 0x02 cmd 0x40  wValue=0             WireBulkParams, 6136 B both ways
 
-EqParamPacket.bypass     offset 3, 1 byte
+EqParamPacket.bypass     offset 3, 1 byte (firmware recipe and preset slots)
 WireBandParams.bypass    offset 1, 1 byte
 WireBulkParams.eq[ch][b].bypass  byte offset 360 + (ch*12 + b)*16 + 1
 

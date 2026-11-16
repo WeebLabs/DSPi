@@ -4,6 +4,8 @@
 `control_surfaces_spec.md`, which remains authoritative for bindings,
 components, actions and the validity model.*
 
+*Last updated: 2026-11-16 (section 3 and the command names on the paged protocol of firmware 1.1.7)*
+
 An auxiliary output is a GPIO the firmware attaches no audio meaning to. It
 exists so a front panel can switch and dim things the firmware does not know
 about. An amplifier trigger, a speaker relay, a panel lamp, a fan. Two new
@@ -110,7 +112,7 @@ and must still be 0 on every type except the two aux types, so a pre-v18
 config stays valid unchanged.
 
 The output's name is the ordinary per-slot name, set and read with
-`REQ_SET_CS_NAME` / `REQ_GET_CS_NAME` (`0x8B` / `0x8C`). There is no separate
+`CS.SLOT_NAME`. There is no separate
 aux name.
 
 ### 2.2 `extras` bits
@@ -118,7 +120,7 @@ aux name.
 | Bit | Name | Applies to | Meaning |
 |-----|------|-----------|---------|
 | `0x01` | `CS_AUX_X_BOOT_ON` | both | the output boots on (clear = boots off) |
-| `0x02` | `CS_AUX_X_BOOT_SAVED` | both | `REQ_CS_SAVE` folds the live flag and level into `CS_AUX_X_BOOT_ON` and `value` before writing |
+| `0x02` | `CS_AUX_X_BOOT_SAVED` | both | `CS.SAVE` folds the live flag and level into `CS_AUX_X_BOOT_ON` and `value` before writing |
 | `0x04` | `CS_AUX_X_LINEAR` | `AUX_PWM` only | linear duty instead of the squared perceptual curve; rejected on `AUX_OUT` |
 | | `CS_AUX_X_MASK` = `0x07` | | any other bit set is `CS_STATUS_INVALID_VALUE` |
 
@@ -137,45 +139,47 @@ No header field is added or moved, and `CsBinding`, `IrCommand`,
 
 ---
 
-## 3. Commands (`0x04`-`0x07`)
+## 3. Commands (`CS` page 0x0A)
 
-`wValue` is the binding slot, 0-15. All four work over USB, UART and I2C, and
-are the same commands the engine itself dispatches (section 6.1).
+The address is the binding slot, 0-15. All three work over USB, UART and I2C,
+and the two SETs are the same commands the engine itself dispatches
+(section 6.1).
 
-| Command | Code | Dir | wValue | wLength / payload | Response |
-|---------|------|-----|--------|-------------------|----------|
-| `REQ_SET_CS_AUX_STATE` | `0x04` | OUT | slot (0-15) | 1 byte (non-zero = on) | none (applied immediately) |
-| `REQ_GET_CS_AUX_STATE` | `0x05` | IN | slot (0-15), or `0xFFFF` | - | 1 byte, or 48 bytes |
-| `REQ_SET_CS_AUX_LEVEL` | `0x06` | OUT | slot (0-15) | 2 bytes, 8.8 percent LE | none (applied immediately) |
-| `REQ_GET_CS_AUX_LEVEL` | `0x07` | IN | slot (0-15) | - | 2 bytes, 8.8 percent LE |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `CS.AUX_STATE` | 0x0A | 0x60 | GET, SET | slot 0-15 | GET 1, SET 1 | Non-zero = on. SET applies immediately |
+| `CS.AUX_LEVEL` | 0x0A | 0x61 | GET, SET | slot 0-15 | GET 2, SET 2 | 8.8 percent LE. SET applies immediately |
+| `CS.AUX_ALL` | 0x0A | 0x62 | GET | none (0) | GET 48 | Every slot's state and level (3.3) |
 
-`0x02` and `0x03` are unallocated and STALL. They were the caps v17 aux config
-commands, which no longer exist.
+The caps v17 aux config commands no longer exist.
 
-### 3.1 Runtime SET (`0x04`, `0x06`)
+### 3.1 Runtime SET (`CS.AUX_STATE`, `CS.AUX_LEVEL`)
 
 Applied in the handler, with no flash write, no dirty flag and no deferral.
-`0x04` treats any non-zero byte as on. `0x06` takes 8.8 percent little-endian
-and clamps above 100 % (25600). A write that leaves the value unchanged is
+`CS.AUX_STATE` treats any non-zero byte as on. `CS.AUX_LEVEL` takes 8.8
+percent little-endian and clamps above 100 % (25600). A write that leaves the value unchanged is
 accepted silently and sends no notification, matching how parameter writes
 behave elsewhere.
 
-A rejected write records the fault in the shared Control Surfaces status
-channel, where `cs_last_slot` is the plain binding slot. There is no
-`0x70 | aux` tag any more. On UART and I2C the transport also returns
-`CTRL_DISPATCH_ERROR`. On USB an OUT request is acknowledged at the transport
-level whatever the outcome (the vendor data stage never stalls, which is how
-every OUT command on this device behaves), so a USB host learns of a rejected
-`0x04` / `0x06` only by reading `REQ_GET_CS_STATUS`. `REQ_GET_CS_STATUS` and
-`slot_status` report an aux slot like any other binding slot.
+A write to a slot that is not an aux output that is up (or a level write to an
+`AUX_OUT` slot) STALLs with `VC_ERR_STATE` and also records
+`CS_STATUS_INVALID_AUX` in the shared Control Surfaces status channel, where
+`cs_last_slot` is the plain binding slot. There is no `0x70 | aux` tag any
+more. A bad slot is `VC_ERR_ADDRESS` and a wrong payload length is
+`VC_ERR_LENGTH`. Neither touches the status channel. A write during a revert
+is `VC_ERR_BUSY` and leaves the status channel alone. UART and I2C return the
+same code in the response status byte, and every transport can read the
+reason from `SYS.LAST_RESULT`. `CS.STATUS` and `slot_status` report an aux
+slot like any other binding slot.
 
-### 3.2 Runtime GET (`0x05`, `0x07`)
+### 3.2 Runtime GET (`CS.AUX_STATE`, `CS.AUX_LEVEL`)
 
-`0x05` with a slot returns one state byte. `0x07` returns two bytes of 8.8
+`CS.AUX_STATE` returns one state byte. `CS.AUX_LEVEL` returns two bytes of 8.8
 percent, which read 0 on an `AUX_OUT` slot because a digital output has no
-level. Either stalls if the slot is not an aux output that is up.
+level. Either STALLs with `VC_ERR_STATE` if the slot is not an aux output that
+is up.
 
-### 3.3 Bulk state read (`0x05` with `wValue = 0xFFFF`)
+### 3.3 Bulk state read (`CS.AUX_ALL`)
 
 Returns **48 bytes**. Sixteen `state` bytes, one per binding slot, followed by
 sixteen little-endian uint16 `level_q8` values in the same slot order. Slots
@@ -191,10 +195,10 @@ keeps it current.
 | noun 68 whose target slot holds neither aux type | `CS_STATUS_INVALID_AUX` (`0x26`) |
 | noun 69 whose target slot is not `CS_TYPE_AUX_PWM` | `CS_STATUS_INVALID_AUX` (`0x26`) |
 | a binding on noun 68 / 69 whose target is the slot it is being written to | `CS_STATUS_INVALID_TARGET` (`0x17`) |
-| `0x04` / `0x06` on a slot that is not an aux output that is up | `CS_STATUS_INVALID_AUX` (`0x26`), rejected (see 3.1 for what "rejected" means per transport) |
-| `0x06` on an `AUX_OUT` slot | `CS_STATUS_INVALID_AUX` (`0x26`), rejected |
-| `0x04` / `0x06` payload shorter than 1 / 2 bytes | `CS_STATUS_INVALID_VALUE` (`0x14`), rejected |
-| `0x05` / `0x07` on a slot that is not an aux output that is up | control transfer stalls (no status record) |
+| `CS.AUX_STATE` / `CS.AUX_LEVEL` SET on a slot that is not an aux output that is up | `CS_STATUS_INVALID_AUX` (`0x26`), SET refused with `VC_ERR_STATE` |
+| `CS.AUX_LEVEL` SET on an `AUX_OUT` slot | `CS_STATUS_INVALID_AUX` (`0x26`), SET refused with `VC_ERR_STATE` |
+| `CS.AUX_STATE` / `CS.AUX_LEVEL` SET payload other than 1 / 2 bytes | no status record, SET refused with `VC_ERR_LENGTH` |
+| `CS.AUX_STATE` / `CS.AUX_LEVEL` GET on a slot that is not an aux output that is up | no status record, GET refused with `VC_ERR_STATE` |
 | `CS_FLAG_GROUP` on an aux noun, or a `CsGroup` with `target_kind = 5` | `CS_STATUS_INVALID_GROUP` (`0x1F`) |
 | aux container with a non-zero `noun`, `action`, `event`, `target`, `index`, `step` or range field | `CS_STATUS_INVALID_VALUE` (`0x14`) |
 | `extras` outside `CS_AUX_X_MASK`, or non-zero on a non-aux type | `CS_STATUS_INVALID_VALUE` (`0x14`) |
@@ -225,19 +229,19 @@ lower-numbered non-aux slot used to win.
 switched to an output (or, for PWM, before the pin is muxed to the slice), so
 a relay never sees a glitch through the off state on the way up.
 
-**Save (`REQ_CS_SAVE`).** `control_surfaces_aux_prepare_save()` runs first.
+**Save (`CS.SAVE`).** `control_surfaces_aux_prepare_save()` runs first.
 For every up aux slot carrying `CS_AUX_X_BOOT_SAVED` it copies the live flag
 into `CS_AUX_X_BOOT_ON` and, on `AUX_PWM`, the live level into `value`. The
 whole Control Surfaces config then persists in the one directory write.
 Toggling an output never writes flash and never sets the dirty flag.
 
-**Revert (`REQ_CS_REVERT`).** Reloads the stored config, but carries the live
+**Revert (`CS.REVERT`).** Reloads the stored config, but carries the live
 flag and level of every up aux slot across to the slot that reloads with the
 same type. A revert therefore never snaps a relay to its boot value. The pin
 is released and reclaimed during the reload, a gap of microseconds, exactly as
 for any LED.
 
-**Same-type re-apply.** A host `REQ_SET_CS_BINDING` on an aux slot that keeps
+**Same-type re-apply.** A host `CS.BINDING` SET on an aux slot that keeps
 the same type (a rename, a delay change, a ceiling change, a boot-field edit)
 also keeps the live value. Changing the type resets the slot to its boot
 value.
@@ -258,7 +262,7 @@ persisted on every toggle would put a flash write behind a front-panel button.
 
 ## 5. Notification (`NOTIFY_EVT_CS_AUX`, `0x0C`)
 
-Every `0x04` and `0x06` dispatch that changes a value pushes a **9-byte**
+Every `CS.AUX_STATE` and `CS.AUX_LEVEL` SET that changes a value pushes a **9-byte**
 packet, from any source.
 
 ```
@@ -293,7 +297,7 @@ poll-the-status model of every other Control Surfaces SET.
 ### 6.1 Dispatch
 
 `CS_NOUN_AUX` and `CS_NOUN_AUX_LEVEL` go through
-`vendor_dispatch_set(CTRL_SOURCE_GPIO, ...)` with `0x04` / `0x06`, exactly
+`vc_set(CTRL_SOURCE_GPIO, ...)` with `CS.AUX_STATE` / `CS.AUX_LEVEL`, exactly
 like every other noun. Nothing about aux outputs bypasses the command surface,
 which is why a panel toggle produces the same notification a host write does,
 tagged as GPIO. The level is 8.8 percent in RAM, on the wire and in the noun
@@ -348,7 +352,7 @@ event overlay like any other watched page.
 | 0 | `BUTTON` (GPIO 16) | `AUX` (68) | `TOGGLE` | `target = 1`, `event = CS_EVT_PRESS` |
 | 1 | `AUX_OUT` (GPIO 21) | - | - | `CS_FLAG_INVERT` for an active-low relay board, `extras = 0` so it boots off |
 
-Name slot 1 "Amp" with `REQ_SET_CS_NAME`. Leaving `CS_AUX_X_BOOT_ON` clear is
+Name slot 1 "Amp" with `CS.SLOT_NAME`. Leaving `CS_AUX_X_BOOT_ON` clear is
 what keeps the amp from waking up with the device. Add an `off_delay` on slot
 1 if the relay should hold in through a quick power blip.
 
@@ -441,19 +445,20 @@ host. Everything below replaces it rather than extending it.
 - The slot owns the pin. A second LED or PWM LED binding is no longer needed
   to reach hardware, and LED follows are now optional extra indicators.
 - `CsAuxCfg` (36 B) and `CsAuxConfig` (292 B) are gone, and with them
-  `REQ_SET_CS_AUX_CFG` (`0x02`) and `REQ_GET_CS_AUX_CFG` (`0x03`).
+  the aux config commands (then opcodes 0x02 and 0x03).
 - Boot mode became two `extras` bits, `CS_AUX_X_BOOT_ON` and
   `CS_AUX_X_BOOT_SAVED`, on `CsBinding` byte 22 (formerly `reserved2[0]`).
   `CS_AUX_X_LINEAR` was added for non-perceptual loads.
-- The name is the ordinary per-slot name (`0x8B` / `0x8C`); there is no
+- The name is the ordinary per-slot name (`CS.SLOT_NAME`); there is no
   separate aux name.
 - `target` is now the **binding slot** 0-15, not an aux index 0-7, and
   `target_count` reads 16. Validation is strict at bind time.
 - `CS_STATUS_INVALID_AUX` (`0x26`) changed meaning from "index out of range"
   to "target slot is not an aux output, or the level noun targets a non-PWM
   aux slot".
-- The level is 8.8 percent everywhere, not whole percent. `0x06` takes two
-  bytes, `0x07` returns two, the `0x05` bulk read is 48 bytes rather than 16,
+- The level is 8.8 percent everywhere, not whole percent. The level SET takes
+  two bytes, the level GET returns two, the bulk read (now `CS.AUX_ALL`) is 48
+  bytes rather than 16,
   and the whole-percent `step` restriction and its dispatch nudge are gone.
 - `NOTIFY_EVT_CS_AUX` grew from 8 to 9 bytes, carrying the slot and a 16-bit
   level.

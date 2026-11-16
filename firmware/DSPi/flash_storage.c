@@ -3067,7 +3067,7 @@ static bool io_pin_valid(uint8_t pin) {
     // control pins are rejected here so a stored or pushed IO config can
     // never steal the control link applying it (self-lockout guard); at
     // boot the interfaces are not yet up, so stored audio pins win and a
-    // colliding control config stays down (visible via 0xF9).
+    // colliding control config stays down (visible via XPORT.STATUS).
     if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return false;
 #ifdef DSPI_PLATFORM_PINS
     bool valid = dspi_platform_pin_valid(DSPI_PIN_FN_ANY, pin);

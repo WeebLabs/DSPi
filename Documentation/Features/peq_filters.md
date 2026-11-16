@@ -1,6 +1,6 @@
 # PEQ Filters: Host Integration Specification
 
-*Last updated: 2026-08-04*
+*Last updated: 2026-11-16 (wire interfaces on the paged protocol of firmware 1.1.7)*
 
 This document is the complete host-side reference for the DSPi parametric EQ
 (PEQ) system: every filter type, every parameter, and every wire interface an
@@ -28,7 +28,7 @@ The last output channel is always the PDM subwoofer.
 ### 1.2 Bands
 
 Each channel has **10 active PEQ bands, indices 0..9**. Band indices 10..19
-are a reserved gap (writes are silently rejected); 20..23 address the
+are a reserved gap (reads and writes are refused with `VC_ERR_ADDRESS`); 20..23 address the
 crossover bands (separate feature). All 10 PEQ bands are identical in
 capability; there is no ordering requirement, but bands are processed in
 index order (a serial cascade).
@@ -142,12 +142,13 @@ fp = 25 Hz, Qp = 0.55:
 ### 3.4 Round-trip and preset behavior
 
 - `qp` persists in user presets (preset slot format V30) and round-trips
-  through bulk GET/SET_ALL_PARAMS (wire format V22).
-- If a band's type changes away from LT, the stored `qp` is retained by the
-  single-band vendor path (harmless, unused) but zeroed by a bulk apply that
-  writes a non-LT type.
-- Old hosts that are unaware of `qp` and rewrite a band with a 16-byte
-  `REQ_SET_EQ_PARAM` payload do not disturb the stored `qp` (see 4.1).
+  through `STORE.ALL_PARAMS` GET and SET (wire format V22).
+- A `FILTER.BAND` SET always stores the `qp` it carries, whatever the type,
+  so a host that changes a band away from LT keeps whatever `qp` it sends
+  (harmless, unused). A bulk apply that writes a non-LT type zeroes it.
+- There is no write that leaves the stored `qp` alone, apart from
+  `FILTER.BAND_BYPASS`. A host that edits one field reads the band with
+  `FILTER.BAND` GET and writes it back whole (see 4.1).
 
 ### 3.5 Control surfaces
 
@@ -160,61 +161,58 @@ host-only.
 
 ## 4. Wire Interfaces
 
-All vendor requests use the vendor control endpoint; multi-byte fields are
-little-endian.
+All commands use the paged protocol of firmware 1.1.7: the page travels in
+the `wIndex` high byte, the command in `bRequest`, and `wValue` is the
+address. Multi-byte fields are little-endian. A rejected SET STALLs, and the
+reason is readable from `SYS.LAST_RESULT` (see `../commands.md`).
 
-### 4.1 REQ_SET_EQ_PARAM (0x42): write one band
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | One whole band, section 4.1 |
+| `FILTER.BAND_BYPASS` | 0x06 | 0x11 | GET, SET | `(channel << 8) \| band` | GET 1, SET 1 | Section 4.2 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | Bulk snapshot, section 4.3 |
 
-Payload is the 16-byte `EqParamPacket`, optionally followed by 2 bytes of
-`qp` for the Linkwitz Transform:
+### 4.1 `FILTER.BAND`: read or write one band
+
+`wValue` is `(channel << 8) | band`: channel 0..NUM_CHANNELS-1, band 0..9
+for PEQ (20..23 crossover, outputs only). The SET payload and the GET reply
+share one 16-byte layout:
 
 | Offset | Size | Field | Notes |
 |--------|------|-------|-------|
-| 0 | 1 | channel | 0..NUM_CHANNELS-1 |
-| 1 | 1 | band | 0..9 for PEQ (20..23 crossover) |
-| 2 | 1 | type | FilterType |
-| 3 | 1 | bypass | exactly 1 = bypassed |
+| 0 | 1 | type | FilterType |
+| 1 | 1 | bypass | exactly 1 = bypassed. A GET returns exactly 0 or 1 |
+| 2 | 2 | qp_x512 | u16 LE, Q x 512, the Linkwitz Transform target Q. Replaces the stored qp on every SET |
 | 4 | 4 | freq | f32 LE |
 | 8 | 4 | Q | f32 LE |
 | 12 | 4 | gain_db | f32 LE (fp in Hz for LT) |
-| 16 | 2 | qp | **optional** u16 LE, Q x 512. Omitted (16-byte payload): the band's stored qp is preserved. Present (18-byte payload): stored qp is replaced. |
 
-Always send the 18-byte form when writing LT bands. The 16-byte form remains
-fully valid for all other types (and for legacy hosts).
+There is no shorter or longer form, so always send `qp`. A crossover band
+ignores it and reads it back as 0. A GET returns the whole band in one
+transfer, so there is no per-field read.
 
-Invalid channel/band combinations are silently ignored (no error, no STALL).
-The write is asynchronous: the packet is latched and applied from the main
-loop, then a parameter-write notification is emitted (section 4.5).
+A channel past the end, a band in the reserved gap (10..19 or past 23), or a
+crossover band on an input channel is refused with `VC_ERR_ADDRESS`. A NaN or
+infinite freq, Q or gain is refused with `VC_ERR_VALUE` and stores nothing. A
+payload other than 16 bytes is `VC_ERR_LENGTH`.
 
-### 4.2 REQ_GET_EQ_PARAM (0x43): read one field
+The write is asynchronous: the band is latched and applied from the main
+loop, then a parameter-write notification is emitted (section 4.4). There is
+one latch. A `FILTER.BAND` or `FILTER.BAND_BYPASS` SET that arrives while an
+earlier one is still waiting for the main loop is refused with `VC_ERR_BUSY`
+and changes nothing. Retry after a short delay.
 
-Control IN, 4-byte response. `wValue` encodes the target:
+### 4.2 `FILTER.BAND_BYPASS`: toggle bypass without touching params
 
-```
-wValue = (channel << 8) | (band << 3) | param
-```
+Same address as `FILTER.BAND`, 1-byte payload (`1` = bypass, anything
+else = active). Preserves all stored parameters including `qp`. The GET
+returns 0 or 1. It shares the `FILTER.BAND` latch, so it can also be refused
+with `VC_ERR_BUSY`.
 
-| param | Returns | Format |
-|-------|---------|--------|
-| 0 | type | u32 |
-| 1 | freq | f32 |
-| 2 | Q | f32 |
-| 3 | gain_db | f32 (fp in Hz for LT bands) |
-| 4 | bypass | u32, 1 = bypassed |
-| 5 | qp | u32 (low 16 bits = qp_x512; 0 for non-PEQ band indices) |
-
-`band` is a 5-bit field (0..31), so crossover bands 20..23 are addressable
-with the same request.
-
-### 4.3 REQ_SET_BAND_BYPASS (0xD8): toggle bypass without touching params
-
-`wValue = (channel << 8) | band`, 1-byte payload (`1` = bypass, anything
-else = active). Preserves all stored parameters including `qp`.
-
-### 4.4 Bulk transfer: REQ_GET_ALL_PARAMS (0xA0) / REQ_SET_ALL_PARAMS (0xA1)
+### 4.3 Bulk transfer: `STORE.ALL_PARAMS`
 
 The bulk snapshot (`WIRE_FORMAT_VERSION = 22`; also available chunked via
-0xA2/0xA3, see `bulk_params_chunking.md`) carries every PEQ band as a
+`STORE.ALL_PARAMS_CHUNK`, see `bulk_params_chunking.md`) carries every PEQ band as a
 16-byte `WireBandParams`:
 
 | Offset | Size | Field |
@@ -232,16 +230,16 @@ LT bands and forces 0 for all other types. Hosts on wire format 21 or older
 are rejected outright by the exact-version check; update the app's parser to
 declare version 22 (no layout change, only the reserved-byte meaning).
 
-### 4.5 Parameter-write notifications
+### 4.4 Parameter-write notifications
 
 Hosts listening on the notification endpoint receive an EQ-parameter event
 after every applied band write; its payload embeds the same `WireBandParams`
-layout as 4.4, including `qp` in the reserved bytes for LT bands. See
+layout as 4.3, including `qp` in the reserved bytes for LT bands. See
 `notification_protocol_v2_spec.md`.
 
-### 4.6 Presets
+### 4.5 Presets
 
-User preset save/load (vendor 0x90..0x9C, `user_presets_spec.md`) persists
+User preset save/load (the `STORE.PRESET_*` commands, `user_presets_spec.md`) persists
 all PEQ state including `qp` (slot format V30). Presets saved by older
 firmware load with `qp = 0`, i.e. the 0.707 default for any LT band.
 
@@ -252,10 +250,11 @@ firmware load with `qp = 0`, i.e. the 0.707 default for any LT band.
 1. **Type picker**: offer types 0..11; label 11 "Linkwitz Transform".
 2. **Per-type field visibility**: hide Q for types 8..10; hide gain for
    types 4..8; for type 11 show four fields (f0, Q0, fp, Qp) and no gain.
-3. **Writes**: one `REQ_SET_EQ_PARAM` per band edit; 18-byte payload for LT.
-   Batch restores via `REQ_SET_ALL_PARAMS` (or the chunked variants).
-4. **Reads**: `REQ_GET_ALL_PARAMS` for full state (parse reserved bytes as
-   qp when type = 11); `REQ_GET_EQ_PARAM` param 5 for a single qp.
+3. **Writes**: one `FILTER.BAND` SET per band edit, always with `qp`.
+   Retry on `VC_ERR_BUSY`. Batch restores via `STORE.ALL_PARAMS` SET (or
+   `STORE.ALL_PARAMS_CHUNK`).
+4. **Reads**: `STORE.ALL_PARAMS` GET for full state (parse reserved bytes as
+   qp when type = 11); `FILTER.BAND` GET for a single band, `qp` included.
 5. **Validation before send**: clamp freq/f0/fp to [10, 20000] and Q/Q0/Qp
    to [0.1, 20] in the UI so what the user sees matches what the DSP runs.
 6. **LT UX**: display implied DC boost `40*log10(f0/fp)` dB; warn above

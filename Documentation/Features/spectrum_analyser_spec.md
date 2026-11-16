@@ -1,7 +1,7 @@
 # Spectrum Analyser (RTA / FFT) Specification
 
 *Status: implemented, hardware-untested*
-*Last updated: 2026-10-23 (FINISH sliced into steps; bins staged and published in one step). Previously 2026-09-12 (shared elliptic b0; Blackman-Harris FFT window; sixth-order bass bands; protocol V3, continuous 10–200 Hz bass bank plus FFT up to 1024 points)*
+*Last updated: 2026-11-16 (section 5.1 and the vendor command names on the paged protocol of firmware 1.1.7). Previously 2026-10-23 (FINISH sliced into steps; bins staged and published in one step). Previously 2026-09-12 (shared elliptic b0; Blackman-Harris FFT window; sixth-order bass bands; protocol V3, continuous 10–200 Hz bass bank plus FFT up to 1024 points)*
 
 ## 1. Overview
 
@@ -367,41 +367,44 @@ recovery, restart, config rejection, and auto-off in both formats.
 
 ### 5.1 Commands
 
-Vendor commands 0x08 to 0x0F. All GETs are `bmRequestType` 0xC1, all SETs
-0x41, following the shared dispatcher, so UART and I2C get them for free.
+The analyser lives in page 0x09 (`MEAS`) of the paged protocol (`../commands.md`). All GETs are `bmRequestType` 0xC1, all SETs 0x41, with `wIndex` `0x0902` on USB. They go through the shared dispatcher (`vc_dispatch()`), so UART and I2C get them too. A refused request STALLs on USB, and `SYS.LAST_RESULT` gives the reason.
 
-| Code | Name | Dir | wValue | Payload / response |
-|------|------|-----|--------|--------------------|
-| 0x08 | `REQ_RTA_SET_CONFIG` | SET | 0 | `RtaConfig` (12 B). STALL on invalid |
-| 0x09 | `REQ_RTA_GET_CONFIG` | GET | 0 | `RtaConfig` (12 B) applied config |
-| 0x0A | `REQ_RTA_GET_CAPS` | GET | 0 | `RtaCaps` (16 B); 1..n = band centre table chunk |
-| 0x0B | `REQ_RTA_GET_BANDS` | GET | channel | `RtaBandFrame` (82 B) for that channel at the current tap |
-| 0x0C | `REQ_RTA_GET_BINS` | GET | byte offset | chunk of the bin frame, `wLength` bytes |
-| 0x0D | `REQ_RTA_GET_STATUS` | GET | 0 | `RtaStatus` (24 B) |
-| 0x0E | `REQ_RTA_CONTROL` | GET | action | one status byte, like `REQ_SIGGEN_CONTROL`. `RTA_CTL_*` |
-| 0x0F | `REQ_RTA_GET_BANDS_ALL` | GET | 0 | every live channel's `RtaBandFrame` back to back, USB only |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `MEAS.RTA_CONFIG` | 0x09 | 0x20 | GET, SET | none (0) | GET 12, SET 12 | `RtaConfig`. GET returns the applied config. An invalid SET is `VC_ERR_VALUE` |
+| `MEAS.RTA_CAPS` | 0x09 | 0x21 | GET | none (0) | GET 16 | `RtaCaps` |
+| `MEAS.RTA_BAND_CENTRES` | 0x09 | 0x22 | GET | chunk 0-n | GET var | Band centre table chunk n. A chunk past the table is `VC_ERR_ADDRESS` |
+| `MEAS.RTA_BANDS` | 0x09 | 0x23 | GET | channel at the current tap | GET 82 | `RtaBandFrame`. A channel not in the frame is `VC_ERR_ADDRESS` |
+| `MEAS.RTA_BINS` | 0x09 | 0x24 | GET | byte offset | GET var | Bin frame from the offset, at most 256 bytes per request. An offset at or past the frame length is `VC_ERR_ADDRESS` |
+| `MEAS.RTA_STATUS` | 0x09 | 0x25 | GET | none (0) | GET 24 | `RtaStatus` |
+| `MEAS.RTA_BANDS_ALL` | 0x09 | 0x26 | GET | none (0) | GET var | Every live channel's `RtaBandFrame` back to back. USB only |
+| `MEAS.RTA_START` | 0x09 | 0x28 | SET (zero-length) | none (0) | SET 0 | `RTA_CTL_START` |
+| `MEAS.RTA_STOP` | 0x09 | 0x29 | SET (zero-length) | none (0) | SET 0 | `RTA_CTL_STOP` |
+| `MEAS.RTA_RESET` | 0x09 | 0x2A | SET (zero-length) | none (0) | SET 0 | `RTA_CTL_RESET_AVG`: clears averages and peaks |
 
-`REQ_RTA_GET_BANDS`, `GET_BINS` and `GET_BANDS_ALL` count as reads for the
-auto-off timer and auto-start the analyser. `GET_STATUS` does not.
+The three control SETs replace the 1.1.6 write-as-read action opcode. They carry no payload and return no status byte. Success is ACK.
 
-Every applied `REQ_RTA_SET_CONFIG` is announced with `NOTIFY_EVT_RTA_CONFIG`
+`MEAS.RTA_BANDS`, `MEAS.RTA_BINS` and `MEAS.RTA_BANDS_ALL` count as reads for the
+auto-off timer and auto-start the analyser, even when the read is then refused. `MEAS.RTA_STATUS` does not.
+
+Every applied `MEAS.RTA_CONFIG` SET is announced with `NOTIFY_EVT_RTA_CONFIG`
 (0x0D), carrying the applied `RtaConfig` and the SET's source. See
 `notification_protocol_v2_spec.md` §3.9 and section 7 below.
 
-`REQ_RTA_GET_BANDS_ALL` is refused on UART and I2C the same way 0xA0 is; those
-clients read per channel with 0x0B, which fits their 132-byte GET limit. On
-USB it is built in `bulk_param_buf` under the bulk lock, acquired and released
-at the same three sites as 0xA0 through `vendor_is_bulk_get()`.
+`MEAS.RTA_BANDS_ALL` is refused on UART and I2C with `VC_ERR_BLOCKED`. Those
+clients read per channel with `MEAS.RTA_BANDS`, which fits their reply buffer. On
+USB it is built in `bulk_param_buf` under the bulk lock (`vc_bulk.c`), the same
+lock `STORE.ALL_PARAMS` uses. A lock held elsewhere is `VC_ERR_BUSY`.
 
-`REQ_RTA_GET_BINS` follows the 0xA2 chunk pattern with `wValue` as the byte
-offset into the bin frame. The frame is `16 + n_bins + 1` bytes: the header
+`MEAS.RTA_BINS` follows the `STORE.ALL_PARAMS_CHUNK` pattern with `wValue` as the byte
+offset into the bin frame. Each request returns at most 256 bytes, so a full frame takes up to three reads. The frame is `16 + n_bins + 1` bytes: the header
 carries the sequence number, and the same number sits in the final byte, so a
 host that reads several chunks validates that both match and re-reads if the
 frame turned over in between. The engine writes the bins, header and tail
 together in one main-loop step, and the tail reads 0xFF until the first frame;
 sequence numbers skip 0xFF. The layout is fixed for
 the life of a config. No lock is taken. The bin frame is never larger than
-529 bytes.
+529 bytes. Before the first transform the device returns a frame with a zero header and a 0xFF tail, so a host must check the tail.
 
 ### 5.2 Structures
 
@@ -443,7 +446,7 @@ typedef struct __attribute__((packed)) {
     uint16_t bass_dynamic_range_db; // 70, independent of FFT dynamic_range_db
 } RtaCaps;                     // 16 bytes
 
-// GET_CAPS wValue 1..: uint16 band centre frequencies in Hz, 32 per chunk.
+// MEAS.RTA_BAND_CENTRES chunk n (wValue n, from 0): uint16 band centre frequencies in Hz, 32 per chunk.
 
 typedef struct __attribute__((packed)) {
     uint8_t  version;
@@ -507,13 +510,13 @@ required before release.
 V3 is deliberately incompatible with V2 config/frame interpretation. Config,
 caps, status and bin-header sizes stay 12/16/24/16 bytes; band frames grow from
 80 to 82 bytes and their indices shift by three. Read `max_bands` and the centre
-table, and reject unsupported versions. GET_BANDS_ALL uses 82-byte strides.
+table, and reject unsupported versions. `MEAS.RTA_BANDS_ALL` uses 82-byte strides.
 No command IDs were added. The separate Console repository needs a matching V3
 client update; this firmware repository contains only the device test client.
 
 ### 5.3 Validation
 
-`REQ_RTA_SET_CONFIG` STALLs on wrong version or length, unknown tap, an
+A `MEAS.RTA_CONFIG` SET STALLs on a wrong length (`VC_ERR_LENGTH`), or with `VC_ERR_VALUE` on a wrong version, unknown tap, an
 `fft_order` outside the caps range, or an empty `channel_mask` after masking
 to the tap's channel count. `avg_ms` is clamped to 0..10000 and
 `peak_decay_db_s` to 0..100. A config that is valid but changes tap, mask, or
@@ -608,7 +611,7 @@ analyser should follow the same ones.
    the tap matches, the host asks for the union of its own channels and the
    channels the device is currently analysing, so the other host keeps its
    picture. The device analyses every channel in the mask anyway and
-   `GET_BANDS_ALL` returns them all in one read.
+   `MEAS.RTA_BANDS_ALL` returns them all in one read.
 4. **A superset is success.** A readback or event counts as the host's
    configuration applied when the tap and FFT order match and the device's
    mask includes every channel the host asked for. The host adopts the
@@ -620,7 +623,7 @@ analyser should follow the same ones.
 6. **`RESET_AVG` stays shared.** It is momentary and intentional, like
    pressing reset on a shared meter, and it does not restart the frame.
 7. **Without the event**, on firmware that predates it, the host keeps reading
-   `REQ_RTA_GET_CONFIG` back. A readback that disagrees after an earlier one
+   `MEAS.RTA_CONFIG` back. A readback that disagrees after an earlier one
    agreed means another host changed the configuration and the host follows
    it with an unknown origin. A readback that never agreed is the refusal
    path of rule 5.
@@ -638,11 +641,11 @@ analyser should follow the same ones.
 | `tools/rta_test/` | host harness: numpy oracle for the kernel, stubbed engine smoke test |
 | `tools/dspi_test/tests/rta.py` | device tests (section 9) |
 
-Touch points in existing files: `config.h` (command codes), `audio_pipeline.c`
+Touch points in existing files: `audio_pipeline.c`
 and `pdm_generator.c` (tap calls inside the meter loops, packet begin/end),
 `main.c` (`rta_init()`, `rta_service()` in the main loop, `rta_restart()` at
-the existing reset sites), `vendor_commands.c` (handlers, `vendor_is_bulk_get`,
-the SET's source passed to `rta_set_config()`), `notify.h`/`notify.c`
+the existing reset sites), `vendor/vc_page_meas.c` and `vendor/pages/meas.def` (handlers and table
+entries, the SET's source passed to `rta_set_config()`), `notify.h`/`notify.c`
 (`NOTIFY_EVT_RTA_CONFIG`, `notify_push_rta_config()`), `CMakeLists.txt`,
 `scripts/check_ram_placement.py` (hot symbols).
 

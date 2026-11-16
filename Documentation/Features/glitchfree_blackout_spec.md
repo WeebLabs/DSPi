@@ -2,6 +2,8 @@
 
 *Last updated: 2026-05-13*
 
+*Note (2026-11-16): `vendor_commands.c`, named below, belongs to firmware 1.1.6. Firmware 1.1.7 removed it and speaks the paged protocol described in `../commands.md`, with its handlers in `firmware/DSPi/vendor/vc_page_*.c`.*
+
 > **Status (2026-10-12): superseded.** This is a historical design record. It was never implemented as written (see `silent_state_changes_spec.md`), and the pool-based output path it builds on no longer exists. Outputs now play from per-slot free-running DMA rings fed directly by the pipeline. The current design is in `Documentation/current_architecture.md`.
 
 ## 1. Executive summary

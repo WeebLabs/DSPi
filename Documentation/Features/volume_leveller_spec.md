@@ -1,5 +1,7 @@
 # Volume Leveller Specification
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 The Volume Leveller is a feedforward, channel-linked, single-band RMS dynamic range compressor. Its purpose is to maintain a consistent perceived volume across content with varying loudness levels -- for example, preventing quiet dialogue from being drowned out by loud action scenes, or normalizing volume differences between music tracks.
@@ -55,8 +57,7 @@ The Volume Leveller is completely independent of the Loudness Compensation featu
 | **Type** | `bool` (uint8_t on wire) |
 | **Range** | 0 (off) or 1 (on) |
 | **Default** | 0 (disabled) |
-| **SET command** | `0xB4` (`REQ_SET_LEVELLER_ENABLE`) |
-| **GET command** | `0xB5` (`REQ_GET_LEVELLER_ENABLE`) |
+| **Command** | `DYN.LEVELLER_ENABLE` (page 0x07, command 0x20), GET and SET |
 | **Payload** | 1 byte: `0x00` = disabled, `0x01` = enabled |
 
 Controls whether the Volume Leveller is active in the signal chain. When disabled, the leveller is completely bypassed with zero CPU cost (checked via a fast boolean flag before the processing function is called). Toggling this parameter triggers a full state reset (envelopes zeroed, gain returned to unity, lookahead buffer cleared).
@@ -68,8 +69,7 @@ Controls whether the Volume Leveller is active in the signal chain. When disable
 | **Type** | `float` (IEEE 754 single-precision) |
 | **Range** | 0.0 to 100.0 |
 | **Default** | 50.0 |
-| **SET command** | `0xB6` (`REQ_SET_LEVELLER_AMOUNT`) |
-| **GET command** | `0xB7` (`REQ_GET_LEVELLER_AMOUNT`) |
+| **Command** | `DYN.LEVELLER_AMOUNT` (page 0x07, command 0x21), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Controls the upward compression strength as a percentage. This parameter determines the compression ratio:
@@ -82,7 +82,7 @@ The formula is: `ratio = 1.0 + (amount / 100.0) * 19.0`
 
 With upward compression, higher amounts increase the boost applied to quiet content. There is no makeup gain -- the upward compression directly provides the boost, while loud content above the threshold is left untouched. A good starting point for most content is 40-60%.
 
-Values outside the valid range are clamped by the firmware.
+Finite values outside the valid range are clamped by the firmware. NaN and infinity are refused with `VC_ERR_VALUE`.
 
 ### 2.3 speed
 
@@ -91,8 +91,7 @@ Values outside the valid range are clamped by the firmware.
 | **Type** | `uint8_t` |
 | **Range** | 0, 1, or 2 |
 | **Default** | 0 (Slow) |
-| **SET command** | `0xB8` (`REQ_SET_LEVELLER_SPEED`) |
-| **GET command** | `0xB9` (`REQ_GET_LEVELLER_SPEED`) |
+| **Command** | `DYN.LEVELLER_SPEED` (page 0x07, command 0x22), GET and SET |
 | **Payload** | 1 byte |
 
 Selects a speed preset that controls the attack time, release time, and RMS window length. Each preset is tuned for a different content type:
@@ -107,7 +106,7 @@ Selects a speed preset that controls the attack time, release time, and RMS wind
 - **Release time:** How quickly gain recovers (boost resumes) after the signal drops back below the threshold. Shorter = faster recovery, but too fast can cause "pumping" artifacts.
 - **RMS window:** The averaging time for level detection. Longer windows give smoother, more musical compression; shorter windows track rapid level changes.
 
-Invalid values (>= 3) are rejected silently by the firmware (the SET command has no effect).
+Invalid values (>= 3) are refused with `VC_ERR_VALUE` and change nothing.
 
 ### 2.4 max_gain_db
 
@@ -116,8 +115,7 @@ Invalid values (>= 3) are rejected silently by the firmware (the SET command has
 | **Type** | `float` (IEEE 754 single-precision) |
 | **Range** | 0.0 to 35.0 |
 | **Default** | 15.0 |
-| **SET command** | `0xBA` (`REQ_SET_LEVELLER_MAX_GAIN`) |
-| **GET command** | `0xBB` (`REQ_GET_LEVELLER_MAX_GAIN`) |
+| **Command** | `DYN.LEVELLER_MAX_GAIN` (page 0x07, command 0x23), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Sets the maximum boost (in dB) that the upward compressor can apply to quiet content. This prevents the compressor from amplifying very quiet passages (or near-silence) by an excessive amount, which would raise the noise floor.
@@ -130,7 +128,7 @@ Sets the maximum boost (in dB) that the upward compressor can apply to quiet con
 
 **RP2040 note:** the Q28 fixed-point gain path tops out just below 8.0x linear, so the effective maximum boost on RP2040 is 18 dB; higher settings are accepted but clamped at coefficient time. RP2350 honors the full 35 dB range.
 
-Values outside the valid range are clamped by the firmware.
+Finite values outside the valid range are clamped by the firmware. NaN and infinity are refused with `VC_ERR_VALUE`.
 
 ### 2.5 lookahead
 
@@ -139,8 +137,7 @@ Values outside the valid range are clamped by the firmware.
 | **Type** | `bool` (uint8_t on wire) |
 | **Range** | 0 (off) or 1 (on) |
 | **Default** | 1 (enabled) |
-| **SET command** | `0xBC` (`REQ_SET_LEVELLER_LOOKAHEAD`) |
-| **GET command** | `0xBD` (`REQ_GET_LEVELLER_LOOKAHEAD`) |
+| **Command** | `DYN.LEVELLER_LOOKAHEAD` (page 0x07, command 0x24), GET and SET |
 | **Payload** | 1 byte: `0x00` = disabled, `0x01` = enabled |
 
 Enables a 240-sample (5ms at 48kHz) lookahead delay. When enabled, the audio signal is delayed by 5ms while the level detection operates on the non-delayed signal. This allows the compressor to anticipate level transitions before they arrive.
@@ -151,7 +148,7 @@ With upward compression, lookahead is less critical than with traditional downwa
 
 **Trade-off:** Enabling lookahead adds 5ms of latency to the audio path. This is inaudible for music playback but may be noticeable in real-time monitoring scenarios.
 
-Toggling this parameter triggers a full state reset (lookahead buffers cleared, envelopes zeroed, gain returned to unity) to prevent clicks or artifacts. Mask writes (0xDE) do NOT reset state; they switch glitch-free while the rings keep running.
+Toggling this parameter triggers a full state reset (lookahead buffers cleared, envelopes zeroed, gain returned to unity) to prevent clicks or artifacts. Mask writes (`DYN.LEVELLER_MASKS`) do NOT reset state; they switch glitch-free while the rings keep running.
 
 ### 2.6 gate_threshold_db
 
@@ -160,8 +157,7 @@ Toggling this parameter triggers a full state reset (lookahead buffers cleared, 
 | **Type** | `float` (IEEE 754 single-precision) |
 | **Range** | -96.0 to 0.0 |
 | **Default** | -96.0 |
-| **SET command** | `0xBE` (`REQ_SET_LEVELLER_GATE`) |
-| **GET command** | `0xBF` (`REQ_GET_LEVELLER_GATE`) |
+| **Command** | `DYN.LEVELLER_GATE` (page 0x07, command 0x25), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Sets the silence gate threshold in dBFS. When the RMS level of the signal falls below this threshold, the leveller applies unity gain (0 dB adjustment) instead of boosting. This prevents the upward compressor from amplifying background noise or near-silence, which would raise the noise floor ("noise pumping").
@@ -171,7 +167,7 @@ Sets the silence gate threshold in dBFS. When the RMS level of the signal falls 
 - **-40.0 dBFS:** Aggressive gating; quiet passages will not be boosted.
 - **0.0 dBFS:** Gate is always active (leveller never boosts; equivalent to disabling the leveller).
 
-Values outside the valid range are clamped by the firmware.
+Finite values outside the valid range are clamped by the firmware. NaN and infinity are refused with `VC_ERR_VALUE`.
 
 ### 2.7 detector_mask and apply_mask (channel masks)
 
@@ -180,8 +176,7 @@ Values outside the valid range are clamped by the firmware.
 | **Type** | `uint8_t` x2 (bitmask over input channels) |
 | **Range** | 0x00 - 0xFF each (bit k = input channel k) |
 | **Default** | 0xFF each (all channels) |
-| **SET command** | `0xDE` (`REQ_SET_LEVELLER_MASKS`) |
-| **GET command** | `0xDF` (`REQ_GET_LEVELLER_MASKS`) |
+| **Command** | `DYN.LEVELLER_MASKS` (page 0x07, command 0x26), GET and SET |
 | **Payload** | 2 bytes: `[detector_mask, apply_mask]` |
 
 Two bitmasks over the input channels generalize the old stereo link to any channel set:
@@ -189,7 +184,7 @@ Two bitmasks over the input channels generalize the old stereo link to any chann
 - **detector_mask:** which inputs feed the RMS detector. The link is the loudest selected envelope (the maximum over the detector_mask channels), so one shared gain preserves the mix balance.
 - **apply_mask:** which inputs the shared gain is applied to. CPU is only spent on selected channels; unselected active channels pass through unchanged (as a plain lookahead delay when lookahead is on, preserving alignment).
 
-Both masks are ANDed with the active-input set at runtime, so a bit set for an inactive input has no effect. Both default to 0xFF, so with the default masks the leveller behaves exactly as the previous stereo-only version. Writing masks (0xDE) sets `leveller_update_pending` but does NOT reset state, so a mask change is glitch-free and causes zero time shift.
+Both masks are ANDed with the active-input set at runtime, so a bit set for an inactive input has no effect. Both default to 0xFF, so with the default masks the leveller behaves exactly as the previous stereo-only version. Writing masks (`DYN.LEVELLER_MASKS`) sets `leveller_update_pending` but does NOT reset state, so a mask change is glitch-free and causes zero time shift.
 
 **Usage examples:**
 
@@ -199,306 +194,190 @@ Both masks are ANDed with the active-input set at runtime, so a bit set for an i
 
 ### Parameter summary
 
-| Parameter | Type | Range | Default | SET | GET | Payload |
-|-----------|------|-------|---------|-----|-----|---------|
-| enabled | bool | 0/1 | 0 | 0xB4 | 0xB5 | 1 byte |
-| amount | float | 0.0-100.0 | 50.0 | 0xB6 | 0xB7 | 4 bytes (LE float) |
-| speed | uint8_t | 0-2 | 0 | 0xB8 | 0xB9 | 1 byte |
-| max_gain_db | float | 0.0-35.0 | 15.0 | 0xBA | 0xBB | 4 bytes (LE float) |
-| lookahead | bool | 0/1 | 1 | 0xBC | 0xBD | 1 byte |
-| gate_threshold_db | float | -96.0-0.0 | -96.0 | 0xBE | 0xBF | 4 bytes (LE float) |
-| detector_mask | uint8_t | 0x00-0xFF | 0xFF | 0xDE | 0xDF | 2 bytes (with apply_mask) |
-| apply_mask | uint8_t | 0x00-0xFF | 0xFF | 0xDE | 0xDF | 2 bytes (with detector_mask) |
+| Parameter | Type | Range | Default | Command | Payload |
+|-----------|------|-------|---------|---------|---------|
+| enabled | bool | 0/1 | 0 | `DYN.LEVELLER_ENABLE` (0x20) | 1 byte |
+| amount | float | 0.0-100.0 | 50.0 | `DYN.LEVELLER_AMOUNT` (0x21) | 4 bytes (LE float) |
+| speed | uint8_t | 0-2 | 0 | `DYN.LEVELLER_SPEED` (0x22) | 1 byte |
+| max_gain_db | float | 0.0-35.0 | 15.0 | `DYN.LEVELLER_MAX_GAIN` (0x23) | 4 bytes (LE float) |
+| lookahead | bool | 0/1 | 1 | `DYN.LEVELLER_LOOKAHEAD` (0x24) | 1 byte |
+| gate_threshold_db | float | -96.0-0.0 | -96.0 | `DYN.LEVELLER_GATE` (0x25) | 4 bytes (LE float) |
+| detector_mask | uint8_t | 0x00-0xFF | 0xFF | `DYN.LEVELLER_MASKS` (0x26) | 2 bytes (with apply_mask) |
+| apply_mask | uint8_t | 0x00-0xFF | 0xFF | `DYN.LEVELLER_MASKS` (0x26) | 2 bytes (with detector_mask) |
+
+All commands are in page 0x07 (`DYN`) and serve both GET and SET.
 
 ---
 
 ## 3. Vendor Command Reference
 
-All commands use USB EP0 vendor control transfers on the vendor interface (interface 2). SET commands are host-to-device (OUT) with data in the payload. GET commands are device-to-host (IN) with the response in the data phase. The `wValue` and `wIndex` fields are not used by leveller commands (ignored by firmware).
+All commands use USB EP0 vendor control transfers on the vendor interface (interface 2), in the `DYN` page (0x07) of the paged protocol (see `../commands.md`). Each parameter is one command, and the transfer direction selects GET or SET. A SET is host-to-device (`bmRequestType` 0x41) with the value in the payload. A GET is device-to-host (`bmRequestType` 0xC1) with the response in the data phase. `bRequest` is the command number and `wIndex` is `(0x07 << 8) | 2`. No leveller command takes an address, so `wValue` must be 0. The same commands work over UART and I2C. Handlers are in `firmware/DSPi/vendor/vc_page_dyn.c`.
 
-### 3.1 REQ_SET_LEVELLER_ENABLE (0xB4)
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `DYN.LEVELLER_ENABLE` | 0x07 | 0x20 | GET, SET | none (0) | GET 1, SET 1 |
+| `DYN.LEVELLER_AMOUNT` | 0x07 | 0x21 | GET, SET | none (0) | GET 4, SET 4 |
+| `DYN.LEVELLER_SPEED` | 0x07 | 0x22 | GET, SET | none (0) | GET 1, SET 1 |
+| `DYN.LEVELLER_MAX_GAIN` | 0x07 | 0x23 | GET, SET | none (0) | GET 4, SET 4 |
+| `DYN.LEVELLER_LOOKAHEAD` | 0x07 | 0x24 | GET, SET | none (0) | GET 1, SET 1 |
+| `DYN.LEVELLER_GATE` | 0x07 | 0x25 | GET, SET | none (0) | GET 4, SET 4 |
+| `DYN.LEVELLER_MASKS` | 0x07 | 0x26 | GET, SET | none (0) | GET 2, SET 2 |
+
+Rules common to every leveller SET:
+
+- The payload must be exactly the size in the table. Any other length is refused with `VC_ERR_LENGTH`.
+- A non-zero `wValue` is refused with `VC_ERR_ADDRESS`.
+- A NaN or infinite float (amount, max gain, gate) is refused with `VC_ERR_VALUE` and stores nothing.
+- A refused SET STALLs on USB (UART and I2C return the result code in the status byte). The reason is readable from `SYS.LAST_RESULT`.
+
+### 3.1 DYN.LEVELLER_ENABLE (0x20)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xB4` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Payload** | 1 byte: `0x00` = disable, nonzero = enable |
+| **SET payload** | 1 byte: `0x00` = disable, nonzero = enable |
+| **GET response** | 1 byte: `0x00` = disabled, `0x01` = enabled |
 
-**Firmware behavior:**
-1. Reads byte 0 from the vendor receive buffer.
-2. Sets `leveller_config.enabled` to `true` if nonzero, `false` if zero.
-3. Sets `leveller_update_pending = true` and `leveller_reset_pending = true`.
-4. On the next main loop iteration, coefficients are recomputed, state is reset (envelopes zeroed, gain to unity, lookahead buffer cleared), and the bypass flag is updated.
-
-**Validation:** Minimum payload length = 1 byte. Shorter payloads are silently ignored.
+**Firmware behavior on SET:**
+1. Sets `leveller_config.enabled` to `true` if nonzero, `false` if zero.
+2. Sets `leveller_update_pending = true` and `leveller_reset_pending = true`.
+3. On the next main loop iteration, coefficients are recomputed, state is reset (envelopes zeroed, gain to unity, lookahead buffer cleared), and the bypass flag is updated.
 
 **Example:** Enable the leveller:
 ```
-bRequest = 0xB4, wValue = 0x0000, wIndex = 0x0000, wLength = 1
+SET bRequest = 0x20, wValue = 0x0000, wIndex = 0x0702, wLength = 1
 Payload: [0x01]
 ```
 
-### 3.2 REQ_GET_LEVELLER_ENABLE (0xB5)
+### 3.2 DYN.LEVELLER_AMOUNT (0x21)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xB5` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Response** | 1 byte: `0x00` = disabled, `0x01` = enabled |
+| **SET payload** | 4 bytes: IEEE 754 float, little-endian |
+| **GET response** | 4 bytes: IEEE 754 float, little-endian |
 
-**Example response** (leveller enabled):
-```
-[0x01]
-```
-
-### 3.3 REQ_SET_LEVELLER_AMOUNT (0xB6)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xB6` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Payload** | 4 bytes: IEEE 754 float, little-endian |
-
-**Firmware behavior:**
-1. Reads 4 bytes from vendor receive buffer as a float via `memcpy`.
-2. Clamps value to [0.0, 100.0].
+**Firmware behavior on SET:**
+1. Refuses a NaN or infinite value with `VC_ERR_VALUE`.
+2. Clamps the value to [0.0, 100.0] (out-of-range finite values are clamped, not rejected).
 3. Sets `leveller_config.amount` and `leveller_update_pending = true`.
-4. On the next main loop iteration, coefficients (ratio, max gain) are recomputed. State is NOT reset -- the envelope continues tracking smoothly.
-
-**Validation:** Minimum payload length = 4 bytes. Shorter payloads are silently ignored. Out-of-range values are clamped (not rejected).
+4. On the next main loop iteration, coefficients (ratio, max gain) are recomputed. State is NOT reset. The envelope continues tracking smoothly.
 
 **Example:** Set amount to 75.0%:
 ```
-bRequest = 0xB6, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+SET bRequest = 0x21, wValue = 0x0000, wIndex = 0x0702, wLength = 4
 Payload: [0x00, 0x00, 0x96, 0x42]   (75.0f in little-endian IEEE 754)
 ```
 
-### 3.4 REQ_GET_LEVELLER_AMOUNT (0xB7)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xB7` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Response** | 4 bytes: IEEE 754 float, little-endian |
-
-**Example response** (amount = 50.0):
+**Example GET response** (amount = 50.0):
 ```
 [0x00, 0x00, 0x48, 0x42]   (50.0f)
 ```
 
-### 3.5 REQ_SET_LEVELLER_SPEED (0xB8)
+### 3.3 DYN.LEVELLER_SPEED (0x22)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xB8` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Payload** | 1 byte: `0x00` = Slow, `0x01` = Medium, `0x02` = Fast |
+| **SET payload** | 1 byte: `0x00` = Slow, `0x01` = Medium, `0x02` = Fast |
+| **GET response** | 1 byte: `0x00`, `0x01`, or `0x02` |
 
-**Firmware behavior:**
-1. Reads byte 0 from vendor receive buffer.
-2. If the value is < 3 (valid), sets `leveller_config.speed` and `leveller_update_pending = true`.
-3. If the value is >= 3, the command is silently ignored (no change).
+**Firmware behavior on SET:**
+1. If the value is < 3 (valid), sets `leveller_config.speed` and `leveller_update_pending = true`.
+2. If the value is >= 3, the SET is refused with `VC_ERR_VALUE` and nothing changes.
 
 **Validation:** The value must be 0, 1, or 2. Invalid values are rejected (not clamped).
 
 **Example:** Set speed to Fast (speech):
 ```
-bRequest = 0xB8, wValue = 0x0000, wIndex = 0x0000, wLength = 1
+SET bRequest = 0x22, wValue = 0x0000, wIndex = 0x0702, wLength = 1
 Payload: [0x02]
 ```
 
-### 3.6 REQ_GET_LEVELLER_SPEED (0xB9)
+### 3.4 DYN.LEVELLER_MAX_GAIN (0x23)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xB9` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Response** | 1 byte: `0x00`, `0x01`, or `0x02` |
+| **SET payload** | 4 bytes: IEEE 754 float, little-endian |
+| **GET response** | 4 bytes: IEEE 754 float, little-endian |
 
-**Example response** (Medium):
-```
-[0x01]
-```
-
-### 3.7 REQ_SET_LEVELLER_MAX_GAIN (0xBA)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xBA` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Payload** | 4 bytes: IEEE 754 float, little-endian |
-
-**Firmware behavior:**
-1. Reads 4 bytes from vendor receive buffer as a float via `memcpy`.
-2. Clamps value to [0.0, 35.0].
+**Firmware behavior on SET:**
+1. Refuses a NaN or infinite value with `VC_ERR_VALUE`.
+2. Clamps the value to [0.0, 35.0].
 3. Sets `leveller_config.max_gain_db` and `leveller_update_pending = true`.
 4. Coefficients are recomputed on the next main loop iteration. State is NOT reset.
 
-**Validation:** Minimum payload length = 4 bytes. Shorter payloads are silently ignored. Out-of-range values are clamped.
-
 **Example:** Set max gain to 18.0 dB:
 ```
-bRequest = 0xBA, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+SET bRequest = 0x23, wValue = 0x0000, wIndex = 0x0702, wLength = 4
 Payload: [0x00, 0x00, 0x90, 0x41]   (18.0f in little-endian IEEE 754)
 ```
 
-### 3.8 REQ_GET_LEVELLER_MAX_GAIN (0xBB)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xBB` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Response** | 4 bytes: IEEE 754 float, little-endian |
-
-**Example response** (max_gain_db = 15.0):
+**Example GET response** (max_gain_db = 15.0):
 ```
 [0x00, 0x00, 0x70, 0x41]   (15.0f)
 ```
 
-### 3.9 REQ_SET_LEVELLER_LOOKAHEAD (0xBC)
+### 3.5 DYN.LEVELLER_LOOKAHEAD (0x24)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xBC` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Payload** | 1 byte: `0x00` = disable, nonzero = enable |
+| **SET payload** | 1 byte: `0x00` = disable, nonzero = enable |
+| **GET response** | 1 byte: `0x00` = disabled, `0x01` = enabled |
 
-**Firmware behavior:**
-1. Reads byte 0 from the vendor receive buffer.
-2. Sets `leveller_config.lookahead` to `true` if nonzero, `false` if zero.
-3. Sets `leveller_update_pending = true` and `leveller_reset_pending = true`.
-4. On the next main loop iteration, coefficients are recomputed and state is reset (including clearing the circular delay buffer).
+**Firmware behavior on SET:**
+1. Sets `leveller_config.lookahead` to `true` if nonzero, `false` if zero.
+2. Sets `leveller_update_pending = true` and `leveller_reset_pending = true`.
+3. On the next main loop iteration, coefficients are recomputed and state is reset (including clearing the circular delay buffer).
 
 The state reset on toggle is intentional: switching lookahead on/off changes the effective signal path, and stale data in the delay buffer would produce clicks.
 
-**Validation:** Minimum payload length = 1 byte. Shorter payloads are silently ignored.
-
 **Example:** Enable lookahead:
 ```
-bRequest = 0xBC, wValue = 0x0000, wIndex = 0x0000, wLength = 1
+SET bRequest = 0x24, wValue = 0x0000, wIndex = 0x0702, wLength = 1
 Payload: [0x01]
 ```
 
-### 3.10 REQ_GET_LEVELLER_LOOKAHEAD (0xBD)
+### 3.6 DYN.LEVELLER_GATE (0x25)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xBD` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Response** | 1 byte: `0x00` = disabled, `0x01` = enabled |
+| **SET payload** | 4 bytes: IEEE 754 float, little-endian |
+| **GET response** | 4 bytes: IEEE 754 float, little-endian |
 
-**Example response** (lookahead disabled):
-```
-[0x00]
-```
-
-### 3.11 REQ_SET_LEVELLER_GATE (0xBE)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xBE` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Payload** | 4 bytes: IEEE 754 float, little-endian |
-
-**Firmware behavior:**
-1. Reads 4 bytes from vendor receive buffer as a float via `memcpy`.
-2. Clamps value to [-96.0, 0.0].
+**Firmware behavior on SET:**
+1. Refuses a NaN or infinite value with `VC_ERR_VALUE`.
+2. Clamps the value to [-96.0, 0.0].
 3. Sets `leveller_config.gate_threshold_db` and `leveller_update_pending = true`.
 4. Coefficients are recomputed on the next main loop iteration. State is NOT reset.
 
-**Validation:** Minimum payload length = 4 bytes. Shorter payloads are silently ignored. Out-of-range values are clamped.
-
 **Example:** Set gate threshold to -60.0 dBFS:
 ```
-bRequest = 0xBE, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+SET bRequest = 0x25, wValue = 0x0000, wIndex = 0x0702, wLength = 4
 Payload: [0x00, 0x00, 0x70, 0xC2]   (-60.0f in little-endian IEEE 754)
 ```
 
-### 3.12 REQ_GET_LEVELLER_GATE (0xBF)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xBF` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Response** | 4 bytes: IEEE 754 float, little-endian |
-
-**Example response** (gate_threshold_db = -96.0):
+**Example GET response** (gate_threshold_db = -96.0):
 ```
 [0x00, 0x00, 0xC0, 0xC2]   (-96.0f)
 ```
 
-### 3.13 REQ_SET_LEVELLER_MASKS (0xDE)
+### 3.7 DYN.LEVELLER_MASKS (0x26)
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xDE` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 2 |
-| **Payload** | 2 bytes: `[detector_mask, apply_mask]` (bit k = input channel k) |
+| **SET payload** | 2 bytes: `[detector_mask, apply_mask]` (bit k = input channel k) |
+| **GET response** | 2 bytes: `[detector_mask, apply_mask]` |
 
-**Firmware behavior:**
-1. Reads byte 0 as `detector_mask` and byte 1 as `apply_mask` from the vendor receive buffer.
-2. Sets `leveller_config.detector_mask`, `leveller_config.apply_mask`, and `leveller_update_pending = true`.
-3. State is NOT reset; the lookahead rings keep running so the mask change is glitch-free and causes no time shift. The masks are ANDed with the active-input set on each block.
-
-**Validation:** Minimum payload length = 2 bytes. Shorter payloads are silently ignored. Any byte value 0x00-0xFF is accepted.
+**Firmware behavior on SET:**
+1. Stores byte 0 as `detector_mask` and byte 1 as `apply_mask`. Any byte value 0x00-0xFF is accepted.
+2. Sets `leveller_update_pending = true`.
+3. State is NOT reset. The lookahead rings keep running, so the mask change is glitch-free and causes no time shift. The masks are ANDed with the active-input set on each block.
 
 **Example:** Detector and apply on the center channel only (input channel 2):
 ```
-bRequest = 0xDE, wValue = 0x0000, wIndex = 0x0000, wLength = 2
+SET bRequest = 0x26, wValue = 0x0000, wIndex = 0x0702, wLength = 2
 Payload: [0x04, 0x04]
 ```
 
-### 3.14 REQ_GET_LEVELLER_MASKS (0xDF)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xDF` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 2 |
-| **Response** | 2 bytes: `[detector_mask, apply_mask]` |
-
-**Example response** (both masks all-channels default):
+**Example GET response** (both masks all-channels default):
 ```
 [0xFF, 0xFF]
 ```
@@ -556,18 +435,17 @@ The `WireLevellerConfig` section grew from 16 to 20 bytes at `WIRE_FORMAT_VERSIO
 | < 18 | No (16-byte section) | Masks default to 0xFF (all channels); other leveller fields parsed |
 | 18 | Yes (20-byte section) | Full leveller config including both channel masks parsed and applied |
 
-When the firmware receives a SET (0xA1) with an older format that lacks the mask bytes, the leveller keeps the all-channels mask default (0xFF each):
+When the firmware receives a bulk SET (`STORE.ALL_PARAMS`) with an older format that lacks the mask bytes, the leveller keeps the all-channels mask default (0xFF each):
 - detector_mask = 0xFF
 - apply_mask = 0xFF
 
-When the firmware sends a GET (0xA0), the `WireLevellerConfig` section is always populated with current values (including both masks) and `format_version` is set to 18.
+When the firmware answers a bulk GET (`STORE.ALL_PARAMS`), the `WireLevellerConfig` section is always populated with current values (including both masks) and `format_version` is set to 18.
 
 ### Bulk transfer commands
 
-| Command | Code | Direction | Description |
-|---------|------|-----------|-------------|
-| `REQ_GET_ALL_PARAMS` | 0xA0 | Device -> Host | Returns full `WireBulkParams` (`WireLevellerConfig` is its 20-byte tail section) |
-| `REQ_SET_ALL_PARAMS` | 0xA1 | Host -> Device | Applies full `WireBulkParams` to live state |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Description |
+|---|---|---|---|---|---|---|
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | GET returns the full `WireBulkParams`. SET applies it to live state |
 
 After a bulk SET, the firmware sets `leveller_update_pending = true` and `leveller_reset_pending = true`, triggering a full coefficient recompute and state reset on the next main loop iteration.
 
@@ -599,7 +477,7 @@ The following leveller fields are stored in the `PresetSlot` struct:
 
 ### Save behavior
 
-When `REQ_PRESET_SAVE` (0x90) is issued, the current `leveller_config` fields are copied into the slot:
+When `STORE.PRESET_SAVE` is issued, the current `leveller_config` fields are copied into the slot:
 
 ```
 slot->leveller_enabled          = leveller_config.enabled ? 1 : 0;
@@ -614,7 +492,7 @@ slot->leveller_apply_mask       = leveller_config.apply_mask;
 
 ### Load behavior
 
-When `REQ_PRESET_LOAD` (0x91) is issued:
+When `STORE.PRESET_LOAD` is issued:
 
 - **Slot version >= 25:** All leveller parameters, including both channel masks, are restored from the slot data.
 - **Older slot with leveller fields:** Core leveller parameters are restored; both channel masks load the all-channels default (0xFF each).
@@ -625,7 +503,7 @@ In all cases, `leveller_update_pending` and `leveller_reset_pending` are set to 
 
 ### Factory defaults
 
-Applied when loading an empty slot, on factory reset (`REQ_FACTORY_RESET` / 0x53), or when loading a pre-V10 slot:
+Applied when loading an empty slot, on factory reset (`STORE.FACTORY_RESET`), or when loading a pre-V10 slot:
 
 | Parameter | Default value |
 |-----------|---------------|
@@ -801,18 +679,18 @@ On app startup or when connecting to a device, read all leveller parameters. You
 **Option A: Individual GET commands (7 transfers)**
 
 ```
-GET 0xB5 -> enabled          (1 byte)
-GET 0xB7 -> amount           (4 bytes, float)
-GET 0xB9 -> speed            (1 byte)
-GET 0xBB -> max_gain_db      (4 bytes, float)
-GET 0xBD -> lookahead        (1 byte)
-GET 0xBF -> gate_threshold_db (4 bytes, float)
-GET 0xDF -> [detector_mask, apply_mask]  (2 bytes)
+GET DYN.LEVELLER_ENABLE    -> enabled          (1 byte)
+GET DYN.LEVELLER_AMOUNT    -> amount           (4 bytes, float)
+GET DYN.LEVELLER_SPEED     -> speed            (1 byte)
+GET DYN.LEVELLER_MAX_GAIN  -> max_gain_db      (4 bytes, float)
+GET DYN.LEVELLER_LOOKAHEAD -> lookahead        (1 byte)
+GET DYN.LEVELLER_GATE      -> gate_threshold_db (4 bytes, float)
+GET DYN.LEVELLER_MASKS     -> [detector_mask, apply_mask]  (2 bytes)
 ```
 
 **Option B: Bulk parameter GET (1 transfer, recommended)**
 
-Issue `REQ_GET_ALL_PARAMS` (0xA0). The response is a `WireBulkParams` struct. Parse the `WireLevellerConfig` (20 bytes) as the final section of the payload; the mask bytes are at struct offsets 16 and 17. Read the section as the tail of the struct rather than a fixed absolute offset.
+Issue a `STORE.ALL_PARAMS` GET. The response is a `WireBulkParams` struct. Parse the `WireLevellerConfig` (20 bytes) as the final section of the payload; the mask bytes are at struct offsets 16 and 17. Read the section as the tail of the struct rather than a fixed absolute offset.
 
 ### Step 2: Build the UI
 
@@ -839,46 +717,48 @@ When the user changes a control, send the corresponding SET command immediately:
 float amount = 75.0f;
 uint8_t payload[4];
 memcpy(payload, &amount, 4);  // little-endian on ARM/x86
-usb_vendor_out(0xB6, payload, 4);
+// usb_vendor_out(page, cmd, wValue, data, len): bmRequestType 0x41,
+// bRequest = cmd, wIndex = (page << 8) | 2
+usb_vendor_out(0x07, 0x21, 0, payload, 4);   // DYN.LEVELLER_AMOUNT
 
 // User toggles enable on
 uint8_t enable = 1;
-usb_vendor_out(0xB4, &enable, 1);
+usb_vendor_out(0x07, 0x20, 0, &enable, 1);   // DYN.LEVELLER_ENABLE
 
 // User selects "Fast" speed
 uint8_t speed = 2;
-usb_vendor_out(0xB8, &speed, 1);
+usb_vendor_out(0x07, 0x22, 0, &speed, 1);    // DYN.LEVELLER_SPEED
 ```
 
-**Important:** The firmware applies SET commands asynchronously. The vendor receive handler stores the value and sets a pending flag. The main loop processes the pending update on its next iteration (typically within 1-2ms). There is no acknowledgment -- if the transfer completes successfully at the USB level, the parameter was accepted.
+**Important:** The firmware applies SET commands asynchronously. The vendor receive handler stores the value and sets a pending flag. The main loop processes the pending update on its next iteration (typically within 1-2ms). A SET that completes successfully at the USB level was accepted. A refused SET STALLs, and `SYS.LAST_RESULT` gives the reason (section 3).
 
 ### Step 4: Handle preset load events
 
-When the user loads a preset (via `REQ_PRESET_LOAD` / 0x91), all DSP parameters change, including the leveller. After a preset load, re-read all leveller parameters to update the UI:
+When the user loads a preset (via `STORE.PRESET_LOAD`), all DSP parameters change, including the leveller. After a preset load, re-read all leveller parameters to update the UI:
 
 ```
 // After preset load completes:
-GET 0xB5 -> update enable toggle
-GET 0xB7 -> update amount slider
-GET 0xB9 -> update speed selector
-GET 0xBB -> update max gain slider
-GET 0xBD -> update lookahead toggle
-GET 0xBF -> update gate threshold slider
-GET 0xDF -> update detector/apply channel masks
+GET DYN.LEVELLER_ENABLE    -> update enable toggle
+GET DYN.LEVELLER_AMOUNT    -> update amount slider
+GET DYN.LEVELLER_SPEED     -> update speed selector
+GET DYN.LEVELLER_MAX_GAIN  -> update max gain slider
+GET DYN.LEVELLER_LOOKAHEAD -> update lookahead toggle
+GET DYN.LEVELLER_GATE      -> update gate threshold slider
+GET DYN.LEVELLER_MASKS     -> update detector/apply channel masks
 ```
 
-Or use a single bulk GET (0xA0) to refresh all parameters at once. This is the preferred approach since a preset load affects all DSP parameters, not just the leveller.
+Or use a single bulk GET (`STORE.ALL_PARAMS`) to refresh all parameters at once. This is the preferred approach since a preset load affects all DSP parameters, not just the leveller.
 
 ### Step 5: Handle bulk transfers
 
 If your app uses bulk parameter transfers for configuration backup/restore:
 
-**Reading (GET 0xA0):**
+**Reading (`STORE.ALL_PARAMS` GET):**
 1. Parse the full `WireBulkParams` response.
 2. Check `header.format_version`. If < 18, the `WireLevellerConfig` section is 16 bytes and lacks the channel masks; treat both masks as the all-channels default (0xFF).
 3. If >= 18, read the 20-byte `WireLevellerConfig` (masks at struct offsets 16 and 17).
 
-**Writing (SET 0xA1):**
+**Writing (`STORE.ALL_PARAMS` SET):**
 1. Populate `WireLevellerConfig` in the `WireBulkParams` struct, including `detector_mask` and `apply_mask`.
 2. Set `header.format_version = 18`.
 3. Send the complete struct.

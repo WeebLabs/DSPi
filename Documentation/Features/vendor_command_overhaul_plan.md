@@ -1,6 +1,6 @@
 # Vendor Command Overhaul Plan
 
-*Last updated: 2026-11-16 (8.11 As built, Phase 4 follow-ups, 11.1, Phase 4 and 6 text). Previously 2026-11-15*
+*Last updated: 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text). Previously 2026-11-16 (8.11, Phase 4)*
 
 Status: approved by the user on 2026-11-15 with the decisions in section 14. Implementation is in progress. Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
 
@@ -170,7 +170,7 @@ Sizes are bytes. "G" is GET, "S" is SET, "S0" is a zero-length action. "Addr" is
 | 0x42 | `BUFFER_STATS` | G | none | 44 | Unchanged `BufferStatsPacket` |
 | 0x43 | `PIPELINE_STATS` | G | none | 24 | u32 ring underruns, ring drops, min prewrite, input gap us, bg over budget, reserved |
 | 0x44 | `PDM_STATS` | G | none | 16 | u32 ring overruns, ring underruns, DMA overruns, DMA underruns |
-| 0x45 | `SPDIF_TX_STATS` | G | none | 24 | u32 underruns, total starvations, starvations for instances 0-3 |
+| 0x45 | `SPDIF_TX_STATS` | G | none | 24 | u32 USB audio packet gaps of 2 to 50 ms (`spdif_underruns`), total starvations, starvations for instances 0-3 |
 | 0x4F | `STATS_RESET` | S | none | 1 | Bitmask. Bit 0 resets watermarks and worst-gap fields |
 
 ### 5.2 `STORE` (0x02)
@@ -580,7 +580,7 @@ The 246 opcodes become about 215 commands in 13 pages, even after every multiple
 | 0, 1, 2 | Packed peak pairs and CPU | Retire. `MEAS.LEVELS` and `SYS.SYSTEM_STATUS` |
 | 3-6 | PDM ring and DMA counters | `SYS.PDM_STATS` |
 | 7 | Retired | Retire |
-| 8 | S/PDIF underruns | `SYS.SPDIF_TX_STATS` |
+| 8 | USB audio packet gaps of 2 to 50 ms (`spdif_underruns`) | `SYS.SPDIF_TX_STATS` |
 | 9 | Combined meter packet | `MEAS.LEVELS` |
 | 10, 11, 12 | USB packets, alt, mounted | `SYS.USB_AUDIO_STATUS` |
 | 13, 14, 15, 16 | clk_sys, core voltage, sample rate, temperature | `SYS.SYSTEM_STATUS` |
@@ -870,6 +870,14 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - **Paged tests stand alone.** The 14 `tests/paged_*.py` modules no longer send old opcodes. Their A/B halves are replaced by assertions against the spec, and new tests cover the finite-value rule. Each of those first proves the rule on one `ROUTE.OUTPUT_GAIN` write and sends no further non-finite value if it fails.
 - **Windows test.** The echo build is gone. `tools/windex_page_test.py` runs against the normal firmware (11.1).
 
+### 8.12 As built (Phase 5)
+
+- **`commands.md` is generated per page.** Each page section holds its command table between `<!-- VC:BEGIN <MNEM> -->` and `<!-- VC:END <MNEM> -->`, the page map sits in a `PAGES` block, and the name-sorted command index at the end is an `INDEX` block. The index links each command to its page section when the `## N. MNEM (0xPP)` heading exists. `PAGES` and `INDEX` are reserved mnemonics. `scripts/gen_vendor_protocol.py --check` fails when any block, or the JSON registry, differs from the `.def` files. The prose around the blocks stays hand-written.
+- **Old numbers** appear only in section 25 of `commands.md`, which points to `vendor_protocol_migration_notes.md` and `legacy_map.json`. `current_architecture.md`, the feature specs and `README.md` name commands as `PAGE.NAME`.
+- **Tools.** `tools/dspi_poke/` reads names, directions, address kinds and sizes from `dspi_commands.json`, found by walking up from the script or the working directory, and also accepts numeric forms without it. `tools/latency_bench/` resolves names through `tools.dspi_test.device` (`resolve_command`, `pget`), with the shared struct readers in `tools/latency_bench/paged.py`. `tools/clkdiag_poll.py` and `tools/ring_health_poll.py` stay standalone pyusb scripts with page and command numbers as named constants. `dspi_poke`, `clkdiag_poll.py` and `ring_health_poll.py` probe `SYS.PROTOCOL_INFO` first and stop on older firmware. The latency bench relies on the harness device's own protocol probe.
+- **Flag audit.** `RESTART` now marks every command that can interrupt audio. Every flash-writing command carries it, because each ends in `complete_flash_write_operation_full()`. So do the input pin and clock commands that restart a live input under mute (`INPUT.SPDIF_RX_PIN`, `INPUT.I2S_RX_PIN`, `INPUT.I2S_RX_CHANNELS`, `INPUT.ADAT_RX_PIN`, `CLOCK.I2S_BCK_PIN`, `CLOCK.I2S_CLOCK_PIN_MODE`), `OUTPUT.DAC_MUTE_TEST` and `SYS.ENTER_BOOTLOADER`. `STORE.FACTORY_RESET` lost `FLASH`: it resets the live state, writes no flash and keeps every stored preset, as 1.1.6 did. The protocol is unreleased, so no page revision changed.
+- **Doc strings.** `SYS.SPDIF_TX_STATS` describes its first field as the USB packet-gap count it is, `SYS.PLATFORM` lists its bytes, and `STORE.ALL_PARAMS_CHUNK` says that only SET chunks must arrive in order.
+
 ## 9. Generated docs and capability data
 
 `scripts/gen_vendor_protocol.py` (standard library only) parses the `.def` files. They are regular enough to read with a small tokenizer, with no C preprocessor needed.
@@ -1065,15 +1073,17 @@ Verification beyond the gate:
 
 ### Phase 5. Reference documentation and repo tools
 
-Three agents in parallel.
+Five agents in parallel, one per row below, then one closing pass. Done. Section 8.12 records the result.
 
-| Agent | Owns | Work |
-|---|---|---|
-| 5A | `Documentation/commands.md`, opcode references in `Documentation/Features/*.md` | `commands.md` restructured by page with generated tables. Old numbers appear only in a pointer to the migration guide |
-| 5B | `tools/dspi_poke/`, `tools/clkdiag_poll.py`, `tools/ring_health_poll.py` | Ported to the registry and paged names |
-| 5C | `tools/latency_bench/` | Ported to paged names |
+| Owned files | Work |
+|---|---|
+| `Documentation/commands.md` | Rewritten by page around generated tables. Old numbers appear only in the pointer to the migration notes |
+| `Documentation/current_architecture.md` | Vendor Command Reference and Vendor Protocol sections rewritten, old opcode references replaced, timestamps |
+| `Documentation/Features/*.md`, `README.md` | Opcode references replaced by `PAGE.NAME` |
+| `tools/dspi_poke/`, `tools/clkdiag_poll.py`, `tools/ring_health_poll.py` | Ported to paged calls. `dspi_poke` reads the registry |
+| `tools/latency_bench/` | Ported to paged calls through the harness, with `paged.py` |
 
-The final pass on `current_architecture.md` (Vendor Command Reference table, new "Vendor protocol" section, timestamps) follows once 5A is done.
+The closing pass corrected the page flags and doc strings, fixed stale firmware comments, added the generated `INDEX` block with its tests, and ran the gate on both platforms and on the device.
 
 ### Phase 6. Port the tests and delete the translation layer
 

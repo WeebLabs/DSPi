@@ -2,6 +2,8 @@
 
 *Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 to 4 implemented 2026-10-24 (see the status sections at the end); RP2040 measurements outstanding.*
 
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+
 ## TL;DR
 
 Core 0's main loop both feeds audio into the DSP pipeline and runs everything else (USB requests, the analyser, Control Surfaces, deferred configuration changes). The time between two audio deliveries is how long the output rings can go unfed. At the 0.67 ms latency option that budget is roughly 250 to 330 us, so any single piece of work longer than that risks an audible underrun.

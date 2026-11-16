@@ -1,7 +1,7 @@
 # Test Signal Generator Specification
 
 *Status: implemented*
-*Last updated: 2026-10-12*
+*Last updated: 2026-11-16 (section 4 and the command names on the paged protocol of firmware 1.1.7)*
 
 ## 1. Overview
 
@@ -135,7 +135,7 @@ All structures are packed, little-endian; floats are IEEE-754 single-precision.
 
 ### 3.1 `SiggenConfig` (36 bytes)
 
-Payload of `REQ_SIGGEN_SET_CONFIG`; also the response of `REQ_SIGGEN_GET_CONFIG`.
+Payload of a `MEAS.SIGGEN_CONFIG` SET; also the response of its GET.
 
 | Offset | Size | Type | Field | Meaning |
 |-------:|-----:|------|-------|---------|
@@ -156,7 +156,7 @@ Payload of `REQ_SIGGEN_SET_CONFIG`; also the response of `REQ_SIGGEN_GET_CONFIG`
 
 ### 3.2 `SiggenStatus` (16 bytes)
 
-Response of `REQ_SIGGEN_GET_STATUS`.
+Response of `MEAS.SIGGEN_STATUS`.
 
 | Offset | Size | Type | Field | Meaning |
 |-------:|-----:|------|-------|---------|
@@ -176,7 +176,7 @@ raw engine state (`RUN`/`GAP`/`IDLE`) is reported.
 
 ### 3.3 `SiggenCapsHeader` (8 bytes)
 
-Response of `REQ_SIGGEN_GET_CAPS` with `wValue = 0xFFFF`.
+Response of `MEAS.SIGGEN_CAPS`.
 
 | Offset | Size | Type | Field | Meaning |
 |-------:|-----:|------|-------|---------|
@@ -189,7 +189,7 @@ Response of `REQ_SIGGEN_GET_CAPS` with `wValue = 0xFFFF`.
 
 ### 3.4 `SiggenTypeDesc` (62 bytes)
 
-Response of `REQ_SIGGEN_GET_CAPS` with `wValue = 0..type_count-1` (a type index).
+Response of `MEAS.SIGGEN_TYPE_DESC` with `wValue = 0..type_count-1` (a type index).
 Self-describing per-type parameter metadata.
 
 | Offset | Size | Type | Field | Meaning |
@@ -216,64 +216,62 @@ already reflect the running platform's `multitone_max`.
 
 ## 4. Vendor Commands
 
-Five vendor opcodes, `0xA4..0xA8`. Opcodes `0xA9..0xAF` are reserved for future
+The generator lives in page 0x09 (`MEAS`) of the paged protocol (`../commands.md`), commands 0x40 to 0x4A. Commands 0x4B to 0x4F are free for future
 generator extensions. All commands are reachable over USB EP0 (vendor interface
-2), and automatically over the UART and I2C target control transports (they ride
-the shared vendor dispatcher). Multi-byte fields are little-endian.
+2, `wIndex` `0x0902`), and over the UART and I2C target control transports (they ride
+the shared dispatcher, `vc_dispatch()`). Multi-byte fields are little-endian. A refused request STALLs on USB, and `SYS.LAST_RESULT` gives the reason.
 
-| Code | Name | Direction | wValue | Payload / Response |
-|------|------|-----------|--------|--------------------|
-| 0xA4 | `REQ_SIGGEN_SET_CONFIG` | OUT (0x41) | 0 | Payload: `SiggenConfig` (36 B). STALL on reject |
-| 0xA5 | `REQ_SIGGEN_GET_CONFIG` | IN (0xC1) | 0 | Response: `SiggenConfig` (36 B) |
-| 0xA6 | `REQ_SIGGEN_CONTROL` | write-as-read (0xC1) | `SIGGEN_CTL_*` | Response: 1 status byte (1 = accepted); STALL on reject |
-| 0xA7 | `REQ_SIGGEN_GET_STATUS` | IN (0xC1) | 0 | Response: `SiggenStatus` (16 B) |
-| 0xA8 | `REQ_SIGGEN_GET_CAPS` | IN (0xC1) | 0xFFFF or type index | Response: `SiggenCapsHeader` (8 B) or `SiggenTypeDesc` (62 B) |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `MEAS.SIGGEN_CONFIG` | 0x09 | 0x40 | GET, SET | none (0) | GET 36, SET 36 | `SiggenConfig`. A rejected SET is `VC_ERR_VALUE` |
+| `MEAS.SIGGEN_STATUS` | 0x09 | 0x41 | GET | none (0) | GET 16 | `SiggenStatus` |
+| `MEAS.SIGGEN_CAPS` | 0x09 | 0x42 | GET | none (0) | GET 8 | `SiggenCapsHeader` |
+| `MEAS.SIGGEN_TYPE_DESC` | 0x09 | 0x43 | GET | type index | GET 62 | `SiggenTypeDesc`. A bad index is `VC_ERR_ADDRESS` |
+| `MEAS.SIGGEN_START` | 0x09 | 0x48 | SET (zero-length) | none (0) | SET 0 | `SIGGEN_CTL_START`. No valid config is `VC_ERR_STATE` |
+| `MEAS.SIGGEN_STOP` | 0x09 | 0x49 | SET (zero-length) | none (0) | SET 0 | `SIGGEN_CTL_STOP` |
+| `MEAS.SIGGEN_STOP_NOW` | 0x09 | 0x4A | SET (zero-length) | none (0) | SET 0 | `SIGGEN_CTL_STOP_NOW` |
 
-### 4.1 `REQ_SIGGEN_SET_CONFIG` (0xA4, OUT)
+### 4.1 `MEAS.SIGGEN_CONFIG` SET
 
-Validate and stage a config from the 36-byte payload. Validation rejects (STALL):
+Validate and stage a config from the 36-byte payload. A payload of any other length is refused with `VC_ERR_LENGTH`. Validation rejects with `VC_ERR_VALUE`:
 
-- payload shorter than 36 bytes,
 - `version != 1`,
 - `signal_type >= 15`,
 - an **effective channel mask of zero** (no valid output bits set), and
 - a sweep type (`LOG`/`LIN`/`STEP`) with `duration_ms == 0`.
 
 On accept, `channel_mask` is clamped to valid outputs, `invert_mask` is clamped to
-`channel_mask`, and `level_db` is clamped to -120..0. **SET never auto-starts.**
+`channel_mask`, and `level_db` is clamped to -120..0. Float fields are sanitised, not refused. **SET never auto-starts.**
 If the generator is idle, the config is simply staged and becomes the config a
 subsequent `START` uses. If the generator is already running, SET **restarts** it:
 the engine fades out, `siggen_service()` (main loop) applies the new config, then
 the engine fades back in. The interim status `stop_reason` is `SIGGEN_STOP_RECONFIG`.
 
-### 4.2 `REQ_SIGGEN_GET_CONFIG` (0xA5, IN)
+### 4.2 `MEAS.SIGGEN_CONFIG` GET
 
 Returns the currently applied `SiggenConfig`. If no valid config has ever been
 staged, returns a zeroed struct with `version = 1`.
 
-### 4.3 `REQ_SIGGEN_CONTROL` (0xA6, write-as-read)
+### 4.3 `MEAS.SIGGEN_START`, `MEAS.SIGGEN_STOP`, `MEAS.SIGGEN_STOP_NOW`
 
-Parameterless action carried in `wValue` (low byte), acknowledged with a single
-status byte (`1`). This is a **write-as-read** command: issue it as an IN transfer
-(`bmRequestType = 0xC1`) even though it mutates state. Unknown actions, or `START`
-with no valid config staged, return failure (STALL).
+Parameterless actions, each a zero-length SET (`bmRequestType = 0x41`, `wLength = 0`). Success is ACK. There is no status byte. These replace the 1.1.6 write-as-read action opcode 0xA6, whose `wValue` 1, 0 and 2 map to `START`, `STOP` and `STOP_NOW`. `START` with no valid config staged STALLs with `VC_ERR_STATE`. `STOP` and `STOP_NOW` always succeed.
 
-| `wValue` | Constant | Action |
+| Command | Constant | Action |
 |----------|----------|--------|
-| 0 | `SIGGEN_CTL_STOP` | Fade out over `SIGGEN_FADE_MS`, then idle (`stop_reason = HOST`). A stop issued during a silent gap goes idle immediately (no fade needed). |
-| 1 | `SIGGEN_CTL_START` | (Re)start with the applied config. If already running, restarts via fade-out then relaunch (`stop_reason = RECONFIG`). |
-| 2 | `SIGGEN_CTL_STOP_NOW` | Immediate hard stop, no fade (`stop_reason = HOST`). |
+| `MEAS.SIGGEN_STOP` | `SIGGEN_CTL_STOP` | Fade out over `SIGGEN_FADE_MS`, then idle (`stop_reason = HOST`). A stop issued during a silent gap goes idle immediately (no fade needed). |
+| `MEAS.SIGGEN_START` | `SIGGEN_CTL_START` | (Re)start with the applied config. If already running, restarts via fade-out then relaunch (`stop_reason = RECONFIG`). |
+| `MEAS.SIGGEN_STOP_NOW` | `SIGGEN_CTL_STOP_NOW` | Immediate hard stop, no fade (`stop_reason = HOST`). |
 
-### 4.4 `REQ_SIGGEN_GET_STATUS` (0xA7, IN)
+### 4.4 `MEAS.SIGGEN_STATUS`
 
 Returns `SiggenStatus` (16 B). Poll this for progress (`elapsed_ms`,
 `cycles_done`, `current_freq`) and to detect completion, though completion is also
 pushed asynchronously (section 8).
 
-### 4.5 `REQ_SIGGEN_GET_CAPS` (0xA8, IN)
+### 4.5 `MEAS.SIGGEN_CAPS` and `MEAS.SIGGEN_TYPE_DESC`
 
-`wValue = 0xFFFF` returns the `SiggenCapsHeader` (8 B). `wValue = 0..type_count-1`
-returns that type's `SiggenTypeDesc` (62 B). Any other index returns failure.
+`MEAS.SIGGEN_CAPS` returns the `SiggenCapsHeader` (8 B). `MEAS.SIGGEN_TYPE_DESC` with `wValue = 0..type_count-1`
+returns that type's `SiggenTypeDesc` (62 B). Any other index is `VC_ERR_ADDRESS`. These replace the 1.1.6 opcode 0xA8, which took `wValue` 0xFFFF for the header.
 
 ---
 
@@ -495,20 +493,20 @@ Nothing in these paths changes how many samples any slot consumes or produces, s
 
 ## 12. Room-Correction Workflow (sketch)
 
-1. Host (DSPi Console) reads `REQ_SIGGEN_GET_CAPS` to learn the type list, output
+1. Host (DSPi Console) reads `MEAS.SIGGEN_CAPS` and `MEAS.SIGGEN_TYPE_DESC` to learn the type list, output
    channel count, and parameter ranges for the running platform.
-2. For each channel to measure, the host issues `REQ_SIGGEN_SET_CONFIG` with a log
+2. For each channel to measure, the host sets `MEAS.SIGGEN_CONFIG` with a log
    sweep (`SIGGEN_SWEEP_LOG`), `channel_mask` = the single channel under test,
    `duration_ms` = one sweep, `repeat` = the number of sweeps to average, and a
    safe `level_db`. RAW may be set to characterize the raw electrical/acoustic path
    without the channel's current EQ.
-3. Host issues `REQ_SIGGEN_CONTROL` with `START` (`wValue = 1`).
+3. Host sends `MEAS.SIGGEN_START`.
 4. Host records the response with the measurement microphone (or, for electrical
    verification, uses the `DSPI_LOOPBACK` build to capture output slot 0 back to
    the host). Because per-cycle synth state resets, repeated sweeps are identical
    and can be coherently averaged.
 5. Completion is announced by `NOTIFY_EVT_SIGGEN_STATE` with `state = IDLE`,
-   `reason = COMPLETED`; the host can also poll `REQ_SIGGEN_GET_STATUS`
+   `reason = COMPLETED`; the host can also poll `MEAS.SIGGEN_STATUS`
    (`cycles_done`, `current_freq`).
 6. The host computes the correction filters and writes them back via the normal EQ
    / crossover vendor commands.
@@ -517,9 +515,9 @@ Nothing in these paths changes how many samples any slot consumes or produces, s
 
 ## 13. Example Command Sequences
 
-All payloads below are the 36-byte `SiggenConfig` for `REQ_SIGGEN_SET_CONFIG`
-(0xA4, OUT `0x41`, `wIndex = 2`), followed by a `REQ_SIGGEN_CONTROL` START
-(0xA6, write-as-read `0xC1`, `wValue = 1`, `wIndex = 2`, 1-byte response). Bytes
+All payloads below are the 36-byte `SiggenConfig` for a `MEAS.SIGGEN_CONFIG` SET
+(`bRequest` 0x40, OUT `0x41`, `wValue = 0`, `wIndex = 0x0902`), followed by `MEAS.SIGGEN_START`
+(`bRequest` 0x48, OUT `0x41`, `wValue = 0`, `wIndex = 0x0902`, zero-length). Bytes
 are shown space-separated in transmission order (little-endian fields).
 
 ### 13.1 1 kHz sine at -20 dBFS on channels 0 and 1 (until stopped)
@@ -528,7 +526,7 @@ are shown space-separated in transmission order (little-endian fields).
 `p1 = 1000.0`:
 
 ```
-SET_CONFIG (0xA4) payload:
+SIGGEN_CONFIG (0x40) SET payload:
 01 00 03 00 00 00 00 00  00 00 A0 C1 00 00 00 00
 00 00 00 00 00 00 7A 44  00 00 00 00 00 00 00 00
 00 00 00 00
@@ -539,7 +537,7 @@ Field decode: `version=01 type=00 mask=0003 invert=0000 flags=00 rsv=00`,
 `p1=447A0000 (1000.0) p2=p3=p4=0`.
 
 ```
-CONTROL (0xA6) START: bmRequestType=0xC1 wValue=0x0001 wIndex=0x0002 wLength=1
+SIGGEN_START (0x48): bmRequestType=0x41 wValue=0x0000 wIndex=0x0902 wLength=0
 ```
 
 ### 13.2 Out-of-phase mono tone check (1 kHz on ch0+ch1, ch1 inverted)
@@ -548,7 +546,7 @@ Same as 13.1 but `invert_mask = 0x0002` (invert channel 1). Summed to mono this
 nulls; any residual reveals a polarity or level mismatch:
 
 ```
-SET_CONFIG (0xA4) payload:
+SIGGEN_CONFIG (0x40) SET payload:
 01 00 03 00 02 00 00 00  00 00 A0 C1 00 00 00 00
 00 00 00 00 00 00 7A 44  00 00 00 00 00 00 00 00
 00 00 00 00
@@ -562,7 +560,7 @@ SET_CONFIG (0xA4) payload:
 `duration_ms = 10000`, `repeat = 3`, `p1 = 20.0`, `p2 = 20000.0`:
 
 ```
-SET_CONFIG (0xA4) payload:
+SIGGEN_CONFIG (0x40) SET payload:
 01 04 04 00 00 00 00 00  00 00 C0 C0 10 27 00 00
 03 00 00 00 00 00 A0 41  00 40 9C 46 00 00 00 00
 00 00 00 00
@@ -580,7 +578,7 @@ notification (`state=IDLE reason=COMPLETED`) after three sweeps.
 CHANNEL_ID walks regardless of the WALK flag:
 
 ```
-SET_CONFIG (0xA4) payload:
+SIGGEN_CONFIG (0x40) SET payload:
 01 0E FF FF 00 00 00 00  00 00 40 C1 00 00 00 00
 01 00 00 00 00 00 F0 42  00 00 00 00 00 00 00 00
 00 00 00 00

@@ -1,5 +1,9 @@
 # USB Error Diagnostics
 
+*Last updated: 2026-11-16 (retired in firmware 1.1.7)*
+
+*Status: retired. Since the TinyUSB migration these counters always read zero, and firmware 1.1.7 removed the two vendor commands (1.1.6 opcodes 0xB2 and 0xB3) without a replacement. For USB stream health use `SYS.USB_AUDIO_STATUS` (packets, ring overruns, worst packet gap) and `SYS.BUFFER_STATS`. The rest of this document describes the pre-TinyUSB feature and keeps its 1.1.6 opcode numbers.*
+
 ## Overview
 
 The DSPi firmware tracks USB PHY-level errors detected by the RP2040/RP2350 SIE (Serial Interface Engine) hardware. These are transient electrical events — not application-layer failures — and are handled by clearing the hardware status bits and incrementing per-type diagnostic counters. No bus reset or re-enumeration occurs.
@@ -26,7 +30,7 @@ High sustained error rates (>10/second) may indicate a marginal cable, noisy USB
 
 ### UsbErrorStatsPacket (24 bytes)
 
-Returned by `REQ_GET_USB_ERROR_STATS`. All fields are little-endian unsigned 32-bit integers. Fits in a single 64-byte USB control transfer.
+Returned by the retired 1.1.6 opcode 0xB2. All fields are little-endian unsigned 32-bit integers. Fits in a single 64-byte USB control transfer.
 
 ```
 Offset  Size  Type      Field        Description
@@ -79,9 +83,9 @@ struct UsbErrorStats {
 
 ## Vendor Commands
 
-All commands use USB control transfers on the vendor interface (interface 2, class 0xFF).
+Retired. Firmware 1.1.7 does not answer either command. The paged protocol has no replacement, because the counters had no source under TinyUSB. The tables below record the 1.1.6 requests.
 
-### REQ_GET_USB_ERROR_STATS (0xB2)
+### 1.1.6 opcode 0xB2: get USB error stats
 
 Read the current error counters.
 
@@ -94,7 +98,7 @@ Read the current error counters.
 | wLength | `24` |
 | Response | 24-byte `UsbErrorStatsPacket` |
 
-### REQ_RESET_USB_ERROR_STATS (0xB3)
+### 1.1.6 opcode 0xB3: reset USB error stats
 
 Reset all error counters to zero.
 
@@ -204,15 +208,15 @@ def assess_link_quality(dev, test_duration_sec=30):
 
 USB errors and buffer underruns are related but distinct. A burst of USB errors can cause the host to miss a retransmission window, leading to a late audio packet, which shows up as a buffer underrun. To correlate:
 
-1. Reset both counters: `REQ_RESET_USB_ERROR_STATS` (0xB3) + `REQ_RESET_BUFFER_STATS` (0xB1)
+1. Reset both counters: 1.1.6 opcode 0xB3 plus the buffer stats reset (now `SYS.STATS_RESET`)
 2. Play audio for the test period
-3. Read both: `REQ_GET_USB_ERROR_STATS` (0xB2) + `REQ_GET_BUFFER_STATS` (0xB0)
+3. Read both: 1.1.6 opcode 0xB2 plus the buffer stats (now `SYS.BUFFER_STATS`)
 4. If buffer `consumer_min_fill_pct` hit 0% AND USB error count is elevated, the underrun was likely caused by USB link issues, not firmware timing
 
 ## Counter Behavior
 
 - Counters are 32-bit unsigned integers. At 10 errors/second, they wrap after ~13.6 years. Overflow is not a practical concern.
-- Counters survive across audio stream start/stop cycles — they are only reset by `REQ_RESET_USB_ERROR_STATS` or device power cycle.
+- Counters survive across audio stream start/stop cycles. They are only reset by 1.1.6 opcode 0xB3 or a device power cycle.
 - Counters are incremented inside the USB IRQ handler. Reads via vendor commands are not atomic across all 6 fields (each is read independently). For rate calculations, small inconsistencies between fields are negligible.
 - The `total` field is incremented on every error interrupt. Per-type fields are incremented based on the SIE status register bits active at that instant. A single interrupt may set multiple SIE bits (e.g., both CRC and bit stuff), so per-type sums can occasionally exceed `total` for that window.
 
@@ -224,8 +228,8 @@ USB errors and buffer underruns are related but distinct. A burst of USB errors 
 
 **Counters:** 6 `volatile uint32_t` globals in `usb_device.c`, accessed via `extern` from `usb_audio.c`.
 
-**Vendor commands:** Handled in `firmware/DSPi/usb_audio.c` vendor request handler.
-- `REQ_GET_USB_ERROR_STATS` (0xB2): reads all 6 counters into `UsbErrorStatsPacket`, sends 24 bytes.
-- `REQ_RESET_USB_ERROR_STATS` (0xB3): zeroes all 6 counters, sends 1-byte ACK.
+**Vendor commands (1.1.6, retired in 1.1.7):** were handled in the `firmware/DSPi/usb_audio.c` vendor request handler.
+- 0xB2: read all 6 counters into `UsbErrorStatsPacket`, sent 24 bytes.
+- 0xB3: zeroed all 6 counters, sent a 1-byte ACK.
 
-**Request IDs:** Defined in `firmware/DSPi/config.h`.
+**Request IDs:** were defined in `firmware/DSPi/config.h`. Firmware 1.1.7 removed every `REQ_*` define.

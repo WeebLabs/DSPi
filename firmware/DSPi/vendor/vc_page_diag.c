@@ -9,7 +9,8 @@
 #include "loop_prof.h"
 
 #if DSPI_CLOCK_DIAG
-// The packet outgrows the 132-byte UART and I2C reply cap, hence VC_F_USB_ONLY.
+// VC_F_USB_ONLY is a choice for a bench readout: the packet fits the 256-byte
+// reply buffer (VC_REPLY_MAX) that UART and I2C also use.
 static VcResult diag_clock_diag_get(VcCtx *c) {
     ClockDiagPacket diag;
     clock_diag_get_snapshot(&diag);

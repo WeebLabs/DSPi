@@ -1,6 +1,6 @@
 # Vendor Protocol Migration Notes (working file)
 
-*Last updated: 2026-11-16 (page 0, finite-value rule, `RTA_BINS`, ROUTE delay note)*
+*Last updated: 2026-11-16 (page 0, finite-value rule, `RTA_BINS`, ROUTE delay note, discovery, `SPDIF_TX_STATS`, factory reset, command flags)*
 
 Raw material for the host migration guide (`Documentation/vendor_protocol_migration.md`, plan Phase 7). Each entry is a place where the paged protocol in 1.1.7 behaves differently from the 1.1.6 opcode, beyond the renumbering. They were recorded by the agents who ported each page and checked against the device. This file is folded into the guide and then deleted.
 
@@ -22,10 +22,16 @@ Raw material for the host migration guide (`Documentation/vendor_protocol_migrat
 
 Every request with a zero `wIndex` high byte is refused. USB STALLs at SETUP, UART and I2C return status 0x10, and `SYS.LAST_RESULT` records `VC_ERR_UNKNOWN`. Page 0 has no `GET_PLATFORM` and no `ENTER_BOOTLOADER`, so a 1.1.6 host can neither read the version of a 1.1.7 device nor reboot it into the bootloader. The Microsoft OS 2.0 descriptor request (IN, `bRequest` 0x01, `wIndex` 7) is not a DSPi command and is served as before.
 
+## Discovery
+
+- `SYS.PAGE_COMMANDS` for a page the build does not implement (page 0, or `DIAG` in a release build) is `VC_ERR_ADDRESS`. It never returns an empty bitmap, so a host must treat that result as "page absent".
+- `SYS.COMMAND_INFO` flags are informational from bit 3 up. `RESTART` marks every command that can interrupt audio, including the flash writers (each ends in a synchronized output restart), the input pin and clock commands (only while that input is live), `OUTPUT.DAC_MUTE_TEST` and `SYS.ENTER_BOOTLOADER`. A command without the flag never restarts or mutes the outputs.
+
 ## SYS
 
 | Old | New | Difference |
 |---|---|---|
+| 0x50 selector 8 | `SPDIF_TX_STATS` offset 0 | Same counter, `spdif_underruns`. Despite the name it counts USB audio packet gaps longer than 2 ms and shorter than 50 ms (none during a preset load), not S/PDIF transmitter events. 1.1.6 described it as S/PDIF underruns |
 | 0x50 selectors 11, 12 | `USB_AUDIO_STATUS` | Alt setting and mounted are u8 fields (were u32 replies) |
 | 0x50 selector 14 | `SYSTEM_STATUS` | Core voltage is u16 |
 | 0x50 selector 16 | `SYSTEM_STATUS` | Temperature is i16 centi-degrees |
@@ -45,6 +51,7 @@ Every request with a zero `wIndex` high byte is refused. USB STALLs at SETUP, UA
 | 0x97 | `STARTUP` GET | 2 bytes `{mode, slot}`. The old third byte, last active slot, is `DIRECTORY` byte 4 |
 | 0x98 | `OUTPUT_CONFIG_MODE` SET | Exactly 1 byte |
 | 0x52, 0x53 | `OUTPUT_CONFIG_SAVE`, `FACTORY_RESET` | Zero-length SETs, no status byte |
+| 0x53 | `FACTORY_RESET` | Unchanged behaviour, now stated by its flags (`DEFERRED`, `RESTART`, no `FLASH`). It resets the live state to factory defaults under a muted output restart and switches the input to USB. It writes no flash, keeps every stored preset, slot name and device-wide setting, and keeps the master volume. Save to a preset afterwards to keep the result |
 | 0x51 | none | Retired. Read `PRESET_ACTIVE`, then `PRESET_SAVE` to that slot |
 | 0xA1 | `ALL_PARAMS` SET | Any length other than 6136 STALLs at SETUP with `VC_ERR_LENGTH` (1.1.6 ACKed and ignored 64 bytes or fewer). A header the apply would refuse STALLs the status stage with `VC_ERR_VALUE` (1.1.6 ACKed and dropped it) |
 | 0xA2, 0xA3 | `ALL_PARAMS_CHUNK` | Same semantics, USB only, chunk size 1 to the remainder of the struct (hosts on WinUSB use 4096 or less). Refusals now carry a reason: offset past the end is `VC_ERR_ADDRESS`, a SET running past the end is `VC_ERR_LENGTH`, no session or out of order is `VC_ERR_STATE`, lock held elsewhere is `VC_ERR_BUSY`. A final chunk with a bad header fails with `VC_ERR_VALUE` and applies nothing |

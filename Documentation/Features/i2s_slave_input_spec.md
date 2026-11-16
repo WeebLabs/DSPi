@@ -1,6 +1,6 @@
 # I2S Clock-Slave Input Mode Specification
 
-*Last updated: 2026-07-11 (clock-pin mode: UNIFIED vs SPLIT slave pair, role-indexed 0xC2/0xC3, new 0xFE/0xFF, slot V29 / directory V14; wire claims two `WireI2SConfig` reserved bytes with no version bump)*
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7). 2026-07-11 (clock-pin mode: UNIFIED vs SPLIT slave pair, role-indexed BCK pin, new clock-pin mode command, slot V29 / directory V14; wire claims two `WireI2SConfig` reserved bytes with no version bump)*
 
 This document specifies the I2S clock-slave input mode: behavior, wiring, the
 complete host-facing control surface (vendor commands, notifications, bulk
@@ -18,7 +18,7 @@ The DSPi has two I2S clock modes, selected by a single persisted setting:
 
 | Mode | Value | Who drives BCK/LRCLK | Rate authority |
 |---|---|---|---|
-| MASTER (default) | 0 | DSPi (PIO side-set or I2S output clock master) | Host-selected via `REQ_SET_INPUT_RATE` (0xED) |
+| MASTER (default) | 0 | DSPi (PIO side-set or I2S output clock master) | Host-selected via `INPUT.I2S_RX_RATE` |
 | SLAVE | 1 | External device; DSPi's BCK/LRCLK pins become inputs | Auto-detected from the external LRCLK |
 
 In SLAVE mode the DSPi handles audio data only: it clocks input data in and
@@ -27,7 +27,7 @@ superior external clocking and compatibility with I2S sources that only
 operate as clock masters (many ADCs, USB-to-I2S interfaces).
 
 The mode is only meaningful while the input source is I2S
-(`REQ_SET_INPUT_SOURCE` = 2). With any other input source the setting is
+(`INPUT.SOURCE` = 2). With any other input source the setting is
 dormant: it is stored, reported by GET, and takes effect at the next switch
 into I2S. **While a non-I2S source is selected, the DSPi reverts to driving
 the clock pins whenever an I2S output slot exists** (see section 8).
@@ -84,29 +84,28 @@ are kept mutually distinct by validation.
 
 **Setting the pins:**
 
-- `REQ_SET_I2S_BCK_PIN` (0xC2): `wValue = (role << 8) | GPIO`. Role 0 =
-  master/unified pair, role 1 = slave pair. Legacy hosts that send a bare GPIO
-  (implicit role 0) get the unchanged master-pair behavior. Rejected with
-  `OUTPUT_ACTIVE` while I2S output slots run on the pair being moved,
-  `PIN_IN_USE` on overlap/collision, `INVALID_OUTPUT` for role > 1. The slave
+- `CLOCK.I2S_BCK_PIN` SET: `wValue` = role, 1-byte payload = BCK GPIO. Role 0 =
+  master/unified pair, role 1 = slave pair. Rejected with
+  `VC_ERR_STATE` while I2S output slots run on the pair being moved,
+  `VC_ERR_PIN_IN_USE` on overlap/collision, `VC_ERR_ADDRESS` for role > 1. The slave
   pin is storable at any time; a change restarts the input only when that pair
   is the one the running input currently uses (SPLIT + slave clocking).
-- `REQ_GET_I2S_BCK_PIN` (0xC3): `wValue = role` (0 = master/unified,
-  1 = slave); an invalid role returns 0.
-- `REQ_SET_I2S_CLOCK_PIN_MODE` (0xFE): `wValue = 0` unified / `1` split; returns
-  a `PIN_CONFIG_*` status byte. Entering SPLIT always validates the slave pair
+- `CLOCK.I2S_BCK_PIN` GET: `wValue` = role (0 = master/unified,
+  1 = slave); an invalid role is `VC_ERR_ADDRESS`.
+- `CLOCK.I2S_CLOCK_PIN_MODE` SET: 1-byte payload, 0 unified / 1 split. Entering SPLIT always validates the slave pair
   (distinct from the master pair, both GPIOs free of other owners), even as a
-  dormant store while the clock mode is master; a later 0x88 flip adopts the
-  pair without rechecking, so the conflict must be caught here (`PIN_IN_USE`).
+  dormant store while the clock mode is master; a later `CLOCK.I2S_CLOCK_MODE` flip adopts the
+  pair without rechecking, so the conflict must be caught here (`VC_ERR_PIN_IN_USE`).
   Leaving SPLIT needs no pin checks. A set while slave clocking is (or is
-  pending) live is rejected with `OUTPUT_ACTIVE` when I2S output slots exist;
+  pending) live is rejected with `VC_ERR_STATE` when I2S output slots exist;
   otherwise it applies live and arms a deferred input restart onto the new
-  pair. `INVALID_PARAM` for wValue > 1.
-- `REQ_GET_I2S_CLOCK_PIN_MODE` (0xFF): returns the live mode byte (0/1).
+  pair. `VC_ERR_VALUE` for a payload > 1.
+- `CLOCK.I2S_CLOCK_PIN_MODE` GET: returns the live mode byte (0/1).
 
-In slave mode the active clock pair pins are inputs. Input data pins
-(`REQ_SET/GET_I2S_RX_PIN`, 0xF1/0xF2) and I2S output slot data pins
-(0x7C/0x7D) are unchanged.
+A rejected SET STALLs and its result code is readable from `SYS.LAST_RESULT`
+(section 4). In slave mode the active clock pair pins are inputs. Input data pins
+(`INPUT.I2S_RX_PIN`) and I2S output slot data pins
+(`OUTPUT.PIN`) are unchanged.
 
 ### External master requirements
 
@@ -152,7 +151,7 @@ minimizes but cannot eliminate it while the user has both devices wired.
 ### Lock state machine
 
 Slave mode adds a SPDIF-style lock state machine, exposed via
-`REQ_GET_I2S_SLAVE_STATUS` (0x8A) and NOTIFY event 0x09:
+`CLOCK.I2S_SLAVE_STATUS` and NOTIFY event 0x09:
 
 | State | Value | Meaning |
 |---|---|---|
@@ -207,18 +206,19 @@ wiring rather than source behavior.
 
 ### Rate reporting
 
-- `REQ_GET_INPUT_RATE` (0xEE) still returns `{current pipeline Hz, selected
-  I2S Hz}`. In slave mode the pipeline Hz follows the detected rate once
-  locked; the "selected" value is the stored master-mode preference.
-- `REQ_SET_INPUT_RATE` (0xED) in slave mode stores the value (and notifies)
-  but does NOT change the live rate; the stored rate applies when the device
-  returns to master mode.
-- The status packet (0x8A) carries both the snapped locked rate and the raw
+- The current pipeline rate is the sample rate field of `SYS.SYSTEM_STATUS`
+  (u32 Hz at offset 4). In slave mode it follows the detected rate once
+  locked.
+- `INPUT.I2S_RX_RATE` GET returns the selected I2S rate (u32 Hz), which in
+  slave mode is the stored master-mode preference. Its SET in slave mode stores
+  the value (and notifies) but does NOT change the live rate; the stored rate
+  applies when the device returns to master mode.
+- The status packet (`CLOCK.I2S_SLAVE_STATUS`) carries both the snapped locked rate and the raw
   measured rate.
 
 ### Output type switching
 
-Output slots remain freely switchable between SPDIF and I2S (0xC0) while
+Output slots remain freely switchable between SPDIF and I2S (`OUTPUT.TYPE`) while
 slave mode is active. The type switch rebuilds the affected slots with the
 correct clocking (edge-slaved program for I2S) and re-runs the muted
 prefill/synchronized start, exactly like a type switch in any other mode.
@@ -227,12 +227,20 @@ prefill/synchronized start, exactly like a type switch in any other mode.
 
 ## 4. Vendor commands
 
-All three new commands work over USB vendor control transfers and the
-UART/I2C control interfaces (standard dispatcher framing).
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `CLOCK.I2S_CLOCK_MODE` | 0x0C | 0x12 | GET, SET | none (0) | GET 1, SET 1 |
+| `CLOCK.I2S_SLAVE_STATUS` | 0x0C | 0x13 | GET | none (0) | GET 16 |
 
-### REQ_SET_I2S_CLOCK_MODE (0x88), OUT
+All three commands of this feature (these two and `CLOCK.I2S_CLOCK_PIN_MODE`,
+section 2) use the paged protocol (see `../commands.md`) and work over USB
+vendor control transfers and the UART/I2C control interfaces. A rejected SET
+STALLs on USB and its `VC_*` result is readable from `SYS.LAST_RESULT`. UART
+and I2C return the code in the response status byte.
 
-Payload: 1 byte, 0 = master, 1 = slave. Values > 1 are ignored.
+### `CLOCK.I2S_CLOCK_MODE` SET
+
+Payload: 1 byte, 0 = master, 1 = slave. A value > 1 is refused with `VC_ERR_VALUE`.
 
 Deferred apply: the main loop performs the transition (input restart,
 output-slot clocking rebuild, MCK policy). If the input source is not I2S
@@ -241,13 +249,13 @@ current mode again is a no-op. A `PARAM_CHANGED` notification for the
 `input_config.i2s_clock_mode` wire field is emitted when the change is
 actually applied, not at SET time.
 
-### REQ_GET_I2S_CLOCK_MODE (0x89), IN
+### `CLOCK.I2S_CLOCK_MODE` GET
 
 Returns 1 byte: the LIVE mode. A SET that has not yet been applied by the
 main loop is not reflected (window is a few main-loop iterations; track the
 apply via the PARAM_CHANGED notification if exact sequencing matters).
 
-### REQ_GET_I2S_SLAVE_STATUS (0x8A), IN
+### `CLOCK.I2S_SLAVE_STATUS` GET
 
 Returns the 16-byte `I2sSlaveStatusPacket` (little-endian):
 
@@ -269,12 +277,12 @@ open). For state transitions prefer NOTIFY event 0x09.
 
 | Command | Slave-mode behavior |
 |---|---|
-| 0xE0 SET_INPUT_SOURCE | Unchanged; slave clocking engages/disengages when I2S becomes/stops being the source |
-| 0xED SET_INPUT_RATE | Stored + notified only; no live effect until master mode |
-| 0xC2 SET_I2S_BCK_PIN | Role-indexed (`wValue = (role<<8)|GPIO`; role 0 = master/unified pair, 1 = slave pair). Rejected with OUTPUT_ACTIVE only while I2S output slots run on the pair being moved; a change restarts the input when that pair is the one the running input uses. In UNIFIED mode role 0 is the slave pair too; in SPLIT mode slave clocking uses role 1 (`i2s_bck_pin_slave`, default 12/13 RP2040 / 26/27 RP2350). Legacy role-0 hosts see unchanged behavior |
-| 0xFE SET_I2S_CLOCK_PIN_MODE | Selects UNIFIED (0) vs SPLIT (1). Dormant store in master/non-I2S; live slave-clocked change rejected with OUTPUT_ACTIVE if I2S outputs run, else validates the newly effective pair and arms a deferred input restart |
-| 0xC4 SET_MCK_ENABLE | Stored; MCK output remains forced off while slave mode is live and resumes per config on exit |
-| 0xF1/0xF3 RX data pins / channel count | Unchanged (multichannel 4/6/8-ch input works in slave mode on RP2350; all pairs sample against the external clocks) |
+| `INPUT.SOURCE` | Unchanged; slave clocking engages/disengages when I2S becomes/stops being the source |
+| `INPUT.I2S_RX_RATE` SET | Stored + notified only; no live effect until master mode |
+| `CLOCK.I2S_BCK_PIN` SET | Role-indexed (`wValue` = role, payload = GPIO; role 0 = master/unified pair, 1 = slave pair). Rejected with `VC_ERR_STATE` only while I2S output slots run on the pair being moved; a change restarts the input when that pair is the one the running input uses. In UNIFIED mode role 0 is the slave pair too; in SPLIT mode slave clocking uses role 1 (`i2s_bck_pin_slave`, default 12/13 RP2040 / 26/27 RP2350) |
+| `CLOCK.I2S_CLOCK_PIN_MODE` SET | Selects UNIFIED (0) vs SPLIT (1). Dormant store in master/non-I2S; live slave-clocked change rejected with `VC_ERR_STATE` if I2S outputs run, else validates the newly effective pair and arms a deferred input restart |
+| `CLOCK.MCK_ENABLE` SET | Stored; MCK output remains forced off while slave mode is live and resumes per config on exit |
+| `INPUT.I2S_RX_PIN`, `INPUT.I2S_RX_CHANNELS` | Unchanged (multichannel 4/6/8-ch input works in slave mode on RP2350; all pairs sample against the external clocks) |
 
 ---
 
@@ -319,7 +327,7 @@ do.
 
 ## 6. Persistence and bulk parameters
 
-### Wire format (REQ_GET/SET_ALL_PARAMS, 0xA0/0xA1)
+### Wire format (`STORE.ALL_PARAMS`)
 
 `WIRE_FORMAT_VERSION` = 18 when this feature landed; the byte offsets below
 are the CURRENT (V28) ones. `WireInputConfig` is a 16-byte section throughout;
@@ -363,13 +371,13 @@ effective input pair moved.
 to the slot tail, on top of the V28 `i2s_clock_mode` byte. Pre-V29 slots read
 the missing bytes as 0 (= unified + unset), the correct defaults; V21..V28
 slots still load via the per-version CRC-range mechanism (backward-compatible
-tail-append). Both are saved by `REQ_SAVE_PRESET` like the rest of the IO
+tail-append). Both are saved by `STORE.PRESET_SAVE` like the rest of the IO
 config and restored on preset load / boot, honoring `output_config_mode`
 exactly like the other IO fields:
 
 - WITH_PRESET: the slot value (device-global directory value as fallback).
 - INDEPENDENT: the device-global directory value (saved via
-  `REQ_SAVE_OUTPUT_CONFIG`).
+  `STORE.OUTPUT_CONFIG_SAVE`).
 
 Directory format V14 grew the device-global `FlashOutputConfig` by these two
 bytes (29 -> 31 bytes) with an automatic V13 -> V14 migration (frozen
@@ -390,11 +398,11 @@ the load).
 
 ### Enabling slave mode
 
-1. `SET_I2S_CLOCK_MODE(1)` (0x88).
-2. If not already: `SET_INPUT_SOURCE(2)` (0xE0).
-3. Watch NOTIFY 0x09 (or poll 0x8A) for LOCKED; display the detected rate.
+1. SET `CLOCK.I2S_CLOCK_MODE` to 1.
+2. If not already: SET `INPUT.SOURCE` to 2.
+3. Watch NOTIFY 0x09 (or poll `CLOCK.I2S_SLAVE_STATUS`) for LOCKED; display the detected rate.
 4. Audio starts automatically after lock + prefill. No further host action.
-5. Persist with `REQ_SAVE_PRESET` as usual.
+5. Persist with `STORE.PRESET_SAVE` as usual.
 
 ### Status UI guidance
 
@@ -402,7 +410,7 @@ the load).
   single "waiting for external clock" indication with the raw `measured_hz`
   as a diagnostic (0 means no clocks at all; a nonzero value that never
   locks means an unsupported rate or wrong BCK ratio).
-- In slave mode, gray out the sample-rate selector (0xED) or relabel it
+- In slave mode, gray out the sample-rate selector (`INPUT.I2S_RX_RATE`) or relabel it
   "rate used in master mode"; show the detected rate as read-only.
 - Hide/disable MCK controls while slave mode is live (values are kept but
   the output is forced off).
@@ -411,7 +419,7 @@ the load).
 
 ### Sequencing detail
 
-GET 0x89 reflects the mode only after the deferred apply; if the app needs a
+A `CLOCK.I2S_CLOCK_MODE` GET reflects the mode only after the deferred apply; if the app needs a
 positive confirmation, wait for the PARAM_CHANGED on
 `input_config.i2s_clock_mode` (or the first 0x09 event) after the SET.
 
@@ -465,7 +473,7 @@ positive confirmation, wait for the PARAM_CHANGED on
 | Library external-clock plumbing, program patch/reload, two-phase `enable_sync_prepare` | `audio_i2s_multi.c/.h` (and `audio_spdif.c/.h` for the SPDIF prepare half) |
 | LRCLK-gated combined output start, main-loop slave block, deferred mode-change handler, type-switch clocking rebuild | `firmware/DSPi/main.c` |
 | ADAT servo handoff | `firmware/DSPi/adat_output.c` (`adat_output_servo_divider`, resync divider pull) |
-| Vendor handlers 0x88-0x8A, 0xED gate, role-indexed 0xC2/0xC3, clock-pin mode 0xFE/0xFF | `firmware/DSPi/vendor_commands.c`, `config.h` |
+| Vendor handlers: `CLOCK` page (clock mode, slave status, role-indexed BCK pin, clock-pin mode), `INPUT.I2S_RX_RATE` gate | `firmware/DSPi/vendor/vc_page_clock.c`, `vc_page_input.c`, `pages/clock.def` |
 | Clock-pin mode globals + `i2s_effective_bck_pin()` / `i2s_clock_pin_claimed()` helpers, `PICO_I2S_BCK_PIN_SLAVE` default | `firmware/DSPi/audio_input.h`, `config.h`, `usb_audio.c` (globals) |
 | NOTIFY event 0x09 (push + formatter) | `firmware/DSPi/notify.c/.h` |
 | Persistence (slot V29, directory V14, wire V21 with two claimed `WireI2SConfig` bytes) | `firmware/DSPi/flash_storage.c`, `bulk_params.h/.c` |

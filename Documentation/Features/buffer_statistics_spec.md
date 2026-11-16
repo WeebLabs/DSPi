@@ -1,6 +1,6 @@
 # Buffer Fill Level Statistics
 
-*Last updated: 2026-10-12*
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7)*
 
 ## Overview
 
@@ -53,23 +53,20 @@ Offset  Size  Field
 
 ## Vendor Commands
 
-### REQ_GET_BUFFER_STATS (0xB0)
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `SYS.BUFFER_STATS` | 0x01 | 0x42 | GET | none (0) | GET 44 | The `BufferStatsPacket` above |
+| `SYS.STATS_RESET` | 0x01 | 0x4F | SET | none (0) | SET 1 | u8 reset mask. Bit 0 resets the watermarks |
 
-- **Direction:** GET (IN)
-- **wValue:** Unused
-- **wLength:** 44
-- **Response:** 44-byte `BufferStatsPacket`
+Both use the paged protocol (`../commands.md`): page in the `wIndex` high byte, command in `bRequest`. A refused request STALLs, and `SYS.LAST_RESULT` gives the reason.
+
+### `SYS.BUFFER_STATS`
 
 Returns a snapshot of all buffer fill levels and watermarks. The `sequence` counter increments on each call, allowing the host to detect missed polls.
 
-### REQ_RESET_BUFFER_STATS (0xB1)
+### `SYS.STATS_RESET`
 
-- **Direction:** GET (IN)
-- **wValue:** Reset flags (bit 0: reset watermarks)
-- **wLength:** 1
-- **Response:** 1-byte success (0x01)
-
-Resets min watermarks to 100 and max watermarks to 0 for all SPDIF instances and PDM.
+A 1-byte SET with no reply. Bit 0 resets min watermarks to 100 and max watermarks to 0 for all SPDIF instances and PDM. The same bit also clears the worst-gap and minimum-prewrite fields of `SYS.PIPELINE_STATS` and `SYS.USB_AUDIO_STATUS`. Any other bit set is refused with `VC_ERR_VALUE` and resets nothing. A payload that is not exactly 1 byte is `VC_ERR_LENGTH`.
 
 ## Fill Percentage Formulas
 
@@ -112,7 +109,7 @@ fill_pct = ((head - tail) & 0xFF) * 100 / RING_SIZE
 - Slot ring watermarks tracked per slot, whichever output type the slot has
 - Only updated while the pipeline is processing blocks (watermarks freeze when the input stops)
 - PDM watermarks only update while PDM is enabled
-- Watermarks reset via `REQ_RESET_BUFFER_STATS` (0xB1) with wValue bit 0 set
+- Watermarks reset via `SYS.STATS_RESET` with bit 0 of its payload set
 - Also reset at firmware initialization (`usb_sound_card_init()`)
 
 ## Flags Field
@@ -127,13 +124,13 @@ fill_pct = ((head - tail) & 0xFF) * 100 / RING_SIZE
 
 ### Periodic Polling
 
-Poll `REQ_GET_BUFFER_STATS` every 100-500ms to build a time series. Use the `sequence` counter to detect missed polls (gap > 1 between consecutive reads).
+Poll `SYS.BUFFER_STATS` every 100-500ms to build a time series. Use the `sequence` counter to detect missed polls (gap > 1 between consecutive reads).
 
 ### Glitch Investigation
 
-1. Reset watermarks via `REQ_RESET_BUFFER_STATS`
+1. Reset watermarks via `SYS.STATS_RESET` (payload 0x01)
 2. Reproduce the audio glitch
-3. Read `REQ_GET_BUFFER_STATS` — check `consumer_min_fill_pct` for near-zero values indicating underrun
+3. Read `SYS.BUFFER_STATS`. Check `consumer_min_fill_pct` for near-zero values indicating underrun
 
 ### Health Dashboard
 

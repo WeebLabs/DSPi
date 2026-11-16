@@ -1,6 +1,6 @@
 # Physical IO / Output Config — Independent vs. With-Preset Persistence
 
-*Last updated: 2026-09-22 (the output limiter settings follow the same mode, directory V22; 2026-06-01: original)*
+*Last updated: 2026-11-16 (command names on the paged protocol of firmware 1.1.7); 2026-09-22 (the output limiter settings follow the same mode, directory V22; 2026-06-01: original)*
 
 ## Summary
 
@@ -27,7 +27,7 @@ not that was wanted). The flag is now a *mode* governing the whole IO block.
 > IO block: with-preset takes them from the loaded slot (V39+, defaults
 > otherwise), independent applies a device-global copy at boot only and leaves
 > the live settings alone on preset load, active-slot delete and factory reset.
-> `REQ_SAVE_OUTPUT_CONFIG` (0x52) saves them alongside the IO block, and a bulk
+> `STORE.OUTPUT_CONFIG_SAVE` saves them alongside the IO block, and a bulk
 > SET applies its limiter section only in with-preset mode, as it does for pins.
 > The device-global copy is `FlashLimiterConfig` in directory V22. Details:
 > `output_limiter_spec.md` section 5.
@@ -39,7 +39,7 @@ Like master volume, the IO config follows the active preset *context*:
 > "Output configuration is either part of each preset (with-preset) or stored on
 > the device independently and applied at boot (independent). In independent
 > mode, **loading a preset never changes your wiring**; an explicit
-> `REQ_SAVE_OUTPUT_CONFIG` persists the live IO to the device."
+> `STORE.OUTPUT_CONFIG_SAVE` persists the live IO to the device."
 
 | Context | Independent (mode 0) | With-preset (mode 1, default) |
 |---|---|---|
@@ -73,7 +73,7 @@ the same discipline master volume uses. A single `io_config_apply()` validates
 pins, checks MCK GPOUT-capability, and schedules the SPDIF RX hot-swap when the
 pin changes while RX is the active input; it is shared by both the per-slot and
 device-global sources so they cannot diverge. `io_config_from_live()` snapshots
-the live globals for `REQ_SAVE_OUTPUT_CONFIG`.
+the live globals for `STORE.OUTPUT_CONFIG_SAVE`.
 
 Context callers each invoke the helper right beside their existing
 `apply_master_volume_from_mode()` call: `preset_load`, `preset_delete` (active
@@ -84,22 +84,24 @@ slot, NULL context), `preset_boot_load` (`is_boot=true`), and
 
 Per the chosen model, INDEPENDENT mode uses **explicit save** (like master
 volume): live IO changes via the existing per-field commands
-(`REQ_SET_OUTPUT_TYPE`, `REQ_SET_OUTPUT_PIN`, MCK setters, `REQ_SET_SPDIF_RX_PIN`)
+(`OUTPUT.TYPE`, `OUTPUT.PIN`, the `CLOCK.MCK_*` setters, `INPUT.SPDIF_RX_PIN`)
 take effect immediately but only survive reboot after a
-**`REQ_SAVE_OUTPUT_CONFIG` (0x52)** — `preset_save_output_config()` snapshots the
+**`STORE.OUTPUT_CONFIG_SAVE`**. `preset_save_output_config()` snapshots the
 live IO into `dir_cache.output_config` and flushes. There is no `get-saved`
 command: the device-global block equals live IO right after a save, and the app
 reads current IO via the existing per-field getters / bulk-params GET.
 
-## Vendor commands (zero net-new opcodes)
+## Vendor commands
 
-- `REQ_SET_OUTPUT_CONFIG_MODE` (0x98) / `REQ_GET_OUTPUT_CONFIG_MODE` (0x99) —
-  renamed from `REQ_PRESET_SET/GET_INCLUDE_PINS`; payload/return is the 0/1 mode
-  byte (clamped `>1 → independent`). The mode is also byte [5] of the
-  `REQ_PRESET_GET_DIR` summary.
-- `REQ_SAVE_OUTPUT_CONFIG` (0x52) — **repurposed** from the dead, deprecated
-  `REQ_LOAD_PARAMS`. No payload; 1-byte `PRESET_OK` status; flash write deferred
-  to the main loop. Hosts use `REQ_PRESET_LOAD` (0x91) for "revert to saved".
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `STORE.OUTPUT_CONFIG_MODE` | 0x02 | 0x20 | GET, SET | none (0) | GET 1, SET 1 | The 0/1 mode byte. A SET value above 1 stores 0 (independent). Also byte 5 of `STORE.DIRECTORY` |
+| `STORE.OUTPUT_CONFIG_SAVE` | 0x02 | 0x21 | SET (zero-length) | none (0) | SET 0 | No payload and no status byte. Success is the ACK. The flash write is deferred to the main loop |
+
+Hosts use `STORE.PRESET_LOAD` for "revert to saved". In firmware 1.1.6 these
+were opcodes 0x98/0x99 (renamed from the include-pins pair) and 0x52 (repurposed
+from the dead load-params opcode, issued as an IN request that returned a
+`PRESET_OK` status byte).
 
 ## Directory format V3 → V4
 
@@ -110,7 +112,7 @@ only the first `NUM_PIN_OUTPUTS`/`NUM_SPDIF_INSTANCES` entries are meaningful).
 `output_config` from firmware IO defaults and carrying the device-level SPDIF RX
 pin into the block. A device that had the non-default `include_pins=0` lands in
 independent mode and boots to default routing until it re-saves via
-`REQ_SAVE_OUTPUT_CONFIG` (output_config is unused for the default with-preset
+`STORE.OUTPUT_CONFIG_SAVE` (output_config is unused for the default with-preset
 majority).
 
 ## Inviolable constraint
@@ -128,7 +130,7 @@ IO uses.
 Built clean on both platforms (RP2350 BSS +20 bytes = the `FlashOutputConfig`
 added to the RAM-cached directory). On connected RP2350: V3→V4 migration
 preserved `output_config_mode` (1, from `include_pins=1`); `output_config_save`
-(0x52) acks `PRESET_OK`; `output_config_mode_roundtrip` (0x98/0x99 + clamp) and
+(1.1.6 opcode 0x52) acked `PRESET_OK`; `output_config_mode_roundtrip` (1.1.6 opcodes 0x98/0x99 + clamp) and
 the behavioral `output_config_independent_isolation` test pass — the latter
 proving that, with the MCK multiplier as a non-disruptive marker, a preset load
 leaves live IO untouched in independent mode and applies the slot's IO in

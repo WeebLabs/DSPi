@@ -1,5 +1,7 @@
 # Master Volume Specification
 
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 The Master Volume is a device-side output ceiling that sets the maximum output level of the DSPi hardware. It acts as an attenuator (0 dB to -127 dB) with a dedicated mute sentinel, applied at the very end of the signal chain as a multiplier on the final output gain. It is completely independent of the USB host volume and does not affect any DSP processing stages.
@@ -68,8 +70,7 @@ Critically, the master volume does not change the value that loudness compensati
 | **Type** | `float` (IEEE 754 single-precision) |
 | **Range** | -128.0 (mute) to 0.0 (unity) |
 | **Default** | -20.0 (power-on / fresh-device default; see `MASTER_VOL_DEFAULT_DB`) |
-| **SET command** | `0xD2` (`REQ_SET_MASTER_VOLUME`) |
-| **GET command** | `0xD3` (`REQ_GET_MASTER_VOLUME`) |
+| **Command** | `ROUTE.MASTER_VOLUME` (GET and SET) |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 The master volume level in decibels. This is an attenuation-only control:
@@ -80,7 +81,7 @@ The master volume level in decibels. This is an attenuation-only control:
 - **-127.0 dB:** Minimum non-mute attenuation. Effectively inaudible but not digital silence.
 - **-128.0 dB:** Mute sentinel. True digital silence (output is zero).
 
-Values below -128.0 are clamped to -128.0 (mute). Values above 0.0 are clamped to 0.0 (unity). NaN and infinity values are silently rejected (the master volume is left unchanged).
+Values below -128.0 are clamped to -128.0 (mute). Values above 0.0 are clamped to 0.0 (unity). A NaN or infinite value is refused with `VC_ERR_VALUE` (the SET STALLs and the master volume is left unchanged).
 
 ### 2.2 master_volume_mode
 
@@ -89,28 +90,27 @@ Values below -128.0 are clamped to -128.0 (mute). Values above 0.0 are clamped t
 | **Type** | `uint8_t` |
 | **Range** | 0 (independent) or 1 (with preset) |
 | **Default** | 0 (independent) |
-| **SET command** | `0xD4` (`REQ_SET_MASTER_VOLUME_MODE`) |
-| **GET command** | `0xD5` (`REQ_GET_MASTER_VOLUME_MODE`) |
+| **Command** | `ROUTE.MASTER_VOLUME_MODE` (GET and SET) |
 | **Payload** | 1 byte |
 
 Selects how master volume is persisted across boots. This is a **directory-level** setting (global, not per-preset), mirroring `include_pins`.
 
-- **Mode 0 — Independent (default).** Master volume is a stand-alone device setting, saved in the preset directory, applied at boot, and completely unaffected by preset save/load. The app persists a chosen value by issuing `REQ_SAVE_MASTER_VOLUME` (0xD6); the device then boots at that value on subsequent power-ups. Preset save still writes `master_volume_db` into the slot (so the same flash layout works for either mode), but the saved slot value is ignored on load. Behaves like a physical volume knob: preset switching never moves the knob.
+- **Mode 0: Independent (default).** Master volume is a stand-alone device setting, saved in the preset directory, applied at boot, and completely unaffected by preset save/load. The app persists a chosen value by issuing `ROUTE.MASTER_VOLUME_SAVE`; the device then boots at that value on subsequent power-ups. Preset save still writes `master_volume_db` into the slot (so the same flash layout works for either mode), but the saved slot value is ignored on load. Behaves like a physical volume knob: preset switching never moves the knob.
 - **Mode 1 — With preset.** Master volume is part of the preset. Saved with the preset, restored on preset load, same as other DSP parameters. Useful when different presets target different speaker setups at different maximum output levels.
 
 Values outside `[0, 1]` are clamped to 0. Setting the mode triggers a deferred flash write via the main loop. The value itself persists in the preset directory across reboots.
 
 ### 2.3 saved master volume (independent storage)
 
-The directory sector also carries a `master_volume_db` field — the value applied at boot when mode is 0. Updated by `REQ_SAVE_MASTER_VOLUME` (copies the current live `master_volume_db` into the field and flushes the directory). Readable via `REQ_GET_SAVED_MASTER_VOLUME`. The save command is accepted in both modes; in mode 1 the stored value is dormant until the user switches to mode 0.
+The directory sector also carries a `master_volume_db` field. It is the value applied at boot when mode is 0. Updated by `ROUTE.MASTER_VOLUME_SAVE` (copies the current live `master_volume_db` into the field and flushes the directory). Readable via `ROUTE.MASTER_VOLUME_SAVED`. The save command is accepted in both modes; in mode 1 the stored value is dormant until the user switches to mode 0.
 
 ### Parameter summary
 
-| Parameter | Type | Range | Default | SET | GET | Payload |
+| Parameter | Type | Range | Default | Write | Read | Payload |
 |-----------|------|-------|---------|-----|-----|---------|
-| master_volume_db (live) | float | -128.0 to 0.0 | 0.0 | 0xD2 | 0xD3 | 4 bytes (LE float) |
-| master_volume_mode | uint8_t | 0/1 | 0 | 0xD4 | 0xD5 | 1 byte |
-| saved master volume | float | -128.0 to 0.0 | 0.0 | 0xD6 (no payload, uses live) | 0xD7 | 4 bytes (LE float) |
+| master_volume_db (live) | float | -128.0 to 0.0 | 0.0 | `ROUTE.MASTER_VOLUME` SET | `ROUTE.MASTER_VOLUME` GET | 4 bytes (LE float) |
+| master_volume_mode | uint8_t | 0/1 | 0 | `ROUTE.MASTER_VOLUME_MODE` SET | `ROUTE.MASTER_VOLUME_MODE` GET | 1 byte |
+| saved master volume | float | -128.0 to 0.0 | 0.0 | `ROUTE.MASTER_VOLUME_SAVE` (zero-length, uses live) | `ROUTE.MASTER_VOLUME_SAVED` | 4 bytes (LE float) |
 
 ### Constants
 
@@ -126,48 +126,56 @@ The firmware defines the following constants for master volume:
 
 ## 3. Vendor Command Reference
 
-All commands use USB EP0 vendor control transfers on the vendor interface (interface 2). SET commands are host-to-device (OUT) with data in the payload. GET commands are device-to-host (IN) with the response in the data phase. The `wValue` and `wIndex` fields are not used by master volume commands (ignored by firmware).
+All four commands are on the `ROUTE` page of the paged protocol (see `../commands.md`). The page travels in the high byte of `wIndex` and the vendor interface (2) in the low byte, so every request carries `wIndex` 0x0502. None of them takes an address, so `wValue` must be 0. A non-zero `wValue` STALLs with `VC_ERR_ADDRESS`. A SET payload of the wrong length STALLs with `VC_ERR_LENGTH`. The reason for any STALL is readable from `SYS.LAST_RESULT`.
 
-### 3.1 REQ_SET_MASTER_VOLUME (0xD2)
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.MASTER_VOLUME` | 0x05 | 0x50 | GET, SET | none (0) | GET 4, SET 4 | f32 dB, clamped to -128..0 |
+| `ROUTE.MASTER_VOLUME_MODE` | 0x05 | 0x51 | GET, SET | none (0) | GET 1, SET 1 | 0 independent, 1 with preset. Deferred flash write |
+| `ROUTE.MASTER_VOLUME_SAVE` | 0x05 | 0x52 | SET (zero-length) | none (0) | SET 0 | Saves the live value as the independent value. Deferred flash write |
+| `ROUTE.MASTER_VOLUME_SAVED` | 0x05 | 0x53 | GET | none (0) | GET 4 | The saved independent value, f32 dB |
+
+### 3.1 `ROUTE.MASTER_VOLUME` SET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xD2` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
+| **Direction** | Host -> Device (OUT, `bmRequestType` 0x41) |
+| **bRequest** | `0x50` |
+| **wValue** | 0 |
+| **wIndex** | `0x0502` |
 | **wLength** | 4 |
 | **Payload** | 4 bytes: IEEE 754 float, little-endian |
 
 **Firmware behavior:**
-1. Reads 4 bytes from the vendor receive buffer as a float via `memcpy`.
-2. Clamps the value to [-128.0, 0.0].
-3. Converts to a linear multiplier: `10^(db / 20)`, or 0.0 if the value is -128.0 (mute).
-4. Stores the dB value and the linear multiplier in the live state.
-5. The new master volume takes effect on the next audio callback iteration (typically within 1ms).
+1. Reads 4 bytes from the payload as a float.
+2. Refuses a NaN or infinite value with `VC_ERR_VALUE` and stores nothing.
+3. Clamps the value to [-128.0, 0.0].
+4. Converts to a linear multiplier: `10^(db / 20)`, or 0.0 if the value is -128.0 (mute).
+5. Stores the dB value and the linear multiplier in the live state.
+6. The new master volume takes effect on the next audio callback iteration (typically within 1ms).
 
-**Validation:** Minimum payload length = 4 bytes. Shorter payloads are silently ignored. Out-of-range values are clamped (not rejected).
+**Validation:** The payload must be exactly 4 bytes, otherwise the SET STALLs with `VC_ERR_LENGTH`. Out-of-range finite values are clamped (not rejected).
 
 **Example:** Set master volume to -6.0 dB:
 ```
-bRequest = 0xD2, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+bRequest = 0x50, wValue = 0x0000, wIndex = 0x0502, wLength = 4
 Payload: [0x00, 0x00, 0xC0, 0xC0]   (-6.0f in little-endian IEEE 754)
 ```
 
 **Example:** Mute the output:
 ```
-bRequest = 0xD2, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+bRequest = 0x50, wValue = 0x0000, wIndex = 0x0502, wLength = 4
 Payload: [0x00, 0x00, 0x00, 0xC3]   (-128.0f in little-endian IEEE 754)
 ```
 
-### 3.2 REQ_GET_MASTER_VOLUME (0xD3)
+### 3.2 `ROUTE.MASTER_VOLUME` GET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xD3` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
+| **Direction** | Device -> Host (IN, `bmRequestType` 0xC1) |
+| **bRequest** | `0x50` |
+| **wValue** | 0 |
+| **wIndex** | `0x0502` |
 | **wLength** | 4 |
 | **Response** | 4 bytes: IEEE 754 float, little-endian |
 
@@ -188,39 +196,39 @@ Returns the current master volume in dB. Returns -128.0 if muted, or a value in 
 [0x00, 0x00, 0x00, 0xC3]   (-128.0f)
 ```
 
-### 3.3 REQ_SET_MASTER_VOLUME_MODE (0xD4)
+### 3.3 `ROUTE.MASTER_VOLUME_MODE` SET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xD4` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
+| **Direction** | Host -> Device (OUT, `bmRequestType` 0x41) |
+| **bRequest** | `0x51` |
+| **wValue** | 0 |
+| **wIndex** | `0x0502` |
 | **wLength** | 1 |
 | **Payload** | 1 byte: `0x00` = independent (default), `0x01` = with preset |
 
 **Firmware behavior:**
-1. Reads byte 0 from the vendor receive buffer.
-2. Clamps values outside `[0, 1]` to `0`.
+1. Reads byte 0 of the payload.
+2. Stores `0` for any value outside `[0, 1]`.
 3. Updates the `master_volume_mode` field in the directory cache.
 4. Sets a pending flag for a deferred flash write on the next main loop iteration.
 
-**Validation:** Minimum payload length = 1 byte. Shorter payloads are silently ignored.
+**Validation:** The payload must be exactly 1 byte, otherwise the SET STALLs with `VC_ERR_LENGTH`.
 
 **Example:** Switch to mode 1 (volume lives inside presets):
 ```
-bRequest = 0xD4, wValue = 0x0000, wIndex = 0x0000, wLength = 1
+bRequest = 0x51, wValue = 0x0000, wIndex = 0x0502, wLength = 1
 Payload: [0x01]
 ```
 
-### 3.4 REQ_GET_MASTER_VOLUME_MODE (0xD5)
+### 3.4 `ROUTE.MASTER_VOLUME_MODE` GET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xD5` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
+| **Direction** | Device -> Host (IN, `bmRequestType` 0xC1) |
+| **bRequest** | `0x51` |
+| **wValue** | 0 |
+| **wIndex** | `0x0502` |
 | **wLength** | 1 |
 | **Response** | 1 byte: `0x00` = independent, `0x01` = with preset |
 
@@ -229,43 +237,42 @@ Payload: [0x01]
 [0x00]
 ```
 
-### 3.5 REQ_SAVE_MASTER_VOLUME (0xD6)
+### 3.5 `ROUTE.MASTER_VOLUME_SAVE`
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xD6` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 1 |
-| **Response** | 1 byte: status code (`PRESET_OK` = 0 on acceptance) |
+| **Direction** | Host -> Device (OUT, `bmRequestType` 0x41) |
+| **bRequest** | `0x52` |
+| **wValue** | 0 |
+| **wIndex** | `0x0502` |
+| **wLength** | 0 |
+| **Response** | None. Success is the ACK of the status stage |
 
-Action-style command: copies the current live `master_volume_db` into the directory's independent storage field and flushes the directory sector to flash. This is the command that makes a chosen master volume survive a power cycle in mode 0. Follows the same request shape as `REQ_FACTORY_RESET` — an IN control transfer with a 1-byte status response, no OUT payload.
+Action command: copies the current live `master_volume_db` into the directory's independent storage field and flushes the directory sector to flash. This is the command that makes a chosen master volume survive a power cycle in mode 0. It is a zero-length SET, like `STORE.FACTORY_RESET`. Firmware 1.1.6 issued it as an IN transfer (opcode 0xD6) that returned a 1-byte `PRESET_OK` status. That status byte is gone.
 
 **Firmware behavior:**
 1. Sets a pending flag for a deferred flash write on the next main loop iteration.
-2. Returns `PRESET_OK` (0) immediately — the status confirms acceptance, not completion of the flash write. The subsequent main-loop dispatch captures the then-current live `master_volume_db` value and writes it to the directory.
+2. ACKs immediately. The ACK confirms acceptance, not completion of the flash write. The subsequent main-loop dispatch captures the then-current live `master_volume_db` value and writes it to the directory.
 
-**Accepted in both modes.** In mode 1 the stored value is dormant until the user switches to mode 0, so the app can issue this command regardless of mode without a pre-check. No error is surfaced for a "wrong mode" — the write simply becomes inert.
+**Accepted in both modes.** In mode 1 the stored value is dormant until the user switches to mode 0, so the app can issue this command regardless of mode without a pre-check. No error is surfaced for a "wrong mode". The write simply becomes inert.
 
 **Example:** Persist the currently active master volume:
 ```
-bmRequestType = 0xC0, bRequest = 0xD6, wValue = 0x0000, wIndex = 0x0000, wLength = 1
-Response: [0x00]   (PRESET_OK)
+bmRequestType = 0x41, bRequest = 0x52, wValue = 0x0000, wIndex = 0x0502, wLength = 0
 ```
 
-### 3.6 REQ_GET_SAVED_MASTER_VOLUME (0xD7)
+### 3.6 `ROUTE.MASTER_VOLUME_SAVED`
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xD7` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
+| **Direction** | Device -> Host (IN, `bmRequestType` 0xC1) |
+| **bRequest** | `0x53` |
+| **wValue** | 0 |
+| **wIndex** | `0x0502` |
 | **wLength** | 4 |
 | **Response** | 4 bytes: IEEE 754 float, little-endian |
 
-Returns the value stored in the directory's independent master-volume field — i.e., the value the device would apply at boot in mode 0. Independent of the current live value and the current mode. Useful for showing "saved value" and "current value" side by side in the UI, or offering a "revert" button.
+Returns the value stored in the directory's independent master-volume field. That is the value the device would apply at boot in mode 0. Independent of the current live value and the current mode. Useful for showing "saved value" and "current value" side by side in the UI, or offering a "revert" button.
 
 **Example response** (saved value is -12.0 dB):
 ```
@@ -318,18 +325,17 @@ The `WireMasterVolume` section was introduced in `WIRE_FORMAT_VERSION` 6.
 | V1-V5 | No | Master volume defaults to 0.0 dB (unity) |
 | V6+ | Yes | Master volume parsed and applied |
 
-When the firmware receives a SET (0xA1) with `format_version` < 6, master volume is set to 0.0 dB (unity). The device behaves identically to pre-master-volume firmware.
+When the firmware receives a `STORE.ALL_PARAMS` SET with `format_version` < 6, master volume is set to 0.0 dB (unity). The device behaves identically to pre-master-volume firmware.
 
-When the firmware sends a GET (0xA0), the `WireMasterVolume` section is always populated with the current value and `format_version` is set to the current version.
+When the firmware answers a `STORE.ALL_PARAMS` GET, the `WireMasterVolume` section is always populated with the current value and `format_version` is set to the current version.
 
-**Bulk SET behavior:** The master volume from a bulk SET is always applied to the live `master_volume_db` global, regardless of `master_volume_mode`. Bulk SET is an in-memory state push — it does not touch the directory's independent storage field (that requires an explicit `REQ_SAVE_MASTER_VOLUME`). Mode 0 users who want a bulk-pushed value to survive a reboot must follow the bulk SET with a `REQ_SAVE_MASTER_VOLUME`.
+**Bulk SET behavior:** The master volume from a bulk SET is always applied to the live `master_volume_db` global, regardless of `master_volume_mode`. Bulk SET is an in-memory state push. It does not touch the directory's independent storage field (that requires an explicit `ROUTE.MASTER_VOLUME_SAVE`). Mode 0 users who want a bulk-pushed value to survive a reboot must follow the bulk SET with a `ROUTE.MASTER_VOLUME_SAVE`.
 
 ### Bulk transfer commands
 
-| Command | Code | Direction | Description |
-|---------|------|-----------|-------------|
-| `REQ_GET_ALL_PARAMS` | 0xA0 | Device -> Host | Returns full `WireBulkParams` (2896 bytes) |
-| `REQ_SET_ALL_PARAMS` | 0xA1 | Host -> Device | Applies full `WireBulkParams` to live state |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Description |
+|---|---|---|---|---|---|---|
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | GET returns the full `WireBulkParams` (2896 bytes at V6, 6136 at V32). SET applies it to live state |
 
 ---
 
@@ -361,7 +367,7 @@ At `version = 2`:
 
 ### Save behavior (preset save)
 
-When `REQ_PRESET_SAVE` (0x90) is issued, the current live master volume is **always** saved into the preset slot, regardless of mode:
+When `STORE.PRESET_SAVE` is issued, the current live master volume is **always** saved into the preset slot, regardless of mode:
 
 ```
 slot->master_volume_db = master_volume_db;
@@ -371,11 +377,11 @@ This ensures the preset always contains a complete snapshot of the device state.
 
 ### Save behavior (independent storage, mode 0)
 
-When `REQ_SAVE_MASTER_VOLUME` (0xD6) is issued, the current live master volume is copied to `PresetDirectory.master_volume_db` and the directory sector is flushed to flash. This is the write that makes the chosen volume survive a power cycle in mode 0. Issuing this command in mode 1 is accepted but dormant (see Section 3.5).
+When `ROUTE.MASTER_VOLUME_SAVE` is issued, the current live master volume is copied to `PresetDirectory.master_volume_db` and the directory sector is flushed to flash. This is the write that makes the chosen volume survive a power cycle in mode 0. Issuing this command in mode 1 is accepted but dormant (see Section 3.5).
 
 ### Load behavior (preset load)
 
-When `REQ_PRESET_LOAD` (0x91) is issued, master volume is applied as follows:
+When `STORE.PRESET_LOAD` is issued, master volume is applied as follows:
 
 - **Mode 1 AND slot version >= 12:** Master volume is restored from `slot->master_volume_db`.
 - **Mode 1 AND slot version < 12:** Master volume falls back to `PresetDirectory.master_volume_db` (the slot predates master volume support, so there's nothing to restore).
@@ -384,7 +390,7 @@ When `REQ_PRESET_LOAD` (0x91) is issued, master volume is applied as follows:
 
 ### Factory defaults
 
-Applied on factory reset (`REQ_FACTORY_RESET` / 0x53) and on loading an empty or corrupt slot:
+Applied on factory reset (`STORE.FACTORY_RESET`) and on loading an empty or corrupt slot:
 
 | Path | master_volume_db applied |
 |------|--------------------------|
@@ -413,7 +419,7 @@ On device startup:
 
 ### Preset directory response
 
-The `REQ_PRESET_GET_DIR` (0x95) response is still 7 bytes; byte [6] now carries `master_volume_mode` instead of `include_master_volume`. The numeric value space is unchanged (0 or 1):
+The `STORE.DIRECTORY` response is 7 bytes; byte [6] carries `master_volume_mode` instead of `include_master_volume`. The numeric value space is unchanged (0 or 1):
 
 | Byte | Field | Description |
 |------|-------|-------------|
@@ -424,7 +430,7 @@ The `REQ_PRESET_GET_DIR` (0x95) response is still 7 bytes; byte [6] now carries 
 | 5 | `include_pins` | 0 = don't restore pins on load, 1 = restore |
 | 6 | `master_volume_mode` | 0 = independent, 1 = with preset |
 
-Apps requesting the old 6-byte size still work (USB truncates to `wLength`). Apps that want the mode byte must request `wLength >= 7`. The renamed field at byte [6] is numerically compatible with apps written for `include_master_volume`: value 1 still means "preset restores master volume" in both interpretations, and value 0 still means "preset does not restore" (with the new semantic that the device instead applies an independent stored value at boot).
+A GET shorter than 7 bytes is truncated to `wLength`. Apps that want the mode byte must request `wLength >= 7`. The renamed field at byte [6] is numerically compatible with apps written for `include_master_volume`: value 1 still means "preset restores master volume" in both interpretations, and value 0 still means "preset does not restore" (with the new semantic that the device instead applies an independent stored value at boot).
 
 ---
 
@@ -439,21 +445,21 @@ On app startup or when connecting to a device, read the master volume. You have 
 **Option A: Individual GET command (1 transfer)**
 
 ```
-GET 0xD3 -> master_volume_db  (4 bytes, float)
+GET ROUTE.MASTER_VOLUME -> master_volume_db  (4 bytes, float)
 ```
 
 **Option B: Bulk parameter GET (1 transfer, recommended)**
 
-Issue `REQ_GET_ALL_PARAMS` (0xA0). The response is a `WireBulkParams` struct (2896 bytes). Parse the `WireMasterVolume` at byte offset 2880 (the last 16 bytes). Check `header.format_version >= 6`; if the format version is older, master volume is not present and should be displayed as 0.0 dB.
+Issue a `STORE.ALL_PARAMS` GET. The response is a `WireBulkParams` struct (2896 bytes at V6). Parse the `WireMasterVolume` at byte offset 2880 (the last 16 bytes). Check `header.format_version >= 6`; if the format version is older, master volume is not present and should be displayed as 0.0 dB.
 
 Also read the mode and the saved independent value:
 
 ```
-GET 0xD5 -> master_volume_mode          (1 byte; 0 = independent, 1 = with preset)
-GET 0xD7 -> saved_master_volume_db      (4 bytes; float)
+GET ROUTE.MASTER_VOLUME_MODE  -> master_volume_mode      (1 byte; 0 = independent, 1 = with preset)
+GET ROUTE.MASTER_VOLUME_SAVED -> saved_master_volume_db  (4 bytes; float)
 ```
 
-Or parse byte 6 of the `REQ_PRESET_GET_DIR` (0x95) response (request `wLength = 7`) for `master_volume_mode`.
+Or parse byte 6 of the `STORE.DIRECTORY` response (request `wLength = 7`) for `master_volume_mode`.
 
 ### Step 2: Build the UI
 
@@ -485,71 +491,73 @@ float db_to_slider(float db) {
 - Option 0 (default): "Master volume is independent of presets"
 - Option 1: "Master volume is part of each preset"
 - Consider offering a "Save as boot default" button next to the volume slider. In mode 0 this button is the primary way to persist the current volume; in mode 1 it still works (writes to the independent storage) but is less meaningful until the user switches modes.
-- A "Revert to saved" button can call `GET 0xD7` and then `SET 0xD2` to pull the stored value back into the live state.
+- A "Revert to saved" button can call `ROUTE.MASTER_VOLUME_SAVED` and then a `ROUTE.MASTER_VOLUME` SET to pull the stored value back into the live state.
 
 ### Step 3: Send SET commands on user interaction
 
 When the user changes the volume slider, send the corresponding SET command immediately:
 
 ```c
+// usb_vendor_out/in(bRequest, wIndex, buf, len) send wValue 0.
+// ROUTE is page 0x05, so wIndex = (0x05 << 8) | 2.
+#define ROUTE_WINDEX 0x0502
+
 // User drags slider to -12.0 dB
 float vol = -12.0f;
 uint8_t payload[4];
 memcpy(payload, &vol, 4);  // little-endian on ARM/x86
-usb_vendor_out(0xD2, payload, 4);
+usb_vendor_out(0x50, ROUTE_WINDEX, payload, 4);   // ROUTE.MASTER_VOLUME
 
 // User presses mute toggle
 float mute = -128.0f;
 memcpy(payload, &mute, 4);
-usb_vendor_out(0xD2, payload, 4);
+usb_vendor_out(0x50, ROUTE_WINDEX, payload, 4);
 
 // User unmutes (restore previous volume)
 float restore = -12.0f;  // app remembers the pre-mute value
 memcpy(payload, &restore, 4);
-usb_vendor_out(0xD2, payload, 4);
+usb_vendor_out(0x50, ROUTE_WINDEX, payload, 4);
 
 // User toggles mode to "with preset"
 uint8_t mode = 1;
-usb_vendor_out(0xD4, &mode, 1);
+usb_vendor_out(0x51, ROUTE_WINDEX, &mode, 1);     // ROUTE.MASTER_VOLUME_MODE
 
 // User clicks "Save as boot default" (mode 0 persistence).
-// REQ_SAVE_MASTER_VOLUME is an IN-shaped action command like REQ_FACTORY_RESET:
-// host issues a 1-byte IN transfer, device responds with status (0 = accepted).
-uint8_t status;
-usb_vendor_in(0xD6, &status, 1);
+// ROUTE.MASTER_VOLUME_SAVE is a zero-length SET. Success is the ACK.
+usb_vendor_out(0x52, ROUTE_WINDEX, NULL, 0);
 
 // User clicks "Revert to saved"
 float saved;
-usb_vendor_in(0xD7, &saved, 4);
-usb_vendor_out(0xD2, &saved, 4);
+usb_vendor_in(0x53, ROUTE_WINDEX, &saved, 4);     // ROUTE.MASTER_VOLUME_SAVED
+usb_vendor_out(0x50, ROUTE_WINDEX, &saved, 4);
 ```
 
-**Important:** The firmware applies the new master volume value immediately (within the next audio callback, typically < 1ms). There is no pending/deferred mechanism for master volume itself -- unlike EQ coefficient updates, master volume is a single float that can be applied atomically. There is no acknowledgment; if the USB transfer completes successfully, the value was accepted.
+**Important:** The firmware applies the new master volume value immediately (within the next audio callback, typically < 1ms). There is no pending/deferred mechanism for master volume itself -- unlike EQ coefficient updates, master volume is a single float that can be applied atomically. There is no reply payload. If the USB transfer completes without a STALL, the value was accepted.
 
 ### Step 4: Handle preset load events
 
-When the user loads a preset (via `REQ_PRESET_LOAD` / 0x91), the master volume may or may not change depending on `master_volume_mode`. In mode 0 it is guaranteed not to change; in mode 1 it is replaced by the slot's saved value. After a preset load, re-read the master volume to update the UI:
+When the user loads a preset (via `STORE.PRESET_LOAD`), the master volume may or may not change depending on `master_volume_mode`. In mode 0 it is guaranteed not to change; in mode 1 it is replaced by the slot's saved value. After a preset load, re-read the master volume to update the UI:
 
 ```
-GET 0xD3 -> update volume slider / mute state
+GET ROUTE.MASTER_VOLUME -> update volume slider / mute state
 ```
 
-Or use a single bulk GET (0xA0) to refresh all parameters at once. This is the preferred approach since a preset load affects all DSP parameters.
+Or use a single `STORE.ALL_PARAMS` GET to refresh all parameters at once. This is the preferred approach since a preset load affects all DSP parameters.
 
 ### Step 5: Handle bulk transfers
 
 If your app uses bulk parameter transfers for configuration backup/restore:
 
-**Reading (GET 0xA0):**
+**Reading (`STORE.ALL_PARAMS` GET):**
 1. Parse the full `WireBulkParams` response.
 2. Check `header.format_version`. If < 6, the `WireMasterVolume` section is not present; display 0.0 dB.
 3. If >= 6, read `WireMasterVolume` at offset 2880.
 
-**Writing (SET 0xA1):**
+**Writing (`STORE.ALL_PARAMS` SET):**
 1. Populate `WireMasterVolume` in the `WireBulkParams` struct.
 2. Set `header.format_version` to the current version (6 or later).
 3. Send the complete struct.
-4. Bulk SET always applies master volume to the live globals regardless of `master_volume_mode`. It does **not** update the independent storage field — if the user is in mode 0 and expects the pushed value to survive a reboot, follow the bulk SET with `REQ_SAVE_MASTER_VOLUME` (0xD6).
+4. Bulk SET always applies master volume to the live globals regardless of `master_volume_mode`. It does **not** update the independent storage field. If the user is in mode 0 and expects the pushed value to survive a reboot, follow the bulk SET with `ROUTE.MASTER_VOLUME_SAVE`.
 
 ### Step 6: Mute implementation pattern
 
@@ -574,7 +582,7 @@ void on_mute_toggle() {
 
 void on_connect() {
     float vol;
-    GET 0xD3 -> vol;
+    GET ROUTE.MASTER_VOLUME -> vol;
     if (vol <= -128.0f) {
         is_muted = true;
         saved_master_vol = 0.0f;  // no way to know pre-mute value
@@ -607,23 +615,18 @@ Devices running firmware built before the mode-flag refactor have a `PresetDirec
 3. The migrated cache is flushed to flash as `version = 2`. The migration is transparent and one-shot.
 4. If the v1 CRC fails to validate, the fresh-directory path runs — identical to a first-ever boot. User-visible directory state (slot names, startup config, slot occupancy) would be lost, but slot contents remain intact.
 
-Behavior across the upgrade: old `include_master_volume == 1` devices continue to restore master volume from each loaded preset, unchanged. Old `include_master_volume == 0` devices previously booted at 0 dB (unity); after upgrade they boot at `MASTER_VOL_DEFAULT_DB` (-20 dB) until the user issues `REQ_SAVE_MASTER_VOLUME` to persist a different value. Quieter, safer — not louder.
+Behavior across the upgrade: old `include_master_volume == 1` devices continue to restore master volume from each loaded preset, unchanged. Old `include_master_volume == 0` devices previously booted at 0 dB (unity); after upgrade they boot at `MASTER_VOL_DEFAULT_DB` (-20 dB) until the user issues `ROUTE.MASTER_VOLUME_SAVE` to persist a different value. Quieter and safer, not louder.
 
-### Old apps with new firmware
+### Hosts and firmware 1.1.7
 
-Apps that do not know about master volume will never send `REQ_SET_MASTER_VOLUME` (0xD2). Device-side boot behavior continues to be governed by `PresetDirectory.master_volume_db` (mode 0, unity by default) or the loaded preset (mode 1) — same as before on devices that were already in that state.
+Firmware 1.1.7 speaks only the paged protocol, so a host built for 1.1.6 cannot drive master volume on it (every page 0 request is refused). On paged firmware there is nothing to probe. Every paged firmware has all four `ROUTE.MASTER_VOLUME*` commands, and a host that gates on the command table can check their bits in `SYS.PAGE_COMMANDS` for page 0x05.
 
-Apps written for the old `REQ_SET_INCLUDE_MASTER_VOL` / `REQ_GET_INCLUDE_MASTER_VOL` semantics (commands `0xD4` / `0xD5`) continue to work: the command IDs are unchanged, the payloads are still `uint8_t` in `[0, 1]`, and the numeric mapping is 1:1 (value `1` still means "preset restores master volume"; value `0` now means "use independent storage" with a default of 0 dB, which matches the pre-refactor "don't restore on load" boot behavior).
+The rest of this section applies to hosts that still support firmware 1.1.6 and older, where the commands were opcodes 0xD2/0xD3 (volume), 0xD4/0xD5 (mode), 0xD6 (save) and 0xD7 (saved value).
 
-The new commands (`0xD6` `REQ_SAVE_MASTER_VOLUME`, `0xD7` `REQ_GET_SAVED_MASTER_VOLUME`) are additive — old apps that don't issue them are unaffected.
-
-### New apps with old firmware
-
-Apps that send `REQ_SET_MASTER_VOLUME` (0xD2) to firmware that does not support it will receive a USB STALL response. The same is true of the new `0xD6` / `0xD7` commands on firmware that predates them.
-
-Detection strategy:
-- **Master volume feature present?** Attempt `REQ_GET_MASTER_VOLUME` (0xD3). If success, feature is present.
-- **Mode/save API present (vs. the old include-flag API)?** Attempt `REQ_GET_SAVED_MASTER_VOLUME` (0xD7). If it succeeds, the refactored API is in place and the app can use mode 0 independent persistence. If it STALLs, the firmware still speaks the old `include_master_volume` semantics at 0xD4/0xD5 — the app can fall back to treating the byte-6 field of `REQ_PRESET_GET_DIR` as a classic include flag.
+- Apps written for the include-flag semantics of 0xD4/0xD5 work unchanged on firmware that has the mode refactor. The payloads are still `uint8_t` in `[0, 1]` and the numeric mapping is 1:1 (value `1` still means "preset restores master volume"; value `0` now means "use independent storage" with a default of 0 dB, which matches the pre-refactor "don't restore on load" boot behavior).
+- Firmware without master volume STALLs 0xD2 and 0xD3. Firmware that predates the mode refactor STALLs 0xD6 and 0xD7.
+- **Master volume feature present?** Attempt 0xD3. If it succeeds, the feature is present.
+- **Mode/save API present (vs. the old include-flag API)?** Attempt 0xD7. If it succeeds, the refactored API is in place and the app can use mode 0 independent persistence. If it STALLs, the firmware still speaks the old `include_master_volume` semantics at 0xD4/0xD5, and the app can fall back to treating byte 6 of the directory response (opcode 0x95) as a classic include flag.
 
 ### Old presets
 

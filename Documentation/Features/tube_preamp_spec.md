@@ -1,5 +1,7 @@
 # Tube Preamp Emulation Specification
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 The tube preamp ("tube") adds valve-style harmonic colour, compression and, optionally, the output-stage response of a tube amplifier driving a loudspeaker to any selected output channel. It is a per-output effect module in the same family as Psychoacoustic Bass and the Subharmonic Synthesizer: one global configuration, a 16-bit output mask, shared double-buffered coefficients, per-output filter state, zero added latency.
@@ -203,16 +205,30 @@ Output level applied to the wet path only.
 
 ### USB (primary transport)
 
-Vendor control requests on the DSPi vendor interface, as for every other module. UART and I2C reach the same handlers through the shared dispatcher with no per-command table to update.
+Vendor control requests on the DSPi vendor interface, as for every other module, on the paged protocol (page in the `wIndex` high byte, command in `bRequest`, see `../commands.md`). UART and I2C reach the same handlers through the paged dispatcher (`vc_dispatch()`, handlers in `firmware/DSPi/vendor/vc_page_fx.c`).
 
 ### Command summary
 
-| Command | Code | Dir | wValue | Payload / Response |
-|---|---|---|---|---|
-| `REQ_SET_TUBE_PARAM` | 0x3E | OUT | parameter index (0..13) | 4-byte float32 LE |
-| `REQ_GET_TUBE_PARAM` | 0x3F | IN | parameter index (0..13) | 4-byte float32 LE |
+One command per parameter, in `TUBE_PARAM_*` order. The command number is 0x60 plus the parameter index of section 2. Every value is a 4-byte float32 LE in both directions.
 
-The index travels in the low byte of wValue on both SET and GET, matching the existing indexed pin commands. An out-of-range index makes the SET a no-op and the GET STALL. A SET shorter than 4 bytes is a no-op.
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Index | Field |
+|---|---|---|---|---|---|---|---|
+| `FX.TUBE_ENABLE` | 0x08 | 0x60 | GET, SET | none (0) | GET 4, SET 4 | 0 | `enabled` |
+| `FX.TUBE_OUTPUT_MASK` | 0x08 | 0x61 | GET, SET | none (0) | GET 4, SET 4 | 1 | `output_mask` |
+| `FX.TUBE_TYPE` | 0x08 | 0x62 | GET, SET | none (0) | GET 4, SET 4 | 2 | `tube_type` |
+| `FX.TUBE_DRIVE` | 0x08 | 0x63 | GET, SET | none (0) | GET 4, SET 4 | 3 | `drive_db` |
+| `FX.TUBE_BIAS` | 0x08 | 0x64 | GET, SET | none (0) | GET 4, SET 4 | 4 | `bias_pct` |
+| `FX.TUBE_ASYM` | 0x08 | 0x65 | GET, SET | none (0) | GET 4, SET 4 | 5 | `asym_db` |
+| `FX.TUBE_HARDNESS` | 0x08 | 0x66 | GET, SET | none (0) | GET 4, SET 4 | 6 | `hardness_pct` |
+| `FX.TUBE_SAG` | 0x08 | 0x67 | GET, SET | none (0) | GET 4, SET 4 | 7 | `sag_pct` |
+| `FX.TUBE_RECTIFIER` | 0x08 | 0x68 | GET, SET | none (0) | GET 4, SET 4 | 8 | `rectifier` |
+| `FX.TUBE_XFMR_ENABLE` | 0x08 | 0x69 | GET, SET | none (0) | GET 4, SET 4 | 9 | `xfmr_enabled` |
+| `FX.TUBE_XFMR_DAMPING` | 0x08 | 0x6A | GET, SET | none (0) | GET 4, SET 4 | 10 | `xfmr_damping` |
+| `FX.TUBE_XFMR_RES` | 0x08 | 0x6B | GET, SET | none (0) | GET 4, SET 4 | 11 | `xfmr_res_hz` |
+| `FX.TUBE_MIX` | 0x08 | 0x6C | GET, SET | none (0) | GET 4, SET 4 | 12 | `mix_pct` |
+| `FX.TUBE_TRIM` | 0x08 | 0x6D | GET, SET | none (0) | GET 4, SET 4 | 13 | `trim_db` |
+
+None of these commands takes an address, so `wValue` must be 0 (anything else is `VC_ERR_ADDRESS`). A SET payload other than exactly 4 bytes is `VC_ERR_LENGTH`. A NaN is refused with `VC_ERR_VALUE` and stores nothing. Infinity and other out-of-range values are clamped to the end of the range. A rejected SET STALLs on USB and the reason is readable from `SYS.LAST_RESULT`.
 
 ### Apply semantics
 
@@ -224,7 +240,7 @@ Every SET calls `notify_param_write` at each field it writes, at that field's `W
 
 ---
 
-## 4. Bulk Wire Format (GET/SET_ALL_PARAMS 0xA0/0xA1)
+## 4. Bulk Wire Format (`STORE.ALL_PARAMS`)
 
 Wire format version **31** appends `WireTubeParams` (48 bytes) after the subharm section at offset 5980, for a total of 6028 bytes.
 
@@ -267,7 +283,7 @@ Read the bulk parameter block (V31 or later) and populate the UI from the tube s
 
 ### Live control
 
-Send `REQ_SET_TUBE_PARAM` per knob change. The firmware clamps and notifies, so a second host or a front panel stays in sync from the notification stream.
+Send the parameter's `FX.TUBE_*` SET per knob change. The firmware clamps and notifies, so a second host or a front panel stays in sync from the notification stream.
 
 ### Typical UI
 
@@ -286,11 +302,11 @@ Send `REQ_SET_TUBE_PARAM` per knob change. The firmware clamps and notifies, so 
 
 ### Feature detection
 
-Firmware wire format version >= 31, or a non-STALL response to `REQ_GET_TUBE_PARAM` index 0.
+Every firmware that speaks the paged protocol (1.1.7 and later) has the tube commands. A host may check the GET bit of `FX.TUBE_ENABLE` in `SYS.PAGE_COMMANDS` for page 0x08, or the FX page revision in `SYS.PAGE_LIST`. Firmware 1.1.6 and older does not answer the paged protocol (`vendor_command_overhaul_plan.md` section 5.14).
 
 ### Control Surfaces
 
-Caps version 19 adds four nouns so panels and IR remotes can drive the effect: `CS_NOUN_TUBE` (bool), `CS_NOUN_TUBE_DRIVE` (continuous dB -30..24, taken from `TUBE_DRIVE_MIN` and `TUBE_DRIVE_MAX`), `CS_NOUN_TUBE_TYPE` (enum, 17 values), `CS_NOUN_TUBE_MIX` (continuous percent 0..100). Each maps to the indexed SET with the parameter index in wValue.
+Caps version 19 adds four nouns so panels and IR remotes can drive the effect: `CS_NOUN_TUBE` (bool), `CS_NOUN_TUBE_DRIVE` (continuous dB -30..24, taken from `TUBE_DRIVE_MIN` and `TUBE_DRIVE_MAX`), `CS_NOUN_TUBE_TYPE` (enum, 17 values), `CS_NOUN_TUBE_MIX` (continuous percent 0..100). Each maps to the SET of its own command: `FX.TUBE_ENABLE`, `FX.TUBE_DRIVE`, `FX.TUBE_TYPE` and `FX.TUBE_MIX`.
 
 ---
 
@@ -317,4 +333,4 @@ Caps version 19 adds four nouns so panels and IR remotes can drive the effect: `
 - **Measured footprint (2026-09-20 builds):** RP2350 kernel 660 B of RAM text, `.data` 91,288 of the 92,160 B budget, BSS +560 B, free RAM 77,520 B. RP2040 kernel 1,212 B of RAM text (1,196 B after the 2026-09-28 drive-floor change), `.data` 64,448 of 65,536, BSS +460 B, free RAM 46,756 B. Neither placement budget needed raising.
 - **Cost:** the branchy first build metered about 2 % CPU per output at 48 kHz on RP2350 (307.2 MHz); the branch-free build meters just over 1 % per output under the same conditions (2026-09-19). Arithmetic alone is about 30 FP ops per sample per output with the output stage off and about 50 with it on (the bell is 13 ops, the shelf 6). On RP2040, 10 `fast_mul_q28` per sample base, plus one with sag on, one on the negative half, and seven with the output stage on (12 to 19 typical), unmeasured.
 - **Versions:** wire V31, slot V38, Control Surfaces caps v19.
-- **Vendor commands:** 0x3E, 0x3F.
+- **Vendor commands:** `FX.TUBE_ENABLE` to `FX.TUBE_TRIM` (page 0x08, commands 0x60-0x6D).

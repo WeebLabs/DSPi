@@ -1,5 +1,7 @@
 # Per-Channel Preamp Specification
 
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7, legacy all-channel commands retired)*
+
 ## 1. Overview
 
 The Per-Channel Preamp provides independent gain control for each USB input channel. Previously, a single global preamp value was applied identically to both USB L and R input channels. Now each input channel has its own preamp gain, enabling independent left/right level adjustment before any downstream processing.
@@ -8,7 +10,7 @@ The Per-Channel Preamp provides independent gain control for each USB input chan
 
 - **Per-channel gain:** Each input channel (USB L, USB R) has an independent preamp gain value in dB.
 - **First in the DSP chain:** Applied during PASS 1 (input conversion), before EQ, leveller, crossfeed, matrix mixing, and output processing.
-- **Full backward compatibility:** Legacy single-value commands still work, setting all channels to the same value.
+- **One command per channel:** `ROUTE.PREAMP` addresses one input channel. The legacy all-channel commands of firmware 1.1.6 (opcodes 0x44/0x45) are retired in 1.1.7.
 - **No firmware-side linking:** Linked mode (both channels adjust together) is an app-side concept. The firmware always stores and applies per-channel values independently.
 
 ### Signal chain position
@@ -55,10 +57,7 @@ The array is sized by `NUM_INPUT_CHANNELS`: **2 on RP2040**, **8 on RP2350** (in
 | **Type** | `float` (IEEE 754 single-precision) |
 | **Range** | No firmware-enforced range (any float accepted) |
 | **Default** | 0.0 (unity gain) |
-| **SET command (per-channel)** | `0xD0` (`REQ_SET_PREAMP_CH`) |
-| **GET command (per-channel)** | `0xD1` (`REQ_GET_PREAMP_CH`) |
-| **SET command (legacy, all channels)** | `0x44` (`REQ_SET_PREAMP`) |
-| **GET command (legacy, channel 0)** | `0x45` (`REQ_GET_PREAMP`) |
+| **Command** | `ROUTE.PREAMP` (page 0x05, command 0x40), GET and SET, input channel in `wValue` |
 | **Payload** | 4 bytes: little-endian IEEE 754 float (dB value) |
 
 Controls the input gain for a specific channel. Negative values attenuate, positive values boost. The conversion from dB to a linear multiplier uses:
@@ -77,116 +76,78 @@ Common values:
 | +6.0 | 1.995 | Double voltage |
 | +12.0 | 3.981 | 4x voltage |
 
-**No range clamping:** The firmware does not clamp dB values to any range. The app is responsible for enforcing sensible limits in its UI (e.g., -24 dB to +24 dB). However, NaN and infinity values are silently rejected (the preamp value is left unchanged) to prevent audio path corruption.
+**No range clamping:** The firmware does not clamp dB values to any range. The app is responsible for enforcing sensible limits in its UI (e.g., -24 dB to +24 dB). However, a NaN or infinite value is refused with `VC_ERR_VALUE` (the SET STALLs and the preamp value is left unchanged) to prevent audio path corruption.
 
 ### Parameter summary
 
-| Parameter | Type | Range | Default | SET | GET | Payload |
-|-----------|------|-------|---------|-----|-----|---------|
-| preamp_db (per-ch) | float | unrestricted | 0.0 | 0xD0 | 0xD1 | 4 bytes (LE float) |
-| preamp_db (legacy) | float | unrestricted | 0.0 | 0x44 | 0x45 | 4 bytes (LE float) |
+| Parameter | Type | Range | Default | Command | Payload |
+|-----------|------|-------|---------|---------|---------|
+| preamp_db (per-ch) | float | unrestricted (finite) | 0.0 | `ROUTE.PREAMP` | 4 bytes (LE float) |
 
 ---
 
 ## 3. Vendor Command Reference
 
-All commands use USB EP0 vendor control transfers on the vendor interface (interface 2). SET commands are host-to-device (OUT) with data in the payload. GET commands are device-to-host (IN) with the response in the data phase.
+The preamp uses one command of the paged protocol (see `../commands.md`). The page travels in the high byte of `wIndex` and the vendor interface (2) in the low byte, so every request carries `wIndex` 0x0502.
 
-### 3.1 REQ_SET_PREAMP_CH (0xD0) -- Per-Channel SET
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `ROUTE.PREAMP` | 0x05 | 0x40 | GET, SET | input channel 0 to `NUM_INPUT_CHANNELS` - 1 | GET 4, SET 4 |
+
+### 3.1 `ROUTE.PREAMP` SET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0xD0` |
-| **wValue** | Channel index (0 = USB L, 1 = USB R) |
-| **wIndex** | Unused (0) |
+| **Direction** | Host -> Device (OUT, `bmRequestType` 0x41) |
+| **bRequest** | `0x40` |
+| **wValue** | Input channel index (0 = USB L, 1 = USB R) |
+| **wIndex** | `0x0502` |
 | **wLength** | 4 |
 | **Payload** | 4 bytes: IEEE 754 float, little-endian (dB value) |
 
 **Firmware behavior:**
-1. Validates `wValue` < `NUM_INPUT_CHANNELS`. If out of range, the command is silently ignored.
-2. Reads 4 bytes from the vendor receive buffer as a float via `memcpy`.
+1. The dispatcher checks `wValue` < `NUM_INPUT_CHANNELS` and the payload length of exactly 4. A bad channel STALLs with `VC_ERR_ADDRESS` and a wrong length with `VC_ERR_LENGTH`.
+2. A NaN or infinite value STALLs with `VC_ERR_VALUE` and stores nothing.
 3. Stores the dB value in `preamp_db[wValue]`.
 4. Converts to linear gain: `preamp_linear[wValue] = powf(10.0f, db / 20.0f)`.
 5. On RP2040, also computes a Q28 fixed-point representation for the audio callback.
 
 **Example:** Set USB Right channel to +3.0 dB:
 ```
-bRequest = 0xD0, wValue = 0x0001, wIndex = 0x0000, wLength = 4
+bRequest = 0x40, wValue = 0x0001, wIndex = 0x0502, wLength = 4
 Payload: [0x00, 0x00, 0x40, 0x40]   (3.0f in little-endian IEEE 754)
 ```
 
 **Example:** Set USB Left channel to -6.0 dB:
 ```
-bRequest = 0xD0, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+bRequest = 0x40, wValue = 0x0000, wIndex = 0x0502, wLength = 4
 Payload: [0x00, 0x00, 0xC0, 0xC0]   (-6.0f in little-endian IEEE 754)
 ```
 
-### 3.2 REQ_GET_PREAMP_CH (0xD1) -- Per-Channel GET
+### 3.2 `ROUTE.PREAMP` GET
 
 | Field | Value |
 |-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0xD1` |
-| **wValue** | Channel index (0 = USB L, 1 = USB R) |
-| **wIndex** | Unused (0) |
+| **Direction** | Device -> Host (IN, `bmRequestType` 0xC1) |
+| **bRequest** | `0x40` |
+| **wValue** | Input channel index (0 = USB L, 1 = USB R) |
+| **wIndex** | `0x0502` |
 | **wLength** | 4 |
 | **Response** | 4 bytes: IEEE 754 float, little-endian (dB value) |
 
 **Firmware behavior:**
-1. Validates `wValue` < `NUM_INPUT_CHANNELS`. If out of range, returns 0.0 dB.
+1. A `wValue` at or above `NUM_INPUT_CHANNELS` STALLs with `VC_ERR_ADDRESS`. Firmware 1.1.6 returned 0.0 dB instead.
 2. Returns the dB value for the requested channel.
 
 **Example:** Get USB Left channel preamp:
 ```
-bRequest = 0xD1, wValue = 0x0000, wIndex = 0x0000, wLength = 4
+bRequest = 0x40, wValue = 0x0000, wIndex = 0x0502, wLength = 4
 Response: [0x00, 0x00, 0x40, 0x40]   (3.0f -- channel 0 is at +3.0 dB)
 ```
 
-### 3.3 REQ_SET_PREAMP (0x44) -- Legacy SET (All Channels)
+### 3.3 Retired legacy commands
 
-| Field | Value |
-|-------|-------|
-| **Direction** | Host -> Device (OUT) |
-| **bRequest** | `0x44` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Payload** | 4 bytes: IEEE 754 float, little-endian (dB value) |
-
-**Firmware behavior:**
-1. Reads 4 bytes from the vendor receive buffer as a float via `memcpy`.
-2. Sets ALL input channels to the same dB value: `preamp_db[i] = db` for all `i`.
-3. Converts to linear and Q28 representations for all channels.
-
-This command is retained for backward compatibility with apps that predate per-channel support. It is also useful for implementing linked mode (see section 7).
-
-**Example:** Set all channels to +6.0 dB:
-```
-bRequest = 0x44, wValue = 0x0000, wIndex = 0x0000, wLength = 4
-Payload: [0x00, 0x00, 0xC0, 0x40]   (6.0f in little-endian IEEE 754)
-```
-
-### 3.4 REQ_GET_PREAMP (0x45) -- Legacy GET (Channel 0 Only)
-
-| Field | Value |
-|-------|-------|
-| **Direction** | Device -> Host (IN) |
-| **bRequest** | `0x45` |
-| **wValue** | Unused (0) |
-| **wIndex** | Unused (0) |
-| **wLength** | 4 |
-| **Response** | 4 bytes: IEEE 754 float, little-endian (dB value) |
-
-**Firmware behavior:**
-1. Returns the dB value of **channel 0 only** (`preamp_db[0]`).
-
-**Important:** This command does NOT return the value of channel 1. If channels have different preamp values, this command only reflects channel 0. Always use `REQ_GET_PREAMP_CH` (0xD1) with the appropriate channel index to get accurate per-channel state.
-
-**Example response** (channel 0 at +6.0 dB):
-```
-[0x00, 0x00, 0xC0, 0x40]   (6.0f)
-```
+Firmware 1.1.6 also had an all-channel SET (opcode 0x44, set every input channel to one value) and a channel 0 GET (opcode 0x45). Both are retired in 1.1.7 and have no paged equivalent. A host sets each channel with `ROUTE.PREAMP` and reads each channel the same way.
 
 ---
 
@@ -253,14 +214,13 @@ On SET, if the incoming `format_version` is >= 6:
 | V2-V5 | No | Legacy `preamp_gain_db` applied to all channels |
 | V6+ | Yes | Per-channel values from `WirePreampConfig` applied |
 
-When the firmware sends a GET (0xA0), `WirePreampConfig` is always populated with current per-channel values and `format_version` is set to the current version.
+When the firmware answers a `STORE.ALL_PARAMS` GET, `WirePreampConfig` is always populated with current per-channel values and `format_version` is set to the current version.
 
 ### Bulk transfer commands
 
-| Command | Code | Direction | Description |
-|---------|------|-----------|-------------|
-| `REQ_GET_ALL_PARAMS` | 0xA0 | Device -> Host | Returns full `WireBulkParams` (2896 bytes) |
-| `REQ_SET_ALL_PARAMS` | 0xA1 | Host -> Device | Applies full `WireBulkParams` to live state |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Description |
+|---|---|---|---|---|---|---|
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | GET returns the full `WireBulkParams` (2896 bytes at V6, 6136 at V32). SET applies it to live state |
 
 ---
 
@@ -282,7 +242,7 @@ The legacy `preamp_db` field is retained in the slot struct and is always popula
 
 ### Save behavior
 
-When `REQ_PRESET_SAVE` (0x90) is issued:
+When `STORE.PRESET_SAVE` is issued:
 ```
 slot->preamp_db           = preamp_db[0];           // Legacy field = channel 0
 slot->preamp_db_per_ch[0] = preamp_db[0];
@@ -291,7 +251,7 @@ slot->preamp_db_per_ch[1] = preamp_db[1];
 
 ### Load behavior
 
-When `REQ_PRESET_LOAD` (0x91) is issued:
+When `STORE.PRESET_LOAD` is issued:
 
 - **Slot version >= 12:** Per-channel preamp values are restored from `preamp_db_per_ch[]`.
 - **Slot version < 12:** The single legacy `preamp_db` value is applied to ALL input channels.
@@ -299,7 +259,7 @@ When `REQ_PRESET_LOAD` (0x91) is issued:
 
 ### Factory defaults
 
-Applied when loading an empty slot, on factory reset (`REQ_FACTORY_RESET` / 0x53), or when loading a pre-V12 slot with no legacy preamp value:
+Applied when loading an empty slot, on factory reset (`STORE.FACTORY_RESET`), or when loading a pre-V12 slot with no legacy preamp value:
 
 | Parameter | Default value |
 |-----------|---------------|
@@ -342,15 +302,13 @@ On app startup or when connecting to a device, read the preamp for each channel:
 **Option A: Individual GET commands (2 transfers)**
 
 ```
-GET 0xD1, wValue=0 -> preamp_db[0]  (4 bytes, float)
-GET 0xD1, wValue=1 -> preamp_db[1]  (4 bytes, float)
+GET ROUTE.PREAMP, wValue=0 -> preamp_db[0]  (4 bytes, float)
+GET ROUTE.PREAMP, wValue=1 -> preamp_db[1]  (4 bytes, float)
 ```
 
 **Option B: Bulk parameter GET (1 transfer, recommended)**
 
-Issue `REQ_GET_ALL_PARAMS` (0xA0). Parse the `WirePreampConfig` at byte offset 2864 (16 bytes). Read `preamp_db[0]` at offset 0 and `preamp_db[1]` at offset 4 within the struct.
-
-**Do NOT use the legacy GET (0x45) for reading preamp state** -- it only returns channel 0 and cannot tell you if the channels have different values.
+Issue a `STORE.ALL_PARAMS` GET. Parse the `WirePreampConfig` at byte offset 2864 (16 bytes). Read `preamp_db[0]` at offset 0 and `preamp_db[1]` at offset 4 within the struct.
 
 ### Step 2: Build the UI
 
@@ -369,24 +327,15 @@ Place the L/R sliders side by side with a link icon/toggle between them. When li
 
 **Linked mode (both channels adjust together):**
 
-When the user adjusts either channel with linking enabled, set both channels to the same value. Two approaches:
+When the user adjusts either channel with linking enabled, set both channels to the same value with one `ROUTE.PREAMP` SET per channel. There is no all-channel form in 1.1.7.
 
-*Approach A: Use legacy command (simplest)*
 ```
-// User drags left slider to +3.0 dB with link enabled
+// usb_vendor_out(bRequest, wValue, wIndex, payload, len)
 float db = 3.0f;
 uint8_t payload[4];
 memcpy(payload, &db, 4);
-usb_vendor_out(0x44, 0, 0, payload, 4);  // Sets BOTH channels to +3.0 dB
-```
-
-*Approach B: Send two per-channel commands*
-```
-float db = 3.0f;
-uint8_t payload[4];
-memcpy(payload, &db, 4);
-usb_vendor_out(0xD0, 0, 0, payload, 4);  // USB L = +3.0 dB
-usb_vendor_out(0xD0, 1, 0, payload, 4);  // USB R = +3.0 dB
+usb_vendor_out(0x40, 0, 0x0502, payload, 4);  // ROUTE.PREAMP, USB L = +3.0 dB
+usb_vendor_out(0x40, 1, 0x0502, payload, 4);  // ROUTE.PREAMP, USB R = +3.0 dB
 ```
 
 **Independent mode (channels adjust separately):**
@@ -397,19 +346,19 @@ When the user adjusts a single channel:
 float db = -3.0f;
 uint8_t payload[4];
 memcpy(payload, &db, 4);
-usb_vendor_out(0xD0, 1, 0, payload, 4);  // USB R only, wValue=1
+usb_vendor_out(0x40, 1, 0x0502, payload, 4);  // ROUTE.PREAMP, USB R only, wValue=1
 ```
 
 ### Step 4: Handle preset load events
 
-When the user loads a preset (`REQ_PRESET_LOAD` / 0x91), all DSP parameters change including preamp values. After a preset load, re-read both channels:
+When the user loads a preset (`STORE.PRESET_LOAD`), all DSP parameters change including preamp values. After a preset load, re-read both channels:
 
 ```
-GET 0xD1, wValue=0 -> update left slider
-GET 0xD1, wValue=1 -> update right slider
+GET ROUTE.PREAMP, wValue=0 -> update left slider
+GET ROUTE.PREAMP, wValue=1 -> update right slider
 ```
 
-Or use a single bulk GET (0xA0) to refresh all parameters at once (recommended since preset load affects everything).
+Or use a single `STORE.ALL_PARAMS` GET to refresh all parameters at once (recommended since preset load affects everything).
 
 After reading, check if both channels have the same value to set the initial state of the link toggle.
 
@@ -417,12 +366,12 @@ After reading, check if both channels have the same value to set the initial sta
 
 If your app uses bulk parameter transfers for configuration backup/restore:
 
-**Reading (GET 0xA0):**
+**Reading (`STORE.ALL_PARAMS` GET):**
 1. Parse the full `WireBulkParams` response.
 2. Check `header.format_version`. If < 6, the `WirePreampConfig` section is not present; read the legacy `WireGlobalParams.preamp_gain_db` field and use it for both channels.
 3. If >= 6, read `WirePreampConfig` at offset 2864.
 
-**Writing (SET 0xA1):**
+**Writing (`STORE.ALL_PARAMS` SET):**
 1. Populate both `WirePreampConfig.preamp_db[0]` and `WirePreampConfig.preamp_db[1]`.
 2. Also populate `WireGlobalParams.preamp_gain_db` with channel 0's value (for legacy compat).
 3. Set `header.format_version` to the current version (>= 6).
@@ -438,29 +387,13 @@ All numeric values in the wire protocol are **little-endian**, which is the nati
 
 This section details how the per-channel preamp interoperates with older firmware versions and older apps.
 
-### Old app, new firmware
+### Hosts and firmware 1.1.7
 
-An app that only knows about the legacy global preamp (commands 0x44/0x45) will continue to work:
+Firmware 1.1.7 speaks only the paged protocol, so a host built for 1.1.6 cannot drive the preamp on it at all (every page 0 request is refused). The 1.1.6 behaviour below is kept for hosts that still support older firmware.
 
-| App action | Firmware behavior |
-|------------|-------------------|
-| `SET 0x44` with value X | Both channels set to X |
-| `GET 0x45` | Returns channel 0's value |
-| Bulk SET with V5 format | Legacy `preamp_gain_db` applied to all channels |
-| Bulk GET | `WireGlobalParams.preamp_gain_db` = channel 0 (old app ignores the new section) |
-
-The only limitation: an old app cannot set L and R to different values, and cannot read channel 1's value independently. But it will never see incorrect behavior.
-
-### New app, old firmware
-
-An app that sends the new per-channel commands (0xD0/0xD1) to firmware that does not support them:
-
-| App action | Old firmware behavior |
-|------------|----------------------|
-| `SET 0xD0` | Unrecognized vendor command, silently ignored |
-| `GET 0xD1` | Unrecognized vendor command, no response (transfer stalls or returns 0) |
-
-**Recommendation:** New apps should probe for per-channel support by issuing `GET 0xD1, wValue=0` at startup. If the transfer succeeds and returns 4 bytes, per-channel preamp is supported. If it fails or returns 0 bytes, fall back to legacy commands (0x44/0x45) and hide the per-channel UI.
+- On firmware 1.1.6, opcode 0x44 set every channel to one value and opcode 0x45 returned channel 0.
+- Firmware that predates per-channel preamp ignored opcode 0xD0 and stalled or answered nothing to 0xD1. A host that supports such firmware probes 0xD1 with `wValue` 0 and hides the per-channel UI when it fails.
+- On paged firmware there is nothing to probe. Every paged firmware has `ROUTE.PREAMP`, and a host that gates on the command table can check its bit in `SYS.PAGE_COMMANDS` for page 0x05.
 
 ### Preset compatibility
 
@@ -485,7 +418,7 @@ An app that sends the new per-channel commands (0xD0/0xD1) to firmware that does
 
 ### Both platforms supported
 
-Per-channel preamp is available on both RP2040 and RP2350. The vendor commands, wire format, and preset storage are identical across platforms.
+Per-channel preamp is available on both RP2040 and RP2350. The vendor command, wire format, and preset storage are identical across platforms.
 
 ### RP2350 (float pipeline)
 

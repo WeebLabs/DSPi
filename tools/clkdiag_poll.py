@@ -1,31 +1,69 @@
 #!/usr/bin/env python3
-"""
-clkdiag_poll.py - poll the DSPi REQ_GET_CLOCK_DIAG (0x82) snapshot at 1 Hz,
-decode the packed ClockDiagPacket, print CLKDIAG-style lines, and append raw
-hex + decoded lines to clkdiag.log in the current directory.
-
-No console backend exists in the shipped firmware (USB CDC off, UART stdio
-off), so the 1 Hz CLKDIAG values are read over the vendor control endpoint.
-Requires firmware configured with -DDSPI_CLOCK_DIAG=ON, and pyusb.
-
-Usage: python3 clkdiag_poll.py [seconds]   (default 130)
+"""Poll DIAG.CLOCK_DIAG at 1 Hz, print CLKDIAG lines and append raw hex plus decoded lines to
+./clkdiag.log. Needs a -DDSPI_CLOCK_DIAG=ON build and pyusb. Decodes ClockDiagPacket versions 1
+and 2 from firmware/DSPi/clock_diag.h. Usage: python3 clkdiag_poll.py [seconds] (default 130)
 """
 import os, sys, time, struct
 import usb.core
 
 VID, PID = 0x2E8B, 0xFEAA
 BM_VENDOR_IN = 0xC1          # device -> host, vendor, interface
-REQ_GET_CLOCK_DIAG = 0x82
-VENDOR_IFACE = 2
-NOM_SYS_HZ = 307_200_000     # soft-VCXO nominal sys_clk
+SYS_PAGE, DIAG_PAGE = 0x01, 0xF0
+CMD_PROTOCOL_INFO, CMD_PAGE_COMMANDS, CMD_LAST_RESULT = 0x10, 0x12, 0x14
+CMD_CLOCK_DIAG = 0x10        # DIAG.CLOCK_DIAG, absent unless built with DSPI_CLOCK_DIAG
+DECODER_VERSION = 2          # newest ClockDiagPacket.version decoded here
+NOM_SYS_HZ = 307_200_000     # soft-VCXO nominal sys_clk, both platforms
+VC_NAMES = {0x10: "VC_ERR_UNKNOWN", 0x11: "VC_ERR_DIRECTION", 0x13: "VC_ERR_ADDRESS",
+            0x16: "VC_ERR_BLOCKED", 0x17: "VC_ERR_BUSY"}
 
 LOGPATH = os.path.join(os.getcwd(), "clkdiag.log")
+NOT_DIAG = ("this firmware is not a clock-diag build: DIAG.CLOCK_DIAG is absent.  Configure with "
+            "-DDSPI_CLOCK_DIAG=ON (for example build-rp2350-clkdiag) and flash that build.")
+
+
+def is_stall(e):
+    return getattr(e, "errno", None) == 32 or "pipe" in str(e).lower()
+
+
+def get(dev, page, cmd, addr, n):
+    return bytes(dev.ctrl_transfer(BM_VENDOR_IN, cmd, addr, (page << 8) | 2, n, timeout=1000))
+
 
 def find_dev():
     d = usb.core.find(idVendor=VID, idProduct=PID)
     if d is None:
         raise SystemExit(f"no DSPi at {VID:04X}:{PID:04X}")
     return d
+
+
+def last_result(dev, cmd_id):
+    """VC_* name of the last refusal when SYS.LAST_RESULT describes cmd_id as a GET."""
+    try:
+        rid, is_get, res, _addr = struct.unpack_from("<HBBH", get(dev, SYS_PAGE, CMD_LAST_RESULT, 0, 8))
+    except usb.core.USBError:
+        return None
+    return VC_NAMES.get(res, f"0x{res:02X}") if (rid, is_get) == (cmd_id, 1) else None
+
+
+def probe(dev):
+    """PROTOCOL_INFO first (older firmware ignores the page), then the DIAG page bitmap."""
+    try:
+        r = get(dev, SYS_PAGE, CMD_PROTOCOL_INFO, 0, 16)
+    except usb.core.USBError as e:
+        if is_stall(e):
+            raise SystemExit("the device STALLed SYS.PROTOCOL_INFO: firmware 1.1.6 or older, which "
+                             "this tool does not support.  Use the clkdiag_poll.py from that release.")
+        raise SystemExit(f"USB error on the SYS.PROTOCOL_INFO probe: {e}")
+    if r[:4] != b"DSPi":
+        raise SystemExit(f"SYS.PROTOCOL_INFO without the DSPi magic ({r.hex(' ')}); refusing")
+    try:
+        bm = get(dev, SYS_PAGE, CMD_PAGE_COMMANDS, DIAG_PAGE, 64)
+    except usb.core.USBError as e:
+        if is_stall(e):
+            raise SystemExit(NOT_DIAG)   # VC_ERR_ADDRESS: no DIAG page on this build
+        raise SystemExit(f"USB error reading SYS.PAGE_COMMANDS: {e}")
+    if not bm[CMD_CLOCK_DIAG >> 3] >> (CMD_CLOCK_DIAG & 7) & 1:
+        raise SystemExit(NOT_DIAG)
 
 def decode(buf):
     b = bytes(buf)
@@ -69,7 +107,7 @@ def decode(buf):
          d["fb_span_ms"]) = u("IIIIII")
         (d["fb_servo"], d["fb_ferr"]) = u("ii")
         (d["fb_upd"], d["fb_merged"], d["fb_rej"], d["fb_reanch"]) = u("IIII")
-    d["_raw_len"] = len(b)
+    d["_raw_len"], d["_used"] = len(b), o
     return d
 
 def hz_ppm(hz):
@@ -122,24 +160,40 @@ def fmt_block(t, d):
 def main():
     dur = int(sys.argv[1]) if len(sys.argv) > 1 else 130
     dev = find_dev()
+    probe(dev)
     t0 = time.time()
     n = 0
+    warned = False
     with open(LOGPATH, "a") as f:
         hdr = f"\n===== CLKDIAG live capture start {time.strftime('%Y-%m-%d %H:%M:%S')} dur={dur}s =====\n"
         f.write(hdr); f.flush(); print(hdr.strip())
         while time.time() - t0 < dur:
             try:
-                buf = dev.ctrl_transfer(BM_VENDOR_IN, REQ_GET_CLOCK_DIAG, 0, VENDOR_IFACE, 256)
+                buf = get(dev, DIAG_PAGE, CMD_CLOCK_DIAG, 0, 256)
             except usb.core.USBError as e:
-                line = f"[{time.time()-t0:6.1f}s] USBError: {e} (retrying)"
+                if is_stall(e):
+                    why = last_result(dev, (DIAG_PAGE << 8) | CMD_CLOCK_DIAG)
+                    if why == "VC_ERR_UNKNOWN":
+                        raise SystemExit(NOT_DIAG)
+                    line = f"[{time.time()-t0:6.1f}s] STALL ({why or 'reason unknown'}), retrying"
+                else:
+                    line = f"[{time.time()-t0:6.1f}s] USBError: {e} (retrying)"
                 print(line); f.write(line + "\n"); f.flush()
                 time.sleep(1.0)
-                try: dev = find_dev()
-                except SystemExit: pass
+                try:
+                    dev = find_dev(); probe(dev)
+                except SystemExit as x:
+                    if str(x) == NOT_DIAG:
+                        raise
                 continue
             d = decode(buf)
+            if not warned and (d["version"] > DECODER_VERSION or d["_used"] != d["_raw_len"]):
+                warned = True
+                w = (f"warning: packet version {d['version']}, {d['_raw_len']} bytes, decoder read "
+                     f"{d['_used']} (knows version {DECODER_VERSION}); check clock_diag.h")
+                print(w); f.write(w + "\n")
             ts = time.time() - t0
-            raw = bytes(buf).hex()
+            raw = buf.hex()
             f.write(f"[{ts:6.1f}s] raw({d['_raw_len']}B)={raw}\n")
             block = fmt_block(ts, d)
             stamp = f"[{ts:6.1f}s]"
@@ -148,11 +202,12 @@ def main():
                 print(out); f.write(out + "\n")
             f.write("\n"); f.flush()
             n += 1
-            # pace to ~1 Hz (firmware latches once per second)
+            # The firmware latches the snapshot once a second.
             nxt = t0 + n
             slp = nxt - time.time()
             if slp > 0: time.sleep(slp)
     print(f"captured {n} snapshots over {time.time()-t0:.1f}s -> {LOGPATH}")
+
 
 if __name__ == "__main__":
     main()

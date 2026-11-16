@@ -13,7 +13,7 @@ VC_CMD(0x14, LAST_RESULT, sys_last_result_get, VC_NONE,
        NONE, 8, 0, 0, 0, 0, "Result of the last request on this transport")
 
 VC_CMD(0x20, PLATFORM, sys_platform_get, VC_NONE,
-       NONE, 7, 0, 0, 0, 0, "Platform and firmware version, same bytes as legacy GET_PLATFORM")
+       NONE, 7, 0, 0, 0, 0, "Platform ID, packed version, output count, then minor, patch and beta numbers")
 VC_CMD(0x21, SERIAL, sys_serial_get, VC_NONE,
        NONE, 16, 0, 0, 0, 0, "USB serial number string")
 VC_CMD(0x22, BUILD_INFO, sys_build_info_get, VC_NONE,
@@ -24,7 +24,7 @@ VC_CMD(0x24, DEVICE_NAME, sys_device_name_get, sys_device_name_set,
        NONE, 32, 1, 32, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Board name, NUL padded; a SET keeps at most 31 bytes")
 
 VC_CMD(0x30, ENTER_BOOTLOADER, VC_NONE, sys_enter_bootloader_set,
-       NONE, 0, 0, 0, 0, 0, "Reboot into the USB bootloader after the status stage")
+       NONE, 0, 0, 0, VC_F_RESTART, 0, "Reboot into the USB bootloader after the reply has gone out")
 
 VC_CMD(0x40, SYSTEM_STATUS, sys_system_status_get, VC_NONE,
        NONE, 16, 0, 0, 0, 0, "clk_sys Hz, sample rate Hz, core mV, temperature cdeg, CPU loads")
@@ -37,6 +37,6 @@ VC_CMD(0x43, PIPELINE_STATS, sys_pipeline_stats_get, VC_NONE,
 VC_CMD(0x44, PDM_STATS, sys_pdm_stats_get, VC_NONE,
        NONE, 16, 0, 0, 0, 0, "PDM ring overruns, ring underruns, DMA overruns, DMA underruns")
 VC_CMD(0x45, SPDIF_TX_STATS, sys_spdif_tx_stats_get, VC_NONE,
-       NONE, 24, 0, 0, 0, 0, "S/PDIF underruns, total DMA starvations, starvations of instances 0-3")
+       NONE, 24, 0, 0, 0, 0, "USB audio packet gaps of 2 to 50 ms, total output DMA starvations, starvations of instances 0-3")
 VC_CMD(0x4F, STATS_RESET, VC_NONE, sys_stats_reset_set,
        NONE, 0, 1, 1, 0, 0, "Bitmask; bit 0 resets buffer watermarks and worst-gap fields")

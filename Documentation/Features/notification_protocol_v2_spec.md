@@ -1,7 +1,7 @@
 # Notification Protocol v2 Specification
 
 *Status: implemented*
-*Last updated: 2026-09-15*
+*Last updated: 2026-11-16 (vendor command names on the paged protocol of firmware 1.1.7)*
 
 ## 1. Motivation
 
@@ -12,7 +12,7 @@ The v1 notification protocol (see `interrupt_endpoint_spec.md`) defines a per-pa
 **Non-goals:**
 - Replacing v1 entirely. v1 stays for back-compat until every host app is updated.
 - Notifying every sample of audio state (meters, levels). This protocol is for **parameter** changes only.
-- Replacing `REQ_GET_ALL_PARAMS` / bulk SET. Bulk transfer is still the right tool for initial sync and wholesale restore.
+- Replacing the bulk GET / SET (`STORE.ALL_PARAMS`). Bulk transfer is still the right tool for initial sync and wholesale restore.
 
 ## 2. Design Principles
 
@@ -21,7 +21,7 @@ The v1 notification protocol (see `interrupt_endpoint_spec.md`) defines a per-pa
 3. **Write-site notification, not poll-based diffing.** Every setter calls one helper (`param_write`) that updates both the live state and a shadow copy of `WireBulkParams`, then enqueues a notification only if bytes actually changed. No periodic diff scanner; no jitter.
 4. **Source tagging lets the host suppress its own echoes.** The emit path stamps each notification with its origin (host SET, preset load, GPIO, factory reset, etc.). Suppression is a host-side policy decision, not a firmware config.
 5. **Coalescing keys on `(offset, size)`.** A sweeping knob produces one queued notification per target parameter, not hundreds.
-6. **Bulk invalidation is a separate event.** Operations that touch dozens of parameters at once (preset load, factory reset, bulk SET) emit a single `NOTIFY_EVT_BULK_INVALIDATED` and the host does one `REQ_GET_ALL_PARAMS`.
+6. **Bulk invalidation is a separate event.** Operations that touch dozens of parameters at once (preset load, factory reset, bulk SET) emit a single `NOTIFY_EVT_BULK_INVALIDATED` and the host does one `STORE.ALL_PARAMS` GET.
 
 ## 3. Wire Format v2
 
@@ -66,7 +66,7 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x00 | `NOTIFY_EVT_IDLE`             | Idle         | Keep-alive. Host discards. Sent after 100 ms without a packet, only to keep the pipe active. |
 | 0x01 | `NOTIFY_EVT_MASTER_VOLUME`    | v1 legacy    | Payload: `float db` (4 bytes). Emitted **in addition to** v2 for hosts that only speak v1. |
 | 0x02 | `NOTIFY_EVT_PARAM_CHANGED`    | Coalesceable | See §3.4. The primary v2 event. |
-| 0x03 | `NOTIFY_EVT_BULK_INVALIDATED` | Discrete     | See §3.5. Host should `REQ_GET_ALL_PARAMS`. |
+| 0x03 | `NOTIFY_EVT_BULK_INVALIDATED` | Discrete     | See §3.5. Host should GET `STORE.ALL_PARAMS`. |
 | 0x04 | `NOTIFY_EVT_PRESET_LOADED`    | Discrete     | Payload: `uint8_t slot` (byte 4), followed by `NOTIFY_EVT_BULK_INVALIDATED`. |
 | 0x05 | `NOTIFY_EVT_INPUT_FORMAT`     | Discrete     | Active USB/pipeline input channel count changed. Payload: `uint8_t channels` (byte 4). |
 | 0x06 | reserved (coalesceable)      |              | Reserved for batched `PARAM_CHANGED` (see §10.5). |
@@ -75,7 +75,7 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x09 | `NOTIFY_EVT_I2S_SLAVE_STATE`  | Discrete     | I2S slave lock state changed. 9-byte packet `[ver=2, 0x09, 0, seq, state, rate (uint32 LE)]`. See `i2s_slave_input_spec.md`. |
 | 0x0A | `NOTIFY_EVT_CS_IR_LEARN`      | Discrete     | IR learn finished. 12-byte packet `[ver=2, 0x0A, 0, seq, state, protocol, 0, 0, code (uint32 LE)]`; state 2 = done, 3 = timeout. See `control_surfaces_spec.md`. |
 | 0x0B | `NOTIFY_EVT_ADAT_INPUT_STATE` | Discrete     | RP2350 ADAT input lock state changed. 10-byte packet `[ver=2, 0x0B, 0, seq, state, rate (uint32 LE), clock_mode]`. See `adat_input_spec.md`. |
-| 0x0C | `NOTIFY_EVT_CS_AUX`           | Discrete     | Aux output state or level changed. 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot (0-15), state (0/1), level_q8 (uint16 LE, 8.8 percent), src]`. `slot` is the Control Surfaces binding slot holding the aux component; `level_q8` reads 0 on a `CS_TYPE_AUX_OUT` slot. Pushed on every `REQ_SET_CS_AUX_STATE` (0x04) and `REQ_SET_CS_AUX_LEVEL` (0x06) that changes a value, whatever the origin. `src` identifies it: `GPIO` for a bound control, `HOST_SET` for USB, `UART` / `I2C` for those transports. See `control_surfaces_aux_spec.md`. |
+| 0x0C | `NOTIFY_EVT_CS_AUX`           | Discrete     | Aux output state or level changed. 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot (0-15), state (0/1), level_q8 (uint16 LE, 8.8 percent), src]`. `slot` is the Control Surfaces binding slot holding the aux component; `level_q8` reads 0 on a `CS_TYPE_AUX_OUT` slot. Pushed on every `CS.AUX_STATE` and `CS.AUX_LEVEL` SET that changes a value, whatever the origin. `src` identifies it: `GPIO` for a bound control, `HOST_SET` for USB, `UART` / `I2C` for those transports. See `control_surfaces_aux_spec.md`. |
 | 0x0D | `NOTIFY_EVT_RTA_CONFIG`       | Discrete     | The spectrum analyser applied a configuration. See §3.9. |
 | 0x0E | reserved                      |              | Held for the AC-3/DTS work; not emitted by this firmware. |
 | 0x0F | `NOTIFY_EVT_INPUT_SOURCE_NAME`| Discrete     | An input source name was stored. 40-byte packet `[ver=2, 0x0F, 0, seq, source_id, src, 0, 0, name (32 bytes)]`; name all zero when cleared. See `input_source_names_spec.md`. |
@@ -127,7 +127,7 @@ Total = 8 bytes. Emitted when the host should do a full re-sync rather than appl
 **When to emit:**
 - Preset load (always — plus `NOTIFY_EVT_PRESET_LOADED` first so the host can show a toast)
 - Factory reset
-- Bulk SET via `REQ_SET_ALL_PARAMS`
+- Bulk SET via `STORE.ALL_PARAMS`
 - Firmware-side mass edits (e.g., auto-tune completes, future batch operations)
 
 ### 3.6 Addressing Rule
@@ -146,8 +146,8 @@ Examples:
 ```c
 typedef enum : uint8_t {
     PARAM_SRC_UNKNOWN    = 0,
-    PARAM_SRC_HOST_SET   = 1,  // REQ_SET_* via EP0
-    PARAM_SRC_BULK_SET   = 2,  // REQ_SET_ALL_PARAMS
+    PARAM_SRC_HOST_SET   = 1,  // a vendor SET via EP0
+    PARAM_SRC_BULK_SET   = 2,  // STORE.ALL_PARAMS SET
     PARAM_SRC_PRESET     = 3,  // Preset load
     PARAM_SRC_FACTORY    = 4,  // Factory reset
     PARAM_SRC_GPIO       = 5,  // Hardware control (knobs, encoders, pads)
@@ -195,7 +195,7 @@ Offset  Size  Field         Description
 | Value | Constant | Meaning |
 |-------|----------|---------|
 | 0 | `SIGGEN_STOP_NONE` | No stop (a `RUN` event marks a start) |
-| 1 | `SIGGEN_STOP_HOST` | Explicit `REQ_SIGGEN_CONTROL` stop (STOP or STOP_NOW) |
+| 1 | `SIGGEN_STOP_HOST` | Explicit `MEAS.SIGGEN_STOP` or `MEAS.SIGGEN_STOP_NOW` |
 | 2 | `SIGGEN_STOP_COMPLETED` | Duration or repeat count exhausted |
 | 3 | `SIGGEN_STOP_PRESET` | Preset load or factory reset stopped it |
 | 4 | `SIGGEN_STOP_RECONFIG` | SET_CONFIG / START while running: fade-out for a restart |
@@ -205,12 +205,12 @@ SIGGEN_STOP_NONE`) on start, and `SIGGEN_STATE_IDLE` (with the stop reason) on
 stop/completion. The event is pushed from `siggen_service()` in the main loop, not
 from the audio render path. The generator's run state is transient (never
 persisted); hosts should not infer generator state across a reconnect without
-re-reading `REQ_SIGGEN_GET_STATUS`.
+re-reading `MEAS.SIGGEN_STATUS`.
 
 ### 3.9 RTA_CONFIG Layout (event 0x0D)
 
 The spectrum analyser (see `spectrum_analyser_spec.md`) has one configuration
-shared by every host. A host that pushes `REQ_RTA_SET_CONFIG` (0x08) stages it,
+shared by every host. A host that pushes a `MEAS.RTA_CONFIG` SET stages it,
 and the main loop applies it on the next `rta_service()` pass. This event is
 pushed at that moment, once per applied configuration, whether or not the new
 configuration differs from the old one. Fixed 17-byte packet:
@@ -224,7 +224,7 @@ bytes 4-15  RtaConfig            the 12-byte configuration as applied
 byte 16     src                  ParamSource of the SET that staged it (§3.7)
 ```
 
-The `RtaConfig` bytes are exactly what `REQ_RTA_GET_CONFIG` (0x09) returns
+The `RtaConfig` bytes are exactly what a `MEAS.RTA_CONFIG` GET returns
 after the apply: `avg_ms` and `peak_decay_db_s` are the clamped values,
 `channel_mask` has been masked to the tap's channel count, and the reserved
 bytes are zero. A host therefore never needs to read the configuration back
@@ -235,7 +235,7 @@ is `HOST_SET` for USB and `UART` or `I2C` for the external control interfaces.
 The analyser does not emit this event for anything that is not a staged SET.
 A preset load, factory reset, sample-rate change or input-source switch
 restarts the frame (analyser spec §3.5) but leaves the configuration alone, and
-auto-off, auto-start and `REQ_RTA_CONTROL` (0x0E) never touch it.
+auto-off, auto-start and the `MEAS.RTA_START` / `MEAS.RTA_STOP` / `MEAS.RTA_RESET` actions never touch it.
 
 **Why it exists.** Several hosts can watch one device at once (the USB host,
 DSPi Link clients through a hub, a UART or I2C bridge). Each one used to read
@@ -247,7 +247,7 @@ from `src` (on USB) or the hub's session attribution (over DSPi Link) whether
 the change was its own echo. The host-side rules for following another host's
 configuration are in the analyser spec, section 7. A host must keep working
 when this event never arrives (older firmware), by falling back to the
-`REQ_RTA_GET_CONFIG` readback.
+`MEAS.RTA_CONFIG` readback.
 
 **Attribution over DSPi Link.** A hub treats a packet whose `src` is
 `HOST_SET` or `BULK_SET` as host-sourced and attributes it to the session whose
@@ -256,7 +256,7 @@ event sits at offset 16.
 
 **Capability.** No caps flag announces the event. It is part of the firmware
 release that introduces it, and Console and firmware ship as a matched pair.
-A host may stop polling `REQ_RTA_GET_CONFIG` once it has received one
+A host may stop polling `MEAS.RTA_CONFIG` once it has received one
 `RTA_CONFIG` event on the current connection.
 
 ## 4. Firmware Architecture
@@ -347,12 +347,11 @@ Because seq is stamped once at push and stored in the entry, a re-peek or an xfe
 A scoped bracket sets `current_param_source` for the duration of an operation. Pattern already exists for `notify_master_vol_host_initiated`; generalise it:
 
 ```c
-// In vendor_commands.c around a SET dispatch:
-current_param_source = PARAM_SRC_HOST_SET;
-__dmb();
-dispatch_vendor_set(request);
-__dmb();
-current_param_source = PARAM_SRC_UNKNOWN;
+// In vc_run() (vendor/vc_core.c) around every handler call.
+// vc_param_src() maps USB to PARAM_SRC_HOST_SET, UART, I2C and GPIO to their own tags.
+notify_set_source(vc_param_src(src));
+VcResult r = (is_get ? e->get : e->set)(&c);
+notify_set_source(PARAM_SRC_UNKNOWN);
 ```
 
 Equivalent brackets wrap preset load (`PARAM_SRC_PRESET`), factory reset (`PARAM_SRC_FACTORY`), bulk SET (`PARAM_SRC_BULK_SET`), and GPIO handlers (`PARAM_SRC_GPIO`). Because v1 `update_master_volume()` runs inside these brackets, the source is attached at emit time without per-setter plumbing.
@@ -370,7 +369,7 @@ Rationale: emitting 100+ PARAM_CHANGED events for every preset load floods the r
 
 Implementation: a `notify_suppress_count` that emit paths check. `preset_apply`, `apply_factory_defaults`, `bulk_params_apply` increment at entry, decrement at exit, and emit `BULK_INVALIDATED` on the last exit.
 
-**Host bulk SET** (`REQ_SET_ALL_PARAMS`): same pattern with `PARAM_SRC_BULK_SET`.
+**Host bulk SET** (`STORE.ALL_PARAMS`): same pattern with `PARAM_SRC_BULK_SET`.
 
 **Factory reset**: same pattern with `PARAM_SRC_FACTORY`.
 
@@ -409,7 +408,7 @@ consumer's tail, that consumer's oldest entry is dropped (its tail is
 force-advanced, `notify_consumer_drops[c]++`) and the push proceeds. A slow or
 starved consumer therefore loses its oldest events but never delays the producer
 or any other consumer. The dropped consumer detects the loss as a **seq gap** and
-recovers with a full `REQ_GET_ALL_PARAMS` (§3.2, §5). This replaces the old
+recovers with a full `STORE.ALL_PARAMS` GET (§3.2, §5). This replaces the old
 displace-oldest-on-full path that existed only for `BULK_INVALIDATED`; force-
 advance guarantees delivery for every event type without it.
 
@@ -547,7 +546,7 @@ RP2040 BSS is currently ~125 KB; headroom is fine. RP2350 currently ~210 KB; sam
 2. Bump `NOTIFY_EP_MAX_PKT` to 64; bump `bcdDevice`.
 3. Convert `update_master_volume` to emit both v1 and v2 (shim layer).
 4. Instrument all other setters (`update_preamp`, crossfeed, matrix, EQ band set, delays, leveller, loudness, I2S config, pin config, channel names, preamp per-ch, input source).
-5. Add scoped source brackets in `vendor_commands.c`, `flash_storage.c` (preset), `bulk_params.c` (bulk SET).
+5. Add scoped source brackets in the vendor dispatcher (since 1.1.7 `vc_run()` in `vendor/vc_core.c`), `flash_storage.c` (preset), `bulk_params.c` (bulk SET).
 6. Add `notify_suppress_count` gate for bulk operations.
 7. Host app: add v2 parser, PARAM_TABLE, echo-suppression policy. Remove v1 handler once stable.
 8. Regression: run the full DCD stress matrix before merging.
@@ -556,7 +555,7 @@ RP2040 BSS is currently ~125 KB; headroom is fine. RP2350 currently ~210 KB; sam
 
 1. ~~**Do we want a max packet size > 64?**~~ **Resolved: 64.** USB 2.0 caps full-speed bulk `wMaxPacketSize` at 8/16/32/64. 128 is not a legal value; 512 requires high-speed. Anything larger would require wire fragmentation, which breaks the one-xfer-per-event invariant. Every current parameter fits.
 2. ~~**Do we want per-core source tagging?**~~ **Resolved: no.** Keep `current_param_source` as a single global. Core 1 does not call setters today; if that changes, promote to a per-core variable then.
-3. ~~**Should `REQ_GET_NOTIFY_STATS` be added?**~~ **Resolved: no.** `notify_overflow_count` stays as a firmware-internal counter for debug builds; no vendor command.
+3. ~~**Should a notify-stats vendor command be added?**~~ **Resolved: no.** `notify_overflow_count` stays as a firmware-internal counter for debug builds; no vendor command.
 4. ~~**Do v2 hosts receive `NOTIFY_EVT_IDLE`?**~~ **Resolved: idle is always `{0x00}`, one byte.** Treated as a protocol-neutral keep-alive by both v1 and v2 parsers. Version byte is not used in idle packets; the host distinguishes idle by length (1 byte) or by `event_id == 0x00`.
 5. ~~**Do we want batched PARAM_CHANGED?**~~ **Resolved: defer.** Event ID 0x06 is reserved for a future `NOTIFY_EVT_PARAM_CHANGED_BATCH` that would pack multiple `(offset, size, value)` tuples into one 64 B packet. Implement only if measurement shows PARAM_CHANGED bursts are a bottleneck. The v2 base protocol does not depend on it.
 

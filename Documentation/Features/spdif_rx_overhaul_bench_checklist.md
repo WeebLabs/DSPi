@@ -2,6 +2,8 @@
 
 *Written 2026-10-11; updated 2026-10-12 for images built from `9cc9f1e` on `merge/spdif-rx-overhaul` (includes the post-merge audit fixes, the ring performance changes and the S/PDIF PIO biphase-mark encoder).*
 
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+
 This is the hardware verification the merge plan (`spdif_rx_overhaul_merge_plan.md`, Phase 4) calls for. Nothing in the merge has run on hardware yet. The RP2040 output-ring path and RP2040 PLL dithering have never run on hardware at all, so treat every RP2040 step as a first run.
 
 Work through the sections in order. Earlier sections catch the faults that would make later ones meaningless. Record each result next to its checkbox, with numbers where the step asks for them.
@@ -20,8 +22,10 @@ All images are in `custom-builds/`.
 **These images predate Phase 3 (producer-pool removal, 2026-10-12).** Rebuild the set from the Phase 3 commit before benching; this table is updated when that happens. Every merge image reports `v1.1.6-beta4-40-g9cc9f1e` as its build stamp. The older `merge-bench-006b3de` and `merge-bench-f223724` sets are superseded. Before each section, confirm which image is running:
 
 ```bash
-python3 tools/dspi_poke/dspi_poke.py get REQ_GET_BUILD_INFO 64
+python3 tools/dspi_poke/dspi_poke.py get SYS.BUILD_INFO
 ```
+
+That command needs firmware 1.1.7 or later. An image from the 1.1.6 line answers only the old opcodes, so read its build stamp with the `dspi_poke.py` from a 1.1.6 checkout (for example `fb9a254`).
 
 Equipment the sections assume:
 - A logic analyser with at least 4 channels and SPDIF and I2S decoders (sections 4 and 12).

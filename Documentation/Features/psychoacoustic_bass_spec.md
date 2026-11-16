@@ -1,5 +1,7 @@
 # Psychoacoustic Bass Enhancement Specification
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 Psychoacoustic Bass ("psybass") makes small, excursion-limited speakers convey bass that they cannot physically reproduce. It exploits the missing fundamental effect: when the ear hears a harmonic series (2f, 3f, 4f, ...), the brain perceives the pitch of the fundamental f even when f itself is absent. The feature extracts the low band below a configurable cutoff (the speaker's low-frequency limit), synthesizes harmonics from it with a nonlinear device (NLD), band-limits those harmonics into the speaker's reproducible range, and mixes them back into the signal. Optionally it also attenuates or removes the original un-reproducible fundamental, which reduces driver excursion and distortion at no perceptual cost.
@@ -57,7 +59,7 @@ Because psybass runs pre-gain, its character does not change with volume; and be
 
 ## 2. Parameters
 
-All floats on the wire are little-endian IEEE 754 single-precision. All SET values are clamped by the firmware to the documented range; a GET after a SET returns the clamped value.
+All floats on the wire are little-endian IEEE 754 single-precision. All finite SET values are clamped by the firmware to the documented range; a GET after a SET returns the clamped value. A NaN or infinite float is refused with `VC_ERR_VALUE`.
 
 ### 2.1 enabled
 
@@ -66,8 +68,7 @@ All floats on the wire are little-endian IEEE 754 single-precision. All SET valu
 | **Type** | `bool` (uint8_t on wire) |
 | **Range** | 0 (off) or 1 (on) |
 | **Default** | 0 (disabled) |
-| **SET command** | `0x30` (`REQ_SET_PSYBASS`) |
-| **GET command** | `0x31` (`REQ_GET_PSYBASS`) |
+| **Command** | `FX.PSYBASS_ENABLE` (page 0x08, command 0x40), GET and SET |
 | **Payload** | 1 byte: `0x00` = disabled, `0x01` = enabled |
 
 Master enable. When disabled the coefficient pointer is unpublished and the per-output processing is skipped entirely (zero per-sample CPU cost); per-output filter states are cleared so re-enabling starts transient-free.
@@ -79,8 +80,7 @@ Master enable. When disabled the coefficient pointer is unpublished and the per-
 | **Type** | `float` |
 | **Range** | 30.0 to 300.0 (Hz) |
 | **Default** | 80.0 |
-| **SET command** | `0x32` (`REQ_SET_PSYBASS_CUTOFF`) |
-| **GET command** | `0x33` (`REQ_GET_PSYBASS_CUTOFF`) |
+| **Command** | `FX.PSYBASS_CUTOFF` (page 0x08, command 0x41), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 The speaker's low-frequency limit. Content below this frequency feeds the harmonic generator; generated harmonics occupy roughly cutoff to 4x cutoff. Set it to the frequency below which the target speaker's output collapses (typical values: 50-60 Hz for bookshelf speakers, 80-120 Hz for small Bluetooth speakers, 150-250 Hz for laptop/phone speakers).
@@ -92,8 +92,7 @@ The speaker's low-frequency limit. Content below this frequency feeds the harmon
 | **Type** | `float` |
 | **Range** | -24.0 to +12.0 (dB) |
 | **Default** | 0.0 |
-| **SET command** | `0x34` (`REQ_SET_PSYBASS_HARMONICS`) |
-| **GET command** | `0x35` (`REQ_GET_PSYBASS_HARMONICS`) |
+| **Command** | `FX.PSYBASS_HARMONICS` (page 0x08, command 0x42), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Level of the generated harmonics mixed into the output. This is the primary "amount of effect" control. 0 dB injects the shaped harmonic band at unity relative to the NLD output; negative values make the effect subtle, positive values emphasize it. The +12 dB ceiling protects fixed-point headroom on RP2040 and applies to both platforms for parity.
@@ -105,8 +104,7 @@ Level of the generated harmonics mixed into the output. This is the primary "amo
 | **Type** | `float` |
 | **Range** | 0.0 to 18.0 (dB) |
 | **Default** | 6.0 |
-| **SET command** | `0x36` (`REQ_SET_PSYBASS_DRIVE`) |
-| **GET command** | `0x37` (`REQ_GET_PSYBASS_DRIVE`) |
+| **Command** | `FX.PSYBASS_DRIVE` (page 0x08, command 0x43), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Pre-gain into the odd-harmonic soft clipper. Higher drive pushes quieter bass into the clipper's nonlinear region, producing a denser, more saturated odd-harmonic series and making the effect audible on quieter passages. At 0 dB only near-full-scale bass generates odd harmonics. Drive does not affect the even (rectifier) path, so at low `character` values this control does little.
@@ -118,8 +116,7 @@ Pre-gain into the odd-harmonic soft clipper. Higher drive pushes quieter bass in
 | **Type** | `float` |
 | **Range** | 0.0 to 100.0 (%) |
 | **Default** | 50.0 |
-| **SET command** | `0x38` (`REQ_SET_PSYBASS_CHARACTER`) |
-| **GET command** | `0x39` (`REQ_GET_PSYBASS_CHARACTER`) |
+| **Command** | `FX.PSYBASS_CHARACTER` (page 0x08, command 0x44), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Even-to-odd harmonic blend. 0% = rectifier only (even harmonics: warm, smooth, octave-flavored); 100% = clipper only (odd harmonics: harder, growlier, more "electric bass"). The 50% default gives the consecutive series that produces the strongest missing-fundamental pitch perception. Present this in a UI as a "warm ... aggressive" tone control.
@@ -131,8 +128,7 @@ Even-to-odd harmonic blend. 0% = rectifier only (even harmonics: warm, smooth, o
 | **Type** | `float` |
 | **Range** | -60.0 to 0.0 (dB) |
 | **Default** | 0.0 |
-| **SET command** | `0x3A` (`REQ_SET_PSYBASS_ORIGINAL`) |
-| **GET command** | `0x3B` (`REQ_GET_PSYBASS_ORIGINAL`) |
+| **Command** | `FX.PSYBASS_ORIGINAL` (page 0x08, command 0x45), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Level of the original low band (below cutoff) in the output. 0 dB leaves the original bass untouched (harmonics are added on top). Negative values attenuate the fundamental the speaker cannot reproduce anyway, freeing driver excursion and amplifier headroom; -60 dB is effectively full removal. Implemented as `out += (g_orig - 1) * low`, so it is exact complementary attenuation of the LP2 band, not a shelf approximation.
@@ -144,8 +140,7 @@ Level of the original low band (below cutoff) in the output. 0 dB leaves the ori
 | **Type** | `uint16_t` |
 | **Range** | bit k = process output channel k; bits above the platform's channel count are ignored |
 | **Default** | 0xFFFF (all outputs) |
-| **SET command** | `0x3C` (`REQ_SET_PSYBASS_MASK`) |
-| **GET command** | `0x3D` (`REQ_GET_PSYBASS_MASK`) |
+| **Command** | `FX.PSYBASS_MASK` (page 0x08, command 0x46), GET and SET |
 | **Payload** | 2 bytes: little-endian uint16 |
 
 Selects which output channels are processed. Output channel indexing:
@@ -163,39 +158,34 @@ Mask changes take effect on the next audio packet without a coefficient recomput
 
 ## 3. Vendor Command Transport
 
-Psybass uses the standard DSPi vendor command surface, so it is reachable over every control transport (USB EP0, UART, I2C target, control surfaces engine) with the same command bytes.
+Psybass uses the standard DSPi vendor command surface, the `FX` page (0x08) of the paged protocol (see `../commands.md`), so it is reachable over every control transport (USB EP0, UART, I2C target, control surfaces engine) with the same commands. Each parameter is one command, and the transfer direction selects GET or SET.
 
 **Control Surfaces** (caps v4+): six front-panel nouns map onto these commands, so physical knobs/buttons/IR commands can drive the effect: `PSYBASS` (41, enable), `PSYBASS_CUTOFF` (42, log stepping), `PSYBASS_HARMONICS` (43), `PSYBASS_DRIVE` (44), `PSYBASS_CHARACTER` (45), `PSYBASS_ORIGINAL` (46). The output mask stays host-only. See `control_surfaces_spec.md` sections 4.3 and 5.
 
 ### USB (primary transport)
 
-- **SET**: control transfer, `bmRequestType = 0x40` (vendor, host-to-device), `bRequest = <command>`, `wValue = 0`, `wIndex = 0`, data stage = payload as documented per parameter.
-- **GET**: control transfer, `bmRequestType = 0xC0` (vendor, device-to-host), `bRequest = <command>`, `wLength` >= response size; the device returns the payload in the data stage.
+- **SET**: control transfer, `bmRequestType = 0x41` (vendor, interface, host-to-device), `bRequest = <command>`, `wValue = 0`, `wIndex = (0x08 << 8) | 2`, data stage = payload as documented per parameter.
+- **GET**: control transfer, `bmRequestType = 0xC1` (vendor, interface, device-to-host), `bRequest = <command>`, `wValue = 0`, `wIndex = (0x08 << 8) | 2`, `wLength` = response size; the device returns the payload in the data stage.
 
 ### Command summary
 
-| Command | Direction | Payload | Meaning |
-|---------|-----------|---------|---------|
-| 0x30 | SET | 1 byte bool | Enable/disable |
-| 0x31 | GET | 1 byte bool | Enabled state |
-| 0x32 | SET | 4-byte float | Cutoff (Hz, clamps 30-300) |
-| 0x33 | GET | 4-byte float | Cutoff |
-| 0x34 | SET | 4-byte float | Harmonic level (dB, clamps -24..+12) |
-| 0x35 | GET | 4-byte float | Harmonic level |
-| 0x36 | SET | 4-byte float | Drive (dB, clamps 0..18) |
-| 0x37 | GET | 4-byte float | Drive |
-| 0x38 | SET | 4-byte float | Character (%, clamps 0..100) |
-| 0x39 | GET | 4-byte float | Character |
-| 0x3A | SET | 4-byte float | Original bass level (dB, clamps -60..0) |
-| 0x3B | GET | 4-byte float | Original bass level |
-| 0x3C | SET | 2-byte uint16 LE | Output mask |
-| 0x3D | GET | 2-byte uint16 LE | Output mask |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Meaning |
+|---|---|---|---|---|---|---|
+| `FX.PSYBASS_ENABLE` | 0x08 | 0x40 | GET, SET | none (0) | GET 1, SET 1 | Enable (u8 bool) |
+| `FX.PSYBASS_CUTOFF` | 0x08 | 0x41 | GET, SET | none (0) | GET 4, SET 4 | Cutoff (Hz, clamps 30-300) |
+| `FX.PSYBASS_HARMONICS` | 0x08 | 0x42 | GET, SET | none (0) | GET 4, SET 4 | Harmonic level (dB, clamps -24..+12) |
+| `FX.PSYBASS_DRIVE` | 0x08 | 0x43 | GET, SET | none (0) | GET 4, SET 4 | Drive (dB, clamps 0..18) |
+| `FX.PSYBASS_CHARACTER` | 0x08 | 0x44 | GET, SET | none (0) | GET 4, SET 4 | Character (%, clamps 0..100) |
+| `FX.PSYBASS_ORIGINAL` | 0x08 | 0x45 | GET, SET | none (0) | GET 4, SET 4 | Original bass level (dB, clamps -60..0) |
+| `FX.PSYBASS_MASK` | 0x08 | 0x46 | GET, SET | none (0) | GET 2, SET 2 | Output mask (u16 LE) |
+
+Floats are 4-byte IEEE 754 LE. A SET payload of any other length is `VC_ERR_LENGTH`, a non-zero `wValue` is `VC_ERR_ADDRESS`, and a NaN or infinite float is `VC_ERR_VALUE` (nothing is stored). A rejected SET STALLs on USB and the reason is readable from `SYS.LAST_RESULT`.
 
 ### Apply semantics
 
 - Every SET updates live state immediately. Enable and the five value parameters raise an internal recompute flag; the firmware main loop rebuilds the coefficient set (double-buffered, glitch-free) and publishes it, typically within a few milliseconds. No stream interruption, no click, no alignment disturbance.
 - The mask SET takes effect on the next audio packet directly (no recompute needed).
-- SETs are **not persisted** to flash by themselves. Persistence happens when the user saves a preset (`REQ_PRESET_SAVE` 0x90) or via `REQ_SAVE_PARAMS` (0x51), following the same convention as loudness/crossfeed/leveller.
+- SETs are **not persisted** to flash by themselves. Persistence happens when the user saves a preset (`STORE.PRESET_SAVE`), following the same convention as loudness/crossfeed/leveller. The 1.1.6 save-to-active-slot opcode is retired. A host saves to the active slot by reading `STORE.PRESET_ACTIVE` and sending `STORE.PRESET_SAVE` to that slot.
 
 ### Change notifications
 
@@ -203,7 +193,7 @@ Each SET emits a parameter-write notification on the notification endpoint (see 
 
 ---
 
-## 4. Bulk Wire Format (GET/SET_ALL_PARAMS 0xA0/0xA1)
+## 4. Bulk Wire Format (`STORE.ALL_PARAMS`)
 
 Psybass appears in `WireBulkParams` from **wire format version 23** as the final section. `WIRE_FORMAT_VERSION` mismatches are rejected wholesale by the firmware, so a host must speak V23 to use bulk transfer with this firmware (total packet size 5900 bytes).
 
@@ -220,14 +210,14 @@ Psybass appears in `WireBulkParams` from **wire format version 23** as the final
 | +16 | 4 | float LE | character_pct |
 | +20 | 4 | float LE | original_db |
 
-On bulk SET (0xA1), all psybass fields are applied and coefficients recompute automatically. On bulk GET (0xA0), the section reflects live state including clamping.
+On a bulk SET, all psybass fields are applied and coefficients recompute automatically. On a bulk GET, the section reflects live state including clamping.
 
 ---
 
 ## 5. Persistence
 
-- **Preset slots (flash):** psybass fields are stored per preset from `SLOT_DATA_VERSION` 31. Presets saved by older firmware (V21-V30) load with psybass defaults (disabled, mask 0xFFFF, cutoff 80, harmonics 0, drive 6, character 50, original 0); no data is lost or misread. Preset save (0x90) captures the live psybass state; preset load (0x91) restores it and recomputes coefficients.
-- **Factory reset (0x53):** restores the defaults above.
+- **Preset slots (flash):** psybass fields are stored per preset from `SLOT_DATA_VERSION` 31. Presets saved by older firmware (V21-V30) load with psybass defaults (disabled, mask 0xFFFF, cutoff 80, harmonics 0, drive 6, character 50, original 0); no data is lost or misread. Preset save (`STORE.PRESET_SAVE`) captures the live psybass state; preset load (`STORE.PRESET_LOAD`) restores it and recomputes coefficients.
+- **Factory reset (`STORE.FACTORY_RESET`):** restores the defaults above.
 - **Startup:** the boot preset (or factory defaults) determines the psybass state at power-on; the effect is fully initialized before audio starts.
 
 ---
@@ -236,7 +226,7 @@ On bulk SET (0xA1), all psybass fields are applied and coefficients recompute au
 
 ### Startup / reconnect sync
 
-1. Read `GET_ALL_PARAMS` (0xA0) and parse the psybass section at offset 5876 (verify `format_version == 23` in the header first), **or** issue the seven individual GETs (0x31, 0x33, 0x35, 0x37, 0x39, 0x3B, 0x3D).
+1. Read `STORE.ALL_PARAMS` and parse the psybass section at offset 5876 (verify `format_version` in the header first), **or** issue the seven individual GETs (`FX.PSYBASS_ENABLE` to `FX.PSYBASS_MASK`, commands 0x40-0x46).
 2. Populate the UI from the returned values. Do not assume defaults; the device may have loaded a preset.
 
 ### Live control
@@ -259,7 +249,7 @@ A minimal UI is a single enable switch plus a "bass boost" slider mapped to `har
 
 ### Feature detection
 
-There is no capability bit for psybass. Detect support by firmware version, by `format_version >= 23` in the bulk header, or by issuing `REQ_GET_PSYBASS` (0x31) and treating a failed/zero-length control transfer as "unsupported" (the established pattern for loudness/crossfeed).
+Every firmware that speaks the paged protocol (1.1.7 and later) has psybass. A host that gates features on the command table checks the GET bit of `FX.PSYBASS_ENABLE` in `SYS.PAGE_COMMANDS` for page 0x08, or the FX page revision in `SYS.PAGE_LIST`. Firmware 1.1.6 and older does not answer the paged protocol (`vendor_command_overhaul_plan.md` section 5.14).
 
 ---
 
@@ -273,7 +263,7 @@ There is no capability bit for psybass. Detect support by firmware version, by `
 - **Sample rate changes:** coefficients recompute automatically for 44.1/48/96 kHz; no host action needed.
 - **Multichannel USB (RP2350 4/6/8-channel alts):** fully supported; psybass is input-count agnostic since it runs post-matrix.
 - **Clipping headroom:** the effect adds energy. With `harmonics_db` high, hot content, and `original_db = 0`, the summed output can clip (the output meters and clip flags at channels CH_OUT_* report it). Reducing `original_db` usually buys back more headroom than the harmonics consume; otherwise lower the output gain or harmonics level.
-- **CPU cost:** roughly 1.5-2x the cost of loudness compensation per enabled output. On RP2040, enabling all outputs at 96 kHz is the worst case; monitor `cpu0_load`/`cpu1_load` in `REQ_GET_STATUS` if you enable it broadly. Masked-off outputs cost nothing.
+- **CPU cost:** roughly 1.5-2x the cost of loudness compensation per enabled output. On RP2040, enabling all outputs at 96 kHz is the worst case; monitor `cpu0_load`/`cpu1_load` in `SYS.SYSTEM_STATUS` (bytes 12 and 13) if you enable it broadly. Masked-off outputs cost nothing.
 
 ---
 
@@ -290,6 +280,6 @@ There is no capability bit for psybass. Detect support by firmware version, by `
 | State | `psybass_output_state[NUM_OUTPUT_CHANNELS]`, 5 words per output, owned by the core that owns the output, reset whenever the output is skipped |
 | Dual-core | Coefficient pointer + mask snapshotted once per packet into `Core1EqWork` so both cores apply one consistent view |
 | Latency | 0 samples added; dry path untouched; inter-slot alignment preserved by construction |
-| Versions | Vendor commands 0x30-0x3D; wire format V23; preset slot V31 |
+| Versions | Vendor commands `FX.PSYBASS_ENABLE` to `FX.PSYBASS_MASK` (page 0x08, 0x40-0x46); wire format V23; preset slot V31 |
 | RAM | ~340 B (RP2040) / ~420 B (RP2350) total |
 | Status | Implemented and audited; hardware listening test pending |

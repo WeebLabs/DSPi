@@ -1,5 +1,7 @@
 # I2S Output Specification
 
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7)*
+
 ## Overview
 
 The DSPi firmware supports per-slot I2S output alongside S/PDIF. Each output slot (0–1 on RP2040, 0–3 on RP2350) can be individually switched between S/PDIF and I2S mode at runtime. I2S slots share a common BCK/LRCLK clock pair and can optionally generate a master clock (MCK). All output slots run on the same PIO block (PIO0) and can be synchronized to start sample-aligned.
@@ -29,7 +31,7 @@ Each slot is either S/PDIF (`OUTPUT_TYPE_SPDIF = 0`) or I2S (`OUTPUT_TYPE_I2S = 
 
 ### Data Pin
 
-Each slot has an independently assignable data GPIO pin. For S/PDIF slots this carries the BMC-encoded bitstream. For I2S slots this carries the serial audio data (MSB-first, left-justified 24-bit in 32-bit frames). The same `REQ_SET_OUTPUT_PIN` / `REQ_GET_OUTPUT_PIN` commands (0x7C/0x7D) work for both output types.
+Each slot has an independently assignable data GPIO pin. For S/PDIF slots this carries the BMC-encoded bitstream. For I2S slots this carries the serial audio data (MSB-first, left-justified 24-bit in 32-bit frames). The same `OUTPUT.PIN` command works for both output types.
 
 Default data pins:
 
@@ -46,7 +48,7 @@ I2S requires bit clock (BCK) and left/right clock (LRCLK) signals. These are sha
 
 | Signal | Default GPIO | Assignable | Notes |
 |--------|-------------|------------|-------|
-| BCK | 14 | Yes (via `REQ_SET_I2S_BCK_PIN`) | Requires no I2S outputs active to change |
+| BCK | 14 | Yes (via `CLOCK.I2S_BCK_PIN`) | Requires no I2S outputs active to change |
 | LRCLK | 15 | No — always BCK + 1 | PIO side-set constraint |
 
 BCK and LRCLK are only driven when at least one I2S slot is active. When all slots are S/PDIF, these pins are idle. Both BCK and BCK+1 are reserved in the pin-in-use check, preventing any output data pin from being assigned to either.
@@ -116,34 +118,33 @@ Divider  = sys_clk * 2 / Fs   = 307200000 * 2 / 48000 = 12800
 
 ## Vendor Commands
 
-All I2S commands use USB EP0 control transfers on the vendor interface (interface 2). I2S configuration commands use request codes `0xC0`–`0xC9`. The existing pin configuration commands (`0x7C`–`0x7D`) also apply to I2S data pins.
+The commands use the paged protocol of `../commands.md`. The page travels in the `wIndex` high byte (low byte 2, the vendor interface) and the command in `bRequest`. `wValue` carries the address and the payload carries the value. One command serves both directions, and the transfer direction selects GET or SET. The output type is on the OUTPUT page, the clock pins and MCK on the CLOCK page. `OUTPUT.PIN` also applies to I2S data pins.
 
 ### Command Summary
 
-| Command | Code | Direction | wValue | wLength | Description |
-|---------|------|-----------|--------|---------|-------------|
-| `REQ_SET_OUTPUT_TYPE` | `0xC0` | IN | `(type << 8) \| slot` | 1 | Switch slot between S/PDIF and I2S |
-| `REQ_GET_OUTPUT_TYPE` | `0xC1` | IN | slot (0-3) | 1 | Get slot's current output type |
-| `REQ_SET_I2S_BCK_PIN` | `0xC2` | IN | new_pin | 1 | Set BCK GPIO (LRCLK = pin + 1) |
-| `REQ_GET_I2S_BCK_PIN` | `0xC3` | IN | 0 | 1 | Get current BCK GPIO |
-| `REQ_SET_MCK_ENABLE` | `0xC4` | IN | 0 or 1 | 1 | Enable or disable MCK output. Returns `PIN_CONFIG_PIN_IN_USE` (MCK stays off) if the MCK pin is claimed by another function |
-| `REQ_GET_MCK_ENABLE` | `0xC5` | IN | 0 | 1 | Get MCK enabled state |
-| `REQ_SET_MCK_PIN` | `0xC6` | IN | new_pin | 1 | Set MCK GPIO |
-| `REQ_GET_MCK_PIN` | `0xC7` | IN | 0 | 1 | Get current MCK GPIO |
-| `REQ_SET_MCK_MULTIPLIER` | `0xC8` | IN | 128 or 256 | 1 | Set MCK frequency multiplier |
-| `REQ_GET_MCK_MULTIPLIER` | `0xC9` | IN | 0 | 1 | Get current MCK multiplier |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `OUTPUT.TYPE` | 0x04 | 0x10 | GET, SET | slot 0 to `NUM_SPDIF_INSTANCES - 1` | GET 1, SET 1 | `0` = S/PDIF, `1` = I2S. SET is applied by the main loop |
+| `OUTPUT.PIN` | 0x04 | 0x11 | GET, SET | pin output 0 to `NUM_PIN_OUTPUTS - 1` | GET 1, SET 1 | Data GPIO. 0xFF restores the default |
+| `CLOCK.I2S_BCK_PIN` | 0x0C | 0x10 | GET, SET | role 0 (master or unified) or 1 (slave) | GET 1, SET 1 | BCK GPIO (LRCLK = pin + 1). 0xFF restores the default |
+| `CLOCK.MCK_ENABLE` | 0x0C | 0x20 | GET, SET | none (0) | GET 1, SET 1 | `0` = disabled, `1` = enabled |
+| `CLOCK.MCK_PIN` | 0x0C | 0x21 | GET, SET | none (0) | GET 1, SET 1 | MCK GPIO (a clk_gpout pin). 0xFF restores the default |
+| `CLOCK.MCK_MULTIPLIER` | 0x0C | 0x22 | GET, SET | none (0) | GET 1, SET 1 | `0` = 128x, `1` = 256x |
 
-### Status Codes
+Role 1 of `CLOCK.I2S_BCK_PIN` is the separate slave pair used in SPLIT clock-pin mode (`clock_pins_spec.md`). This spec describes role 0, which the I2S outputs use in master clocking.
 
-I2S commands that return a status byte reuse the existing pin configuration status codes:
+### Result Codes
 
-| Code | Name | Description |
-|------|------|-------------|
-| `0x00` | `PIN_CONFIG_SUCCESS` | Operation succeeded |
-| `0x01` | `PIN_CONFIG_INVALID_PIN` | GPIO number is out of range, reserved, or invalid value |
-| `0x02` | `PIN_CONFIG_PIN_IN_USE` | GPIO is already assigned to another output |
-| `0x03` | `PIN_CONFIG_INVALID_OUTPUT` | Slot index is out of range |
-| `0x04` | `PIN_CONFIG_OUTPUT_ACTIVE` | Cannot change pin/type while output is active |
+A SET either succeeds (ACK) or STALLs. There is no status byte. The reason for a STALL is readable from `SYS.LAST_RESULT`, and UART and I2C return it in the response status byte. The table lists the codes that replace the old `PIN_CONFIG_*` bytes.
+
+| Result | Replaces | Description |
+|--------|----------|-------------|
+| `VC_OK` | `PIN_CONFIG_SUCCESS` | Operation succeeded, or queued for the main loop |
+| `VC_ERR_PIN_INVALID` | `PIN_CONFIG_INVALID_PIN` | GPIO number is out of range, reserved, or not usable for this function |
+| `VC_ERR_PIN_IN_USE` | `PIN_CONFIG_PIN_IN_USE` | GPIO is already assigned to another function |
+| `VC_ERR_ADDRESS` | `PIN_CONFIG_INVALID_OUTPUT` | Slot, pin output or role index is out of range |
+| `VC_ERR_STATE` | `PIN_CONFIG_OUTPUT_ACTIVE` | Cannot change pin while the output or MCK using it is active |
+| `VC_ERR_VALUE` | | Type or multiplier value out of range |
 
 ### Reserved GPIO Pins
 
@@ -159,87 +160,65 @@ Additionally, when setting the BCK pin, both the BCK pin AND the BCK + 1 pin (LR
 
 ---
 
-### REQ_SET_OUTPUT_TYPE (0xC0)
+### `OUTPUT.TYPE`
 
 Switch an output slot between S/PDIF and I2S mode.
 
-**Transfer type:** Control IN (Device to Host)
-**bmRequestType:** `0xC1` (Device-to-Host, Vendor, Interface)
-**bRequest:** `0xC0`
-**wValue:** `(new_type << 8) | slot_index`
-- `slot_index`: 0 to `NUM_SPDIF_INSTANCES - 1`
-- `new_type`: `0` = S/PDIF, `1` = I2S
-**wIndex:** 2 (vendor interface)
-**wLength:** 1
-
-**Response:** 1-byte status code.
+**SET:** `wValue` = slot index (0 to `NUM_SPDIF_INSTANCES - 1`), 1-byte payload = new type (`0` = S/PDIF, `1` = I2S).
 
 **Behavior:**
-1. Validates slot index and type value
+1. A bad slot index STALLs with `VC_ERR_ADDRESS`, a type above 1 with `VC_ERR_VALUE`
 2. If the slot is already the requested type, returns success immediately (no-op)
-3. Audio is muted for ~5 ms (256 samples at 48 kHz) to prevent clicks
-4. For SPDIF-to-I2S: tears down the S/PDIF instance, sets up the I2S instance on the same SM, DMA channel, pin and ring storage, then restarts all outputs in sync
-5. For I2S-to-SPDIF: tears down the I2S instance, sets up the S/PDIF instance on the same resources, then restarts all outputs in sync
-6. Updates the stored output type
+3. Otherwise the change is queued and the SET is ACKed. The main loop then carries out steps 4 to 7
+4. Audio is muted for ~5 ms (256 samples at 48 kHz) to prevent clicks
+5. For SPDIF-to-I2S: tears down the S/PDIF instance, sets up the I2S instance on the same SM, DMA channel, pin and ring storage, then restarts all outputs in sync
+6. For I2S-to-SPDIF: tears down the I2S instance, sets up the S/PDIF instance on the same resources, then restarts all outputs in sync
+7. Updates the stored output type
+
+**GET:** `wValue` = slot index. 1-byte reply, `0` = S/PDIF, `1` = I2S.
 
 **Notes:**
 - The data pin for the slot is unchanged during a type switch
-- All I2S slots share the same BCK/LRCLK pins (set via `REQ_SET_I2S_BCK_PIN`)
+- All I2S slots share the same BCK/LRCLK pins (set via `CLOCK.I2S_BCK_PIN`)
 - This change is NOT automatically persisted to flash. Save the active preset to persist.
 
 **Example (C/libusb):**
 ```c
-// Switch slot 2 to I2S
-uint8_t status;
-uint16_t wValue = (OUTPUT_TYPE_I2S << 8) | 2;  // type=1, slot=2
+// Switch slot 2 to I2S: SET OUTPUT.TYPE (page 0x04, cmd 0x10), wValue = slot
+uint8_t type = OUTPUT_TYPE_I2S;
 int ret = libusb_control_transfer(handle,
-    0xC1,       // bmRequestType: IN, Vendor, Interface
-    0xC0,       // bRequest: REQ_SET_OUTPUT_TYPE
-    wValue,     // wValue: (type << 8) | slot
-    2,          // wIndex: vendor interface
-    &status,    // data
-    1,          // wLength
-    1000);      // timeout ms
-if (ret == 1 && status == 0x00) {
-    // Switch succeeded
+    0x41,              // bmRequestType: OUT, Vendor, Interface
+    0x10,              // bRequest: OUTPUT.TYPE
+    2,                 // wValue: slot
+    (0x04 << 8) | 2,   // wIndex: page 0x04, vendor interface 2
+    &type,             // data
+    1,                 // wLength
+    1000);             // timeout ms
+if (ret == 1) {
+    // Accepted. A STALL (LIBUSB_ERROR_PIPE) means refused: read SYS.LAST_RESULT
 }
-```
 
----
-
-### REQ_GET_OUTPUT_TYPE (0xC1)
-
-Get the current output type of a slot.
-
-**wValue:** Slot index (0 to `NUM_SPDIF_INSTANCES - 1`)
-**wLength:** 1
-
-**Response:** 1 byte — `0` = S/PDIF, `1` = I2S.
-
-**Example:**
-```c
-uint8_t type;
-libusb_control_transfer(handle, 0xC1, 0xC1, slot, 2, &type, 1, 1000);
+// Read a slot's type: GET OUTPUT.TYPE
+libusb_control_transfer(handle, 0xC1, 0x10, slot, (0x04 << 8) | 2, &type, 1, 1000);
 printf("Slot %d: %s\n", slot, type ? "I2S" : "S/PDIF");
 ```
 
 ---
 
-### REQ_SET_I2S_BCK_PIN (0xC2)
+### `CLOCK.I2S_BCK_PIN`
 
 Set the BCK (bit clock) GPIO pin. LRCLK is always BCK + 1.
 
-**wValue:** New BCK GPIO pin number
-**wLength:** 1
-
-**Response:** 1-byte status code.
+**SET:** `wValue` = role (0 for the pair the outputs use in master clocking), 1-byte payload = new BCK GPIO. 0xFF restores the default (GPIO 14).
 
 **Behavior:**
-1. Validates that both `new_pin` and `new_pin + 1` are valid GPIO pins
+1. Validates that both `new_pin` and `new_pin + 1` are valid GPIO pins (`VC_ERR_PIN_INVALID`)
 2. If unchanged from current BCK pin, returns success (no-op)
-3. Checks that NO output slots are currently configured as I2S. If any slot is I2S, returns `PIN_CONFIG_OUTPUT_ACTIVE`
-4. Checks both pins are not in use by output data pins or MCK
+3. Checks that NO output slots are currently configured as I2S on that pair. If any slot is I2S, the SET STALLs with `VC_ERR_STATE`
+4. Checks both pins are not in use by output data pins or MCK (`VC_ERR_PIN_IN_USE`)
 5. Stores the new BCK pin value
+
+**GET:** `wValue` = role. 1-byte reply, BCK GPIO pin number (default: 14).
 
 **Notes:**
 - The BCK pin change does NOT take effect until a slot is next switched to I2S mode
@@ -247,34 +226,24 @@ Set the BCK (bit clock) GPIO pin. LRCLK is always BCK + 1.
 
 **Example:**
 ```c
-uint8_t status;
-libusb_control_transfer(handle, 0xC1, 0xC2, /*new_pin=*/16, 2, &status, 1, 1000);
+uint8_t pin = 16;
+libusb_control_transfer(handle, 0x41, 0x10, /*role=*/0, (0x0C << 8) | 2, &pin, 1, 1000);
 // BCK will now be GPIO 16, LRCLK will be GPIO 17
 ```
 
 ---
 
-### REQ_GET_I2S_BCK_PIN (0xC3)
-
-**wValue:** 0
-**wLength:** 1
-
-**Response:** 1 byte — BCK GPIO pin number (default: 14).
-
----
-
-### REQ_SET_MCK_ENABLE (0xC4)
+### `CLOCK.MCK_ENABLE`
 
 Enable or disable the master clock output.
 
-**wValue:** 0 = disable, 1 = enable
-**wLength:** 1
-
-**Response:** 1-byte status code (always `PIN_CONFIG_SUCCESS`).
+**SET:** 1-byte payload, `0` = disable, any other value = enable.
 
 **Behavior:**
-- **Enable:** Configures the MCK PIO clock divider for the current sample rate and multiplier, starts the MCK output
+- **Enable:** Configures the MCK PIO clock divider for the current sample rate and multiplier, starts the MCK output. If the MCK pin is claimed by another function, the SET STALLs with `VC_ERR_PIN_IN_USE` and MCK stays off
 - **Disable:** Stops the MCK PIO state machine; the MCK pin goes idle
+
+**GET:** 1-byte reply, `0` = disabled, `1` = enabled.
 
 **Notes:**
 - MCK can be enabled independently of whether any I2S slots are active
@@ -283,41 +252,27 @@ Enable or disable the master clock output.
 
 ---
 
-### REQ_GET_MCK_ENABLE (0xC5)
-
-**Response:** 1 byte — `0` = disabled, `1` = enabled.
-
----
-
-### REQ_SET_MCK_PIN (0xC6)
+### `CLOCK.MCK_PIN`
 
 Set the MCK GPIO pin.
 
-**wValue:** New MCK GPIO pin number
-**wLength:** 1
+**SET:** 1-byte payload = new MCK GPIO. 0xFF restores the default (GPIO 13). The pin must be a clk_gpout pin, or the SET STALLs with `VC_ERR_PIN_INVALID`.
 
-**Response:** 1-byte status code.
+**GET:** 1-byte reply, GPIO pin number (default: 13).
 
 **Notes:**
-- MCK must be disabled before changing the pin
+- MCK must be disabled before changing the pin. While MCK runs the SET STALLs with `VC_ERR_STATE`, even for the current pin
 - To change: disable MCK → change pin → re-enable MCK
 
 ---
 
-### REQ_GET_MCK_PIN (0xC7)
-
-**Response:** 1 byte — GPIO pin number (default: 13).
-
----
-
-### REQ_SET_MCK_MULTIPLIER (0xC8)
+### `CLOCK.MCK_MULTIPLIER`
 
 Set the MCK frequency multiplier.
 
-**wValue:** 128 or 256
-**wLength:** 1
+**SET:** 1-byte payload, `0` = 128x, `1` = 256x. Any other value STALLs with `VC_ERR_VALUE`.
 
-**Response:** 1-byte status code.
+**GET:** 1-byte reply, `0` = 128x, `1` = 256x.
 
 **Notes:**
 - 128x at 48 kHz gives an integer PIO divider (25.0) = zero jitter (recommended)
@@ -326,22 +281,15 @@ Set the MCK frequency multiplier.
 
 ---
 
-### REQ_GET_MCK_MULTIPLIER (0xC9)
+### `OUTPUT.PIN` (data pins of S/PDIF and I2S slots)
 
-**Response:** 1 byte — `0` = 128x, `1` = 256x.
+The data pin change command works with both S/PDIF and I2S slots.
 
----
+**SET:** `wValue` = pin output index (slots first, then the PDM output), 1-byte payload = new GPIO. 0xFF restores the output's default pin.
 
-### REQ_SET_OUTPUT_PIN (0x7C) — Updated for I2S
+**GET:** `wValue` = pin output index. 1-byte reply, current GPIO.
 
-The existing data pin change command now works with both S/PDIF and I2S slots.
-
-**wValue:** `(new_pin << 8) | output_index`
-**wLength:** 1
-
-**Response:** 1-byte status code.
-
-**Behavior for I2S slots:** The slot is briefly disabled, the data pin is changed via `audio_i2s_change_data_pin()`, and the slot is re-enabled. Clock pins (BCK/LRCLK) are NOT affected.
+**Behavior for I2S slots:** The slot is briefly disabled, the data pin is changed via `audio_i2s_change_data_pin()`, and the slot is re-enabled. Clock pins (BCK/LRCLK) are NOT affected. A slot pin change is queued and applied by the main loop, which restarts the slot in phase with the others.
 
 ## Preset Persistence
 
@@ -367,7 +315,7 @@ I2S output configuration is included in the preset system. When a preset is save
 
 ## Bulk Parameter Transfer
 
-I2S configuration is included in the bulk parameter transfer (`REQ_GET_ALL_PARAMS` / `REQ_SET_ALL_PARAMS`).
+I2S configuration is included in the bulk parameter transfer (`STORE.ALL_PARAMS`).
 
 ### Wire Format Version
 
@@ -422,18 +370,18 @@ typedef struct __attribute__((packed)) {
 When a host application connects to the device:
 
 ```
-1. REQ_GET_PLATFORM (0x7F)            → Get platform, firmware version, output count
-2. REQ_GET_ALL_PARAMS (0xA0)          → Read complete state including I2S config
+1. SYS.PLATFORM                       → Get platform, firmware version, output count
+2. STORE.ALL_PARAMS (GET)             → Read complete state including I2S config
 3. Parse i2s_config section:
    - For each slot: read output_types[i] to know S/PDIF vs I2S
    - Read bck_pin to display BCK/LRCLK assignment
    - Read mck_enabled, mck_pin, mck_multiplier for MCK state
 4. For each output slot:
-   REQ_GET_OUTPUT_PIN (0x7D)          → Get current data pin
+   OUTPUT.PIN (GET)                   → Get current data pin
 5. Display output configuration UI
 ```
 
-All I2S state is included in the bulk parameter response. There is no need to issue separate `REQ_GET_OUTPUT_TYPE` / `REQ_GET_I2S_BCK_PIN` calls during initialization.
+All I2S state is included in the bulk parameter response. There is no need to issue separate `OUTPUT.TYPE` / `CLOCK.I2S_BCK_PIN` reads during initialization.
 
 ### Switching a Slot to I2S
 
@@ -441,12 +389,12 @@ Recommended order of operations:
 
 ```
 1. (If no I2S slots exist yet and BCK pin needs changing)
-   REQ_SET_I2S_BCK_PIN (0xC2)       → Set BCK pin before first I2S switch
+   CLOCK.I2S_BCK_PIN (SET, role 0)    → Set BCK pin before first I2S switch
 
 2. (If DAC needs MCK and MCK is not yet enabled)
-   REQ_SET_MCK_ENABLE (0xC4)         → Enable MCK output
+   CLOCK.MCK_ENABLE (SET, 1)          → Enable MCK output
 
-3. REQ_SET_OUTPUT_TYPE (0xC0)         → Switch slot to I2S
+3. OUTPUT.TYPE (SET, 1)               → Switch slot to I2S
    // Audio briefly mutes during switch (~5 ms)
 
 4. Update UI to reflect the slot's new type
@@ -455,10 +403,10 @@ Recommended order of operations:
 ### Switching a Slot Back to S/PDIF
 
 ```
-1. REQ_SET_OUTPUT_TYPE (0xC0)         → Switch slot back to S/PDIF
+1. OUTPUT.TYPE (SET, 0)               → Switch slot back to S/PDIF
 
 2. If no more I2S slots remain:
-   (Optional) REQ_SET_MCK_ENABLE (0xC4) with wValue=0  → Disable MCK
+   (Optional) CLOCK.MCK_ENABLE (SET, 0) → Disable MCK
 ```
 
 ### Changing the BCK Pin
@@ -467,12 +415,12 @@ All I2S slots must be switched to S/PDIF first:
 
 ```
 1. For each slot that is I2S:
-   REQ_SET_OUTPUT_TYPE (0xC0)         → Switch to S/PDIF temporarily
+   OUTPUT.TYPE (SET, 0)               → Switch to S/PDIF temporarily
 
-2. REQ_SET_I2S_BCK_PIN (0xC2)        → Set new BCK pin
+2. CLOCK.I2S_BCK_PIN (SET, role 0)    → Set new BCK pin
 
 3. For each slot that was I2S:
-   REQ_SET_OUTPUT_TYPE (0xC0)         → Switch back to I2S
+   OUTPUT.TYPE (SET, 1)               → Switch back to I2S
 ```
 
 ### Persisting I2S Configuration
@@ -481,7 +429,7 @@ I2S settings are part of the live state and are captured when saving a preset:
 
 ```
 1. Configure outputs as desired (type, pins, MCK)
-2. REQ_PRESET_SAVE (0x90)            → Save to a preset slot
+2. STORE.PRESET_SAVE (slot)          → Save to a preset slot
    // All I2S config is included in the saved preset
 3. On next boot, the startup preset will restore the I2S config
 ```
@@ -493,17 +441,15 @@ I2S settings are part of the live state and are captured when saving a preset:
 #define OUTPUT_TYPE_SPDIF  0
 #define OUTPUT_TYPE_I2S    1
 
-// Vendor command request codes
-#define REQ_SET_OUTPUT_TYPE      0xC0
-#define REQ_GET_OUTPUT_TYPE      0xC1
-#define REQ_SET_I2S_BCK_PIN     0xC2
-#define REQ_GET_I2S_BCK_PIN     0xC3
-#define REQ_SET_MCK_ENABLE      0xC4
-#define REQ_GET_MCK_ENABLE      0xC5
-#define REQ_SET_MCK_PIN         0xC6
-#define REQ_GET_MCK_PIN         0xC7
-#define REQ_SET_MCK_MULTIPLIER  0xC8
-#define REQ_GET_MCK_MULTIPLIER  0xC9
+// Paged commands: wIndex = (page << 8) | 2, bRequest = cmd (vc_ids.h has the full IDs)
+#define PAGE_OUTPUT              0x04
+#define CMD_OUTPUT_TYPE          0x10   // wValue = slot
+#define CMD_OUTPUT_PIN           0x11   // wValue = pin output
+#define PAGE_CLOCK               0x0C
+#define CMD_I2S_BCK_PIN          0x10   // wValue = role
+#define CMD_MCK_ENABLE           0x20
+#define CMD_MCK_PIN              0x21
+#define CMD_MCK_MULTIPLIER       0x22
 
 // Default pins
 #define PICO_I2S_BCK_PIN   14   // LRCLK = 15

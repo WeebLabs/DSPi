@@ -1,6 +1,6 @@
 # Master Clock (MCK) Specification
 
-*Last updated: 2026-05-09*
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
 
 ## 1. Overview
 
@@ -12,7 +12,7 @@ MCK is independent from the I2S data/word clocks (BCK/LRCLK). It can be enabled 
 
 | Property | Value |
 |----------|-------|
-| Vendor commands | `0xC4`–`0xC9` (six commands: SET/GET enable, pin, multiplier) |
+| Vendor commands | `CLOCK.MCK_ENABLE`, `CLOCK.MCK_PIN`, `CLOCK.MCK_MULTIPLIER` (page 0x0C, commands 0x20-0x22, each GET and SET) |
 | Default state | Disabled |
 | Default pin (RP2350) | GPIO 13 (`clk_gpout0`) |
 | Default pin (RP2040) | GPIO 21 (`clk_gpout0`) |
@@ -118,8 +118,7 @@ The default takes effect on factory reset, on first boot before any preset has b
 | Property | Value |
 |----------|-------|
 | Type | `bool` (uint8_t on the wire: 0/1) |
-| SET command | `0xC4` `REQ_SET_MCK_ENABLE` |
-| GET command | `0xC5` `REQ_GET_MCK_ENABLE` |
+| Command | `CLOCK.MCK_ENABLE` (GET, SET) |
 | Default | `false` |
 | Persisted | Yes |
 | Notify offset (v2) | `offsetof(WireBulkParams, i2s_config.mck_enabled)`, length 1 |
@@ -131,21 +130,20 @@ When `true`, the CLK_GPOUTn block is configured (AUXSRC = clk_sys, divider loade
 | Property | Value |
 |----------|-------|
 | Type | `uint8_t` (GPIO index) |
-| SET command | `0xC6` `REQ_SET_MCK_PIN` |
-| GET command | `0xC7` `REQ_GET_MCK_PIN` |
+| Command | `CLOCK.MCK_PIN` (GET, SET) |
 | Default | `PICO_I2S_MCK_PIN` (13 on RP2350, 21 on RP2040) |
 | Persisted | Yes |
 | Notify offset (v2) | `offsetof(WireBulkParams, i2s_config.mck_pin)`, length 1 |
-| Mutable while enabled? | **No** — must disable MCK first |
+| Mutable while enabled? | **No**. Disable MCK first |
 
 The pin must satisfy **all** of:
 
-1. `is_valid_gpio_pin(pin)`: not in 23-25 (board-reserved) and in range for the platform. GPIO 12 is no longer reserved (updated 2026-11-15).
-2. `GPIO_TO_GPOUT_CLOCK_HANDLE(pin, clk_sys) != clk_sys` — pin must map to a CLK_GPOUTn block on the current platform.
+1. `PIN_VALID_FOR(DSPI_PIN_FN_MCK, pin)` (`is_valid_gpio_pin()` on standard builds): not in 23-25 (board-reserved) and in range for the platform. GPIO 12 is no longer reserved (updated 2026-11-15).
+2. `GPIO_TO_GPOUT_CLOCK_HANDLE(pin, clk_sys) != clk_sys`. The pin must map to a CLK_GPOUTn block on the current platform.
 3. Not in use by any other output / RX feature (`is_pin_in_use(pin, 0xFF) == false`).
 4. MCK currently disabled (`i2s_mck_enabled == false`).
 
-If any check fails, the SET handler returns a non-zero status byte (see § 4.2).
+If any check fails, the SET is refused with a result code (see § 4.2). A GPIO of 0xFF (`PIN_RESET_TO_DEFAULT`) selects the platform default pin.
 
 ### 3.3 Multiplier (`i2s_mck_multiplier`)
 
@@ -153,8 +151,7 @@ If any check fails, the SET handler returns a non-zero status byte (see § 4.2).
 |----------|-------|
 | Type | `uint16_t` runtime; `uint8_t` on wire/flash |
 | Wire encoding | `0` = 128×, `1` = 256× |
-| SET command | `0xC8` `REQ_SET_MCK_MULTIPLIER` |
-| GET command | `0xC9` `REQ_GET_MCK_MULTIPLIER` |
+| Command | `CLOCK.MCK_MULTIPLIER` (GET, SET) |
 | Default | `128` (wire `0`) |
 | Persisted | Yes |
 | Notify offset (v2) | `offsetof(WireBulkParams, i2s_config.mck_multiplier)`, length 1 |
@@ -165,89 +162,89 @@ The MCK frequency is `Fs × multiplier`. Both 128× and 256× are accepted at ev
 
 ## 4. Vendor Commands
 
-All MCK commands use the standard DSPi vendor-class control transfer pattern (`bmRequestType` recipient = vendor, type = vendor; routed via `tud_vendor_control_xfer_cb` in `vendor_commands.c`).
+All MCK commands use the paged vendor protocol (page in the `wIndex` high byte, command in `bRequest`, see `../commands.md`). On USB they arrive through `tud_vendor_control_xfer_cb` in `firmware/DSPi/vendor/vc_usb.c`, and the handlers are in `firmware/DSPi/vendor/vc_page_clock.c`. They also work over the UART and I2C control interfaces.
 
 ### 4.1 Command table
 
-| Code | Name | Direction | wValue | wLength | Payload | Response |
-|------|------|-----------|--------|---------|---------|----------|
-| `0xC4` | `REQ_SET_MCK_ENABLE` | OUT-then-IN | 0 = disable, 1 = enable | 0 | (none) | 1 byte status (`PIN_CONFIG_*`) |
-| `0xC5` | `REQ_GET_MCK_ENABLE` | IN | 0 | 1 | — | 1 byte: 0/1 |
-| `0xC6` | `REQ_SET_MCK_PIN` | OUT-then-IN | new GPIO index | 0 | (none) | 1 byte status (`PIN_CONFIG_*`) |
-| `0xC7` | `REQ_GET_MCK_PIN` | IN | 0 | 1 | — | 1 byte: GPIO index |
-| `0xC8` | `REQ_SET_MCK_MULTIPLIER` | OUT-then-IN | 0 = 128×, 1 = 256× | 0 | (none) | 1 byte status (`PIN_CONFIG_*`) |
-| `0xC9` | `REQ_GET_MCK_MULTIPLIER` | IN | 0 | 1 | — | 1 byte: 0 (128×) / 1 (256×) |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `CLOCK.MCK_ENABLE` | 0x0C | 0x20 | GET, SET | none (0) | GET 1, SET 1 | 0 = disable, non-zero = enable. GET returns 0/1 |
+| `CLOCK.MCK_PIN` | 0x0C | 0x21 | GET, SET | none (0) | GET 1, SET 1 | GPIO index. 0xFF restores the platform default |
+| `CLOCK.MCK_MULTIPLIER` | 0x0C | 0x22 | GET, SET | none (0) | GET 1, SET 1 | 0 = 128×, 1 = 256× |
 
-"OUT-then-IN" SET commands send the parameter in the setup packet's `wValue` and immediately return a 1-byte status byte over the IN data stage — there is no separate OUT data phase.
+Each SET carries its value in a 1-byte OUT payload. There is no status byte. Success is an ACK. A rejected SET STALLs, and the reason is readable from `SYS.LAST_RESULT` (UART and I2C return it in the response status byte).
 
-### 4.2 Status byte (`PIN_CONFIG_*`)
+### 4.2 Result codes
 
 Returned by the three SET commands:
 
 | Code | Name | Meaning |
 |------|------|---------|
-| `0x00` | `PIN_CONFIG_SUCCESS` | Operation completed; new state has been applied |
-| `0x01` | `PIN_CONFIG_INVALID_PIN` | (Pin commands only.) Pin failed `is_valid_gpio_pin()` *or* has no `clk_gpoutN` mapping on this platform *or* multiplier wValue out of range |
-| `0x02` | `PIN_CONFIG_PIN_IN_USE` | (Pin commands only.) Pin is currently assigned to another output / SPDIF RX / I2S BCK or LRCLK |
-| `0x04` | `PIN_CONFIG_OUTPUT_ACTIVE` | (Pin commands only.) Cannot change pin while MCK is enabled |
+| `0x00` | `VC_OK` | Operation completed; new state has been applied |
+| `0x19` | `VC_ERR_PIN_INVALID` | (`MCK_PIN` only.) Pin failed the platform pin check *or* has no `clk_gpoutN` mapping on this platform |
+| `0x1A` | `VC_ERR_PIN_IN_USE` | Pin is currently assigned to another output / SPDIF RX / I2S BCK or LRCLK. `MCK_PIN` checks the new pin; `MCK_ENABLE` checks the stored pin when it turns MCK on |
+| `0x18` | `VC_ERR_STATE` | (`MCK_PIN` only.) Cannot change pin while MCK is enabled, even to the current pin |
+| `0x14` | `VC_ERR_VALUE` | (`MCK_MULTIPLIER` only.) Value above 1 |
 
-`PIN_CONFIG_INVALID_OUTPUT` (`0x03`) is shared with other vendor commands and is not returned by the MCK handlers.
+Every command also refuses a non-zero `wValue` (`VC_ERR_ADDRESS`) and a payload that is not exactly 1 byte (`VC_ERR_LENGTH`).
 
 ### 4.3 Behavioural details per command
 
-**`REQ_SET_MCK_ENABLE`** (0xC4):
+**`CLOCK.MCK_ENABLE`** SET:
 
-1. If `wValue != 0` and MCK was previously off:
+1. If the payload is non-zero and MCK was previously off:
+   - If the stored pin is claimed by another function (MCK reserves its pin only while enabled), returns `VC_ERR_PIN_IN_USE` and changes nothing.
    - Calls `audio_i2s_mck_update_frequency(audio_state.freq, i2s_mck_multiplier)` to compute and stash the divider.
-   - Calls `audio_i2s_mck_set_enabled(true)` — configures CLK_GPOUTn (AUXSRC, DIV, ENABLE) and routes the pad mux.
+   - Calls `audio_i2s_mck_set_enabled(true)`. This configures CLK_GPOUTn (AUXSRC, DIV, ENABLE) and routes the pad mux.
    - Sets `i2s_mck_enabled = true`.
-2. If `wValue == 0` and MCK was on: disconnects pad mux, clears `i2s_mck_enabled`.
-3. Always emits a v2 notification at offset `i2s_config.mck_enabled`.
-4. Returns `PIN_CONFIG_SUCCESS` unconditionally.
+2. If the payload is 0 and MCK was on: disconnects pad mux, clears `i2s_mck_enabled`.
+3. Emits a v2 notification at offset `i2s_config.mck_enabled` on every accepted SET.
+4. Otherwise returns `VC_OK`.
 
-**`REQ_SET_MCK_PIN`** (0xC6):
+**`CLOCK.MCK_PIN`** SET:
 
-1. Validates against `is_valid_gpio_pin()` → returns `INVALID_PIN` on failure.
-2. Validates against `GPIO_TO_GPOUT_CLOCK_HANDLE()` → returns `INVALID_PIN` if pin has no clock-output mapping.
-3. If `i2s_mck_enabled` → returns `OUTPUT_ACTIVE` (must disable first).
-4. If `is_pin_in_use(pin, 0xFF)` → returns `PIN_IN_USE`.
-5. If new pin equals current pin → no-op `SUCCESS`.
-6. Otherwise: calls `audio_i2s_mck_change_pin(pin)` (book-keeping only, no hardware effect; takes effect on next enable), updates `i2s_mck_pin`, emits notification, returns `SUCCESS`.
+1. Maps 0xFF to `PICO_I2S_MCK_PIN`.
+2. Validates against the platform pin check → `VC_ERR_PIN_INVALID` on failure.
+3. Validates against `GPIO_TO_GPOUT_CLOCK_HANDLE()` → `VC_ERR_PIN_INVALID` if pin has no clock-output mapping.
+4. If `i2s_mck_enabled` → `VC_ERR_STATE` (must disable first).
+5. If `is_pin_in_use(pin, 0xFF)` → `VC_ERR_PIN_IN_USE`.
+6. If new pin equals current pin → no-op `VC_OK`.
+7. Otherwise: calls `audio_i2s_mck_change_pin(pin)` (book-keeping only, no hardware effect; takes effect on next enable), updates `i2s_mck_pin`, emits notification, returns `VC_OK`.
 
-**`REQ_SET_MCK_MULTIPLIER`** (0xC8):
+**`CLOCK.MCK_MULTIPLIER`** SET:
 
-1. `wValue` must be 0 or 1 → otherwise returns `INVALID_PIN`.
-2. Maps wValue to `i2s_mck_multiplier ∈ {128, 256}`.
+1. The payload must be 0 or 1 → otherwise `VC_ERR_VALUE`.
+2. Maps the payload to `i2s_mck_multiplier ∈ {128, 256}`.
 3. If MCK is currently enabled, hot-loads the new divider via `audio_i2s_mck_update_frequency()`. The CLK_GPOUTn `DIV` register is reloaded glitchlessly (no pin transitions are dropped; ENABLE stays asserted).
-4. Emits notification; returns `SUCCESS`.
+4. Emits notification; returns `VC_OK`.
 
-**`REQ_GET_*`** commands (0xC5/0xC7/0xC9): single-byte read of current state, no validation, no side effects.
+**GET** of each command: single-byte read of current state, no side effects.
 
 ### 4.4 Common app patterns
 
 #### 4.4.1 Enable MCK with a custom multiplier
 
 ```
-1. control SET 0xC4 wValue=0          → status 0x00 (force MCK off, in case it was on)
-2. control SET 0xC8 wValue=1          → status 0x00 (set 256×)
-3. control SET 0xC4 wValue=1          → status 0x00 (enable; MCK starts at Fs × 256)
+1. SET CLOCK.MCK_ENABLE      payload 00   → ACK (force MCK off, in case it was on)
+2. SET CLOCK.MCK_MULTIPLIER  payload 01   → ACK (set 256×)
+3. SET CLOCK.MCK_ENABLE      payload 01   → ACK (enable; MCK starts at Fs × 256)
 ```
 
-If you skip step 1 and MCK is already on, `REQ_SET_MCK_MULTIPLIER` will hot-update the divider without re-toggling the pad mux (no DAC PLL relock chirp).
+If you skip step 1 and MCK is already on, the `CLOCK.MCK_MULTIPLIER` SET will hot-update the divider without re-toggling the pad mux (no DAC PLL relock chirp).
 
 #### 4.4.2 Move MCK to a different GPIO
 
 ```
-1. control SET 0xC4 wValue=0          → status 0x00 (must disable first)
-2. control SET 0xC6 wValue=21         → status 0x00 (or INVALID_PIN / PIN_IN_USE)
-3. control SET 0xC4 wValue=1          → status 0x00 (re-enable on new pin)
+1. SET CLOCK.MCK_ENABLE  payload 00   → ACK (must disable first)
+2. SET CLOCK.MCK_PIN     payload 21   → ACK (or STALL: VC_ERR_PIN_INVALID / VC_ERR_PIN_IN_USE)
+3. SET CLOCK.MCK_ENABLE  payload 01   → ACK (re-enable on new pin)
 ```
 
-Trying step 2 while MCK is on returns `OUTPUT_ACTIVE` (0x04). The same status is returned for changing the I2S BCK pin while any I2S slot is active — same pattern.
+Trying step 2 while MCK is on STALLs with `VC_ERR_STATE`. The same result is returned for changing the I2S BCK pin while any I2S slot is active. Same pattern.
 
 #### 4.4.3 Read full MCK state in one round trip
 
-If your host SDK already uses `REQ_GET_ALL_PARAMS` (0xA0) for bulk state, the `WireI2SConfig` block already contains all three MCK fields. Prefer the bulk transfer over three separate GETs.
+If your host SDK already uses `STORE.ALL_PARAMS` for bulk state, the `WireI2SConfig` block already contains all three MCK fields. Prefer the bulk transfer over three separate GETs.
 
 ---
 
@@ -297,7 +294,7 @@ The host doesn't observe the servo'd divider — it doesn't change the multiplie
 
 ### 6.1 `WireI2SConfig` (16 bytes)
 
-Defined in `firmware/DSPi/bulk_params.h` Section 11. Used by both bulk parameter transfers (`REQ_GET_ALL_PARAMS` / `REQ_SET_ALL_PARAMS`) and v2 notifications (`notify_param_write`):
+Defined in `firmware/DSPi/bulk_params.h` Section 11. Used by both bulk parameter transfers (`STORE.ALL_PARAMS` GET and SET) and v2 notifications (`notify_param_write`):
 
 ```c
 typedef struct __attribute__((packed)) {
@@ -343,9 +340,9 @@ The CLK_GPOUTn migration is **value-only** — no `SLOT_DATA_VERSION` bump was r
 
 Every successful SET handler emits a `notify_param_write(offset, length, ptr)` call so other USB hosts (or the same host, on re-poll) see the new state. For MCK:
 
-- `REQ_SET_MCK_PIN` → emits 1 byte at `i2s_config.mck_pin`
-- `REQ_SET_MCK_ENABLE` → emits 1 byte at `i2s_config.mck_enabled`
-- `REQ_SET_MCK_MULTIPLIER` → emits 1 byte at `i2s_config.mck_multiplier`
+- `CLOCK.MCK_PIN` SET → emits 1 byte at `i2s_config.mck_pin`
+- `CLOCK.MCK_ENABLE` SET → emits 1 byte at `i2s_config.mck_enabled`
+- `CLOCK.MCK_MULTIPLIER` SET → emits 1 byte at `i2s_config.mck_multiplier`
 
 See `Documentation/Features/notification_protocol_v2_spec.md` for the notification framing.
 
@@ -370,7 +367,7 @@ if (GPIO_TO_GPOUT_CLOCK_HANDLE(loaded_mck_pin, clk_sys) == clk_sys) {
 
 This is silent at the wire / flash level — there is no error returned to the host. If you want to detect that migration occurred, compare the MCK fields before and after the bulk SET (or check the directory `mck_pin` against the platform default).
 
-**Recommendation for app developers:** when porting a preset between platforms (export from RP2350, import on RP2040), call `REQ_GET_MCK_PIN` after import. If it equals `21` and you expected `13` (or vice versa), prompt the user that MCK was moved to the platform default and is currently disabled.
+**Recommendation for app developers:** when porting a preset between platforms (export from RP2350, import on RP2040), read `CLOCK.MCK_PIN` after import. If it equals `21` and you expected `13` (or vice versa), prompt the user that MCK was moved to the platform default and is currently disabled.
 
 ---
 
@@ -379,62 +376,54 @@ This is silent at the wire / flash level — there is no error returned to the h
 ### 8.1 Enabling MCK with libusb / Python
 
 ```python
-import usb.core, usb.util
+import struct
+import usb.core
 
-DSPI_VENDOR  = 0x239A   # placeholder — see device descriptors
-REQ_SET_MCK_ENABLE     = 0xC4
-REQ_GET_MCK_ENABLE     = 0xC5
-REQ_SET_MCK_PIN        = 0xC6
-REQ_GET_MCK_PIN        = 0xC7
-REQ_SET_MCK_MULTIPLIER = 0xC8
-REQ_GET_MCK_MULTIPLIER = 0xC9
+IFACE = 2
+PAGE_SYS, PAGE_CLOCK = 0x01, 0x0C
+SYS_LAST_RESULT = 0x14
+MCK_ENABLE, MCK_PIN, MCK_MULTIPLIER = 0x20, 0x21, 0x22
 
-PIN_CONFIG_SUCCESS       = 0x00
-PIN_CONFIG_INVALID_PIN   = 0x01
-PIN_CONFIG_PIN_IN_USE    = 0x02
-PIN_CONFIG_OUTPUT_ACTIVE = 0x04
+def windex(page):
+    return (page << 8) | IFACE          # page in the high byte, interface in the low byte
 
-def vendor_set(dev, request, wValue):
-    """Returns the 1-byte status from a SET-then-IN command."""
-    rsp = dev.ctrl_transfer(
-        bmRequestType = 0xC2,   # IN | vendor | interface
-        bRequest      = request,
-        wValue        = wValue,
-        wIndex        = 0,
-        data_or_wLength = 1,
-        timeout       = 1000)
-    return rsp[0]
+def clock_set(dev, cmd, value):
+    """1-byte SET. Returns None on ACK, or the VC_* result code after a STALL."""
+    try:
+        dev.ctrl_transfer(0x41, cmd, 0, windex(PAGE_CLOCK), bytes([value]), timeout=1000)
+        return None
+    except usb.core.USBError:
+        lr = dev.ctrl_transfer(0xC1, SYS_LAST_RESULT, 0, windex(PAGE_SYS), 8, timeout=1000)
+        cmd_id, is_get, result = struct.unpack_from("<HBB", bytes(lr))
+        return result if cmd_id == (PAGE_CLOCK << 8) | cmd and not is_get else -1
 
-def vendor_get(dev, request, length=1):
-    return dev.ctrl_transfer(0xC2, request, 0, 0, length, timeout=1000)
+def clock_get(dev, cmd):
+    return dev.ctrl_transfer(0xC1, cmd, 0, windex(PAGE_CLOCK), 1, timeout=1000)[0]
 
 def enable_mck(dev, multiplier=256, pin=None):
     """Configure and enable MCK.  Disables first to allow pin/mult changes."""
-    # Step 1: force MCK off so we can change pin / multiplier
-    assert vendor_set(dev, REQ_SET_MCK_ENABLE, 0) == PIN_CONFIG_SUCCESS
-
-    # Step 2: optionally change the pin
+    assert clock_set(dev, MCK_ENABLE, 0) is None          # force MCK off
     if pin is not None:
-        st = vendor_set(dev, REQ_SET_MCK_PIN, pin)
-        if st != PIN_CONFIG_SUCCESS:
-            raise RuntimeError(f"REQ_SET_MCK_PIN({pin}) failed: status 0x{st:02x}")
-
-    # Step 3: set the multiplier (0 = 128×, 1 = 256×)
-    wire_mult = 1 if multiplier == 256 else 0
-    st = vendor_set(dev, REQ_SET_MCK_MULTIPLIER, wire_mult)
-    if st != PIN_CONFIG_SUCCESS:
-        raise RuntimeError(f"REQ_SET_MCK_MULTIPLIER({multiplier}) failed: status 0x{st:02x}")
-
-    # Step 4: enable
-    assert vendor_set(dev, REQ_SET_MCK_ENABLE, 1) == PIN_CONFIG_SUCCESS
+        r = clock_set(dev, MCK_PIN, pin)
+        if r is not None:
+            raise RuntimeError(f"CLOCK.MCK_PIN({pin}) refused: result 0x{r:02x}")
+    wire_mult = 1 if multiplier == 256 else 0             # 0 = 128×, 1 = 256×
+    r = clock_set(dev, MCK_MULTIPLIER, wire_mult)
+    if r is not None:
+        raise RuntimeError(f"CLOCK.MCK_MULTIPLIER({multiplier}) refused: result 0x{r:02x}")
+    r = clock_set(dev, MCK_ENABLE, 1)
+    if r is not None:
+        raise RuntimeError(f"CLOCK.MCK_ENABLE refused: result 0x{r:02x}")
 
 def get_mck_state(dev):
     return {
-        "enabled":    bool(vendor_get(dev, REQ_GET_MCK_ENABLE)[0]),
-        "pin":        int(vendor_get(dev, REQ_GET_MCK_PIN)[0]),
-        "multiplier": 256 if vendor_get(dev, REQ_GET_MCK_MULTIPLIER)[0] == 1 else 128,
+        "enabled":    bool(clock_get(dev, MCK_ENABLE)),
+        "pin":        clock_get(dev, MCK_PIN),
+        "multiplier": 256 if clock_get(dev, MCK_MULTIPLIER) == 1 else 128,
     }
 ```
+
+The repo's test harness wraps the same pattern: `dev.pset("CLOCK.MCK_PIN", bytes([pin]))` raises `PagedStall` carrying the result code (`tools/dspi_test/device.py`).
 
 ### 8.2 Validating a pin client-side
 
@@ -442,7 +431,7 @@ Saves a USB round trip when the user picks an MCK pin in the UI — replicate th
 
 ```python
 def is_mck_pin_valid(platform_is_rp2350: bool, pin: int) -> bool:
-    if pin == 12 or 23 <= pin <= 25:
+    if 23 <= pin <= 25:
         return False                # reserved by is_valid_gpio_pin
     if pin in (21,):                # gpout0 on both
         return True
@@ -451,18 +440,19 @@ def is_mck_pin_valid(platform_is_rp2350: bool, pin: int) -> bool:
     return False                    # any other pin has no GPOUTn mapping
 ```
 
-The platform identity is exposed via `REQ_GET_DEVICE_INFO` (see `device_identification_spec.md`).
+The platform identity is byte 0 of `SYS.PLATFORM` (see `device_identification_spec.md`).
 
 ### 8.3 Error handling
 
-| Status | Meaning | Recommended UX |
+| Result | Meaning | Recommended UX |
 |--------|---------|----------------|
-| `0x00` `SUCCESS` | Operation applied | Update UI from new GET values |
-| `0x01` `INVALID_PIN` | Pin has no GPOUTn mapping or is otherwise unsuitable | Show the per-platform valid set (§ 2.2); refuse the choice |
-| `0x02` `PIN_IN_USE` | Pin claimed by another output / RX | Suggest a different pin or first move the conflicting feature |
-| `0x04` `OUTPUT_ACTIVE` | Tried to change pin while MCK enabled | Auto-issue `REQ_SET_MCK_ENABLE(0)` first, then retry |
+| ACK (`VC_OK`) | Operation applied | Update UI from new GET values |
+| `0x19` `VC_ERR_PIN_INVALID` | Pin has no GPOUTn mapping or is otherwise unsuitable | Show the per-platform valid set (§ 2.2); refuse the choice |
+| `0x1A` `VC_ERR_PIN_IN_USE` | Pin claimed by another output / RX | Suggest a different pin or first move the conflicting feature |
+| `0x18` `VC_ERR_STATE` | Tried to change pin while MCK enabled | Auto-issue a `CLOCK.MCK_ENABLE` SET of 0 first, then retry |
+| `0x14` `VC_ERR_VALUE` | Multiplier above 1 | Fix the host value |
 
-App code that batches changes (e.g., importing a preset) should disable MCK first, apply pin + multiplier, then re-enable — this avoids the `OUTPUT_ACTIVE` status in the middle of the sequence.
+App code that batches changes (e.g., importing a preset) should disable MCK first, apply pin + multiplier, then re-enable. This avoids the `VC_ERR_STATE` refusal in the middle of the sequence.
 
 ---
 
@@ -489,14 +479,14 @@ ls firmware/pico-extras/src/rp2_common/pico_audio_i2s_multi/audio_mck.pio
 
 | Test | Expected result |
 |------|-----------------|
-| `REQ_SET_MCK_PIN(13)` on RP2350 | `0x00 SUCCESS` |
-| `REQ_SET_MCK_PIN(13)` on RP2040 | `0x01 INVALID_PIN` (no GPOUTn mapping) |
-| `REQ_SET_MCK_PIN(17)` on either | `0x01 INVALID_PIN` |
-| `REQ_SET_MCK_PIN(23)` on either | `0x01 INVALID_PIN` (board-reserved) |
-| `REQ_SET_MCK_PIN(21)` on RP2040 | `0x00 SUCCESS` |
-| `REQ_SET_MCK_PIN` while enabled | `0x04 OUTPUT_ACTIVE` |
-| `REQ_SET_MCK_MULTIPLIER(1)` at 96 kHz | `0x00 SUCCESS` (was rejected pre-CLK_GPOUTn) |
-| `REQ_SET_MCK_MULTIPLIER(2)` (out of range) | `0x01 INVALID_PIN` |
+| `CLOCK.MCK_PIN` SET 13 on RP2350 | ACK |
+| `CLOCK.MCK_PIN` SET 13 on RP2040 | STALL, `VC_ERR_PIN_INVALID` (no GPOUTn mapping) |
+| `CLOCK.MCK_PIN` SET 17 on either | STALL, `VC_ERR_PIN_INVALID` |
+| `CLOCK.MCK_PIN` SET 23 on either | STALL, `VC_ERR_PIN_INVALID` (board-reserved) |
+| `CLOCK.MCK_PIN` SET 21 on RP2040 | ACK |
+| `CLOCK.MCK_PIN` SET while enabled | STALL, `VC_ERR_STATE` |
+| `CLOCK.MCK_MULTIPLIER` SET 1 at 96 kHz | ACK (was rejected pre-CLK_GPOUTn) |
+| `CLOCK.MCK_MULTIPLIER` SET 2 (out of range) | STALL, `VC_ERR_VALUE` |
 
 ### 9.3 Frequency verification (oscilloscope on the MCK pin)
 
@@ -530,8 +520,8 @@ With SPDIF RX locked and resampler enabled, monitor MCK divider updates over a 3
 | Library header | `firmware/pico-extras/src/rp2_common/pico_audio_i2s_multi/include/pico/audio_i2s_multi.h` | "MCK (Master Clock) generator API" section |
 | Default pin | `firmware/DSPi/config.h` | `PICO_I2S_MCK_PIN` |
 | Boot-time setup | `firmware/DSPi/usb_audio.c` | `usb_sound_card_init()` → `audio_i2s_mck_setup(i2s_mck_pin)` |
-| Vendor command handlers | `firmware/DSPi/vendor_commands.c` | `REQ_SET_MCK_*` / `REQ_GET_MCK_*` cases |
-| Pin validation | `firmware/DSPi/vendor_commands.c` | `is_valid_gpio_pin()`, `is_pin_in_use()` |
+| Vendor command handlers | `firmware/DSPi/vendor/vc_page_clock.c`, `pages/clock.def` | `clock_mck_*` handlers |
+| Pin validation | `firmware/DSPi/vendor/vc_pins.c` | `is_valid_gpio_pin()`, `is_pin_in_use()` |
 | Preset persistence | `firmware/DSPi/flash_storage.c` | `apply_slot_to_live()` I2S configuration block |
 | Bulk wire format | `firmware/DSPi/bulk_params.h` / `bulk_params.c` | `WireI2SConfig`, `bulk_params_apply()` I2S section |
 | Sample rate change hooks | `firmware/DSPi/main.c` | `perform_rate_change()`, `process_type_switches()`, preset_load_pending block, bulk_apply_pending block |

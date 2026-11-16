@@ -164,7 +164,7 @@ static const CsCapsHeader s_caps = {
                               CS_ACT_BIT(CS_ACT_TOGGLE) | CS_ACT_BIT(CS_ACT_SET) |
                               CS_ACT_BIT(CS_ACT_TRIGGER) | CS_ACT_BIT(CS_ACT_MOMENTARY),
                               1, CS_PINCLASS_ANY },
-        // Display container: gpio = SDA/SCL, content via commands 0x27-0x2B.
+        // Display container: gpio = SDA/SCL, content via CS.DISPLAY_*.
         [CS_TYPE_DISPLAY] = { 0, 2, CS_PINCLASS_ANY },
         // Aux output containers (caps v18): the slot IS the output; controls
         // reach it through CS_NOUN_AUX / CS_NOUN_AUX_LEVEL targeting the slot.

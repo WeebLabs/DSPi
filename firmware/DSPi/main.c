@@ -3328,7 +3328,7 @@ int main(void) {
                     // MCK would be asynchronous to them.
                     audio_i2s_mck_set_enabled(false);
                     // Drop any pending stored-rate change that raced the flip
-                    // (e.g. armed by a restore mirror or vendor 0xED just
+                    // (e.g. armed by a restore mirror or INPUT.I2S_RX_RATE just
                     // before this handler ran): in slave mode the lock
                     // machinery re-detects and re-arms the external rate.
                     rate_change_pending = false;

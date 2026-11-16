@@ -59,6 +59,8 @@ ADDR_DOC = {
 MAX_SET_PAYLOAD = 64
 MAX_GET_REPLY = 256   # vc_core.c reply buffer; larger replies must be VC_F_BULK
 DOCS_PAGES_MARKER = "PAGES"
+DOCS_INDEX_MARKER = "INDEX"
+DOCS_MARKERS = (DOCS_PAGES_MARKER, DOCS_INDEX_MARKER)
 
 UPPER_IDENT = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 C_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -350,8 +352,8 @@ def parse_def_text(text, path):
                 if cond:
                     errs.append("%s:%d: VC_PAGE inside a conditional" % (path, line))
                 mnem = _upper_ident(args[0], "page mnemonic", path, line)
-                if mnem == DOCS_PAGES_MARKER:
-                    raise ValueError("%s:%d: mnemonic %s is reserved for the docs page map"
+                if mnem in DOCS_MARKERS:
+                    raise ValueError("%s:%d: mnemonic %s is reserved for a docs block"
                                      % (path, line, mnem))
                 page = {
                     "page": _ranged(args[1], "page number", 0x01, 0xFF, path, line),
@@ -560,9 +562,38 @@ def render_pages_table(pages):
     return rows
 
 
+def page_anchors(text):
+    """Map each page mnemonic to the GitHub anchor of its '## N. MNEM (0xPP)' heading."""
+    anchors = {}
+    for m in re.finditer(r"^##[ \t]+(.*\b([A-Z][A-Z0-9_]*) \(0x[0-9A-Fa-f]{2}\))[ \t]*$", text, re.M):
+        slug = re.sub(r"[^\w\- ]", "", m.group(1).strip().lower()).replace(" ", "-")
+        anchors.setdefault(m.group(2), slug)
+    return anchors
+
+
+def _availability(build):
+    if build is None:
+        return ""
+    return "RP2350 only" if build == "PICO_RP2350" else "`%s`" % _md(build)
+
+
+def render_index_table(pages, anchors):
+    """Every command sorted by name then page; links to the page section when its heading exists."""
+    rows = ["| Name | Command | ID | Availability |", "|---|---|---|---|"]
+    entries = sorted(((c["name"], p["page"], p["mnemonic"], c) for p in pages for c in p["commands"]),
+                     key=lambda e: (e[0], e[1]))
+    for name, _num, mnem, c in entries:
+        cmd = "`%s.%s`" % (mnem, name)
+        if mnem in anchors:
+            cmd = "[%s](#%s)" % (cmd, anchors[mnem])
+        rows.append(("| %s | %s | `0x%04X` | %s |" % (name, cmd, c["id"], _availability(c["build"]))))
+    return rows
+
+
 def rewrite_doc_blocks(text, pages, path="<docs>"):
     """Replace every VC:BEGIN/VC:END block in text. Returns (new_text, blocks_rewritten)."""
     by_mnem = {p["mnemonic"]: p for p in pages}
+    anchors = page_anchors(text)
     lines = text.splitlines(True)
     nl = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
     out, errs, seen = [], [], {}
@@ -578,7 +609,7 @@ def rewrite_doc_blocks(text, pages, path="<docs>"):
                 continue
             if mnem in seen:
                 errs.append("%s:%d: second block for %s (first at line %d)" % (path, n, mnem, seen[mnem]))
-            elif mnem != DOCS_PAGES_MARKER and mnem not in by_mnem:
+            elif mnem not in DOCS_MARKERS and mnem not in by_mnem:
                 errs.append("%s:%d: VC:BEGIN names unknown page %s" % (path, n, mnem))
             seen[mnem] = n
             open_blk = (mnem, n)
@@ -594,6 +625,8 @@ def rewrite_doc_blocks(text, pages, path="<docs>"):
                 mnem = open_blk[0]
                 if mnem == DOCS_PAGES_MARKER:
                     rows = render_pages_table(pages)
+                elif mnem == DOCS_INDEX_MARKER:
+                    rows = render_index_table(pages, anchors)
                 elif mnem in by_mnem:
                     rows = render_page_table(by_mnem[mnem])
                 else:

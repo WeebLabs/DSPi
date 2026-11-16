@@ -8,6 +8,8 @@ PAGE_VALUE). Caps v11 adds per-line horizontal alignment and the
 edit markers (s5.1, marker placement revised 2026-08-24), and caps v13 adds
 level bars (s5.2); no structure size changes.*
 
+*Last updated: 2026-11-16 (s2.4 on the paged protocol of firmware 1.1.7)*
+
 A display is a new Control Surfaces component: a small I2C character or
 OLED module wired to two spare GPIOs that shows what the device is doing.
 The content model is deliberately hi-fi-shaped: an **event overlay** pops
@@ -91,7 +93,7 @@ fills in any unset timing defaults (overlay hold 2 s, dwell 3 s, edit timeout
 behaviour (s3.3). Seeding deliberately does *not* mark the CS config dirty:
 it is deterministic, so boot and revert reproduce the same live state instead
 of showing an unsaved preview forever. Every seeded page is editable or
-clearable like any other page, and a `REQ_CS_SAVE` after any host edit
+clearable like any other page, and a `CS.SAVE` after any host edit
 persists the seeded state with it.
 
 ### 1.4 Modes and the event overlay
@@ -194,15 +196,19 @@ ignore it (their backlight line is driven on unconditionally).
 
 `{noun, target, index, flags}` as in s1.3. All-zero clears the slot.
 
-### 2.4 Commands (0x27-0x2B)
+### 2.4 Commands (`CS` page 0x0A)
 
-| Cmd | Name | Dir | wValue | Payload / response |
-|---|---|---|---|---|
-| 0x27 | `REQ_SET_CS_DISPLAY_CFG` | SET | 0 | 12-byte `CsDisplayCfg` |
-| 0x28 | `REQ_GET_CS_DISPLAY_CFG` | GET | 0 | 16 bytes: `{max_pages, model_count, reserved[2]}` + `CsDisplayCfg` |
-| 0x29 | `REQ_SET_CS_DISPLAY_PAGE` | SET | page 0-15 | 4-byte `CsDisplayPage` |
-| 0x2A | `REQ_GET_CS_DISPLAY_PAGE` | GET | page 0-15 | 4-byte `CsDisplayPage` |
-| 0x2B | `REQ_GET_CS_DISPLAY_STATUS` | GET | 0 | 8-byte `CsDisplayStatus` |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `CS.DISPLAY_CONFIG` | 0x0A | 0x70 | GET, SET | none (0) | GET 12, SET 12 | `CsDisplayCfg`. GET reads the live record, SET stages a preview |
+| `CS.DISPLAY_CAPS` | 0x0A | 0x71 | GET | none (0) | GET 4 | `{max_pages, model_count, reserved[2]}` |
+| `CS.DISPLAY_PAGE` | 0x0A | 0x72 | GET, SET | page 0-15 | GET 4, SET 4 | `CsDisplayPage`. All-zero clears |
+| `CS.DISPLAY_STATUS` | 0x0A | 0x73 | GET | none (0) | GET 8 | `CsDisplayStatus` |
+
+In firmware 1.1.6 the config GET (opcode 0x28) returned 16 bytes, the four
+limit bytes followed by the config. They are now two commands,
+`CS.DISPLAY_CAPS` and `CS.DISPLAY_CONFIG`, and the config reads and writes
+the same 12 bytes.
 
 `CsDisplayStatus`: `init_state` (0 down / 1 initializing / 2 live / 3
 error-backoff), `current_page` (0xFF = none or a synthesized overlay),
@@ -210,16 +216,20 @@ error-backoff), `current_page` (0xFF = none or a synthesized overlay),
 (uint16, saturating count of I2C aborts), `reserved[2]`.
 
 All SETs are deferred single-deep handoffs in the established shape,
-apply-live-only previews under the shared dirty flag; `REQ_CS_SAVE` /
-`REQ_CS_REVERT` cover the display config and pages. `cs_last_slot` tags:
+apply-live-only previews under the shared dirty flag; `CS.SAVE` /
+`CS.REVERT` cover the display config and pages. `cs_last_slot` tags:
 `0x50` bare for the config, `0x50 | page` for a page (0x50 = display
 namespace, distinct from 0x40 groups and 0x60 macros). New status codes:
 `CS_STATUS_DISPLAY_IN_USE` 0x22, `CS_STATUS_PIN_NOT_I2C` 0x23,
 `CS_STATUS_I2C_IN_USE` 0x24, `CS_STATUS_INVALID_PAGE` 0x25.
+A bad page index or a wrong length STALLs with `VC_ERR_ADDRESS` or
+`VC_ERR_LENGTH` and does not touch the status packet. A SET while one of the
+same kind is pending STALLs with `VC_ERR_BUSY` and posts BUSY. The reason is
+readable from `SYS.LAST_RESULT`.
 
 **Caps discovery.** The fixed `CsCapsHeader` fields are unchanged and
 `caps_version` becomes 10, but adding `CS_TYPE_DISPLAY` grows the caps
-**type table** by one 4-byte `CsTypeDesc` row, so the `REQ_GET_CS_CAPS`
+**type table** by one 4-byte `CsTypeDesc` row, so the `CS.CAPS`
 header response goes from 40 to 44 bytes. This is the self-describing
 mechanism documented since caps v3: hosts read `type_count` and locate the
 post-table fields (`max_ir_commands`, `max_groups`, `max_macros`,
@@ -229,7 +239,7 @@ offset. Every other structure (`CsBinding`, `IrCommand`, `CsStatusPacket`,
 one pre-existing GET whose length changes at caps v10; external clients that
 do exact-length readback (see the ESP32 front-panel client) must be updated
 before shipping this firmware to them. Display limits are served separately
-by `REQ_GET_CS_DISPLAY_CFG`'s response header.
+by `CS.DISPLAY_CAPS`.
 
 ## 3. IR remote group support (bundled)
 
@@ -259,7 +269,7 @@ key, and a grouped resolved page borrows a context from the same pool.
 
 | Noun | Value | Kind | Notes |
 |---|---|---|---|
-| `CS_NOUN_CPU_LOAD` | 53 | continuous percent 0-100, read-only | `global_status.cpu0_load`, the same source as `REQ_GET_STATUS` wValue 9; bindable to IND_ABOVE / IND_LEVEL (PWM meter LED) and displayable |
+| `CS_NOUN_CPU_LOAD` | 53 | continuous percent 0-100, read-only | `global_status.cpu0_load`, the same source as the cpu0 byte of `MEAS.LEVELS`; bindable to IND_ABOVE / IND_LEVEL (PWM meter LED) and displayable |
 | `CS_NOUN_DISPLAY_PAGE` | 54 | enum 0-15 | STEP/INC/DEC/SET (+WRAP) select the shown page; read = current page (0xFF when none); steps skip empty page slots exactly like PRESET skips empty presets |
 | `CS_NOUN_DISPLAY_EDIT` | 55 | bool | arm editing of the shown page (TOGGLE/SET/MOMENTARY; IND_EQUALS for an armed LED); auto-disarms after `edit_timeout` |
 | `CS_NOUN_PAGE_VALUE` | 56 | virtual | STEP/INC/DEC/TOGGLE applied to the shown page's item, resolved at event time (s1.5); value/step/range fields must be 0; no ADJUST; not usable as a macro step or as a page noun |

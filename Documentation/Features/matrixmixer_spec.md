@@ -1,5 +1,7 @@
 # DSPi Matrix Mixer - Developer Reference
 
+*Last updated: 2026-11-16 (commands on the paged protocol of firmware 1.1.7)*
+
 This document provides complete specifications for implementing control software for the DSPi matrix mixer. All communication occurs via USB vendor control transfers on interface 2.
 
 ---
@@ -95,224 +97,123 @@ USB Stereo Input (L/R)
 
 ## USB Control Transfer Format
 
-All vendor commands use USB control transfers with:
-- **bmRequestType**: `0x40` (OUT, vendor, device) or `0xC0` (IN, vendor, device)
-- **wIndex**: Interface number (2)
-- **bRequest**: Command code (see tables below)
-- **wValue**: Command-specific parameter
-- **wLength**: Data length
-- **Data**: Command-specific payload
+All vendor commands use the paged protocol of firmware 1.1.7 (see `../commands.md`), as USB control transfers with:
+- **bmRequestType**: `0x41` (OUT, vendor, interface) for a SET or `0xC1` (IN, vendor, interface) for a GET
+- **wIndex**: `(page << 8) | 2`. The high byte is the page, the low byte the interface number (2)
+- **bRequest**: Command number within the page (see the tables below)
+- **wValue**: The address (input/output, output, or channel/band). Zero for a command with no address
+- **wLength**: Data length. A SET must send exactly the documented size
+- **Data**: Command-specific payload, little-endian
+
+A rejected SET STALLs. The reason is readable from `SYS.LAST_RESULT` as a `VC_*` result code. A GET for a bad address also STALLs (`VC_ERR_ADDRESS`).
 
 ---
 
 ## Matrix Mixer Commands
 
-### REQ_SET_MATRIX_ROUTE (0x70) - Set Crosspoint
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(input << 8) \| output` | GET 8, SET 8 | One crosspoint |
+| `ROUTE.OUTPUT_ENABLE` | 0x05 | 0x20 | GET, SET | output 0..NUM_OUTPUT_CHANNELS-1 | GET 1, SET 1 | 0 = disabled, non-zero = enabled |
+| `ROUTE.OUTPUT_GAIN` | 0x05 | 0x21 | GET, SET | output | GET 4, SET 4 | f32 dB |
+| `ROUTE.OUTPUT_MUTE` | 0x05 | 0x22 | GET, SET | output | GET 1, SET 1 | 0 = unmuted, 1 = muted |
+| `ROUTE.OUTPUT_DELAY` | 0x05 | 0x23 | GET, SET | output | GET 4, SET 4 | f32 ms |
+| `ROUTE.OUTPUT_ENABLE_CONFLICT` | 0x05 | 0x24 | GET | output | GET 1 | 1 when enabling this output would collide with the Core 1 mode |
 
-Configure a single crosspoint in the matrix.
+### `ROUTE.MATRIX_ROUTE`: one crosspoint
 
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (OUT) |
-| bRequest | 0x70 |
-| wValue | 0 (unused) |
-| wIndex | 2 |
-| wLength | 9 |
-| Data | MatrixRoutePacket |
+Configure or read a single crosspoint in the matrix. The crosspoint is addressed by `wValue` in both directions.
+- High byte: input channel (0..NUM_INPUT_CHANNELS-1)
+- Low byte: output channel (0..NUM_OUTPUT_CHANNELS-1)
 
-**MatrixRoutePacket Structure (9 bytes):**
+The SET payload and the GET reply share one 8-byte layout:
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
-| 0 | 1 | uint8_t | input | Input channel (0=Left, 1=Right) |
-| 1 | 1 | uint8_t | output | Output channel (0-8) |
-| 2 | 1 | uint8_t | enabled | Route enabled (0=off, 1=on) |
-| 3 | 1 | uint8_t | phase_invert | Polarity invert (0=normal, 1=inverted) |
+| 0 | 1 | uint8_t | enabled | Route enabled (0=off, 1=on) |
+| 1 | 1 | uint8_t | phase_invert | Polarity invert (0=normal, 1=inverted) |
+| 2 | 2 | uint16_t | reserved | Send 0 |
 | 4 | 4 | float | gain_db | Crosspoint gain in dB (-60.0 to +12.0) |
 
-**Example - Route Left input to Output 0 at -3dB:**
+A NaN or infinite gain is refused with `VC_ERR_VALUE` and stores nothing. An input or output past the end is `VC_ERR_ADDRESS`.
+
+**Example - Route input 0 (Left) to Output 0 at -3dB:**
 ```c
-uint8_t packet[9];
-packet[0] = 0;              // input = Left
-packet[1] = 0;              // output = 0
-packet[2] = 1;              // enabled
-packet[3] = 0;              // no phase invert
+uint8_t packet[8] = {0};
+packet[0] = 1;              // enabled
+packet[1] = 0;              // no phase invert
 float gain = -3.0f;
 memcpy(&packet[4], &gain, 4);
-// Send control transfer with bRequest=0x70, wValue=0, data=packet
+// SET: bmRequestType=0x41, bRequest=0x10, wIndex=(0x05 << 8) | 2,
+//      wValue=(0 << 8) | 0, data=packet (8 bytes)
 ```
 
----
-
-### REQ_GET_MATRIX_ROUTE (0x71) - Get Crosspoint
-
-Read the current state of a crosspoint.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x71 |
-| wValue | (input << 8) \| output |
-| wIndex | 2 |
-| wLength | 9 |
-| Data | MatrixRoutePacket (returned) |
-
-**wValue encoding:**
-- High byte: input channel (0-1)
-- Low byte: output channel (0-8)
-
-**Example - Read crosspoint for Left→Output 3:**
+**Example - Read crosspoint for input 0 to Output 3:**
 ```c
-// wValue = (0 << 8) | 3 = 0x0003
-MatrixRoutePacket result;
-// Control IN transfer with bRequest=0x71, wValue=0x0003
-// Result contains current crosspoint state
+// GET: bmRequestType=0xC1, bRequest=0x10, wIndex=0x0502,
+//      wValue=(0 << 8) | 3 = 0x0003, wLength=8
+// The reply is the 8-byte layout above. It does not echo input and output.
+```
+
+```python
+# Same with the test harness (tools/dspi_test/device.py)
+dev.pset("ROUTE.MATRIX_ROUTE", struct.pack("<BBHf", 1, 0, 0, -3.0), addr=(0 << 8) | 0)
+enabled, phase, _, gain = struct.unpack("<BBHf", dev.pget("ROUTE.MATRIX_ROUTE", addr=(0 << 8) | 3))
 ```
 
 ---
 
-### REQ_SET_OUTPUT_ENABLE (0x72) - Enable/Disable Output
+### `ROUTE.OUTPUT_ENABLE`: enable or disable an output
 
-Enable or disable an output channel. Disabled outputs consume no CPU.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (OUT) |
-| bRequest | 0x72 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | uint8_t (0=disabled, 1=enabled) |
+Enable or disable an output channel. Disabled outputs consume no CPU. Payload and reply are one byte (0=disabled, 1=enabled). An enable that would collide with the Core 1 mode (PDM and the Core 1 EQ worker outputs are mutually exclusive) is refused with `VC_ERR_STATE`. `ROUTE.OUTPUT_ENABLE_CONFLICT` reports in advance whether an enable would collide.
 
 ---
 
-### REQ_GET_OUTPUT_ENABLE (0x73) - Get Output Enable State
+### `ROUTE.OUTPUT_GAIN`: output gain
 
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x73 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | uint8_t (0=disabled, 1=enabled) |
+Set or read the gain for an output channel. Payload and reply are a float, gain in dB (-60.0 to +12.0). A NaN or infinite gain is refused with `VC_ERR_VALUE`.
 
 ---
 
-### REQ_SET_OUTPUT_GAIN (0x74) - Set Output Gain
+### `ROUTE.OUTPUT_MUTE`: output mute
 
-Set the gain for an output channel.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (OUT) |
-| bRequest | 0x74 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 4 |
-| Data | float (gain in dB, -60.0 to +12.0) |
+Mute or unmute an output channel. Muted outputs are silenced but still consume CPU (unlike disable). Payload and reply are one byte (0=unmuted, 1=muted).
 
 ---
 
-### REQ_GET_OUTPUT_GAIN (0x75) - Get Output Gain
+### `ROUTE.OUTPUT_DELAY`: output delay
 
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x75 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 4 |
-| Data | float (gain in dB) |
-
----
-
-### REQ_SET_OUTPUT_MUTE (0x76) - Set Output Mute
-
-Mute or unmute an output channel. Muted outputs are silenced but still consume CPU (unlike disable).
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (OUT) |
-| bRequest | 0x76 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | uint8_t (0=unmuted, 1=muted) |
-
----
-
-### REQ_GET_OUTPUT_MUTE (0x77) - Get Output Mute State
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x77 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | uint8_t (0=unmuted, 1=muted) |
-
----
-
-### REQ_SET_OUTPUT_DELAY (0x78) - Set Output Delay
-
-Set the delay for an output channel.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (OUT) |
-| bRequest | 0x78 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 4 |
-| Data | float (delay in milliseconds) |
+Set or read the delay for an output channel. Payload and reply are a float, delay in milliseconds. A NaN or infinite value is refused with `VC_ERR_VALUE`. A negative value is clamped to 0.
 
 **Delay Limits:**
 - RP2350: 0 to 170ms (8192 samples at 48kHz)
 - RP2040: 0 to 85ms (4096 samples at 48kHz)
 
----
-
-### REQ_GET_OUTPUT_DELAY (0x79) - Get Output Delay
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x79 |
-| wValue | output (0-8) |
-| wIndex | 2 |
-| wLength | 4 |
-| Data | float (delay in milliseconds) |
+An `OUTPUT_DELAY` write also updates the output's entry in `ROUTE.CHANNEL_DELAY`. A `ROUTE.CHANNEL_DELAY` write to an output channel does not change what `OUTPUT_DELAY` reads back, so set output delays through `OUTPUT_DELAY`.
 
 ---
 
 ## Per-Output EQ Commands
 
-Output channels have parametric EQ available via the standard EQ commands. Use EQ channel indices 2-10 (CH_OUT_1 through CH_OUT_9_PDM).
+Output channels have parametric EQ available via the standard band command. Use the output channel indices (`CH_OUT_1` and above).
 
-### REQ_SET_EQ_PARAM (0x42) - Set EQ Band Parameter
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | One whole band, both directions |
+| `FILTER.BAND_BYPASS` | 0x06 | 0x11 | GET, SET | `(channel << 8) \| band` | GET 1, SET 1 | Bypass one band |
 
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (OUT) |
-| bRequest | 0x42 |
-| wValue | 0 |
-| wIndex | 2 |
-| wLength | 16 |
-| Data | EqParamPacket |
-
-**EqParamPacket Structure (16 bytes):**
+**`FILTER.BAND` payload (16 bytes):**
 
 | Offset | Size | Type | Field | Description |
 |--------|------|------|-------|-------------|
-| 0 | 1 | uint8_t | channel | EQ channel (0-10) |
-| 1 | 1 | uint8_t | band | Band index (0-9) |
-| 2 | 1 | uint8_t | type | Filter type (see below) |
-| 3 | 1 | uint8_t | reserved | Set to 0 |
+| 0 | 1 | uint8_t | type | Filter type (see below) |
+| 1 | 1 | uint8_t | bypass | 1 = bypassed, anything else = active (`band_bypass_spec.md`) |
+| 2 | 2 | uint16_t | qp_x512 | Linkwitz Transform only (`peq_filters.md`). Send 0 otherwise |
 | 4 | 4 | float | freq | Center/corner frequency (Hz) |
 | 8 | 4 | float | Q | Q factor (0.1 to 10.0) |
 | 12 | 4 | float | gain_db | Gain in dB (-24.0 to +24.0) |
+
+A GET returns the whole band in the same layout. There is no per-field read. A band write that arrives while an earlier one is still waiting for the main loop is refused with `VC_ERR_BUSY`, so retry after a short delay. The full filter type list and the band index map are in `peq_filters.md` and `crossover_filters_spec.md`.
 
 **Filter Types:**
 
@@ -325,64 +226,19 @@ Output channels have parametric EQ available via the standard EQ commands. Use E
 | 4 | FILTER_LOWPASS | 2nd-order lowpass |
 | 5 | FILTER_HIGHPASS | 2nd-order highpass |
 
-### REQ_GET_EQ_PARAM (0x43) - Get EQ Band Parameter
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x43 |
-| wValue | (channel << 8) \| (band << 4) \| param |
-| wIndex | 2 |
-| wLength | 4 |
-| Data | uint32_t or float (see below) |
-
-**wValue encoding:**
-- Bits 15-8: channel (0-10)
-- Bits 7-4: band (0-9)
-- Bits 3-0: parameter (0=type, 1=freq, 2=Q, 3=gain_db)
-
 ---
 
 ## Persistence Commands
 
-### REQ_SAVE_PARAMS (0x51) - Save to Flash
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `STORE.PRESET_SAVE` | 0x02 | 0x10 | SET (zero-length) | slot 0-9 | SET 0 | Save the live state, matrix included, to a slot |
+| `STORE.PRESET_ACTIVE` | 0x02 | 0x14 | GET | none (0) | GET 1 | The active slot |
+| `STORE.FACTORY_RESET` | 0x02 | 0x30 | SET (zero-length) | none (0) | SET 0 | Reset the live state to defaults |
 
-Save all current settings (including matrix mixer state) to flash memory.
+Matrix mixer state is saved with the rest of the live state in a user preset slot (`user_presets_spec.md`). The 1.1.6 "save to the active slot" request (opcode 0x51) is retired. To get the same effect, read `STORE.PRESET_ACTIVE` and send `STORE.PRESET_SAVE` to that slot. There was never a separate "load from flash" request: opcode 0x52, listed here as one in earlier revisions of this document, was the output-config save, now `STORE.OUTPUT_CONFIG_SAVE`. Loading a preset is `STORE.PRESET_LOAD`.
 
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x51 |
-| wValue | 0 |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | int8_t result (0=success) |
-
-### REQ_LOAD_PARAMS (0x52) - Load from Flash
-
-Load settings from flash memory.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x52 |
-| wValue | 0 |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | int8_t result (0=success, -1=no data, -2=CRC error) |
-
-### REQ_FACTORY_RESET (0x53) - Reset to Defaults
-
-Reset all settings to factory defaults. Does NOT erase flash (use SAVE_PARAMS after to persist).
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (IN) |
-| bRequest | 0x53 |
-| wValue | 0 |
-| wIndex | 2 |
-| wLength | 1 |
-| Data | int8_t result (0=success) |
+`STORE.FACTORY_RESET` is a zero-length SET with no status byte. Success is the ACK. The reset runs on the main loop after the ACK. It resets all live settings to factory defaults and does NOT erase flash (save to a preset slot with `STORE.PRESET_SAVE` afterwards to persist).
 
 **Factory Default Matrix Configuration:**
 - Input L → Output 0 at 0dB (enabled)
@@ -457,15 +313,16 @@ R → Out8 (-6dB, phase_invert=1)
 
 ## Error Handling
 
-- Invalid input/output indices are silently ignored
+- A rejected SET STALLs, and `SYS.LAST_RESULT` gives the reason.
+  - `VC_ERR_ADDRESS`: input, output, channel or band index out of range (GETs too)
+  - `VC_ERR_LENGTH`: payload size other than the documented one
+  - `VC_ERR_VALUE`: NaN or infinite float (gain, delay, EQ freq/Q/gain)
+  - `VC_ERR_STATE`: output enable that collides with the Core 1 mode
+  - `VC_ERR_BUSY`: EQ band write while an earlier one is still pending
 - Gain values are internally converted to linear multipliers: `linear = 10^(dB/20)`
 - Delay values exceeding the maximum are clamped
 - Negative delays are clamped to 0
-- Flash operations return result codes:
-  - `0` (FLASH_OK): Success
-  - `-1` (FLASH_ERR_NO_DATA): No saved data found
-  - `-2` (FLASH_ERR_CRC): CRC validation failed
-  - `-3` (FLASH_ERR_WRITE): Write verification failed
+- Preset saves and the factory reset are deferred and return no flash result code. Read `STORE.DIRECTORY` to confirm a save. A factory reset is announced by a bulk-invalidated notification (`notification_protocol_v2_spec.md`)
 
 ---
 
@@ -482,23 +339,17 @@ R → Out8 (-6dB, phase_invert=1)
 
 ## Command Reference Quick Table
 
-| Code | Name | Direction | wValue | Data Size | Description |
-|------|------|-----------|--------|-----------|-------------|
-| 0x70 | SET_MATRIX_ROUTE | OUT | 0 | 9 | Set crosspoint routing |
-| 0x71 | GET_MATRIX_ROUTE | IN | (in<<8)\|out | 9 | Get crosspoint state |
-| 0x72 | SET_OUTPUT_ENABLE | OUT | output | 1 | Enable/disable output |
-| 0x73 | GET_OUTPUT_ENABLE | IN | output | 1 | Get output enable state |
-| 0x74 | SET_OUTPUT_GAIN | OUT | output | 4 | Set output gain (dB) |
-| 0x75 | GET_OUTPUT_GAIN | IN | output | 4 | Get output gain |
-| 0x76 | SET_OUTPUT_MUTE | OUT | output | 1 | Mute/unmute output |
-| 0x77 | GET_OUTPUT_MUTE | IN | output | 1 | Get mute state |
-| 0x78 | SET_OUTPUT_DELAY | OUT | output | 4 | Set output delay (ms) |
-| 0x79 | GET_OUTPUT_DELAY | IN | output | 4 | Get output delay |
-| 0x42 | SET_EQ_PARAM | OUT | 0 | 16 | Set EQ band |
-| 0x43 | GET_EQ_PARAM | IN | encoded | 4 | Get EQ parameter |
-| 0x51 | SAVE_PARAMS | IN | 0 | 1 | Save to flash |
-| 0x52 | LOAD_PARAMS | IN | 0 | 1 | Load from flash |
-| 0x53 | FACTORY_RESET | IN | 0 | 1 | Reset to defaults |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(input << 8) \| output` | GET 8, SET 8 | Crosspoint routing |
+| `ROUTE.OUTPUT_ENABLE` | 0x05 | 0x20 | GET, SET | output | GET 1, SET 1 | Enable/disable output |
+| `ROUTE.OUTPUT_GAIN` | 0x05 | 0x21 | GET, SET | output | GET 4, SET 4 | Output gain (dB) |
+| `ROUTE.OUTPUT_MUTE` | 0x05 | 0x22 | GET, SET | output | GET 1, SET 1 | Mute/unmute output |
+| `ROUTE.OUTPUT_DELAY` | 0x05 | 0x23 | GET, SET | output | GET 4, SET 4 | Output delay (ms) |
+| `ROUTE.OUTPUT_ENABLE_CONFLICT` | 0x05 | 0x24 | GET | output | GET 1 | Core 1 collision check |
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | EQ band |
+| `STORE.PRESET_SAVE` | 0x02 | 0x10 | SET (zero-length) | slot 0-9 | SET 0 | Save to a preset slot |
+| `STORE.FACTORY_RESET` | 0x02 | 0x30 | SET (zero-length) | none (0) | SET 0 | Reset to defaults |
 
 ---
 
@@ -514,4 +365,4 @@ R → Out8 (-6dB, phase_invert=1)
 
 5. **Phase Coherence**: All S/PDIF outputs are synchronized via PIO. The PDM output has automatic latency compensation.
 
-6. **Persistence**: Matrix mixer state is included in flash storage format V5. Use SAVE_PARAMS to persist configuration across power cycles.
+6. **Persistence**: Matrix mixer state is part of every user preset slot. Use `STORE.PRESET_SAVE` to persist configuration across power cycles.

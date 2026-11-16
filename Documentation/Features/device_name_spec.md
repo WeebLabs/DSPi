@@ -1,6 +1,6 @@
 # Device Name
 
-*Last updated: 2026-11-01*
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
 *Status: implemented, HW-untested*
 *Platforms: RP2040 + RP2350*
 
@@ -12,24 +12,25 @@ This is the board-level sibling of input source names (`input_source_names_spec.
 
 ## 1. Model
 
-- **One name per board.** It is device-global. Preset save, preset load and factory reset leave it alone, as they do source names. Bulk params (0xA0/0xA1) do not carry it.
+- **One name per board.** It is device-global. Preset save, preset load and factory reset leave it alone, as they do source names. Bulk params (`STORE.ALL_PARAMS`) do not carry it.
 - **Empty means default.** An all-zero name means the user has not named the board. Each host supplies its own fallback (the Console shows "DSPi (serial)"; a hub uses its stored name or "DSPi" plus the serial tail, section 5).
 - **Length.** Up to 31 bytes plus a NUL terminator, in a 32-byte field (`DEVICE_NAME_LEN`). Hosts should send printable ASCII, because the front panel font only covers characters 32-126.
 
 ## 2. Vendor commands
 
-| Opcode | Name | Dir | wValue | Payload / response |
-|---|---|---|---|---|
-| 0x56 | `REQ_SET_DEVICE_NAME` | OUT | 0 | 1-32 bytes of name. A payload whose first byte is NUL clears the name. Bytes past 31 are dropped. |
-| 0x57 | `REQ_GET_DEVICE_NAME` | IN | 0 | 32 bytes, NUL-terminated. All zeros when the board is unnamed. |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `SYS.DEVICE_NAME` | 0x01 | 0x24 | GET, SET | none (0) | GET 32, SET 1-32 |
 
-- A non-zero wValue STALLs the GET and makes the SET a no-op.
-- Both commands work over USB, UART and I2C through the shared vendor dispatcher.
+- **GET** returns 32 bytes, NUL-terminated. All zeros when the board is unnamed.
+- **SET** takes 1-32 bytes of name. A payload whose first byte is NUL clears the name. Bytes past 31 are dropped.
+- An empty or over-long SET payload STALLs with `VC_ERR_LENGTH`. A non-zero `wValue` STALLs either direction with `VC_ERR_ADDRESS`. The reason is readable from `SYS.LAST_RESULT` (see `../commands.md`).
+- The command works over USB, UART and I2C through the paged dispatcher (`vc_dispatch()`).
 - A GET issued after a SET returns the new name at once, even before the flash write.
 
 ### Detecting support
 
-Probe 0x57 on its own. Passing the 0x55 source-name probe does not imply support: firmware from 2026-10-31 to 2026-11-01 has source names but STALLs 0x57, and older firmware answers 0x57 with the 1-byte legacy channel mute. A host sends a 32-byte GET and treats a STALL or any reply shorter than 32 bytes as "not supported". It must never send 0x56 to firmware that fails the probe.
+Every firmware that speaks the paged protocol (1.1.7 and later) has `SYS.DEVICE_NAME`. A host that gates features on the command table checks the command's GET bit in `SYS.PAGE_COMMANDS` for page 0x01. Firmware 1.1.6 and older does not answer the paged protocol at all (`vendor_command_overhaul_plan.md` section 5.14), so a host never sends this command to it.
 
 ## 3. Persistence
 
@@ -59,10 +60,10 @@ The event fires even when the directory write fails. In that case the name lives
 
 The board is the single authority for its name on firmware that passes the probe. Hubs treat it like this:
 
-- **Inventory.** The hub reads 0x57 while reading identity. The `name` in `device.list` is the board's name when set, else the hub-stored name, else the serial default. The hub applies that order every time a board comes online, not only on first sight.
-- **Notify is the only writer.** On capable firmware the hub sets the registry name from `NOTIFY_EVT_DEVICE_NAME` and nothing else, so a rename from any source is seen: `device.rename`, a raw 0x56 through `cmd`, the hub's own local UI, a UART client or the front panel.
-- **`device.rename`.** On capable firmware the hub writes 0x56 as the requesting session and replies `ok` once the board accepts the write. `device.changed` follows from the notify. A capable board that is not attached (offline within its grace window) answers `no_device`, because a stored name would be overridden by the board's own name when it returns. An unknown handle also answers `no_device`. The hub stores what the board can hold: it drops characters outside printable ASCII, closes the gaps they leave, trims the ends and caps the name at 31 characters, so "Café – Rack" becomes "Caf Rack". On old firmware the hub updates its stored name and emits `device.changed` itself, as before.
-- **Probe at attach.** The hub reads 0x57 with the identity and retries once, so a transient miss does not treat a capable board as old firmware for the whole attachment.
+- **Inventory.** The hub reads `SYS.DEVICE_NAME` while reading identity. The `name` in `device.list` is the board's name when set, else the hub-stored name, else the serial default. The hub applies that order every time a board comes online, not only on first sight.
+- **Notify is the only writer.** On capable firmware the hub sets the registry name from `NOTIFY_EVT_DEVICE_NAME` and nothing else, so a rename from any source is seen: `device.rename`, a raw `SYS.DEVICE_NAME` SET through `cmd`, the hub's own local UI, a UART client or the front panel.
+- **`device.rename`.** On capable firmware the hub writes `SYS.DEVICE_NAME` as the requesting session and replies `ok` once the board accepts the write. `device.changed` follows from the notify. A capable board that is not attached (offline within its grace window) answers `no_device`, because a stored name would be overridden by the board's own name when it returns. An unknown handle also answers `no_device`. The hub stores what the board can hold: it drops characters outside printable ASCII, closes the gaps they leave, trims the ends and caps the name at 31 characters, so "Café – Rack" becomes "Caf Rack". On old firmware the hub updates its stored name and emits `device.changed` itself, as before.
+- **Probe at attach.** The hub reads `SYS.DEVICE_NAME` with the identity and retries once, so a transient miss does not treat a capable board as old firmware for the whole attachment.
 - **One-time adoption.** A hub that already stored a name for a capable board that reports an empty name writes the stored name to the board once. The hub deletes its stored entry as soon as the board accepts that write, whenever it reads a non-empty name from the board, and on any 0x10 for that serial. Deleting on acceptance keeps adoption to one attempt even if the confirming notify is lost, so a later deliberate clear is never undone. The cost is that a directory write failing on the board loses the adopted name at the next reboot. The adoption write is an unrequested flash write with a brief output restart at attach time. It happens at most once per board per hub, and only for boards already named on that hub.
 
 ## 6. Front panel display
@@ -75,7 +76,7 @@ When no display page is current, the label line shows the board name instead of 
 - The Global Parameters settings page has a "Device Name" field. Like the source-name fields, it drops unsupported characters and stops at 31 as you type, so the field never shows more than will be stored. Typing edits a draft that joins the Settings unsaved-changes bar, the same as source names. Save writes it, after any source names, in one burst of SETs.
 - A `NOTIFY_EVT_DEVICE_NAME` for the connected board updates the cached name. A draft that now matches it no longer counts as unsaved.
 - The device picker shows the board name for a locally connected board once it has been read. A board reached through a hub keeps the hub's inventory name, which on capable firmware is the board's own name.
-- The field appears only on firmware that passes the probe. Remote boards rename through the same field, because 0x56 travels through the hub's `cmd` passthrough and the hub learns the result from the notify.
+- The field appears only on firmware that passes the probe. Remote boards rename through the same field, because the `SYS.DEVICE_NAME` SET travels through the hub's `cmd` passthrough and the hub learns the result from the notify.
 
 ## 8. Test coverage
 

@@ -57,7 +57,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-11-16 (vendor protocol flip: `vendor_commands.c/.h` deleted, `vendor/` is the whole vendor protocol). Previously 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c); 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
+*Last updated: 2026-11-16 (phase 5: bg_job counter read through `SYS.PIPELINE_STATS`). Previously 2026-11-16 (vendor protocol flip: `vendor_commands.c/.h` deleted, `vendor/` is the whole vendor protocol); 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c); 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -101,7 +101,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `output_latency.c` | Output latency option table, the resolve rule (stream-only options on USB) and the live target / input batch / block cap state (see "Output Latency") |
 | `output_latency.h` | Option IDs, flags and the live-state API (`output_latency_apply`) |
 | `loop_prof.c` / `loop_prof.h` | Bench-only (`DSPI_LOOP_PROF`) main-loop profiler: named sections (`LOOP_PROF(id)`), background steps and paged command handlers, each a worst time since boot or `DIAG.LOOP_PROF_RESET`, read through `DIAG.LOOP_PROF_SECTION`, `_JOB` and `_COMMAND` (see "Vendor Protocol"). The header's X-macro lists are also parsed by `tools/latency_bench/loop_prof.py` |
-| `bg_job.c` / `bg_job.h` | Background jobs: long main-loop work run in budgeted steps between deliveries (`bg_run_one()`), the step budget and the over-budget counter (`REQ_GET_STATUS` 31); see Output Latency "Step budget and background jobs" |
+| `bg_job.c` / `bg_job.h` | Background jobs: long main-loop work run in budgeted steps between deliveries (`bg_run_one()`), the step budget and the over-budget counter (read through `SYS.PIPELINE_STATS`); see Output Latency "Step budget and background jobs" |
 | `clock_diag.c` | Bench clock/audio-path diagnostics: once-per-second `CLKDIAG` serial dump (gated by `DSPI_CLOCK_DIAG`). See "Clock Diagnostics" |
 | `clock_diag.h` | Clock diagnostics API (`clock_diag_init` / `clock_diag_sample` / `clock_diag_poll`); no-op inlines when the flag is 0 |
 | `flash_storage.c` | Parameter save/load to last 4KB flash sector |
@@ -133,7 +133,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 ---
 
 ## Build System
-*Last updated: 2026-09-01 (git build stamp added)*
+*Last updated: 2026-11-16 (vendor protocol sources listed). Previously 2026-09-01 (git build stamp added)*
 
 ### CMake Configuration
 
@@ -164,7 +164,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 - `PICO_DIVIDER_IN_RAM=1`; RP2040 only, divider shims in RAM
 - `PICO_INT64_OPS_IN_RAM=1` and `PICO_BITS_IN_RAM=1`; RP2040 only, 64-bit mul and clz shims in RAM
 
-**Vendor commands** were temporarily excluded in Phase 1 and re-added in Phase 2; `vendor_commands.c` / `vendor_commands.h` are now back in `add_executable()`.
+**Vendor protocol sources:** `add_executable()` lists the `vendor/` core files and one `vendor/vc_page_<mnem>.c` per page (see "Vendor Protocol"). The `.def` files are included by their page file and need no CMake entry.
 
 **Build commands:**
 ```bash
@@ -173,22 +173,22 @@ cmake --build build-rp2350 --clean-first   # RP2350 build
 ```
 
 ### Git Build Stamp
-*Last updated: 2026-11-16 (served by `SYS.BUILD_INFO`). Previously 2026-09-01*
+*Last updated: 2026-11-16 (served by `SYS.BUILD_INFO`; no old opcode names). Previously 2026-11-16 (served by `SYS.BUILD_INFO`); 2026-09-01*
 
 Every build regenerates `<build dir>/DSPi/generated/build_info.h` via the `dspi_build_info` custom target, which runs `scripts/gen_build_info.cmake` at build time (never at configure time, which would go stale). The header defines `BUILD_GIT_DESCRIBE` (`git describe --always --dirty`, clamped from the front to 47 chars so the hash and dirty flag survive) and `BUILD_DATE`. The script writes the header only when the content changes, so dependents recompile only when the hash, dirty state, or date actually moved.
 
-Consumers: `vendor/vc_page_sys.c` serves the stamp over `SYS.BUILD_INFO` (the 1.1.6 `REQ_GET_BUILD_INFO` layout), and `main.c` embeds it in the UF2's binary info (`bi_program_version_string`) so `picotool info` identifies a build file or a BOOTSEL-mode device. The stamp is provenance for humans; the version reported by `SYS.PLATFORM` remains the only compatibility contract (see `Documentation/Features/firmware_versioning_spec.md`).
+Consumers: `vendor/vc_page_sys.c` serves the stamp over `SYS.BUILD_INFO` (the same 64-byte layout 1.1.6 used), and `main.c` embeds it in the UF2's binary info (`bi_program_version_string`) so `picotool info` identifies a build file or a BOOTSEL-mode device. The stamp is provenance for humans; the version reported by `SYS.PLATFORM` remains the only compatibility contract (see `Documentation/Features/firmware_versioning_spec.md`).
 
 ### Firmware Version Reporting
-*Last updated: 2026-11-16 (firmware 1.1.7 beta 1; the version is read through `SYS.PLATFORM`). Previously 2026-09-12*
+*Last updated: 2026-11-16 (byte 6 described against `SYS.PLATFORM`). Previously 2026-11-16 (firmware 1.1.7 beta 1; the version is read through `SYS.PLATFORM`); 2026-09-12*
 
 `config.h` holds the version as four macros: `FW_VERSION_MAJOR`, `FW_VERSION_MINOR`, `FW_VERSION_PATCH`, and `FW_VERSION_BETA`. This tree is 1.1.7 beta 1 (1, 1, 7, 1). `FW_VERSION_PACKED` nibble-packs minor and patch for byte 2 of `SYS.PLATFORM` and feeds nothing else.
 
-`SYS.PLATFORM` (page 0x01, command 0x20) returns the same 7 bytes the 1.1.6 `REQ_GET_PLATFORM` (0x7F) did. Firmware 1.1.7 no longer answers 0x7F, because page 0 answers nothing (see "Vendor Protocol"), so the paragraphs below describe the reply layout, which is unchanged.
+`SYS.PLATFORM` (page 0x01, command 0x20) returns the same 7 bytes the 1.1.6 platform request (`bRequest` 0x7F) did. Firmware 1.1.7 no longer answers 0x7F, because page 0 answers nothing (see "Vendor Protocol"), so the paragraphs below describe the reply layout, which is unchanged.
 
 `FW_VERSION_BETA` is the pre-release ordinal: 0 means a final release, 1 to 255 mean beta N of that patch. Betas of one patch share the patch number and count upward, so the ordinal is the only field distinguishing them, and it must return to 0 in the commit that gets tagged as final. A final release outranks every beta of its patch, so the comparison key a host must use is `(major, minor, patch, beta == 0 ? 256 : beta)`, not a plain four-field compare.
 
-The ordinal ships as byte 6 of the `REQ_GET_PLATFORM` (0x7F) response, which the firmware now offers 7 bytes long. Every transport caps the data stage at the host's `wLength`, so hosts asking for 4 or 6 bytes see exactly the responses they saw before. A reply shorter than 7 bytes comes from firmware predating the ordinal, and every such build was final, so hosts decode the missing byte as 0. Wire layout and the host fallback rules live in `Documentation/Features/firmware_versioning_spec.md` and `Documentation/Features/device_identification_spec.md`.
+The ordinal ships as byte 6 of the `SYS.PLATFORM` reply, which is 7 bytes long. Every transport caps the data stage at the host's `wLength`, so hosts asking for 4 or 6 bytes see exactly the responses they saw before. A reply shorter than 7 bytes comes from firmware predating the ordinal, and every such build was final, so hosts decode the missing byte as 0. Wire layout and the host fallback rules live in `Documentation/Features/firmware_versioning_spec.md` and `Documentation/Features/device_identification_spec.md`.
 
 The bulk parameter header carries `fw_version_major` / `fw_version_minor` separately and does not carry the ordinal.
 
@@ -228,13 +228,13 @@ Defined in `main.c`, function `core0_init()`:
 *Last updated: 2026-03-18*
 
 ### USB Stack
-*Last updated: 2026-10-17 (RP2350 multichannel alts listed)*
+*Last updated: 2026-11-16 (error counters and vendor interface described as they are now). Previously 2026-10-17 (RP2350 multichannel alts listed)*
 
 **Library:** TinyUSB (vendored via Pico SDK) with a custom UAC1 class driver (`usb_audio.c`, registered via `usbd_app_driver_get_cb`). TinyUSB's built-in audio class driver is UAC2-only and is bypassed. See "TinyUSB Migration (Phase 1)" for details.
 
-**Error handling:** TinyUSB's USB IRQ handler receives bus-level error interrupts and increments internal counters. In Phase 1, the vendor-command hooks for `REQ_GET_USB_ERROR_STATS` / `REQ_RESET_USB_ERROR_STATS` are unreachable (vendor interface dropped); Phase 2 will re-expose these once the vendor interface is wired into TinyUSB.
+**Error handling:** TinyUSB's USB IRQ handler receives bus-level error interrupts and counts them internally. No vendor command exposes those counts. The 1.1.6 USB error statistics commands always read zero under TinyUSB and were retired in 1.1.7.
 
-**Interfaces (Phase 1):**
+**Interfaces:**
 1. **Audio Control (AC)** — Interface 0
 2. **Audio Streaming (AS)** — Interface 1
    - Alt 0: Zero-bandwidth (idle)
@@ -244,7 +244,7 @@ Defined in `main.c`, function `core0_init()`:
    - EP OUT 0x01 (isochronous async): Audio data
    - EP IN 0x82 (isochronous feedback): 10.14 fixed-point rate, bRefresh=2 (4 ms)
 
-The vendor interface (formerly interface 2) and its WinUSB/WCID descriptors are removed in Phase 1. They will be reintroduced in Phase 2 using TinyUSB's `CFG_TUD_VENDOR` mechanism and MS OS 2.0 descriptors.
+3. **Vendor** (interface 2, class 0xFF): control requests on EP0 for the paged vendor protocol (see "Vendor Protocol") and the bulk IN notification endpoint 0x83 (see "Notification Endpoint"). The UAC1 class driver claims it; `CFG_TUD_VENDOR` stays 0. Windows binds WinUSB to it through the MS OS 2.0 descriptors below.
 
 ### Microsoft OS 2.0 Descriptors (auto-bind WinUSB)
 *Last updated: 2026-11-16 (intercept now in `vendor/vc_usb.c`; other uses of 0x01 fall through to the paged dispatcher). Previously 2026-04-30*
@@ -291,11 +291,11 @@ Any host-driven format change (SET_INTERFACE between AS alts for a bit-depth swi
 **Output dividers at rate changes (`apply_nominal_output_rate()`, main.c):** output dividers are never trimmed. Input clock tracking pulls `sys_clk` in ppm through the soft VCXO, which moves every output together (see "Soft VCXO" and "Clock Servo"). `perform_rate_change()` therefore only programs the nominal divider for the new rate on each set-up S/PDIF slot and MCK, while `audio_i2s_update_all_frequencies()` retunes the I2S slots. Leaving a tracked input (SPDIF, ADAT slave, I2S slave) needs no divider work at all: its stop path calls `input_servo_reset()`, which parks the VCXO at nominal. `input_servo_reset()` must never run on the pipeline-reset path, because it would park a locked VCXO mid-lock. *Last updated: 2026-10-10*
 
 ### Clock Diagnostics (bench instrument)
-*Last updated: 2026-10-16 (packet version 2: USB feedback controller block and `usbfb:` line)*
+*Last updated: 2026-11-16 (read through `DIAG.CLOCK_DIAG`; config.h default corrected). Previously 2026-10-16 (packet version 2: USB feedback controller block and `usbfb:` line)*
 
-**Building it.** Diagnostics are compiled in only with `-DDSPI_CLOCK_DIAG=ON` at configure time (a CMake option, OFF by default, like `DSPI_LOOPBACK`); release builds answer `REQ_GET_CLOCK_DIAG` with zero bytes. The UART and I2C control transports also get zero bytes, because the `ClockDiagPacket` (226 bytes on RP2040, 248 on RP2350; static-asserted at most 256, the length `clkdiag_poll.py` requests) exceeds their response buffer and would otherwise arrive silently truncated; read it over USB with `tools/clkdiag_poll.py`.
+**Building it.** Diagnostics are compiled in only with `-DDSPI_CLOCK_DIAG=ON` at configure time (a CMake option, OFF by default, like `DSPI_LOOPBACK`). `DIAG.CLOCK_DIAG` exists only in such a build. A release build has no such command, so a request STALLs with `VC_ERR_UNKNOWN`. The command is flagged USB only, so UART and I2C get `VC_ERR_BLOCKED`. The `ClockDiagPacket` is 226 bytes on RP2040 and 248 on RP2350, static-asserted to fit the 256-byte reply buffer. Read it over USB with `tools/clkdiag_poll.py`.
 
-`clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and a read-only `REQ_GET_CLOCK_DIAG` (0x82) vendor GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf output is otherwise discarded). Gated entirely by `DSPI_CLOCK_DIAG` (config.h, default 1 for bench; set 0 for release, which compiles everything to no-op inlines and makes `REQ_GET_CLOCK_DIAG` return a zero-length response). `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
+`clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and the read-only `DIAG.CLOCK_DIAG` GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf output is otherwise discarded). Gated entirely by `DSPI_CLOCK_DIAG`. `config.h` defaults it to 0, which compiles everything to no-op inlines and leaves `DIAG.CLOCK_DIAG` out of the table; the CMake option sets it to 1. `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
 
 The dump is seven-to-nine lines, each prefixed `CLKDIAG ` for grepping:
 
@@ -311,29 +311,29 @@ The dump is seven-to-nine lines, each prefixed `CLKDIAG ` for grepping:
 
 Starvation counters are the authoritative instantaneous-empty signal (H3). With the ring model they count **frames** of silence exposed to the wire (ring underrun accounting is always on, no monitor bool, no IRQ path). All `clock_diag.*`, plus the diagnostic getters in `soft_vcxo.c`/`input_servo.c`/`spdif_input.c`, live in flash and run only from the main loop.
 
-The `REQ_GET_CLOCK_DIAG` (0x82) snapshot is a packed little-endian `ClockDiagPacket` (`clock_diag.h`, version byte = 2; version 2 appended the twelve `fb_*` words, and the decoder still parses version 1) carrying every dump field: ppm values are centi-ppm (ppm times 100), frequencies flagged `_mhz` are milli-Hz, per-slot arrays are sized `NUM_SPDIF_INSTANCES` with a `num_slots` count. `clock_diag_poll()` latches it each second next to the printf; `clock_diag_get_snapshot()` copies it for the handler. Tearing is acceptable (both the poll and the control transfer run on the core 0 main loop). Host decoder: `tools`-adjacent `clkdiag_poll.py` polls it at 1 Hz. *Last updated: 2026-10-16 (version 2).*
+The `DIAG.CLOCK_DIAG` snapshot is a packed little-endian `ClockDiagPacket` (`clock_diag.h`, version byte = 2; version 2 appended the twelve `fb_*` words, and the decoder still parses version 1) carrying every dump field: ppm values are centi-ppm (ppm times 100), frequencies flagged `_mhz` are milli-Hz, per-slot arrays are sized `NUM_SPDIF_INSTANCES` with a `num_slots` count. `clock_diag_poll()` latches it each second next to the printf; `clock_diag_get_snapshot()` copies it for the handler. Tearing is acceptable (both the poll and the control transfer run on the core 0 main loop). Host decoder: `tools`-adjacent `clkdiag_poll.py` polls it at 1 Hz. *Last updated: 2026-10-16 (version 2).*
 
 ### Multichannel USB Input + Per-Input EQ/Metering (RP2350)
-*Last updated: 2026-10-17 (alt 6 = 4ch/24-bit; shared 24-bit unpack). Previously, 2026-07-10 (crossfeed moved to per-output-pair stage; no longer bypassed in multichannel)*
+*Last updated: 2026-11-16 (input EQ, meters and active count named by paged command). Previously 2026-10-17 (alt 6 = 4ch/24-bit; shared 24-bit unpack); 2026-07-10 (crossfeed moved to per-output-pair stage; no longer bypassed in multichannel)*
 
-**Unified channel model (no "master").** Channels are now `[inputs 0..NUM_INPUT_CHANNELS-1][outputs NUM_INPUT_CHANNELS..]`; `NUM_CHANNELS = NUM_INPUT_CHANNELS + NUM_OUTPUT_CHANNELS` (17 on RP2350, 7 on RP2040). The former "master EQ" was always the EQ on the 2 stereo inputs — it is generalized so **every input channel is a first-class channel with its own 10-band PEQ + peak/clip metering** (no crossover). Output channels keep PEQ + crossover + gain/delay/mute. `CH_OUT_1 = NUM_INPUT_CHANNELS`; the output-slot→channel-index mapping (`CH_OUT_1 + slot`) shifts automatically, so the slot-aligned output path is structurally unchanged. **Input EQ and metering reuse the existing `REQ_SET/GET_EQ_PARAM` (channel = input index) and `REQ_GET_STATUS` (`peaks[]`/`clip_flags`) commands — no new commands.** `clip_flags` is `uint32_t` (17 channels > 16 bits).
+**Unified channel model (no "master").** Channels are now `[inputs 0..NUM_INPUT_CHANNELS-1][outputs NUM_INPUT_CHANNELS..]`; `NUM_CHANNELS = NUM_INPUT_CHANNELS + NUM_OUTPUT_CHANNELS` (17 on RP2350, 7 on RP2040). The former "master EQ" was always the EQ on the 2 stereo inputs. It is generalized so **every input channel is a first-class channel with its own 10-band PEQ + peak/clip metering** (no crossover). Output channels keep PEQ + crossover + gain/delay/mute. `CH_OUT_1 = NUM_INPUT_CHANNELS`; the output-slot→channel-index mapping (`CH_OUT_1 + slot`) shifts automatically, so the slot-aligned output path is structurally unchanged. **Input EQ and metering use the same commands as outputs. `FILTER.BAND` takes the input index as its channel, and `MEAS.LEVELS` carries `peaks[]` and `clip_flags` for every channel.** `clip_flags` is `uint32_t` (17 channels > 16 bits).
 
 **USB formats.** RP2350 advertises AudioStreaming alts **1 = 2ch/16, 2 = 2ch/24** (44.1/48/96 kHz), and **3 = 4ch/16, 4 = 6ch/16, 5 = 8ch/16, 6 = 4ch/24** (all 48 kHz fixed). No 6ch or 8ch 24-bit format exists. Alt 6 is packed 3-byte PCM (`S24_3LE` on ALSA) and needs at most 49 × 12 = 588 B per packet, so it fits the shared 788 B endpoint and ring slots. The host picks the format; the firmware sets the active input count (`usb_input_channels` = 2/4/6/8) and bit depth (`usb_input_bit_depth`, 24 for alts 2 and 6) in `uac1_apply_alt()`, which forces 48 kHz for multichannel alts (SET_CUR rejects non-48k), flushes the ring, and resyncs. Alt 3 ↔ alt 6 changes only the bit depth, which still counts as a format change. RP2040 is stereo-only (2 SPDIF = 4 output channels). The multichannel alt blocks are emitted by a parameterized `AS_MULTICH_ALT(alt,nch,bits)` macro; descriptor offsets/`CONFIG_TOTAL_LEN` (421 on RP2350: FU +6, four 52-byte alt blocks) are arithmetic + `_Static_assert`-verified. `USB_BCD_DEVICE` is 0x0204 so Windows re-reads the changed descriptors. The single Input Terminal/Feature Unit declare the 8-channel superset (`wChannelConfig=0x063F`); iso OUT max-packet `AUDIO_EP_MAX_PKT=788`.
 
 **Decode + pipeline.** `process_audio_packet()` deinterleaves N channels (stride = `channels`) into `input_bufs[c]`. The 24-bit stereo path casts the packet buffer to `uint32_t*` and the compiler may emit `ldrd` (which faults on a non-word-aligned address), so the USB ring slot's `data[]` is `__attribute__((aligned(4)))` (`usb_audio_ring.h`); macOS opens a stereo device at 24-bit, so this path runs even in "2-channel" mode. Bytes per frame is `channels × bit_depth / 8`, and the decoder drops any 24-bit packet whose channel count is not 2 or 4. Both 24-bit formats share the inline `unpack_s24x4()`, which turns three aligned words (12 bytes) into four floats. One call is one 4-channel frame, or two stereo frames. A stereo packet with an odd frame count decodes its last 6 bytes byte-wise, so the decoder never reads past the packet. The decode stays inside the RAM-resident `usb_audio_drain_ring()`; alt 6 costs about the same per frame as alt 3. (inputs 0/1 → buf_l/buf_r, 2-7 → buf_in_ext) with per-input preamp. In `process_input_block()` the **input-EQ pass** runs `dsp_process_channel_block(filters[k], input_bufs[k], …)` for each active input `k`, then meters its post-EQ peak/clip into `global_status.peaks[k]`/`clip_flags`. `n_active_inputs` = `usb_input_channels` for USB else 2. **Crossfeed no longer sits on the input bus; it runs per output pair post-matrix (PASS 4.5), so it is input-count agnostic and never bypassed in multichannel** (see "Crossfeed"). (Loudness no longer sits on the input bus; it runs per output post-gain, mask-selected, in both stereo and multichannel modes; see "Loudness Compensation".) The **volume leveller now runs channel-count-agnostic over the active inputs** (mask-driven; see "Volume Leveller"), so it is no longer bypassed in multichannel. The matrix iterates `n_active_inputs`, so `buf_in_ext` is read only when those inputs are active; inactive input peaks are zeroed. Inter-output sample alignment is preserved bit-for-bit (the leveller delays every active input identically through its per-channel lookahead ring). Default factory routing is stereo pass-through; multichannel routing is configured by the host app.
 
-**Live active-input-count for the host.** The app reads the active count (2/4/6/8) from the `REQ_GET_STATUS` combined packet (a 1-byte `active_input_channels` field, polled with the meters) or the scalar `wValue==23`; the bulk header `num_input_channels` stays the device max (8). Both report sites are **source-aware** via `active_input_channel_count()` (`audio_pipeline.c`), the single source of truth shared with the DSP pipeline's input dimension: USB → `usb_input_channels`, I2S → `i2s_input_channels`, S/PDIF → 2. A `NOTIFY_EVT_INPUT_FORMAT` (0x05) push event fires whenever the active count can change — USB alt change, input-source switch, and live I2S channel-count change (`REQ_SET_I2S_INPUT_CHANNELS` while I2S is active) — so the app relayouts immediately regardless of source.
+**Live active-input-count for the host.** The app reads the active count (2/4/6/8) from the last byte of `MEAS.LEVELS` (`active_input_channels`, polled with the meters) or from byte 1 of `INPUT.STATUS`; the bulk header `num_input_channels` stays the device max (8). Both report sites are **source-aware** via `active_input_channel_count()` (`audio_pipeline.c`), the single source of truth shared with the DSP pipeline's input dimension: USB → `usb_input_channels`, I2S → `i2s_input_channels`, S/PDIF → 2. A `NOTIFY_EVT_INPUT_FORMAT` (0x05) push event fires whenever the active count can change: USB alt change, input-source switch, and live I2S channel-count change (`INPUT.I2S_RX_CHANNELS` SET while I2S is active). The app therefore relayouts immediately regardless of source.
 
 **Persistence (compat-breaking).** Wire `WIRE_FORMAT_VERSION=16` (direct 8-input matrix/preamp + 17-channel EQ; no tail-append/version gates; 5864 B). Flash `SLOT_DATA_VERSION=21` (direct layout; the slot spans **2 flash sectors** on RP2350; 1 on RP2040). No migration — pre-version data loads factory defaults.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-11-16 (HOST_SET source tag comes from the paged dispatcher's `vc_run()` bracket). Previously 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
+*Last updated: 2026-11-16 (event sources and resync reads named by paged command). Previously 2026-11-16 (HOST_SET source tag comes from the paged dispatcher's `vc_run()` bracket); 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
 See `Documentation/Features/notification_protocol_v2_spec.md` for the full protocol specification.
 
-**Why bulk rather than interrupt:** an earlier draft used an interrupt IN endpoint at 4 ms polling. Under heavy EP0 control-transfer traffic (rapid `REQ_SET_MASTER_VOLUME` from a slider drag in the host app) the RP2040/2350 USB controller crashed after ~20–40 s and the device re-enumerated. Switching the EP to bulk IN eliminates the crash: bulk uses opportunistic host scheduling rather than a fixed bInterval poll cadence. The v2 protocol preserves the bulk transport.
+**Why bulk rather than interrupt:** an earlier draft used an interrupt IN endpoint at 4 ms polling. Under heavy EP0 control-transfer traffic (rapid master volume SETs from a slider drag in the host app) the RP2040/2350 USB controller crashed after ~20–40 s and the device re-enumerated. Switching the EP to bulk IN eliminates the crash: bulk uses opportunistic host scheduling rather than a fixed bInterval poll cadence. The v2 protocol preserves the bulk transport.
 
 **v2 core design (`notify.c/notify.h`):** every parameter is identified by its `offsetof` into `WireBulkParams`. A single event ID (`NOTIFY_EVT_PARAM_CHANGED = 0x02`) carries `(wire_offset, wire_size, source, value)`. Host dispatch is a flat lookup on offset, not a hand-written switch — adding a parameter requires zero wire-format changes.
 
@@ -356,38 +356,38 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 | 6 | INTERNAL | Firmware-initiated (clamps, auto-recalc) |
 | 7 | UAC1 | UAC1 Feature Unit SET_CUR data-stage handler in `usb_audio.c` (OS volume slider writes via standard audio class control transfers) |
 
-**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in the `vendor/` page handlers (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`. **UAC1 Feature Unit VOLUME SET_CUR** (`usb_audio.c` data-stage handler) also emits a PARAM_CHANGED on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1`, so v2 hosts see OS volume slider movements on the same field they already listen to for `REQ_SET_USER_VOLUME` (tagged `PARAM_SRC_HOST_SET`) and LG Sound Sync writes. `audio_state.volume` is shared across all three controllers and the notify field mirrors it source-agnostically, while the distinct source byte lets hosts attribute the change to the right controller. UAC1 Feature Unit MUTE has no notify (no parallel WireBulkParams field: `user_volume.user_mute` represents the *vendor* mute with different gating semantics, not `audio_state.mute`).
+**Emit hookpoints:** `update_master_volume` emits both v1 (`notify_push_master_volume_v1`) and v2 (`notify_param_write`). `update_preamp` emits v2. Direct-write setters in the `vendor/` page handlers (delays, gain/mute, loudness, crossfeed, leveller, matrix, pins, I2S, MCK, SPDIF RX pin, channel names) each call `notify_param_write` after the live-state write. Deferred setters (EQ band, input source) emit at apply time in `main.c`. **UAC1 Feature Unit VOLUME SET_CUR** (`usb_audio.c` data-stage handler) also emits a PARAM_CHANGED on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1`, so v2 hosts see OS volume slider movements on the same field they already listen to for `ROUTE.USER_VOLUME` (tagged `PARAM_SRC_HOST_SET`) and LG Sound Sync writes. `audio_state.volume` is shared across all three controllers and the notify field mirrors it source-agnostically, while the distinct source byte lets hosts attribute the change to the right controller. UAC1 Feature Unit MUTE has no notify (no parallel WireBulkParams field: `user_volume.user_mute` represents the *vendor* mute with different gating semantics, not `audio_state.mute`).
 
-**Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `REQ_GET_ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
+**Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `STORE.ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
-**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), `NOTIFY_EVT_RTA_CONFIG` (0x0D), `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F; 0x0E is held by the `ac3-dts-decode` branch), and `NOTIFY_EVT_DEVICE_NAME` (0x10). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `REQ_SET_CS_AUX_STATE` / `_LEVEL` handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `REQ_RTA_SET_CONFIG` as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `_dispatch_src` into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser"). INPUT_SOURCE_NAME announces each stored source name as a 40-byte packet `[ver=2, 0x0F, flags=0, seq, source_id, src, 0, 0, name(32)]`, pushed after the directory write that stores it, with `src` captured at SET time the same way *(2026-10-31; see "Input Source Names")*. DEVICE_NAME announces the stored board name in the same 40-byte layout with byte 4 zero, `[ver=2, 0x10, flags=0, seq, 0, src, 0, 0, name(32)]`, from the same write *(2026-11-01; see "Device Name")*.
+**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), `NOTIFY_EVT_RTA_CONFIG` (0x0D), `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F; 0x0E is held by the `ac3-dts-decode` branch), and `NOTIFY_EVT_DEVICE_NAME` (0x10). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `CS.AUX_STATE` / `CS.AUX_LEVEL` SET handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `MEAS.RTA_CONFIG` SET as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `vc_param_src()` of the request's transport into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser"). INPUT_SOURCE_NAME announces each stored source name as a 40-byte packet `[ver=2, 0x0F, flags=0, seq, source_id, src, 0, 0, name(32)]`, pushed after the directory write that stores it, with `src` captured at SET time the same way *(2026-10-31; see "Input Source Names")*. DEVICE_NAME announces the stored board name in the same 40-byte layout with byte 4 zero, `[ver=2, 0x10, flags=0, seq, 0, src, 0, 0, name(32)]`, from the same write *(2026-11-01; see "Device Name")*.
 
 **Drain:** each consumer drains its own tail via `notify_peek_next_for(consumer, ...)` / `notify_commit_pop_for(consumer)`. The USB consumer (`usb_notify_drain` in usb_audio.c) claims EP 0x83 via `usbd_edpt_claim`, formats the next packet into the stable TX buffer, and submits via `usbd_edpt_xfer`; on success `notify_commit_pop_for(USB)` advances the USB tail, and on xfer rejection the entry stays queued for the next tick. The UART consumer drains from `uart_ctrl_poll` (see "Multi-consumer ring").
 
-**Multi-consumer ring:** the ring supports independent consumers, each with its own tail: `NOTIFY_CONSUMER_USB` (always active) and `NOTIFY_CONSUMER_UART` (active while the UART transport is live with `notify_enable` set). `notify_consumer_set_active(c, active)` snaps a newly activated consumer's tail to `head` so it sees no stale backlog. A lagging consumer never stalls the producer or another consumer: if a push would collide with a consumer's tail, that consumer's oldest entry is force-dropped (counted in `notify_consumer_drops[c]`) and the push proceeds; the consumer detects the loss as a seq gap and re-reads `REQ_GET_ALL_PARAMS`. Sequence numbers are stamped at **push** time and stored in the ring entry (not allocated at drain time), so a re-peek or xfer retry does not burn a number; this removed a historical phantom-gap artifact for USB hosts where a rejected transfer had allocated but not delivered a seq. The v1 legacy master-volume entry carries no seq, consumes none, and is delivered to the USB consumer only (every v1 event has a v2 twin, which the UART consumer receives instead). The old displace-oldest-on-full path for `BULK_INVALIDATED` is gone; force-advance guarantees delivery for every event type.
+**Multi-consumer ring:** the ring supports independent consumers, each with its own tail: `NOTIFY_CONSUMER_USB` (always active) and `NOTIFY_CONSUMER_UART` (active while the UART transport is live with `notify_enable` set). `notify_consumer_set_active(c, active)` snaps a newly activated consumer's tail to `head` so it sees no stale backlog. A lagging consumer never stalls the producer or another consumer: if a push would collide with a consumer's tail, that consumer's oldest entry is force-dropped (counted in `notify_consumer_drops[c]`) and the push proceeds; the consumer detects the loss as a seq gap and re-reads `STORE.ALL_PARAMS`. Sequence numbers are stamped at **push** time and stored in the ring entry (not allocated at drain time), so a re-peek or xfer retry does not burn a number; this removed a historical phantom-gap artifact for USB hosts where a rejected transfer had allocated but not delivered a seq. The v1 legacy master-volume entry carries no seq, consumes none, and is delivered to the USB consumer only (every v1 event has a v2 twin, which the UART consumer receives instead). The old displace-oldest-on-full path for `BULK_INVALIDATED` is gone; force-advance guarantees delivery for every event type.
 
 **Initialisation:** `notify_init()` is called from `core0_init()` after `preset_boot_load()` so `bulk_params_collect(&param_shadow)` sees a fully-populated live state. The control-interface init block (UART / I2C) is now **deliberately placed after** `notify_init()` in `core0_init()`, so the UART bring-up's notify-consumer activation is not wiped by the consumer-table reset inside `notify_init()`. The USB reset path (`uac1_driver_reset`) calls `notify_reset_queue()`, which resets **only** the USB consumer's view (drops its backlog) and the source/bulk brackets; the global seq counter and other consumers' backlogs are left intact (resetting seq would fake a wrap-around gap for a mid-stream UART consumer).
 
 **v1 back-compat:** `update_master_volume` still pushes an 8-byte `MASTER_VOLUME` (0x01) event into the ring. Existing v1 host apps that only recognise byte 0 = 0x01 continue to work; v2 hosts receive the parallel PARAM_CHANGED event and dispatch by offset.
 
 ### Volume & Mute
-*Last updated: 2026-10-04 (audio_set_volume() returns true when applied, restoring the UAC1 volume notify)*
+*Last updated: 2026-11-16 (vendor-channel commands named by paged command). Previously 2026-10-04 (audio_set_volume() returns true when applied, restoring the UAC1 volume notify)*
 
 **Volume range:** -60 dB to 0 dB (1 dB resolution, 61 steps). Bottom step is fully silent. USB Audio Class 8.8 fixed-point dB encoding. Q15 lookup table (`db_to_vol[61]`) maps dB index to linear multiplier; index 0 = 0x0000 (silent), index 60 = 0x7FFF (unity).
 
 **User volume — multiple owners, one source of truth:** `audio_state.volume` (and `audio_state.mute`) hold the user-perceived volume/mute. Three controllers can drive these fields, all funneling through the same `apply_vol_index_to_audio()` helper so `vol_mul` and the loudness coefficient pointer always move in lock-step:
 
-1. **UAC1 host slider/mute** (`audio_set_volume()` / UAC1 Feature Unit MUTE). This is the primary controller while USB is the active input source. When `active_input_source != INPUT_SOURCE_USB`, `audio_set_volume()` does not touch `audio_state.volume` at all. It parks the value in a private `uac1_host_volume` with a pending flag and returns false. UAC1 GET_CUR returns the parked value while it is pending, so the host's round-trip still matches what it wrote. An applied UAC1 SET_CUR VOLUME emits a `PARAM_CHANGED` on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1` (distinct from `PARAM_SRC_HOST_SET`, which tags `REQ_SET_USER_VOLUME`). A parked write emits nothing. The data-stage handler gates the notify on `audio_set_volume()` returning true, so the applied path must end in an explicit `return true`. Without it the return value is undefined in C, and GCC at -O2 deleted the notify call entirely (the build has no `-Wreturn-type` to catch it). UAC1 Feature Unit MUTE does NOT emit (no parallel WireBulkParams field; see "Mute" below).
+1. **UAC1 host slider/mute** (`audio_set_volume()` / UAC1 Feature Unit MUTE). This is the primary controller while USB is the active input source. When `active_input_source != INPUT_SOURCE_USB`, `audio_set_volume()` does not touch `audio_state.volume` at all. It parks the value in a private `uac1_host_volume` with a pending flag and returns false. UAC1 GET_CUR returns the parked value while it is pending, so the host's round-trip still matches what it wrote. An applied UAC1 SET_CUR VOLUME emits a `PARAM_CHANGED` on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1` (distinct from `PARAM_SRC_HOST_SET`, which tags a `ROUTE.USER_VOLUME` SET). A parked write emits nothing. The data-stage handler gates the notify on `audio_set_volume()` returning true, so the applied path must end in an explicit `return true`. Without it the return value is undefined in C, and GCC at -O2 deleted the notify call entirely (the build has no `-Wreturn-type` to catch it). UAC1 Feature Unit MUTE does NOT emit (no parallel WireBulkParams field; see "Mute" below).
 2. **LG Sound Sync** (`lg_sound_sync.c`) — owns `vol_mul` and re-keys the loudness pointer while SPDIF input is active and an LG TV is producing optical TC values.
-3. **Vendor channel** (`REQ_SET_USER_VOLUME` / `REQ_SET_USER_MUTE`) — `update_user_volume()` always applies, regardless of input source, so an external control surface or app can drive user volume during non-USB playback. Caller-side conventions (e.g. "Console only writes during non-USB input") are not enforced by the firmware. While LG Sound Sync is locked, its next ~20 ms poll will overwrite the vendor write — that's intentional ownership during LG-driven playback.
+3. **Vendor channel** (`ROUTE.USER_VOLUME` / `ROUTE.USER_MUTE`). `update_user_volume()` always applies, regardless of input source, so an external control surface or app can drive user volume during non-USB playback. Caller-side conventions (e.g. "Console only writes during non-USB input") are not enforced by the firmware. While LG Sound Sync is locked, its next ~20 ms poll will overwrite the vendor write. That is intentional ownership during LG-driven playback.
 
 **Mute (two flags, different gating):**
 - `audio_state.mute` — UAC1 Feature Unit MUTE control. **USB-gated:** the OS mute key has no audible effect when the active input is not USB, so the host can't accidentally silence SPDIF playback. Host volume is parked the same way by `audio_set_volume()` when source != USB.
-- `user_mute` — vendor-channel mute (`REQ_SET_USER_MUTE`). **Always honored, no input-source guard** — symmetric with `REQ_SET_USER_VOLUME`'s always-apply contract. An external control surface that mutes via the vendor channel expects audio to actually go silent.
+- `user_mute` is the vendor-channel mute (`ROUTE.USER_MUTE`). **Always honored, no input-source guard.** This is symmetric with the always-apply contract of `ROUTE.USER_VOLUME`. An external control surface that mutes via the vendor channel expects audio to actually go silent.
 
-The pipeline ORs them: `muted = (audio_state.mute && host_active) || user_mute`. Either flag forces the per-packet target gain to zero; the apply then ramps to zero over the per-sample envelope used for volume changes (see below), so mute toggles are click-free regardless of which flag triggered them. `REQ_GET_USER_MUTE` returns `user_mute` only — UAC1's mute remains queryable via UAC1 GET_CUR (each surface owns its native interface).
+The pipeline ORs them: `muted = (audio_state.mute && host_active) || user_mute`. Either flag forces the per-packet target gain to zero; the apply then ramps to zero over the per-sample envelope used for volume changes (see below), so mute toggles are click-free regardless of which flag triggered them. A `ROUTE.USER_MUTE` GET returns `user_mute` only. UAC1's mute remains queryable via UAC1 GET_CUR (each surface owns its native interface).
 
-**Invariant:** `audio_state.volume` always equals the volume actually applied to `vol_mul`. The control-surface display (`CS_NOUN_USER_VOLUME`), Console's `REQ_GET_USER_VOLUME`, bulk params, and preset save all read it, so none of them may ever see a value that is not audible. The host's parked value lives only in `uac1_host_volume`. Before 2026-09-28 the parked value was written into `audio_state.volume`, so an OS volume restore on enumeration during SPDIF playback made the LCD and Console show a volume the device was not playing at, and a preset save then persisted it.
+**Invariant:** `audio_state.volume` always equals the volume actually applied to `vol_mul`. The control-surface display (`CS_NOUN_USER_VOLUME`), Console's `ROUTE.USER_VOLUME` GET, bulk params, and preset save all read it, so none of them may ever see a value that is not audible. The host's parked value lives only in `uac1_host_volume`. Before 2026-09-28 the parked value was written into `audio_state.volume`, so an OS volume restore on enumeration during SPDIF playback made the LCD and Console show a volume the device was not playing at, and a preset save then persisted it.
 
 **Parked value on switch to USB:** `audio_thaw_host_volume()` runs in the switching-to-USB branch of the input-source handler. It applies the parked host value through `update_user_volume()` only if the pending flag is still set. Any later `update_user_volume()` call (control surface, vendor command, preset load, LG Sound Sync) clears the flag, so the most recent writer wins.
 
@@ -441,7 +441,7 @@ The model's host honours feedback exactly, on average. It therefore cannot repro
 **IRQ safety:** The SOF handler runs inside `isr_usbctrl`. Output DMA raises no IRQ, so it cannot preempt the SOF read; the read-pointer unwrap is done under a brief IRQ-off section inside the getter. The DMA/USB IRQ priority pinning is retained for the S/PDIF RX path (the only remaining DMA IRQ user).
 
 ### USB Audio Decoupling (SPSC Ring Buffer)
-*Last updated: 2026-04-18*
+*Last updated: 2026-11-16 (overrun counter and deferred store commands named by paged command). Previously 2026-04-18*
 
 The DSP pipeline is decoupled from USB audio transfer completion via a lock-free SPSC ring buffer (`usb_audio_ring.h`). The UAC1 class driver's `xfer_cb` pushes raw packets into the ring; the main loop drains the ring and runs the full DSP pipeline. This prevents the USB stack from being blocked for hundreds of microseconds per packet and eliminates ISR-context spinlock contention.
 
@@ -453,9 +453,9 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 
 **Gap detection:** USB packet arrival gap measurement runs in `uac1_driver_xfer_cb` (task context under TinyUSB) using file-scope `audio_ring_last_push_us`, reset on stream lifecycle transitions in `uac1_apply_alt()` and `usb_audio_flush_ring()`.
 
-**Ring overruns:** `audio_ring.overrun_count`, queryable via `REQ_GET_STATUS` wValue=22. wValue=7 (`spdif_overruns`, producer-pool take failures) is retired and always reads 0. *Last updated: 2026-10-12*
+**Ring overruns:** `audio_ring.overrun_count`, read as the ring overrun field (offset 4) of `SYS.USB_AUDIO_STATUS`. The old producer-pool take-failure counter is gone. *Last updated: 2026-11-16*
 
-**Deferred flash SET commands:** `REQ_PRESET_SET_NAME`, `REQ_PRESET_SET_STARTUP`, `REQ_SET_OUTPUT_CONFIG_MODE` (and the action-style `REQ_SAVE_OUTPUT_CONFIG`) use separate pending flags per command type. Main loop copies payload under brief interrupt-off (~1µs) to prevent ISR/thread race, then drains ring and executes the flash write. GET-style flash commands (SAVE/LOAD/DELETE) remain synchronous in the vendor handler with real result codes.
+**Deferred flash SET commands:** every `STORE` write is queued for the main loop through its own pending flag. `STORE.PRESET_NAME`, `STORE.STARTUP` and `STORE.OUTPUT_CONFIG_MODE` stage their payload, and `STORE.OUTPUT_CONFIG_SAVE`, `STORE.PRESET_SAVE`, `STORE.PRESET_LOAD` and `STORE.PRESET_DELETE` are zero-length SETs that only raise a flag. The main loop copies the staged payload under a brief interrupt-off (~1µs) to prevent an ISR/thread race, then drains the ring and executes the flash write. The SET returns `VC_OK` once it is queued. The outcome is observed through readback (`STORE.DIRECTORY`, `STORE.PRESET_ACTIVE`) and notifications.
 
 ### Packet Flow
 *Last updated: 2026-04-18*
@@ -527,7 +527,7 @@ Block-based two-phase architecture with dual-core EQ processing, all in Q28 fixe
 ---
 
 ## USB Audio Loopback Capture (DSPI_LOOPBACK)
-*Last updated: 2026-11-15 (Host side: harness already captures from DSPi; release builds read 0 at GET_STATUS 24/25). Previously 2026-08-02 (capture glitch counters on REQ_GET_STATUS 24/25)*
+*Last updated: 2026-11-16 (glitch counters read through `DIAG.LOOPBACK_STATS`). Previously 2026-11-15 (Host side: harness already captures from DSPi; release builds read 0 at GET_STATUS 24/25); 2026-08-02 (capture glitch counters on REQ_GET_STATUS 24/25)*
 
 A **debug/verification-only** feature, compiled in only when the `DSPI_LOOPBACK`
 build flag is defined. It folds the standalone `~/USBrx` S/PDIF-to-USB recorder's
@@ -599,7 +599,7 @@ slot-0 final 24-bit samples (audio_pipeline.c slot_stage[0], admitted blocks onl
   accumulator. Primes to target before streaming; underrun emits silence and
   re-primes. Ported from USBrx, reading the internal ring instead of a S/PDIF FIFO.
 
-### Glitch counters (`REQ_GET_STATUS` wValue 24/25)
+### Glitch counters (`DIAG.LOOPBACK_STATS`)
 The capture is asynchronous to the host, so it can lose or insert frames in two
 ways: the ring **overflows** when the host is not draining (`loopback_push_slot0`
 drops the rest of the block), or it **underruns** when the ring runs dry
@@ -607,16 +607,15 @@ drops the rest of the block), or it **underruns** when the ring runs dry
 captured stream, and a spliced stream fails a strict comparison (bit-exact
 residual, inter-channel lag) exactly as a real DSP fault would.
 
-Two free-running counters make the two distinguishable:
+Two free-running counters make the two distinguishable. `DIAG.LOOPBACK_STATS` returns both in one 8-byte reply.
 
-| wValue | Returns | Increments |
+| Offset | Returns | Increments |
 |---|---|---|
-| 24 | `loopback_get_overflow_count()` | once per frame dropped with the ring full |
-| 25 | `loopback_get_underrun_count()` | once per underrun episode (the following packets take the prime branch, so an episode counts once) |
+| 0 (u32) | `loopback_get_overflow_count()` | once per frame dropped with the ring full |
+| 4 (u32) | `loopback_get_underrun_count()` | once per underrun episode (the following packets take the prime branch, so an episode counts once) |
 
-Both are `#ifdef DSPI_LOOPBACK`, so on a release build indices 24/25 have no
-case and read 0 (`REQ_GET_STATUS` never STALLs on an unknown index); the host
-treats them as optional. The harness samples them either side of a
+The command is `#ifdef DSPI_LOOPBACK`, so a release build has no such command and
+a request STALLs with `VC_ERR_UNKNOWN`. The host treats the counters as optional. The harness samples them either side of a
 capture (`_clean_capture` in `tools/dspi_test/tests/audio_loopback.py`): a
 measurement whose counters moved is retried once, and a persistent glitch is
 reported as a transport fault instead of being asserted on. With the counters
@@ -689,7 +688,7 @@ every source; inputs ≥2 carry audio only in a multichannel USB alt.
 | CH_OUT_5_PDM | 6 | PDM Subwoofer |
 
 ### Biquad Filter
-*Last updated: 2026-08-04 (first-order low/high pass, types 12-13)*
+*Last updated: 2026-11-16 (Linkwitz `Qp` carried by `FILTER.BAND`). Previously 2026-08-04 (first-order low/high pass, types 12-13)*
 
 **Types:** Flat (bypass), Peaking, Low Shelf, High Shelf, Low Pass, High Pass, Notch, All-Pass (2nd-order RBJ), First-Order All-Pass (`FILTER_ALLPASS1`), First-Order Low Shelf (`FILTER_LOWSHELF1`), First-Order High Shelf (`FILTER_HIGHSHELF1`), Linkwitz Transform (`FILTER_LINKWITZ_TRANSFORM`), First-Order Low Pass (`FILTER_LOWPASS1`), First-Order High Pass (`FILTER_HIGHPASS1`)
 
@@ -697,7 +696,7 @@ every source; inputs ≥2 carry audio only in a multichannel USB alt.
 
 **First-order types (`FILTER_ALLPASS1`, added 2026-06-17; `FILTER_LOWSHELF1` / `FILTER_HIGHSHELF1`, added 2026-06-20; `FILTER_LOWPASS1` / `FILTER_HIGHPASS1`, added 2026-07-27):** Genuine 1st-order sections. The all-pass has flat magnitude with phase 0° → -180° (-90° at the corner), single parameter `freq` (`Q`/`gain_db` unused). The shelves are gentle 6 dB/oct shelves (monotonic, no `Q`); the first-order shelf prewarps `g` by `A` (not `sqrt(A)` like the 2nd-order shelves). The low/high pass are single-pole 6 dB/oct rolloffs, -3 dB at the corner with no resonance, single parameter `freq` (`Q`/`gain_db` unused); on the SVF path the low pass takes the one-pole output directly and the high pass takes `in - lp`, and on the biquad path both are exact-bilinear degenerate sections (`b2 = a2 = 0`, and `b0 = b1` for the low pass, which its inner loop exploits). On RP2350 these follow the **same hybrid rule as every other type** (changed 2026-06-20): a one-pole TPT SVF below `Fs/7.5` (`bq->svf_first_order`), a degenerate TDF2 biquad (`b2 = a2 = 0`) above. The one-pole SVF folds the `1/(1+g)` reciprocal into a coefficient so its inner loop is multiply-only. On RP2040 (no SVF) they always run as a Q28 degenerate biquad through the existing assembly kernel. Both realizations produce the identical RBJ-cookbook response, verified across the `Fs/7.5` boundary by `tools/filter_tester`.
 
-**Linkwitz Transform (`FILTER_LINKWITZ_TRANSFORM` = 11, added 2026-07-12):** A pole/zero bass-extension biquad that replaces a driver's measured 2nd-order rolloff (`f0`, `Q0`) with a target alignment (`fp`, `Qp`): `H(s) = (s^2 + s*w0/Q0 + w0^2) / (s^2 + s*wp/Qp + wp^2)`. Unlike every other PEQ type it needs **four** parameters, so it borrows the wire packet unconventionally: `EqParamPacket.freq` = `f0`, `.Q` = `Q0`, `.gain_db` carries `fp` in Hz (`gain_db` is otherwise unused, and the front-panel gain noun is a no-op on LT bands), and the fourth parameter `Qp` rides a parallel array `peq_qp_x512[NUM_CHANNELS][MAX_BANDS]` (`dsp_pipeline.c`) as a `uint16` LE `Q*512` (`0` = the 0.707 default). Clamps: `f0` and `fp` to `[10, 0.15*Fs]` (tighter than the generic 0.45*Fs PEQ clamp; bounds every normalized coefficient inside the RP2040 Q28 range), `Q0` and `Qp` to `[0.1, 20]`; `fp <= 0` (or `freq <= 0`) is treated as flat. On RP2350 it runs on the hybrid path (see below); on RP2040 it is the same exact-bilinear TDF2 biquad in Q28 with both corners independently prewarped. The sidecar `Qp` is carried through the wire (`WireBandParams.reserved[2]`), flash (`PresetSlot.peq_qp_x512` tail-append), the `REQ_SET_EQ_PARAM` optional 18-byte payload, and `REQ_GET_EQ_PARAM` param code 5; these bumped `WIRE_FORMAT_VERSION` to 22 and `SLOT_DATA_VERSION` to 30 (V21..V29 slots still load, `qp` defaulting to 0 = 0.707). Full host-facing spec: [`Documentation/Features/peq_filters.md`](Features/peq_filters.md).
+**Linkwitz Transform (`FILTER_LINKWITZ_TRANSFORM` = 11, added 2026-07-12):** A pole/zero bass-extension biquad that replaces a driver's measured 2nd-order rolloff (`f0`, `Q0`) with a target alignment (`fp`, `Qp`): `H(s) = (s^2 + s*w0/Q0 + w0^2) / (s^2 + s*wp/Qp + wp^2)`. Unlike every other PEQ type it needs **four** parameters, so it borrows the wire packet unconventionally: `EqParamPacket.freq` = `f0`, `.Q` = `Q0`, `.gain_db` carries `fp` in Hz (`gain_db` is otherwise unused, and the front-panel gain noun is a no-op on LT bands), and the fourth parameter `Qp` rides a parallel array `peq_qp_x512[NUM_CHANNELS][MAX_BANDS]` (`dsp_pipeline.c`) as a `uint16` LE `Q*512` (`0` = the 0.707 default). Clamps: `f0` and `fp` to `[10, 0.15*Fs]` (tighter than the generic 0.45*Fs PEQ clamp; bounds every normalized coefficient inside the RP2040 Q28 range), `Q0` and `Qp` to `[0.1, 20]`; `fp <= 0` (or `freq <= 0`) is treated as flat. On RP2350 it runs on the hybrid path (see below); on RP2040 it is the same exact-bilinear TDF2 biquad in Q28 with both corners independently prewarped. The sidecar `Qp` is carried through the wire (`WireBandParams.reserved[2]`), flash (`PresetSlot.peq_qp_x512` tail-append), and bytes 2-3 of `FILTER.BAND` (`qp_x512`) in both directions. The wire and flash fields bumped `WIRE_FORMAT_VERSION` to 22 and `SLOT_DATA_VERSION` to 30 (V21..V29 slots still load, `qp` defaulting to 0 = 0.707). Full host-facing spec: [`Documentation/Features/peq_filters.md`](Features/peq_filters.md).
 
 **Filter type value space (`enum FilterType`):** PEQ types occupy 0–7 plus the first-order all-pass at 8, the first-order low/high shelves at 9–10 (added 2026-06-20), the Linkwitz Transform at 11 (added 2026-07-12), and the first-order low/high pass at 12–13 (added 2026-07-27), with 14–31 reserved for future PEQ types; crossover types occupy 32–63 (see [Crossover Filters](#crossover-filters)). `filter_is_peq_type()` (config.h) is the single classifier (any value below `FILTER_XOVER_FIRST`); `is_filter_flat()` uses it to flatten a crossover type that lands in a PEQ band slot. The crossover types were renumbered from the old 8–39 range on 2026-06-17 to open the contiguous PEQ block, which bumped `SLOT_DATA_VERSION` to 18 (pre-V18 presets migrated on load via `remap_filter_type_pre_v18()`) and `WIRE_FORMAT_VERSION` to 13. Adding the first-order shelves (new enum values only; no renumber, no on-disk layout change, no migration) bumped `SLOT_DATA_VERSION` to 19 and `WIRE_FORMAT_VERSION` to 14. The Linkwitz Transform adds a per-band target-`Q` sidecar (`peq_qp_x512`), tail-appended to `PresetSlot` and carried in the `WireBandParams.reserved[2]` bytes, which bumped `SLOT_DATA_VERSION` to 30 and `WIRE_FORMAT_VERSION` to 22 (V21..V29 slots still load with `qp` defaulting to 0 = 0.707). The first-order low/high pass added enum values only (no renumber, no layout change, no migration) and bumped **neither** version, unlike the first-order shelves before them; nothing is incompatible as a result, but hosts have no version signal for types 12–13 and must probe by setting one. `CS_PEQ_TYPE_COUNT` (`control_surfaces_nouns.c`) is anchored to `FILTER_HIGHSHELF1`, so a Control Surfaces `FILTER_TYPE` control still cycles only 0–10 and cannot reach them.
 
@@ -778,26 +777,27 @@ RP2040 is unaffected: its band-major assembly kernels (`dsp_process_rp2040.S`) a
 **RP2040:** Completely unaffected. All SVF code is inside `#if PICO_RP2350` blocks.
 
 ### Per-Band Bypass
-*Last updated: 2026-10-23 (defaults clear the bypass byte). Previously, 2026-05-04*
+*Last updated: 2026-11-16 (intake points and vendor commands named by paged command). Previously 2026-10-23 (defaults clear the bypass byte); 2026-05-04*
 
 Each EQ band has a user-controllable bypass flag in `EqParamPacket.bypass` (config.h). When set to exactly `1` it forces `Biquad.bypass = true` inside `dsp_compute_coefficients()`, which causes the audio inner loops in `dsp_pipeline.c`, `dsp_process_rp2040.S`, `audio_pipeline.c`, and `pdm_generator.c` to skip the band entirely (`if (bq->bypass) continue;`). User bypass and the existing auto-bypass for `FILTER_FLAT` / zero-gain peaking/shelf filters share the same `Biquad.bypass` flag — `channel_bypassed[ch]` (true when *every* band on the channel is bypassed) automatically benefits, allowing the audio path to skip the entire channel.
 
-**0xFF safety:** the byte at offset 3 of `EqParamPacket` was previously named `reserved`. To stay backward-compatible with hosts that may zero-pad with `0xFF` rather than `0x00`, the firmware treats *only* the literal value `1` as bypass — every other value (0, 0xFF, 0x42, …) leaves the band active. Intake points (`REQ_SET_EQ_PARAM`, `REQ_SET_BAND_BYPASS`, bulk-params apply, flash preset load) normalize the byte to 0 or 1 so GET round-trips and the live recipe stay clean.
+**0xFF safety:** the byte at offset 3 of `EqParamPacket` was previously named `reserved`. To stay backward-compatible with hosts that may zero-pad with `0xFF` rather than `0x00`, the firmware treats *only* the literal value `1` as bypass. Every other value (0, 0xFF, 0x42, …) leaves the band active. Intake points (`FILTER.BAND` and `FILTER.BAND_BYPASS` SETs, bulk-params apply, flash preset load) normalize the byte to 0 or 1 so GET round-trips and the live recipe stay clean.
 
 **Wire format:** `WireBandParams.reserved[3]` was split into `bypass` (1 byte) + `reserved[2]` (still zero-padded). Same byte layout, no `WIRE_FORMAT_VERSION` bump needed.
 
 **Persistence:** `filter_recipes` is `memcpy`'d into `PresetSlot.filter_recipes` (flash_storage.c:500/625) so the bypass byte rides through preset save/load with no `SLOT_DATA_VERSION` bump. Legacy presets had `0` in that byte → they load as "active", preserving original behavior. `apply_slot_to_live()` re-normalizes after `memcpy` for defense-in-depth.
 
-**Factory-default channel/band fix (2026-05-04):** `dsp_init_default_filters()` now writes `.channel = ch` and `.band = b` into every `filter_recipes` slot. Previously these fields stayed at BSS-zero, which caused `REQ_SET_BAND_BYPASS` to silently misroute writes to slot (0,0) since the handler copies the recipe (carrying the stale `.channel`/`.band`) into `pending_packet`, and the main-loop apply does `filter_recipes[p.channel][p.band] = p`. Symptom: bypass toggle didn't take effect on factory-defaulted bands until `REQ_SET_EQ_PARAM` rewrote the recipe with correct channel/band. `apply_slot_to_live()` (`flash_storage.c`) also normalizes `.channel` / `.band` after the recipe `memcpy` so old presets saved before the fix don't carry the bug into live state.
+**Factory-default channel/band fix (2026-05-04):** `dsp_init_default_filters()` now writes `.channel = ch` and `.band = b` into every `filter_recipes` slot. Previously these fields stayed at BSS-zero, which caused the 1.1.x band bypass SET to silently misroute writes to slot (0,0) since the handler copies the recipe (carrying the stale `.channel`/`.band`) into `pending_packet`, and the main-loop apply does `filter_recipes[p.channel][p.band] = p`. Symptom: bypass toggle didn't take effect on factory-defaulted bands until a full band write rewrote the recipe with correct channel/band. `FILTER.BAND_BYPASS` now sets `.channel` / `.band` from its address before staging. `apply_slot_to_live()` (`flash_storage.c`) also normalizes `.channel` / `.band` after the recipe `memcpy` so old presets saved before the fix don't carry the bug into live state.
 
 **Factory defaults are now flat (2026-05-04):** `dsp_init_default_filters()` no longer installs the 80 Hz highpass on output channels nor the 80 Hz lowpass on the PDM sub. Every band starts as `FILTER_FLAT` with `freq = 1000`, `Q = 0.707`, `gain_db = 0`, `bypass = 0`. Crossover/sub configuration is now an explicit user choice via the host, not a baked-in default that the user has to discover and override.
 
 **Defaults clear the bypass byte (2026-10-23):** until v1.1.6-beta5, `dsp_init_default_filters()` wrote every PEQ recipe field except `bypass`, so the `bypass = 0` above held only while the BSS zero survived. A band bypassed earlier in the session stayed bypassed through factory reset, an empty-slot load or delete, and a boot with no preset. Bulk GET then reported it bypassed, the Console's preserve-bypass policy kept it bypassed through later edits, and a preset save persisted it. The initializer now writes `bypass = 0` explicitly, matching `xover_init_default_filters()`.
 
 **Vendor commands:**
-- `REQ_SET_EQ_PARAM` (0x42): host can set the byte directly inside the `EqParamPacket` payload.
-- `REQ_GET_EQ_PARAM` (0x43): added `param=4` → returns 1-byte bypass.
-- `REQ_SET_BAND_BYPASS` (0xD8) / `REQ_GET_BAND_BYPASS` (0xD9): direct toggle, `wValue = (channel<<8)|band`, payload/return = 1 byte.
+- `FILTER.BAND`: byte 1 of the 16-byte band payload is the bypass byte, in both directions.
+- `FILTER.BAND_BYPASS`: direct toggle, `wValue = (channel<<8)|band`, payload and reply 1 byte.
+
+Both SETs are deferred to the main loop through one pending slot, and a second band write before the first is applied returns `VC_ERR_BUSY`.
 
 **CPU impact:** zero in the audio path (the `bq->bypass` check already existed); a bypassed band skips its biquad/SVF math, so user-bypass is a small *win* vs. an active band. One added byte comparison per coefficient recompute (only on user write or rate change).
 
@@ -831,7 +831,7 @@ PDM sub gets automatic alignment compensation: the ring fill target minus `PDM_B
 ---
 
 ## Crossover Filters
-*Last updated: 2026-09-22*
+*Last updated: 2026-11-16 (band addressing named by paged command). Previously 2026-09-22*
 
 ### Purpose
 
@@ -846,13 +846,13 @@ A dedicated per-output crossover stage between the matrix mixer (PASS 4) and per
 
 ### Band-index addressing
 
-Crossover bands share the band-index space with PEQ for all band-addressing vendor commands (REQ_SET_EQ_PARAM, REQ_GET_EQ_PARAM, REQ_SET_BAND_BYPASS, REQ_GET_BAND_BYPASS):
+Crossover bands share the band-index space with PEQ for both band-addressing vendor commands, `FILTER.BAND` and `FILTER.BAND_BYPASS`. Their address is `(channel << 8) | band`. The band index means the following.
 
 - 0..9 = active PEQ band
-- 10..19 = reserved (rejected); wide gap so PEQ can grow without moving crossover
-- 20..23 = crossover band 0..3 (`XOVER_BAND_BASE = 20`)
+- 10..19 = reserved (rejected with `VC_ERR_ADDRESS`); wide gap so PEQ can grow without moving crossover
+- 20..23 = crossover band 0..3 (`XOVER_BAND_BASE = 20`), output channels only. On an input channel these are `VC_ERR_ADDRESS`
 
-The crossover base was widened from 12 to 20 on 2026-06-04. Because `REQ_GET_EQ_PARAM` previously packed the band into a 4-bit `wValue` field (max 15), its `wValue` layout changed to a 5-bit band field: `(channel << 8) | (band << 3) | param` (param dropped from 4 bits to 3; only 5 values exist). The other three band-addressing commands and the bulk transfer already use an 8-bit band field and were unaffected. The wire-format size, persistence layout, and filter-type enum were all unchanged by that 2026-06-04 change.
+The crossover base was widened from 12 to 20 on 2026-06-04. The wire-format size, persistence layout, and filter-type enum were all unchanged by that change. The 1.1.6 per-parameter band read and its packed `wValue` are gone; `FILTER.BAND` returns the whole band.
 
 **Filter-type renumber (2026-06-17):** the crossover *type* values (`enum FilterType`, distinct from the band indices above) moved from the old 8–39 range to **32–63** so the PEQ type block could grow contiguously (first-order all-pass added at type 8, 9–31 reserved for future PEQ types). Band-index addressing is unchanged. This bumped `SLOT_DATA_VERSION` to 18 (pre-V18 presets remap their stored type values on load via `remap_filter_type_pre_v18()`) and `WIRE_FORMAT_VERSION` to 13. See `crossover_filters_spec.md` §2 and the FilterType value-space contract comment in `config.h`.
 
@@ -885,9 +885,9 @@ Kernel reuses the existing per-section TDF2 (RP2040) and SVF/TDF2 (RP2350) inner
 `xover_design_filter()` snapshots each section's filter state (`s1`/`s2`, `svic1eq`/`svic2eq`) before the passthrough reset and restores it for sections that survive the redesign, so live edits (dragging fc, changing order) do not zero the cascade's memory and click. State is reset only when a section's SVF/TDF2 path changes, when the section drops out of the new cascade, or when the band toggles bypass; this matches the PEQ convention in `dsp_compute_coefficients()`.
 
 ### Interaction with global EQ bypass
-*Last updated: 2026-06-26*
+*Last updated: 2026-11-16 (`FILTER.EQ_BYPASS`). Previously 2026-06-26*
 
-`REQ_SET_BYPASS` (`bypass_master_eq`) scopes to the **input/master PEQ only**. In the unified channel model the input channels carry the "master EQ" (the pre-matrix per-channel PEQ), so the global bypass gates the input-EQ pass (`!is_bypassed && !channel_bypassed[k]`) and nothing else. It does NOT bypass per-output PEQ and does NOT bypass crossover.
+`FILTER.EQ_BYPASS` (`bypass_master_eq`) scopes to the **input/master PEQ only**. In the unified channel model the input channels carry the "master EQ" (the pre-matrix per-channel PEQ), so the global bypass gates the input-EQ pass (`!is_bypassed && !channel_bypassed[k]`) and nothing else. It does NOT bypass per-output PEQ and does NOT bypass crossover.
 
 - Per-output PEQ is gated by its own `channel_bypassed[eq_ch]` fast-path flag only, independent of `bypass_master_eq`, on both platforms.
 - Crossover is never gated by the global bypass on either platform: crossover filters are speaker-protection critical (a tweeter high-pass must survive a global "EQ off" toggle). Only per-band bypass and the channel-level fast path disable crossover processing.
@@ -896,7 +896,7 @@ Previously the RP2040 path also folded `is_bypassed` into its per-output PEQ gat
 
 ### Band-field normalization (critical correctness invariant)
 
-`xover_recipes[ch][i].band` always stores the **wire band index** (`XOVER_BAND_BASE + i` = 20..23), NOT the local 0..3. The dispatch path through `pending_packet → main.c::eq_update_pending` keys on `p.band` to choose between PEQ and crossover storage. If a stale local index leaked through (via REQ_SET_BAND_BYPASS's read-modify-write of the existing recipe), the update would misroute to PEQ band 0. Init, preset load, bulk apply, and the vendor handlers all explicitly normalize the band field — see `crossover_filters_spec.md` for the full discussion.
+`xover_recipes[ch][i].band` always stores the **wire band index** (`XOVER_BAND_BASE + i` = 20..23), NOT the local 0..3. The dispatch path through `pending_packet → main.c::eq_update_pending` keys on `p.band` to choose between PEQ and crossover storage. If a stale local index leaked through (via the `FILTER.BAND_BYPASS` read-modify-write of the existing recipe), the update would misroute to PEQ band 0. Init, preset load, bulk apply, and the vendor handlers all explicitly normalize the band field. See `crossover_filters_spec.md` for the full discussion.
 
 ### Defaults
 
@@ -910,14 +910,14 @@ Every default band: `type=FILTER_FLAT, freq=1000.0, Q=0.707, gain_db=0, bypass=0
 - Persistence in `flash_storage.c` (PresetSlot V16)
 - Wire format in `bulk_params.h` / `.c` (WireBulkParams V11, new WireCrossoverConfig section)
 - Live-edit dispatch in `main.c::eq_update_pending`
-- Vendor handlers in `vendor_commands.c` (band-range extension)
+- Vendor handlers in `vendor/vc_page_filter.c` (`filter_recipe()` maps an address to a PEQ or crossover recipe)
 
 Spec: `Documentation/Features/crossover_filters_spec.md`.
 
 ---
 
 ## Matrix Mixer
-*Last updated: 2026-07-18 (loop bound generalized to n_matrix_sources; rows 2..4 shared by multichannel inputs 3..5 and the stereo upmixer's C/Ls/Rs)*
+*Last updated: 2026-11-16 (vendor commands table on the ROUTE page). Previously 2026-07-18 (loop bound generalized to n_matrix_sources; rows 2..4 shared by multichannel inputs 3..5 and the stereo upmixer's C/Ls/Rs)*
 
 ### Architecture
 
@@ -952,19 +952,20 @@ USB R ──┘    (gain/phase)    ├── Output 3 (SPDIF 2L)
 Each output: `sample = L * gain_L + R * gain_R` (with phase invert option)
 
 ### Vendor Commands
+*Last updated: 2026-11-16 (paged commands)*
 
-| Command | Code | Description |
+All on the `ROUTE` page. Each GET reply is a valid SET payload.
+
+| Command | Address (`wValue`) | Payload |
 |---------|------|-------------|
-| REQ_SET_MATRIX_ROUTE | 0x70 | Set crosspoint (input, output, enabled, phase, gain) |
-| REQ_GET_MATRIX_ROUTE | 0x71 | Get crosspoint state |
-| REQ_SET_OUTPUT_ENABLE | 0x72 | Enable/disable output channel |
-| REQ_GET_OUTPUT_ENABLE | 0x73 | Get output enable state |
-| REQ_SET_OUTPUT_GAIN | 0x74 | Set per-output gain |
-| REQ_GET_OUTPUT_GAIN | 0x75 | Get per-output gain |
-| REQ_SET_OUTPUT_MUTE | 0x76 | Set per-output mute |
-| REQ_GET_OUTPUT_MUTE | 0x77 | Get per-output mute |
-| REQ_SET_OUTPUT_DELAY | 0x78 | Set per-output delay (ms) |
-| REQ_GET_OUTPUT_DELAY | 0x79 | Get per-output delay |
+| `ROUTE.MATRIX_ROUTE` | `(input << 8) \| output` | 8 B: u8 enabled, u8 phase invert, u16 reserved, f32 gain dB |
+| `ROUTE.OUTPUT_ENABLE` | output | 1 B. An enable that collides with the core 1 mode is `VC_ERR_STATE` |
+| `ROUTE.OUTPUT_GAIN` | output | f32 dB |
+| `ROUTE.OUTPUT_MUTE` | output | 1 B |
+| `ROUTE.OUTPUT_DELAY` | output | f32 ms, negative clamps to 0 |
+| `ROUTE.OUTPUT_ENABLE_CONFLICT` | output | GET only, 1 when enabling the output would collide with the core 1 mode |
+
+A non-finite gain or delay is refused with `VC_ERR_VALUE` and stores nothing.
 
 ---
 
@@ -1025,7 +1026,7 @@ typedef struct audio_spdif_instance {
 ```
 
 ### Buffer Configuration
-*Last updated: 2026-10-26 (idle pump runs after every producer service, blocking spins included; stale-lap exposure thresholds). Previously 2026-10-23 (rings halved to 512 frames, erase-ahead 64, runtime fill target; see "Output Latency"). Previously 2026-10-22 (ring writers accept reader-ahead writes; per-slot drop deadlock). Previously 2026-10-16 (ring fill target unified into one constant). Previously 2026-10-12 (producer pools removed: per-slot staging, direct ring writes). Previously 2026-10-11 (dedicated S/PDIF silence stamper; consumed-count reader: whole-lap selector moved to a slow path). Previously 2026-07-23 (PDM/slot recovery made block-size exact)*
+*Last updated: 2026-11-16 (buffer stats read through `SYS.BUFFER_STATS`). Previously 2026-10-26 (idle pump runs after every producer service, blocking spins included; stale-lap exposure thresholds). Previously 2026-10-23 (rings halved to 512 frames, erase-ahead 64, runtime fill target; see "Output Latency"). Previously 2026-10-22 (ring writers accept reader-ahead writes; per-slot drop deadlock). Previously 2026-10-16 (ring fill target unified into one constant). Previously 2026-10-12 (producer pools removed: per-slot staging, direct ring writes). Previously 2026-10-11 (dedicated S/PDIF silence stamper; consumed-count reader: whole-lap selector moved to a slow path). Previously 2026-07-23 (PDM/slot recovery made block-size exact)*
 
 The consumer buffer pool is gone. Each slot now drains a single **encoded ring** filled by the writer and read by a free-running DMA with **zero output IRQs**:
 
@@ -1035,7 +1036,7 @@ The consumer buffer pool is gone. Each slot now drains a single **encoded ring**
 - Erase-ahead silence margin: the writer keeps `PICO_AUDIO_SPDIF_ERASE_AHEAD` = 64 frames (192 before 2026-10-23) of valid silence stamped ahead of real audio, so a stalled producer plays silence rather than a loop of stale ring content. The margin only has to last until `output_rings_idle_pump()` extends the silence to a full ring. The pump acts only once a reader has passed its writer (a stalled producer; gated on the signed fill below zero since 2026-10-23, previously below 240 frames and then half the target, which put the gate inside the fill sawtooth at small targets). An unpumped stretch that begins with the ring at its fill target replays the previous lap once it outlasts the fill plus the erase-ahead (target + 64 frames): 5.3 ms at the 4 ms default at 48 kHz, 2 ms at the 0.67 ms option and 4.7 ms at 4 ms and 96 kHz (12 ms with the old 384-frame target and 192-frame margin). Once a reader has passed its writer only the 64 frames remain, so the pump must run at least every 64 frames, 1.3 ms at 48 kHz and 0.67 ms at 96 kHz. Since 2026-10-26 it runs at the end of every `pipeline_service_producer()` call (`main.c`): the four main-loop delivery points, so the interval is one segment of the pass rather than a whole pass, and the blocking spins that service the producer (`pipeline_settle_to_silence()` and the `prepare_flash_write_operation()` settle loop). Before that the spins did not pump. A producer that stalled inside one replayed the previous lap for the rest of the spin; a USB host stall does this, because `sync_started` stays set without packets and the settle then runs to its 200 ms cap (`PIPELINE_FADE_CAP_US`). The pump writes identical silence to every enabled slot and re-anchors through the group skip, so alignment is unaffected. Every frame of it is subtracted from the writable span, so it bounds the latency ceiling (see "Output Latency"). It still divides the 192-frame IEC block.
 - On both platforms, `stamp_silence_frame()` writes zero-PCM S/PDIF words directly, retaining the phase-dependent Z/X and Y preambles, live channel-status bit, and matching parity. The writer's erase-ahead pass, underrun skip, and silence pump (including reset and flash-stall protection) use it instead of the general sample encoder. It is byte-identical to `stamp_frame(..., 0, 0)`, requires no lookup table or new storage, and is forced inline into the RAM-resident callers. Ring positions, frame counts, silence margin, and group alignment behavior are unchanged. Since 2026-10-11 the writer, skip and pump go through `stamp_audio_run()` / `stamp_silence_run()`, which pick the word format once per run from the instance's `pio_bmc` flag: `stamp_frame_bmc()` / `stamp_silence_frame_bmc()` write the PIO-encoder control and data words, the original stampers write the NRZI words, and both carry a running IEC phase.
 - Free-running DMA: **ENDLESS** transfer count with hardware read-address wrap on RP2350 (power-of-two ring, no reload channel); on RP2040 a data + reload channel pair (`dma_reload_channel = OUTPUT_SLOT_RELOAD_DMA_BASE + slot`, base 6) rewrites the read address at the ring end. No DMA completes, so there is no output DMA IRQ on either platform.
-- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. The DMA address supplies the exact position modulo the 512-frame ring; for calls separated by more than one lap, elapsed microseconds and the configured sample rate select the nearest whole-lap count, so the ~45 ms flash blackout cannot disappear from recovery accounting. Time is only the lap selector; the hardware pointer remains the sample-granular remainder. Since 2026-10-11 the selector is a slow path: a read less than half a ring after the previous one cannot have missed a lap (the rounded lap count is provably zero there, checked exhaustively for every rate and in-ring delta), so the reader decides that with one 64-bit multiply and compare and runs the 64-bit divide only after a genuinely late read. On the hot path that is about 13 reads per block saved. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter returns that snapshot difference (cumulative-count differencing). A separate `recovery_prewrite_fill_frames` snapshot captures fill immediately **before** each successful write (`UINT32_MAX` until the first write after reset). The separation is load-bearing: the servo wants post-write fill, while underrun recovery must exclude the final real block that PDM consumes before inserting zeros. The USB feedback loop consumes the same unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). `REQ_GET_BUFFER_STATS` keeps byte compatibility via a 48-frames-per-bucket mapping (`SLOT_FILL_FRAMES_PER_BUCKET`; a ring fill of N frames maps to N/48 legacy "buffers"). The bucket is only a unit. Both clock servos read the frame-exact snapshot fill and express it as a fractional bucket count, and their gains are per bucket.
+- Fill, consumed-words, and underrun accounting are pointer arithmetic (always on). `wr_frames − consumed` gives fill. The DMA address supplies the exact position modulo the 512-frame ring; for calls separated by more than one lap, elapsed microseconds and the configured sample rate select the nearest whole-lap count, so the ~45 ms flash blackout cannot disappear from recovery accounting. Time is only the lap selector; the hardware pointer remains the sample-granular remainder. Since 2026-10-11 the selector is a slow path: a read less than half a ring after the previous one cannot have missed a lap (the rounded lap count is provably zero there, checked exhaustively for every rate and in-ring delta), so the reader decides that with one 64-bit multiply and compare and runs the 64-bit divide only after a genuinely late read. On the hot path that is about 13 reads per block saved. A coherent produced/consumed **snapshot pair** (`snap_produced_frames` / `snap_consumed_frames`) is latched at the end of each block write, giving the clock servo a constant-production-phase observation free of the block-arrival sawtooth; the fractional fill getter returns that snapshot difference (cumulative-count differencing). A separate `recovery_prewrite_fill_frames` snapshot captures fill immediately **before** each successful write (`UINT32_MAX` until the first write after reset). The separation is load-bearing: the servo wants post-write fill, while underrun recovery must exclude the final real block that PDM consumes before inserting zeros. The USB feedback loop consumes the same unwrapped ring read pointer at SOF (`audio_spdif_ring_consumed_words()`), which is sample-exact (see "Asynchronous Feedback Endpoint"). `SYS.BUFFER_STATS` keeps the 1.1.6 byte layout via a 48-frames-per-bucket mapping (`SLOT_FILL_FRAMES_PER_BUCKET`; a ring fill of N frames maps to N/48 legacy "buffers"). The bucket is only a unit. Both clock servos read the frame-exact snapshot fill and express it as a fractional bucket count, and their gains are per bucket.
 
 **Fill target.** Since 2026-10-23 the steady-state ring fill is a runtime value, `output_ring_target_frames`, derived from the selectable output latency. Its derivation, users and limits are in "Output Latency" below. Before that it was the constant `OUTPUT_RING_TARGET_FILL_FRAMES` (384 frames).
 - **Underrun recovery** is a group re-anchor: `output_rings_pre_give()` (audio_pipeline.c) selects the worst enabled slot and applies one identical `*_ring_skip()` to every enabled slot, so inter-slot sample alignment is preserved exactly. Its skip is `deficit + recovery_prewrite_fill_frames`, with no bucket rounding. Algebraically this is the missing-source interval after the final successfully written block; it therefore equals the number of zeros PDM inserts after draining that same real block, preserving PDM-to-slot content alignment for arbitrary block sizes. A valid zero pre-write fill remains distinguishable from the reset sentinel. The starvation counters (`audio_spdif_get_dma_starvations_instance()` / I2S mirror) return frames of silence exposed to the wire, not silence-buffer DMA starts.
@@ -1046,9 +1047,9 @@ The consumer buffer pool is gone. Each slot now drains a single **encoded ring**
 Since 2026-07-23 each per-slot record also carries `fill_centi_pct` (uint16, formerly the two pad bytes): sample-granular fill in 0.01% units of the same 16-bucket scale (5000 = 50.00%; values above 10000 are legal, the ring holds more than the legacy capacity). Older firmware reports 0 in this field; the coarse bucket fields are unchanged, so existing Console builds keep working.
 
 ### Output Latency
-*Last updated: 2026-11-16 (profiler reads moved to the DIAG page). Previously 2026-10-26 (idle pump in every producer service; clock servos tick on time). Previously 2026-10-24 (underrun episodes, USB packet gap readout, host stall root cause). Previously 2026-10-23 (option table and low-latency option; module `output_latency.c`; two input delivery points per main-loop pass)*
+*Last updated: 2026-11-16 (latency and ring health read through `OUTPUT.LATENCY*`, `SYS.PIPELINE_STATS`, `SYS.USB_AUDIO_STATUS` and `INPUT.STATUS`). Previously 2026-11-16 (profiler reads moved to the DIAG page); 2026-10-26 (idle pump in every producer service; clock servos tick on time). Previously 2026-10-24 (underrun episodes, USB packet gap readout, host stall root cause). Previously 2026-10-23 (option table and low-latency option; module `output_latency.c`; two input delivery points per main-loop pass)*
 
-The output latency setting is how full the slot rings are kept. Every slot shares one write index and one target, so the setting moves every ring output by the same amount and never moves one against another. The host picks it from a fixed table of options (`output_latency.c`), set and read with `REQ_OUTPUT_LATENCY` (0x03). The choice is stored device-globally (directory V23, never in a preset; a factory reset keeps it). The default is 4 ms.
+The output latency setting is how full the slot rings are kept. Every slot shares one write index and one target, so the setting moves every ring output by the same amount and never moves one against another. The host picks it from a fixed table of options (`output_latency.c`), set and read with `OUTPUT.LATENCY`. The choice is stored device-globally (directory V23, never in a preset; a factory reset keeps it). The default is 4 ms.
 
 **Options.** Each entry is a stable ID (the wire and flash value; 0 is never valid), flags, the ring fill target and the input batch the option needs:
 
@@ -1083,13 +1084,13 @@ It runs at boot (default, then the stored option after `preset_boot_load()`), in
 
 A device at 96 kHz runs the 4, 6 and 8 ms options at the ceiling and returns to them when the rate drops. `output_latency.c` static-asserts that the low-latency and 2 ms targets each exceed one block at 44.1 kHz, that 2 ms fits the ring at 96 kHz, and that the option table reply fits one EP0 packet.
 
-**Protocol.** OUT: a 1-byte option ID. An unknown ID is ignored over USB (the data stage is acknowledged before any handler runs, as for every SET) and reported as `CTRL_STATUS_ERROR` over UART/I2C. Re-sending the stored option is a no-op. IN, wValue 0: the 12-byte `OutputLatencyStatus` (requested and effective ID, effective microseconds at the current rate, target frames, batch frames, pending flag, option count). IN, wValue 1: the option table as 8-byte `OutputLatencyOptionWire` entries (ID, flags with `OUTPUT_LATENCY_WIRE_AVAILABLE` set when the option runs as itself on the active source, nominal latency and batch, and what selecting it gives now). Other wValues STALL. A host builds its menu from the table, so a firmware can change the options without a host release.
+**Protocol.** `OUTPUT.LATENCY` SET takes a 1-byte option ID and its GET returns the requested ID (a pending one included). An unknown ID is refused with `VC_ERR_VALUE`, which STALLs on USB and is the status byte on UART and I2C. Re-sending the stored option is a no-op. `OUTPUT.LATENCY_STATUS` returns the 12-byte `OutputLatencyStatus` (requested and effective ID, effective microseconds at the current rate, target frames, batch frames, pending flag, option count). `OUTPUT.LATENCY_OPTIONS` returns the option table as 8-byte `OutputLatencyOptionWire` entries (ID, flags with `OUTPUT_LATENCY_WIRE_AVAILABLE` set when the option runs as itself on the active source, nominal latency and batch, and what selecting it gives now). A host builds its menu from the table, so a firmware can change the options without a host release.
 
 **Users of the target.** The USB feedback servo (passed into `fb_ctrl_sof_update()` per SOF), the input servo (`servo_fill_target()`, read live; its smoother reseeds when the target changes, since the rings re-anchor at the new one), the prefill handshakes (`slot_fill_at_target()` and `producer_block_bounds()`) and the test-signal pump (`slot_fill_at_target()`), the underrun re-anchor fallback, the post-restart dwell and the PDM sub offset (`dsp_update_delay_samples()`).
 
 **Applying a change.** The SET handler only records the request (`flash_set_output_latency_pending`). The flag, which the GET reports as `pending`, stays set until the restart below has completed, and a newer request that arrives meanwhile keeps it set for the next pass. The main loop runs it inside the standard flash bracket: `prepare_flash_write_operation()`, the directory write, `output_latency_request()` and `output_latency_apply()`, the sub-delay recompute, then `complete_flash_write_operation_full()`. That completion is the full synchronized restart (or, for S/PDIF input, the lock handshake's drain and prefill), so slot alignment is preserved by construction. The cost is one short mute per change. The servos are never used to move the fill: they work in ppm and would take minutes, and nothing per-slot is touched.
 
-**Ring health readouts.** `REQ_GET_STATUS` wValue 26 returns underrun episodes (see "Underrun episodes" below), 27 returns blocks refused by group admission, and 28 returns the lowest enabled-slot fill seen just before a write, in frames, since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` when there has been no write). Index 29 returns the worst gap between input deliveries in microseconds since the same reset (`input_delivery_mark()`, called by every `pipeline_service_producer()`): how long a stream input can go unread, which is what bounds the usable margin at small targets. Until the second delivery point (below) this was the worst main-loop pass. Index 30 returns the longest gap between audio-carrying USB packets since the same reset (`usb_audio_worst_packet_gap_us`), with no upper cap, unlike the 2 to 50 ms gap count at index 8. Indices 26 and 27 are cumulative. Since 2026-11-05, index 32 returns the S/PDIF input's long-window measured rate in mHz (0 until a window is valid or when not locked), and index 33 the soft VCXO's commanded trim in ppm × 100 as a signed int32. Together they show an off-rate source directly.
+**Ring health readouts.** `SYS.PIPELINE_STATS` carries them as u32 fields. Offset 0 is underrun episodes (see "Underrun episodes" below), offset 4 blocks refused by group admission, and offset 8 the lowest enabled-slot fill seen just before a write, in frames, since `SYS.STATS_RESET` bit 0 (`0xFFFFFFFF` when there has been no write). Offset 12 is the worst gap between input deliveries in microseconds since the same reset (`input_delivery_mark()`, called by every `pipeline_service_producer()`): how long a stream input can go unread, which is what bounds the usable margin at small targets. Until the second delivery point (below) this was the worst main-loop pass. Offset 16 is the background over-budget count (see "Step budget and background jobs"). The worst gap between audio-carrying USB packets since the same reset (`usb_audio_worst_packet_gap_us`) is offset 8 of `SYS.USB_AUDIO_STATUS`, with no upper cap, unlike the 2 to 50 ms gap count (`spdif_underruns`, offset 0 of `SYS.SPDIF_TX_STATS`). Underruns and refused blocks are cumulative. `INPUT.STATUS` carries the S/PDIF input's long-window measured rate in mHz at offset 4 (0 until a window is valid or when not locked), and the soft VCXO's commanded trim in ppm × 100 as a signed int32 at offset 8. Together they show an off-rate source directly.
 
 **Underrun episodes (2026-10-24).** A dry episode runs from the first recovery to the next block that finds no ring dry. While a producer is stalled the idle pump re-anchors the rings on every main-loop pass, and each of those used to count, so one 100 ms host stall read as about 1000 underruns. `output_rings_pre_give()` now judges an episode when it ends. It counts once if a producer owed audio throughout, and not at all if any part of it fell in a mute window (`preset_loading`) or a closed USB stream (alt 0, with no generator running). The closure rule matters because a host stops sending a few milliseconds before it selects alt 0, so every deliberate stream stop would otherwise count. Recovery itself (the skip and the alignment it preserves) is unchanged.
 
@@ -1102,7 +1103,7 @@ A device at 96 kHz runs the 4, 6 and 8 ms options at the ceiling and returns to 
 
 A first attempt counted the queued input toward the target instead, starting the outputs with the ring as low as target minus one block and relying on the queue being delivered within that slack. On S/PDIF it dipped about 100 frames below the target right after every start and underran at 2 ms and below, so it was replaced by the bounds above.
 
-**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into named sections (`LOOP_PROF_SECTION_LIST` in `loop_prof.h`), read through `DIAG.LOOP_PROF_SECTION` (`REQ_GET_STATUS` 64+ before 2026-11-16). Measured on RP2350 with S/PDIF input:
+**Main-loop budget (2026-10-23).** Stream inputs are read, and every block processed, on the Core 0 main loop, so the longest gap between deliveries bounds how long a ring can go unfed. At the low-latency targets that budget is about 0.3 ms (0.67 ms option) or 0.6 ms (1 ms option) beyond a normal pass. `tools/latency_bench/soak.py --profile-actions` times each host action in isolation, and a `DSPI_LOOP_PROF` bench build (`loop_prof.h`) splits the pass into named sections (`LOOP_PROF_SECTION_LIST` in `loop_prof.h`), read through `DIAG.LOOP_PROF_SECTION`. Measured on RP2350 with S/PDIF input:
 - The quiet pass is about 70 to 80 µs. Every section carries a floor of about 53 µs from interrupts landing inside it (the S/PDIF receiver's block check every 4 ms), so any pass can grow by that much.
 - Three tasks ran far longer and were reworked. The spectrum analyser's FINISH ran 530 µs in one call (now a background job in 16-bin chunks; see "Spectrum Analyser"). The loudness table rebuild ran 540 µs on every reference or intensity change (now a background job that builds into the inactive table and swaps when complete; see "Step budget and background jobs"). The idle pump gated at half the target, inside the fill sawtooth at small targets, and spent about 55 µs per pass stamping silence while streaming (now gated on a reader that has passed its writer).
 - After those, single host actions add 20 to 170 µs over the quiet pass (vendor request handling, deferred applies, the first block they affect), with a Control Surfaces binding add or revert the largest at up to about 350 µs.
@@ -1131,7 +1132,7 @@ Jobs today:
 - **Control Surfaces revert** (`control_surfaces.c`). `control_surfaces_revert_begin()` starts it; it runs the reload one slot or table at a time, and the module refuses or defers every write and answers reads with the reverted state while it runs (Control Surfaces "Deferred SET, Apply/Save/Revert").
 - **Loudness rebuild** (`loudness.c`). `loudness_recompute_begin()` starts or restarts it; it builds volume steps into the inactive table until the deadline, swaps when complete, and `loudness_recompute_take_done()` tells the main loop to re-key. Boot keeps the blocking `loudness_recompute_table()`, which runs before any job.
 
-`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (`REQ_GET_STATUS` 31, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (`DIAG.LOOP_PROF_JOB`, addressed by `BgJobId`). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. GET_STATUS 29 stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
+`bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (offset 16 of `SYS.PIPELINE_STATS`, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (`DIAG.LOOP_PROF_JOB`, addressed by `BgJobId`). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. The worst input delivery gap (`SYS.PIPELINE_STATS` offset 12) stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
 
 **Real-use soaks (2026-10-23, RP2350, `tools/latency_bench/soak.py`).** Each run lasts 15 minutes with the same action seed. The analyser is read every 50 ms while 448 random host actions run (parameter edits, feature toggles, bulk reads, analyser reconfiguration, generator bursts, Control Surfaces binds and reverts). Results with two delivery points (one delivery point in brackets):
 
@@ -1143,7 +1144,7 @@ Jobs today:
 
 The 0.67 ms option no longer underran, but its lowest pre-write fill touched zero during a Control Surfaces revert, so it remains a thin-margin option. The 1 ms option kept at least 17 frames throughout.
 
-**USB host stalls (resolved 2026-10-24).** The two USB bursts (88 and 90 recoveries, ten seconds apart), and an earlier 69-recovery window, were the Mac's doing. A diagnostic build logged every recovery: each burst was the idle pump re-anchoring on every pass for about 100 ms with no block arriving, on an open stream. The macOS log matches each burst to the second. `coreaudiod` reports `HALS_IOA1Engine::EndWriting: got an error from the kernel trap, Error: 0xE00002D7` (`kIOReturnOffline`), then `IO Stopped Context ... after 512 frames`, and the kernel stops sending isochronous data until the IO context restarts about 100 ms later, without a SET_INTERFACE. The HAL logs "skipping cycle due to overload" alongside, and the same `EndWriting` error appears all night on another audio engine on the same Mac, so it is a host IO-thread overload, not a DSPi fault. Firmware cannot fill audio the host never sends. What it did wrong was the reporting: the stall read as hundreds of underruns and was invisible to the 2 to 50 ms gap count. Both are fixed (underrun episodes above, `REQ_GET_STATUS` 30), and `soak.py` logs any second with a packet gap over 5 ms as a host stall. Verified on RP2350: a bench hook that discarded USB audio for 100 ms on an open stream counted exactly one underrun per stall (five of five), deliberate host stream stops of 0.15 to 8 s (the longer ones closing to alt 0) counted none, and steady streaming counted none.
+**USB host stalls (resolved 2026-10-24).** The two USB bursts (88 and 90 recoveries, ten seconds apart), and an earlier 69-recovery window, were the Mac's doing. A diagnostic build logged every recovery: each burst was the idle pump re-anchoring on every pass for about 100 ms with no block arriving, on an open stream. The macOS log matches each burst to the second. `coreaudiod` reports `HALS_IOA1Engine::EndWriting: got an error from the kernel trap, Error: 0xE00002D7` (`kIOReturnOffline`), then `IO Stopped Context ... after 512 frames`, and the kernel stops sending isochronous data until the IO context restarts about 100 ms later, without a SET_INTERFACE. The HAL logs "skipping cycle due to overload" alongside, and the same `EndWriting` error appears all night on another audio engine on the same Mac, so it is a host IO-thread overload, not a DSPi fault. Firmware cannot fill audio the host never sends. What it did wrong was the reporting: the stall read as hundreds of underruns and was invisible to the 2 to 50 ms gap count. Both are fixed (underrun episodes above, and the worst USB packet gap in `SYS.USB_AUDIO_STATUS`), and `soak.py` logs any second with a packet gap over 5 ms as a host stall. Verified on RP2350: a bench hook that discarded USB audio for 100 ms on an open stream counted exactly one underrun per stall (five of five), deliberate host stream stops of 0.15 to 8 s (the longer ones closing to alt 0) counted none, and steady streaming counted none.
 
 **Low-latency option: what it depends on.** The margin is the target minus one batch minus scheduling jitter: 32 - 16 frames before jitter at 48 kHz, against 96 - 48 at 2 ms. Jitter does not shrink with the batch (USB control requests, the I2C display, the spectrum analyser and flash brackets all run on the same main loop), so heavy configurations are the risk. The CPU cost is the fixed per-call cost three times as often; `Documentation/Features/low_latency_overhead_plan.md` measures it and describes the overhead reductions (on the unmerged `bench/input-batch` work) that would recover most of it. The USB feedback servo's fixed ±1 bucket inner zone (48 frames, `FB_FILL_KNEE_Q16`) would be larger than the whole target, which is a further reason USB never runs this option. The PDM sub offset (target minus 256) clamps the sub's delay at zero below 256 frames; see PDM "Known alignment defect".
 
@@ -1282,7 +1283,7 @@ Linear fade-in/fade-out ramp applied to `pcm_val` after hard limiting, before th
 ---
 
 ## Crossfeed
-*Last updated: 2026-07-10 (per-output-pair stage; output-pair mask; dual-core split)*
+*Last updated: 2026-11-16 (vendor commands on the FX page). Previously 2026-07-10 (per-output-pair stage; output-pair mask; dual-core split)*
 
 ### Purpose
 
@@ -1333,12 +1334,12 @@ Double-buffered coeffs plus 4 (RP2350) / 2 (RP2040) pair states; net a few dozen
 
 - **Wire format V20:** `WireCrossfeedParams` reserved byte (offset 3) is now `output_pair_mask`; struct sizes unchanged.
 - **Preset slot V27:** `uint8 crossfeed_output_pair_mask` tail-appended (struct grows 1 byte), gated on `version >= 27` at apply; older slots load `0x01`; factory default `0x01`; V26 CRC sizes still validate.
-- **Vendor commands:** `REQ_SET_CROSSFEED_OUTPUTS` (0xFC, OUT, 1 byte pair mask, clamped to valid pair bits, notify on write) and `REQ_GET_CROSSFEED_OUTPUTS` (0xFD, IN, 1 byte). The existing 0x5E-0x67 crossfeed commands are unchanged. The mask is read live each packet, so 0xFC needs no coefficient recompute.
+- **Vendor commands:** `FX.CROSSFEED_OUTPUTS` (1 byte pair mask, clamped to valid pair bits, notify on write) sits beside `FX.CROSSFEED_ENABLE`, `_PRESET`, `_FREQ`, `_FEED` and `_ITD`. The mask is read live each packet, so its SET needs no coefficient recompute. A non-finite cutoff or feed is refused with `VC_ERR_VALUE`.
 
 ---
 
 ## Psychoacoustic Bass
-*Last updated: 2026-07-13*
+*Last updated: 2026-11-16 (vendor commands on the FX page). Previously 2026-07-13*
 
 ### Purpose
 
@@ -1409,12 +1410,12 @@ Follows the loudness/crossfeed module pattern:
 
 - **Wire format V23:** `WirePsybassParams` (24 bytes) is tail-appended to `WireBulkParams` (`enabled` + `reserved0` + `output_mask` + five floats). Bulk collect/apply copy it straight to/from `psybass_config` and raise the pending flag.
 - **Preset slot V31:** the config is tail-appended to `PresetSlot` (struct grows 24 bytes; `SLOT_DATA_SIZE_V31`), gated on `slot->version >= 31` in `apply_slot_to_live()`. Older slots have no psybass data and load the disabled/all-outputs defaults; V21..V30 slots still validate via `slot_data_size_for_version()`. Factory defaults set it disabled with `PSYBASS_DEFAULT_*` values.
-- **Vendor commands:** `0x30-0x3D` (SET/GET enable, cutoff, harmonics, drive, character, original, mask). Each SET clamps to the parameter range, writes `psybass_config`, and emits a `notify_param_write`. All SET commands except the mask raise `psybass_update_pending`; the mask (0x3C) is read live each packet (skipped outputs reset themselves), so it needs no recompute. See the Vendor Command Reference table.
+- **Vendor commands:** `FX.PSYBASS_ENABLE`, `_CUTOFF`, `_HARMONICS`, `_DRIVE`, `_CHARACTER`, `_ORIGINAL` and `_MASK` (FX 0x40-0x46, each GET and SET). Each SET clamps to the parameter range, writes `psybass_config`, and emits a `notify_param_write`. A non-finite float is refused with `VC_ERR_VALUE` and stores nothing. All SET commands except the mask raise `psybass_update_pending`; `FX.PSYBASS_MASK` is read live each packet (skipped outputs reset themselves), so it needs no recompute. Sizes and flags are in `Documentation/commands.md`.
 
 ---
 
 ## Subharmonic Synthesizer
-*Last updated: 2026-09-04*
+*Last updated: 2026-11-16 (vendor commands on the FX page). Previously 2026-09-04*
 
 ### Purpose
 
@@ -1471,7 +1472,7 @@ The kernel behaviour behind the third band, the selectivity gate, the ceiling an
 
 ### Headroom Reading
 
-`REQ_GET_SUBHARM_HEADROOM` (0x1A) returns the worst-case gain of the current configuration in dB: the preamp headroom a host must free so the effect cannot clip. `subharm_headroom_db()` is a pure function of the config (not the rate or the mask) evaluated on each GET, so a host can SET and immediately GET without racing the main-loop recompute. It scans an eighth-octave grid from 16 to 362 Hz and sums, as amplitudes, the direct tone through the bell plus each of the three bands' divided components (n = 1, 3, 5, 7 at n f/2) through that band's post lowpass and the bell, using analog-prototype magnitudes; with a ceiling on it bisects on the input level for the smallest headroom at which an input that far below full scale cannot exceed it, because the ceiling is absolute and stops limiting once the preamp is lowered. Selectivity and the pair link only ever lower the sub, so they never raise the bound. The bound is conservative by 1 to 2 dB on real tones and never below the measured peak (offline model: one band at 0 dB 4.2 vs 3.3 dB measured; both bands 6.3 vs 4.4; everything at +6 dB 13.5 vs 11.2). Because the divider preserves band amplitude and every other stage is linear, a preamp cut of the reported amount is an exact correction. This is the first contributor to the planned per-output headroom budget; the budget will sum the worst-case boost of every stage in an output's chain.
+`FX.SUBHARM_HEADROOM` returns the worst-case gain of the current configuration in dB: the preamp headroom a host must free so the effect cannot clip. `subharm_headroom_db()` is a pure function of the config (not the rate or the mask) evaluated on each GET, so a host can SET and immediately GET without racing the main-loop recompute. It scans an eighth-octave grid from 16 to 362 Hz and sums, as amplitudes, the direct tone through the bell plus each of the three bands' divided components (n = 1, 3, 5, 7 at n f/2) through that band's post lowpass and the bell, using analog-prototype magnitudes; with a ceiling on it bisects on the input level for the smallest headroom at which an input that far below full scale cannot exceed it, because the ceiling is absolute and stops limiting once the preamp is lowered. Selectivity and the pair link only ever lower the sub, so they never raise the bound. The bound is conservative by 1 to 2 dB on real tones and never below the measured peak (offline model: one band at 0 dB 4.2 vs 3.3 dB measured; both bands 6.3 vs 4.4; everything at +6 dB 13.5 vs 11.2). Because the divider preserves band amplitude and every other stage is linear, a preamp cut of the reported amount is an exact correction. This is the first contributor to the planned per-output headroom budget; the budget will sum the worst-case boost of every stage in an output's chain.
 
 ### Coefficient Publish & Per-Output State
 
@@ -1490,14 +1491,14 @@ Follows the psybass module pattern:
 - **Wire format V30:** the section grows to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, taking the packet total to **5980 bytes**. The section offset stays 5944. Apply clamps `select_mode`; the floats are clamped downstream. `solo` is not on the wire, so a bulk apply never changes it.
 - **Preset slot V36:** the config is tail-appended to `PresetSlot` (struct grows 16 bytes; `SLOT_DATA_SIZE_V36`), gated on `slot->version >= 36` in `apply_slot_to_live()`. Older slots load the disabled/all-outputs defaults; V21..V35 slots still validate via `slot_data_size_for_version()`. Factory defaults set it disabled with `SUBHARM_DEFAULT_*` values.
 - **Preset slot V37:** the V30 fields are tail-appended in turn (struct grows a further 20 bytes; `SLOT_DATA_SIZE_V37`), gated on `slot->version >= 37`. V36 slots load the `SUBHARM_DEFAULT_*` values for them. `solo` is not stored.
-- **Vendor commands:** `0x10-0x1F`, `0x2C-0x2F` and `0xA9-0xAE` (SET/GET enable, low, high, boost, mask, top, selectivity mode/depth/hold, ceiling, link, solo; GET headroom and sub meter). 0x10-0x1F were the first application commands allocated inside 0x00-0x1F. Each SET clamps to the parameter range, writes `subharm_config`, and emits a `notify_param_write`. The mask, link and solo SETs do **not** raise `subharm_update_pending` (the pipeline reads them live each packet); every other SET does. Solo has no wire offset, so it emits no notification. See the Vendor Command Reference table.
-- **Sub meter:** `REQ_GET_SUBHARM_METER` (0x1F) returns `NUM_OUTPUT_CHANNELS` uint16 LE values from `subharm_meter_u16()`, a decaying peak of the synthesized sub per output on the same 0..32767 scale as `SystemStatusPacket.peaks`. 18 bytes on RP2350, 10 on RP2040.
+- **Vendor commands:** FX 0x20-0x2B are `FX.SUBHARM_ENABLE`, `_LOW`, `_HIGH`, `_TOP`, `_BOOST`, `_MASK`, `_SELECT`, `_DEPTH`, `_HOLD`, `_CEILING`, `_LINK` and `_SOLO` (each GET and SET), and `FX.SUBHARM_HEADROOM` and `FX.SUBHARM_METER` are GET only. Each SET clamps to the parameter range, writes `subharm_config`, and emits a `notify_param_write`. A non-finite float is refused with `VC_ERR_VALUE`. The mask, link and solo SETs do **not** raise `subharm_update_pending` (the pipeline reads them live each packet); every other SET does. Solo has no wire offset, so it emits no notification.
+- **Sub meter:** `FX.SUBHARM_METER` returns `NUM_OUTPUT_CHANNELS` uint16 LE values from `subharm_meter_u16()`, a decaying peak of the synthesized sub per output on the same 0..32767 scale as the `MEAS.LEVELS` peaks. 18 bytes on RP2350, 10 on RP2040.
 - **Control Surfaces:** caps v14 nouns 57-60 (`SUBHARM`, `SUBHARM_LOW`, `SUBHARM_HIGH`, `SUBHARM_BOOST`) and caps v15 nouns 61-67 (`SUBHARM_TOP`, `SUBHARM_SELECT`, `SUBHARM_DEPTH`, `SUBHARM_HOLD`, `SUBHARM_CEILING`, `SUBHARM_LINK`, `SUBHARM_SOLO`). Caps v16 (2026-09-05) widens the band-level nouns to -30..+12 dB.
 
 ---
 
 ## Tube Preamp Emulation
-*Last updated: 2026-09-28 (output stage on by default at 95 Hz; default drive -12 dB; drive floor lowered to -30 dB; RP2040 drive and shaper-output terms now in per-coefficient-set shifted domains `t_shift` / `s_shift`; kernel 1,196 B; 2026-09-20: transformer split/saturation/HF rolloff replaced by a damping-factor output stage: bell at the speaker resonance plus a fixed top shelf, parameters 10 and 11 now xfmr_damping and xfmr_res_hz, 14 parameters in all; per-output saturation meter and its 0x81 command removed; 2026-09-19: drive range -6..24 dB with automatic makeup gain, level-neutral defaults, rescaled tube rows, RP2040 shaper-output clamp; RP2350 kernel rewritten branch-free, 660 B; 2026-09-18: RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
+*Last updated: 2026-11-16 (fourteen FX.TUBE_* commands replace the indexed pair). Previously 2026-09-28 (output stage on by default at 95 Hz; default drive -12 dB; drive floor lowered to -30 dB; RP2040 drive and shaper-output terms now in per-coefficient-set shifted domains `t_shift` / `s_shift`; kernel 1,196 B; 2026-09-20: transformer split/saturation/HF rolloff replaced by a damping-factor output stage: bell at the speaker resonance plus a fixed top shelf, parameters 10 and 11 now xfmr_damping and xfmr_res_hz, 14 parameters in all; per-output saturation meter and its 0x81 command removed; 2026-09-19: drive range -6..24 dB with automatic makeup gain, level-neutral defaults, rescaled tube rows, RP2040 shaper-output clamp; RP2350 kernel rewritten branch-free, 660 B; 2026-09-18: RP2040 headroom rules and kernel size corrected; multiply counts; host-model result; indexed-SET coercion and notification rules)*
 
 ### Purpose
 
@@ -1624,8 +1625,8 @@ Follows the psybass module pattern:
 
 - **Wire format V31:** `WireTubeParams` (48 bytes) is tail-appended to `WireBulkParams` at offset 5980, taking the packet total to **6028 bytes**. The section carries `enabled`, `tube_type`, `rectifier`, `xfmr_enabled`, `output_mask`, two reserved bytes, nine floats and one reserved float that holds the size at 48. V31 was revised in place when the output stage replaced the transformer stage, before any release carried it, so there is only one V31 layout. Bulk collect copies `tube_config` straight out and zeroes both reserved fields. Bulk apply copies the fields verbatim, clamps `tube_type` and `rectifier` because the coefficient tables index on them, leaves the floats to be clamped downstream and raises the pending flag. It never runs the tube-type row lookup, which would overwrite a saved Custom voicing.
 - **Preset slot V38:** the same fourteen values plus the reserved float are tail-appended to `PresetSlot` (struct grows 48 bytes; `SLOT_DATA_SIZE_V38`), revised in place with V31 and gated on `slot->version >= 38` in `apply_slot_to_live()`. V21..V37 slots still validate via `slot_data_size_for_version()` and load the `TUBE_DEFAULT_*` values with the effect off. Factory reset applies the same defaults. The pending flag is raised on both branches, so a load that turns the effect off also unpublishes its coefficients.
-- **Vendor commands:** `0x3E` and `0x3F` are one indexed SET/GET pair covering every parameter, with the index in the low byte of wValue and a 4-byte float32 LE payload. Adding a parameter later therefore costs no opcode. An out-of-range index makes the SET a no-op and the GET STALL, so a host can feature-detect the module from index 0 alone; a SET shorter than four bytes is a no-op, and a NaN is ignored while the SET still reports success. Coercion differs by type. The booleans (indices 0 and 9) are **non-zero-is-true**, not rounded, so 0.4 enables. The enums and `output_mask` are **rounded to nearest and then clamped**. `tube_set_param()` owns the clamping and the pending flag, and it calls `notify_param_write` on every SET whether or not the stored value changed (deduplicating a no-change write is the notify layer's job, not the module's), so a tube-type SET that names a row always issues five notifications (four knobs plus the type byte) and a knob SET that drops the type to Custom emits two. Only `output_mask` skips the recompute flag, because the pipeline reads it live each packet. See the Vendor Command Reference table.
-- **Control Surfaces:** caps v19 nouns 70-73 (`TUBE`, `TUBE_DRIVE`, `TUBE_TYPE`, `TUBE_MIX`). All four dispatch through `REQ_SET_TUBE_PARAM` with the parameter index in wValue, so all four carry a float32 payload, the bool and the enum included. Display labels are "Tube", "Tube Drive", "Tube Type" and "Tube Mix", and the type noun has its own 17-entry short-form label table.
+- **Vendor commands:** fourteen commands, FX 0x60-0x6D in `TUBE_PARAM_*` order (`FX.TUBE_ENABLE`, `_OUTPUT_MASK`, `_TYPE`, `_DRIVE`, `_BIAS`, `_ASYM`, `_HARDNESS`, `_SAG`, `_RECTIFIER`, `_XFMR_ENABLE`, `_XFMR_DAMPING`, `_XFMR_RES`, `_MIX`, `_TRIM`), each GET and SET with a 4-byte float32 LE payload. The table entry's ARG is the parameter index, so one handler pair serves all fourteen. A SET of any other length is `VC_ERR_LENGTH`. A NaN is refused with `VC_ERR_VALUE`, and an infinity is clamped like any other out-of-range value. Coercion differs by type. The booleans (indices 0 and 9) are **non-zero-is-true**, not rounded, so 0.4 enables. The enums and `output_mask` are **rounded to nearest and then clamped**. `tube_set_param()` owns the clamping and the pending flag, and it calls `notify_param_write` on every SET whether or not the stored value changed (deduplicating a no-change write is the notify layer's job, not the module's), so a tube-type SET that names a row always issues five notifications (four knobs plus the type byte) and a knob SET that drops the type to Custom emits two. Only `output_mask` skips the recompute flag, because the pipeline reads it live each packet.
+- **Control Surfaces:** caps v19 nouns 70-73 (`TUBE`, `TUBE_DRIVE`, `TUBE_TYPE`, `TUBE_MIX`). They dispatch through `FX.TUBE_ENABLE`, `FX.TUBE_DRIVE`, `FX.TUBE_TYPE` and `FX.TUBE_MIX`, so all four carry a float32 payload, the bool and the enum included. Display labels are "Tube", "Tube Drive", "Tube Type" and "Tube Mix", and the type noun has its own 17-entry short-form label table.
 
 ### Interactions and Edge Cases
 
@@ -1637,7 +1638,7 @@ Follows the psybass module pattern:
 ---
 
 ## Output Limiter
-*Last updated: 2026-09-28 (Control Surfaces nouns 74-78; 2026-09-26: link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
+*Last updated: 2026-11-16 (DYN.LIMITER_* commands replace the single multiplexed opcode). Previously 2026-09-28 (Control Surfaces nouns 74-78; 2026-09-26: link groups gang their settings; earlier: RAW test signals are limited, persistence follows `output_config_mode`, directory V22)*
 
 ### Purpose
 
@@ -1672,12 +1673,12 @@ The delay exists only while at least one output's limiter is enabled; with none 
 ### Persistence & Control
 
 - **Wire format V32:** `WireLimiterParams` (108 bytes, nine 12-byte `WireLimiterOutput` records: `enabled`, `link_group`, two reserved bytes, `threshold_db`, `release_ms`) is tail-appended at offset 6028, taking the total to **6136 bytes**. Records past `num_output_channels` are zero on collect and ignored on apply. Apply copies values raw. `limiter_apply_config()` sanitizes them in place (NaN falls back to the default, then clamps), so a GET always reports what the audio path uses.
-- **Persistence follows `output_config_mode`** (added 2026-09-22), like the output pins. `apply_output_config_from_mode()` is the only place the live limiter settings are sourced on a context change. With-preset takes them from the slot (V39+, defaults for an empty or older slot). Independent applies the directory copy at boot only and leaves the live settings untouched on preset load, active-slot delete and factory reset. `apply_slot_to_live()` and `apply_factory_defaults()` no longer touch the limiter. `REQ_SAVE_OUTPUT_CONFIG` (0x52) also snapshots the limiter into the directory, and `bulk_params_apply()` applies the wire limiter section only when `apply_pins` (with-preset) is set.
+- **Persistence follows `output_config_mode`** (added 2026-09-22), like the output pins. `apply_output_config_from_mode()` is the only place the live limiter settings are sourced on a context change. With-preset takes them from the slot (V39+, defaults for an empty or older slot). Independent applies the directory copy at boot only and leaves the live settings untouched on preset load, active-slot delete and factory reset. `apply_slot_to_live()` and `apply_factory_defaults()` no longer touch the limiter. `STORE.OUTPUT_CONFIG_SAVE` also snapshots the limiter into the directory, and `bulk_params_apply()` applies the wire limiter section only when `apply_pins` (with-preset) is set.
 - **Preset slot V39:** per output `limiter_enabled[]`, `limiter_link_group[]`, `limiter_threshold_db[]`, `limiter_release_ms[]` (10 bytes x `NUM_OUTPUT_CHANNELS`) tail-appended to `PresetSlot` (`SLOT_DATA_SIZE_V39`). A save always stores the live settings; whether a load applies them follows the mode.
 - **Directory V22:** `FlashLimiterConfig` (112 bytes: version byte, 3 reserved, nine 12-byte records fixed at the RP2350 output count) appended after `cs_display`. See "Preset Directory Fields".
-- **Vendor command:** a single opcode, `REQ_LIMITER` `0x81`, in both dispatchers. OUT sets one parameter (`wValue = (output << 8) | index`, float32 payload; output `0xFF` sets every output). IN gets one parameter as float32, or the read-only blocks at index `0x80` (gain-reduction meter, one uint16 per output in 0.01 dB) and `0x81` (status: engaged, lookahead 32, block 16, output count). A bad output or index STALLs a GET and makes a SET a no-op. NaN is ignored. `limiter_set_param()` emits one `notify_param_write` per output changed.
+- **Vendor commands:** `DYN.LIMITER_ENABLE`, `DYN.LIMITER_THRESHOLD`, `DYN.LIMITER_RELEASE` and `DYN.LIMITER_LINK_GROUP` each address one output in `wValue` and carry a float32 payload both ways. On a SET, output `0xFF` sets every output. `DYN.LIMITER_METERS` returns the gain-reduction meter, one uint16 per output in 0.01 dB, and `DYN.LIMITER_STATUS` returns 4 bytes (engaged, lookahead 32, block 16, output count). A bad output is `VC_ERR_ADDRESS` and a NaN is `VC_ERR_VALUE`; an infinity is clamped. `limiter_set_param()` emits one `notify_param_write` per output changed.
 - **Ganged link groups** (added 2026-09-26). A SET of enable, threshold or release on a linked output writes every member of its group. A `link_group` SET makes the joining output adopt the settings of the group's lowest-numbered other member (`lm_group_peer()`); the first member keeps its own. `limiter_apply_config()` runs `lm_gang_groups()` after sanitizing, so a raw bulk or preset restore with a disagreeing group is made consistent, with a notification per value changed. A stored `link_group` above 4 now falls back to 0 (unlinked) in both `limiter_apply_config()` and `dir_sanitize_limiter()`, so corrupt data cannot join a real group. Wire, slot and directory formats are unchanged. Spec section 2.2.
-- **Control Surfaces:** caps v20 nouns 74-78, all targeting an output (added 2026-09-28). `LIMITER` (enable), `LIMITER_THRESHOLD` (-30..0 dB), `LIMITER_RELEASE` (10..1000 ms, in the new log-stepping `CS_UNIT_MS_LOG`) and `LIMITER_LINK` (enum 0-4, 0 = unlinked) dispatch through `REQ_LIMITER` with `wValue = (output << 8) | index`, so all four carry a float32 payload. They reach `limiter_set_param()` exactly as a host SET does, so a control on one member of a link group moves the whole group. `LIMITER_GR` is a read-only gain-reduction meter in dB (0..30, positive = reduction) read from `limiter_meter_centidb()`, for `IND_ABOVE` and `IND_LEVEL` LEDs. Front-panel edits are live edits: in independent `output_config_mode` they persist only when the host sends `REQ_SAVE_OUTPUT_CONFIG` (0x52), and in with-preset mode on the next preset save.
+- **Control Surfaces:** caps v20 nouns 74-78, all targeting an output (added 2026-09-28). `LIMITER` (enable), `LIMITER_THRESHOLD` (-30..0 dB), `LIMITER_RELEASE` (10..1000 ms, in the new log-stepping `CS_UNIT_MS_LOG`) and `LIMITER_LINK` (enum 0-4, 0 = unlinked) dispatch through the matching `DYN.LIMITER_*` command with the output in `wValue`, so all four carry a float32 payload. They reach `limiter_set_param()` exactly as a host SET does, so a control on one member of a link group moves the whole group. `LIMITER_GR` is a read-only gain-reduction meter in dB (0..30, positive = reduction) read from `limiter_meter_centidb()`, for `IND_ABOVE` and `IND_LEVEL` LEDs. Front-panel edits are live edits: in independent `output_config_mode` they persist only when the host sends `STORE.OUTPUT_CONFIG_SAVE`, and in with-preset mode on the next preset save.
 
 ### Cost
 
@@ -1697,7 +1698,7 @@ The real `limiter.c` was compiled on the host against stub headers for both `PIC
 ---
 
 ## Stereo Upmixer
-*Last updated: 2026-10-10 (SET change notifications, shared wire encoder; 2026-08-01: centre engine OFF mode)*
+*Last updated: 2026-11-16 (vendor commands on the FX page). Previously 2026-10-10 (SET change notifications, shared wire encoder; 2026-08-01: centre engine OFF mode)*
 
 ### Purpose
 
@@ -1705,7 +1706,7 @@ Derives Centre / Left-Surround / Right-Surround virtual source channels from a s
 
 ### Signal Flow
 
-The pass sits between the leveller and the matrix (PASS 3 in the RP2350 pipeline). It reads the post-EQ/leveller stereo bus (`buf_l`/`buf_r`), writes the derived channels into the otherwise-idle multichannel input rows (`buf_in_ext[0..2]` = matrix source rows 2..4 = `UPMIX_ROW_C`/`_LS`/`_RS`), and applies centre removal to L/R in place. The matrix then treats the derived channels as ordinary sources: routing, crosspoint gains, and the whole per-output chain (PEQ, crossover, delay, gain, loudness) are reused unchanged. The matrix loop bound is generalized from `n_active_inputs` to `n_matrix_sources` (2 + 1 for centre-only, 2 + 3 with surround), so only the rows actually carrying derived audio are summed. The derived rows have **no input PEQ** (they are synthesized after the per-input stage) but DO get peak/clip metering into `global_status.peaks[2..4]` while the upmixer runs; the extracted centre can legitimately reach +3 dBFS on hot correlated content, so hosts must watch these meters. Steering telemetry (correlation, balance, live gains) is exposed through `REQ_UPMIX_GET_STATUS`.
+The pass sits between the leveller and the matrix (PASS 3 in the RP2350 pipeline). It reads the post-EQ/leveller stereo bus (`buf_l`/`buf_r`), writes the derived channels into the otherwise-idle multichannel input rows (`buf_in_ext[0..2]` = matrix source rows 2..4 = `UPMIX_ROW_C`/`_LS`/`_RS`), and applies centre removal to L/R in place. The matrix then treats the derived channels as ordinary sources: routing, crosspoint gains, and the whole per-output chain (PEQ, crossover, delay, gain, loudness) are reused unchanged. The matrix loop bound is generalized from `n_active_inputs` to `n_matrix_sources` (2 + 1 for centre-only, 2 + 3 with surround), so only the rows actually carrying derived audio are summed. The derived rows have **no input PEQ** (they are synthesized after the per-input stage) but DO get peak/clip metering into `global_status.peaks[2..4]` while the upmixer runs; the extracted centre can legitimately reach +3 dBFS on hot correlated content, so hosts must watch these meters. Steering telemetry (correlation, balance, live gains) is exposed through `FX.UPMIX_STATUS`.
 
 Two independent engines feed the derived rows.
 
@@ -1762,7 +1763,7 @@ One global config (`UpmixConfig`); ranges are clamped downstream in `upmix_compu
 
 - **Wire format V25 (presence byte V26; centre OFF V27):** `WireUpmixParams` (44 bytes, layout-identical to `UpmixConfigPacket`) is tail-appended to `WireBulkParams` at offset 5900 (total 5944 bytes at V25; later sections follow it). V26 claims the section's reserved byte for `presence_q1` (int8, dB * 2, 0.5 dB steps; no size change). V27 changes no layout at all; it exists so hosts can detect that `center_mode` accepts 2 (OFF). Bulk collect/apply copy it straight to/from `upmix_config` and raise the pending flag; the section is zeroed on collect and ignored on apply on RP2040. `upmix_config_to_packet()` is the single live-to-wire encoder, shared by GET_CONFIG, bulk collect and change notifications, so the notify shadow can never disagree with a bulk read.
 - **Preset slot V33 (presence byte V34):** the config is tail-appended to `PresetSlot` (struct grows 44 bytes; `SLOT_DATA_SIZE_V33`), gated on `slot->version >= 33` in `apply_slot_to_live()` (RP2350). V34 claims the upmix reserved byte for `upmix_presence_q1` (no size change; `SLOT_DATA_SIZE_V34` = `SLOT_DATA_SIZE_V33`); V33 slots always wrote 0 there, which decodes to the 0 dB default, so no version gate is needed for the byte. Older slots have no upmix data and load the disabled defaults; V21..V33 slots still validate via `slot_data_size_for_version()`. Factory reset sets it disabled with `UPMIX_DEFAULT_*` values. RP2040 round-trips the fields as zeros and never applies them.
-- **Vendor commands:** `0x4A-0x4E`; RP2350 only (SETs STALL on RP2040, GETs return zeros). `0x4A` SET_CONFIG takes the 44-byte `UpmixConfigPacket` (byte 3 = `presence_q1`, int8 dB * 2); `0x4B` GET_CONFIG returns it; `0x4C`/`0x4D` SET/GET_PARAM address a single field by `wValue` (`UPMIX_PARAM_*` 0..13; 13 = `UPMIX_PARAM_PRESENCE`, plain float dB) as a 4-byte float; `0x4E` GET_STATUS returns the 16-byte `UpmixStatus`. `0x4F` is reserved. See the Vendor Command Reference table.
+- **Vendor commands:** RP2350 only. The commands are not built on RP2040, so every request there STALLs with `VC_ERR_UNKNOWN` and `SYS.PAGE_COMMANDS` does not list them. `FX.UPMIX_CONFIG` carries the 44-byte `UpmixConfigPacket` both ways (byte 3 = `presence_q1`, int8 dB * 2). `FX.UPMIX_ENABLE` through `FX.UPMIX_PRESENCE` (FX 0x90-0x9D, in `UPMIX_PARAM_*` order) each carry one field as a 4-byte float; `FX.UPMIX_PRESENCE` is plain float dB. `FX.UPMIX_STATUS` returns the 16-byte `UpmixStatus`. A non-finite float in any of them is `VC_ERR_VALUE`.
 - **Change notifications (added 2026-10-10):** both SET handlers call `upmix_notify_config()` after writing `upmix_config`. It runs `notify_param_write()` over all 14 fields at their `WireBulkParams.upmix` offsets, and the notify shadow comparison turns that into one `PARAM_CHANGED` per field that actually changed. Control Surfaces nouns and the UART/I2C transports reach the same handlers, so every live edit is announced with its source tag. Before this the upmixer was the only DSP block whose SETs were silent, so a second host or a front-panel edit left other UIs stale until the next bulk read. Preset load, factory reset and bulk SET still announce through the bulk-invalidation bracket. Presence is notified in its 0.5 dB wire encoding, so a SET_PARAM that moves the float within one step emits nothing. Any new upmixer SET path must also call `upmix_notify_config()`. Host-facing detail is in `upmixer_spec.md` section 6.5.
 
 **Matrix row-sharing consequence.** Source rows 2..4 are dual-purpose: they carry multichannel inputs 3..5 in multichannel input modes and the Upmix C / Ls / Rs derived channels in stereo upmix mode. The matrix crosspoints for those rows are the same storage in both cases, so a host application must present them contextually (real input vs upmix-derived) based on the active input mode.
@@ -1770,7 +1771,7 @@ One global config (`UpmixConfig`); ranges are clamped downstream in `upmix_compu
 ---
 
 ## Volume Leveller
-*Last updated: 2026-10-10 (safety limiter rebuilt as a smoothed peak limiter on the boost, see "Safety Limiter"; 2026-07-10: crossfeed no longer stereo-only; runs per output pair)*
+*Last updated: 2026-11-16 (vendor commands on the DYN page). Previously 2026-10-10 (safety limiter rebuilt as a smoothed peak limiter on the boost, see "Safety Limiter"; 2026-07-10: crossfeed no longer stereo-only; runs per output pair)*
 
 ### Purpose
 
@@ -1789,7 +1790,7 @@ Automatic volume levelling via a feedforward, channel-linked, single-band RMS co
 - **Glitch-free masks:** Writing masks (0xDE) recomputes coefficients but does NOT reset state; the rings keep running so a mask change is glitch-free
 
 ### Safety Limiter
-*Last updated: 2026-10-10*
+*Last updated: 2026-11-16 (mask command named `DYN.LEVELLER_MASKS`). Previously 2026-10-10*
 
 The limiter caps the leveller's boost so that the leveller never pushes a sample above the -3 dBFS ceiling (`LEVELLER_LIMITER_CEIL`). It only ever lowers the boost, and never below unity. Content already above the ceiling therefore passes untouched, and the leveller never attenuates. The gain applied to each sample is the smallest of the leveller gain, the limiter ramp and the instant cap. The cap is computed over the apply-mask channels only and shared by them, so the mix balance holds.
 
@@ -1805,7 +1806,7 @@ The window minimum was chosen over a ramp that aims at each block's cap just in 
 
 **Hold and release.** The cap of each block that has finished playing feeds `lim_env`. A cap at or under the held value replaces it and re-arms a 50 ms hold (`LEVELLER_LIM_HOLD_SEC`). That spans a half cycle down to 10 Hz, so steady peaks never let the gain rise between crests. Once the hold runs out, the envelope rises at 60 dB/s (`LEVELLER_LIM_RELEASE_DBPS`). On a sustained loud passage the leveller's own RMS detector catches up within its window. The leveller gain then falls under the cap and the limiter goes idle. After a short isolated hit the leveller's detector also dips the gain, and the limiter's hold stays inside that dip.
 
-**Mask changes and lookahead toggles.** Masks change without a state reset (0xDE). A channel newly added to the apply set therefore has 5 ms of samples in its ring that no cap has measured. `lim_rescan` re-measures every ring block from the ring and drops the ramp straight to the lowest cap, a single step at most once per change. The last apply set is kept together with the lookahead flag in `lim_app_prev`. A lookahead toggle that the audio path sees before the main loop's state reset therefore rescans too.
+**Mask changes and lookahead toggles.** Masks change without a state reset (`DYN.LEVELLER_MASKS`). A channel newly added to the apply set therefore has 5 ms of samples in its ring that no cap has measured. `lim_rescan` re-measures every ring block from the ring and drops the ramp straight to the lowest cap, a single step at most once per change. The last apply set is kept together with the lookahead flag in `lim_app_prev`. A lookahead toggle that the audio path sees before the main loop's state reset therefore rescans too.
 
 **Platform notes.** RP2350 runs the limiter in float. RP2040 keeps the gains in Q28 with `LIM_GMAX = INT32_MAX` (just under 8.0, above the 18 dB boost limit). `fast_mul_q28` floors, so the ramp step is rounded toward zero instead. A floored falling step overshoots its target and can carry a ramp down to unity slightly below it, which would attenuate. `lim_cap_of` holds the only float divide, which runs once per block, and per sample only while a no-lookahead attack is still deepening. The per-segment loops are channel-major and share one per-sample gain array (`gv`). Sample-major inner channel loops were fully unrolled by `-O3` and overflowed the `.data` budget. The limiter costs 56 B of `LevellerState` and adds 336 B (RP2040) and 496 B (RP2350) of RAM code. That leaves 144 B and 64 B under the `.data` budgets.
 
@@ -1845,29 +1846,25 @@ USB Input → Per-Ch Preamp → Per-Input EQ + Metering → Volume Leveller (act
 | `leveller.c` | RMS envelope tracking, gain computation, soft-knee curve, mask-driven link, per-channel lookahead rings |
 | `leveller.h` | Public API, state struct, configuration struct (incl. detector_mask/apply_mask) |
 
-### Vendor Commands (0xB4–0xBF, 0xDE/0xDF)
+### Vendor Commands (DYN page)
+*Last updated: 2026-11-16*
 
-| Code | Command | Direction | Description |
-|------|---------|-----------|-------------|
-| 0xB4 | REQ_SET_LEVELLER_ENABLE | OUT | Enable/disable leveller |
-| 0xB5 | REQ_GET_LEVELLER_ENABLE | IN | Get leveller enabled state |
-| 0xB6 | REQ_SET_LEVELLER_AMOUNT | OUT | Set compression amount (0.0–100.0, float) |
-| 0xB7 | REQ_GET_LEVELLER_AMOUNT | IN | Get compression amount |
-| 0xB8 | REQ_SET_LEVELLER_SPEED | OUT | Set envelope speed (0=Slow, 1=Medium, 2=Fast) |
-| 0xB9 | REQ_GET_LEVELLER_SPEED | IN | Get envelope speed |
-| 0xBA | REQ_SET_LEVELLER_MAX_GAIN | OUT | Set max boost gain in dB (0.0–35.0, float) |
-| 0xBB | REQ_GET_LEVELLER_MAX_GAIN | IN | Get max boost gain |
-| 0xBC | REQ_SET_LEVELLER_LOOKAHEAD | OUT | Enable/disable 5 ms lookahead |
-| 0xBD | REQ_GET_LEVELLER_LOOKAHEAD | IN | Get lookahead state |
-| 0xBE | REQ_SET_LEVELLER_GATE | OUT | Set silence gate threshold (-96.0–0.0 dBFS, float) |
-| 0xBF | REQ_GET_LEVELLER_GATE | IN | Get silence gate threshold |
-| 0xDE | REQ_SET_LEVELLER_MASKS | OUT | Set channel masks (2 bytes: [detector_mask, apply_mask]); no state reset |
-| 0xDF | REQ_GET_LEVELLER_MASKS | IN | Get channel masks (2 bytes: [detector_mask, apply_mask]) |
+Each command is one GET and SET pair, and the GET reply is a valid SET payload. A non-finite amount, max gain or gate is refused with `VC_ERR_VALUE`.
+
+| Command | Size | Description |
+|---------|------|-------------|
+| `DYN.LEVELLER_ENABLE` | 1 | Enable or disable the leveller |
+| `DYN.LEVELLER_AMOUNT` | 4 | Compression amount (0.0 to 100.0, float) |
+| `DYN.LEVELLER_SPEED` | 1 | Envelope speed (0=Slow, 1=Medium, 2=Fast) |
+| `DYN.LEVELLER_MAX_GAIN` | 4 | Max boost gain in dB (0.0 to 35.0, float) |
+| `DYN.LEVELLER_LOOKAHEAD` | 1 | Enable or disable the 5 ms lookahead |
+| `DYN.LEVELLER_GATE` | 4 | Silence gate threshold (-96.0 to 0.0 dBFS, float) |
+| `DYN.LEVELLER_MASKS` | 2 | Channel masks `[detector_mask, apply_mask]`; a SET does not reset state |
 
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
+*Last updated: 2026-11-16 (output mask set with `DYN.LOUDNESS_MASK`). Previously 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
 
 ### Purpose
 
@@ -1899,7 +1896,7 @@ Loudness now runs **per output channel**, inside the per-output chain (PASS 5-7)
 
 **Alignment.** The shelves are IIR with no sample delay, so inter-output slot alignment is untouched (the CLAUDE.md inviolable guarantee holds). ADAT bulk output mirrors the finalized `buf_out`, so it inherits per-output loudness automatically.
 
-**Persistence and control.** `loudness_output_mask` is set/read by vendor commands `REQ_SET_LOUDNESS_MASK` (0xFA, 2-byte little-endian mask) and `REQ_GET_LOUDNESS_MASK` (0xFB, returns 2 bytes). It persists via wire format **V19** (a `uint16 loudness_output_mask` in `WireGlobalParams`, replacing its `reserved[2]`) and preset slot **V26** (tail-append; older slots default to `0xFFFF` = all outputs).
+**Persistence and control.** `loudness_output_mask` is set and read with `DYN.LOUDNESS_MASK` (2-byte little-endian mask both ways). It persists via wire format **V19** (a `uint16 loudness_output_mask` in `WireGlobalParams`, replacing its `reserved[2]`) and preset slot **V26** (tail-append; older slots default to `0xFFFF` = all outputs).
 
 ### Parameters
 
@@ -2004,7 +2001,7 @@ Last 12 sectors (48 KB) of flash:
 | 11 | -4 KB | `0x44535031` ("DSP1") | Legacy sector (migration source) |
 
 ### Preset Directory Fields (Version 25)
-*Last updated: 2026-11-01 (V25 appends the 32-byte board name). Previously 2026-10-31 (V24 appends the 256-byte input source name table). Previously 2026-10-23 (V23 appends the 4-byte output latency block). Previously 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
+*Last updated: 2026-11-16 (CS names, CS save and limiter write named by paged command). Previously 2026-11-01 (V25 appends the 32-byte board name). Previously 2026-10-31 (V24 appends the 256-byte input source name table). Previously 2026-10-23 (V23 appends the 4-byte output latency block). Previously 2026-09-22 (V22 appends the 112-byte output limiter block; 2026-09-07: V21 drops the V20 auxiliary output table and restores the V19 layout; 2026-09-05: V20 appended that table; 2026-08-12: V19 appends the display config and page table)*
 
 `DIR_VERSION_CURRENT` = 25. V4 renamed the former `include_pins` byte to
 `output_config_mode` (same offset, 1:1 value mapping) and appended the
@@ -2034,8 +2031,7 @@ every field forward and upgrades `cs_config`, while V7->V9 additionally widens
 the 23-byte v7 `output_config` into the 25-byte field (new ADAT bytes zeroed).
 `dir_sanitize_cs_config()` now also range-checks each binding's `event`. V10
 appends the per-slot Control Surfaces names (`cs_names[16][32]`, 512 bytes):
-user labels set via `REQ_SET_CS_NAME` (0x8B) and read via `REQ_GET_CS_NAME`
-(0x8C), slot metadata independent of the binding table (survive binding
+user labels set and read via `CS.SLOT_NAME`, slot metadata independent of the binding table (survive binding
 changes; may be set before a binding exists). The V9->V10 step validates the
 V9 CRC (frozen `PresetDirectory_v9` snapshot), copies every field forward, and
 leaves the new block zeroed (all slots unnamed); `dir_sanitize_cs_config()`
@@ -2047,7 +2043,7 @@ board-level reasons; the V10->V11 step validates the V10 CRC (frozen
 new block zeroed (every sub-slot empty = feature idle).
 `dir_sanitize_cs_ir()` bounds-checks it on load like `dir_sanitize_cs_config`.
 The Control Surfaces bindings and IR table are persisted together in one
-write by `preset_set_cs_all` (the `REQ_CS_SAVE` path; per-binding SETs no
+write by `preset_set_cs_all` (the `CS.SAVE` path; per-binding SETs no
 longer persist). V12 through V16 each grow the embedded `output_config`
 (optional SPDIF inputs 2/3, I2S clock mode, I2S clock-pin mode, ADAT input,
 SPDIF input 4 pin); each has a frozen `PresetDirectory_vN` snapshot and a
@@ -2172,7 +2168,7 @@ layout ends.
 | input_source_names[8][32] | User names per `InputSource` ID (V24+): 32-byte NUL-terminated, all-zero = unnamed (the host or display supplies the built-in label); entry 7 is spare; device-global, survives preset load and factory reset |
 | device_name[32] | The board's user name (V25+): 32-byte NUL-terminated, all-zero = unnamed (each host supplies its own fallback); device-global, survives preset load and factory reset |
 | output_latency | Output latency (V23+, 4-byte `FlashOutputLatencyConfig`: version (0 = never saved) + option ID (`OutputLatencyId`, 0 = unset) + 2 reserved; device-global, survives factory reset; see "Output Latency") |
-| limiter | Output limiter settings for independent mode (V22+, 112-byte `FlashLimiterConfig`: version byte (0 = never saved) + 3 reserved + 9x 12-byte records of enabled, link group, threshold, release; RP2040 uses the first 5). Written by `REQ_SAVE_OUTPUT_CONFIG`, applied at boot in independent mode only |
+| limiter | Output limiter settings for independent mode (V22+, 112-byte `FlashLimiterConfig`: version byte (0 = never saved) + 3 reserved + 9x 12-byte records of enabled, link group, threshold, release; RP2040 uses the first 5). Written by `STORE.OUTPUT_CONFIG_SAVE`, applied at boot in independent mode only |
 
 Auxiliary outputs have no directory field of their own. Since caps v18 they
 are `CS_TYPE_AUX_OUT` / `CS_TYPE_AUX_PWM` components inside `cs_config`, named
@@ -2219,13 +2215,12 @@ through `cs_names` like any other slot. (Historical: V20 alone carried a
 On first boot after firmware upgrade, if the old `0x44535031` ("DSP1") magic is found in the last sector but no preset directory exists, the firmware automatically migrates the old data into preset slot 0 (named "Migrated") and sets it as the default.
 
 ### Legacy API Redirect
+*Last updated: 2026-11-16 (1.1.7: no legacy save or load request remains)*
 
-- `REQ_SAVE_PARAMS` (0x51): saves to the active preset slot
-- `REQ_LOAD_PARAMS` (0x52): **removed and the opcode repurposed** as `REQ_SAVE_OUTPUT_CONFIG` (2026-06-01). It was a deprecated synchronous "revert to saved" that crashed on SPDIF input; hosts use the deferred, SPDIF-safe `REQ_PRESET_LOAD` (0x91) instead. See the Output-Config Persistence section.
-- `REQ_FACTORY_RESET` (0x53): resets live state to defaults, active slot unchanged
+Firmware 1.1.7 has no single-sector save or load request. To save to the active slot, a host reads `STORE.PRESET_ACTIVE` and sends `STORE.PRESET_SAVE` addressed to that slot. Loading is `STORE.PRESET_LOAD`, which is deferred and SPDIF-safe. `STORE.FACTORY_RESET` resets live state to defaults and leaves the active slot unchanged. History: until 2026-06-01 the 1.1.x protocol also had a synchronous "revert to saved" that crashed on SPDIF input, and its number then carried the output-config save that is now `STORE.OUTPUT_CONFIG_SAVE`.
 
 ### Preset-Switch Mute & Pipeline Reset
-*Last updated: 2026-07-25 (pipeline reset now fades fully out before the teardown and fades back up after the restart)*
+*Last updated: 2026-11-16 (deferral described from the vendor handler; delete flag name; bulk and factory reset commands named by paged command). Previously 2026-07-25 (pipeline reset now fades fully out before the teardown and fades back up after the restart)*
 
 **Observed fade-out before any disruptive work (2026-07-25).** Arming the mute envelope does not make the wire silent. The envelope (`update_preset_mute_envelope()`, `audio_pipeline.c`) only advances when a packet is processed, its gain is applied *ahead* of the per-output delay lines, and the resulting samples still have to cross the consumer queues before the DMA plays them. The bracket used to arm the mute and tear down in the same main-loop iteration, so everything in flight was discarded and the clocks stopped on a full-level sample — the click the bracket exists to prevent. `main.c` now runs a shared, restartable settle state machine, `pipeline_fade_to_silence_poll()`, which reports complete only once (1) a processed packet has rendered the envelope down to zero and (2) every enabled slot ring has actually played those zeros. When the envelope first reads zero, `output_rings_silence_mark_arm()` latches each slot's write position, and the poll then waits until `output_rings_silence_mark_reached()` sees every reader past that position plus the longest active output delay line (`pipeline_max_active_delay_samples()`, which includes the limiter lookahead). The wait is measured from the ring pointers, so it is exact at every rate. A ring reset after the mark was latched counts as silent, since a reset ring restarts from stamped silence. PDM and ADAT need no separate check, because both stay sample-aligned to the slots. *Updated 2026-10-10: the measured mark replaced a wall-clock dwell sized from the old consumer-pool depth.*
 
@@ -2238,9 +2233,9 @@ The machine drives the envelope through a second, independent countdown (`pipeli
 
 Alignment is unaffected: the settle only adds ordinary shared-pipeline packets (every slot, PDM, delay index and DSP state advances by the same sample count), the envelope is one gain shared by both cores, and the teardown/synchronized-restart sequence is unchanged.
 
-All preset operations (load, save, delete) are **deferred from the USB IRQ to the main loop** via pending flags (`preset_load_pending`, `preset_save_pending`, `preset_delete_pending` in `usb_audio.c`). This avoids running flash operations inside the USB ISR (which would cause a ~45ms interrupt blackout inside an interrupt handler) and allows proper pipeline reset bracketing.
+All preset operations (load, save, delete) are **deferred from the vendor handler to the main loop's deferred-work path** via pending flags (`preset_load_pending`, `preset_save_pending`, and the per-slot `preset_delete_mask` in `usb_audio.c`). The handler returns `VC_OK` before any flash work, so the ~45ms interrupt blackout never runs inside a control request, and the operation gets proper pipeline reset bracketing.
 
-**SPDIF-RX suspend across disruptive state swaps (required when SPDIF is the active input).** Any deferred handler that mutates the live DSP state (coefficients, matrix, delays, output types/pins) or tears down output slots must first stop the SPDIF receiver and restart it afterward. While RX runs, `pico_spdif_rx`'s decode-timeout alarm fires on a separate timer IRQ and can touch PIO/DMA state mid-mutation; left running, this races the swap and faults the core, which the 8-second `watchdog_enable()` then resets (RAM is re-initialised, so `buffer_stats_sequence` resets to ~0 — the signature of this reboot). `preset_load_pending`, `process_type_switches`, and `process_pin_changes` have always bracketed RX this way. The `bulk_params_pending` (`REQ_SET_ALL_PARAMS` / 0xA1) and `factory_reset_pending` (`REQ_FACTORY_RESET` / 0x53) handlers were **missing this bracket** and would reboot the device when applied with SPDIF input active (intermittent, ~4/6 under repeated `0xA1`). Both now mirror `preset_load`: after `prepare_pipeline_reset()`, `if (active_input_source == INPUT_SOURCE_SPDIF && spdif_input_get_state() != SPDIF_INPUT_INACTIVE) { spdif_input_stop(); spdif_prefilling = false; }`, and at the end restart via `spdif_input_start()` (guarded by `!input_source_change_pending`, since a bulk-applied source change defers RX management to that handler). `process_type_switches` leaves caller-stopped RX alone (`rx_was_running` check), so the change-mask path doesn't double-start. Verified: 0/10 reboots on `0xA1` with SPDIF locked after the fix (was 4/6).
+**SPDIF-RX suspend across disruptive state swaps (required when SPDIF is the active input).** Any deferred handler that mutates the live DSP state (coefficients, matrix, delays, output types/pins) or tears down output slots must first stop the SPDIF receiver and restart it afterward. While RX runs, `pico_spdif_rx`'s decode-timeout alarm fires on a separate timer IRQ and can touch PIO/DMA state mid-mutation; left running, this races the swap and faults the core, which the 8-second `watchdog_enable()` then resets (RAM is re-initialised, so `buffer_stats_sequence` resets to ~0, which is the signature of this reboot). `preset_load_pending`, `process_type_switches`, and `process_pin_changes` have always bracketed RX this way. The `bulk_params_pending` (`STORE.ALL_PARAMS` SET) and `factory_reset_pending` (`STORE.FACTORY_RESET`) handlers were **missing this bracket** and would reboot the device when applied with SPDIF input active (intermittent, ~4/6 under repeated bulk SETs). Both now mirror `preset_load`: after `prepare_pipeline_reset()`, `if (active_input_source == INPUT_SOURCE_SPDIF && spdif_input_get_state() != SPDIF_INPUT_INACTIVE) { spdif_input_stop(); spdif_prefilling = false; }`, and at the end restart via `spdif_input_start()` (guarded by `!input_source_change_pending`, since a bulk-applied source change defers RX management to that handler). `process_type_switches` leaves caller-stopped RX alone (`rx_was_running` check), so the change-mask path doesn't double-start. Verified: 0/10 reboots on a bulk SET with SPDIF locked after the fix (was 4/6).
 
 The main loop handler for each operation follows the pattern:
 1. `usb_audio_drain_ring()` — process in-flight audio packets
@@ -2331,15 +2326,15 @@ section.
 | 25 | LED | Heartbeat |
 
 ### Runtime Reconfiguration
-*Last updated: 2026-10-10 (slot re-inits align every output clock to the locked servo's divider before the synchronized restart; restores and boot move pins through one coordinated output transition; PDM hold handshake; PDM pin change keeps the live rate; 2026-07-15: universal PIN_RESET_TO_DEFAULT 0xFF escape hatch across every single-pin SET command)*
+*Last updated: 2026-11-16 (pin commands named by paged command, results as `VC_*` codes). Previously 2026-10-10 (slot re-inits align every output clock to the locked servo's divider before the synchronized restart; restores and boot move pins through one coordinated output transition; PDM hold handshake; PDM pin change keeps the live rate; 2026-07-15: universal PIN_RESET_TO_DEFAULT 0xFF escape hatch across every single-pin SET command)*
 
-Vendor commands `REQ_SET_OUTPUT_PIN` (0x7C) / `REQ_GET_OUTPUT_PIN` (0x7D).
+Vendor command `OUTPUT.PIN`, addressed by pin output in `wValue`, with the GPIO as the 1-byte payload. A refused pin STALLs on USB, and the reason (`VC_ERR_PIN_INVALID`, `VC_ERR_PIN_IN_USE`, `VC_ERR_STATE`) is in `SYS.LAST_RESULT`.
 
 **Constraints:** Valid GPIO range, not reserved (23-25 power/LED; GPIO 16/17 are no longer reserved now that the debug UART is gone), and not in use by another output, the I2S BCK/LRCLK or MCK pin, the SPDIF RX pin, the DAC hardware-mute pin, or a live UART/I2C control-interface pin (`is_pin_in_use`).
 
-**Reset-to-default escape hatch (`PIN_RESET_TO_DEFAULT`, 0xFF):** every single-pin SET command — `REQ_SET_OUTPUT_PIN` (0x7C), `REQ_SET_I2S_BCK_PIN` (0xC2, per role), `REQ_SET_MCK_PIN` (0xC6), `REQ_SET_ADAT_PIN` (0xCC), `REQ_SET_SPDIF_RX_PIN` (0xE4, per index), `REQ_SET_ADAT_INPUT_PIN` (0x6A), `REQ_SET_I2S_RX_PIN` (0xF1, per pair) — maps a pin byte of 0xFF to the platform default for the addressed target before running its normal validation chain, so a reset can still fail (e.g. PIN_IN_USE if the default has been claimed). 0xFF is not a valid GPIO on either platform, so pin byte 0 always means GPIO 0; the previous `REQ_SET_ADAT_PIN` behavior of treating 0 as "reset to default 12" is gone (0 now addresses GPIO 0 like everywhere else). ADAT input has no free default GPIO, so its "default" is unset: 0xFF clears the pin (only while the input is disabled, since an enabled input with no pin would be unselectable). The persistence layers are unchanged: flash/bulk zero-fill "0 = default/absent" decoding is a migration artifact of zero-filled struct tails, not a wire semantic of the SET commands.
+**Reset-to-default escape hatch (`PIN_RESET_TO_DEFAULT`, 0xFF):** every single-pin SET command maps a pin byte of 0xFF to the platform default for the addressed target before running its normal validation chain, so a reset can still fail (e.g. `VC_ERR_PIN_IN_USE` if the default has been claimed). The commands are `OUTPUT.PIN`, `CLOCK.I2S_BCK_PIN` (per role), `CLOCK.MCK_PIN`, `OUTPUT.ADAT_TX_PIN`, `INPUT.SPDIF_RX_PIN` (per index), `INPUT.ADAT_RX_PIN` and `INPUT.I2S_RX_PIN` (per pair). 0xFF is not a valid GPIO on either platform, so pin byte 0 always means GPIO 0. The ADAT output pin once treated 0 as "reset to default 12"; that is gone. ADAT input has no free default GPIO, so its "default" is unset: 0xFF clears the pin (only while the input is disabled, since an enabled input with no pin would be unselectable). The persistence layers are unchanged: flash/bulk zero-fill "0 = default/absent" decoding is a migration artifact of zero-filled struct tails, not a wire semantic of the SET commands.
 
-**S/PDIF and I2S slots:** Deferred to the main loop, not applied in the USB ISR. `REQ_SET_OUTPUT_PIN` writes the target into `output_pins[out_idx]` (RAM-only, like `spdif_rx_pin`) and sets a bit in `output_pin_change_mask`; the main-loop gate (shared `pipeline_reset_ready()` hold) then runs `process_pin_changes(mask)`. That helper mirrors `process_type_switches`: `prepare_pipeline_reset()` (soft mute + Core 1 fence + DAC hardware-mute assert) → suspend SPDIF RX if running → `drain_and_disable_outputs()` → `audio_spdif_change_pin()` / `audio_i2s_change_data_pin()` on each flagged slot while disabled → `complete_pipeline_reset()` for the **synchronized** restart of all slots → restart RX. The synchronized restart is the point: a moved slot re-enters in phase with the others, preserving the inviolable inter-slot sample alignment. (The prior implementation restarted only the changed slot live in the ISR, which clicked and left that slot phase-misaligned until the next full reset.) `change_pin` masks the channel's DMA IRQ before aborting the DMA so the handler can't start a conflicting transfer during PIO SM reinit, and clears any stale completion flag before unmasking. Back-to-back requests accumulate in the mask and apply in one batch. Persistence follows `output_config_mode`: in with-preset mode the pin travels with the preset (`REQ_PRESET_SAVE` captures it, applied on load); in independent mode it is device-global (`REQ_SAVE_OUTPUT_CONFIG` persists it, applied at boot).
+**S/PDIF and I2S slots:** Deferred to the main loop, not applied in the vendor handler. `OUTPUT.PIN` writes the target into `output_pins[out_idx]` (RAM-only, like `spdif_rx_pin`) and sets a bit in `output_pin_change_mask`; the main-loop gate (shared `pipeline_reset_ready()` hold) then runs `process_pin_changes(mask)`. That helper mirrors `process_type_switches`: `prepare_pipeline_reset()` (soft mute + Core 1 fence + DAC hardware-mute assert) → suspend SPDIF RX if running → `drain_and_disable_outputs()` → `audio_spdif_change_pin()` / `audio_i2s_change_data_pin()` on each flagged slot while disabled → `complete_pipeline_reset()` for the **synchronized** restart of all slots → restart RX. The synchronized restart is the point: a moved slot re-enters in phase with the others, preserving the inviolable inter-slot sample alignment. (The prior implementation restarted only the changed slot live in the ISR, which clicked and left that slot phase-misaligned until the next full reset.) `change_pin` masks the channel's DMA IRQ before aborting the DMA so the handler can't start a conflicting transfer during PIO SM reinit, and clears any stale completion flag before unmasking. Back-to-back requests accumulate in the mask and apply in one batch. Persistence follows `output_config_mode`: in with-preset mode the pin travels with the preset (`STORE.PRESET_SAVE` captures it, applied on load); in independent mode it is device-global (`STORE.OUTPUT_CONFIG_SAVE` persists it, applied at boot).
 
 **PDM:** Applied inline (must be disabled first; rebuilds PIO config). PDM has no running audio to realign at change time, so it needs no deferral or synchronized restart. The vendor path also refuses while `pdm_hw_is_active()`, i.e. while Core 1 is still fading the sub out after a disable. `pdm_change_pin()` restores the PIO clock at `audio_state.freq` (it hard-coded 48 kHz before 2026-10-10, which left the sub at the wrong rate after a pin change at 44.1 or 96 kHz).
 
@@ -2358,7 +2353,7 @@ Releasing every outgoing pin before claiming any incoming one is what makes pin 
 **PDM hold handshake.** `pdm_hold_hw()` stores `pdm_hold`, issues a barrier and waits for `pdm_hw_active` to clear. Core 1 runs the PDM hardware only while `pdm_enabled && !pdm_hold`; before restarting the hardware it stores `pdm_hw_active`, barriers, and backs off if `pdm_hold` is set, so the two cores can never both believe they own the SM/DMA. Core 1 clears `pdm_hw_active` after stopping the SM and aborting DMA. `pdm_release_hw()` drops the hold, and Core 1 restarts through its normal re-anchored enable path if PDM is still enabled.
 
 ### Restore Order in `io_config_apply()` and `bulk_params_apply()`
-*Last updated: 2026-10-02*
+*Last updated: 2026-11-16 (output type and MCK commands named by paged command). Previously 2026-10-02*
 
 `io_config_apply()` (flash_storage.c) installs a stored `FlashOutputConfig` into the live pin globals at boot and on preset loads. `bulk_params_apply()` (bulk_params.c) does the same for a pushed `WireBulkParams`. Apart from the DAC hardware-mute GPIO claim in the bulk path, which is unrelated to the output slots, both only set globals. The audio hardware is rebuilt later in the normal pipeline-reset bracket, so the install order has no effect on slot timing.
 
@@ -2383,16 +2378,16 @@ Before this order was established, the flash path checked BCK before installing 
 - A rejected BCK, slave pair or RX set falls back to the live value, and that value is not re-checked against the newly installed pins.
 - An optional SPDIF input that stays enabled while its pin moves is not re-checked.
 - In the bulk path, the MCK and BCK checks still see the old DAC-mute pin, so a payload that moves the mute off a pin while moving MCK or BCK onto it is falsely rejected.
-- `REQ_SET_OUTPUT_TYPE` does not check the clock pins when it turns an idle pair into a driven one.
+- `OUTPUT.TYPE` does not check the clock pins when it turns an idle pair into a driven one.
 
-**MCK enable.** MCK claims its pin only while enabled, so another function can take `i2s_mck_pin` while MCK is off. `REQ_SET_MCK_ENABLE` (0xC4) therefore checks `is_pin_in_use()` before enabling, and on a conflict returns PIN_IN_USE with MCK left off. Like `REQ_SET_MCK_PIN`, it reserves the clock pairs only while I2S is active. The restore paths use `i2s_mck_pin_acceptable()` instead, and rely on the later BCK check for the clock pair.
+**MCK enable.** MCK claims its pin only while enabled, so another function can take `i2s_mck_pin` while MCK is off. A `CLOCK.MCK_ENABLE` SET therefore checks `is_pin_in_use()` before enabling, and on a conflict fails with `VC_ERR_PIN_IN_USE` with MCK left off. Like `CLOCK.MCK_PIN`, it reserves the clock pairs only while I2S is active. The restore paths use `i2s_mck_pin_acceptable()` instead, and rely on the later BCK check for the clock pair.
 
 **ADAT loopback share.** `adat_input_pin_acceptable()` lets ADAT input share the ADAT output pin only while ADAT output is enabled. A disabled output's stored pin gets the normal ownership check.
 
 ---
 
 ## Core 1 Architecture
-*Last updated: 2026-02-15*
+*Last updated: 2026-11-16 (mutual exclusion enforced by `ROUTE.OUTPUT_ENABLE`). Previously 2026-02-15*
 
 ### Operating Modes
 
@@ -2411,7 +2406,7 @@ Determined at boot and runtime based on output enables:
 - **EQ_WORKER mode:** Any SPDIF output in Core 1 range enabled AND PDM disabled (RP2040: outputs 2-3, RP2350: outputs 2-7)
 - **IDLE:** Neither condition met
 
-**Mutual exclusion:** PDM sub and EQ worker outputs cannot coexist on either platform, enforced in `REQ_SET_OUTPUT_ENABLE`. RP2040: outputs 2-3 conflict with PDM. RP2350: outputs 2-7 conflict with PDM.
+**Mutual exclusion:** PDM sub and EQ worker outputs cannot coexist on either platform, enforced in the `ROUTE.OUTPUT_ENABLE` SET, which refuses a conflicting enable with `VC_ERR_STATE`. RP2040: outputs 2-3 conflict with PDM. RP2350: outputs 2-7 conflict with PDM.
 
 ### EQ Worker (Both Platforms)
 *Last updated: 2026-07-13 (RP2350 slot finalization mode selected per packet via core1_eq_work.finalize_s24)*
@@ -2479,7 +2474,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2495,8 +2490,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
-| RAM code+rodata+data (.data) | 67,984 B of the 72,704 B budget (2026-10-12) | 95,800 B of the 100,352 B budget (2026-10-12) |
-| Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 42,772 B (2026-10-12) | 77,144 B (2026-10-12) |
+| RAM code+rodata+data (.data) | 70,088 B of the 72,704 B budget (2026-11-16) | 97,960 B of the 100,352 B budget (2026-11-16) |
+| Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 58,384 B (2026-11-16) | 118,204 B (2026-11-16) |
+| Vendor commands (release build) | 181 in 12 pages. The 23 RP2350-only commands (ADAT RX and TX, upmixer) are not built and answer `VC_ERR_UNKNOWN` | 204 in 12 pages. Both platforms: the 7 `DIAG` commands exist only in bench builds that set their flag |
 | Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
 | Output slot rings | 2 × 8 KB `.slot_rings` at the top of RAM (512 frames) | 4 × 8 KB `.slot_rings` at the top of RAM (512 frames) |
 | Output latency (ring fill target) | Option table: 0.67 ms and 1 ms (stream inputs only; USB falls back to 2 ms), 2/3/4/6/8 ms, default 4 ms; identical on both | Same; 4-8 ms clamp to 3.66 ms at 96 kHz on both |
@@ -2637,6 +2633,13 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > `.data` 70,088 B / 97,960 B, free RAM 58,380 B / 118,204 B.
 > `scripts/ram_baseline.json` was reset to these figures (it held the
 > pre-XIP numbers of 2026-07-05).
+>
+> **Final 1.1.7 beta 1 figures (phase 4 verification, 2026-11-16).** The
+> finite-value checks and the removal of the dead save path, which landed after
+> the measurement above, move the totals slightly. `arm-none-eabi-size`: text
+> 283,252 B / 320,796 B, bss 133,672 B / 308,124 B (RP2040 / RP2350).
+> `check_ram_placement.py`: `.data` 70,088 B / 97,960 B, free RAM 58,384 B /
+> 118,204 B. These are the values in `scripts/ram_baseline.json`.
 
 > **Paged protocol on UART and I2C (2026-11-16).** The UART `tx_copy` and I2C
 > `resp_small` reply copies grow from 132 to 256 bytes (`VC_REPLY_MAX`) and the
@@ -2704,7 +2707,7 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 > 277,644 B plus `.slot_rings` 32 KB / 64 KB; free heap before runtime
 > allocation (`__HeapLimit - end`, now reported by `check_ram_placement.py`)
 > 45,256 B / 82,804 B, leaving about 19 KB / 31 KB after the producer pools.
-*Last updated: 2026-11-16 (vendor protocol flip: text -19.8 KB RP2040 / -19.6 KB RP2350, BSS -216 B / -220 B, `ram_baseline.json` reset; paged protocol on UART and I2C: BSS +120 B RP2040 / +124 B RP2350, text about -7 KB; paged vendor dispatcher: BSS +284 B RP2040 / +280 B RP2350; see the notes above). Previously 2026-10-16 (USB feedback long-window rate, dual-slope servo and diagnostics: `fb_ctrl` grows to 84 B, BSS +56 B both platforms, RAM code +416 B RP2040 / +408 B RP2350, measured `.data` 68,496 B / 96,328 B, inside the 72,704 B / 100,352 B budgets). Previously 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
+*Last updated: 2026-11-16 (final 1.1.7 beta 1 sizes from the phase 4 verification; per-platform `.data` and free-heap rows brought up to date). Previously 2026-11-16 (vendor protocol flip: text -19.8 KB RP2040 / -19.6 KB RP2350, BSS -216 B / -220 B, `ram_baseline.json` reset; paged protocol on UART and I2C: BSS +120 B RP2040 / +124 B RP2350, text about -7 KB; paged vendor dispatcher: BSS +284 B RP2040 / +280 B RP2350; see the notes above). Previously 2026-10-16 (USB feedback long-window rate, dual-slope servo and diagnostics: `fb_ctrl` grows to 84 B, BSS +56 B both platforms, RAM code +416 B RP2040 / +408 B RP2350, measured `.data` 68,496 B / 96,328 B, inside the 72,704 B / 100,352 B budgets). Previously 2026-10-12 (producer pools removed: heap unused, `slot_stage` staging in BSS; see the note above). Previously 2026-10-11 (SPDIF RX overhaul merge: output rings at the top of RAM, ADAT ring 960 frames, `DATA_BUDGET` 72,704 B / 100,352 B, `__StackLimit` bounded below the rings; see the note below). Previously, 2026-10-10 (leveller safety limiter: `LevellerState` +56 B both platforms, RAM code +336 B RP2040 / +496 B RP2350, measured `.data` 67,440 B and 94,144 B (64 B under the RP2350 budget); 2026-09-28: RP2040 tube kernel 1,196 B after the drive-floor change, BSS unchanged; 2026-09-22: directory V22: dir_cache 3,035 -> 3,147 B; buffer cleanup: notify rebaseline scratch removed, preset save builds in the flash staging buffer, bulk buffer sized to `WireBulkParams`: BSS -10,880 B RP2040 / -14,648 B RP2350; crossover cascades output-indexed: BSS -1,058 B RP2040 / -9,352 B RP2350; output limiter: BSS +1,238 B RP2040 / +2,126 B RP2350, RAM text +2,444 B / +2,200 B, `.data` budgets raised 2 KB each; 2026-09-19: RP2040 tube kernel 1,212 B after the shaper-output clamp, was 1,220 B; RP2350 tube kernel branch-free, 660 B; 2026-09-18 tube preamp: BSS +460 B RP2040 / +560 B RP2350, shared kernel RAM text (branch-free RP2350 rewrite 2026-09-19, was 858 B); current .data, BSS and free-RAM figures for both platforms; 2026-09-12: shared elliptic b0: BSS -16 B both platforms, RP2350 RAM code +256 B from -O3; bass bands 6th-order: BSS +1,456 B RP2040 / +2,352 B RP2350; continuous bass bank: BSS +1,580 B RP2040 / +2,000 B RP2350; spectrum analyser FFT ceiling lowered to 1024 points: BSS -2,560 B RP2040 / -4,608 B RP2350, flash -3.5 KB / -6.6 KB; 2026-09-07: auxiliary outputs reworked as binding-slot components: +~130 B BSS both platforms, preset directory back to 3035 B at V21; 2026-08-12: Control Surfaces display, +~750 B BSS both platforms, ~12 KB flash)*
 
 > **Crossover cascades output-indexed (2026-09-22).** `xover_filters` and the
 > crossover bypass flags dropped their input-channel rows, which no path could
@@ -2991,9 +2994,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Input capture arena (SPDIF RX FIFO / I2S RX ring union, 4 KB aligned) | 12 KB |
 | Other BSS | ~20 KB |
 | **Total BSS** | **~110 KB** `.bss` (measured 112,936 B on 2026-10-23) plus the 16 KB `.slot_rings` section |
-| RAM code+rodata+data (.data section, hot set only) | 67,984 B as of 2026-10-12, within the 72,704 B `check_ram_placement.py` budget |
+| RAM code+rodata+data (.data section, hot set only) | 70,088 B as of 2026-11-16, within the 72,704 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 42,772 B (2026-10-12) |
+| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 58,384 B (2026-11-16) |
 | Stack | drawn from the free-RAM pool above |
 
 ### RP2350 (520 KB SRAM)
@@ -3021,9 +3024,9 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
 | **Total BSS** | **~265 KB** `.bss` (measured 271,076 B on 2026-10-23) plus the 32 KB `.slot_rings` section |
-| RAM code+rodata+data (.data section, hot set only) | 95,800 B as of 2026-10-12, within the 100,352 B `check_ram_placement.py` budget |
+| RAM code+rodata+data (.data section, hot set only) | 97,960 B as of 2026-11-16, within the 100,352 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 77,144 B (2026-10-12) |
+| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 118,204 B (2026-11-16) |
 | Stack | drawn from the free-RAM pool above |
 
 ### Flash Layout
@@ -3098,7 +3101,7 @@ Any RP2040 code that compares a sample-derived level with an absolute dBFS value
 Until 2026-10-23 every row except the output limiter assumed 2^28, so each was 6 dB off on RP2040. The meters read hot, clip flags tripped at -6 dBFS and the signal generator played 6 dB low. The leveller, subharm ceiling, tube drive and psybass clip point all acted 6 dB away from their set levels. The RP2350 was the reference and is unchanged, except for the PDM sub.
 
 ## Channel Metering
-*Last updated: 2026-11-15 (peak array table follows the unified channel model). Previously 2026-10-23.*
+*Last updated: 2026-11-16 (status and clip commands on the MEAS page). Previously 2026-11-15 (peak array table follows the unified channel model); 2026-10-23.*
 
 Full peak metering for all input and output channels. Peak values are `uint16_t` in Q15 format (0–32767 maps to 0.0–1.0 full scale). Per-channel clip detection via sticky `clip_flags` bitmask.
 
@@ -3135,42 +3138,33 @@ In single-core mode, Core 0 meters all outputs including PDM.
 **Thread safety:** No race — Core 1 writes its channel peaks before `work_done`; Core 0 writes its channel peaks after `work_done`. The `__dmb()` + handshake guarantees memory visibility. Each core only OR's its own non-overlapping channel bits in `clip_flags`, so no torn-write risk.
 
 ### Clip Detection (OVER Indicator)
-*Last updated: 2026-10-23*
+*Last updated: 2026-11-16 (`clip_flags` is 32 bits; cleared by `MEAS.CLIP_CLEAR`). Previously 2026-10-23*
 
-`global_status.clip_flags` is a `uint16_t` bitmask — one bit per channel (bit position = channel index). A bit is **set** when the block peak exceeds the clip threshold (`CLIP_THRESH_F` = 1.001f on RP2350, `CLIP_THRESH_Q28` = (1<<29) + (1<<29)/1000 on RP2040, the same 0.1% margin over the RP2040's 2^29 full scale). The threshold includes ~+0.01 dB headroom above unity to avoid false positives from float precision noise when 0 dBFS signals pass through biquad filters. Bits are **sticky**: once set, they remain set until explicitly cleared by the host via `REQ_CLEAR_CLIPS` (0x83). The firmware never autonomously clears clip flags.
+`global_status.clip_flags` is a `uint32_t` bitmask, one bit per channel (bit position = channel index). A bit is **set** when the block peak exceeds the clip threshold (`CLIP_THRESH_F` = 1.001f on RP2350, `CLIP_THRESH_Q28` = (1<<29) + (1<<29)/1000 on RP2040, the same 0.1% margin over the RP2040's 2^29 full scale). The threshold includes ~+0.01 dB headroom above unity to avoid false positives from float precision noise when 0 dBFS signals pass through biquad filters. Bits are **sticky**: once set, they remain set until explicitly cleared by the host via `MEAS.CLIP_CLEAR`. The firmware never autonomously clears clip flags.
 
 This matches the industry-standard sticky OVER indicator pattern (IEC 60268-18). Since DSPi is a DSP processor (not an ADC), any sample exceeding the threshold in `buf_out` is a genuine clip event — single-sample detection is correct.
 
 **Detection cost:** One compare + conditional OR per channel per block on the already-computed peak value. Zero measurable overhead.
 
-### Status Protocol (`REQ_GET_STATUS`, wValue=9)
+### Status Protocol (`MEAS.LEVELS`)
+*Last updated: 2026-11-16 (`MEAS.LEVELS` layout; the old 2-byte clip field and 11-channel sizes were stale)*
 
-Variable-size response: `NUM_CHANNELS * 2 + 4` bytes.
+Variable-size reply: `NUM_CHANNELS * 2 + 7` bytes.
 
-- RP2350: 26 bytes (11 peaks × 2 bytes + 2 CPU load bytes + 2 clip_flags bytes)
-- RP2040: 18 bytes (7 peaks × 2 bytes + 2 CPU load bytes + 2 clip_flags bytes)
+- RP2350: 41 bytes (17 peaks × 2 bytes + 2 CPU load bytes + 4 clip_flags bytes + 1 active input count byte)
+- RP2040: 21 bytes (7 peaks × 2 bytes + 2 CPU load bytes + 4 clip_flags bytes + 1 active input count byte)
 
-Format: peaks as little-endian `uint16_t` in channel index order, followed by `cpu0_load` and `cpu1_load` (each `uint8_t`, 0–100%), followed by `clip_flags` as little-endian `uint16_t`.
+Format: peaks as little-endian `uint16_t` in channel index order, then `cpu0_load` and `cpu1_load` (each `uint8_t`, 0 to 100%), then `clip_flags` as little-endian `uint32_t`, then `active_input_channels` (`uint8_t`, see "Multichannel USB Input").
 
-### REQ_CLEAR_CLIPS (0x83) — Clear Clip Flags
-*Last updated: 2026-03-01*
+### Clip Flags (`MEAS.CLIP_FLAGS`, `MEAS.CLIP_CLEAR`)
+*Last updated: 2026-11-16 (read and clear are separate commands; reads never clear). Previously 2026-03-01*
 
-Atomic read-then-clear: returns the current `clip_flags` value (2 bytes, little-endian `uint16_t`) and resets it to 0. This gives the host an acknowledgment of which channels had clipped since the last clear.
-
-| Field | Value |
-|-------|-------|
-| `bmRequestType` | `0xC1` |
-| `bRequest` | `0x83` |
-| `wValue` | 0 |
-| `wIndex` | 0 |
-| `wLength` | 2 |
-
-**Response (2 bytes):** The `clip_flags` value that was just cleared (little-endian `uint16_t`).
+`MEAS.CLIP_FLAGS` is a 4-byte GET that returns `clip_flags` as a little-endian `uint32_t` and changes nothing. `MEAS.CLIP_CLEAR` is a zero-length SET that resets the flags to 0. The 1.1.6 read-then-clear request is gone, because a GET may not change state. A host that wants an acknowledgment reads the flags and then clears them. A clip that lands between the read and the clear is cleared unseen.
 
 ---
 
 ## External Control Interfaces (UART / I2C Target)
-*Last updated: 2026-11-16 (page 0 refused with `VC_ERR_UNKNOWN`; status codes 0x02 and 0x03 retired). Previously 2026-11-16 (paged protocol on UART and I2C: entry points moved to `vendor/`, status byte carries `VC_*` codes, `STORE.ALL_PARAMS` streaming, deferred bootloader reboot); 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
+*Last updated: 2026-11-16 (phase 5: leftover page-0 notes removed from reply buffers, bulk, USB-only and chunk paragraphs). Previously 2026-11-16 (page 0 refused with `VC_ERR_UNKNOWN`; status codes 0x02 and 0x03 retired); 2026-11-16 (paged protocol on UART and I2C: entry points moved to `vendor/`, status byte carries `VC_*` codes, `STORE.ALL_PARAMS` streaming, deferred bootloader reboot); 2026-08-12 (the Control Surfaces display claims the other I2C instance)*
 
 An external microcontroller can drive the entire vendor-command surface over a
 UART or the I2C target (slave) interface, at parity with USB. Full integrator
@@ -3178,7 +3172,7 @@ detail lives in `Documentation/Features/control_interfaces_spec.md`; this sectio
 covers the firmware-side structure.
 
 ### Entry points (`vendor/vc_ctrl.h`)
-*Last updated: 2026-11-16 (page 0 call-through and `CtrlDispatchResult` removed)*
+*Last updated: 2026-11-16 (`DIAG.CLOCK_DIAG` USB-only reason). Previously 2026-11-16 (page 0 call-through and `CtrlDispatchResult` removed)*
 
 USB (EP0), UART and I2C each parse their own wire framing into the same
 `bRequest` / `wValue` / `wIndex` / `wLength` shape. The external transports call
@@ -3208,17 +3202,13 @@ answer.
 **Reply buffers.** A non-bulk GET reply is at most `VC_REPLY_MAX` (256) bytes in
 the dispatcher's reply buffer, valid until the next dispatch from any transport.
 The UART `tx_copy` and the I2C `resp_small` copies are `VC_REPLY_MAX` bytes, so
-a paged reply is never truncated. The page-0 path copies its replies into the
-same reply buffer (the old 132-byte `_ext_resp_copy` is gone), and its
-`vendor_send_response()` is `noinline`, which saves about 7 KB of flash on both
-platforms.
+a paged reply is never truncated.
 
 **Bulk over UART/I2C.** `vendor_is_bulk_set(wIndex, bRequest, wLength)` is the
 single, table-free test the UART parser and the I2C target ISR use to stream a
 SET payload into `bulk_param_buf` under their lock. It accepts a paged
 `STORE.ALL_PARAMS` of 1 to `WIRE_BULK_BUF_SIZE` bytes, so a wrong length reaches
-the handler and fails with `VC_ERR_LENGTH` exactly as on USB, and the page-0
-`0xA1` on one removable line. `vc_bulk_ext_set()` runs the table checks, confirms
+the handler and fails with `VC_ERR_LENGTH` exactly as on USB. `vc_bulk_ext_set()` runs the table checks, confirms
 and refreshes ownership with interrupts off (so the I2C ISR's 500 ms stale
 reclaim cannot fire before the handler sets `bulk_params_pending`), runs the
 handler (header check, pending flag), and releases the lock only on success; on
@@ -3232,8 +3222,9 @@ command and `MEAS.RTA_BANDS_ALL` carry `VC_F_USB_ONLY` and answer
 **USB-only commands.** Off USB, `vc_check()` refuses `VC_F_USB_ONLY` commands in
 both directions and `VC_F_SET_USB_ONLY` SETs with `VC_ERR_BLOCKED`. Today these
 are the XPORT config SETs, `STORE.ALL_PARAMS_CHUNK`, `MEAS.RTA_BANDS_ALL` and
-`DIAG.CLOCK_DIAG`. The old `ctrl_cmd_usb_only()` list is consulted for page 0
-only.
+`DIAG.CLOCK_DIAG`. The flags live in the `.def` files, so no separate list exists.
+`DIAG.CLOCK_DIAG` fits the 256-byte reply buffer on every transport, so its
+USB-only flag is a choice for a bench readout, not a size limit.
 
 **Bootloader entry.** `SYS.ENTER_BOOTLOADER` from UART or I2C sets a per-source
 flag (`ctrl_reboot_request()`) instead of rebooting in the handler. The UART poll
@@ -3247,12 +3238,11 @@ multi-packet paged reply, with a 100 ms stale reclaim. External dispatch answers
 BUSY meanwhile, so the two paths never share the EP0 receive buffer or the reply
 buffer.
 
-**Chunked USB bulk access (0xA2/0xA3, added 2026-07-04).** Windows/WinUSB caps
+**Chunked USB bulk access (`STORE.ALL_PARAMS_CHUNK`, added 2026-07-04).** Windows/WinUSB caps
 control-transfer data stages at 4 KB, so the `WireBulkParams` blob cannot cross a
-single control transfer on any Windows host (GitHub issue #62). The chunk
-commands (`STORE.ALL_PARAMS_CHUNK`, and page-0 `0xA2`/`0xA3` until the flip) move
-the same payload in `wValue`-offset chunks riding the bulk owner lock as a
-multi-transfer session; the session logic lives in `vendor/vc_bulk.c`. They are
+single control transfer on any Windows host (GitHub issue #62). `STORE.ALL_PARAMS_CHUNK`
+moves the same payload in `wValue`-offset chunks riding the bulk owner lock as a
+multi-transfer session; the session logic lives in `vendor/vc_bulk.c`. It is
 USB-only. Host migration guide: `Documentation/Features/bulk_params_chunking.md`.
 
 **bulk_param_buf owner lock.** `vendor_bulk_try_acquire` / `vendor_bulk_release`
@@ -3326,16 +3316,15 @@ format version is unchanged by this feature.
 ---
 
 ## Control Surfaces (User-Wired Physical Controls)
-*Last updated: 2026-11-02 (caps v22: `OUTPUT_LATENCY` enum noun 80). Previously 2026-10-26 (caps v21: `PRESET_SAVE` trigger noun 79; 2026-09-28 caps v20: output limiter nouns 74-78 and unit `CS_UNIT_MS_LOG`; 2026-09-18 caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19; 2026-07-22: PWM LED and aux PWM binds reject the soft-VCXO reserved slice)*
+*Last updated: 2026-11-16 (commands named by `CS.*` and the paged commands each noun dispatches through). Previously 2026-11-02 (caps v22: `OUTPUT_LATENCY` enum noun 80); 2026-10-26 (caps v21: `PRESET_SAVE` trigger noun 79; 2026-09-28 caps v20: output limiter nouns 74-78 and unit `CS_UNIT_MS_LOG`; 2026-09-18 caps v19: tube preamp nouns 70-73, all four through the indexed command 0x3E; 2026-09-07 caps v18: auxiliary outputs are binding-slot components CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, commands 0x04-0x07, directory V21; caps v17 never shipped; caps v16: subharmonic band-level nouns widened to +12 dB; 2026-09-04 caps v15: subharmonic synthesizer nouns 61-67; 2026-09-02 caps v14: subharmonic synthesizer nouns 57-60; 2026-08-24: input-source stepping skips unselectable sources; caps v13: display level bars; caps v12: per-LED PWM brightness ceiling; caps v11: display line alignment and edit markers; caps v10: I2C display component, IR group support, nouns 53-56, commands 0x27-0x2B, directory V19; 2026-07-22: PWM LED and aux PWM binds reject the soft-VCXO reserved slice)*
 
 User-wired push buttons, toggle switches, potentiometers, quadrature rotary
 encoders, plain indicator LEDs, PWM-dimmed LEDs, an IR remote receiver, an
 I2C character/OLED display, and switched or dimmable auxiliary outputs on
-spare GPIOs, configured over vendor commands `0x84`-`0x87`, `0x8B`/`0x8C`
-(per-slot names), `0x8D`-`0x8F` (IR commands and learn), `0x9D`/`0x9E`
-(save/revert), `0x20`-`0x26` (target groups and macros), `0x27`-`0x2B`
-(display config, pages and status), and `0x04`-`0x07` (auxiliary output
-runtime state and level).
+spare GPIOs, configured over the `CS` page (0x0A): bindings, capabilities and
+status, per-slot names, IR commands and learn, save/revert, target groups and
+macros, display config, pages and status, and auxiliary output runtime state
+and level. `Documentation/commands.md` lists the 25 commands.
 A binding attaches
 one component (`CsType`)
 to one firmware parameter (`CsNoun`) through one operation (`CsAction`), on one
@@ -3373,13 +3362,13 @@ offers it and no binding to it validates there.
 structure or stored-config changes (directory stays V11): the stereo upmixer
 (enable, centre mode Passive/Logic, surround mode Off/Passive/Logic,
 strength, centre width, presence; all six RP2350-only via the empty-mask
-convention, dispatched through `REQ_UPMIX_SET_PARAM`), psychoacoustic bass
+convention, dispatched through the `FX.UPMIX_*` commands), psychoacoustic bass
 (enable plus cutoff/harmonics/drive/character/original through the per-param
-`0x30`-`0x3A` SETs), per-output delay (`CS_NOUN_OUTPUT_DELAY`, target =
-output channel, `REQ_SET_OUTPUT_DELAY`; new `CS_UNIT_MS` = 8.8 ms, linear,
+`FX.PSYBASS_*` SETs), per-output delay (`CS_NOUN_OUTPUT_DELAY`, target =
+output channel, `ROUTE.OUTPUT_DELAY`; new `CS_UNIT_MS` = 8.8 ms, linear,
 default step 0.1 ms, range = the full delay ring at 48 kHz: 21 ms RP2040 /
 42 ms RP2350), and `CS_NOUN_PRESET_RELOAD` (a `TRIGGER` that reloads the
-active preset from flash via the deferred `REQ_PRESET_LOAD` path, discarding
+active preset from flash via the deferred `STORE.PRESET_LOAD` path, discarding
 unsaved live edits).
 
 **Caps v5** (2026-08-01) adds no nouns, units, or structure changes (directory
@@ -3400,9 +3389,9 @@ command list from it rather than assume 8.
 **Caps v7** (2026-08-04) appends the two remaining loudness parameters as
 nouns 49-50, with no unit, structure, or stored-config changes (directory
 stays V17). `CS_NOUN_LOUDNESS_SPL` is the reference listening level in dB SPL
-(`CS_UNIT_DB`, 40-100, `REQ_SET_LOUDNESS_REF`) and
+(`CS_UNIT_DB`, 40-100, `DYN.LOUDNESS_REF`) and
 `CS_NOUN_LOUDNESS_INTENSITY` is the compensation depth
-(`CS_UNIT_PERCENT`, 0-127, `REQ_SET_LOUDNESS_INTENSITY`); both join
+(`CS_UNIT_PERCENT`, 0-127, `DYN.LOUDNESS_INTENSITY`); both join
 `CS_NOUN_LOUDNESS` (enable, noun 3) so a front panel can voice the loudness
 curve, not just switch it. The wire commands accept intensity up to 200 %, but
 8.8 percent tops out at 127.99, so the front-panel span stops at 127 %.
@@ -3438,7 +3427,7 @@ minutes drives an amp's 12 V trigger on at the first signal and off only
 after sustained silence (spec section 8.2g).
 
 **Caps v9** (2026-08-09) adds target groups and macros (subsection below),
-commands `0x20`-`0x26`, and directory V18. `CsBinding`, `IrCommand` and
+their commands (now `CS.GROUP` and the `CS.MACRO*` family), and directory V18. `CsBinding`, `IrCommand` and
 `CsStatusPacket` are byte-identical to caps v8, so external clients doing
 exact-length readback are unaffected until they opt into the new commands;
 `CsCapsHeader` keeps its 40 bytes with the three reserved bytes after
@@ -3447,9 +3436,9 @@ pre-v9 host read them as zeros). One noun is appended, `CS_NOUN_MACRO` (52),
 taking `noun_count` to 53.
 
 **Caps v10** (2026-08-12) adds the I2C display component (subsection below),
-commands `0x27`-`0x2B`, IR remote group support, four nouns (53-56), and
+its commands (now the `CS.DISPLAY_*` family), IR remote group support, four nouns (53-56), and
 directory V19. `CsBinding`, `IrCommand`, `CsStatusPacket`, `CsExtStatusPacket`
-and `CsNounDesc` are byte-identical to caps v9, but `REQ_GET_CS_CAPS` is the
+and `CsNounDesc` are byte-identical to caps v9, but the caps GET (now `CS.CAPS`) is the
 one pre-existing GET whose **length changes**: adding `CS_TYPE_DISPLAY` (8)
 grows the caps type table by one 4-byte `CsTypeDesc` row, so the header
 response goes from 40 to 44 bytes. That is the self-describing mechanism
@@ -3458,7 +3447,7 @@ documented since caps v3 (hosts read `type_count` and locate
 `4 + 4 * type_count`), but external clients that do exact-length readback must
 be updated before this firmware ships to them. The appended nouns are
 `CS_NOUN_CPU_LOAD` (53, read-only percent from `global_status.cpu0_load`, the
-same source as `REQ_GET_STATUS` wValue 9, so an `IND_LEVEL` PWM LED becomes a
+same source as the CPU bytes of `MEAS.LEVELS`, so an `IND_LEVEL` PWM LED becomes a
 CPU meter), `CS_NOUN_DISPLAY_PAGE` (54), `CS_NOUN_DISPLAY_EDIT` (55) and
 `CS_NOUN_PAGE_VALUE` (56), taking `noun_count` to 57.
 
@@ -3481,17 +3470,17 @@ record stays 4 bytes and `CsDisplayFlash` 80, so again nothing migrates.
 
 **Caps v14** (2026-09-02) appends four nouns (57-60) for the subharmonic
 synthesizer with no structure or stored-config changes: `SUBHARM` (enable,
-`REQ_SET_SUBHARM`), `SUBHARM_LOW` and `SUBHARM_HIGH` (band levels, -30..+6 dB
-via the per-param `0x12`/`0x14` SETs) and `SUBHARM_BOOST` (0..+6 dB via
-`0x16`), taking `noun_count` to 61. Display labels are "Subharm", "Sub 24-36",
+`FX.SUBHARM_ENABLE`), `SUBHARM_LOW` and `SUBHARM_HIGH` (band levels, -30..+6 dB
+via `FX.SUBHARM_LOW` / `FX.SUBHARM_HIGH`) and `SUBHARM_BOOST` (0..+6 dB via
+`FX.SUBHARM_BOOST`), taking `noun_count` to 61. Display labels are "Subharm", "Sub 24-36",
 "Sub 36-56" and "LF Boost".
 
 **Caps v15** (2026-09-04) appends the rest of the subharmonic synthesizer's
 parameters as nouns 61-67, again with no structure or stored-config changes:
-`SUBHARM_TOP` (-30..+6 dB via `0x1B`), `SUBHARM_SELECT` (enum 0-2 via `0x1D`,
-labels "All" / "Percussive" / "Sustained"), `SUBHARM_DEPTH` (0..100 % via
-`0xA9`), `SUBHARM_HOLD` (ms via `0xAB`), `SUBHARM_CEILING` (-40..0 dB via
-`0xAD`), `SUBHARM_LINK` (bool via `0x2E`) and `SUBHARM_SOLO` (bool via `0x2C`),
+`SUBHARM_TOP` (-30..+6 dB), `SUBHARM_SELECT` (enum 0-2,
+labels "All" / "Percussive" / "Sustained"), `SUBHARM_DEPTH` (0..100 %),
+`SUBHARM_HOLD` (ms), `SUBHARM_CEILING` (-40..0 dB), `SUBHARM_LINK` (bool) and
+`SUBHARM_SOLO` (bool), each through the `FX.SUBHARM_*` command of the same name,
 taking `noun_count` to 68. The hold noun's caps range stops at 127 ms because
 `CsNounDesc.min_q`/`max_q` are signed 8.8 fixed point; the command still accepts
 the documented 50..400 ms, the same limitation `CS_LOUDNESS_INTENSITY_MAX`
@@ -3504,7 +3493,7 @@ Range change only; no nouns, structures or stored config change.
 
 **Caps v17** (2026-09-05) never shipped. It modelled auxiliary outputs as a
 separate table of eight pinless on/off + level values (`CsAuxCfg` /
-`CsAuxConfig`, commands `0x02`-`0x07`, directory V20) that an LED binding had
+`CsAuxConfig`, its own commands, directory V20) that an LED binding had
 to follow to reach a pin. No device or host ever ran it, and caps v18 replaces
 it outright.
 
@@ -3517,7 +3506,7 @@ already locates the v3 tail at `4 + 4*type_count` needs no change; one that
 hardcoded the header length does. The other additions are nouns `CS_NOUN_AUX`
 (68) and `CS_NOUN_AUX_LEVEL` (69), the target kind `CS_TARGET_AUX` (5, which
 addresses the binding slot holding the output), status code
-`CS_STATUS_INVALID_AUX` (0x26), commands `0x04`-`0x07`, and directory V21.
+`CS_STATUS_INVALID_AUX` (0x26), the aux commands (now `CS.AUX_STATE`, `CS.AUX_LEVEL` and `CS.AUX_ALL`), and directory V21.
 `noun_count` goes to 70. `CsBinding` byte 22 becomes `extras`, which must stay
 0 on every non-aux type, so pre-v18 bindings remain valid unchanged; no
 structure changes size and no other GET changes length, so external clients
@@ -3536,8 +3525,8 @@ label table. The authority for the effect is `tube_preamp_spec.md`.
 one unit, with no structure or stored-config changes. `noun_count` goes to 79.
 Every limiter noun targets an output (`CS_TARGET_OUTPUT_CH`). `LIMITER`,
 `LIMITER_THRESHOLD`, `LIMITER_RELEASE` and `LIMITER_LINK` dispatch through
-`REQ_LIMITER` (`0x81`) with `wValue = (output << 8) | index` and a float32
-payload, and `LIMITER_GR` is a read-only gain-reduction meter (0..30 dB). The
+`DYN.LIMITER_ENABLE`, `_THRESHOLD`, `_RELEASE` and `_LINK_GROUP` with the output
+in `wValue` and a float32 payload, and `LIMITER_GR` is a read-only gain-reduction meter (0..30 dB). The
 release spans 10..1000 ms, past the 127.99 ms ceiling of 8.8 `CS_UNIT_MS`, so it
 uses the new `CS_UNIT_MS_LOG` (6): plain integer ms in the value and range
 fields, stepping and pot mapping in octaves exactly like `CS_UNIT_HZ`, and a
@@ -3551,11 +3540,11 @@ before it can label or encode the release noun. Link-group ganging stays in
 **Caps v21** (2026-10-26) appends one noun, `CS_NOUN_PRESET_SAVE` (79), with no
 structure or stored-config changes. `noun_count` goes to 80. It is a `TRIGGER`
 that saves the live state to the active preset slot through the same deferred
-`REQ_PRESET_SAVE` (`0x90`) path a host save takes, so the flash write is
+`STORE.PRESET_SAVE` path a host save takes, so the flash write is
 bracketed by the full pipeline reset and slot alignment is preserved. It is the
 counterpart of `PRESET_RELOAD`. Device-global state keeps its own save paths:
-output config in independent mode needs `REQ_SAVE_OUTPUT_CONFIG`, and CS
-bindings need `REQ_CS_SAVE`. The display label is "Save". Only `CS_ACT_TRIGGER`
+output config in independent mode needs `STORE.OUTPUT_CONFIG_SAVE`, and CS
+bindings need `CS.SAVE`. The display label is "Save". Only `CS_ACT_TRIGGER`
 is legal, so button auto-repeat (INC/DEC only) cannot spam flash writes.
 A macro step after a save waits for `preset_save_pending` to clear, so later
 steps cannot leak into the snapshot.
@@ -3563,7 +3552,7 @@ steps cannot leak into the snapshot.
 **Caps v22** (2026-11-02) appends one noun, `CS_NOUN_OUTPUT_LATENCY` (80), with
 no structure or stored-config changes. `noun_count` goes to 81. It is an enum of
 seven values, value = `OutputLatencyId` - 1 (0.67, 1, 2, 3, 4, 6, 8 ms), and it
-dispatches the one-byte option ID through `REQ_OUTPUT_LATENCY` (`0x03`). The
+dispatches the one-byte option ID through `OUTPUT.LATENCY`. The
 main loop stores the request in the directory and restarts every output at the
 new target inside the full flash-write bracket, as a host SET does, so slot
 alignment is preserved. The noun is `CS_NDF_DEFERRED`, and rapid detents
@@ -3574,23 +3563,24 @@ make the engine step from the wrong base. The display label is "Latency" with
 values "0.67 ms" through "8 ms".
 
 ### File layout
+*Last updated: 2026-11-16 (vendor handlers in `vendor/vc_page_cs.c`; `CsCapsHeader` size)*
 
 - `control_surfaces.c` / `.h`: the engine and the wire/flash data model
   (`CsBinding` 24 B, `CsFlashConfig` 388 B, `IrCommand` 16 B, `CsIrConfig`
-  260 B, `CsCapsHeader` 40 B, `CsNounDesc` 12 B, `CsStatusPacket` 41 B, with a
+  260 B, `CsCapsHeader` 52 B, `CsNounDesc` 12 B, `CsStatusPacket` 41 B, with a
   `uint16_t active_mask` for the 16 slots and a `uint16_t ir_active_mask` for
   the 16 IR sub-slots).
   The type-capability table and the noun-descriptor table (`cs_noun_table`, in
   `control_surfaces_nouns.c`) are the single source of truth for the validity
-  model and are served verbatim by `REQ_GET_CS_CAPS`, so host UIs and firmware
+  model and are served verbatim by `CS.CAPS` and `CS.NOUN_DESC`, so host UIs and firmware
   can never disagree about which type/noun/action combinations are legal.
 - `control_surfaces_nouns.c`: the noun catalog. `cs_noun_table` is
   the descriptor table; `cs_noun_get` reads a noun's live value in natural units;
   `cs_noun_dispatch` applies a resolved absolute target through the shared vendor
   surface; `cs_noun_validate_target` bounds-checks a binding's target/index
   against the live channel/band layout. Filter nouns do a read-modify-write
-  through `REQ_SET_EQ_PARAM` behind an `eq_update_pending` BUSY guard;
-  `CS_NOUN_FILTER_BYPASS` uses `REQ_SET_BAND_BYPASS`. Like `control_surfaces.c`,
+  through `FILTER.BAND`, which answers `VC_ERR_BUSY` while an earlier band write
+  is still pending; `CS_NOUN_FILTER_BYPASS` uses `FILTER.BAND_BYPASS`. Like `control_surfaces.c`,
   this file executes from flash XIP on RP2040 (not in the RAM pull list).
 - `control_surfaces_ir.c` / `.h` (engine-internal): IR remote capture and
   decode for the `CS_TYPE_IR` component. A RAM-resident, lowest-priority
@@ -3612,12 +3602,14 @@ values "0.67 ms" through "8 ms".
   (`control_surfaces_apply_display_cfg` / `_page`,
   `control_surfaces_display_flash`, `control_surfaces_get_display_status`)
   are declared in `control_surfaces.h`.
-- `vendor_commands.c`: the `0x84`-`0x87`, `0x8B`-`0x8F`, `0x9D`/`0x9E`
-  handlers; `REQ_SET_CS_BINDING`, `REQ_SET_CS_NAME`, and `REQ_SET_CS_IR_CMD`
-  latch deferred SETs, `REQ_CS_SAVE`/`REQ_CS_REVERT` latch deferred flags,
-  `REQ_CS_IR_LEARN` arms/cancels/reads the learner, the GETs return live
-  accessor data.
-  `control_surfaces_owns_pin()` is wired into `pin_used_by_fixed_peripheral()`.
+- `vendor/vc_page_cs.c` with `vendor/pages/cs.def`: the `CS` page handlers.
+  `CS.BINDING`, `CS.SLOT_NAME`, `CS.IR_CMD`, `CS.GROUP`, `CS.MACRO_HEADER`,
+  `CS.MACRO_STEP`, `CS.DISPLAY_CONFIG` and `CS.DISPLAY_PAGE` latch single-deep
+  deferred SETs, `CS.SAVE` / `CS.REVERT` latch deferred flags,
+  `CS.IR_LEARN_ARM` / `_CANCEL` / `_STATUS` drive and read the learner, and the
+  GETs return live accessor data.
+  `control_surfaces_owns_pin()` is wired into `pin_used_by_fixed_peripheral()`
+  (`vendor/vc_pins.c`).
 - `flash_storage.c`: directory V11 persistence (`preset_get_cs_config`,
   `preset_get_cs_ir_config`, the combined single-write setter
   `preset_set_cs_all` (bindings + IR commands + names), `preset_get_cs_name`,
@@ -3702,24 +3694,25 @@ value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
 is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
-*Last updated: 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`). Previously 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
+*Last updated: 2026-11-16 (CS SETs named by `CS.*` command; length and busy refusals are `VcResult` codes). Previously 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`); 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
 
-`REQ_SET_CS_BINDING` requires the full 24-byte payload; a short payload records
-`CS_STATUS_INVALID_VALUE` and is dropped. It otherwise validates only the slot
-index and latches the binding (`cs_set_binding_pending`), mirroring
-`ctrl_set_uart_pending`. The main loop runs `control_surfaces_apply_binding`
+`CS.BINDING` SET requires the full 24-byte payload. Any other length is refused
+by the dispatcher with `VC_ERR_LENGTH` before the handler runs, so it never
+reaches `cs_last_status`. The handler latches the binding
+(`cs_set_binding_pending`), mirroring `ctrl_set_uart_pending`, and posts
+`CS_STATUS_PENDING`. The main loop runs `control_surfaces_apply_binding`
 (target validation + pin release/claim + runtime seed) and records
-`cs_last_status` / `cs_last_slot` (read via `REQ_GET_CS_STATUS`).
-`REQ_SET_CS_IR_CMD` follows the identical single-deep deferred shape for a
+`cs_last_status` / `cs_last_slot` (read via `CS.STATUS`).
+`CS.IR_CMD` follows the identical single-deep deferred shape for a
 16-byte `IrCommand` sub-slot, reported as `cs_last_slot = 0x80 | sub`.
 
 **Apply-live-only preview (v3):** no CS SET (binding, IR command, or slot
 name) persists to flash. A successful apply marks the live config dirty
-(`CsStatusPacket.dirty`, the former reserved byte). `REQ_CS_SAVE` (0x9D,
-deferred via `cs_save_pending`) persists the bindings, the IR table, and the
+(`CsStatusPacket.dirty`, the former reserved byte). `CS.SAVE` (a zero-length
+SET, deferred via `cs_save_pending`) persists the bindings, the IR table, and the
 slot names together in one directory write (`preset_set_cs_all`) inside the
 usual `prepare_flash_write_operation` brackets and clears dirty;
-`REQ_CS_REVERT` (0x9E, `cs_revert_pending`) re-applies the stored config from
+`CS.REVERT` (zero-length, `cs_revert_pending`) re-applies the stored config from
 the directory cache with no flash write. A reboot is an implicit revert.
 
 **Revert as a background job (2026-10-24).** The reload is one sequence of
@@ -3750,11 +3743,11 @@ that nothing interleaves with it or sees it half done:
   after it and discard it). Every public apply, aux write, macro fire and IR
   learn returns `CS_STATUS_BUSY` (or false), whatever path reaches it.
 - **Reads answer with the result.** A revert converges on the stored image for
-  any image this firmware saved, so `REQ_GET_CS_BINDING` and the IR command
+  any image this firmware saved, so `CS.BINDING` GETs and the IR command
   reads answer from it, and aux state and level reads answer with the value the
   slot comes back with (live while still up as the same type, else the stash
   or its stored boot fields). Groups, macros, display tables and names each
-  change within one unit, so their reads stay live. `REQ_GET_CS_STATUS` answers
+  change within one unit, so their reads stay live. `CS.STATUS` answers
   its per-slot fields (active masks, slot and IR command status) from a snapshot
   taken when the revert started, with the result and dirty fields live, so it is
   never torn either. No CS GET newly fails, which matters to clients that check
@@ -3771,7 +3764,7 @@ stored bindings with dirty cleared, a SET sent during a revert is applied after
 it, and binding reads polled across 20 reverts all equal the stored image. A
 revert lasts about a millisecond, shorter than one host read, so on a
 `DSPI_LOOP_PROF` build the test slows background jobs to one unit per 50 passes
-(`DIAG.LOOP_PROF_BG_PACE`, `REQ_GET_STATUS` 512+n before 2026-11-16) to land reads mid-revert (159 of them on 2026-10-24).
+(`DIAG.LOOP_PROF_BG_PACE`) to land reads mid-revert (159 of them on 2026-10-24).
 
 The per-slot work and the state derived from the whole binding set are split.
 `cs_apply_binding_slot()` releases, validates, claims and seeds one slot, and
@@ -3788,12 +3781,14 @@ status codes: `CS_STATUS_INVALID_TARGET` (0x17), `CS_STATUS_INVALID_EVENT`
 (0x18), `CS_STATUS_PWM_CONFLICT` (0x19), `CS_STATUS_EVENT_IN_USE` (0x1A, a
 GPIO+event pair already claimed by another button binding), and
 `CS_STATUS_BUSY` (0x1B, a SET arrived while a previous SET was still queued
-for the main-loop apply; the new SET is dropped and the host retries). v3
+for the main-loop apply; the new SET is dropped, also refused with
+`VC_ERR_BUSY`, and the host retries). v3
 adds `CS_STATUS_IR_IN_USE` (0x1D, a second IR component) and
 `CS_STATUS_NO_IR` (0x1E, learn armed without a live IR component);
 `CS_STATUS_FLASH_ERROR` (0x1C) now also reports a failed save.
 
-### IR remote component (`CS_TYPE_IR`, 0x8D-0x8F)
+### IR remote component (`CS_TYPE_IR`, `CS.IR_*`)
+*Last updated: 2026-11-16 (learn split into `CS.IR_LEARN_ARM`, `_CANCEL` and `_STATUS`)*
 
 One binding slot holds the receiver (one GPIO; `CS_FLAG_INVERT` = idle-low
 module; every other binding field must be 0; single instance). Its remote
@@ -3834,36 +3829,37 @@ Cases 1 and 2 lift the tap-rate cap entirely for the remotes they cover. The
 sized to outlast a dropped frame at the longest repeat period in use
 (Kaseikyo ~130 ms).
 
-Learn (`REQ_CS_IR_LEARN`: wValue 1
-arm / 0 cancel / 2 read result) captures the next decoded press within 10 s,
+Learn (`CS.IR_LEARN_ARM` and `CS.IR_LEARN_CANCEL`, zero-length SETs, and
+`CS.IR_LEARN_STATUS`, an 8-byte GET) captures the next decoded press within 10 s,
 suppressing dispatch while armed, and completion is pushed as notify event
 `NOTIFY_EVT_CS_IR_LEARN` (0x0A: state, protocol, code) as well as being
 readable synchronously. Commands may be stored before the component exists
 and activate when it comes up.
 
-### Per-slot names (0x8B/0x8C, V10)
+### Per-slot names (`CS.SLOT_NAME`, V10)
+*Last updated: 2026-11-16 (`CS.SLOT_NAME`)*
 
 Each of the 16 slots carries a device-persistent 32-byte NUL-terminated user
 label (`CS_NAME_LEN`, same convention as preset and channel names), set by the
-host app via `REQ_SET_CS_NAME` (0x8B) and read via `REQ_GET_CS_NAME` (0x8C),
+host app and read back via `CS.SLOT_NAME`,
 so external MCUs on UART/I2C and apps on other hosts can display what each
 control is for. Names are slot metadata independent of the binding: they
 survive binding changes and slot clears, and may be set before a binding
 exists. Like bindings and IR commands, the SET is an apply-live-only
 preview: deferred to the main loop via `cs_set_name_pending`, it updates the
 engine's live name table (`control_surfaces_apply_name`) and marks the config
-dirty, with no flash write; `REQ_CS_SAVE` persists the names alongside the
-bindings and IR commands, and `REQ_CS_REVERT` (or a reboot) restores the
+dirty, with no flash write; `CS.SAVE` persists the names alongside the
+bindings and IR commands, and `CS.REVERT` (or a reboot) restores the
 stored names. The SET reports through the shared `cs_last_status` /
 `cs_last_slot` channel: `CS_STATUS_PENDING` then `PIN_CONFIG_SUCCESS`;
-`CS_STATUS_BUSY` if a previous name SET is still queued. The GET returns the
+`CS_STATUS_BUSY` (and `VC_ERR_BUSY`) if a previous name SET is still queued. The GET returns the
 live name (`control_surfaces_get_name`; the unsaved preview while dirty). A
 payload of one NUL byte clears the name; names are not part of
 `WireBulkParams` and emit no notification.
 
-### Target groups and macros (caps v9, 0x20-0x26)
+### Target groups and macros (caps v9, `CS.GROUP` and `CS.MACRO*`)
 
-*Last updated: 2026-10-10 (macro steps wait for a queued preset load, factory reset or bulk apply to land)*
+*Last updated: 2026-11-16 (commands named by `CS.*`; macro header and step split). Previously 2026-10-10 (macro steps wait for a queued preset load, factory reset or bulk apply to land)*
 
 Wire detail (every struct, status code and command payload) is in
 `Documentation/Features/control_surfaces_groups_macros_spec.md`; this
@@ -3926,8 +3922,8 @@ elapses before the step runs. Macros are fired through the appended noun
 `CS_NOUN_MACRO` (52), an enum of `max_macros` positions that accepts `SET`
 (fire macro `value`) and `IND_EQUALS` (lit while that macro runs), so any
 button gesture or IR command fires one with no change to `CsBinding` or
-`IrCommand`; `REQ_CS_MACRO_FIRE` gives hosts and external MCUs the same
-trigger. There is a single sequencer, so one macro runs at a time: a new fire
+`IrCommand`; `CS.MACRO_FIRE` (a zero-length SET addressed by macro) gives hosts
+and external MCUs the same trigger, and `CS.MACRO_CANCEL` stops the running macro. There is a single sequencer, so one macro runs at a time: a new fire
 cancels the running one at its current step boundary (remaining steps
 dropped, the in-flight step not rolled back) and starts the new one. Steps
 are re-validated at fire time and a step that no longer validates (its group
@@ -3952,24 +3948,25 @@ load. It also holds a step at its fire point while one of the flags is set,
 which covers a load queued mid-macro by the host or another control. The fade
 is time-capped, so a held macro always resumes.
 
-**Control plumbing.** `REQ_SET_CS_GROUP`, `REQ_SET_CS_MACRO` and
-`REQ_SET_CS_MACRO_STEP` are single-deep deferred SETs in the established shape
+**Control plumbing.** `CS.GROUP`, `CS.MACRO_HEADER` and
+`CS.MACRO_STEP` SETs are single-deep deferred SETs in the established shape
 (`cs_set_group_pending` / `cs_set_macro_hdr_pending` / `cs_set_macro_step_pending`
 consumed by the main loop into `control_surfaces_apply_group` /
 `_apply_macro_header` / `_apply_macro_step`), reported through the shared
 `cs_last_status` / `cs_last_slot` channel with tags `0x40 | group` and
 `0x60 | macro`. They are apply-live-only previews like every other CS SET:
-`REQ_CS_SAVE` persists groups and macros alongside the bindings, names and IR
-table in the one directory write, and `REQ_CS_REVERT` (or a reboot) restores
-the stored set. `REQ_GET_CS_EXT_STATUS` returns the 24-byte
+`CS.SAVE` persists groups and macros alongside the bindings, names and IR
+table in the one directory write, and `CS.REVERT` (or a reboot) restores
+the stored set. `CS.MACRO` returns a whole 132-byte macro, and the header and
+step GETs return exactly what their SETs take. `CS.EXT_STATUS` returns the 24-byte
 `CsExtStatusPacket` (limits, running macro and step, per-group and per-macro
 validity). New status codes are `CS_STATUS_INVALID_GROUP` (0x1F),
 `CS_STATUS_INVALID_MACRO` (0x20) and `CS_STATUS_INVALID_STEP` (0x21). At boot
 groups and macros load before bindings, since bindings validate against
 groups.
 
-### I2C display component (caps v10-v13, 0x27-0x2B)
-*Last updated: 2026-09-05 (CS_DPAGE_BAR added to the directory sanitize mask, so saved level-bar pages survive a boot; 2026-08-24: alignment-aware edit marker placement; caps v13: level bars; caps v11: per-line alignment, edit markers)*
+### I2C display component (caps v10-v13, `CS.DISPLAY_*`)
+*Last updated: 2026-11-16 (control plumbing on `CS.DISPLAY_*`; the caps bytes moved to `CS.DISPLAY_CAPS`). Previously 2026-09-05 (CS_DPAGE_BAR added to the directory sanitize mask, so saved level-bar pages survive a boot; 2026-08-24: alignment-aware edit marker placement; caps v13: level bars; caps v11: per-line alignment, edit markers)*
 
 Wire detail (every struct, status code, model table and command payload) is in
 `Documentation/Features/control_surfaces_display_spec.md`; this subsection
@@ -4102,25 +4099,25 @@ new op for that press. The CS tick pumps BUSY members, ages sessions and
 frees idle contexts back to the pool; receiver teardown restores any engaged
 grouped momentary first.
 
-**Control plumbing.** `REQ_SET_CS_DISPLAY_CFG` (0x27) and
-`REQ_SET_CS_DISPLAY_PAGE` (0x29) are single-deep deferred SETs in the
+**Control plumbing.** `CS.DISPLAY_CONFIG` and `CS.DISPLAY_PAGE` SETs are
+single-deep deferred SETs in the
 established shape (`cs_set_disp_cfg_pending` / `cs_set_disp_page_pending`
 consumed by the main loop into `control_surfaces_apply_display_cfg` /
 `_apply_display_page`), reported through the shared `cs_last_status` /
 `cs_last_slot` channel with tag `0x50` bare for the config and `0x50 | page`
-for a page. They are apply-live-only previews: `REQ_CS_SAVE` persists the
+for a page. They are apply-live-only previews: `CS.SAVE` persists the
 80-byte blob alongside bindings, names, IR commands, groups and macros in the
-one directory write, and `REQ_CS_REVERT` (or a reboot) restores the stored
-set. `REQ_GET_CS_DISPLAY_CFG` (0x28) prefixes the live config with
-`{max_pages, model_count, reserved[2]}` so a host learns the limits without a
-caps change, `REQ_GET_CS_DISPLAY_PAGE` (0x2A) returns one 4-byte record, and
-`REQ_GET_CS_DISPLAY_STATUS` (0x2B) returns the 8-byte `CsDisplayStatus`
+one directory write, and `CS.REVERT` (or a reboot) restores the stored
+set. `CS.DISPLAY_CONFIG` reads back the 12-byte live config, the same bytes
+its SET takes. `CS.DISPLAY_CAPS` returns `{max_pages, model_count, reserved[2]}`
+so a host learns the limits without a caps change, `CS.DISPLAY_PAGE` returns
+one 4-byte record, and `CS.DISPLAY_STATUS` returns the 8-byte `CsDisplayStatus`
 (init state, shown page, overlay/edit flags, live model, cumulative NAK
 count). At boot the display blob loads before the bindings, so a stored
 display binding's attach sees its stored pages and does not re-seed.
 
-### Auxiliary outputs (caps v18, 0x04-0x07)
-*Last updated: 2026-09-07 (reworked as binding-slot components: CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, 8.8 level, commands 0x04-0x07, directory V21; caps v17's pinless table never shipped)*
+### Auxiliary outputs (caps v18, `CS.AUX_*`)
+*Last updated: 2026-11-16 (runtime SETs on `CS.AUX_STATE` / `CS.AUX_LEVEL`, refusals as `VcResult` codes, `CS.AUX_ALL`). Previously 2026-09-07 (reworked as binding-slot components: CS_TYPE_AUX_OUT 9 / CS_TYPE_AUX_PWM 10, nouns 68-69 target the slot, 8.8 level, commands 0x04-0x07, directory V21; caps v17's pinless table never shipped)*
 
 Wire detail (every field, status code and command payload) is in
 `Documentation/Features/control_surfaces_aux_spec.md`; this subsection covers
@@ -4191,34 +4188,35 @@ aux slots applied first, so a control that targets one validates whatever the
 slot order. The boot flag comes from `CS_AUX_X_BOOT_ON` and the boot level from
 `value`, with the delay filter starting in agreement with the pin rather than
 timing the boot value. `control_surfaces_aux_prepare_save()` (called from the
-`REQ_CS_SAVE` handler in `main.c` before the config is copied out) folds each
+`CS.SAVE` handler in `main.c` before the config is copied out) folds each
 UP `CS_AUX_X_BOOT_SAVED` slot's live flag and level back into
 `CS_AUX_X_BOOT_ON` and `value`. Nothing writes flash on a toggle and nothing
 sets the dirty flag, and there is deliberately no "remember on every change"
 mode, because a flash write freezes the audio clocks for roughly 44 ms.
-`REQ_CS_REVERT` stashes the live flag and level of every UP aux slot in
+`CS.REVERT` stashes the live flag and level of every UP aux slot in
 `s_aux_carry[]` and hands each back to the slot that reloads with the same
 type, so a revert never snaps a relay to its boot value; `cs_seed_runtime()`
 consumes the carry. A host binding SET that keeps the same type (rename, delay,
 ceiling, boot-field edit) carries the value the same way. Changing the type
 resets the slot to its boot value.
 
-**Runtime SETs and notification.** `REQ_SET_CS_AUX_STATE` (0x04, 1 byte) and
-`REQ_SET_CS_AUX_LEVEL` (0x06, 2 bytes 8.8 LE, clamped to 25600) apply in the
+**Runtime SETs and notification.** `CS.AUX_STATE` (1 byte) and
+`CS.AUX_LEVEL` (2 bytes 8.8 LE, clamped to 25600) apply in the
 handler with no flash, no dirty flag and no deferral, from USB, UART, I2C or
 the CS engine, with `wValue` = the binding slot. A slot that is not an aux
-output that is UP is rejected with `CS_STATUS_INVALID_AUX` and `cs_last_slot` = the
-plain slot number (UART/I2C return `CTRL_DISPATCH_ERROR`; USB acknowledges the
-OUT stage as it does for every OUT command, so the host reads `REQ_GET_CS_STATUS`).
-The old `0x70 | aux` tag is gone, and `REQ_GET_CS_STATUS` /
-`slot_status` report an aux slot like any other binding slot. A short payload
-is rejected with `CS_STATUS_INVALID_VALUE`. Each changing write pushes
+output that is UP is refused with `VC_ERR_STATE` (a STALL on USB, the status
+byte on UART and I2C) and also posts `CS_STATUS_INVALID_AUX` with `cs_last_slot`
+= the plain slot number. GETs of such a slot are `VC_ERR_STATE` too. While a
+revert runs the SETs answer `VC_ERR_BUSY` without touching `cs_last_status`.
+The old `0x70 | aux` tag is gone, and `CS.STATUS` /
+`slot_status` report an aux slot like any other binding slot. A payload of the
+wrong length is refused by the dispatcher with `VC_ERR_LENGTH`. Each changing write pushes
 `NOTIFY_EVT_CS_AUX` (0x0C), now a 9-byte packet
 `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` carrying both
 values and the dispatch source (`PARAM_SRC_GPIO` for a bound control,
 `HOST_SET` / `UART` / `I2C` for the transports), which is how the Console
 learns a panel button moved an aux output. Unchanged writes are silent.
-`REQ_GET_CS_AUX_STATE` with `wValue = 0xFFFF` returns 48 bytes (`state[16]`
+`CS.AUX_ALL` returns 48 bytes (`state[16]`
 then sixteen little-endian 8.8 `level_q8`, zero on slots that are not UP aux
 outputs) for a host's initial sync.
 
@@ -4266,333 +4264,301 @@ lands on a hot path and the audio path is untouched.
 ---
 
 ## Vendor Protocol
-*Last updated: 2026-11-16 (Phase 4 close: `tools/windex_page_test.py` replaces the echo test). Previously 2026-11-16 (Phase 4 follow-up: finite-value check on every float SET, `save_params_pending` and `flash_save_params()` removed); 2026-11-16 (Phase 4 flip: 1.1.6 opcode space deleted, page 0 refused, firmware 1.1.7 beta 1); 2026-11-16 (Phase 3: loop profiler on the DIAG page); 2026-11-16 (Phase 2: all pages implemented); 2026-11-16 (shared page helpers in `vc_core.h`, Phase 1 dispatcher core); 2026-11-15.*
+*Last updated: 2026-11-16 (phase 5: rewritten as a description of the subsystem as built; development history stays in the plan). Previously 2026-11-16 (Phase 4 close: `tools/windex_page_test.py` replaces the echo test); 2026-11-16 (Phase 4 follow-up: finite-value check on every float SET, `save_params_pending` and `flash_save_params()` removed); 2026-11-16 (Phase 4 flip: 1.1.6 opcode space deleted, page 0 refused, firmware 1.1.7 beta 1); 2026-11-16 (Phase 3: loop profiler on the DIAG page); 2026-11-16 (Phase 2: all pages implemented); 2026-11-16 (shared page helpers in `vc_core.h`, Phase 1 dispatcher core); 2026-11-15.*
 
-From firmware 1.1.7 beta 1 every vendor command is addressed by a page (the `wIndex` high byte) and a command number (`bRequest`), on USB, UART, I2C and for internal callers alike. The whole implementation is `firmware/DSPi/vendor/`. The design, the old-to-new mapping and the phase plan are in `Documentation/Features/vendor_command_overhaul_plan.md`, and the command list is `Documentation/protocol/dspi_commands.json`, generated from the `.def` files. The "Vendor Command Reference" below describes the 1.1.6 opcode space, which this firmware no longer answers.
+Every vendor command is addressed by a page and a command number. The page is the high byte of `wIndex` and the command number is `bRequest`. The same addressing holds on USB, UART, I2C and for internal callers. `wValue` only names which instance (channel, band, slot, byte offset), and every value travels in the payload. One table per page says what each command accepts, and one dispatcher checks every request against it before a handler runs. The protocol is version 1.0 (`VC_PROTOCOL_MAJOR` / `VC_PROTOCOL_MINOR` in `vc_core.h`). Firmware 1.1.7 beta 1 is the first release that speaks it and speaks nothing else. How the protocol was built, the old-to-new mapping and the reasons for each rule are in `Documentation/Features/vendor_command_overhaul_plan.md`. The command reference is `Documentation/commands.md` (see "Vendor Command Reference").
 
-**Page 0 answers nothing.** No page 0 table exists, so every page 0 request fails the lookup with `VC_ERR_UNKNOWN` and is recorded in `SYS.LAST_RESULT` for its transport, like any other unknown command. On USB it STALLs at SETUP, so a SET never gets to its data stage. UART and I2C answer status 0x10, and `vc_set()` / `vc_get()` return the same code. A 1.1.6 host sends `wIndex` 0 or 2, so it reaches page 0 for every request and cannot change anything. The only request answered without a page lookup is the Microsoft OS 2.0 descriptor fetch (IN, `bRequest` 0x01, `wIndex` 7), which is not a DSPi command; see "Microsoft OS 2.0 Descriptors". The old `GET_PLATFORM` and `ENTER_BOOTLOADER` are gone with the rest, so a 1.1.6 host can neither read the version nor reboot a 1.1.7 device into the bootloader (BOOTSEL is the way back).
+### Files and responsibilities
+*Last updated: 2026-11-16*
 
-**wIndex page test.** The `DSPI_WINDEX_ECHO` build option and its request 0x4F were deleted at the flip. `tools/windex_page_test.py` checks on 1.1.7 that a host delivers the page byte intact: it sends refused requests to several pages and reads them back through `SYS.LAST_RESULT`. Procedure in `Documentation/Features/windex_page_test.md`.
+All of it is in `firmware/DSPi/vendor/`. Tables, dispatcher and handlers are cold code and run from flash.
 
-**Golden capture.** `tools/dspi_test/golden/` holds a byte-for-byte capture of every vendor read on firmware 1.1.6, before and after a scripted set of writes, plus a mask of fields that legitimately vary. Later phases replay it against the rewritten handlers.
+| File | Responsibility |
+|---|---|
+| `vc_ctrl.h` | What transports and internal callers need: `CtrlSource`, `VcResult`, the `CTRL_STATUS_*` wire codes, `ctrl_dispatch_get` / `ctrl_dispatch_set`, the bulk lock API, `vendor_is_bulk_set()`, the deferred reboot flags |
+| `vc_core.h` | Table types (`VcCmd`, `VcPage`, `VcCtx`), address kinds, `VC_F_*` flags, `vc_dispatch()`, `vc_set()` / `vc_get()`, payload and reply helpers, the helpers more than one page uses |
+| `vc_core.c` | Page directory, lookup, address check, `vc_check()` / `vc_run()` / `vc_record()`, `LAST_RESULT` storage, the 256-byte reply buffer, the USB in-flight guard, the UART and I2C entry points |
+| `vc_usb.c` | `tud_vendor_control_xfer_cb` and the EP0 stage logic, the MS OS 2.0 intercept, the 64-byte receive buffer `vc_usb_rx`, the reboot after the status stage |
+| `vc_bulk.c` | The `bulk_param_buf` lock, `VC_F_BULK` routing on every transport, `STORE.ALL_PARAMS` over UART and I2C, the USB chunk sessions, the bulk header check |
+| `vc_internal.h` | State shared by the core files only. Not for page files or transports |
+| `vc_ids.h` | `VC_PAGE_<MNEM>` page numbers and `VC_<MNEM>_<NAME>` command IDs, built from the `.def` files, includable anywhere. `VC_PAGE_LIST` is the list of pages |
+| `vc_page_table.inc` | Expands one `.def` into handler prototypes, compile-time checks, the `const VcCmd` table and the exported `VcPage` |
+| `vc_pins.c` / `vc_pins.h` | Pin validation helpers (`pin_used_by_fixed_peripheral*`, `i2s_rx_pair_pin_taken`, `check_i2s_rx_pin`, `default_output_pins`, `PIN_VALID_FOR`, `ctrl_iface_check_pin()`) |
+| `pages/<mnem>.def` and `vc_page_<mnem>.c` | One pair per page, the command table and its handlers |
 
-**Paged dispatcher.** Built in Phase 1 beside the 1.1.6 switches, which the Phase 4 flip deleted.
+The generator `scripts/gen_vendor_protocol.py` reads the same `.def` files and writes `Documentation/protocol/dspi_commands.json` and the command tables in `Documentation/commands.md`.
 
-- **Page derivation.** `vc_page_of(bmRequestType, wIndex)` in `vc_core.h` is the only place a page is computed. `tud_vendor_control_xfer_cb` (`vc_usb.c`) uses it at every stage, after the bulk-lock cleanup and the MS OS 2.0 intercept. `ctrl_dispatch_get` / `ctrl_dispatch_set` (UART, I2C) and `vc_set` / `vc_get` (Control Surfaces) use it too.
-- **Tables.** Each page is `pages/<mnem>.def` (grammar in the plan, section 8.3) plus `vc_page_<mnem>.c`. The page file defines its handlers and ends with `#define VC_PAGE_DEF "pages/<mnem>.def"` and `#include "vc_page_table.inc"`. The include expands the `.def` into handler prototypes, compile-time checks, a `const VcCmd` array and the exported `const VcPage vc_page_<MNEM>`. A duplicate command number, a number that is also `VC_RESERVED`, a number below 0x10, or an inconsistent length or handler field fails the build. `vc_ids.h` builds the `VC_PAGE_<MNEM>` and `VC_<MNEM>_<NAME>` constants from the same files and can be included anywhere; a duplicate name fails there. `VC_PAGE_LIST` in `vc_ids.h` and the per-page include blocks below it are the only central lists. A page with no commands compiles and is not reported by `SYS.PAGE_LIST`. Tables and dispatcher are cold code in flash.
-- **Dispatch.** `vc_dispatch()` runs the plan's checks in order (lookup, direction, transport flags, SET length, address range for the `VcAddrKind`), sets the notify source tag around the handler, and records `{id, direction, result, wValue}` in a per-`CtrlSource` `LAST_RESULT` slot. A read of `SYS.LAST_RESULT` does not overwrite its own slot. Page 0 requests are recorded as `VC_ERR_UNKNOWN`. GET handlers write into one static 256-byte reply buffer, pre-zeroed to the fixed length. A fixed-length GET's length comes from the table, and a variable one sets `out_len`. The `COMMAND_INFO` encodings of the flags (`VC_F_USB_ONLY` 0x01, `SET_USB_ONLY` 0x02, `BULK` 0x04, `DEFERRED` 0x08, `FLASH` 0x10, `RESTART` 0x20, `KEEPALIVE` 0x40) and of the address kinds (the contract's token order from `NONE` = 0 to `INDEX` = 24) are fixed.
-- **USB front end (`vc_usb.c`).** `tud_vendor_control_xfer_cb` overrides TinyUSB's weak callback, which receives every vendor-type control request whatever its recipient. SETUP runs the checks, so a bad request STALLs before any data stage. A GET runs at SETUP and is clamped to `wLength`. A zero-length SET runs at SETUP and then sends the status stage or STALLs. A SET with data lands in the 64-byte `vc_usb_rx` buffer and runs at the DATA stage, where a failure returns false and STALLs the status stage. The existing USB-in-flight guard now also covers a paged GET longer than one EP0 packet, because TinyUSB reads later packets from the reply buffer, so UART, I2C and Control Surfaces answer BUSY in that window for every page.
-- **Bulk.** A `VC_F_BULK` command uses `bulk_param_buf` under the existing lock. Over USB the lock is taken at SETUP and released at the status ACK, on failure, or by the SETUP-stage cleanup. UART and I2C stream `STORE.ALL_PARAMS` only; every other bulk command is `VC_ERR_BLOCKED` off USB. The lock, the bulk routing and the USB chunk sessions live in `vc_bulk.c`. The SETUP cleanup keeps a chunk session open only for the next `STORE.ALL_PARAMS_CHUNK` request in the same direction (`vc_bulk_chunk_continues()`).
-- **SYS page (0x01).** `PROTOCOL_INFO`, `PAGE_LIST`, `PAGE_COMMANDS`, `COMMAND_INFO` and `LAST_RESULT` read the tables. `PLATFORM`, `SERIAL`, `BUILD_INFO` and `CORE1_MODE` return the same bytes as the 1.1.6 opcodes 0x7F, 0x7E, 0x80 and 0x7A did, from the same sources. `SYSTEM_STATUS` reads the core voltage and die temperature through `vreg_voltage_to_mv()` and `read_temperature_cdeg()`, static in `vc_page_sys.c`. `ENTER_BOOTLOADER` (0x30) is a zero-length SET. Over USB it reboots at the ACK of its own status stage, and a pending reboot is cleared by the next SETUP. Over UART and I2C the transport reboots once its response frame is out (`ctrl_reboot_request()`).
-- **Pin helpers** live in `vendor/vc_pins.c` and `vc_pins.h`; `control_surfaces.c` includes `vc_pins.h` for `ctrl_iface_check_pin()`. The formerly static helpers (`pin_used_by_fixed_peripheral*`, `i2s_rx_pair_pin_taken`, `check_i2s_rx_pin`, `default_output_pins`, `PIN_VALID_FOR`) are now exported for the page files.
-- **Shared page helpers.** `vc_core.h` carries what more than one page needs. `vc_param_src()` (defined in `vc_core.c`) maps a `CtrlSource` to the `ParamSource` notification tag; a handler that tags a deferred notification itself (CS aux, RTA config, device and source names) calls it so the tag matches the dispatcher's own bracket. `vc_from_pin_status()` maps `PIN_CONFIG_*` onto `VcResult` (SUCCESS to `VC_OK`, INVALID_PIN to `VC_ERR_PIN_INVALID`, PIN_IN_USE to `VC_ERR_PIN_IN_USE`, INVALID_OUTPUT to `VC_ERR_ADDRESS`, OUTPUT_ACTIVE to `VC_ERR_STATE`, anything else to `VC_ERR_VALUE`) for the INPUT, OUTPUT and CLOCK pin SETs. `vc_core.h` takes the `PIN_CONFIG_*` codes from `config.h`. `vc_clampf()` is the float range clamp of the DYN and FX setters; NaN passes through it, so every caller checks `isfinite()` first.
-- **Pages (Phase 2, 2026-11-16).** All 13 pages are implemented in `vendor/vc_page_<mnem>.c`: SYS 0x01, STORE 0x02, INPUT 0x03, OUTPUT 0x04, ROUTE 0x05, FILTER 0x06, DYN 0x07, FX 0x08, MEAS 0x09, CS 0x0A, XPORT 0x0B, CLOCK 0x0C and DIAG 0xF0 (bench builds only). The command list is `Documentation/protocol/dspi_commands.json`, generated from the `.def` files. Each handler uses the same globals, setters, pending flags and main-loop paths as the 1.1.6 case body it replaced, so deferred work (flash writes, pipeline resets, output restarts, pin moves) is sequenced exactly as before and output slot alignment is unaffected.
-  - **Actions.** Every former write-as-read is a SET. The old status byte is a `VcResult`. `PIN_CONFIG_*` maps through `vc_from_pin_status()`.
-  - **STORE bulk.** `ALL_PARAMS` and `ALL_PARAMS_CHUNK` are `VC_F_BULK`. The chunk-session state lives in `vc_bulk.c`. `vc_bulk_chunk_continues()` drives the SETUP-stage cleanup, which closes any session the request does not continue and drops a USB-held lock. A bulk SET validates the header with `vc_bulk_params_check()` and sets `bulk_params_pending` at the DATA stage.
-  - **SYS telemetry.** `SYSTEM_STATUS`, `USB_AUDIO_STATUS`, `PIPELINE_STATS`, `PDM_STATS` and `SPDIF_TX_STATS` are fixed structs that replace the scalar `REQ_GET_STATUS` selectors. `MEAS.LEVELS` is the old selector 9 packet and `INPUT.STATUS` holds the input-side selectors.
-  - **FILTER.** `BAND` and `BAND_BYPASS` stage through `pending_packet`, `pending_eq_qp_x512` and `eq_update_pending`. A write while one is pending returns `VC_ERR_BUSY`.
-  - **DYN, FX.** Limiter, tube and upmixer parameters are one command each, served by one get and one set handler per family through the table `ARG`. The upmixer and both ADAT blocks are inside `#if PICO_RP2350`.
-  - **MEAS.** `RTA_BANDS`, `RTA_BINS` and `RTA_BANDS_ALL` are keepalives. `RTA_BANDS_ALL` runs in the bulk buffer, and a static assert in `vc_page_meas.c` keeps every tracked channel's frame inside it. `RTA_BINS` is capped at the 256-byte reply buffer.
-  - **CS.** Preview SETs stage into the existing `cs_set_*_pending` handoffs and report through `cs_last_status`. Address and length refusals happen in the core and no longer touch the status packet.
-  - **CLOCK.** `mck_encode()` / `mck_decode()` (0 = 128x, 1 = 256x), static in `vc_page_clock.c`, are the wire and bulk encoding of the MCK multiplier.
-  - **XPORT.** Config SETs are USB only. Scalar fields and GPIO range are checked before anything is queued. Ownership checks stay in the deferred apply.
-- **Loop profiler on DIAG (Phase 3, 2026-11-16).** A `DSPI_LOOP_PROF` build adds five DIAG commands, absent (`VC_ERR_UNKNOWN`) otherwise. Every value is the worst time in µs since boot or the last reset, and no read clears it.
+### Request flow
+*Last updated: 2026-11-16*
 
-  | Cmd | Name | Dir | Address | Payload |
-  |---|---|---|---|---|
-  | 0x30 | `LOOP_PROF_SECTION` | G | section index in `LOOP_PROF_SECTION_LIST` (`INDEX`, checked by the handler) | u32 µs |
-  | 0x31 | `LOOP_PROF_JOB` | G | `BgJobId` in `BG_JOB_LIST` (`INDEX`) | u32 µs |
-  | 0x32 | `LOOP_PROF_COMMAND` | G | command ID `(page << 8) \| cmd` (`PAGE_CMD`); a command not built is `VC_ERR_ADDRESS` | u32 µs, GET and SET together |
-  | 0x33 | `LOOP_PROF_BG_PACE` | G, S | none | u16 n: above 1, each background step does one unit, on one pass in n; a SET of 0 stores 1 |
-  | 0x34 | `LOOP_PROF_RESET` | S (zero-length) | none | zeroes every section, job and command value |
+**USB.** `tud_vendor_control_xfer_cb` overrides TinyUSB's weak callback, which receives every vendor-type control request whatever its recipient. It runs in `tud_task()` on the main loop. The page comes from `vc_page_of()`, the only place a page is derived on any transport.
 
-  `vc_run()` times every paged handler, so every transport and internal caller is covered, and passes the ID to `loop_prof_command()`. The per-command storage is one `uint32_t` per command built into the image, indexed by `vc_cmd_index()`: the command's position across the page directory, page by page in table order. The host never sees that index. `loop_prof.c` sizes the array by expanding every `.def` file at compile time, and a page missing from its list fails the build. The array is 744 B on RP2040 and 836 B on RP2350 (186 and 209 commands), against the 1,024 B per-opcode array it replaced. `tools/latency_bench/loop_prof.py` reads it (its CLI resets, waits and prints the window's worst times) and `soak.py` resets before each measured window instead of relying on clear-on-read.
-- **Non-finite floats (2026-11-16).** A float SET handler refuses a NaN or infinite field with `VC_ERR_VALUE` before it touches any state (`if (!isfinite(v)) return VC_ERR_VALUE;`). That covers ROUTE (matrix gain, output gain, output and channel delay, preamp, master and user volume), FILTER.BAND (freq, Q, gain), the leveller and loudness floats on DYN, and the crossfeed, subharmonic, psychoacoustic bass and upmixer floats on FX. Finite out-of-range values are still clamped as before. `DYN.LIMITER` and `FX.TUBE` refuse NaN on the page and rely on the subsystem setter clamping infinity to the range end. `MEAS.SIGGEN_CONFIG` is sanitised by `siggen_stage_config()`. `STORE.ALL_PARAMS` applies floats as the bulk loader always has, without a finite check except on master volume.
-- **Removed after the flip (2026-11-16).** `save_params_pending`, its main-loop branch and `flash_save_params()` are gone. Only the 1.1.6 `SAVE_PARAMS` opcode ever set the flag, and nothing else called the function. `STORE.PRESET_SAVE` is the save path.
+1. **SETUP.** The callback first closes any chunk session the request does not continue and drops a USB-held bulk lock, then clears the in-flight guard. Next comes the MS OS 2.0 intercept (see "Page 0" below). Everything else goes to `vc_check()`, so a bad page, command, direction, length or address STALLs before any data stage and is recorded in `SYS.LAST_RESULT`. A `VC_F_BULK` command takes the bulk lock here.
+2. **GET.** The handler runs at SETUP into the reply buffer (or the bulk buffer window), and the reply is clamped to `wLength`. A non-bulk reply longer than one 64-byte EP0 packet raises the in-flight guard, because TinyUSB reads the later packets from the buffer after the callback returns.
+3. **Zero-length SET.** The handler runs at SETUP, then the status stage is sent, or the request STALLs on failure. This is what makes actions with no value possible.
+4. **SET with data.** The payload lands in `vc_usb_rx` (64 bytes) or the bulk window, with the in-flight guard raised. At the DATA stage the checks run again and the handler runs. A failure returns false, which STALLs the status stage.
+5. **ACK.** The guard is cleared, a bulk command releases the lock (unless its chunk session continues), and a pending `SYS.ENTER_BOOTLOADER` reboots.
+
+**UART and I2C.** Both frames carry `bRequest`, `wValue`, `wIndex`, `wLength` and an explicit GET or SET type. The low byte of `wIndex` is ignored. `ctrl_dispatch_get()` and `ctrl_dispatch_set()` run from the main loop only. They answer `CTRL_STATUS_BUSY` while a USB transfer holds the shared buffers, send `STORE.ALL_PARAMS` to the bulk path and everything else to `vc_dispatch()`, and return the wire status byte. Framing, the status byte rule and the bulk streaming are in "External Control Interfaces".
+
+**Internal callers.** `vc_set(src, id, addr, payload, len)` and `vc_get()` take a command ID (`VC_<MNEM>_<NAME>`, which is `(page << 8) | cmd`) and run the same checks and handlers. The Control Surfaces engine is the only user, with `CTRL_SOURCE_GPIO` (see "Dispatcher reuse via `CTRL_SOURCE_GPIO`"). Internal callers have no bulk buffer, so a `VC_F_BULK` command answers `VC_ERR_BLOCKED`.
+
+A GET reply in the shared buffer stays valid only until the next dispatch from any transport. Off USB, `vc_dispatch()` answers `VC_ERR_BUSY` while the USB in-flight guard is up. The guard goes stale after 100 ms in case a host abandons a transfer.
+
+### Table and `.def` grammar
+*Last updated: 2026-11-16 (meaning of `VC_F_RESTART` and the flag audit)*
+
+```
+VC_PAGE(MNEM, 0xPP, REV, "one line description")
+VC_CMD(0xCC, NAME, get_fn, set_fn, ADDR_KIND, GET_LEN, SET_MIN, SET_MAX, FLAGS, ARG, "one line doc")
+VC_RESERVED(0xCC, "note")
+```
+
+- `get_fn` or `set_fn` is `VC_NONE` when the command has no handler for that direction.
+- `GET_LEN` is a fixed byte count, `VC_LEN_VAR` for a variable reply, or 0 when there is no GET. A fixed reply is zeroed before the handler runs and its length comes from the table. A variable one sets `out_len`.
+- `SET_MIN` / `SET_MAX` bound a SET payload, at most 64 bytes. A `VC_F_BULK` command ignores them and takes 1 to `WIRE_BULK_BUF_SIZE` bytes.
+- `ADDR_KIND` is a bare token, one of `NONE`, `CHANNEL`, `INPUT`, `OUTPUT`, `OUTPUT_ALL` (also 0xFF on a SET, meaning all), `SLOT`, `PIN_OUTPUT`, `PRESET`, `CH_BAND`, `IN_OUT`, `SOURCE`, `SPDIF_RX`, `I2S_PAIR`, `ROLE`, the `CS_*` kinds, `PAGE`, `PAGE_CMD`, `OFFSET` and `INDEX`. The dispatcher range-checks each against the platform's counts. `CH_BAND` checks only the channel, and `PAGE_CMD`, `OFFSET` and `INDEX` are checked by the handler. Two-level addresses pack as `(major << 8) | minor`.
+- `ARG` is a per-entry constant, so one handler pair can serve a family (the limiter, tube and upmixer parameters use it).
+- `VC_RESERVED` holds a number that must not be used, such as a retired command.
+- Platform and build limits are whole-line `#if PICO_RP2350` or `#ifdef DSPI_X` blocks around entries, with no `#else` and no nesting. A command outside its build does not exist.
+
+The build fails on a duplicate command number, a number that is also reserved, a number below 0x10, a `GET_LEN` that disagrees with the GET handler, a fixed reply above 256 bytes without `VC_F_BULK`, out-of-order or oversized SET bounds, SET bounds on a command with no SET, an `ARG` outside 0 to 255, more than 240 commands in a page, a duplicate name (in `vc_ids.h`), and two pages with one number or a page 0. A page whose entries are all compiled out has a count of 0. It is then not implemented. `SYS.PAGE_LIST` omits it and its commands are unknown.
+
+The flag and address-kind numbers reach hosts through `SYS.COMMAND_INFO`, so both enums are append only. The flag bits are `VC_F_USB_ONLY` 0x01 and `VC_F_SET_USB_ONLY` 0x02 (transport limits), `VC_F_BULK` 0x04 (payload or reply in `bulk_param_buf`), and the informational `VC_F_DEFERRED` 0x08, `VC_F_FLASH` 0x10, `VC_F_RESTART` 0x20 and `VC_F_KEEPALIVE` 0x40. `VC_F_RESTART` marks every command that can interrupt audio, so a host can rely on its absence. That covers every `VC_F_FLASH` command (each ends in `complete_flash_write_operation_full()`), the input pin and clock commands that restart a live input under mute, `OUTPUT.DAC_MUTE_TEST` and `SYS.ENTER_BOOTLOADER`. `STORE.FACTORY_RESET` carries `VC_F_RESTART` but not `VC_F_FLASH`, because `flash_factory_reset()` changes only the live state.
+
+### Validation order and result codes
+*Last updated: 2026-11-16*
+
+`vc_check()` and `vc_run()` do every check for every transport, in this order.
+
+1. Page and command lookup. A page with no implemented table, page 0 included, fails here. `VC_ERR_UNKNOWN`
+2. A handler exists for the direction. `VC_ERR_DIRECTION`
+3. Transport flags, and the bulk rule that only UART and I2C may use `STORE.ALL_PARAMS` off USB. `VC_ERR_BLOCKED`
+4. SET payload length. `VC_ERR_LENGTH`
+5. `wValue` in range for the address kind. `VC_ERR_ADDRESS`
+6. The handler runs inside the notify source bracket (`notify_set_source()`), so notifications it emits carry the transport's `ParamSource`. Value checks are the handler's job.
+7. The result is recorded in the transport's `LAST_RESULT` slot.
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0x00 | `VC_OK` | Done, or accepted for deferred work |
+| 0x10 | `VC_ERR_UNKNOWN` | No such page or command on this build |
+| 0x11 | `VC_ERR_DIRECTION` | No handler for this direction |
+| 0x12 | `VC_ERR_LENGTH` | SET payload length out of range |
+| 0x13 | `VC_ERR_ADDRESS` | `wValue` out of range |
+| 0x14 | `VC_ERR_VALUE` | A payload field is out of range, or a float is not finite |
+| 0x15 | `VC_ERR_UNSUPPORTED` | Not available on this platform |
+| 0x16 | `VC_ERR_BLOCKED` | Not allowed on this transport |
+| 0x17 | `VC_ERR_BUSY` | Try again shortly |
+| 0x18 | `VC_ERR_STATE` | Not allowed in the current state |
+| 0x19 | `VC_ERR_PIN_INVALID` | GPIO not usable for this function |
+| 0x1A | `VC_ERR_PIN_IN_USE` | GPIO already claimed |
+
+A USB host sees a STALL and can read the code from `SYS.LAST_RESULT`. UART and I2C return it as the status byte. `vc_set()` and `vc_get()` return it. A deferred command returns `VC_OK` once it passes validation and is queued, and its outcome shows in readback, notifications and, for Control Surfaces, `CS.STATUS`.
+
+**`SYS.LAST_RESULT`.** One slot per `CtrlSource` (USB, UART, I2C, Control Surfaces). The 8-byte reply is u16 command ID, u8 direction (1 = GET), u8 result, u16 `wValue`, 2 reserved bytes. A read of `SYS.LAST_RESULT` does not overwrite its own slot. Transport conditions (`CTRL_STATUS_*`) are not recorded, because the command never ran.
+
+### Discovery
+*Last updated: 2026-11-16*
+
+- `SYS.PROTOCOL_INFO` (16 bytes): magic `"DSPi"`, protocol major and minor, number of implemented pages, a reserved flags byte, u16 largest non-bulk SET (64), u16 largest non-bulk GET (256), 4 reserved bytes. A host sends it first. Firmware 1.1.6 and older STALL it harmlessly.
+- `SYS.PAGE_LIST`: `{page, revision}` for each implemented page.
+- `SYS.PAGE_COMMANDS` (address = page, 64 bytes): a 256-bit GET bitmap, then a 256-bit SET bitmap. An unimplemented page is `VC_ERR_ADDRESS`.
+- `SYS.COMMAND_INFO` (address = `(page << 8) | cmd`, 8 bytes): u16 flags, u16 GET length (0 = none, 0xFFFF = variable), u8 SET minimum, u8 SET maximum, u8 address kind, u8 directions (bit 0 GET, bit 1 SET).
+
+Hosts gate features on page revisions and command bits, never on the firmware version.
+
+### Bulk and chunk sessions
+*Last updated: 2026-11-16*
+
+`bulk_param_buf` (`WIRE_BULK_BUF_SIZE`, one `WireBulkParams`, 6136 bytes at V32) has one owner at a time across USB, UART and I2C. `vendor_bulk_try_acquire()` / `vendor_bulk_release()` / `vendor_bulk_touch()` are IRQ-safe, because the I2C target ISR acquires the lock when a bulk SET header arrives. An external owner goes stale after 500 ms without a touch and a USB owner after 3 s. After a SET is handed over, `bulk_params_pending` guards the buffer until the main loop has applied it.
+
+- **`STORE.ALL_PARAMS`.** GET collects the live state into the buffer and streams it. A USB SET must be exactly `sizeof(WireBulkParams)`. Its header (platform, channel counts, format version, payload length) is checked by `vc_bulk_params_check()` at the DATA stage, so a snapshot the main loop would refuse fails the request with `VC_ERR_VALUE`. A good SET raises `bulk_params_pending`. UART and I2C stream this command only (see "External Control Interfaces").
+- **`STORE.ALL_PARAMS_CHUNK`** (USB only). `wValue` is the byte offset into the struct, so a host can stay under the 4 KB WinUSB data-stage limit. A GET at offset 0 opens a session and snapshots the state, and later offsets read the same snapshot. A SET must start at offset 0 and continue in order, and the final chunk runs the header check and queues the apply. A later offset with no live session, or an out-of-order offset, is `VC_ERR_STATE`, and the host restarts at 0. The session keeps the USB bulk lock across transfers. Any other vendor request closes it, except that a chunk SET refused at SETUP keeps it so the host can resend the right offset.
+- **`MEAS.RTA_BANDS_ALL`** (USB only) builds every tracked channel's band frame in the bulk buffer. A static assert in `vc_page_meas.c` keeps it inside.
+
+### Non-finite floats
+*Last updated: 2026-11-16*
+
+A float SET handler refuses a NaN or infinite field with `VC_ERR_VALUE` before it touches any state. That covers ROUTE (matrix gain, output gain, output and channel delay, preamp, master and user volume), `FILTER.BAND` (freq, Q, gain), the leveller and loudness floats on DYN, and the crossfeed, subharmonic, psychoacoustic bass and upmixer floats on FX. Finite out-of-range values are still clamped. The `DYN.LIMITER_*` and `FX.TUBE_*` handlers refuse NaN and rely on the subsystem setter clamping infinity to the range end. `MEAS.SIGGEN_CONFIG` is sanitised by `siggen_stage_config()`. `STORE.ALL_PARAMS` applies floats as the bulk loader always has, with a finite check on master volume only.
+
+### Platform and build-conditional commands
+*Last updated: 2026-11-16*
+
+A command outside its platform or build is absent from the table. A request for it is `VC_ERR_UNKNOWN`, and `SYS.PAGE_COMMANDS` does not list it.
+
+- **RP2350 only (23).** `INPUT.ADAT_RX_*` (4), `OUTPUT.ADAT_TX_*` (3) and the upmixer (`FX.UPMIX_*`, 16).
+- **Bench builds only (`DIAG`, 7).** `DIAG.CLOCK_DIAG` needs `DSPI_CLOCK_DIAG` (tested with `#if`, because `config.h` defines it as 0 when off), `DIAG.LOOPBACK_STATS` needs `DSPI_LOOPBACK`, and the five `DIAG.LOOP_PROF_*` commands need `DSPI_LOOP_PROF`. In a release build the DIAG page is empty, so it is not implemented and `SYS.PAGE_LIST` omits it.
+
+The `.def` files hold 211 commands. A release build has 12 pages with 181 commands on RP2040 and 204 on RP2350.
+
+### Page 0 and the MS OS 2.0 intercept
+*Last updated: 2026-11-16*
+
+No page 0 table exists. Every page 0 request fails the lookup with `VC_ERR_UNKNOWN` and is recorded in `SYS.LAST_RESULT` for its transport. On USB it STALLs at SETUP, so a SET never reaches its data stage. UART and I2C answer status 0x10, and `vc_set()` / `vc_get()` return the same code. A 1.1.6 host sends `wIndex` 0 or 2, so every request it makes reaches page 0 and changes nothing. It can neither read the version nor reboot a 1.1.7 device into the bootloader (BOOTSEL is the way back).
+
+The one request answered without a page lookup is the Microsoft OS 2.0 descriptor set (IN, `bRequest` 0x01 = `MS_VENDOR_CODE`, `wIndex` 7, any recipient), which Windows needs to bind WinUSB and which is not a DSPi command. Every other use of `bRequest` 0x01 falls through and is refused, since no page has a command below 0x10. See "Microsoft OS 2.0 Descriptors".
+
+### Shared helpers
+*Last updated: 2026-11-16*
+
+- `vc_in_u8/u16/u32/f32()` and `vc_out_*()` read and write little-endian payload fields without alignment faults. `vc_reply()` copies a whole reply and sets its length.
+- `vc_param_src()` maps a `CtrlSource` to its `ParamSource` notification tag. A handler that tags a deferred notification itself (CS aux, RTA config, device and source names) calls it so the tag matches the dispatcher's own bracket.
+- `vc_from_pin_status()` maps `PIN_CONFIG_*` to a result: SUCCESS to `VC_OK`, INVALID_PIN to `VC_ERR_PIN_INVALID`, PIN_IN_USE to `VC_ERR_PIN_IN_USE`, INVALID_OUTPUT to `VC_ERR_ADDRESS`, OUTPUT_ACTIVE to `VC_ERR_STATE`, anything else to `VC_ERR_VALUE`. The INPUT, OUTPUT and CLOCK pin SETs use it.
+- `vc_clampf()` is the float range clamp of the DYN and FX setters. NaN passes through it, so every caller checks `isfinite()` first.
+
+### Page notes
+*Last updated: 2026-11-16*
+
+- **Deferred work.** Each handler uses the same globals, setters, pending flags and main-loop paths as the 1.1.6 code it replaced. Flash writes, pipeline resets, output restarts and pin moves are therefore sequenced exactly as before, through `prepare_pipeline_reset()` and `complete_pipeline_reset()` where they always were, and output slot alignment is unaffected.
+- **SYS.** `PLATFORM`, `SERIAL`, `BUILD_INFO` and `CORE1_MODE` return the bytes 1.1.6 returned, from the same sources. `SYSTEM_STATUS`, `USB_AUDIO_STATUS`, `PIPELINE_STATS`, `PDM_STATS` and `SPDIF_TX_STATS` are fixed structs. `ENTER_BOOTLOADER` is a zero-length SET. Over USB it reboots at the ACK of its own status stage, and the next SETUP clears a pending reboot. Over UART and I2C the transport reboots once its response frame is out (`ctrl_reboot_request()`).
+- **FILTER.** `BAND` and `BAND_BYPASS` stage through `pending_packet`, `pending_eq_qp_x512` and `eq_update_pending`. A write while one is pending is `VC_ERR_BUSY`.
+- **MEAS.** `RTA_BANDS`, `RTA_BINS` and `RTA_BANDS_ALL` refresh the analyser keepalive. `RTA_BINS` returns at most 256 bytes per request. `CLIP_FLAGS` does not clear, and `CLIP_CLEAR` does.
+- **CS.** Preview SETs stage into the `cs_set_*_pending` handoffs and report through `cs_last_status`. Address and length refusals happen in the dispatcher and do not touch the status packet.
+- **CLOCK.** `mck_encode()` / `mck_decode()` (0 = 128x, 1 = 256x), static in `vc_page_clock.c`, are the wire and bulk encoding of the MCK multiplier.
+- **XPORT.** Config SETs are USB only. Scalar fields and GPIO range are checked before anything is queued. Ownership checks stay in the deferred apply.
+
+### Loop profiler hook
+*Last updated: 2026-11-16*
+
+`vc_run()` times every handler on a `DSPI_LOOP_PROF` build, so every transport and internal caller is covered, and passes the command ID to `loop_prof_command()`. The build adds five DIAG commands. Every value is the worst time in µs since boot or the last reset, and no read clears it.
+
+| Cmd | Name | Dir | Address | Payload |
+|---|---|---|---|---|
+| 0x30 | `LOOP_PROF_SECTION` | G | section index in `LOOP_PROF_SECTION_LIST` (`INDEX`, checked by the handler) | u32 µs |
+| 0x31 | `LOOP_PROF_JOB` | G | `BgJobId` in `BG_JOB_LIST` (`INDEX`) | u32 µs |
+| 0x32 | `LOOP_PROF_COMMAND` | G | command ID `(page << 8) \| cmd` (`PAGE_CMD`); a command not built is `VC_ERR_ADDRESS` | u32 µs, GET and SET together |
+| 0x33 | `LOOP_PROF_BG_PACE` | G, S | none | u16 n: above 1, each background step does one unit, on one pass in n; a SET of 0 stores 1 |
+| 0x34 | `LOOP_PROF_RESET` | S (zero-length) | none | zeroes every section, job and command value |
+
+The per-command storage is one `uint32_t` per command built into the image, indexed by `vc_cmd_index()`, the command's position across the page directory in table order. The host never sees that index. `loop_prof.c` sizes the array by expanding every `.def` file at compile time, and a page missing from its list fails the build. The array is 744 B on RP2040 and 836 B on RP2350 (186 and 209 commands). `tools/latency_bench/loop_prof.py` reads it, and `soak.py` resets before each measured window.
+
+### Tests and verification tooling
+*Last updated: 2026-11-16*
+
+- **Generator.** `scripts/gen_vendor_protocol.py` (standard library only) parses the `.def` files and writes `Documentation/protocol/dspi_commands.json` and the command tables between the `VC:BEGIN` / `VC:END` markers in `Documentation/commands.md`. `--check` writes nothing and fails when either file is stale or a `.def` is invalid. `--list` prints a compact listing. Its own tests are in `scripts/tests/gen_vendor_protocol/`.
+- **Paged tests.** `tools/dspi_test` has one group per page, `paged_<page>` (modules `tests/paged_*.py`). They send only paged commands and assert against the specification, the finite-value rule included. They SKIP on firmware without the paged dispatcher.
+- **Page 0 test.** `paged_page0` walks every `bRequest` on page 0 (both recipients, GET and both SET shapes), checks that each STALLs and leaves the parameters and directory unchanged, and checks that the MS OS 2.0 request is still served. It refuses to run unless the firmware provably has no page 0.
+- **Translation layer (temporary).** `tools/dspi_test/legacy_map.py`, driven by `Documentation/protocol/legacy_map.json`, translates the 1.1.6 requests of the not-yet-ported test groups into paged commands. `device.py` selects it automatically on paged firmware (`DSPI_TEST_PROTOCOL` forces a mode). It is scheduled for deletion once those tests are ported (plan, Phase 6). `legacy_map.json` stays as migration data for hosts.
+- **Golden capture.** `tools/dspi_test/golden/` holds a byte-for-byte capture of every vendor read on firmware 1.1.6, before and after a scripted set of writes, with a mask of fields that legitimately vary. It is replayed against the paged handlers through the translation layer (`legacy_map:golden_transport`).
+- **wIndex page test.** `tools/windex_page_test.py` checks that a host stack delivers the page byte intact. It sends refused requests to several pages and reads them back through `SYS.LAST_RESULT`. Procedure in `Documentation/Features/windex_page_test.md`.
 
 ## Vendor Command Reference
+*Last updated: 2026-11-16 (phase 5: the 1.1.6 opcode table is replaced by the page map; the per-command reference is generated into `Documentation/commands.md`). Previously 2026-11-16 (marked as the 1.1.6 opcode space); 2026-11-16 (`REQ_GET_STATUS` loop-profiler selectors removed); 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim); 2026-11-01 (0x56/0x57 board name); 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned); 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts); 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
 
-> **This table describes the 1.1.6 opcode space, which firmware 1.1.7 no longer answers (see "Vendor Protocol").**
-> The next documentation pass replaces it with the paged command reference.
+This section is the map of the command space. The per-command reference (number, directions, address, sizes, flags, doc line for every command) is `Documentation/commands.md`, whose tables are generated from `firmware/DSPi/vendor/pages/*.def`. The same data is machine-readable in `Documentation/protocol/dspi_commands.json`. Neither is edited by hand. `Documentation/protocol/legacy_map.json` maps every 1.1.6 opcode to its 1.1.7 command.
 
-*Last updated: 2026-11-16 (marked as the 1.1.6 opcode space). Previously 2026-11-16 (`REQ_GET_STATUS` loop-profiler selectors removed). Previously 2026-11-05 (`REQ_GET_STATUS` wValue 32-33: S/PDIF measured rate, VCXO trim). Previously 2026-11-01 (0x56/0x57 board name). Previously 2026-10-31 (0x54/0x55 input source names replace the retired legacy channel gain/mute; 0x56/0x57 unassigned). Previously 2026-10-23 (0x03 `REQ_OUTPUT_LATENCY`, one opcode for both directions; `REQ_GET_STATUS` wValue 26-28 ring health readouts). Previously 2026-10-02 (0xC4 `SET_MCK_ENABLE` now rejects an enable onto a claimed pin with PIN_IN_USE); 2026-09-22 (0x52 also saves the output limiter settings device-wide; output limiter: 0x81 `REQ_LIMITER`, one opcode for both directions; 2026-09-20: tube preamp: parameter indices now 0-13; the 0x81 saturation meter is removed and 0x81 is unallocated again; 2026-09-18: tube preamp: indexed 0x3E/0x3F; 2026-09-12: RTA V3 bass capability and 82-byte band frames; 2026-09-07: Control Surfaces auxiliary outputs are now 0x04-0x07 slot-indexed with an 8.8 level; 0x02 and 0x03 removed; spectrum analyser V2 bank/fast-only bins, 0x08-0x0F; 2026-09-04: subharmonic synthesizer widened to 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; 2026-09-02: subharmonic synthesizer 0x10-0x1A; REQ_GET_BUILD_INFO 0x80 added 2026-09-01: 64-byte git/date build stamp)*
+### Addressing
+*Last updated: 2026-11-16*
 
-**Band-index map (PEQ and crossover share one address space):**
+| Field | Meaning |
+|---|---|
+| `bmRequestType` | Vendor type, interface recipient. `0xC1` is GET, `0x41` is SET |
+| `bRequest` | Command number within the page, 0x10 to 0xFF |
+| `wIndex` high byte | Page, 0x01 to 0xFF. Page 0 is never used and is refused |
+| `wIndex` low byte | Interface number, always 2 on USB. UART and I2C may send anything, and the firmware ignores it |
+| `wValue` | Address only, 0 when the command addresses nothing |
+| Payload | Values, little-endian |
+
+A command is written `PAGE.NAME` (for example `FILTER.BAND`), and its 16-bit ID is `(page << 8) | cmd`.
+
+### Page map
+*Last updated: 2026-11-16*
+
+| Page | Mnemonic | Holds | Commands, RP2040 / RP2350 release | Source |
+|---|---|---|---|---|
+| 0x00 | (none) | Nothing. Every request is refused, apart from the MS OS 2.0 descriptor request | 0 | |
+| 0x01 | `SYS` | Discovery, identity, device name, last result, bootloader, system and stream telemetry | 18 / 18 | `pages/sys.def`, `vc_page_sys.c` |
+| 0x02 | `STORE` | Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters | 12 / 12 | `pages/store.def`, `vc_page_store.c` |
+| 0x03 | `INPUT` | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names | 13 / 17 | `pages/input.def`, `vc_page_input.c` |
+| 0x04 | `OUTPUT` | Output type and pins, output latency, ADAT TX, DAC hardware mute | 7 / 10 | `pages/output.def`, `vc_page_output.c` |
+| 0x05 | `ROUTE` | Matrix, per-output controls, delays, channel names, preamp, master and user volume | 15 / 15 | `pages/route.def`, `vc_page_route.c` |
+| 0x06 | `FILTER` | EQ and crossover bands, bypasses | 3 / 3 | `pages/filter.def`, `vc_page_filter.c` |
+| 0x07 | `DYN` | Limiter, leveller, loudness | 17 / 17 | `pages/dyn.def`, `vc_page_dyn.c` |
+| 0x08 | `FX` | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer | 41 / 57 | `pages/fx.def`, `vc_page_fx.c` |
+| 0x09 | `MEAS` | Level meters, clip flags, spectrum analyser, signal generator | 20 / 20 | `pages/meas.def`, `vc_page_meas.c` |
+| 0x0A | `CS` | Control Surfaces | 25 / 25 | `pages/cs.def`, `vc_page_cs.c` |
+| 0x0B | `XPORT` | UART and I2C control transports | 3 / 3 | `pages/xport.def`, `vc_page_xport.c` |
+| 0x0C | `CLOCK` | I2S clock pins and modes, MCK | 7 / 7 | `pages/clock.def`, `vc_page_clock.c` |
+| 0x0D-0x7F | | Unallocated, for future subsystems | | |
+| 0x80-0xDF | | Reserved | | |
+| 0xE0-0xEF | | Private use for forks and ports, never allocated upstream | | |
+| 0xF0 | `DIAG` | Bench and diagnostic commands with no stability promise | 0 / 0 (7 in bench builds) | `pages/diag.def`, `vc_page_diag.c` |
+| 0xF1-0xFF | | Reserved | | |
+
+Every page is at revision 1. Totals: 181 commands on RP2040 and 204 on RP2350 in release builds, 211 in the `.def` files. Paths are under `firmware/DSPi/vendor/`.
+
+### Conventions
+*Last updated: 2026-11-16*
+
+The full list with reasons is plan section 3.2. The generator and the build enforce the mechanical ones.
+
+- One number per setting. A read-write setting is one command with a GET and a SET handler.
+- A GET never changes configuration, runtime state or flash. The only exceptions are refreshing a keepalive timer and the bulk lock a chunked read takes.
+- Anything that changes state is a SET, including actions with no value, which are zero-length SETs.
+- `wValue` is an address and never selects an operation or carries a value.
+- A new operation gets a new number, never a selector on an existing command.
+- One GET reply shape and one SET payload shape per command. For a read-write command the GET reply is a valid SET payload.
+- Shapes grow only at the end, in a later page revision. Any other change needs a new number.
+- Numbers are never reused. A retired command stays in its `.def` as `VC_RESERVED`.
+- 0x00 to 0x0F are reserved in every page (0x01 is the MS OS 2.0 vendor code, 0x02 is held for WebUSB).
+- Each feature starts on a 0x_0 boundary within its page and grows upward.
+- A command lives with the state it touches.
+- Failure is explicit. A refused request STALLs on USB, returns a result code on UART and I2C, and leaves the reason in `SYS.LAST_RESULT`.
+- `0xFF` as an address means all outputs only on a SET of an `OUTPUT_ALL` command.
+
+### Adding or changing a command
+*Last updated: 2026-11-16*
+
+1. Pick the page by the state the command touches, and the next free number in the feature's block. Never reuse a number, a `VC_RESERVED` one included.
+2. Add the `VC_CMD` line to `firmware/DSPi/vendor/pages/<mnem>.def`, inside an `#if` block if it is platform or build specific.
+3. Write the handlers in `vc_page_<mnem>.c`. Value checks only, since the dispatcher has done the rest. Refuse a non-finite float with `VC_ERR_VALUE`.
+4. Raise the page revision in the `VC_PAGE` line whenever a command is added to the page or a shape grows.
+5. Run `python3 scripts/gen_vendor_protocol.py` to regenerate `dspi_commands.json` and the `commands.md` tables, and `--check` to confirm they are current. Write any prose the command needs in `commands.md` outside the generated blocks.
+6. Build both platforms.
+7. A new page also needs an entry in `VC_PAGE_LIST` and a block in `vc_ids.h`, its `.c` in `add_executable()` in `firmware/DSPi/CMakeLists.txt`, its `.def` in the list in `loop_prof.c`, and a `VC:BEGIN` / `VC:END` block in `commands.md`.
+
+Retiring a command: replace its `VC_CMD` line with `VC_RESERVED(0xCC, "retired: NAME")` and raise the revision.
+
+**What CLAUDE.md's "update the Vendor Command Reference table" means now.** When a command is added or retired, update the page map above: the command counts per platform, the totals line, and a page's "Holds" text if the page gains a new kind of state. Per-command detail belongs in the `.def` doc line and in `commands.md`, not here.
+
+### Band-index map
+*Last updated: 2026-11-16 (addressing named for `FILTER.BAND` and `FILTER.BAND_BYPASS`)*
+
+PEQ and crossover share one band address space. `FILTER.BAND` and `FILTER.BAND_BYPASS` take `wValue = (channel << 8) | band`.
 
 | Band index | Meaning |
 |---|---|
 | 0..9 | Active PEQ band (10 bands per channel today) |
-| 10..19 | Reserved for future PEQ-count growth; rejected by handlers |
+| 10..19 | Reserved for future PEQ-count growth; refused with `VC_ERR_ADDRESS` |
 | 20..23 | Crossover band 0..3 (`XOVER_BAND_BASE = 20`) |
-| ≥24 | Rejected |
+| ≥24 | Refused with `VC_ERR_ADDRESS` |
 
-`REQ_SET_EQ_PARAM`, `REQ_GET_EQ_PARAM`, `REQ_SET_BAND_BYPASS`, and `REQ_GET_BAND_BYPASS` all accept the unified band range. Crossover bands (20..23) are rejected on master channels (channel < `CH_OUT_1` = 2). `REQ_GET_EQ_PARAM` packs the band into a 5-bit `wValue` field: `(channel << 8) | (band << 3) | param` (band 0..31, param 0..4); the other three commands carry the band in a full 8-bit field. See `Documentation/Features/crossover_filters_spec.md` for the complete crossover spec.
-
-
-| Command | Code | Direction | Description |
-|---------|------|-----------|-------------|
-| REQ_OUTPUT_LATENCY | 0x03 | OUT | Select the output latency option: 1-byte `OutputLatencyId` (1 = 0.67 ms and 2 = 1 ms low latency, 3/4/5/6/7 = 2/3/4/6/8 ms). Deferred to the main loop: directory write plus a full synchronized output restart (one short mute). Re-sending the stored option is a no-op; an unknown ID is ignored over USB and returns ERROR over UART/I2C. See "Output Latency" |
-| REQ_OUTPUT_LATENCY | 0x03 | IN | Same opcode, IN direction. wValue 0: 12-byte `OutputLatencyStatus` (requested and effective ID, effective us at the current rate, target frames, batch frames, pending, option count). wValue 1: the option table, `option_count` x 8-byte `OutputLatencyOptionWire` (ID, flags incl. available-now bit 0x80, nominal latency and batch us, effective us now). Other wValues STALL |
-| REQ_SET_CS_AUX_STATE | 0x04 | OUT | Set an auxiliary output on/off (wValue = binding slot 0-15, 1 byte, non-zero = on). Immediate, runtime only, no flash, no dirty flag; pushes `NOTIFY_EVT_CS_AUX` on a change. Rejected with `CS_STATUS_INVALID_AUX` unless the slot is an aux output that is up, or `CS_STATUS_INVALID_VALUE` on a short payload (USB acknowledges the OUT stage; read `REQ_GET_CS_STATUS`). Auxiliary output *configuration* is an ordinary binding (`REQ_SET_CS_BINDING`), not a command of its own; 0x02 is unallocated |
-| REQ_GET_CS_AUX_STATE | 0x05 | IN | Get an auxiliary output's state (wValue = binding slot: 1 byte; wValue = 0xFFFF: 48 bytes, state[16] then sixteen little-endian 8.8 percent levels, zero on slots that are not up aux outputs) |
-| REQ_SET_CS_AUX_LEVEL | 0x06 | OUT | Set an auxiliary output's level (wValue = binding slot, 2 bytes little-endian 8.8 percent, clamped to 100 % = 25600). Immediate, runtime only; pushes `NOTIFY_EVT_CS_AUX` on a change. Rejected with `CS_STATUS_INVALID_AUX` unless the slot is an up `CS_TYPE_AUX_PWM` |
-| REQ_GET_CS_AUX_LEVEL | 0x07 | IN | Get an auxiliary output's level (wValue = binding slot; 2 bytes little-endian 8.8 percent, 0 on a `CS_TYPE_AUX_OUT` slot) |
-| REQ_RTA_SET_CONFIG | 0x08 | OUT | Set the V3 spectrum analyser config (12-byte `RtaConfig`). STALLs on wrong version or length, unknown tap, an `fft_order` outside the caps range (8..10), or an empty `channel_mask` after masking to the tap's width |
-| REQ_RTA_GET_CONFIG | 0x09 | IN | Get the applied 12-byte `RtaConfig` (clamped `avg_ms` and `peak_decay_db_s`, masked `channel_mask`) |
-| REQ_RTA_GET_CAPS | 0x0A | IN | wValue 0: the 16-byte `RtaCaps`. wValue 1..: a chunk of the band-centre table, 32 `uint16` Hz values per chunk; a chunk past the end STALLs |
-| REQ_RTA_GET_BANDS | 0x0B | IN | wValue = channel; returns that channel's 82-byte `RtaBandFrame` at the applied tap. Counts as a read (auto-off keepalive + auto-start) |
-| REQ_RTA_GET_BINS | 0x0C | IN | wValue = byte offset into the bin frame, wLength = chunk size; no lock, validate the header `seq` against the frame's final byte and re-read on mismatch. Counts as a read |
-| REQ_RTA_GET_STATUS | 0x0D | IN | Get the 24-byte `RtaStatus`. Deliberately **not** a read: polling status neither keeps the analyser alive nor starts it |
-| REQ_RTA_CONTROL | 0x0E | IN | GET-style, like `REQ_SIGGEN_CONTROL`: the action is in wValue (`RTA_CTL_STOP` / `START` / `RESET_AVG`) and the reply is one status byte; an unknown action STALLs |
-| REQ_RTA_GET_BANDS_ALL | 0x0F | IN | USB only: every live channel's `RtaBandFrame` back to back, staged in `bulk_param_buf` under the bulk lock (generalised through `vendor_is_bulk_get`). Refused on UART and I2C, which poll 0x0B per channel to stay inside their 132-byte GET cap. An empty live mask answers with a zero-length data stage, not a STALL. Counts as a read |
-| REQ_SET_SUBHARM | 0x10 | OUT | Enable/disable the subharmonic synthesizer (1 byte, 0/1) |
-| REQ_GET_SUBHARM | 0x11 | IN | Get subharm enabled state (1 byte) |
-| REQ_SET_SUBHARM_LOW | 0x12 | OUT | Set 24-36 Hz sub level (4-byte LE IEEE754 float, -30..+12 dB, clamped; -30 = band off) |
-| REQ_GET_SUBHARM_LOW | 0x13 | IN | Get 24-36 Hz sub level (4-byte float) |
-| REQ_SET_SUBHARM_HIGH | 0x14 | OUT | Set 36-56 Hz sub level (4-byte float, -30..+12 dB, clamped; -30 = band off) |
-| REQ_GET_SUBHARM_HIGH | 0x15 | IN | Get 36-56 Hz sub level (4-byte float) |
-| REQ_SET_SUBHARM_BOOST | 0x16 | OUT | Set LF boost bell gain (4-byte float, 0..+6 dB, clamped) |
-| REQ_GET_SUBHARM_BOOST | 0x17 | IN | Get LF boost bell gain (4-byte float) |
-| REQ_SET_SUBHARM_MASK | 0x18 | OUT | Set output mask (2-byte LE uint16; read live, no recompute) |
-| REQ_GET_SUBHARM_MASK | 0x19 | IN | Get output mask (2-byte LE uint16) |
-| REQ_GET_SUBHARM_HEADROOM | 0x1A | IN | Get the preamp headroom the current subharm config needs (4-byte float dB, 0 while disabled; computed on request) |
-| REQ_SET_SUBHARM_TOP | 0x1B | OUT | Set 56-80 Hz sub level (4-byte float, -30..+12 dB, clamped; -30 = band off) |
-| REQ_GET_SUBHARM_TOP | 0x1C | IN | Get 56-80 Hz sub level (4-byte float) |
-| REQ_SET_SUBHARM_SELECT | 0x1D | OUT | Set selectivity mode (1 byte: 0 all, 1 percussive, 2 sustained; above 2 clamps to 2) |
-| REQ_GET_SUBHARM_SELECT | 0x1E | IN | Get selectivity mode (1 byte) |
-| REQ_GET_SUBHARM_METER | 0x1F | IN | Get the per-output synthesized-sub peak (NUM_OUTPUT_CHANNELS x uint16 LE, 0..32767 each; 18 B RP2350 / 10 B RP2040) |
-| REQ_SET_SUBHARM_SOLO | 0x2C | OUT | Solo the synthesized sub on masked outputs (1 byte, 0/1). Runtime only: never persisted, never on the wire, no notification |
-| REQ_GET_SUBHARM_SOLO | 0x2D | IN | Get subharm solo state (1 byte) |
-| REQ_SET_SUBHARM_LINK | 0x2E | OUT | Synthesize each output pair's sub from the pair's mono sum (1 byte, 0/1; read live, no recompute) |
-| REQ_GET_SUBHARM_LINK | 0x2F | IN | Get subharm pair-link state (1 byte) |
-| REQ_SET_SUBHARM_DEPTH | 0xA9 | OUT | Set selectivity depth (4-byte float, 0..100 %, clamped) |
-| REQ_GET_SUBHARM_DEPTH | 0xAA | IN | Get selectivity depth (4-byte float) |
-| REQ_SET_SUBHARM_HOLD | 0xAB | OUT | Set selectivity hold time (4-byte float, 50..400 ms, clamped) |
-| REQ_GET_SUBHARM_HOLD | 0xAC | IN | Get selectivity hold time (4-byte float) |
-| REQ_SET_SUBHARM_CEILING | 0xAD | OUT | Set the sub ceiling (4-byte float, -40..0 dBFS, clamped; 0 = off) |
-| REQ_GET_SUBHARM_CEILING | 0xAE | IN | Get the sub ceiling (4-byte float) |
-| REQ_SET_CS_GROUP | 0x20 | OUT | Set a Control Surfaces target group (wValue=group 0-7, payload=40-byte CsGroup; all-zero clears); apply-live-only preview, deferred, poll 0x87 (last_slot = 0x40\|group) |
-| REQ_GET_CS_GROUP | 0x21 | IN | Get the live 40-byte CsGroup (wValue=group 0-7) |
-| REQ_SET_CS_MACRO | 0x22 | OUT | Set a macro's name and step count (wValue=macro 0-7, payload=36-byte CsMacroHeaderWire); apply-live-only, deferred, poll 0x87 (last_slot = 0x60\|macro) |
-| REQ_GET_CS_MACRO | 0x23 | IN | Get the live 132-byte CsMacro (wValue=macro 0-7) |
-| REQ_SET_CS_MACRO_STEP | 0x24 | OUT | Set one macro step (wValue=(step << 8)\|macro, payload=12-byte CsMacroStep; all-zero clears); apply-live-only, deferred, poll 0x87 |
-| REQ_CS_MACRO_FIRE | 0x25 | IN | Fire a macro (wValue=macro 0-7; 0xFFFF cancels the running one); returns 1 status byte |
-| REQ_GET_CS_EXT_STATUS | 0x26 | IN | Get the 24-byte CsExtStatusPacket (group/macro limits, running macro and step, per-group and per-macro validity) |
-| REQ_SET_CS_DISPLAY_CFG | 0x27 | OUT | Set the Control Surfaces display config (payload=12-byte CsDisplayCfg); apply-live-only preview, deferred, poll 0x87 (last_slot = 0x50) |
-| REQ_GET_CS_DISPLAY_CFG | 0x28 | IN | Get 16 bytes: `{max_pages, model_count, reserved[2]}` + the live 12-byte CsDisplayCfg |
-| REQ_SET_CS_DISPLAY_PAGE | 0x29 | OUT | Set one display page (wValue=page 0-15, payload=4-byte CsDisplayPage; all-zero clears); apply-live-only, deferred, poll 0x87 (last_slot = 0x50\|page) |
-| REQ_GET_CS_DISPLAY_PAGE | 0x2A | IN | Get the live 4-byte CsDisplayPage (wValue=page 0-15) |
-| REQ_GET_CS_DISPLAY_STATUS | 0x2B | IN | Get the 8-byte CsDisplayStatus (init state, shown page, overlay/edit flags, live model, cumulative I2C NAK count) |
-| REQ_SET_PSYBASS | 0x30 | OUT | Enable/disable psychoacoustic bass (1 byte, 0/1) |
-| REQ_GET_PSYBASS | 0x31 | IN | Get psybass enabled state (1 byte) |
-| REQ_SET_PSYBASS_CUTOFF | 0x32 | OUT | Set cutoff (4-byte LE IEEE754 float, 30-300 Hz, clamped) |
-| REQ_GET_PSYBASS_CUTOFF | 0x33 | IN | Get cutoff (4-byte float) |
-| REQ_SET_PSYBASS_HARMONICS | 0x34 | OUT | Set harmonics mix level (4-byte float, -24..+12 dB, clamped) |
-| REQ_GET_PSYBASS_HARMONICS | 0x35 | IN | Get harmonics mix level (4-byte float) |
-| REQ_SET_PSYBASS_DRIVE | 0x36 | OUT | Set odd-path drive (4-byte float, 0..18 dB, clamped) |
-| REQ_GET_PSYBASS_DRIVE | 0x37 | IN | Get odd-path drive (4-byte float) |
-| REQ_SET_PSYBASS_CHARACTER | 0x38 | OUT | Set even/odd blend (4-byte float, 0..100, clamped) |
-| REQ_GET_PSYBASS_CHARACTER | 0x39 | IN | Get even/odd blend (4-byte float) |
-| REQ_SET_PSYBASS_ORIGINAL | 0x3A | OUT | Set original low-band level (4-byte float, -60..0 dB, clamped) |
-| REQ_GET_PSYBASS_ORIGINAL | 0x3B | IN | Get original low-band level (4-byte float) |
-| REQ_SET_PSYBASS_MASK | 0x3C | OUT | Set output mask (2-byte LE uint16; read live, no recompute) |
-| REQ_GET_PSYBASS_MASK | 0x3D | IN | Get output mask (2-byte LE uint16) |
-| REQ_SET_TUBE_PARAM | 0x3E | OUT | Set one tube preamp parameter (wValue low byte = index 0-13, payload = 4-byte LE IEEE754 float for every parameter, the bool and enum ones included). Clamped; an out-of-range index, a payload shorter than 4 bytes and a NaN are all no-ops. Every index except 1 (`output_mask`) raises the coefficient recompute |
-| REQ_GET_TUBE_PARAM | 0x3F | IN | Get one tube preamp parameter (wValue low byte = index; 4-byte float). An unknown index STALLs, so index 0 doubles as the feature probe |
-| REQ_LIMITER | 0x81 | OUT | Set one output-limiter parameter: wValue = (output << 8) \| index (0 enabled, 1 threshold_db -30..0, 2 release_ms 10..1000, 3 link_group 0..4), payload = 4-byte LE float. Output 0xFF sets every output. Clamped; bad output or index, short payload and NaN are no-ops |
-| REQ_LIMITER | 0x81 | IN | Same opcode, IN direction: get one parameter as a 4-byte float (wValue as above), or index 0x80 = gain-reduction meter (`NUM_OUTPUT_CHANNELS` x uint16 LE, 0.01 dB, output byte ignored), 0x81 = 4-byte status (engaged, lookahead 32, block 16, num_outputs). A bad output or index STALLs; index 0x81 is the feature probe |
-| REQ_SET_EQ_PARAM | 0x42 | OUT | Set EQ band parameters; optional 18-byte payload appends a `uint16` LE Linkwitz-Transform `qp` (`Q*512`) at offsets 16-17 (a 16-byte payload preserves the stored `qp`) |
-| REQ_GET_EQ_PARAM | 0x43 | IN | Get one EQ scalar; param codes 0-4 as before (type/freq/Q/gain_db/bypass), param code 5 returns `qp_x512` as a `u32` |
-| REQ_SET_PREAMP | 0x44 | OUT | Set preamp gain (legacy: sets all input channels) |
-| REQ_GET_PREAMP | 0x45 | IN | Get preamp gain (legacy: returns channel 0) |
-| REQ_SET_BYPASS | 0x46 | OUT | Set master EQ bypass |
-| REQ_GET_BYPASS | 0x47 | IN | Get master EQ bypass state |
-| REQ_SET_DELAY | 0x48 | OUT | Set channel delay |
-| REQ_GET_DELAY | 0x49 | IN | Get channel delay |
-| REQ_UPMIX_SET_CONFIG | 0x4A | OUT | Set the whole stereo upmixer config (44-byte `UpmixConfigPacket`; RP2350 only, wrong length STALLs; RP2040 STALLs). Mode fields clamped; floats clamped downstream |
-| REQ_UPMIX_GET_CONFIG | 0x4B | IN | Get the stereo upmixer config (44-byte `UpmixConfigPacket`; RP2040 returns 44 zero bytes) |
-| REQ_UPMIX_SET_PARAM | 0x4C | OUT | Set one upmixer field: `wValue` = `UPMIX_PARAM_*` (0..13; 13 = presence dB), payload = 4-byte LE float (mode/enable rounded to int; RP2350 only, RP2040 STALLs) |
-| REQ_UPMIX_GET_PARAM | 0x4D | IN | Get one upmixer field (`wValue` = `UPMIX_PARAM_*`, returns 4-byte float; RP2040 returns 0.0). Unknown param STALLs |
-| REQ_UPMIX_GET_STATUS | 0x4E | IN | Get 16-byte `UpmixStatus` (active, parked_reason, corr_q14, balance_q14, center/ls/rs gains; RP2040 returns 16 zero bytes). 0x4F reserved |
-| REQ_GET_STATUS | 0x50 | IN | Get all channel peaks + CPU load (see Channel Metering). Scalar wValue 26 = output ring underrun recoveries, 27 = blocks refused by ring admission (both cumulative), 28 = lowest pre-write ring fill in frames since `REQ_RESET_BUFFER_STATS` bit 0 (`0xFFFFFFFF` = none), 29 = worst gap between input deliveries in microseconds since the same reset, 30 = worst gap between audio-carrying USB packets in microseconds since the same reset; 31 = background steps over budget since boot; 32 = S/PDIF input measured rate in mHz (0 = none); 33 = soft VCXO commanded trim, ppm × 100, signed int32 (both 2026-11-05); 26 counts one per dry episode in which a producer owed audio throughout (2026-10-24). The `DSPI_LOOP_PROF` selectors (64+, 96+, 256+, 512+) are gone; the profiler is read through `DIAG.LOOP_PROF_*` (2026-11-16) |
-| REQ_SAVE_PARAMS | 0x51 | OUT | Save all params to flash |
-| REQ_SAVE_OUTPUT_CONFIG | 0x52 | IN | Persist live physical IO config and output limiter settings to the directory's device-global blocks (independent mode; was the deprecated REQ_LOAD_PARAMS) |
-| REQ_FACTORY_RESET | 0x53 | OUT | Reset to defaults |
-| REQ_SET_INPUT_SOURCE_NAME | 0x54 | OUT | Set the user name for input source `wValue` (1-32 bytes, a leading NUL clears it, bytes past 31 dropped; an invalid source, including any wValue above 0xFF, is a no-op). Persisted on the main loop (2026-10-31; was the retired legacy channel gain SET) |
-| REQ_GET_INPUT_SOURCE_NAME | 0x55 | IN | Get the 32-byte name for input source `wValue` (all zeros = unnamed; a staged, unwritten name reads back at once). Invalid source (including any wValue above 0xFF) STALLs. Older firmware answers with 4 bytes, which is the host's support probe (2026-10-31) |
-| REQ_SET_DEVICE_NAME | 0x56 | OUT | Set the board's user name (wValue 0; 1-32 bytes, a leading NUL clears it, bytes past 31 dropped; a non-zero wValue is a no-op). Persisted on the main loop with any staged source names (2026-11-01; was the retired legacy channel mute SET) |
-| REQ_GET_DEVICE_NAME | 0x57 | IN | Get the 32-byte board name (all zeros = unnamed; a staged name reads back at once). A non-zero wValue STALLs. Hosts probe this on its own: older firmware STALLs it or answers 1 byte (2026-11-01) |
-| REQ_SET_LOUDNESS | 0x58 | OUT | Enable/disable loudness |
-| REQ_GET_LOUDNESS | 0x59 | IN | Get loudness state |
-| REQ_SET_LOUDNESS_REF | 0x5A | OUT | Set loudness reference SPL |
-| REQ_GET_LOUDNESS_REF | 0x5B | IN | Get loudness reference SPL |
-| REQ_SET_LOUDNESS_INTENSITY | 0x5C | OUT | Set loudness intensity |
-| REQ_GET_LOUDNESS_INTENSITY | 0x5D | IN | Get loudness intensity |
-| REQ_SET_CROSSFEED | 0x5E | OUT | Enable/disable crossfeed |
-| REQ_GET_CROSSFEED | 0x5F | IN | Get crossfeed state |
-| REQ_SET_CROSSFEED_PRESET | 0x60 | OUT | Set crossfeed preset |
-| REQ_GET_CROSSFEED_PRESET | 0x61 | IN | Get crossfeed preset |
-| REQ_SET_CROSSFEED_FREQ | 0x62 | OUT | Set custom crossfeed freq |
-| REQ_GET_CROSSFEED_FREQ | 0x63 | IN | Get custom crossfeed freq |
-| REQ_SET_CROSSFEED_FEED | 0x64 | OUT | Set custom crossfeed level |
-| REQ_GET_CROSSFEED_FEED | 0x65 | IN | Get custom crossfeed level |
-| REQ_SET_CROSSFEED_ITD | 0x66 | OUT | Set crossfeed ITD |
-| REQ_GET_CROSSFEED_ITD | 0x67 | IN | Get crossfeed ITD |
-| REQ_SET_ADAT_INPUT_ENABLE | 0x68 | OUT | Enable/disable ADAT input (1 byte, 0/1; RP2350 only). Selectable only when enabled AND a pin is set |
-| REQ_GET_ADAT_INPUT_ENABLE | 0x69 | IN | Get ADAT input enable state (1 byte) |
-| REQ_SET_ADAT_INPUT_PIN | 0x6A | OUT | Set ADAT RX GPIO (1 byte; 0xFF = reset to default = clear to unset, only while disabled). May equal the ADAT output pin for a zero-hardware loopback self-test |
-| REQ_GET_ADAT_INPUT_PIN | 0x6B | IN | Get ADAT RX GPIO (1 byte) |
-| REQ_SET_ADAT_INPUT_CLOCK_MODE | 0x6C | OUT | Set ADAT clock mode (1 byte: 0 = master, 1 = slave); deferred apply |
-| REQ_GET_ADAT_INPUT_CLOCK_MODE | 0x6D | IN | Get ADAT clock mode (1 byte) |
-| REQ_GET_ADAT_INPUT_STATUS | 0x6E | IN | Get 20-byte AdatInputStatusPacket (state, clock_mode, enabled, pin, rate_ok, lock/loss/slip counts, header_err, detected_rate, measured_hz). 0x6F reserved |
-| REQ_SET_MATRIX_ROUTE | 0x70 | OUT | Set matrix crosspoint |
-| REQ_GET_MATRIX_ROUTE | 0x71 | IN | Get matrix crosspoint |
-| REQ_SET_OUTPUT_ENABLE | 0x72 | OUT | Enable/disable output |
-| REQ_GET_OUTPUT_ENABLE | 0x73 | IN | Get output enable state |
-| REQ_SET_OUTPUT_GAIN | 0x74 | OUT | Set output gain |
-| REQ_GET_OUTPUT_GAIN | 0x75 | IN | Get output gain |
-| REQ_SET_OUTPUT_MUTE | 0x76 | OUT | Set output mute |
-| REQ_GET_OUTPUT_MUTE | 0x77 | IN | Get output mute |
-| REQ_SET_OUTPUT_DELAY | 0x78 | OUT | Set output delay |
-| REQ_GET_OUTPUT_DELAY | 0x79 | IN | Get output delay |
-| REQ_GET_CORE1_MODE | 0x7A | IN | Get Core 1 operating mode |
-| REQ_GET_CORE1_CONFLICT | 0x7B | IN | Get Core 1 conflict state |
-| REQ_SET_OUTPUT_PIN | 0x7C | OUT | Set output GPIO pin (pin byte 0xFF = reset that output to its platform default) |
-| REQ_GET_OUTPUT_PIN | 0x7D | IN | Get output GPIO pin |
-| REQ_GET_SERIAL | 0x7E | IN | Get unique board serial |
-| REQ_GET_PLATFORM | 0x7F | IN | Get platform ID, fw version (legacy nibbles + full-width minor/patch + beta ordinal), output count; 7 bytes |
-| REQ_GET_BUILD_INFO | 0x80 | IN | Get 64-byte build stamp: git describe [0..47] + build date [48..59]; provenance only, never gated on |
-| REQ_GET_CLOCK_DIAG | 0x82 | IN | Get packed ClockDiagPacket clock/audio-path snapshot. Built only with `-DDSPI_CLOCK_DIAG=ON`, USB only; zero-length otherwise. See Clock Diagnostics |
-| REQ_CLEAR_CLIPS | 0x83 | IN | Read-then-clear clip flags (see Clip Detection) |
-| REQ_SET_CS_BINDING | 0x84 | OUT | Set a Control Surfaces binding (wValue=slot 0-15, payload=24-byte CsBinding, required; short payload = INVALID_VALUE); apply-live-only preview, deferred, poll 0x87; persist via REQ_CS_SAVE (see Control Surfaces) |
-| REQ_GET_CS_BINDING | 0x85 | IN | Get the live 24-byte CsBinding for a slot (wValue=slot) |
-| REQ_GET_CS_CAPS | 0x86 | IN | Get capability tables (wValue=0xFFFF: 40-byte header+type table+max_ir_commands+max_groups/max_macros/max_macro_steps, caps v9; wValue=noun: 12-byte CsNounDesc) |
-| REQ_GET_CS_STATUS | 0x87 | IN | Get 41-byte CsStatusPacket (last SET result, dirty flag, active_mask, per-slot status, ir_active_mask, learn state, per-sub-slot IR status) |
-| REQ_SET_CS_NAME | 0x8B | OUT | Set a Control Surfaces slot name (wValue=slot 0-15, payload=1-32 bytes; one NUL byte clears); apply-live-only preview (persist via 0x9D), poll 0x87 for result |
-| REQ_GET_CS_NAME | 0x8C | IN | Get a Control Surfaces slot name (wValue=slot, returns 32 bytes NUL-terminated, live) |
-| REQ_SET_CS_IR_CMD | 0x8D | OUT | Set a Control Surfaces IR remote command (wValue=sub-slot 0-15, payload=16-byte IrCommand); apply-live-only, deferred; poll 0x87 (last_slot = 0x80\|sub) |
-| REQ_GET_CS_IR_CMD | 0x8E | IN | Get an IR remote command (wValue=sub-slot, returns 16-byte IrCommand) |
-| REQ_CS_IR_LEARN | 0x8F | IN | IR learn control: wValue 1=arm (10 s window), 0=cancel, 2=read result (8 bytes: state, protocol, 0, 0, code_LE32); completion also pushed as notify 0x0A |
-| REQ_PRESET_SAVE | 0x90 | IN | Save live state to preset slot (wValue=slot) |
-| REQ_PRESET_LOAD | 0x91 | IN | Load preset slot to live state (wValue=slot) |
-| REQ_PRESET_DELETE | 0x92 | IN | Delete preset slot (wValue=slot) |
-| REQ_PRESET_GET_NAME | 0x93 | IN | Get 32-byte preset name (wValue=slot) |
-| REQ_PRESET_SET_NAME | 0x94 | OUT | Set preset name (wValue=slot, payload=32 bytes) |
-| REQ_PRESET_GET_DIR | 0x95 | IN | Get directory summary (7 bytes: byte 5 = output_config_mode, byte 6 = master_volume_mode) |
-| REQ_PRESET_SET_STARTUP | 0x96 | OUT | Set startup mode + default slot (2 bytes) |
-| REQ_PRESET_GET_STARTUP | 0x97 | IN | Get startup config (3 bytes) |
-| REQ_SET_OUTPUT_CONFIG_MODE | 0x98 | OUT | Set physical IO persistence mode: 1 = with-preset, 0 = independent (1 byte, was include-pins) |
-| REQ_GET_OUTPUT_CONFIG_MODE | 0x99 | IN | Get physical IO persistence mode (1 byte) |
-| REQ_PRESET_GET_ACTIVE | 0x9A | IN | Get active preset slot (1 byte, always 0-9) |
-| REQ_SET_CHANNEL_NAME | 0x9B | OUT | Set channel name (wValue=channel, payload=1-32 bytes) |
-| REQ_GET_CHANNEL_NAME | 0x9C | IN | Get channel name (wValue=channel, returns 32 bytes) |
-| REQ_CS_SAVE | 0x9D | IN | Persist the whole live Control Surfaces config (bindings + names + IR commands + groups + macros) in one directory write; deferred, poll 0x87 (last_slot=0xFF); clears the dirty flag |
-| REQ_CS_REVERT | 0x9E | IN | Discard the live Control Surfaces preview and re-apply the stored config; deferred, poll 0x87 (last_slot=0xFF); no flash write |
-| REQ_GET_ALL_PARAMS | 0xA0 | IN | Get complete DSP state (3664 bytes at V11, multi-packet control transfer) |
-| REQ_SET_ALL_PARAMS | 0xA1 | OUT | Set complete DSP state (3664 bytes at V11, multi-packet control transfer) |
-| REQ_GET_ALL_PARAMS_CHUNK | 0xA2 | IN | Read WireBulkParams in <= 4 KB chunks (wValue = offset); USB-only, WinUSB 4 KB cap workaround |
-| REQ_SET_ALL_PARAMS_CHUNK | 0xA3 | OUT | Write WireBulkParams in sequential chunks (wValue = offset); apply fires on the final byte; USB-only |
-| REQ_SIGGEN_SET_CONFIG | 0xA4 | OUT | Stage a test-signal `SiggenConfig` (36 B); validates + stages, restarts if running, never auto-starts (see Test Signal Generator) |
-| REQ_SIGGEN_GET_CONFIG | 0xA5 | IN | Get the applied `SiggenConfig` (36 B) |
-| REQ_SIGGEN_CONTROL | 0xA6 | IN* | Test-signal action in wValue (`SIGGEN_CTL_*`: 0 stop, 1 start, 2 stop-now); returns 1-byte ack |
-| REQ_SIGGEN_GET_STATUS | 0xA7 | IN | Get `SiggenStatus` (16 B: state, signal_type, walk channel, elapsed, cycles, stop reason, sweep freq) |
-| REQ_SIGGEN_GET_CAPS | 0xA8 | IN | wValue=0xFFFF -> `SiggenCapsHeader` (8 B); wValue=type index -> `SiggenTypeDesc` (62 B) |
-| REQ_GET_BUFFER_STATS | 0xB0 | IN | Get 44-byte buffer fill level statistics packet |
-| REQ_RESET_BUFFER_STATS | 0xB1 | IN | Reset watermarks (wValue bit 0), returns 1-byte ack |
-| REQ_SET_LEVELLER_ENABLE | 0xB4 | OUT | Enable/disable volume leveller |
-| REQ_GET_LEVELLER_ENABLE | 0xB5 | IN | Get volume leveller enabled state |
-| REQ_SET_LEVELLER_AMOUNT | 0xB6 | OUT | Set leveller compression amount (0.0–100.0, float) |
-| REQ_GET_LEVELLER_AMOUNT | 0xB7 | IN | Get leveller compression amount |
-| REQ_SET_LEVELLER_SPEED | 0xB8 | OUT | Set leveller envelope speed (0=Slow, 1=Med, 2=Fast) |
-| REQ_GET_LEVELLER_SPEED | 0xB9 | IN | Get leveller envelope speed |
-| REQ_SET_LEVELLER_MAX_GAIN | 0xBA | OUT | Set leveller max boost gain (0.0–35.0 dB, float) |
-| REQ_GET_LEVELLER_MAX_GAIN | 0xBB | IN | Get leveller max boost gain |
-| REQ_SET_LEVELLER_LOOKAHEAD | 0xBC | OUT | Enable/disable leveller 5 ms lookahead |
-| REQ_GET_LEVELLER_LOOKAHEAD | 0xBD | IN | Get leveller lookahead state |
-| REQ_SET_LEVELLER_GATE | 0xBE | OUT | Set leveller silence gate threshold (-96.0–0.0 dBFS, float) |
-| REQ_GET_LEVELLER_GATE | 0xBF | IN | Get leveller silence gate threshold |
-| SET_OUTPUT_TYPE | 0xC0 | OUT | Set output slot type (S/PDIF or I2S) |
-| GET_OUTPUT_TYPE | 0xC1 | IN | Get output slot type |
-| SET_I2S_BCK_PIN | 0xC2 | OUT | Set an I2S BCK pin (LRCLK = BCK + 1). `wValue = (role << 8) | GPIO`: role 0 = master/unified pair (legacy hosts send role 0 implicitly), role 1 = slave pair (`i2s_bck_pin_slave`, meaningful in SPLIT clock-pin mode; storable any time). Rejects with OUTPUT_ACTIVE while I2S output slots run on the pair being moved, PIN_IN_USE on overlap/collision, INVALID_OUTPUT for role > 1. The two pairs are kept mutually distinct. GPIO 0xFF = reset the addressed role's pair to its default. |
-| GET_I2S_BCK_PIN | 0xC3 | IN | Get an I2S BCK pin. `wValue = role` (0 = master/unified pair, 1 = slave pair; invalid role returns 0) |
-| SET_MCK_ENABLE | 0xC4 | OUT | Set MCK enable. Returns `PIN_CONFIG_*`: enabling returns PIN_IN_USE (MCK stays off) if another function claimed `i2s_mck_pin` while MCK was disabled. |
-| GET_MCK_ENABLE | 0xC5 | IN | Get MCK enable |
-| SET_MCK_PIN | 0xC6 | OUT | Set MCK pin (0xFF = reset to platform default) |
-| GET_MCK_PIN | 0xC7 | IN | Get MCK pin |
-| SET_MCK_MULTIPLIER | 0xC8 | OUT | Set MCK multiplier (0=128x, 1=256x) |
-| GET_MCK_MULTIPLIER | 0xC9 | IN | Get MCK multiplier |
-| REQ_SET_ADAT_ENABLE | 0xCA | OUT | Enable/disable ADAT bulk output (wValue 0/1; RP2350 only, RP2040 returns INVALID_OUTPUT) |
-| REQ_GET_ADAT_ENABLE | 0xCB | IN | Get configured ADAT enable |
-| REQ_SET_ADAT_PIN | 0xCC | OUT | Set ADAT data GPIO (wValue = pin; 0xFF = reset to default 12; 0 = GPIO 0) |
-| REQ_GET_ADAT_PIN | 0xCD | IN | Get ADAT data GPIO |
-| REQ_GET_ADAT_STATUS | 0xCE | IN | Get 8-byte AdatStatus (enabled, active, pin, rate_ok, resync/slip counters) |
-| REQ_SET_PREAMP_CH | 0xD0 | OUT | Set per-channel preamp gain (wValue=channel) |
-| REQ_GET_PREAMP_CH | 0xD1 | IN | Get per-channel preamp gain (wValue=channel) |
-| REQ_SET_MASTER_VOLUME | 0xD2 | OUT | Set master volume (-128 to 0 dB, -128=mute) |
-| REQ_GET_MASTER_VOLUME | 0xD3 | IN | Get master volume |
-| REQ_SET_MASTER_VOLUME_MODE | 0xD4 | OUT | Set master volume persistence mode (0=independent, 1=with preset) |
-| REQ_GET_MASTER_VOLUME_MODE | 0xD5 | IN | Get master volume persistence mode |
-| REQ_SAVE_MASTER_VOLUME | 0xD6 | IN | Persist live master volume to directory's independent field (mode 0 source) |
-| REQ_GET_SAVED_MASTER_VOLUME | 0xD7 | IN | Get the directory's independent master volume |
-| REQ_SET_USER_VOLUME | 0xDA | OUT | Set user-perceived volume (float dB, [-CENTER_VOLUME_INDEX, 0]); shares `audio_state.volume` with UAC1 host slider, always applies regardless of input source so loudness compensation tracks the change |
-| REQ_GET_USER_VOLUME | 0xDB | IN | Get user-perceived volume (float dB) |
-| REQ_SET_USER_MUTE | 0xDC | OUT | Set vendor-channel `user_mute` flag (1 byte 0/1); always honored regardless of input source. Distinct from `audio_state.mute` (UAC1) which is USB-gated; pipeline ORs them. |
-| REQ_GET_USER_MUTE | 0xDD | IN | Get vendor-channel `user_mute` (UAC1 mute is read via UAC1 GET_CUR) |
-| REQ_SET_LEVELLER_MASKS | 0xDE | OUT | Set leveller channel masks (2 bytes: [detector_mask, apply_mask], bit k = input channel k); sets update-pending, no state reset (glitch-free) |
-| REQ_GET_LEVELLER_MASKS | 0xDF | IN | Get leveller channel masks (2 bytes: [detector_mask, apply_mask]) |
-| REQ_SET_I2S_CLOCK_MODE | 0x88 | OUT | Set I2S clock mode (uint8_t: 0=master, 1=slave); deferred apply, only meaningful while input source is I2S |
-| REQ_GET_I2S_CLOCK_MODE | 0x89 | IN | Get live I2S clock mode (pending change not reflected until applied) |
-| REQ_GET_I2S_SLAVE_STATUS | 0x8A | IN | Get 16-byte I2sSlaveStatusPacket (state, clock_mode, lock/loss/slip counts, detected + measured rate) |
-| REQ_SET_INPUT_SOURCE | 0xE0 | OUT | Set active input source (0=USB, 1=SPDIF, 2=I2S, 3=ADAT, 4=SPDIF2, 5=SPDIF3, 6=SPDIF4). Optional SPDIF inputs rejected unless enabled; ADAT rejected unless enabled with a pin set (RP2350) |
-| REQ_GET_INPUT_SOURCE | 0xE1 | IN | Get active input source |
-| REQ_GET_SPDIF_RX_STATUS | 0xE2 | IN | Get SPDIF RX status (16-byte SpdifRxStatusPacket) |
-| REQ_GET_SPDIF_RX_CH_STATUS | 0xE3 | IN | Get IEC 60958 channel status (24 bytes) |
-| REQ_SET_SPDIF_RX_PIN | 0xE4 | IN* | Set a SPDIF input's RX GPIO (wValue = (index<<8)\|pin, index 0..3; old hosts sending just a pin target index 0; pin 0xFF = reset that input to its default). Enabled inputs conflict-check the new pin; a disabled optional input stores it as a preference. Returns status byte |
-| REQ_GET_SPDIF_RX_PIN | 0xE5 | IN | Get a SPDIF input's RX GPIO (wValue = index 0..3) |
-| REQ_SET_LG_SOUND_SYNC_ENABLE | 0xE6 | OUT | Set LG Sound Sync enable flag (per-preset; live until REQ_SAVE_PRESET) |
-| REQ_GET_LG_SOUND_SYNC_ENABLE | 0xE7 | IN | Get LG Sound Sync enable flag |
-| REQ_GET_LG_SOUND_SYNC_STATUS | 0xE8 | IN | Get 16-byte LgSoundSyncStatus (enabled/present/volume/muted + reserved) |
-| REQ_SET_SPDIF_INPUT_ENABLE | 0xE9 | IN* | Enable/disable an optional SPDIF input (wValue = (index<<8)\|enable, index 1..3). Enabling validates the configured pin (PIN_IN_USE on conflict); disabling the live/pending source is rejected. RAM-only; persist via REQ_PRESET_SAVE. Returns PIN_CONFIG_* status byte |
-| REQ_SET_INPUT_RATE | 0xED | OUT | Set I2S input sample rate (uint32_t Hz: 44100/48000/96000; applied live when I2S input active in master clock mode; stored only in slave mode, where the rate is auto-detected) |
-| REQ_GET_INPUT_RATE | 0xEE | IN | Returns 8 bytes: 2x uint32_t {current pipeline Hz, selected I2S input Hz} |
-| REQ_GET_SPDIF_INPUT_CONFIG | 0xEF | IN | Get 6 bytes: input count (4), enable mask over all inputs (bit 0 = input 1, always set), then GPIOs for inputs 1..4. Lets a host build its source list data-driven |
-| REQ_SET_I2S_RX_PIN | 0xF1 | IN* | Set I2S RX data GPIO pin (wValue=(pair<<8)\|pin, returns status; pin 0xFF = reset that pair to its default). Checked against active pairs only; an inactive pair's parked pin does not block |
-| REQ_GET_I2S_RX_PIN | 0xF2 | IN | Get I2S RX data GPIO pin |
-| REQ_SET_UART_CONFIG | 0xF5 | OUT | Configure UART control interface (8-byte `UartCtrlConfig`; **USB only**, refused with BLOCKED over UART/I2C; deferred apply, persist on success; returns `PIN_CONFIG_*`) |
-| REQ_GET_UART_CONFIG | 0xF6 | IN | Get persisted `UartCtrlConfig` (8 bytes) |
-| REQ_SET_I2C_CONFIG | 0xF7 | OUT | Configure I2C target control interface (8-byte `I2cCtrlConfig`; **USB only**, refused with BLOCKED over UART/I2C; deferred apply, persist on success; returns `PIN_CONFIG_*`) |
-| REQ_GET_I2C_CONFIG | 0xF8 | IN | Get persisted `I2cCtrlConfig` (8 bytes) |
-| REQ_GET_CTRL_IFACE_STATUS | 0xF9 | IN | Get `CtrlIfaceStatus` (8 bytes: uart/i2c last_status + live flags, proto_version=1) |
-| REQ_SET_LOUDNESS_MASK | 0xFA | OUT | Set `loudness_output_mask` (2-byte little-endian; bit k = compensate output k, default 0xFFFF). Selects which output channels get per-output loudness |
-| REQ_GET_LOUDNESS_MASK | 0xFB | IN | Get `loudness_output_mask` (returns 2 bytes) |
-| REQ_SET_CROSSFEED_OUTPUTS | 0xFC | OUT | Set `output_pair_mask` (1 byte; bit p = crossfeed on output pair p, default 0x01 = pair 1 only). Clamped to valid pair bits; read live each packet (no recompute) |
-| REQ_GET_CROSSFEED_OUTPUTS | 0xFD | IN | Get `output_pair_mask` (returns 1 byte) |
-| REQ_SET_I2S_CLOCK_PIN_MODE | 0xFE | IN* | Set I2S clock-pin mode (wValue = 0 unified / 1 split; returns `PIN_CONFIG_*`). Entering SPLIT always validates the slave pair (distinctness + occupancy), even as a dormant store: PIN_IN_USE on conflict. Rejects with OUTPUT_ACTIVE when slave clocking is (or is pending) live with I2S output slots, INVALID_PARAM for wValue > 1. A live input-only change arms a deferred input restart onto the new effective pair. |
-| REQ_GET_I2S_CLOCK_PIN_MODE | 0xFF | IN | Get live I2S clock-pin mode (returns uint8_t: 0 = unified, 1 = split) |
+Crossover bands (20..23) are refused on input channels (channel < `CH_OUT_1`). See `Documentation/Features/crossover_filters_spec.md` for the complete crossover spec.
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-11-15 (wire-format paragraph: crossover section is 1088 bytes at 17 channels, arrays sized for 17 channels, SET accepts only V32). Previously 2026-09-22 (wire V32: output limiter section appended at 6028, total 6136; 2026-09-20: wire V31 tube section revised in place: `xfmr_damping` / `xfmr_res_hz` plus a reserved float, still 48 bytes and total 6028; 2026-09-18 wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
+*Last updated: 2026-11-16 (transport, SET and buffer paragraphs describe `STORE.ALL_PARAMS` on the paged protocol). Previously 2026-11-15 (wire-format paragraph: crossover section is 1088 bytes at 17 channels, arrays sized for 17 channels, SET accepts only V32). Previously 2026-09-22 (wire V32: output limiter section appended at 6028, total 6136; 2026-09-20: wire V31 tube section revised in place: `xfmr_damping` / `xfmr_res_hz` plus a reserved float, still 48 bytes and total 6028; 2026-09-18 wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
 
-Transfers the complete DSP state in a single USB control transfer (3664 bytes at V11/V12), replacing dozens of individual vendor requests.
+`STORE.ALL_PARAMS` transfers the complete DSP state in one control transfer (6136 bytes at V32), replacing dozens of individual vendor requests. `STORE.ALL_PARAMS_CHUNK` moves the same struct in offset-addressed pieces for hosts limited to 4 KB per transfer (see "Bulk and chunk sessions").
 
-**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 32, total 6136 bytes); packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), user volume/mute (`WireUserVolume`, 16 bytes), DAC hardware mute (`WireDacHwMute`, 16 bytes, V10+), and **crossover bands** (`WireCrossoverConfig`, V11+; 1088 bytes = 17 × 4 × `WireBandParams` since the V16 unified channel model). V12 claims two reserved bytes inside `WireInputConfig` for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000); V12 payloads are byte-identical in size to V11. All arrays sized at platform maximums (RP2350: 17 channels, 8 inputs, 9 outputs, 5 pins, 12 PEQ bands, 4 crossover bands per channel), indexed by firmware channel index, so RP2040 uses rows 0-6. Unused entries zero-padded; for crossover, input rows (channel < `CH_OUT_1`) are zeroed on collect and skipped on apply. SET accepts only the current `format_version` at exactly 6136 bytes with matching platform and channel counts; anything else is dropped silently. **V20** repurposes the `WireCrossfeedParams` reserved byte (offset 3) as `output_pair_mask` (bit p = crossfeed on output pair p); struct sizes are unchanged. **V22** carries the Linkwitz-Transform target `Q` in the EQ `WireBandParams.reserved[2]` bytes (`uint16` LE, `Q*512`; zero for non-LT types), so struct sizes stay unchanged. (V21 claimed one `WireInputConfig` reserved byte for the I2S clock master/slave mode, also size-neutral.) **V23** tail-appends the 24-byte `WirePsybassParams` (psychoacoustic bass: `enabled` + `output_mask` + five floats), bringing the total to 5900 bytes. **V24** claims three `WireInputConfig` reserved bytes for the ADAT input (`adat_input_pin`, `adat_input_enabled_p1`, `adat_clock_mode_p1`, each 0 = absent/keep-live); struct sizes and the 5900-byte total are unchanged. **V25** tail-appends the 44-byte `WireUpmixParams` (RP2350 stereo upmixer: enabled + centre/surround modes + reserved + ten floats; layout-identical to `UpmixConfigPacket`), bringing the total to 5944 bytes; the section is zeroed on collect and ignored on apply on RP2040. **V28** widens `WireInputConfig.spdif_rx_pin_ext` from 2 to 3 entries (SPDIF input 4), consuming that section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and the 5944-byte total and every later section offset are unchanged. The input-config section now has no reserved bytes left. **V29** tail-appends the 16-byte `WireSubharmParams` (subharmonic synthesizer: `enabled` + `reserved0` + `output_mask` + `low_db`/`high_db`/`boost_db`) at offset 5944, bringing the total to 5960 bytes. **V30** grows that section to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, bringing the total to 5980 bytes; the section offset stays 5944 and `solo` is deliberately absent (runtime-only). **V31** tail-appends the 48-byte `WireTubeParams` (tube preamp: `enabled` + `tube_type` + `rectifier` + `xfmr_enabled` + `output_mask` + two reserved bytes + nine floats + one reserved float) at offset 5980, bringing the total to 6028 bytes. The two output-stage floats are `xfmr_damping` and `xfmr_res_hz`; the layout was revised in place before release, so there is only one V31. Apply clamps `tube_type` and `rectifier` and copies the character fields verbatim, never running the tube-type row lookup, which would overwrite a saved Custom voicing. **V32** tail-appends the 108-byte `WireLimiterParams` (output limiter: nine 12-byte per-output records of `enabled`, `link_group`, two reserved bytes, `threshold_db`, `release_ms`) at offset 6028, bringing the total to 6136 bytes.
+**Wire format:** `WireBulkParams` (`bulk_params.h`, `WIRE_FORMAT_VERSION` 32, total 6136 bytes); packed struct with header, global params, crossfeed, legacy channel gains, delays, matrix crosspoints, matrix outputs, pin config, EQ bands, channel names, I2S config, leveller config, preamp config (`WirePreampConfig`, 16 bytes), master volume config (`WireMasterVolume`, 16 bytes), input source config (`WireInputConfig`, 16 bytes), LG Sound Sync (`WireLgSoundSync`, 16 bytes), user volume/mute (`WireUserVolume`, 16 bytes), DAC hardware mute (`WireDacHwMute`, 16 bytes, V10+), and **crossover bands** (`WireCrossoverConfig`, V11+; 1088 bytes = 17 × 4 × `WireBandParams` since the V16 unified channel model). V12 claims two reserved bytes inside `WireInputConfig` for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000); V12 payloads are byte-identical in size to V11. All arrays sized at platform maximums (RP2350: 17 channels, 8 inputs, 9 outputs, 5 pins, 12 PEQ bands, 4 crossover bands per channel), indexed by firmware channel index, so RP2040 uses rows 0-6. Unused entries zero-padded; for crossover, input rows (channel < `CH_OUT_1`) are zeroed on collect and skipped on apply. SET accepts only the current `format_version` at exactly 6136 bytes with matching platform and channel counts. Anything else fails the request (`VC_ERR_LENGTH` or `VC_ERR_VALUE`, a STALL on USB) and changes nothing. **V20** repurposes the `WireCrossfeedParams` reserved byte (offset 3) as `output_pair_mask` (bit p = crossfeed on output pair p); struct sizes are unchanged. **V22** carries the Linkwitz-Transform target `Q` in the EQ `WireBandParams.reserved[2]` bytes (`uint16` LE, `Q*512`; zero for non-LT types), so struct sizes stay unchanged. (V21 claimed one `WireInputConfig` reserved byte for the I2S clock master/slave mode, also size-neutral.) **V23** tail-appends the 24-byte `WirePsybassParams` (psychoacoustic bass: `enabled` + `output_mask` + five floats), bringing the total to 5900 bytes. **V24** claims three `WireInputConfig` reserved bytes for the ADAT input (`adat_input_pin`, `adat_input_enabled_p1`, `adat_clock_mode_p1`, each 0 = absent/keep-live); struct sizes and the 5900-byte total are unchanged. **V25** tail-appends the 44-byte `WireUpmixParams` (RP2350 stereo upmixer: enabled + centre/surround modes + reserved + ten floats; layout-identical to `UpmixConfigPacket`), bringing the total to 5944 bytes; the section is zeroed on collect and ignored on apply on RP2040. **V28** widens `WireInputConfig.spdif_rx_pin_ext` from 2 to 3 entries (SPDIF input 4), consuming that section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and the 5944-byte total and every later section offset are unchanged. The input-config section now has no reserved bytes left. **V29** tail-appends the 16-byte `WireSubharmParams` (subharmonic synthesizer: `enabled` + `reserved0` + `output_mask` + `low_db`/`high_db`/`boost_db`) at offset 5944, bringing the total to 5960 bytes. **V30** grows that section to 36 bytes by tail-appending `top_db`, `select_depth`, `select_hold_ms`, `ceiling_db`, `select_mode`, `link_pairs` and two reserved bytes, bringing the total to 5980 bytes; the section offset stays 5944 and `solo` is deliberately absent (runtime-only). **V31** tail-appends the 48-byte `WireTubeParams` (tube preamp: `enabled` + `tube_type` + `rectifier` + `xfmr_enabled` + `output_mask` + two reserved bytes + nine floats + one reserved float) at offset 5980, bringing the total to 6028 bytes. The two output-stage floats are `xfmr_damping` and `xfmr_res_hz`; the layout was revised in place before release, so there is only one V31. Apply clamps `tube_type` and `rectifier` and copies the character fields verbatim, never running the tube-type row lookup, which would overwrite a saved Custom voicing. **V32** tail-appends the 108-byte `WireLimiterParams` (output limiter: nine 12-byte per-output records of `enabled`, `link_group`, two reserved bytes, `threshold_db`, `release_ms`) at offset 6028, bringing the total to 6136 bytes.
 
 **Per-version size anchors** live in `bulk_params.h` (`WIRE_BULK_PARAMS_V{N}_SIZE`, N=2..12). Each legacy-section apply gate inside `bulk_params_apply()` compares `payload_length` against its own version's anchor, NOT against `sizeof(WireBulkParams)`. Without this discipline, growing the struct would silently lock older payloads out of the very tail sections they own (e.g. a V10 payload would stop applying its DAC-mute section the moment V11 was added). V<11 payloads leave crossover state untouched on apply; V<12 payloads leave the I2S input pin/rate untouched.
 
-**Transport:** Multi-packet USB EP0 control transfers using `usb_stream_transfer` from pico-extras. Packets are 64 bytes. No modifications to `usb_device.c` required — uses only public API (`usb_stream_setup_transfer`, `usb_start_transfer`, `usb_start_empty_transfer`).
+**Transport:** Multi-packet USB EP0 control transfers through `tud_control_xfer()`, which handles the 64-byte packets and the ZLP. The command is `VC_F_BULK`, so the payload or reply lives in `bulk_param_buf` under the bulk lock from SETUP to the status ACK (`vendor/vc_bulk.c`). UART and I2C stream the same command zero-copy (see "External Control Interfaces").
 
-**GET (0xA0):** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, then streams it out in 64-byte packets via `usb_stream_transfer`. ZLP appended if total length is a multiple of 64.
+**GET:** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, which is then sent as the reply.
 
-**SET (0xA1):** Incoming data accumulated into `bulk_param_buf` via `usb_stream_transfer`. On completion, `bulk_params_pending` flag is set (after status-phase ACK). Main loop processes deferred: snapshots `output_types[]`, waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with pin application gated on `output_config_mode` (applied only in with-preset mode; independent mode leaves device-global IO to `REQ_SAVE_OUTPUT_CONFIG`), recalculates all filters and delays, transitions Core 1 mode to match the new output enable state, then diffs the new `output_types[]` against the snapshot. If any slot's type changed, dispatches `process_type_switches()` to reconfigure SPDIF/I2S hardware (mirrors the `preset_load_pending` pattern); otherwise calls `complete_pipeline_reset()` to resync output streams (or `reset_usb_feedback_loop()` when SPDIF input is active, to avoid disrupting the prefill handshake).
+**SET:** The payload lands in `bulk_param_buf`. At the DATA stage `vc_bulk_params_check()` checks the header and the handler sets `bulk_params_pending`, so a bad header STALLs the status stage instead of being dropped later. Main loop processes deferred: snapshots `output_types[]`, waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with pin application gated on `output_config_mode` (applied only in with-preset mode; independent mode leaves device-global IO to `STORE.OUTPUT_CONFIG_SAVE`), recalculates all filters and delays, transitions Core 1 mode to match the new output enable state, then diffs the new `output_types[]` against the snapshot. If any slot's type changed, dispatches `process_type_switches()` to reconfigure SPDIF/I2S hardware (mirrors the `preset_load_pending` pattern); otherwise calls `complete_pipeline_reset()` to resync output streams (or `reset_usb_feedback_loop()` when SPDIF input is active, to avoid disrupting the prefill handshake).
 
-**Buffer:** 4 KB aligned static buffer in `usb_audio.c`, shared between GET and SET. Platform validation rejects mismatched `platform_id` or `num_channels`.
+**Buffer:** `bulk_param_buf` in `usb_audio.c`, `WIRE_BULK_BUF_SIZE` bytes (one `WireBulkParams`), 4-byte aligned, shared between GET and SET and across transports. Platform validation rejects mismatched `platform_id` or channel counts.
 
 ### Buffer Statistics
-*Last updated: 2026-07-23 (consumer pool replaced by the slot ring; stats via a 48-frames-per-bucket mapping)*
+*Last updated: 2026-11-16 (read through `SYS.BUFFER_STATS`, reset through `SYS.STATS_RESET`). Previously 2026-07-23 (consumer pool replaced by the slot ring; stats via a 48-frames-per-bucket mapping)*
 
 Real-time buffer fill level monitoring for the SPDIF slot rings (DMA-side) and PDM buffers, accessible via USB vendor commands. Enables host applications to diagnose audio glitches, near-miss underruns, and pipeline health. There is no producer-side buffer to report: the pipeline renders into per-slot staging and copies it into the ring in the same call.
 
-**Ring-to-bucket mapping (2026-07-23).** The wire format and thresholds are unchanged: each slot's ring fill is mapped to legacy "buffer" buckets of 48 frames (a ring fill of N frames reports N/48 buckets, capped at `SPDIF_CONSUMER_BUFFER_COUNT` = 16), so `REQ_GET_BUFFER_STATS` and its fill percentages keep byte- and semantics-compatibility with the old consumer-pool counts. Since 2026-10-16 the prefill thresholds compare frames against `OUTPUT_RING_TARGET_FILL_FRAMES` instead (see "Buffer Configuration").
+**Ring-to-bucket mapping (2026-07-23).** The wire format and thresholds are unchanged: each slot's ring fill is mapped to legacy "buffer" buckets of 48 frames (a ring fill of N frames reports N/48 buckets, capped at `SPDIF_CONSUMER_BUFFER_COUNT` = 16), so `SYS.BUFFER_STATS` and its fill percentages keep byte- and semantics-compatibility with the old consumer-pool counts. Since 2026-10-16 the prefill thresholds compare frames against `OUTPUT_RING_TARGET_FILL_FRAMES` instead (see "Buffer Configuration").
 
 **Wire format:** `BufferStatsPacket` (44 bytes, fits in a single 64-byte USB control transfer). Contains per-instance SPDIF consumer stats (`SpdifBufferStats` x4, 8 bytes each), PDM stats (`PdmBufferStats`, 8 bytes), instance count, flags (PDM active, audio streaming), and a monotonic sequence counter.
 
@@ -4607,7 +4573,7 @@ Real-time buffer fill level monitoring for the SPDIF slot rings (DMA-side) and P
 
 **Producer fill formula:** `(capacity - free) * 100 / capacity` — measures in-flight + prepared buffers, since `prepared` alone is always near zero (DMA IRQ drains it on-demand via the connection).
 
-**Watermark tracking:** Consumer watermarks updated once per USB audio packet (~1ms) in `process_audio_packet()`. Overhead ~1-2us (ring pointer reads; consumer pool list traversals before the 2026-10-11 merge). Reset via `REQ_RESET_BUFFER_STATS` (0xB1, wValue bit 0).
+**Watermark tracking:** Consumer watermarks updated once per USB audio packet (~1ms) in `process_audio_packet()`. Overhead ~1-2us (ring pointer reads; consumer pool list traversals before the 2026-10-11 merge). Reset via `SYS.STATS_RESET` (1-byte mask, bit 0).
 
 **Implementation:** `audio_buffer_list_count()` inline in `pico/audio.h` for read-only list traversal. `pdm_stats_write_idx` volatile in `pdm_generator.c` exposes Core 1 write position to Core 0 (atomic on ARM). Helper functions in `usb_audio.c`: `count_pool_free()`, `count_pool_prepared()`, `update_buffer_watermarks()`, `reset_buffer_watermarks()`.
 
@@ -4616,7 +4582,7 @@ Real-time buffer fill level monitoring for the SPDIF slot rings (DMA-side) and P
 ---
 
 ## I2S Output Support
-*Last updated: 2026-04-09*
+*Last updated: 2026-11-16 (vendor commands on the OUTPUT and CLOCK pages). Previously 2026-04-09*
 
 ### Overview
 
@@ -4661,20 +4627,18 @@ Each output slot can be independently configured as S/PDIF or I2S at runtime via
 
 MCK is driven directly by **CLK_GPOUTn** (hardware clock peripheral output) — `clock_gpio_init_int_frac8()` configures the 24.8 divider against `clk_sys` (AUXSRC_VALUE_CLK_SYS). The previous PIO-toggle implementation needed a `÷2` factor in the denominator (PIO clk = 2 × MCK), which halved divider precision and made every 256× combination fractional; with GPOUTn only 96 kHz × 256× remains fractional. The 96 kHz × 256× clamp that used to silently force 128× has been removed.
 
-### Vendor Commands (0xC0–0xC9)
+### Vendor Commands
+*Last updated: 2026-11-16 (OUTPUT and CLOCK page commands)*
 
-| Code | Command | Direction |
-|------|---------|-----------|
-| 0xC0 | SET_OUTPUT_TYPE | SET |
-| 0xC1 | GET_OUTPUT_TYPE | GET |
-| 0xC2 | SET_I2S_BCK_PIN | SET |
-| 0xC3 | GET_I2S_BCK_PIN | GET |
-| 0xC4 | SET_MCK_ENABLE | SET |
-| 0xC5 | GET_MCK_ENABLE | GET |
-| 0xC6 | SET_MCK_PIN | SET |
-| 0xC7 | GET_MCK_PIN | GET |
-| 0xC8 | SET_MCK_MULTIPLIER | SET |
-| 0xC9 | GET_MCK_MULTIPLIER | GET |
+Each is one GET and SET pair with a 1-byte payload. A refused SET STALLs on USB, and the reason is in `SYS.LAST_RESULT`.
+
+| Command | Address | Payload |
+|---------|---------|---------|
+| `OUTPUT.TYPE` | output slot | 0 = S/PDIF, 1 = I2S; anything else is `VC_ERR_VALUE`. Deferred to the main loop |
+| `CLOCK.I2S_BCK_PIN` | role (0 = master/unified pair, 1 = slave pair) | BCK GPIO, LRCLK is BCK + 1; 0xFF resets the role to its default |
+| `CLOCK.MCK_ENABLE` | none | 0 or 1 |
+| `CLOCK.MCK_PIN` | none | GPIO, 0xFF resets to the default |
+| `CLOCK.MCK_MULTIPLIER` | none | 0 = 128x, 1 = 256x |
 
 ### Persistence
 
@@ -4709,7 +4673,7 @@ Full specification: `Documentation/Features/i2s_output_spec.md`
 ---
 
 ## ADAT Bulk Output
-*Last updated: 2026-10-23 (576-frame ring for the 512-frame slot rings). Previously 2026-10-11 (output rings: synchronous skip mirror, keep-alive, measured resync anchor, 960-frame ring; lead bound `ADAT_MAX_LEAD_FRAMES` on the resync and skip mirror). Previously, 2026-07-13 (LUT-driven NRZI encoder; single float->S24 conversion point shared with the slots)*
+*Last updated: 2026-11-16 (config commands named `OUTPUT.ADAT_TX_*`). Previously 2026-10-23 (576-frame ring for the 512-frame slot rings); 2026-10-11 (output rings: synchronous skip mirror, keep-alive, measured resync anchor, 960-frame ring; lead bound `ADAT_MAX_LEAD_FRAMES` on the resync and skip mirror). Previously, 2026-07-13 (LUT-driven NRZI encoder; single float->S24 conversion point shared with the slots)*
 
 RP2350 only. Streams all 8 main output channels (post-matrix, post per-output
 EQ/gain/delay/mute, the same finalized samples the SPDIF/I2S slots receive) as
@@ -4771,7 +4735,7 @@ Silence frames carry an even number of ones (2 in the header, 48 forced stuffing
 
 **Ring size.** The ring must hold the cushion plus a full slot ring: 96 + (512 - 64) = 544 frames (`ADAT_MAX_LEAD_FRAMES`), so `ADAT_RING_FRAMES` is 576 (960 for the 1024-frame rings before 2026-10-23) (static-asserted, along with the assumption that the I2S slot fill cap is no larger than the S/PDIF one). The pool-era 896 frames only covered the 768-frame blocking-give cap.
 
-**Config/state machine:** vendor commands 0xCA-0xCE (see reference table)
+**Config/state machine:** `OUTPUT.ADAT_TX_ENABLE`, `OUTPUT.ADAT_TX_PIN` and `OUTPUT.ADAT_TX_STATUS` (RP2350 only)
 record intent and set `adat_output_config_dirty`; the main loop applies it
 inside the standard muted `prepare/complete_pipeline_reset` bracket (serviced
 before `process_pin_changes` so a released ADAT GPIO cannot be clobbered).
@@ -4794,7 +4758,7 @@ Full specification: `Documentation/Features/adat_output_spec.md`
 ---
 
 ## Per-Channel Input Preamp
-*Last updated: 2026-04-09*
+*Last updated: 2026-11-16 (`ROUTE.PREAMP`; legacy single-value request retired). Previously 2026-04-09*
 
 ### Overview
 
@@ -4809,13 +4773,9 @@ The input preamp is per-channel rather than a single global value. Each USB inpu
 | `global_preamp_linear[NUM_INPUT_CHANNELS]` | `float` | Linear gain for metering/display |
 
 ### Vendor Commands
+*Last updated: 2026-11-16 (paged commands)*
 
-| Code | Command | Direction | Description |
-|------|---------|-----------|-------------|
-| 0xD0 | REQ_SET_PREAMP_CH | OUT | Set preamp gain for channel (wValue=channel index) |
-| 0xD1 | REQ_GET_PREAMP_CH | IN | Get preamp gain for channel (wValue=channel index) |
-| 0x44 | REQ_SET_PREAMP | OUT | Legacy: sets all input channels to the same gain |
-| 0x45 | REQ_GET_PREAMP | IN | Legacy: returns channel 0 gain |
+`ROUTE.PREAMP` sets and reads one input channel's preamp, with the input channel in `wValue` and an f32 dB payload both ways. A non-finite value is `VC_ERR_VALUE`. The 1.1.6 single-value preamp request, which set every input to one gain, is retired. A host sets each input in turn.
 
 ### Persistence
 
@@ -4827,7 +4787,7 @@ The input preamp is per-channel rather than a single global value. Each USB inpu
 ---
 
 ## Master Volume
-*Last updated: 2026-05-27*
+*Last updated: 2026-11-16 (vendor commands on the ROUTE page). Previously 2026-05-27*
 
 ### Overview
 
@@ -4847,21 +4807,22 @@ Device-side master volume providing an attenuation-only ceiling on all output ch
 Core 1 sees the master-volume-scaled `vol_mul_master` transparently via the `Core1EqWork` handshake struct. No special handling needed in the EQ worker — the combined volume multiplier is pre-computed by Core 0.
 
 ### Vendor Commands
+*Last updated: 2026-11-16 (paged commands)*
 
-| Code | Command | Direction | Description |
-|------|---------|-----------|-------------|
-| 0xD2 | REQ_SET_MASTER_VOLUME | OUT | Set master volume (-128 to 0 dB) |
-| 0xD3 | REQ_GET_MASTER_VOLUME | IN | Get master volume |
-| 0xD4 | REQ_SET_MASTER_VOLUME_MODE | OUT | Set master volume persistence mode (0=independent, 1=with preset) |
-| 0xD5 | REQ_GET_MASTER_VOLUME_MODE | IN | Get master volume persistence mode |
-| 0xD6 | REQ_SAVE_MASTER_VOLUME | IN | Persist live master volume to directory's independent field |
-| 0xD7 | REQ_GET_SAVED_MASTER_VOLUME | IN | Get the directory's independent master volume |
+All on the `ROUTE` page.
+
+| Command | Direction | Description |
+|---------|-----------|-------------|
+| `ROUTE.MASTER_VOLUME` | GET, SET | Master volume, f32 dB, clamped to -128..0 (-128 mutes). A non-finite value is `VC_ERR_VALUE` |
+| `ROUTE.MASTER_VOLUME_MODE` | GET, SET | Persistence mode (0 = independent, 1 = with preset; other values store 0). Deferred, writes flash |
+| `ROUTE.MASTER_VOLUME_SAVE` | SET (zero-length) | Persist the live master volume to the directory's independent field. Deferred, writes flash |
+| `ROUTE.MASTER_VOLUME_SAVED` | GET | The directory's independent master volume, f32 dB |
 
 ### Persistence
 
 - `SLOT_DATA_VERSION` 12 adds `master_volume_db` to `PresetSlot`
 - Directory-level `master_volume_mode` (default 0 = independent): mode 0 saves/restores master volume from a directory field decoupled from presets; mode 1 saves/restores it as part of each preset (legacy behavior)
-- Preset directory response is 7 bytes — byte 6 = `master_volume_mode`
+- `STORE.DIRECTORY` is 7 bytes, and byte 6 is `master_volume_mode`
 - Factory default master volume = `MASTER_VOL_DEFAULT_DB` (-20 dB) — applied at boot when the directory is fresh, and on legacy migration
 - `apply_master_volume_db()` in `flash_storage.c` delegates to `update_master_volume()` so all paths emit host notifications
 - Slots with version < 12 default to 0 dB master volume (unity, no attenuation)
@@ -4879,7 +4840,7 @@ Master volume is re-derived on every preset *context* change (preset load, activ
 ---
 
 ## Audio Input Source System
-*Last updated: 2026-10-10 (only the deferred switch handler writes `active_input_source`; factory defaults queue a switch to USB)*
+*Last updated: 2026-11-16 (vendor commands on the INPUT and CLOCK pages). Previously 2026-10-10 (only the deferred switch handler writes `active_input_source`; factory defaults queue a switch to USB)*
 
 Abstraction layer enabling selection between multiple audio input sources. Supports USB (default), up to three SPDIF inputs, I2S, and (RP2350 only) an 8-channel ADAT lightpipe input.
 
@@ -4905,14 +4866,14 @@ typedef enum {
 `input_source_valid()` accepts every value 0..6 (ADAT = 3 is structurally valid on both platforms so presets round-trip; RP2040 keeps only the config state and can never select it); `input_source_selectable()` additionally requires that an optional SPDIF be enabled, or that ADAT be enabled with a pin set on RP2350, before it is offered. `input_source_is_spdif()`, `spdif_index_for_source()` (0..3), and `spdif_source_for_index()` map between the two SPDIF representations. The optional sources must stay contiguous from `INPUT_SOURCE_SPDIF2` — those two helpers are arithmetic, not lookup tables, and a `_Static_assert` in `audio_input.h` enforces it.
 
 ### Multiple Selectable SPDIF Inputs
-*Last updated: 2026-08-02 (raised from 3 to 4 selectable inputs)*
+*Last updated: 2026-11-16 (vendor commands on the INPUT page). Previously 2026-08-02 (raised from 3 to 4 selectable inputs)*
 
 Up to `SPDIF_RX_NUM_INPUTS` (4) SPDIF inputs share the single RX PIO state machine and DMA pair; only the active one ever claims its GPIO. SPDIF input 1 (`INPUT_SOURCE_SPDIF`, default GPIO 5) is always enabled and behaves exactly as before. The optional inputs 2, 3 and 4 (`INPUT_SOURCE_SPDIF2`..`INPUT_SOURCE_SPDIF4`, default GPIOs 20, 21 and 22) are **disabled by default**.
 
-- **Enable model.** `spdif_rx_enabled_ext` is a 3-bit mask (bit 0 = SPDIF2 .. bit 2 = SPDIF4; `SPDIF_RX_ENABLED_EXT_MASK` is the valid-bit mask applied to anything arriving from the wire or flash). While an input is disabled it is not offered by `REQ_SET_INPUT_SOURCE`, and its configured pin is a stored preference only: invisible to pin-conflict validation, so other functions may use GPIO 20/21/22 freely. Enabling validates the configured pin via `spdif_input_enable_acceptable()` (valid GPIO, not claimed by any other function) and is rejected with `PIN_IN_USE` on a conflict. Disabling the input that is the active source (or the target of a pending source switch) is rejected; the host must switch away first.
+- **Enable model.** `spdif_rx_enabled_ext` is a 3-bit mask (bit 0 = SPDIF2 .. bit 2 = SPDIF4; `SPDIF_RX_ENABLED_EXT_MASK` is the valid-bit mask applied to anything arriving from the wire or flash). While an input is disabled an `INPUT.SOURCE` SET that selects it is refused with `VC_ERR_STATE`, and its configured pin is a stored preference only: invisible to pin-conflict validation, so other functions may use GPIO 20/21/22 freely. Enabling validates the configured pin via `spdif_input_enable_acceptable()` (valid GPIO, not claimed by any other function) and is refused with `VC_ERR_PIN_IN_USE` on a conflict. Disabling the input that is the active source (or the target of a pending source switch) is refused with `VC_ERR_STATE`, so the host must switch away first.
 - **GPIO lifecycle.** `spdif_rx_pin_for_index()` resolves an input's pin (`spdif_rx_pin` for index 0, `spdif_rx_pin_ext[]` for 1..3), `spdif_rx_pin_default_for_index()` gives its factory GPIO (the `PIN_RESET_TO_DEFAULT` target and the unset-pin fallback), and `spdif_rx_active_pin()` gives the GPIO the RX library should run on for the current source. `spdif_input_stop()` resets the RX GPIO to `GPIO_FUNC_NULL` (the vendored `pico_spdif_rx` library never did); it releases the pin it recorded at start time, not the current config, so a pin change or an input switch actually frees the previous pad.
 - **Switching between SPDIF inputs** reuses the existing deferred source-switch machinery (full stop, pipeline reset, restart on the new GPIO, outputs muted until lock). Inter-slot output alignment is preserved by the same complete-reset path as every other source switch.
-- **Vendor commands.** `REQ_SET_SPDIF_RX_PIN` (0xE4) and `REQ_GET_SPDIF_RX_PIN` (0xE5) carry the input index (`wValue = (index<<8)|GPIO` on SET, `wValue = index` on GET, index 0..3); a bare pin from an old host targets index 0. `REQ_SET_SPDIF_INPUT_ENABLE` (0xE9, `wValue = (index<<8)|enable`, index 1..3) toggles the mask; `REQ_GET_SPDIF_INPUT_CONFIG` (0xEF) returns 6 bytes (was 5): the input count, the enable mask over all inputs (bit 0 always set), and all four GPIOs, so a host can build its source list data-driven. A host that asks for fewer bytes gets a short read of the same layout.
+- **Vendor commands.** `INPUT.SPDIF_RX_PIN` takes the input index (0..3) in `wValue` and the GPIO as its 1-byte payload, both ways. `INPUT.SPDIF_RX_ENABLE` (index 1..3, index 0 is `VC_ERR_ADDRESS`) sets or reads one bit of the mask. `INPUT.SPDIF_RX_CONFIG` returns 6 bytes: the input count, the enable mask over all inputs (bit 0 always set), and all four GPIOs, so a host can build its source list data-driven. A host that asks for fewer bytes gets a short read of the same layout.
 - **Default channel names.** SPDIF input 1 keeps "SPDIF L/R"; inputs 2/3/4 produce "SPDIF 2 L/R" .. "SPDIF 4 L/R" so the host can tell them apart. The name generator is index-driven, so it needed no change.
 - **Persistence.** The device-global store is `FlashOutputConfig`: inputs 2/3 use `spdif_rx_pin_ext[2]` (directory V12) and input 4 the appended `spdif_rx_pin4` byte (directory **V16**). The array is not widened in place because the frozen `FlashOutputConfig_v11..v15` structs are strict prefixes that the directory migrations copy forward; `cfg_spdif_ext_pin()` / `cfg_spdif_ext_pin_get()` in `flash_storage.c` index the split storage as one array. Per-preset storage mirrors this: the enable mask and the 2/3 pins are slot V24 fields, input 4's pin is the slot **V35** tail byte. A V24..V34 slot carries a mask with bit 2 clear, so loading such a preset disables SPDIF 4 — the same "the slot's mask fully overrides" rule that already applied to inputs 2/3.
 - **Wire format.** `WireInputConfig.spdif_rx_pin_ext` grows from 2 to 3 entries and consumes that section's last reserved byte, shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one byte; the section stays 16 bytes and every later wire offset is unchanged. This is `WIRE_FORMAT_VERSION` **28**, so hosts pushing a V27 bulk payload are rejected until they are rebuilt. The input-config section now has no reserved bytes left; a further input-config field needs a new wire section.
@@ -4969,14 +4930,14 @@ The switch to USB in the deferred input-source switch handler calls `audio_thaw_
 This matches the user's product-level decision; it differs from the industry-standard pattern (RME TotalMix / UA Apollo, where host volume continues to act as master output gain on external sources) on purpose.
 
 ### SPDIF RX Pin
-*Last updated: 2026-07-15 (pin byte 0xFF on SET = reset that input to its default)*
+*Last updated: 2026-11-16 (`INPUT.SPDIF_RX_PIN`, `STORE.*` save paths). Previously 2026-07-15 (pin byte 0xFF on SET = reset that input to its default)*
 
 - Default: GPIO 5 (`PICO_SPDIF_RX_PIN_DEFAULT`) for input 1; GPIO 20/21 (`PICO_SPDIF_RX_PIN2_DEFAULT` / `PICO_SPDIF_RX_PIN3_DEFAULT`) for the optional inputs 2/3. Input 1's GPIO 5 moved off GPIO 11 to avoid colliding with `DAC_HW_MUTE_DEFAULT_PIN`; it is unclaimed by any default output, the UART, or the I²S pins, so the SPDIF RX defaults stop blocking a fresh-install enable of the DAC hardware-mute feature. A disabled input's pin is not reserved, so GPIO 20/21 stay free for other functions until the input is enabled.
-- **Persistence follows `output_config_mode` (matches `output_pins[]`).** `REQ_SET_SPDIF_RX_PIN` updates the live `spdif_rx_pin` / `spdif_rx_pin_ext[]` global in RAM only; no implicit flash write. In with-preset mode the user `REQ_PRESET_SAVE`s to capture the pins in a slot (restored on load); in independent mode `REQ_SAVE_OUTPUT_CONFIG` persists them to the device-global block (applied at boot). The RX pins are part of the physical-IO config block, applied by `apply_output_config_from_mode()`.
-- Configurable via `REQ_SET_SPDIF_RX_PIN` (0xE4) / `REQ_GET_SPDIF_RX_PIN` (0xE5); both carry the input index (0..3) in `wValue`. Enabled inputs conflict-check a new pin; a disabled optional input's pin is a stored preference validated at enable time (`REQ_SET_SPDIF_INPUT_ENABLE`, 0xE9).
+- **Persistence follows `output_config_mode` (matches `output_pins[]`).** An `INPUT.SPDIF_RX_PIN` SET updates the live `spdif_rx_pin` / `spdif_rx_pin_ext[]` global in RAM only; no implicit flash write. In with-preset mode a `STORE.PRESET_SAVE` captures the pins in a slot (restored on load). In independent mode `STORE.OUTPUT_CONFIG_SAVE` persists them to the device-global block (applied at boot). The RX pins are part of the physical-IO config block, applied by `apply_output_config_from_mode()`.
+- Configurable via `INPUT.SPDIF_RX_PIN`, with the input index (0..3) in `wValue`. Enabled inputs conflict-check a new pin; a disabled optional input's pin is a stored preference validated at enable time (`INPUT.SPDIF_RX_ENABLE`).
 - **On-flash layout:** `spdif_rx_pin` lives in one byte that V13 originally reserved as `input_source_padding[0]`. Reusing that byte keeps the `PresetSlot` size unchanged, so existing V13 presets remain CRC-valid (their padding bytes were zero-initialised, which fails GPIO validity and falls through to the live default — same observable behaviour as before this change).
 - **Boot-time bootstrap.** `preset_boot_load` still reads the directory's legacy `spdif_rx_pin` field as the initial live value. This means users upgrading from auto-flush firmware keep their previously-configured pin until they save a preset under the new firmware. After that, the slot's value drives behaviour and the directory field is no longer consulted on subsequent boots that load the same slot.
-- **Hot-swap supported.** Pin changes (from vendor command, bulk params apply, or preset load) while SPDIF input is active set `spdif_rx_pin_change_pending`; the main-loop deferred handler runs `spdif_input_stop()` → `prepare_pipeline_reset()` → `spdif_input_start()` so the running RX library picks up the new GPIO. Deferred to main loop because the `pico_spdif_rx` library's teardown (program removal, IRQ handler removal, DMA channel unclaim) is not safe to perform from USB ISR context.
+- **Hot-swap supported.** Pin changes (from vendor command, bulk params apply, or preset load) while SPDIF input is active set `spdif_rx_pin_change_pending`; the main-loop deferred handler runs `spdif_input_stop()` → `prepare_pipeline_reset()` → `spdif_input_start()` so the running RX library picks up the new GPIO. Deferred to main loop because the `pico_spdif_rx` library's teardown (program removal, IRQ handler removal, DMA channel unclaim) is not safe to perform inside a vendor request.
 - **`bulk_params_apply` integration.** `WireInputConfig.spdif_rx_pin` is applied on bulk SET when `apply_pins == true`, mirroring how `output_pins[]` is applied. If the new pin differs from the current one and SPDIF input is active, the hot-swap fires.
 
 ### SPDIF RX Implementation
@@ -5056,7 +5017,7 @@ Pulse-width distortion matters here because the decoder alternates rising- and f
 **Files**: `spdif_input.h` (API + status struct), `spdif_input.c` (lifecycle, audio extraction, clock servo, status queries)
 
 ### I2S Input
-*Last updated: 2026-10-16 (inactive pairs' parked data pins reserve nothing; activation re-checks them). Previously 2026-07-15 (pin byte 0xFF on the pin SETs = reset the addressed target to its default)*
+*Last updated: 2026-11-16 (rate, MCK and save commands named by paged command). Previously 2026-10-16 (inactive pairs' parked data pins reserve nothing; activation re-checks them). Previously 2026-07-15 (pin byte 0xFF on the pin SETs = reset the addressed target to its default)*
 
 In the default MASTER clock mode (`i2s_clock_mode` = 0) I2S input keeps the device as the clock authority: the external source slaves to our BCK/LRCLK, the same shared clock pair the I2S outputs use (`i2s_bck_pin` / +1; master clocking always uses this pair regardless of clock-pin mode). Because the input is then synchronous to the device clock domain, there is **no clock servo, no rate detection and no lock state machine**; the subsystem is structurally a much simpler sibling of SPDIF RX. State is just INACTIVE / RUNNING. In SLAVE clock mode (`i2s_clock_mode` = 1) an EXTERNAL master drives BCK/LRCLK instead; that mode adds rate detection, a lock state machine and an output clock servo, described in the "I2S Clock-Slave Input Mode" section below. Everything in THIS section describes master mode unless noted.
 
@@ -5086,47 +5047,40 @@ How the pools get filled depends on the input's clock role, because the prefill 
 
 **Suspend/resume sites** (mirroring SPDIF RX): `perform_rate_change()` (stop before, restart after; covers the master-divider change), `process_type_switches()` (restart with a freshly elected role; this is the role re-election point), flash-write brackets (`i2s_suspended_for_flash` + `resume_i2s_after_flash()`), preset load, factory reset, bulk-params apply, and the input-switch handler. `process_pin_changes()` needs no suspension: output data-pin moves never change the input role, and the structural resync covers the slave re-phase.
 
-**Sample-rate authority.** With USB the host picks Fs, with SPDIF the source does; with I2S input *we* do. `i2s_input_rate` (44100/48000/96000, default 48000) is set via `REQ_SET_INPUT_RATE` and applied through the standard deferred `pending_rate` / `rate_change_pending` mechanism whenever I2S input is active. As part of this feature, `perform_rate_change()` now writes `audio_state.freq = new_freq`; previously only the USB host path updated it, so SPDIF-driven rate changes left the loudness/crossfeed/leveller recompute handlers and `REQ_GET_STATUS` on a stale Fs (latent defect, fixed).
+**Sample-rate authority.** With USB the host picks Fs, with SPDIF the source does; with I2S input *we* do. `i2s_input_rate` (44100/48000/96000, default 48000) is set via `INPUT.I2S_RX_RATE` and applied through the standard deferred `pending_rate` / `rate_change_pending` mechanism whenever I2S input is active. As part of this feature, `perform_rate_change()` now writes `audio_state.freq = new_freq`; previously only the USB host path updated it, so SPDIF-driven rate changes left the loudness/crossfeed/leveller recompute handlers and the reported sample rate on a stale Fs (latent defect, fixed).
 
-**MCK.** The external source may need MCK, so the MCK run condition is now "any output slot is I2S **or** I2S is the active input": extended in `process_type_switches()` and started/stopped by the input-switch handler when entering/leaving I2S input with no I2S outputs (divider before enable, matching `REQ_SET_MCK_ENABLE` ordering).
+**MCK.** The external source may need MCK, so the MCK run condition is now "any output slot is I2S **or** I2S is the active input": extended in `process_type_switches()` and started/stopped by the input-switch handler when entering/leaving I2S input with no I2S outputs (divider before enable, matching the `CLOCK.MCK_ENABLE` ordering).
 
-**I2S RX data pin.** Default GPIO 1 (`PICO_I2S_RX_PIN_DEFAULT`); the four data-pin defaults are the contiguous block GPIO 1/2/3/4 (pairs 0/1/2/3), all unused by any other default. Same persistence and hot-swap model as `spdif_rx_pin`: RAM-only on SET, slot-scoped via `REQ_PRESET_SAVE` (with-preset mode) or `REQ_SAVE_OUTPUT_CONFIG` (independent mode); changes while I2S input is active set `i2s_rx_pin_change_pending`, handled by a deferred main-loop restart. A BCK pin change while the input SM is the clock master (allowed; the any-I2S-output case is rejected as before) sets `i2s_input_restart_pending` for the same handler.
+**I2S RX data pin.** Default GPIO 1 (`PICO_I2S_RX_PIN_DEFAULT`); the four data-pin defaults are the contiguous block GPIO 1/2/3/4 (pairs 0/1/2/3), all unused by any other default. Same persistence and hot-swap model as `spdif_rx_pin`: RAM-only on SET, slot-scoped via `STORE.PRESET_SAVE` (with-preset mode) or `STORE.OUTPUT_CONFIG_SAVE` (independent mode); changes while I2S input is active set `i2s_rx_pin_change_pending`, handled by a deferred main-loop restart. A BCK pin change while the input SM is the clock master (allowed; the any-I2S-output case is rejected as before) sets `i2s_input_restart_pending` for the same handler.
 
 ### Vendor Commands
+*Last updated: 2026-11-16 (paged commands)*
 
-| Code | Command | Direction | Description |
-|------|---------|-----------|-------------|
-| 0xE0 | REQ_SET_INPUT_SOURCE | OUT | Set active input source (uint8_t payload; 2 = I2S, 3 = ADAT, 4 = SPDIF2, 5 = SPDIF3, 6 = SPDIF4; optional SPDIF inputs rejected unless enabled, ADAT rejected unless enabled + pin set on RP2350) |
-| 0xE1 | REQ_GET_INPUT_SOURCE | IN | Get active input source (returns uint8_t) |
-| 0xE2 | REQ_GET_SPDIF_RX_STATUS | IN | Get SPDIF RX status (16-byte SpdifRxStatusPacket) |
-| 0xE3 | REQ_GET_SPDIF_RX_CH_STATUS | IN | Get IEC 60958 channel status (24 bytes) |
-| 0xE4 | REQ_SET_SPDIF_RX_PIN | IN* | Set a SPDIF input's RX pin (wValue = (index<<8)\|pin, index 0..3; old hosts sending a bare pin target index 0; pin 0xFF = reset that input to its default). Returns status byte |
-| 0xE5 | REQ_GET_SPDIF_RX_PIN | IN | Get a SPDIF input's RX pin (wValue = index 0..3, returns uint8_t) |
-| 0xE9 | REQ_SET_SPDIF_INPUT_ENABLE | IN* | Enable/disable an optional SPDIF input (wValue = (index<<8)\|enable, index 1..3). Returns PIN_CONFIG_* status byte |
-| 0x88 | REQ_SET_I2S_CLOCK_MODE | OUT | Set clock mode (0=master, 1=slave); deferred apply |
-| 0x89 | REQ_GET_I2S_CLOCK_MODE | IN | Get live clock mode (returns uint8_t) |
-| 0x8A | REQ_GET_I2S_SLAVE_STATUS | IN | Get 16-byte I2sSlaveStatusPacket |
-| 0xC2 | REQ_SET_I2S_BCK_PIN | IN* | Set a BCK pin; `wValue = (role<<8)|GPIO` (role 0 = master/unified pair, 1 = slave pair; GPIO 0xFF = reset that role's pair to its default) |
-| 0xC3 | REQ_GET_I2S_BCK_PIN | IN | Get a BCK pin; `wValue = role` (0 = master/unified, 1 = slave) |
-| 0xFE | REQ_SET_I2S_CLOCK_PIN_MODE | IN* | Set clock-pin mode (wValue = 0 unified / 1 split; returns `PIN_CONFIG_*`); SPLIT enable always validates the slave pair, live apply, deferred input restart when the effective pair moves |
-| 0xFF | REQ_GET_I2S_CLOCK_PIN_MODE | IN | Get live clock-pin mode (returns uint8_t: 0=unified, 1=split) |
-| 0xED | REQ_SET_INPUT_RATE | OUT | Set I2S input rate (uint32_t Hz: 44100/48000/96000; master mode only; stored-not-applied in slave mode) |
-| 0xEE | REQ_GET_INPUT_RATE | IN | Returns 2x uint32_t {current pipeline Hz, selected I2S Hz} |
-| 0xEF | REQ_GET_SPDIF_INPUT_CONFIG | IN | Returns 6 bytes: input count (4), enable mask (bit 0 = input 1, always set), GPIOs for inputs 1..4 |
-| 0xF1 | REQ_SET_I2S_RX_PIN | IN* | Set I2S RX data pin (wValue=(pair<<8)\|pin, returns status byte; pin 0xFF = reset that pair to its default). Checked against active pairs only |
-| 0xF2 | REQ_GET_I2S_RX_PIN | IN | Get I2S RX data pin (returns uint8_t) |
-| 0x68 | REQ_SET_ADAT_INPUT_ENABLE | OUT | Enable/disable ADAT input (1 byte 0/1; RP2350 only) |
-| 0x69 | REQ_GET_ADAT_INPUT_ENABLE | IN | Get ADAT input enable state (uint8_t) |
-| 0x6A | REQ_SET_ADAT_INPUT_PIN | OUT | Set ADAT RX GPIO (uint8_t; 0xFF = reset to default = clear to unset, only while disabled; may equal the ADAT output pin for loopback self-test) |
-| 0x6B | REQ_GET_ADAT_INPUT_PIN | IN | Get ADAT RX GPIO (uint8_t) |
-| 0x6C | REQ_SET_ADAT_INPUT_CLOCK_MODE | OUT | Set ADAT clock mode (uint8_t 0=master, 1=slave); deferred apply |
-| 0x6D | REQ_GET_ADAT_INPUT_CLOCK_MODE | IN | Get ADAT clock mode (uint8_t) |
-| 0x6E | REQ_GET_ADAT_INPUT_STATUS | IN | Get 20-byte AdatInputStatusPacket (0x6F reserved) |
+Each read-write command is one GET and SET pair, and the GET reply is a valid SET payload. A refused SET STALLs on USB and is the status byte on UART and I2C. The reason is in `SYS.LAST_RESULT`.
 
-*0xE4/0xE9/0xF1 use the immediate-response SET pattern (same as `REQ_SET_I2S_BCK_PIN`).
+| Command | Address | Description |
+|---------|---------|-------------|
+| `INPUT.SOURCE` | none | Active input source, 1 byte (2 = I2S, 3 = ADAT, 4 = SPDIF2, 5 = SPDIF3, 6 = SPDIF4). A disabled optional SPDIF input, or ADAT without enable and pin, is `VC_ERR_STATE`. ADAT on RP2040 is `VC_ERR_UNSUPPORTED`. Deferred |
+| `INPUT.STATUS` | none | 12 bytes: source, active channel count, measured S/PDIF rate mHz, VCXO trim ppm x100 |
+| `INPUT.SPDIF_RX_STATUS` | none | 16-byte `SpdifRxStatusPacket` |
+| `INPUT.SPDIF_RX_CH_STATUS` | none | IEC 60958 channel status (24 bytes) |
+| `INPUT.SPDIF_RX_PIN` | input 0..3 | RX GPIO; 0xFF resets that input to its default |
+| `INPUT.SPDIF_RX_ENABLE` | input 1..3 | Enable of an optional SPDIF input |
+| `INPUT.SPDIF_RX_CONFIG` | none | 6 bytes: input count (4), enable mask (bit 0 = input 1, always set), GPIOs for inputs 1..4 |
+| `INPUT.I2S_RX_PIN` | pair 0..3 | I2S RX data GPIO; 0xFF resets that pair to its default. Checked against active pairs only |
+| `INPUT.I2S_RX_CHANNELS` | none | I2S input channel count (2, 4, 6 or 8) |
+| `INPUT.I2S_RX_RATE` | none | Selected I2S (and ADAT master) rate, u32 Hz: 44100, 48000 or 96000. Applied in master mode, stored but not applied in slave mode. The live pipeline rate is in `SYS.SYSTEM_STATUS` |
+| `CLOCK.I2S_CLOCK_MODE` | none | Clock mode (0 = master, 1 = slave); the GET reports the live mode. Deferred |
+| `CLOCK.I2S_SLAVE_STATUS` | none | 16-byte `I2sSlaveStatusPacket` |
+| `CLOCK.I2S_BCK_PIN` | role (0 = master/unified, 1 = slave) | BCK GPIO; 0xFF resets that role's pair to its default |
+| `CLOCK.I2S_CLOCK_PIN_MODE` | none | 0 = unified, 1 = split. Entering SPLIT validates the slave pair (`VC_ERR_PIN_IN_USE` on conflict); a live pair swap with I2S output slots is `VC_ERR_STATE`. A live input-only change arms a deferred input restart |
+| `INPUT.ADAT_RX_ENABLE` | none | ADAT input enable (RP2350 only) |
+| `INPUT.ADAT_RX_PIN` | none | ADAT RX GPIO. 0xFF clears it, only while disabled. It may equal the ADAT output pin for loopback self-test (RP2350 only) |
+| `INPUT.ADAT_RX_CLOCK_MODE` | none | ADAT clock mode (0 = master, 1 = slave); deferred (RP2350 only) |
+| `INPUT.ADAT_RX_STATUS` | none | 20-byte `AdatInputStatusPacket` (RP2350 only) |
 
 ### Persistence
-*Last updated: 2026-10-10 (factory reset switches to USB through the deferred handler)*
+*Last updated: 2026-11-16 (save paths named by `STORE.*` command). Previously 2026-10-10 (factory reset switches to USB through the deferred handler)*
 
 - `SLOT_DATA_VERSION` 13 adds `input_source` (uint8_t) to `PresetSlot`
 - Slots with version < 13 leave input source at its current value (USB by default)
@@ -5134,21 +5088,21 @@ How the pools get filled depends on the input's clock role, because the prefill 
 - `WireInputConfig` (16 bytes) section in `WireBulkParams` V7+; wire V12 claims two of its reserved bytes for `i2s_rx_pin` and `i2s_input_rate` (enum 0=44100, 1=48000, 2=96000), same byte size as V11
 - SPDIF RX pin stored in `PresetDirectory` (consumed existing padding byte, no directory format change)
 - `SLOT_DATA_VERSION` 17 appends `i2s_rx_pin` (0 = unset, use default) and `i2s_input_rate` to `PresetSlot` (struct grows 2 bytes; per-version CRC ranges via `slot_data_size_for_version()`, same mechanism as V16)
-- `FlashOutputConfig` claims two reserved bytes for `i2s_rx_pin` (0 = unset) and `i2s_input_rate_p1` (+1 sentinel so old zeroed directories read as "unset" instead of 44.1 kHz), so both survive boot in independent IO mode via `REQ_SAVE_OUTPUT_CONFIG`
+- `FlashOutputConfig` claims two reserved bytes for `i2s_rx_pin` (0 = unset) and `i2s_input_rate_p1` (+1 sentinel so old zeroed directories read as "unset" instead of 44.1 kHz), so both survive boot in independent IO mode via `STORE.OUTPUT_CONFIG_SAVE`
 - **Multi-SPDIF (SLOT_DATA_VERSION 23 → 24).** `PresetSlot` tail-appends `spdif_rx_enabled_ext` + `spdif_rx_pin_ext[2]` (struct grows 3 bytes). Backward-compatible: older slots load with the extra inputs disabled and their pins unset. Same `output_config_mode` (with-preset vs independent) routing as the existing SPDIF RX pin.
 - **Directory (V11 → V12).** `FlashOutputConfig` grows 25 → 28 bytes (adds `spdif_rx_enabled_ext` + `spdif_rx_pin_ext[2]`), so `DIR_VERSION_CURRENT` bumps to 12 with a frozen `FlashOutputConfig_v11` / `PresetDirectory_v11` used by the migration. All-zero new bytes read as disabled/unset.
 - **Wire format (WIRE_FORMAT_VERSION stays 17).** `WireInputConfig` claims three of its reserved bytes: `spdif_rx_pin_ext[2]` (0 = absent, keep the live pin) and `spdif_rx_enabled_ext_p1` (enable mask PLUS ONE; 0 = absent), per the reserved-byte claim convention that needs no version break. Bulk apply refuses to disable the live input and validates any newly enabled input's pin (`spdif_input_enable_acceptable()`).
 - `SLOT_DATA_VERSION` 28 appends `i2s_clock_mode` (uint8_t; 0=master, 1=slave) to `PresetSlot` (struct grows 1 byte; tail-append with the same per-version CRC-range mechanism, pre-V28 slots read the missing byte as 0=master). `WIRE_FORMAT_VERSION` 21 claims one `WireInputConfig` reserved byte for the same field (size unchanged; pre-V21 readers see a zero=master byte). Restore honors `output_config_mode`: in WITH_PRESET `io_config_from_slot()` resolves the mode (device-global baseline, slot override) with a live-vs-dormant split; when the input is dormant it sets `i2s_clock_mode` immediately, and when I2S is the live source it defers entirely via `pending_i2s_clock_mode` + `i2s_clock_mode_change_pending` (the main loop flips the global and rebuilds I2S clocking atomically). The bulk-apply path uses the same deferred semantics as the vendor path.
-- `FlashOutputConfig` grows 1 byte for `i2s_clock_mode` (28 → 29 bytes), bumping `DIR_VERSION_CURRENT` 12→13 with a V12→V13 directory migration (`FlashOutputConfig_v12`/`PresetDirectory_v12` frozen snapshots; the new byte defaults to 0=master); the device-global value survives boot in independent IO mode via `REQ_SAVE_OUTPUT_CONFIG`, applied by `io_config_apply()`.
+- `FlashOutputConfig` grows 1 byte for `i2s_clock_mode` (28 → 29 bytes), bumping `DIR_VERSION_CURRENT` 12→13 with a V12→V13 directory migration (`FlashOutputConfig_v12`/`PresetDirectory_v12` frozen snapshots; the new byte defaults to 0=master); the device-global value survives boot in independent IO mode via `STORE.OUTPUT_CONFIG_SAVE`, applied by `io_config_apply()`.
 - `SLOT_DATA_VERSION` 29 appends `i2s_clock_pin_mode` (uint8_t; 0=unified, 1=split) and `i2s_bck_pin_slave` (uint8_t; slave-mode BCK GPIO, 0 = unset → `PICO_I2S_BCK_PIN_SLAVE`) to `PresetSlot` (struct grows 2 bytes; tail-append with the same per-version CRC-range mechanism as V28, `SLOT_DATA_SIZE_V29`). Pre-V29 slots read the missing bytes as 0 (= unified + unset), the correct defaults. Both fields are gated on `slot->version >= 29` in `io_config_from_slot()` and follow `output_config_mode` exactly like the other IO fields (WITH_PRESET resolves device-global baseline then slot override; INDEPENDENT uses the device-global directory value). Unlike `i2s_clock_mode` the pin mode has no pending mechanism: `io_config_apply()` installs it live (after the master BCK, before RX validation, since the RX check reads the live pin mode / slave pin), and arms a deferred input restart only if `i2s_effective_bck_pin()` actually moved while I2S is the live source.
 - `WireI2SConfig` claims two of its reserved bytes for `clock_pin_mode_p1` (+1 sentinel, 0 = absent/keep-live; 1 = unified, 2 = split) and `bck_pin_slave` (0 = absent/keep-live); size unchanged, **no `WIRE_FORMAT_VERSION` bump** (stays 21; old hosts send zeros here). Apply validates the RX set against the values that will actually be installed, installs the pin mode live and the slave pin only if acceptable and non-overlapping with the master pair, and arms a deferred restart if the effective input pair moved.
-- `FlashOutputConfig` grows 2 more bytes for `i2s_clock_pin_mode` + `i2s_bck_pin_slave`, bumping `DIR_VERSION_CURRENT` 13→14 (29 → 31 bytes) with a V13→V14 directory migration (`FlashOutputConfig_v13`/`PresetDirectory_v13` frozen snapshots; the new bytes default to 0 = unified + unset). The V12→V14 and earlier migrations copy their shorter configs forward with the trailing clock/clock-pin bytes staying 0. The device-global values survive boot in independent IO mode via `REQ_SAVE_OUTPUT_CONFIG`.
+- `FlashOutputConfig` grows 2 more bytes for `i2s_clock_pin_mode` + `i2s_bck_pin_slave`, bumping `DIR_VERSION_CURRENT` 13→14 (29 → 31 bytes) with a V13→V14 directory migration (`FlashOutputConfig_v13`/`PresetDirectory_v13` frozen snapshots; the new bytes default to 0 = unified + unset). The V12→V14 and earlier migrations copy their shorter configs forward with the trailing clock/clock-pin bytes staying 0. The device-global values survive boot in independent IO mode via `STORE.OUTPUT_CONFIG_SAVE`.
 - **ADAT input (RP2350).** `WireInputConfig` gains `adat_input_pin`, `adat_input_enabled_p1` (enable + 1; 0 = absent), and `adat_clock_mode_p1` (mode + 1; 0 = absent, 1 = master, 2 = slave), bumping `WIRE_FORMAT_VERSION` to 24. `PresetSlot` tail-appends the same fields (`SLOT_DATA_VERSION` 32; pre-V32 slots load ADAT disabled / pin unset / master) and `FlashOutputConfig` carries them for the device-global path (`DIR_VERSION_CURRENT` 15), honoring `output_config_mode` exactly like the other physical-IO config. RP2040 stores and round-trips the fields but can never select the source.
 - **Fourth SPDIF input (2026-08-02).** `SPDIF_RX_NUM_INPUTS` goes 3 → 4. The enable bit is bit 2 of the existing `spdif_rx_enabled_ext` byte everywhere, so only the pin needed new storage. `WireInputConfig.spdif_rx_pin_ext` grows 2 → 3 entries, consuming the section's last reserved byte and shifting `spdif_rx_enabled_ext_p1`, `i2s_clock_mode` and the ADAT input fields down one; the section stays 16 bytes and no later wire offset moves (`WIRE_FORMAT_VERSION` 28 — a V27 host's bulk SET is rejected until rebuilt). `PresetSlot` tail-appends `spdif_rx_pin4` (`SLOT_DATA_VERSION` 35, `SLOT_DATA_SIZE_V35`; V21..V34 slots still load and keep the device-level pin). `FlashOutputConfig` appends `spdif_rx_pin4` too (34 → 35 bytes, `DIR_VERSION_CURRENT` 16) with a V15→V16 migration over frozen `FlashOutputConfig_v15` / `PresetDirectory_v15`; it is a tail byte rather than a third array entry because the frozen v11..v15 configs are strict prefixes the older migrations copy forward, and `cfg_spdif_ext_pin()` / `cfg_spdif_ext_pin_get()` index the split storage as one array. All-zero new bytes read as unset and resolve to `PICO_SPDIF_RX_PIN4_DEFAULT` (GPIO 22).
 
 
 ### Input Source Names
-*Last updated: 2026-10-31*
+*Last updated: 2026-11-16 (`INPUT.SOURCE_NAME`). Previously 2026-10-31*
 
 Each input source can carry a user name (for example "Turntable"). The table
 lives in the preset directory (V24, `input_source_names[8][32]`), indexed by
@@ -5158,47 +5112,47 @@ unnamed, and each reader supplies its own built-in label. Any structurally
 valid source can be named (`input_source_valid()`), including ADAT on RP2040
 and disabled optional S/PDIF inputs.
 
-`REQ_SET_INPUT_SOURCE_NAME` (0x54) stages the name in `input_source_names.c`.
+An `INPUT.SOURCE_NAME` SET (address = source ID) stages the name in `input_source_names.c`.
 Each source has its own staging buffer, so back-to-back renames are never lost.
 The main loop writes every staged name in one `dir_flush()`, bracketed by
 `prepare_flash_write_operation()` / `complete_flash_write_operation_full()`
 like every other directory write, so all outputs restart together and slot
 alignment holds. A per-source generation counter keeps a name restaged during
-the write pending for the next pass. `REQ_GET_INPUT_SOURCE_NAME` (0x55) returns
+the write pending for the next pass. An `INPUT.SOURCE_NAME` GET returns
 the staged name while one is pending and the stored name otherwise, so a GET
 never sees a cache entry mid-update. After the write the firmware pushes
 `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F) per renamed source.
 
 The front panel display shows a stored name in place of the built-in label on
 `CS_NOUN_INPUT_SOURCE` pages (`disp_enum_label()`), picked up on its normal
-render cadence. The opcodes reuse the legacy three-channel gain/mute pair,
-whose state no audio path read. Those variables are deleted, while the
+render cadence. In 1.1.6 the name commands took over the numbers of the legacy
+three-channel gain/mute pair, whose state no audio path read. Those variables are deleted, while the
 `WireBulkParams.legacy` section and the matching `PresetSlot` fields keep their
 frozen layout, always written as zero (0 dB, unmuted) and ignored on apply.
 Full design: `Documentation/Features/input_source_names_spec.md`.
 
 ### Device Name
-*Last updated: 2026-11-01*
+*Last updated: 2026-11-16 (`SYS.DEVICE_NAME`). Previously 2026-11-01*
 
 The board carries its own user name (for example "Living room") in the preset
 directory (V25, `device_name[32]`), so it keeps the name on any DSPi Link hub
 or computer. Like the source names it is device-global and survives preset
-load and factory reset. `REQ_SET_DEVICE_NAME` (0x56) stages the name as a
+load and factory reset. A `SYS.DEVICE_NAME` SET stages the name as a
 ninth entry of the source-name staging table in `input_source_names.c`, so
 the same main-loop pass writes it, together with any staged source names, in
 one `dir_flush()` inside the usual flash bracket. All outputs restart
-together, so slot alignment holds. `REQ_GET_DEVICE_NAME` (0x57) reads the
+together, so slot alignment holds. A `SYS.DEVICE_NAME` GET reads the
 staged name while one is pending. After the write the firmware pushes
 `NOTIFY_EVT_DEVICE_NAME` (0x10). With no display page current, the front
 panel's label line shows the board name in place of "DSPi".
 
-DSPi Link hubs read 0x57 with the device identity and treat the board's name
+DSPi Link hubs read the device name (`SYS.DEVICE_NAME` on 1.1.7) with the device identity and treat the board's name
 as authoritative; their own stored names are a fallback for older firmware
 and are adopted onto an unnamed board once. Full design:
 `Documentation/Features/device_name_spec.md`.
 
 ### I2S Clock-Slave Input Mode
-*Last updated: 2026-07-11 (clock-pin mode added: UNIFIED shares one BCK/LRCLK pair, SPLIT gives slave clocking its own `i2s_bck_pin_slave` pair; `i2s_effective_bck_pin()` resolves the active pair)*
+*Last updated: 2026-11-16 (clock commands on the CLOCK page). Previously 2026-07-11 (clock-pin mode added: UNIFIED shares one BCK/LRCLK pair, SPLIT gives slave clocking its own `i2s_bck_pin_slave` pair; `i2s_effective_bck_pin()` resolves the active pair)*
 
 `i2s_clock_mode` (0 = master, 1 = slave; persisted, see Persistence above) selects who owns BCK/LRCLK while I2S is the input source. In SLAVE mode an external master drives both pins (they become plain inputs; `gpio_init` + input enable, nothing on-chip drives them) and the device only moves data. The mode is dormant for other input sources. Full spec: `Documentation/Features/i2s_slave_input_spec.md`.
 
@@ -5207,13 +5161,13 @@ and are adopted onto an unnamed board once. Full design:
 - **UNIFIED (0, default, legacy behavior):** master and slave clock modes share one BCK/LRCLK pair (`i2s_bck_pin` / +1, default GPIO 14/15). The slave pair is fully dormant.
 - **SPLIT (1):** master clock mode still drives `i2s_bck_pin`, while slave clock mode listens on a separate `i2s_bck_pin_slave` pair (LRCLK = BCK + 1 in both modes). Defaults: GPIO 12/13 on RP2040, GPIO 26/27 on RP2350 (`PICO_I2S_BCK_PIN_SLAVE`). This lets a board dedicate one pair to its own clock outputs and a different pair to the external master's clock inputs, so a hard-wired external master never contends with the device-driven pair.
 
-The helper `i2s_effective_bck_pin()` resolves the pair the active clock mode actually uses (slave pin only when SPLIT **and** slave clock mode, else `i2s_bck_pin`). Every hardware consumer reads it rather than `i2s_bck_pin` directly: TX `clock_pin_base` in `process_type_switches()` (and its same-type-rebuild change detection), the RX start snapshot in `i2s_input.c` (`i2s_active_bck_pin = i2s_effective_bck_pin()`), and `i2s_input_active_bck_pin()`. In SPLIT mode BOTH pairs count as clock-claimed for RX-data, control-interface, and DAC-mute pin validation (`i2s_clock_pin_claimed()`), because the dormant pair is one deferred mode flip away from being driven or listened on; the two pairs are kept mutually distinct by the SET/apply validators. `REQ_SET_I2S_CLOCK_PIN_MODE` (0xFE) applies the mode live (no pending mechanism). Entering SPLIT always validates the slave pair (distinct from the master pair and free of other owners) even as a dormant store, because a later clock-mode flip adopts the pair without rechecking; leaving SPLIT needs no pin checks (the master pair is clock-claimed in every mode). A live slave-clocked set is additionally rejected with OUTPUT_ACTIVE if I2S output slots run, and otherwise arms a deferred input restart onto the new pair. `REQ_SET_I2S_BCK_PIN` (0xC2) takes `wValue = (role << 8) | GPIO` to address either pair (role 0 = master/unified, role 1 = slave); it restarts the input only when the pair being moved is the one the running input currently uses.
+The helper `i2s_effective_bck_pin()` resolves the pair the active clock mode actually uses (slave pin only when SPLIT **and** slave clock mode, else `i2s_bck_pin`). Every hardware consumer reads it rather than `i2s_bck_pin` directly: TX `clock_pin_base` in `process_type_switches()` (and its same-type-rebuild change detection), the RX start snapshot in `i2s_input.c` (`i2s_active_bck_pin = i2s_effective_bck_pin()`), and `i2s_input_active_bck_pin()`. In SPLIT mode BOTH pairs count as clock-claimed for RX-data, control-interface, and DAC-mute pin validation (`i2s_clock_pin_claimed()`), because the dormant pair is one deferred mode flip away from being driven or listened on; the two pairs are kept mutually distinct by the SET/apply validators. A `CLOCK.I2S_CLOCK_PIN_MODE` SET applies the mode live (no pending mechanism). Entering SPLIT always validates the slave pair (distinct from the master pair and free of other owners) even as a dormant store, because a later clock-mode flip adopts the pair without rechecking; leaving SPLIT needs no pin checks (the master pair is clock-claimed in every mode). A live slave-clocked set is additionally refused with `VC_ERR_STATE` if I2S output slots run, and otherwise arms a deferred input restart onto the new pair. `CLOCK.I2S_BCK_PIN` takes the role in `wValue` and the GPIO as its payload, to address either pair (role 0 = master/unified, role 1 = slave); it restarts the input only when the pair being moved is the one the running input currently uses.
 
 **Clock domains.** I2S output slots are edge-slaved with a dedicated wait-driven PIO program (`audio_i2s_dataout_extclk.pio`, 26 instructions, divider 1.0, `external_clock` instance flag in `pico_audio_i2s_multi`): an LRCLK preamble with a BCK skew guard, then one bit out per external BCK falling edge with per-frame LRCLK framing verification (see "Framing-slip watchdog" below). Like the RX slave programs it is authored with placeholder GPIO indices (wait gpio 0 = BCK, 1 = LRCLK) patched at load (`i2s_extclk_load_program()`, reloaded only on a BCK pin change). Because the checked program is too large to share PIO0's 32-slot instruction memory with the master-clocking programs (clkout 8 + dataout 8 + SPDIF 4), the two clocking modes evict each other's programs at load time (`i2s_extclk_evict_program()` and its mirror in the clkout/dataout load paths); safe because clocking mode is global and a mode rebuild tears down every I2S SM first. Since 2026-10-11 the S/PDIF side takes part in the same budget: while slave clocking is active and any output slot is I2S, `process_type_switches()` selects the 4-instruction NRZI S/PDIF program (software encoder) instead of the default 16-instruction PIO biphase encoder, and a change of that selection rebuilds every S/PDIF slot inside the same transition (see "PIO Program" under SPDIF Output System). With no I2S output slots the PIO encoder stays loaded even under an external master.
 
 **Framing-slip watchdog.** Real-world external masters (USB-I2S bridges such as the Amanero Combo384) glitch or re-frame BCK/LRCLK around stream stop/start and 44.1/48-family rate switches. With free-running slave programs, one runt BCK pulse or LRCLK phase jump would shift the 32-bit word window one bit for the rest of the session; the sign bit lands mid-word (full-scale wrapped garbage) and the word RATE is unchanged, so the rate watchdog can never detect it. Both external-clock programs (`audio_i2s_rx_slave_checked` for RX, `audio_i2s_dataout_extclk` for TX) therefore move/sample the 64 bits per frame by count (deterministic 24-in-32 alignment, autopush/autopull 32) and then verify the LRCLK level at the TWO ADJACENT cells straddling the frame boundary (bit 63 = cell R31 must read HIGH, bit 64 = cell R32 must read LOW, both sampled half a BCK after a rising edge so the pad synchronizers are settled). The adjacent-pair check catches every sub-frame offset (a fixed slip of k cells passes both checks only for k = 0 mod 64); a slip of exactly a whole frame is inherently undetectable from LRCLK (documented spec limit). On a mismatch the program raises **PIO irq flag 7** on its block and re-frames itself at the next LRCLK falling edge, bounding the garbage to ~2 frames; the RX resync path pads the aborted right word (`in null, 1` -> autopush) and the TX path flushes the unsent right-word remainder (`out null, 32`), so L/R word alternation - and therefore channel identity - survives every slip. `i2s_slave_poll()` reads-and-clears both flags (`i2s_slave_slip_check()`: RX block directly, TX blocks via `audio_i2s_extclk_framing_slipped()`) and treats a slip exactly like a clock loss: increment `slip_count` (surfaced in `I2sSlaveStatusPacket`, claims a reserved byte), `i2s_slave_drop_lock()`, and let the main loop's RELOCKING path restart the receiver and re-frame every output through the prefill's gated synchronized start - necessary because a slipped pair/slot is no longer sample-aligned with its peers (inter-slot alignment invariant) and only a full synchronized restart re-establishes that. Stale flags are consumed at every receiver start and by `audio_i2s_enable_sync_prepare()` for extclk instances (the restart IS the handling). The on-chip slave role keeps the plain free-running RX program: our own TX master never glitches, and the checked variant would not fit alongside the clkmaster program. SPDIF, ADAT, and PDM all derive from `sys_clk`, and `i2s_slave_update_clock_servo()` in `i2s_input.c` rate-matches them by calling the shared `input_servo_apply()` (soft-VCXO ppm trim; see "Clock Servo"), referenced to the FIRST SPDIF-type slot as fill reference (an edge-locked I2S slot consumes at exactly the external rate, so its fill can never expose sys_clk error), or the rate term alone (`fill_slot = -1`) when no SPDIF-type slot exists. There are no per-output divider writes and no ADAT servo-divider handoff any more; ADAT and PDM (which formerly did not track in this mode) now follow sys_clk automatically. The I2S slave also gains the centering integrator it never had. MCK output is still forced off in slave mode (a local MCK would be asynchronous to the external clocks); it resumes per its stored config on leaving slave mode.
 
-**Rate detection and lock.** All measurement derives from pair 0's DMA write pointer (2 words per external frame). A ~32 ms fast window snaps to 44100/48000/96000 (2% tolerance); two agreeing windows lock (`I2sSlaveState`: INACTIVE / ACQUIRING / RELOCKING / LOCKED, mirrored to hosts via `REQ_GET_I2S_SLAVE_STATUS` 0x8A and NOTIFY 0x09). A dual-anchor 8-16 s long window refines the servo reference to ~0.1 ppm so ADAT holds without a SPDIF fill reference. 5 ms without words = clock loss (mute and wait; no internal-clock fallback by design); a rate change is a lock drop + re-acquire, feeding the standard deferred `pending_rate` mechanism via `i2s_slave_check_rate_change()`. A poll-gap watchdog (4 ms) re-anchors measurement across long main-loop stalls instead of measuring through a possible ring wrap, and flash brackets suspend/re-arm the input as before.
+**Rate detection and lock.** All measurement derives from pair 0's DMA write pointer (2 words per external frame). A ~32 ms fast window snaps to 44100/48000/96000 (2% tolerance); two agreeing windows lock (`I2sSlaveState`: INACTIVE / ACQUIRING / RELOCKING / LOCKED, mirrored to hosts via `CLOCK.I2S_SLAVE_STATUS` and NOTIFY 0x09). A dual-anchor 8-16 s long window refines the servo reference to ~0.1 ppm so ADAT holds without a SPDIF fill reference. 5 ms without words = clock loss (mute and wait; no internal-clock fallback by design); a rate change is a lock drop + re-acquire, feeding the standard deferred `pending_rate` mechanism via `i2s_slave_check_rate_change()`. A poll-gap watchdog (4 ms) re-anchors measurement across long main-loop stalls instead of measuring through a possible ring wrap, and flash brackets suspend/re-arm the input as before.
 
 **Main-loop flow (slave branch of the I2S block).** Mirrors the SPDIF lock-gated flow: `i2s_input_poll()` itself is gated on LOCKED (pre-lock audio may be at the wrong rate and would drain the soft-mute counter early; the lock transition re-anchors every pair's read pointer to a fresh shared frame boundary so the lapped acquisition backlog is never played), prefill is armed only when LOCKED (real input audio fills the pools; the external clocks never stop during the drain, so no silence synthesis is needed), `enable_outputs_in_sync()` + DAC-mute release at the target fill, and a RELOCKING event mutes (unless already muted) and ALWAYS stops/starts the receiver, including while preset_loading is set, so RX state machines that stalled mid-word re-frame when clocks return (the next gated enable re-frames the extclk TX SMs the same way). The prefill enable is additionally gated on LOCKED so a mid-prefill clock loss cannot re-enable against a misframed receiver.
 
@@ -5224,7 +5178,7 @@ The helper `i2s_effective_bck_pin()` resolves the pair the active clock mode act
 **Hardware notes.** The external master must run BCK = 64 x Fs with standard LRCLK polarity (no runtime format detection). Whenever the device is NOT in slave-clocked I2S operation it drives BCK/LRCLK itself if any I2S output or I2S input is active, so a hard-wired external master and the device can transiently both drive the pins across boots and mode/source transitions (documented user constraint; the firmware minimizes the windows). SPLIT clock-pin mode addresses this directly: because master (and every non-slave) role drives `i2s_bck_pin` while the external master feeds the separate `i2s_bck_pin_slave` pair, the two never contend on the same GPIOs; the dual-driver caveat applies only in UNIFIED mode where both share one pair.
 
 ### ADAT Input (RP2350 only)
-*Last updated: 2026-07-15*
+*Last updated: 2026-11-16 (vendor commands on the INPUT page). Previously 2026-07-15*
 
 `INPUT_SOURCE_ADAT` (3) is an 8-channel, 24-bit ADAT lightpipe input from one TOSLINK receiver, 44.1/48 kHz only (no SMUX/96k). Disabled by default; selectable only when `adat_input_enabled != 0` AND `adat_input_pin != 0xFF`, and only on RP2350 (RP2040 keeps the config state for wire/preset round-trips but has no PIO/DMA budget for the receiver). Files: `adat_input.c/h`, `adat_input.pio`.
 
@@ -5235,7 +5189,7 @@ The helper `i2s_effective_bck_pin()` resolves the pair the active clock mode act
 **Lock machine** (`AdatInputState`): INACTIVE (hardware stopped) -> ACQUIRING (slave: probing exact 48/44.1 kHz decoder timing; master: waiting for a valid device rate) -> SYNCING (candidate header-proven; completing the lock transition) -> LOCKED (decoding audio) -> RELOCKING (signal or rate lost; outputs muted exactly like a SPDIF lock loss). Slave acquisition starts with the 48 kHz cell timing, requires `ADAT_SYNC_VERIFY_FRAMES` = 8 consecutive valid headers at the fixed eight-word frame stride, and alternates to the 44.1 kHz timing after `ADAT_RX_PROBE_DWELL_US` = 10 ms without a valid run (continuing to alternate while absent/unsupported). Re-lock tries the last valid family first. This makes decoded frame structure the family-rate authority, not the DMA rate of a deliberately corrupt wrong-cell stream. The main loop reacts to RELOCKING with the same mute/drain/prefill flow as SPDIF, so the output slots remain aligned through every probe/re-lock transition.
 
 **Clock modes** (`adat_clock_mode`, default MASTER):
-- **MASTER:** the far end locks to DSPi's ADAT output, so the return stream is already in our clock domain; no rate detection, no servo. The device is the rate authority via `REQ_SET_INPUT_RATE` (shared with I2S master mode). Above 48 kHz the input parks with `rate_ok = false` (outputs stay muted through a never-completing prefill), mirroring the ADAT output's suspension above 48k. Parking is master-only: `rate_ok == false` always means "master mode above the device-rate ceiling".
+- **MASTER:** the far end locks to DSPi's ADAT output, so the return stream is already in our clock domain; no rate detection, no servo. The device is the rate authority via `INPUT.I2S_RX_RATE` (shared with I2S master mode). Above 48 kHz the input parks with `rate_ok = false` (outputs stay muted through a never-completing prefill), mirroring the ADAT output's suspension above 48k. Parking is master-only: `rate_ok == false` always means "master mode above the device-rate ceiling".
 - **SLAVE:** external gear owns the clock. Exact-timing header probes select the 44.1/48 kHz family as described above. Only after a candidate is proven does the receiver arm DMA-word measurement: 32 ms fast windows validate the family and supply the initial fine-rate estimate, while a dual-anchor 8-16 s long window supplies a ~0.1 ppm servo reference. All outputs (SPDIF, I2S, ADAT TX, MCK, PDM) track it via `input_servo_apply()`, exactly like SPDIF input; the servo pulls `sys_clk` in ppm (soft VCXO) rather than writing any output divider, so every derived output clock moves together. `adat_input_check_rate_change()` feeds the standard deferred `pending_rate` mechanism when the detected rate differs from `audio_state.freq`. Slave mode is never parked (`rate_ok` always true): if the device rate is above 48 kHz at switch-in, acquisition still reaches LOCKED and the deferred rate change retunes the pipeline under the switch-in mute before the synchronized prefill enables the output slots; the servo holds off until `adat_rx_detected_rate == audio_state.freq`, so no output clock is slewed during that muted window.
 
 **Prefill flow.** On lock the poll batches whole frames (`ADAT_INPUT_MIN_BLOCK` = 48, ~1 ms at 48k, capped at 192/poll), decodes each into the pipeline input buffers (`buf_l`/`buf_r` + `buf_in_ext[0..5]`) with per-channel preamp, and calls `process_input_block()`. A lap guard skips whole frames (preserving frame phase, since the ring holds an exact number of frames) before the reader can be overwritten.
@@ -5244,13 +5198,13 @@ The helper `i2s_effective_bck_pin()` resolves the pair the active clock mode act
 
 **RP2350 pad isolation.** RP2350 pads reset isolated (`ISO=1` in `PADS_BANK0`), and `gpio_set_input_enabled()` never clears the isolation latch; only `gpio_set_function()` does. A dedicated external RX pad would therefore stay electrically isolated and the PIO would see a static level (same-pin loopback worked only because the ADAT TX `pio_gpio_init()` unisolated the shared pad). `adat_input_start()` clears `ISO` directly with `hw_clear_bits()` under `#if HAS_PADS_BANK0_ISOLATION`, keeping funcsel untouched so the loopback self-test still works even if RX and TX ever sit on different PIO blocks. *Last updated: 2026-07-15*
 
-**Main-loop integration** (`main.c`): the poll + prefill block, the source-switch branches, the deferred clock-mode handler (`adat_clock_mode_change_pending`), boot-into-ADAT, the `adat_input_restart_pending` handler (enable/pin change while ADAT is the live source), and the `perform_rate_change` hook (`adat_input_on_rate_change`) mirror the SPDIF/I2S input plumbing. Status is surfaced by `REQ_GET_ADAT_INPUT_STATUS` (0x6E, 20-byte `AdatInputStatusPacket`) and `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B) on every state change.
+**Main-loop integration** (`main.c`): the poll + prefill block, the source-switch branches, the deferred clock-mode handler (`adat_clock_mode_change_pending`), boot-into-ADAT, the `adat_input_restart_pending` handler (enable/pin change while ADAT is the live source), and the `perform_rate_change` hook (`adat_input_on_rate_change`) mirror the SPDIF/I2S input plumbing. Status is surfaced by `INPUT.ADAT_RX_STATUS` (20-byte `AdatInputStatusPacket`) and `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B) on every state change.
 
 **Flash-write bracket.** `prepare_flash_write_operation()` treats a LOCKED ADAT input as a live source: it appears in the pre-mute drain, the streaming test, and the fade-settle loop (which calls `adat_input_poll()` until both the settle interval and the DAC hardware-mute hold have elapsed), matching the guarantees given to USB/SPDIF/I2S (see "DAC Hardware Mute"). Unlike SPDIF and I2S, ADAT is deliberately NOT stopped for the ~45 ms blackout: its RX is an IRQ-less free-running DMA ring with no decode-timeout alarms to race the blackout edge, and the poll re-acquires frame sync after the ring laps; `preset_loading` (still set from `prepare_pipeline_reset()`) then re-runs the drain/prefill/enable handshake once LOCKED returns.
 
 **Resources.** PIO1 SM2 (PIO1 SM0 = PDM, SM1 = ADAT TX); DMA channel 15 (RX ring, ENDLESS mode, no IRQ). The 8 KB `adat_rx_ring` lives in the shared `input_capture_arena` (see "Input Capture Arena"); the decode hot path (`adat_input_poll`, `adat_rx_header_ok`, `adat_rx_decode_frame`, `adat_rx_rate_machine`, `adat_input_update_clock_servo`) is `DSP_TIME_CRITICAL` and RAM-resident (the acquisition probe/header scan stays cold in flash, since it runs only while muted). See "Memory Layout".
 
-**Persistence.** ADAT input config persists like the optional SPDIF inputs (disabled by default, pin `0xFF` = unset, GPIO claimed only while ADAT is the active source). `WireInputConfig` (V24) gains `adat_input_pin`, `adat_input_enabled_p1` (enable + 1; 0 absent), and `adat_clock_mode_p1` (mode + 1; 0 absent, 1 master, 2 slave). The fields also ride `PresetSlot` (`SLOT_DATA_VERSION` 32) and the device-global `FlashOutputConfig` (`DIR_VERSION` 15), honoring `output_config_mode` exactly like the other physical-IO config. Vendor commands: `REQ_SET/GET_ADAT_INPUT_ENABLE` (0x68/0x69), `REQ_SET/GET_ADAT_INPUT_PIN` (0x6A/0x6B), `REQ_SET/GET_ADAT_INPUT_CLOCK_MODE` (0x6C/0x6D), `REQ_GET_ADAT_INPUT_STATUS` (0x6E); 0x6F reserved.
+**Persistence.** ADAT input config persists like the optional SPDIF inputs (disabled by default, pin `0xFF` = unset, GPIO claimed only while ADAT is the active source). `WireInputConfig` (V24) gains `adat_input_pin`, `adat_input_enabled_p1` (enable + 1; 0 absent), and `adat_clock_mode_p1` (mode + 1; 0 absent, 1 master, 2 slave). The fields also ride `PresetSlot` (`SLOT_DATA_VERSION` 32) and the device-global `FlashOutputConfig` (`DIR_VERSION` 15), honoring `output_config_mode` exactly like the other physical-IO config. Vendor commands are `INPUT.ADAT_RX_ENABLE`, `INPUT.ADAT_RX_PIN`, `INPUT.ADAT_RX_CLOCK_MODE` and `INPUT.ADAT_RX_STATUS`, built on RP2350 only.
 
 ---
 
@@ -5303,7 +5257,7 @@ RP2350 slice 8 has no bondable GPIO on RP2350A; RP2040 slice 7 covers GPIO 14/15
 ---
 
 ## DAC Hardware Mute
-*Last updated: 2026-07-25 (hardware mute is now asserted only after the software fade has reached silence, in both `prepare_pipeline_reset()` and the `pipeline_reset_ready()` gate; `dac_hw_mute_release_ms()` getter added so the post-restart fade-up waits out a configured release dwell). Previously, 2026-07-23 (flash-write completion unified on complete_flash_write_operation_full; light path and release_hw_mute_if_outputs_live removed. Previously, 2026-07-14: preset_loading now floored to outlast a pending hold: prepare_pipeline_reset() sizes preset_mute_counter to hold_ms + margin when the hold has not yet elapsed, closing the long-hold expiry cases below. Previously, 2026-07-13: Phase 4 deferral extended to ADAT and SPDIF inputs 2/3; flash-write fade-settle loop services a locked ADAT input)*
+*Last updated: 2026-11-16 (vendor commands on the OUTPUT page; pin gate in `vendor/vc_pins.c`). Previously 2026-07-25 (hardware mute is now asserted only after the software fade has reached silence, in both `prepare_pipeline_reset()` and the `pipeline_reset_ready()` gate; `dac_hw_mute_release_ms()` getter added so the post-restart fade-up waits out a configured release dwell). Previously, 2026-07-23 (flash-write completion unified on complete_flash_write_operation_full; light path and release_hw_mute_if_outputs_live removed. Previously, 2026-07-14: preset_loading now floored to outlast a pending hold: prepare_pipeline_reset() sizes preset_mute_counter to hold_ms + margin when the hold has not yet elapsed, closing the long-hold expiry cases below. Previously, 2026-07-13: Phase 4 deferral extended to ADAT and SPDIF inputs 2/3; flash-write fade-settle loop services a locked ADAT input)*
 
 Configurable GPIO line that drives a hardware mute pin on an external I²S DAC (PCM5102A XSMT, WM8741 MUTEB, AK4493 SMUTE, etc.). Asserted before `complete_pipeline_reset()` halts the I²S state machine, so the DAC sees its analog output ramp to silence under its own internal control while BCK/LRCLK are still running — eliminating the audible thump that occurs when clocks stop mid-cycle with non-silent data in the DMA buffer. Spec doc: `Documentation/Features/dac_hardware_mute_spec.md`.
 
@@ -5318,8 +5272,8 @@ Self-contained module owning pin claim, lifecycle, persistence, and notify. Same
 - `dac_hw_mute_assert()` / `_release()` — pipeline-reset lifecycle hooks. Assert drives the claimed pin to muted polarity and arms the `hold_ms` deadline; it is **non-blocking** (no busy-wait) and idempotent (re-asserting does not re-arm/extend the hold). Release starts after clocks restart: `release_ms == 0` deasserts immediately, while `release_ms > 0` keeps the pin asserted, records a deadline, and returns.
 - `dac_hw_mute_hold_elapsed()` — barrier predicate the caller polls before stopping clocks: true once the armed hold has elapsed (or the feature is off / no hold armed). Lets the assert→clock-stop hold run asynchronously instead of as a main-loop-stalling busy-wait.
 - `dac_hw_mute_tick()` — main-loop deadline service for diagnostic test pulses and delayed pipeline releases. When a release deadline expires, it deasserts the pin only if no other mute reason is active.
-- `dac_hw_mute_owns_pin(uint8_t pin)` — pin-conflict gate used by `is_pin_in_use()` in `vendor_commands.c`. Other pin-setting commands reject pins this module owns.
-- `dac_hw_mute_test_start()` — asynchronous 1-second mute pulse for install verification (`REQ_TEST_DAC_HW_MUTE`).
+- `dac_hw_mute_owns_pin(uint8_t pin)`: pin-conflict gate used by `is_pin_in_use()` in `vendor/vc_pins.c`. Other pin-setting commands reject pins this module owns.
+- `dac_hw_mute_test_start()`: asynchronous 1-second mute pulse for install verification (`OUTPUT.DAC_MUTE_TEST`).
 
 ### Integration with pipeline reset
 
@@ -5352,7 +5306,7 @@ The flash blackout itself costs nothing against the counter (IRQs off, no sample
 ### Mute-carry invariant
 *Last updated: 2026-07-23 (completion-path reference updated for the unified full flash completion. Previously, 2026-07-04: fix: config re-apply un-muted the DAC mid-flash-write, causing full-volume noise on hold/release-timer edits while streaming)*
 
-`dac_hw_mute_set_config()` is invoked from *inside* the flash-write brackets: the deferred `REQ_SET_DAC_HW_MUTE_CONFIG` handler (`main.c`) and the bulk `REQ_SET_ALL_PARAMS` apply (`bulk_params_apply()` → `dac_hw_mute_set_config()`) both run `prepare_flash_write_operation()` / `prepare_pipeline_reset()` first — which has already **asserted** the mute and waited out `hold_ms` — and only then apply the new config, whose `preset_set_dac_hw_mute()` → `dir_flush()` runs a ~45 ms IRQ-off flash blackout. Historically `dac_hw_mute_init()` unconditionally released the pin and re-drove it to the *un-muted* level (and cleared `s_lifecycle_asserted`) on every re-apply, so the DAC un-muted for that blackout; with audio streaming, the output producer pool underruns during the IRQ-off window and the SPDIF/I²S DMA loops stale buffer content, which the now-live DAC plays as full-volume noise. The trailing `dac_hw_mute_release()` was then a no-op (latch already cleared). Symptoms: noise only while music plays (pool has content to loop), only on DAC-mute-config or bulk edits (other directory setters don't call `dac_hw_mute_init()`), gone after closing/reopening the console (no re-apply). Fix: `dac_hw_mute_init()` carries the asserted state across the re-apply (see the module bullet above), so the DAC stays muted through the config change and its flash write, and the completion path (`complete_pipeline_reset()` Phase 4 / `complete_flash_write_operation_full()`) owns the release exactly as for any other reset.
+`dac_hw_mute_set_config()` is invoked from *inside* the flash-write brackets: the deferred `OUTPUT.DAC_MUTE_CONFIG` handler (`main.c`) and the bulk `STORE.ALL_PARAMS` apply (`bulk_params_apply()` → `dac_hw_mute_set_config()`) both run `prepare_flash_write_operation()` / `prepare_pipeline_reset()` first, which has already **asserted** the mute and waited out `hold_ms`, and only then apply the new config, whose `preset_set_dac_hw_mute()` → `dir_flush()` runs a ~45 ms IRQ-off flash blackout. Historically `dac_hw_mute_init()` unconditionally released the pin and re-drove it to the *un-muted* level (and cleared `s_lifecycle_asserted`) on every re-apply, so the DAC un-muted for that blackout; with audio streaming, the output producer pool underruns during the IRQ-off window and the SPDIF/I²S DMA loops stale buffer content, which the now-live DAC plays as full-volume noise. The trailing `dac_hw_mute_release()` was then a no-op (latch already cleared). Symptoms: noise only while music plays (pool has content to loop), only on DAC-mute-config or bulk edits (other directory setters don't call `dac_hw_mute_init()`), gone after closing/reopening the console (no re-apply). Fix: `dac_hw_mute_init()` carries the asserted state across the re-apply (see the module bullet above), so the DAC stays muted through the config change and its flash write, and the completion path (`complete_pipeline_reset()` Phase 4 / `complete_flash_write_operation_full()`) owns the release exactly as for any other reset.
 
 ### Configuration model
 
@@ -5370,11 +5324,12 @@ Board-level attribute. Lives in `PresetDirectory.dac_hw_mute` (V3+). `DIR_VERSIO
 
 ### Vendor commands
 
-| Code | Command                      | Direction | Description |
-|------|------------------------------|-----------|-------------|
-| 0xEA | REQ_SET_DAC_HW_MUTE_CONFIG   | OUT       | 16-byte `DacHwMuteConfig` payload. Deferred to main loop (`flash_set_dac_hw_mute_pending`); validate + persist + apply. |
-| 0xEB | REQ_GET_DAC_HW_MUTE_CONFIG   | IN        | Returns 16-byte live `DacHwMuteConfig`. |
-| 0xEC | REQ_TEST_DAC_HW_MUTE         | IN        | Triggers ~1 s mute pulse for installer verification. Returns `PIN_CONFIG_*` status. |
+*Last updated: 2026-11-16 (OUTPUT page commands)*
+
+| Command | Direction | Description |
+|---------|-----------|-------------|
+| `OUTPUT.DAC_MUTE_CONFIG` | GET, SET | 16-byte `DacHwMuteConfig` both ways. A SET that fails validation is `VC_ERR_VALUE`; a good one is deferred to the main loop (`flash_set_dac_hw_mute_pending`), which validates, persists and applies it. The GET returns the live config |
+| `OUTPUT.DAC_MUTE_TEST` | SET (zero-length) | Queues the ~1 s mute pulse for installer verification. `VC_ERR_STATE` while the feature is disabled |
 
 ### Wire format
 
@@ -5396,7 +5351,7 @@ The audio-path zero-overhead is critical: the inner DSP loops never see this fea
 ---
 
 ## LG Sound Sync
-*Last updated: 2026-05-10*
+*Last updated: 2026-11-16 (vendor commands on the INPUT page). Previously 2026-05-10*
 
 LG Sound Sync (optical) is a one-way side-channel that LG televisions multiplex onto their TOSLINK output: specific bytes of the IEC 60958 channel-status field carry the TV's current volume (0–100) and mute state. When DSPi locks an LG-Sound-Sync-marked SPDIF source and the feature is enabled, the TV remote becomes a host-volume control for DSPi. Spec doc: `Documentation/Features/lg_sound_sync_spec.md`.
 
@@ -5451,11 +5406,11 @@ Once present, **every** signature-positive poll re-decodes and re-applies (not j
 
 LG drives the user-facing volume directly: `audio_state.volume`, `vol_mul`, `current_loudness_coeffs`, and the `WireUserVolume.user_volume_db` notify all move together. The host UI's main volume widget tracks TV remote presses with no special-case binding — it just listens to the existing user-volume notification.
 
-Implementation funnels through `update_user_volume(db)` in `usb_audio.c` — the same single funnel used by `REQ_SET_USER_VOLUME` and the bulk-params apply path. That funnel writes `audio_state.volume`, calls `apply_vol_index_to_audio()` (vol_mul + loudness coeffs), invalidates the LG apply-cache, and pushes the user-volume notify.
+Implementation funnels through `update_user_volume(db)` in `usb_audio.c`, the same single funnel used by `ROUTE.USER_VOLUME` and the bulk-params apply path. That funnel writes `audio_state.volume`, calls `apply_vol_index_to_audio()` (vol_mul + loudness coeffs), invalidates the LG apply-cache, and pushes the user-volume notify.
 
 LG vol → vol_index mapping is proportional with rounded division: `vol_index = (lg_vol × 60 + 50) / 100`. dB = `vol_index - CENTER_VOLUME_INDEX`. Endpoints land cleanly (LG 0 → silent, LG 100 → unity) and intermediate steps approximate 1 dB each, matching `db_to_vol[]`'s shape.
 
-Mute drives `user_mute` (the vendor mute, OR'd with `audio_state.mute` in the audio pipeline). `s_lg_imposed_mute` tracks whether the *current* `user_mute` was set by LG vs. by the user via `REQ_SET_USER_MUTE` — used on demote to clear LG-imposed mute (so the user isn't stuck silent if the TV stops broadcasting) while preserving a manual mute the user set before LG took over.
+Mute drives `user_mute` (the vendor mute, OR'd with `audio_state.mute` in the audio pipeline). `s_lg_imposed_mute` tracks whether the *current* `user_mute` was set by LG vs. by the user via `ROUTE.USER_MUTE`, and is used on demote to clear LG-imposed mute (so the user isn't stuck silent if the TV stops broadcasting) while preserving a manual mute the user set before LG took over.
 
 **No thaw cache** on demote / SPDIF→USB. `audio_state.volume` stays wherever LG last set it. The OS may re-issue UAC1 SET_CUR with its remembered per-device volume on enumeration / default-device-change events; for DSPi-internal input switches the user's slider position simply picks up from LG's last value. This trade-off is documented in spec §1.3 — the dual-widget alternative was rejected as more confusing than the occasional volume-stays-where-LG-left-it surprise.
 
@@ -5472,11 +5427,12 @@ The `enabled` flag lives in `PresetSlot` (V14), not `PresetDirectory`. This matc
 
 ### Vendor commands
 
-| Code | Command                       | Direction | Description                                              |
-|------|-------------------------------|-----------|----------------------------------------------------------|
-| 0xE6 | REQ_SET_LG_SOUND_SYNC_ENABLE  | OUT       | Set the enable flag (uint8_t payload). Live-only — flash persists on `REQ_SAVE_PRESET`. |
-| 0xE7 | REQ_GET_LG_SOUND_SYNC_ENABLE  | IN        | Get the enable flag (returns uint8_t).                  |
-| 0xE8 | REQ_GET_LG_SOUND_SYNC_STATUS  | IN        | Get the full 16-byte `LgSoundSyncStatus` struct.        |
+*Last updated: 2026-11-16 (INPUT page commands)*
+
+| Command | Direction | Description |
+|---------|-----------|-------------|
+| `INPUT.LG_SOUND_SYNC_ENABLE` | GET, SET | The enable flag (1 byte). Live only; flash persists it on the next `STORE.PRESET_SAVE` |
+| `INPUT.LG_SOUND_SYNC_STATUS` | GET | The 16-byte `LgSoundSyncStatus` struct |
 
 ### Notifications
 
@@ -5489,7 +5445,9 @@ The feature touches only `audio_state.vol_mul` and `current_loudness_coeffs`. It
 ---
 
 ## TinyUSB Migration (Phases 1 + 2)
-*Last updated: 2026-04-18*
+*Last updated: 2026-11-16 (marked as a historical record; vendor dispatch file names brought up to date). Previously 2026-04-18*
+
+This section is a record of the 2026 TinyUSB migration. Opcode names in it are 1.1.6-era history. Since 1.1.7 the vendor callback `tud_vendor_control_xfer_cb` lives in `vendor/vc_usb.c`, `vendor_commands.c` no longer exists, and the MS OS 2.0 descriptors deferred below as Phase 2b are in place (see "Microsoft OS 2.0 Descriptors" and "Vendor Protocol").
 
 Phase 1 swapped the USB library from pico-extras `usb_device` to TinyUSB with full UAC1 audio parity. Phase 2 brought the vendor control interface back under TinyUSB. MS OS 2.0 descriptors for WinUSB auto-binding are still deferred (Phase 2b) — on Windows the host app must bind WinUSB manually (e.g. via Zadig) until that lands. macOS and Linux need no extra binding.
 
@@ -5504,7 +5462,7 @@ TinyUSB's built-in audio class driver (`lib/tinyusb/src/class/audio/audio_device
 | TinyUSB configuration | `tusb_config.h` | `CFG_TUD_AUDIO = 0` and all other classes off. The vendor interface is also handled by our custom driver (not `CFG_TUD_VENDOR`), because our vendor interface is control-transfer-only with no bulk endpoints. |
 | UAC1 descriptors | `usb_descriptors.c` / `usb_descriptors.h` | Hand-rolled byte array (no LUFA). Layout: config (9B) → IAD (8B) → AC std itf + CS (49B) → AS alt 0/1/2 (125B) → vendor std itf (9B). Total 200B. Feature unit entity 2 exposes master mute + volume. |
 | Class driver | `usb_audio.c` | `uac1_driver` struct is registered as the single app driver. Implements `init`/`reset`/`open`/`control_xfer_cb`/`xfer_cb`/`sof`. The same driver claims AC+AS (via IAD) AND the vendor interface 2 (class 0xFF). |
-| Vendor command dispatch | `vendor_commands.c` | All existing SET/GET handlers preserved. Public entry point is `tud_vendor_control_xfer_cb(rhport, stage, req)` — TinyUSB's weakly-linked global callback. TinyUSB routes **every** vendor-type control transfer here directly from `process_control_request` (usbd.c:727-730), bypassing class drivers. A `vendor_send_response()` shim wraps `tud_control_xfer()` so case bodies stay unchanged. Bulk SET/GET (`REQ_SET_ALL_PARAMS` / `REQ_GET_ALL_PARAMS`) use `tud_control_xfer()`'s native EP0 chunking instead of the old `usb_stream_setup_transfer` plumbing. |
+| Vendor command dispatch | `vendor/vc_usb.c` (at migration time `vendor_commands.c`) | All existing SET/GET handlers preserved. Public entry point is `tud_vendor_control_xfer_cb(rhport, stage, req)`, TinyUSB's weakly-linked global callback. TinyUSB routes **every** vendor-type control transfer here directly from `process_control_request` (usbd.c:727-730), bypassing class drivers. A `vendor_send_response()` shim wraps `tud_control_xfer()` so case bodies stay unchanged. Bulk SET/GET (`REQ_SET_ALL_PARAMS` / `REQ_GET_ALL_PARAMS`) use `tud_control_xfer()`'s native EP0 chunking instead of the old `usb_stream_setup_transfer` plumbing. |
 | USB init | `usb_audio.c:usb_sound_card_init()` | Calls `tud_init(0)` in place of the pico-extras `usb_interface_init()` / `usb_device_init()` / `usb_device_start()` block. |
 | Main loop | `main.c` | `tud_task()` is called once per iteration before `usb_audio_drain_ring()`. |
 | SOF feedback servo | `usb_audio.c:uac1_driver_sof()` | Replaces the former `usb_sof_irq()` in `main.c`. Runs in USB IRQ context (TinyUSB dispatches SOF-consumer callbacks synchronously from `dcd_event_handler`). |
@@ -5575,7 +5533,7 @@ Phase 1 removed the vendor surface entirely (~9 KB saved). Phase 2 re-added it (
 ---
 
 ## Test Signal Generator
-*Last updated: 2026-07-05*
+*Last updated: 2026-11-16 (vendor commands on the MEAS page). Previously 2026-07-05*
 
 The **test signal generator** ("siggen", `siggen.c` / `siggen.h`) synthesizes
 measurement and diagnostic signals directly into the output pipeline, without a
@@ -5638,9 +5596,11 @@ calls `siggen_service()` once per main-loop pass and `siggen_pump()` at each inp
 delivery point (2026-10-23);
 `siggen_service()` applies staged configs after a fade-out (SET/START while
 running restarts) and pushes the deferred `NOTIFY_EVT_SIGGEN_STATE` (0x07)
-start/stop/completion notification. Vendor commands `0xA4..0xA8` cover
-SET/GET config, CONTROL (start/stop/stop-now), GET status, and self-describing GET
-caps; `0xA9..0xAF` are reserved.
+start/stop/completion notification. The vendor commands are on the MEAS page.
+`MEAS.SIGGEN_CONFIG` (GET and SET, 36 bytes), the zero-length SETs
+`MEAS.SIGGEN_START`, `MEAS.SIGGEN_STOP` and `MEAS.SIGGEN_STOP_NOW`,
+`MEAS.SIGGEN_STATUS`, and the self-describing `MEAS.SIGGEN_CAPS` and
+`MEAS.SIGGEN_TYPE_DESC` (one descriptor per signal type).
 
 **Memory / CPU.** Small BSS (under 1 KB) plus RAM-resident render kernels
 (`DSP_TIME_CRITICAL`); control/config code stays cold in flash. The only cross-core
@@ -5649,7 +5609,7 @@ datum is `siggen_raw_mask`, written by Core 0 between blocks.
 ---
 
 ## Spectrum Analyser (RTA / FFT)
-*Last updated: 2026-10-24 (FFT, FINISH and PUBLISH run as a background job in 16-unit and 16-bin chunks); 2026-10-23 (FINISH sliced and PUBLISH split out, for main-loop latency); 2026-10-20 (applied configurations announced with NOTIFY_EVT_RTA_CONFIG); 2026-09-12 (shared elliptic b0 and RP2350 -O3 bass kernel; Blackman-Harris FFT window; sixth-order bass bands; continuous bass bank and V3 protocol; FFT ceiling lowered to 1024 points; 2026-09-07: single transform, bass stream and bass bank removed)*
+*Last updated: 2026-11-16 (vendor surface on the MEAS page). Previously 2026-10-24 (FFT, FINISH and PUBLISH run as a background job in 16-unit and 16-bin chunks); 2026-10-23 (FINISH sliced and PUBLISH split out, for main-loop latency); 2026-10-20 (applied configurations announced with NOTIFY_EVT_RTA_CONFIG); 2026-09-12 (shared elliptic b0 and RP2350 -O3 bass kernel; Blackman-Harris FFT window; sixth-order bass bands; continuous bass bank and V3 protocol; FFT ceiling lowered to 1024 points; 2026-09-07: single transform, bass stream and bass bank removed)*
 
 One FFT engine (`rta.c`, kernel in `rta_fft.c`, generated tables in
 `rta_tables.h` from `scripts/gen_rta_tables.py`) that can be pointed at any set
@@ -5757,7 +5717,7 @@ Clients must negotiate V3 and derive frame strides/centres from caps. The
 in-repo test client is updated; Console is a separate repository and needs a
 matching release. No vendor command IDs were added.
 
-**Bin frame protocol.** `REQ_RTA_GET_BINS` is chunked by byte offset with no
+**Bin frame protocol.** `MEAS.RTA_BINS` is chunked by byte offset (`wValue`) with no
 lock. The frame is `16 + n_bins + 1` bytes with the sequence number in the
 header and again as the last byte; the engine clears the tail to 0xFF before
 writing and sets it last, and sequence numbers skip 0xFF, so a torn read can
@@ -5766,19 +5726,19 @@ never validate. The layout is fixed for the life of a config.
 **Restart and auto-off.** `rta_restart()` is called from `perform_rate_change()`,
 the input source switch, preset load, and factory reset, and `rta_service()`
 also restarts itself if the device rate changes under it. Any band or bin read
-is a keepalive and auto-starts the analyser; `REQ_RTA_GET_STATUS` is not.
-`RTA_FLAG_MANUAL` hands the run state to `REQ_RTA_CONTROL` entirely (no
+is a keepalive and auto-starts the analyser; `MEAS.RTA_STATUS` is not.
+`RTA_FLAG_MANUAL` hands the run state to `MEAS.RTA_START` / `MEAS.RTA_STOP` entirely (no
 auto-start, no auto-off).
 
 **Configuration announcements (2026-10-20).** The analyser has one
 configuration shared by every host (USB, DSPi Link sessions through a hub, a
 UART or I2C bridge). `apply_config()` pushes `NOTIFY_EVT_RTA_CONFIG` (0x0D)
 once per applied SET, even when nothing changed, carrying the clamped and
-masked `RtaConfig` exactly as `REQ_RTA_GET_CONFIG` would return it. The source
+masked `RtaConfig` exactly as a `MEAS.RTA_CONFIG` GET would return it. The source
 is captured at stage time (`rta_set_config(payload, len, src)` stores it in
 `cfg_next_src`) because the apply runs later on the main loop. Restarts from
 preset load, rate change, input switch or factory reset, auto-off, auto-start
-and `REQ_RTA_CONTROL` never emit it, since none of them changes the
+and `MEAS.RTA_START` / `_STOP` / `_RESET` never emit it, since none of them changes the
 configuration. Hosts use the event to follow another host's configuration and
 to confirm their own push without polling; see analyser spec section 7.
 
@@ -5812,7 +5772,7 @@ per-bin work; on-device timing is unmeasured.
 operation counts put a 1024-point Q15 frame at about 110k cycles (1.7% of an
 RP2040 core at the frame rate); the bench figure is pending. Bass filtering is synchronous audio work and scales with live channels; its new timer is separate from FFT timing, and existing audio CPU meters also include it. On-device CPU, deadline and physical alignment validation remain pending.
 
-**Vendor surface.** Commands 0x08 to 0x0F (see the Vendor Command Reference).
-`REQ_RTA_GET_BANDS_ALL` is USB-only and built in `bulk_param_buf` under the bulk
-lock, which is now keyed at all three sites through `vendor_is_bulk_get()`.
+**Vendor surface.** The `MEAS.RTA_*` commands (MEAS 0x20 to 0x2A; see `Documentation/commands.md`).
+`MEAS.RTA_BANDS_ALL` is USB-only and `VC_F_BULK`, built in `bulk_param_buf` under the bulk
+lock (see "Bulk and chunk sessions").
 Device tests: `tools/dspi_test/tests/rta.py` (group `rta`).

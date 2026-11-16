@@ -1,6 +1,6 @@
 # Crossover Filters Specification
 
-*Last updated: 2026-08-04*
+*Last updated: 2026-11-16 (section 3 and the walkthrough on the paged protocol of firmware 1.1.7)*
 
 ## Purpose
 
@@ -25,17 +25,17 @@ The band index is unified across PEQ and crossover for vendor command addressing
 | Band index | Meaning | Storage |
 |---|---|---|
 | 0 .. 9 | Active PEQ band | `filter_recipes[ch][band]` |
-| 10 .. 19 | **Reserved**; rejected today (future PEQ-count growth) | n/a |
+| 10 .. 19 | **Reserved**; refused with `VC_ERR_ADDRESS` today (future PEQ-count growth) | n/a |
 | 20 .. 23 | Crossover band 0 .. 3 | `xover_recipes[ch][band - 20]` |
-| 24 .. 255 | Rejected | n/a |
+| 24 .. 255 | Refused with `VC_ERR_ADDRESS` | n/a |
 
-`MAX_BANDS = 12` (PEQ storage; only 0–9 active today). `XOVER_BAND_BASE = 20` (crossover wire-index base). `MAX_XOVER_BANDS = 4`. The wide gap at 10–19 is intentional: future PEQ-count expansion can grow active PEQ (and `MAX_BANDS`) up to 20 bands without moving crossover indices. The base was widened from 12 to 20 in firmware revision dated 2026-06-04; see the version-history note about the `REQ_GET_EQ_PARAM` wValue re-encoding that accompanied it.
+`MAX_BANDS = 12` (PEQ storage; only 0–9 active today). `XOVER_BAND_BASE = 20` (crossover wire-index base). `MAX_XOVER_BANDS = 4`. The wide gap at 10–19 is intentional: future PEQ-count expansion can grow active PEQ (and `MAX_BANDS`) up to 20 bands without moving crossover indices. The base was widened from 12 to 20 in firmware revision dated 2026-06-04. On 1.1.6 that came with a re-encoding of the scalar band read (opcode 0x43), which firmware 1.1.7 replaced with the whole-band `FILTER.BAND` GET.
 
 ### Channels and the master-channel rule
 
 Crossovers apply only to **output channels**. Master channels (`CH_MASTER_LEFT=0`, `CH_MASTER_RIGHT=1`) are pre-matrix-mixer and crossover is meaningless there.
 
-- Vendor commands targeting crossover bands (band 20–23) on master channels (channel < `CH_OUT_1` = 2) are **rejected**.
+- Vendor commands targeting crossover bands (band 20 to 23) on input channels (channel < `CH_OUT_1`) are **refused** with `VC_ERR_ADDRESS`.
 - Bulk transfers send zeroed master rows for the crossover section on collect; bulk-apply skips master rows for the crossover section.
 - The recipe array `xover_recipes[NUM_CHANNELS][MAX_XOVER_BANDS]` is symmetric with PEQ so apps, presets and the bulk wire format use the same channel indexing; its master rows are simply inert. The designed cascades (`xover_filters[NUM_OUTPUT_CHANNELS][MAX_XOVER_BANDS]`) and the `output_xover_bypassed` flags are output-indexed (`ch - CH_OUT_1`) and hold no master rows (since 2026-09-22).
 
@@ -111,68 +111,41 @@ There is no "bandpass" filter type. A bandpass output uses two crossover bands o
 
 ## 3. Vendor commands
 
-Crossover bands use the **existing band-addressing vendor commands**. No new commands are introduced. Apps that already implement PEQ band SET/GET work with crossover bands by passing band indices 20–23.
+Crossover bands use the **same band-addressing vendor commands as PEQ**. Apps that already implement PEQ band SET/GET work with crossover bands by passing band indices 20 to 23. The commands use the paged protocol of firmware 1.1.7 (page in the `wIndex` high byte, command in `bRequest`, address in `wValue`, see `../commands.md`). A rejected SET STALLs, and the reason is readable from `SYS.LAST_RESULT`.
 
-> **Wire-protocol change (2026-06-04):** crossover moved from bands 12–15 to **20–23**. Because `REQ_GET_EQ_PARAM` previously packed the band into a 4-bit `wValue` field (max 15), its `wValue` layout was widened to a 5-bit band field. See [3.2 GET commands](#32-get-commands). `REQ_SET_EQ_PARAM`, `REQ_SET_BAND_BYPASS`, `REQ_GET_BAND_BYPASS`, and the bulk transfer carry the band in a full 8-bit field and were unaffected.
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | Whole band recipe, both directions |
+| `FILTER.BAND_BYPASS` | 0x06 | 0x11 | GET, SET | `(channel << 8) \| band` | GET 1, SET 1 | SET: 1 = bypass, anything else = active. GET: 0 or 1 |
 
-### 3.1 SET commands
+### 3.1 Band payload
 
-| Request | Code | wValue | Payload | Effect |
-|---|---|---|---|---|
-| `REQ_SET_EQ_PARAM` | 0x42 | (unused) | 16-byte `EqParamPacket` | Set full band recipe |
-| `REQ_SET_BAND_BYPASS` | 0xD8 | (channel << 8) \| band | 1 byte: 1 = bypass, anything else = active | Toggle band bypass |
-
-`EqParamPacket` layout (16 bytes, packed):
+The `FILTER.BAND` SET payload and GET reply share one 16-byte layout:
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | uint8_t | channel | 0..NUM_CHANNELS-1 |
-| 1 | uint8_t | band | 0..9 (PEQ) or 20..23 (crossover) |
-| 2 | uint8_t | type | `FilterType` enum |
-| 3 | uint8_t | bypass | 1 = bypassed (strict); any other value = active |
+| 0 | uint8_t | type | `FilterType` enum |
+| 1 | uint8_t | bypass | 1 = bypassed (strict); any other value = active. A GET returns 0 or 1 |
+| 2 | uint16_t | qp_x512 | Linkwitz Transform PEQ bands only (`peq_filters.md`). A crossover band ignores it and reads it back as 0 |
 | 4 | float | freq | Hz, clamped to [10, 0.45·Fs] |
 | 8 | float | Q | 0.1..20.0 (ignored for crossover types) |
 | 12 | float | gain_db | -120..+80 dB (ignored for crossover types) |
 
-Validation rules at the SET handler:
-- `channel >= NUM_CHANNELS` → reject
+Validation rules, the same in both directions:
+- `channel >= NUM_CHANNELS` → `VC_ERR_ADDRESS`
 - `band` in active PEQ range (0..`channel_band_counts[ch]`-1) → accepted as PEQ
-- `band` in crossover range (20..23) → accepted only if `channel >= CH_OUT_1` (== 2)
-- `band` in reserved range (10..19) → reject silently
-- `band` ≥ 24 → reject silently
+- `band` in crossover range (20..23) → accepted only if `channel >= CH_OUT_1`, otherwise `VC_ERR_ADDRESS`
+- `band` in reserved range (10..19) or `band` ≥ 24 → `VC_ERR_ADDRESS`
+- A NaN or infinite freq, Q or gain on a `FILTER.BAND` SET → `VC_ERR_VALUE`, nothing stored
+- A payload other than 16 bytes (1 for `FILTER.BAND_BYPASS`) → `VC_ERR_LENGTH`
 - `bypass` byte normalized: strictly equal to 1 = bypassed, else active (defends against 0xFF padding from legacy hosts)
-- For SET_BAND_BYPASS: the handler reads the current recipe from storage, overwrites the bypass byte, normalizes channel/band to the wire values, and queues the update
+- For `FILTER.BAND_BYPASS` SET: the handler reads the current recipe from storage, overwrites the bypass byte, fills in channel/band from `wValue`, and queues the update
 
-### 3.2 GET commands
+Both SETs feed one pending slot that the main loop applies. A SET that arrives while an earlier band write is still pending is refused with `VC_ERR_BUSY` and changes nothing, so retry after a short delay.
 
-| Request | Code | wValue | Returns |
-|---|---|---|---|
-| `REQ_GET_EQ_PARAM` | 0x43 | (channel << 8) \| (band << 3) \| param | 4 bytes (scalar value) |
-| `REQ_GET_BAND_BYPASS` | 0xD9 | (channel << 8) \| band | 1 byte (0 or 1) |
+A `FILTER.BAND` GET returns the whole stored band in one transfer. There is no per-field read.
 
-**`REQ_GET_EQ_PARAM` wValue encoding (changed 2026-06-04):** the band field is now **5 bits** so crossover bands (20–23) remain addressable after the gap widened. The `param` selector is **3 bits** (only 5 values exist). Bit layout:
-
-| Bits | Field | Range |
-|---|---|---|
-| 15..8 | channel | 0..NUM_CHANNELS-1 |
-| 7..3 | band | 0..31 (PEQ 0..9, crossover 20..23) |
-| 2..0 | param | 0..4 |
-
-Build it as `wValue = (channel << 8) | (band << 3) | param`. (Previously band occupied bits 7..4 and param bits 3..0; hosts that addressed PEQ bands 0–9 with the old layout MUST update.) `REQ_GET_BAND_BYPASS` is unchanged: it carries the band in the low 8 bits.
-
-`REQ_GET_EQ_PARAM` returns a single scalar selected by `param`:
-
-| param | Returned scalar |
-|---|---|
-| 0 | `type` (uint32_t, zero-padded) |
-| 1 | `freq` (float) |
-| 2 | `Q` (float, irrelevant for crossover types) |
-| 3 | `gain_db` (float, irrelevant for crossover types) |
-| 4 | `bypass` (uint32_t, 0 or 1) |
-
-Note: `REQ_GET_EQ_PARAM` does NOT round-trip the `band` field; the band is implicit in `wValue`. To verify the stored `band` field, use the bulk transfer.
-
-GET validation mirrors SET: master channels with crossover bands return a USB protocol stall.
+> **History.** Crossover moved from bands 12 to 15 up to **20 to 23** on 2026-06-04. Firmware 1.1.6 also had a scalar read (opcode 0x43) whose `wValue` packed a band and a parameter selector, and whose band field was widened to 5 bits for that move. Firmware 1.1.7 replaced it with the whole-band `FILTER.BAND` GET.
 
 ### 3.3 Vendor command example: configure a 2-way crossover at 2 kHz
 
@@ -180,17 +153,22 @@ For an output pair (CH_OUT_3 = 4 as woofer, CH_OUT_4 = 5 as tweeter):
 
 ```
 // Woofer: LR4 LP at 2000 Hz, band 20 on channel 4
-EqParamPacket woofer = { .channel=4, .band=20, .type=FILTER_LR4_LP, .bypass=0,
-                         .freq=2000.0f, .Q=0.707f, .gain_db=0.0f };
-SET REQ_SET_EQ_PARAM payload=woofer
+// payload: type, bypass, qp_x512, freq, Q, gain_db
+SET FILTER.BAND  wValue=(4 << 8) | 20  payload={ FILTER_LR4_LP, 0, 0, 2000.0f, 0.707f, 0.0f }
 
 // Tweeter: LR4 HP at 2000 Hz, band 20 on channel 5
-EqParamPacket tweeter = { .channel=5, .band=20, .type=FILTER_LR4_HP, .bypass=0,
-                          .freq=2000.0f, .Q=0.707f, .gain_db=0.0f };
-SET REQ_SET_EQ_PARAM payload=tweeter
+SET FILTER.BAND  wValue=(5 << 8) | 20  payload={ FILTER_LR4_HP, 0, 0, 2000.0f, 0.707f, 0.0f }
 ```
 
-That's it. The crossover stage is now active. To disable, send `REQ_SET_BAND_BYPASS` with bypass=1.
+In Python with the test harness (`tools/dspi_test/device.py`):
+
+```python
+import struct
+dev.pset("FILTER.BAND", struct.pack("<BBHfff", FILTER_LR4_LP, 0, 0, 2000.0, 0.707, 0.0), addr=(4 << 8) | 20)
+dev.pset("FILTER.BAND", struct.pack("<BBHfff", FILTER_LR4_HP, 0, 0, 2000.0, 0.707, 0.0), addr=(5 << 8) | 20)
+```
+
+That's it. The crossover stage is now active. To disable, send `FILTER.BAND_BYPASS` with bypass=1. If the second SET is refused with `VC_ERR_BUSY`, the first one has not been applied yet, so retry it after a short delay.
 
 ---
 
@@ -350,7 +328,7 @@ The crossover stage is in-place on the existing `buf_out[output][]` arrays. It d
 
 Core 1 EQ worker (when active — see CPU section): runs crossover before PEQ on its assigned output range.
 
-**Global EQ bypass (`REQ_SET_BYPASS`) intentionally does NOT bypass the crossover stage.** Crossover filters are speaker-protection critical: a tweeter's high-pass must survive a global "EQ off" toggle, or the comparison listen could damage the driver. Only per-band bypass (`REQ_SET_BAND_BYPASS` or the recipe's `bypass` byte) and the per-output `output_xover_bypassed` fast path disable crossover processing.
+**Global EQ bypass (`FILTER.EQ_BYPASS`) intentionally does NOT bypass the crossover stage.** Crossover filters are speaker-protection critical: a tweeter's high-pass must survive a global "EQ off" toggle, or the comparison listen could damage the driver. Only per-band bypass (`FILTER.BAND_BYPASS` or the recipe's `bypass` byte) and the per-output `output_xover_bypassed` fast path disable crossover processing.
 
 ---
 
@@ -375,9 +353,9 @@ Because `FILTER_FLAT` is not in the crossover range, every default band is autom
 - **`fc <= 0` or `Fs <= 0`:** treated as bypassed.
 - **Bypass byte normalization:** the firmware accepts only `bypass == 1` as "bypassed". Any other value (including 0xFF from legacy hosts that fail to zero-init padding) is treated as active. Apps should always send `bypass = 0` or `1`.
 - **Rate change:** all crossover sections are redesigned at the new Fs (in `dsp_recalculate_all_filters()`). Section state (`s1`, `s2`, `svic1eq`, `svic2eq`) is preserved across the redesign and reset only when a section's SVF/TDF2 path changes (e.g. fc crossing the Fs/7.5 gate at the new rate), when a section drops out of the new cascade, or when the band toggles bypass. A small transient from the coefficient step itself is still possible; the PEQ stage has the same behavior, and the preset-mute envelope does NOT cover rate change today (consistent with existing PEQ limitation).
-- **Live edit (REQ_SET_EQ_PARAM with same band twice):** each edit redesigns just that band's sections, then recomputes `output_xover_bypassed[ch - CH_OUT_1]`. Section state is preserved across the redesign (matching the PEQ convention in `dsp_compute_coefficients()`), so dragging fc or switching order does not zero the cascade's memory; any residual transient comes from the coefficient step, as with PEQ.
-- **Reserved band indices 10..19:** rejected at the vendor handler.
-- **Crossover on master channels:** rejected. Use output channels (CH_OUT_1 and above) only.
+- **Live edit (`FILTER.BAND` with same band twice):** each edit redesigns just that band's sections, then recomputes `output_xover_bypassed[ch - CH_OUT_1]`. Section state is preserved across the redesign (matching the PEQ convention in `dsp_compute_coefficients()`), so dragging fc or switching order does not zero the cascade's memory; any residual transient comes from the coefficient step, as with PEQ.
+- **Reserved band indices 10..19:** refused at the vendor handler with `VC_ERR_ADDRESS`.
+- **Crossover on input channels:** refused with `VC_ERR_ADDRESS`. Use output channels (CH_OUT_1 and above) only.
 
 ---
 
@@ -425,7 +403,7 @@ Add this to existing PEQ, master EQ, loudness, leveller, crossfeed, matrix mixer
 
 ### 11.1 Discovering crossover support
 
-Read the bulk transfer (`REQ_GET_ALL_PARAMS`). Inspect `header.format_version`:
+Read the bulk transfer (`STORE.ALL_PARAMS` GET). Inspect `header.format_version`:
 - V11+ → device supports crossover; read `crossovers` section
 - V<11 → device predates crossover; the section doesn't exist
 
@@ -433,21 +411,21 @@ Read the bulk transfer (`REQ_GET_ALL_PARAMS`). Inspect `header.format_version`:
 
 Two paths:
 
-**Bulk read (preferred for app startup):** `REQ_GET_ALL_PARAMS` returns the full state in one transfer; index into `crossovers.bands[channel][local_band]` (`local_band = wire_band - 20`).
+**Bulk read (preferred for app startup):** `STORE.ALL_PARAMS` GET returns the full state in one transfer; index into `crossovers.bands[channel][local_band]` (`local_band = wire_band - 20`).
 
-**Per-band scalar reads:** `REQ_GET_EQ_PARAM` with `wValue = (channel<<8) | (band<<4) | param_nibble` returns 4 bytes per call. Issue one call per parameter (type/freq/Q/gain_db/bypass) per band per channel — slower but useful for incremental UI updates.
+**Per-band reads:** `FILTER.BAND` GET with `wValue = (channel<<8) | band` returns the whole 16-byte band per call. It is slower than the bulk read for a full refresh but useful for incremental UI updates.
 
 ### 11.3 Writing crossover state
 
-**Per-band SET:** `REQ_SET_EQ_PARAM` with a 16-byte `EqParamPacket`. Set `channel`, `band` (20–23), `type` (one of `FILTER_*` crossover values), `freq`, and `bypass`. `Q` and `gain_db` can be 0; the firmware ignores them.
+**Per-band SET:** `FILTER.BAND` with `wValue = (channel<<8) | band` (band 20 to 23) and the 16-byte band payload. Set `type` (one of `FILTER_*` crossover values), `freq`, and `bypass`. `qp_x512`, `Q` and `gain_db` can be 0; the firmware ignores them. Retry on `VC_ERR_BUSY`.
 
-**Bypass-only SET:** `REQ_SET_BAND_BYPASS` with `wValue = (channel<<8) | band` and a 1-byte payload (0 = active, 1 = bypassed). Faster than a full SET for toggle UI elements.
+**Bypass-only SET:** `FILTER.BAND_BYPASS` with `wValue = (channel<<8) | band` and a 1-byte payload (0 = active, 1 = bypassed). Faster than a full SET for toggle UI elements.
 
-**Bulk SET:** assemble a `WireBulkParams` payload at V11 size, fill the `crossovers` section, send via `REQ_SET_ALL_PARAMS`. Master rows in `crossovers` are skipped by the firmware so you can zero them.
+**Bulk SET:** assemble a `WireBulkParams` payload at V11 size, fill the `crossovers` section, send via `STORE.ALL_PARAMS` SET. Master rows in `crossovers` are skipped by the firmware so you can zero them.
 
 ### 11.4 Saving to a preset
 
-`REQ_PRESET_SAVE` with `wValue = slot_index` captures the current live state (including crossover) into the named slot. Preset slots store all crossover state per channel per band.
+A zero-length `STORE.PRESET_SAVE` SET with `wValue = slot_index` captures the current live state (including crossover) into the named slot. Preset slots store all crossover state per channel per band.
 
 ### 11.5 Common configurations
 
@@ -489,4 +467,5 @@ Two paths:
 | Doc version | Date | Change |
 |---|---|---|
 | 1.0 | 2026-05-18 | Initial spec; V16 preset slot, V11 wire format, FilterType extensions 8..37 |
-| 1.1 | 2026-06-04 | Crossover wire band base moved 12 → 20 (reserved gap widened to 10..19, `XOVER_BAND_BASE`); `REQ_GET_EQ_PARAM` wValue re-encoded to a 5-bit band field (`(channel<<8)\|(band<<3)\|param`). No change to wire-format size, persistence layout, or filter-type enum. |
+| 1.1 | 2026-06-04 | Crossover wire band base moved 12 → 20 (reserved gap widened to 10..19, `XOVER_BAND_BASE`); 1.1.6 opcode 0x43 wValue re-encoded to a 5-bit band field (`(channel<<8)\|(band<<3)\|param`). No change to wire-format size, persistence layout, or filter-type enum. |
+| 1.2 | 2026-11-16 | Vendor commands on the paged protocol of firmware 1.1.7: `FILTER.BAND` (whole band both ways, address in `wValue`, `qp_x512` inside) and `FILTER.BAND_BYPASS`. Rejected writes are errors. |

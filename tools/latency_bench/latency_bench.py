@@ -17,37 +17,46 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.dspi_test.device import DspiDevice, OP  # noqa: E402
+from tools.dspi_test.device import DspiDevice, PagedStall  # noqa: E402
 from tools.dspi_test.profile import build_profile  # noqa: E402
 from tools.dspi_test import lifecycle  # noqa: E402
-from tools.batch_bench.batch_bench import Player, apply_profile, bulk, load_slot  # noqa: E402
+from tools.latency_bench.paged import (  # noqa: E402
+    buffer_stats, pdm_stats, pget_ready, pipeline_stats, spdif_tx_stats, stats_reset, system_status,
+    usb_audio_status, wait_ready)
 
-REQ_OUTPUT_LATENCY = 0x03
 LAT_FMT = "<BBHHHBBH"             # OutputLatencyStatus in firmware/DSPi/config.h
 SRC_USB, SRC_SPDIF, SRC_I2S = 0, 1, 2
 LAT_LOW, LAT_LOW_1MS, LAT_2MS, LAT_4MS, LAT_8MS = 1, 2, 3, 5, 7   # OutputLatencyId (output_latency.h)
 OPTION_IDS = [1, 2, 3, 4, 5, 6, 7]
-COUNTERS = {"underruns": 26, "drops": 27, "usb_ring_overruns": 22,
-            "usb_packet_gaps": 8, "pdm_ring_underruns": 4, "pdm_dma_underruns": 6}
-
-
-def status_u32(dev, wv):
-    return dev.get_u32(OP.GET_STATUS, wvalue=wv)
+FS_HOST = 48000
 
 
 def counters(dev):
-    return {k: status_u32(dev, w) for k, w in COUNTERS.items()}
+    p, u, t, d = pipeline_stats(dev), usb_audio_status(dev), spdif_tx_stats(dev), pdm_stats(dev)
+    return {"underruns": p["ring_underruns"], "drops": p["ring_drops"],
+            "usb_ring_overruns": u["ring_overruns"], "usb_packet_gaps": t["spdif_underruns"],
+            "pdm_ring_underruns": d["ring_underruns"], "pdm_dma_underruns": d["dma_underruns"]}
+
+
+def sample_rate(dev):
+    return system_status(dev)["sample_rate_hz"]
+
+
+def latency_get(dev):
+    """OUTPUT.LATENCY: the stored option ID, or the queued one while a change is pending."""
+    return dev.pget("OUTPUT.LATENCY", length=1)[0]
 
 
 def latency_status(dev):
     req, eff, eff_us, frames, batch, pending, count, _ = struct.unpack(
-        LAT_FMT, bytes(dev.get(REQ_OUTPUT_LATENCY, 12, wvalue=0)))
+        LAT_FMT, dev.pget("OUTPUT.LATENCY_STATUS", length=12))
     return dict(requested_id=req, effective_id=eff, effective_us=eff_us, target_frames=frames,
                 batch_frames=batch, pending=pending, option_count=count)
 
 
 def set_latency(dev, opt_id, timeout_s=8.0):
-    dev.set(REQ_OUTPUT_LATENCY, bytes([opt_id]))
+    """An unknown option ID STALLs with VC_ERR_VALUE; the apply is a flash write and an output restart."""
+    dev.pset("OUTPUT.LATENCY", bytes([opt_id]))
     t0 = time.time()
     while time.time() - t0 < timeout_s:
         time.sleep(0.1)
@@ -62,19 +71,14 @@ def set_latency(dev, opt_id, timeout_s=8.0):
 
 def slot_fills(dev):
     """Per-slot live fill in frames for playing slots (fill_centi_pct on the 768-frame scale)."""
-    b = bytes(dev.get(OP.GET_BUFFER_STATS, 44))
-    out = []
-    for i in range(b[0]):
-        base = 4 + 8 * i
-        if b[base + 2]:                                   # consumer_playing
-            out.append(struct.unpack_from("<H", b, base + 6)[0] * 768 / 10000)
-    return out
+    return [s["fill_centi_pct"] * 768 / 10000 for s in buffer_stats(dev)["spdif"] if s["consumer_playing"]]
 
 
 def set_source(dev, src, rate=None):
+    """The I2S rate is a stored setting and is not put back afterwards."""
     if rate is not None:
-        dev.set(OP.SET_INPUT_RATE, struct.pack("<I", rate))
-    dev.set_bytes(OP.SET_INPUT_SOURCE, bytes([src]))
+        dev.pset("INPUT.I2S_RX_RATE", struct.pack("<I", rate))
+    dev.pset("INPUT.SOURCE", bytes([src]))
 
 
 def wait_rate(dev, rate, timeout_s=10.0):
@@ -82,7 +86,7 @@ def wait_rate(dev, rate, timeout_s=10.0):
     while time.time() - t0 < timeout_s:
         time.sleep(0.2)
         try:
-            if status_u32(dev, 15) == rate:
+            if sample_rate(dev) == rate:
                 return True
         except Exception:  # noqa: BLE001
             pass
@@ -92,10 +96,128 @@ def wait_rate(dev, rate, timeout_s=10.0):
 def siggen(dev, on):
     if on:
         cfg = struct.pack("<BBHHBBfIHHffff", 1, 0, 0x00FF, 0, 0, 0, -40.0, 0, 0, 0, 997.0, 0, 0, 0)
-        dev.set(OP.SIGGEN_SET_CONFIG, cfg)
-        dev.get(OP.SIGGEN_CONTROL, 1, wvalue=1)
+        dev.pset("MEAS.SIGGEN_CONFIG", cfg)
+        dev.pset("MEAS.SIGGEN_START")
     else:
-        dev.get(OP.SIGGEN_CONTROL, 1, wvalue=2)
+        dev.pset("MEAS.SIGGEN_STOP_NOW")
+
+
+def preset_active(dev):
+    return dev.pget("STORE.PRESET_ACTIVE", length=1)[0]
+
+
+def bulk(dev, prof):
+    return pget_ready(dev, "STORE.ALL_PARAMS", length=max(prof.bulk_payload_len, 2960))
+
+
+def load_slot(dev, slot, timeout_s=5.0):
+    dev.pset("STORE.PRESET_LOAD", addr=slot)
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        time.sleep(0.2)
+        try:
+            if preset_active(dev) == slot:
+                time.sleep(0.5)
+                wait_ready(dev)
+                return
+        except Exception:  # noqa: BLE001  (busy window during the deferred load)
+            pass
+    raise RuntimeError(f"preset slot {slot} did not become active")
+
+
+# --- 4-way profile (the heavy profile of tools/batch_bench), from factory DSP defaults ----------
+
+FILTER_FLAT, FILTER_PEAKING = 0, 1
+FILTER_LR4_LP, FILTER_LR4_HP = 34, 35
+XOVER_BAND_BASE = 20
+PEQ_FREQS = [40, 80, 160, 315, 630, 1250, 2500, 5000, 10000, 16000]
+
+
+def band(dev, ch, b, ftype, freq, q, gain, tries=100):
+    """FILTER.BAND refuses with VC_ERR_BUSY until the main loop takes the previous band write."""
+    data = struct.pack("<BBHfff", ftype, 0, 0, freq, q, gain)
+    for _ in range(tries):
+        try:
+            dev.pset("FILTER.BAND", data, addr=(ch << 8) | b)
+            return
+        except PagedStall as e:
+            if e.result_name != "VC_ERR_BUSY":
+                raise
+            time.sleep(0.005)
+    raise RuntimeError(f"FILTER.BAND {ch}/{b} still busy after {tries} tries")
+
+
+def route(dev, inp, out, enabled, gain_db=0.0):
+    dev.pset("ROUTE.MATRIX_ROUTE", struct.pack("<BBHf", int(enabled), 0, 0, gain_db), addr=(inp << 8) | out)
+
+
+def apply_4way(dev, prof):
+    n_in, n_out = prof.num_input_channels, prof.num_output_channels
+    spdif_outs = n_out - 1                      # last output is PDM
+    pdm = n_out - 1
+    dev.pset("ROUTE.OUTPUT_ENABLE", b"\x00", addr=pdm)   # PDM excludes the core 1 EQ worker
+    for o in range(spdif_outs):
+        dev.pset("ROUTE.OUTPUT_ENABLE", b"\x01", addr=o)
+    for i in range(n_in):
+        for o in range(n_out):
+            route(dev, i, o, i < 2 and o < spdif_outs and (o % 2) == i)
+    for ch in [0, 1] + [n_in + o for o in range(spdif_outs)]:
+        for b, f in enumerate(PEQ_FREQS):
+            band(dev, ch, b, FILTER_PEAKING, float(f), 1.4, 2.0 if b % 2 == 0 else -2.0)
+    # LR4 pairs: (0,1) sub, (2,3) low-mid, (4,5) mid, (6,7) HF.
+    edges = [(None, 80.0), (80.0, 500.0), (500.0, 3000.0), (3000.0, None)]
+    for o in range(spdif_outs):
+        hp, lp = edges[min(o // 2, 3)]
+        ch = n_in + o
+        band(dev, ch, XOVER_BAND_BASE + 0, FILTER_LR4_HP if hp else FILTER_FLAT, hp or 1000.0, 0.707, 0.0)
+        band(dev, ch, XOVER_BAND_BASE + 1, FILTER_LR4_LP if lp else FILTER_FLAT, lp or 1000.0, 0.707, 0.0)
+        dev.pset("ROUTE.CHANNEL_DELAY", struct.pack("<f", 1.5 if o < 2 else 0.0), addr=ch)
+    time.sleep(0.5)
+    wait_ready(dev)
+
+
+# --- host playback -----------------------------------------------------------------------------
+
+def audio_available():
+    try:
+        import sounddevice  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class Player:
+    """Loops seeded -60 dBFS white noise to the DSPi at 48 kHz, 16-bit stereo. Needs sounddevice."""
+
+    def __init__(self, name="DSPi"):
+        import sounddevice as sd
+        from tools.dspi_test import coreaudio
+        dev_idx = next(i for i, d in enumerate(sd.query_devices())
+                       if name in d["name"] and d["max_output_channels"] >= 2)
+        coreaudio.set_rate_by_name(name, FS_HOST)
+        rng = np.random.default_rng(1)
+        amp = 10 ** (-60 / 20) * 32767
+        self.buf = np.clip(rng.normal(0, amp / 2, (FS_HOST * 2, 2)), -32768, 32767).astype(np.int16)
+        self.pos = 0
+        self.underflows = 0          # callbacks PortAudio flagged as output underflow
+        self.stream = sd.OutputStream(device=dev_idx, samplerate=FS_HOST, channels=2, dtype="int16",
+                                      callback=self._cb, latency="high")
+
+    def _cb(self, out, frames, _t, status):
+        if status.output_underflow:
+            self.underflows += 1
+        n = len(self.buf)
+        idx = (np.arange(frames) + self.pos) % n
+        out[:] = self.buf[idx]
+        self.pos = (self.pos + frames) % n
+
+    def __enter__(self):
+        self.stream.start()
+        return self
+
+    def __exit__(self, *a):
+        self.stream.stop()
+        self.stream.close()
 
 
 def fill_ok(mean, expect, block_cap):
@@ -107,7 +229,7 @@ def measure(dev, opt_id, rate, window_s, steady_s):
     """Window starts the moment the change applies, so the post-reset transient counts."""
     st = set_latency(dev, opt_id)
     c0 = counters(dev)
-    dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
+    stats_reset(dev)
     t0 = time.time()
     samples, spreads, c0s, c1s = [], [], [], []
     while time.time() - t0 < window_s:
@@ -117,11 +239,11 @@ def measure(dev, opt_id, rate, window_s, steady_s):
             continue
         samples.append((time.time() - t0, float(np.mean(f)), min(f)))
         spreads.append(max(f) - min(f))
-        v = status_u32(dev, 2)
-        c0s.append((v >> 16) & 0xFF)
-        c1s.append((v >> 24) & 0xFF)
+        ss = system_status(dev)
+        c0s.append(ss["cpu0_load"])
+        c1s.append(ss["cpu1_load"])
     c1 = counters(dev)
-    minpre = status_u32(dev, 28)
+    minpre = pipeline_stats(dev)["min_prewrite"]
     d = {k: c1[k] - c0[k] for k in c0}
     block_cap = st["batch_frames"] + 1
     steady = [m for t, m, _ in samples if t >= window_s - steady_s]
@@ -160,21 +282,24 @@ def run_source(dev, name, args, rows, out):
     lat = [int(x) for x in args.options.split(",")] if args.options else OPTION_IDS
     player = None
     if name == "usb48":
+        if not audio_available():
+            print("usb48: sounddevice not installed, skipped", flush=True)
+            return
         set_source(dev, SRC_USB)
         player = Player().__enter__()
-        rate = 48000
+        rate = FS_HOST
     elif name.startswith("i2s"):
         rate = {"i2s44": 44100, "i2s48": 48000, "i2s96": 96000}[name]
         set_source(dev, SRC_I2S, rate)
     elif name == "siggen":
         set_source(dev, SRC_USB)
         time.sleep(1.0)
-        rate = status_u32(dev, 15)
+        rate = sample_rate(dev)
         siggen(dev, True)
     elif name == "spdif":
         set_source(dev, SRC_SPDIF)
         time.sleep(4.0)
-        state = bytes(dev.get(OP.GET_SPDIF_RX_STATUS, 16))
+        state = dev.pget("INPUT.SPDIF_RX_STATUS", length=16)
         if state[0] != 2:
             print("spdif: no lock, skipped", flush=True)
             return
@@ -266,7 +391,7 @@ def cmd_restore(args):
     lat = json.loads((out / "original_latency.json").read_text())
     set_latency(dev, lat["requested_id"])
     diffs = lifecycle.diff_bulk(dev, snap, prof)
-    print(f"restored: slot {dev.get_u8(OP.PRESET_GET_ACTIVE)} (was {snap.active_slot}), "
+    print(f"restored: slot {preset_active(dev)} (was {snap.active_slot}), "
           f"latency option {latency_status(dev)['requested_id']}, bulk diffs {len(diffs)}")
 
 
@@ -279,12 +404,12 @@ def cmd_run(args):
     if args.profile == "4way":
         empty = next(s for s in range(10) if not snap.occupied_mask & (1 << s))
         load_slot(dev, empty)
-        apply_profile(dev, prof, "4way")
+        apply_4way(dev, prof)
     ref = bulk(dev, prof)
     rows = []
     # Muted throughout: an undriven I2S data pin reads as full-scale noise.
     # Mute is a gain stage only, so ring timing is unaffected.
-    dev.set_bytes(OP.SET_USER_MUTE, b"\x01")
+    dev.pset("ROUTE.USER_MUTE", b"\x01")
     try:
         for name in args.sources.split(","):
             run_source(dev, name, args, rows, out)
@@ -292,7 +417,7 @@ def cmd_run(args):
             run_checks(dev, out)
     finally:
         set_source(dev, snap.input_source)
-        dev.set_bytes(OP.SET_USER_MUTE, bytes([snap.user_mute]))
+        dev.pset("ROUTE.USER_MUTE", bytes([snap.user_mute]))
     changed = bulk(dev, prof) != ref
     print(f"done: {sum(r['pass'] for r in rows)}/{len(rows)} pass, config "
           f"{'CHANGED' if changed else 'unchanged'}", flush=True)

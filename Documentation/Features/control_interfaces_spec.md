@@ -397,7 +397,7 @@ A GET's `wLength` caps the reply exactly as on USB. A reply longer than `wLength
 
 ### 5.3 Flash blackout
 
-Any command that writes flash (preset save, load and delete, device-level saves, factory reset, an interface config apply, a persisting bulk apply) causes an interrupt blackout of about 45 ms.
+Any command that writes flash (preset save, load and delete, device-level saves, an interface config apply) causes an interrupt blackout of about 45 ms per sector. `SYS.COMMAND_INFO` marks these commands with the `FLASH` flag. `STORE.FACTORY_RESET` and a bulk SET of `STORE.ALL_PARAMS` write no flash. They change only the live state, under a muted output restart.
 
 - **UART.** Bytes that arrive during the blackout can be lost.
 - **I2C.** A transaction in progress stalls until it ends.

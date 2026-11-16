@@ -1,5 +1,7 @@
 # Output Limiter Specification
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 The output limiter is a brickwall peak limiter on every output channel. Each output has its own on/off switch, threshold and release time, and outputs can be linked into groups that share one gain reduction. It exists to protect whatever sits after the device (amplifiers, drivers, a downstream converter) and to stop hard clipping at the output converter.
@@ -83,35 +85,31 @@ The whole operation affects every output identically in one packet, so inter-slo
 
 All parameters are per output. Output indices follow the output channel numbering used everywhere else (RP2350: 0-7 S/PDIF or I2S, 8 PDM; RP2040: 0-3, 4 PDM).
 
-| Index | Name | Range | Default | Notes |
-|-------|------|-------|---------|-------|
-| 0 | `enabled` | 0 / 1 | 0 | Any non-zero value enables |
-| 1 | `threshold_db` | -30.0 .. 0.0 dBFS | -1.0 | Ceiling. 1 dB of margin covers inter-sample overshoot in a DAC |
-| 2 | `release_ms` | 10 .. 1000 ms | 100 | Gain recovers 8.69 dB per release time |
-| 3 | `link_group` | 0 .. 4 | 0 | 0 = unlinked. Rounded to the nearest integer. A stored value above 4 from a bulk or preset restore falls back to 0 |
+| Index | Name | Range | Default | Notes | Command |
+|-------|------|-------|---------|-------|---------|
+| 0 | `enabled` | 0 / 1 | 0 | Any non-zero value enables | `DYN.LIMITER_ENABLE` |
+| 1 | `threshold_db` | -30.0 .. 0.0 dBFS | -1.0 | Ceiling. 1 dB of margin covers inter-sample overshoot in a DAC | `DYN.LIMITER_THRESHOLD` |
+| 2 | `release_ms` | 10 .. 1000 ms | 100 | Gain recovers 8.69 dB per release time | `DYN.LIMITER_RELEASE` |
+| 3 | `link_group` | 0 .. 4 | 0 | 0 = unlinked. Rounded to the nearest integer. A stored value above 4 from a bulk or preset restore falls back to 0 | `DYN.LIMITER_LINK_GROUP` |
 
-Out-of-range values are clamped. NaN is ignored and never stored.
+The index is the internal `LIMITER_PARAM_*` number. Out-of-range values, infinity included, are clamped. A NaN SET is refused with `VC_ERR_VALUE` and stores nothing.
 
 **Full scale.** 0 dBFS is digital full scale of the S/PDIF, I2S and ADAT outputs on both platforms. On RP2350 that is float 1.0. On RP2040 it is Q28 raw 2^29, which is the value that maps to 24-bit full scale through the Q28 `>> 6` output conversion. The PDM output keeps the pipeline's existing PDM scaling, which is not referenced to the same full scale on the two platforms.
 
-## 4. Vendor Command
+## 4. Vendor Commands
 
-One opcode carries every limiter operation. The transfer direction selects SET or GET, so the limiter costs a single top-level command.
+The limiter lives in the `DYN` page (0x07) of the paged protocol (`../commands.md`). Each parameter has its own command, and the transfer direction selects GET or SET.
 
-| Name | Code | Dir | Description |
-|------|------|-----|-------------|
-| `REQ_LIMITER` | 0x81 | OUT | Set one parameter. `wValue = (output << 8) \| index`, payload = float32 LE. `output = 0xFF` sets that parameter on every output |
-| `REQ_LIMITER` | 0x81 | IN | Get one parameter as float32 LE, or a read-only block (below) |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `DYN.LIMITER_ENABLE` | 0x07 | 0x10 | GET, SET | output 0 to `NUM_OUTPUT_CHANNELS` - 1, or 0xFF (all outputs, SET only) | GET 4, SET 4 | float32 LE, non-zero enables |
+| `DYN.LIMITER_THRESHOLD` | 0x07 | 0x11 | GET, SET | output, or 0xFF on SET | GET 4, SET 4 | float32 LE, dBFS |
+| `DYN.LIMITER_RELEASE` | 0x07 | 0x12 | GET, SET | output, or 0xFF on SET | GET 4, SET 4 | float32 LE, ms |
+| `DYN.LIMITER_LINK_GROUP` | 0x07 | 0x13 | GET, SET | output, or 0xFF on SET | GET 4, SET 4 | float32 LE, group 0 to 4 |
+| `DYN.LIMITER_METERS` | 0x07 | 0x18 | GET | none (0) | GET var | Gain-reduction meter, all outputs: `NUM_OUTPUT_CHANNELS` x uint16 LE, gain reduction in 0.01 dB (0 = none) |
+| `DYN.LIMITER_STATUS` | 0x07 | 0x19 | GET | none (0) | GET 4 | `engaged` (1 = the lookahead delay is in the signal path), `lookahead_samples` (32), `block_samples` (16), `num_outputs` |
 
-GET indices:
-
-| Index | Returns |
-|-------|---------|
-| 0-3 | The parameter for `output`, as float32 LE (4 bytes) |
-| 0x80 | Gain-reduction meter, all outputs: `NUM_OUTPUT_CHANNELS` x uint16 LE, gain reduction in 0.01 dB (0 = none). The output byte is ignored |
-| 0x81 | Status, 4 bytes: `engaged` (1 = the lookahead delay is in the signal path), `lookahead_samples` (32), `block_samples` (16), `num_outputs` |
-
-A bad output or index STALLs a GET. A bad output or index on a SET is a silent no-op, matching the other indexed parameter commands. A host can feature-detect the limiter by reading index 0x81.
+A bad output, or 0xFF on a GET, is `VC_ERR_ADDRESS`. The meter and status commands take no address, so a non-zero `wValue` is `VC_ERR_ADDRESS` too. A SET payload other than exactly 4 bytes is `VC_ERR_LENGTH`. A rejected request STALLs on USB, and the reason is readable from `SYS.LAST_RESULT`. Every paged firmware has these commands, so a host that wants to check uses the GET bit of `DYN.LIMITER_STATUS` in `SYS.PAGE_COMMANDS` for page 0x07.
 
 **Meter semantics.** Each output reports the deepest gain applied during the most recent audio packet. The limiter's own release smooths it, so a poll at 10-20 Hz sees any limiting event whose release is 50 ms or longer. Outputs that are not limiting report 0.
 
@@ -127,13 +125,13 @@ Every SET emits `notify_param_write` at the parameter's offset in `WireBulkParam
 
 ### Control Surfaces
 
-Caps v20 exposes the limiter to user-wired controls as five nouns, each targeting one output: `LIMITER` (enable), `LIMITER_THRESHOLD`, `LIMITER_RELEASE`, `LIMITER_LINK` and the read-only `LIMITER_GR` meter. The writable four dispatch through `REQ_LIMITER` exactly as a host SET does, so link-group ganging, clamping and notifications are identical. `LIMITER_GR` reads the same per-packet gain reduction as index 0x80, in dB. A front-panel edit is a live edit and persists the way section 5.1 describes. The noun table and units are in `control_surfaces_spec.md`.
+Caps v20 exposes the limiter to user-wired controls as five nouns, each targeting one output: `LIMITER` (enable), `LIMITER_THRESHOLD`, `LIMITER_RELEASE`, `LIMITER_LINK` and the read-only `LIMITER_GR` meter. The writable four dispatch through `vc_set()` to the matching `DYN.LIMITER_*` command exactly as a host SET does, so link-group ganging, clamping and notifications are identical. `LIMITER_GR` reads the same per-packet gain reduction as `DYN.LIMITER_METERS`, in dB. A front-panel edit is a live edit and persists the way section 5.1 describes. The noun table and units are in `control_surfaces_spec.md`.
 
 ## 5. Persistence and Bulk Wire Format
 
 ### 5.1 Where the settings live
 
-The limiter settings follow the same persistence flag as the output pin configuration, `output_config_mode` (`REQ_SET/GET_OUTPUT_CONFIG_MODE` 0x98/0x99). A limiter usually protects specific hardware on specific outputs, so it belongs with the wiring rather than with a listening preset whenever the wiring is device-wide.
+The limiter settings follow the same persistence flag as the output pin configuration, `output_config_mode` (`STORE.OUTPUT_CONFIG_MODE`). A limiter usually protects specific hardware on specific outputs, so it belongs with the wiring rather than with a listening preset whenever the wiring is device-wide.
 
 | Context | Independent (mode 0) | With preset (mode 1, default) |
 |---|---|---|
@@ -141,11 +139,11 @@ The limiter settings follow the same persistence flag as the output pin configur
 | **Preset load** | Live settings left untouched | The loaded preset's settings, or defaults for an empty or pre-V39 slot |
 | **Active preset deleted** | Live settings left untouched | Defaults |
 | **Factory reset** | Live settings left untouched | Defaults |
-| **Bulk SET (0xA1)** | Limiter section ignored | Limiter section applied |
+| **Bulk SET (`STORE.ALL_PARAMS`)** | Limiter section ignored | Limiter section applied |
 | **Preset save** | Live settings written into the slot (dormant until the mode changes) | Live settings written into the slot |
-| **`REQ_SAVE_OUTPUT_CONFIG` (0x52)** | Live settings written device-wide | Live settings written device-wide (dormant until the mode changes) |
+| **`STORE.OUTPUT_CONFIG_SAVE`** | Live settings written device-wide | Live settings written device-wide (dormant until the mode changes) |
 
-The defaults are every limiter off, -1 dBFS, 100 ms, unlinked. In independent mode a change made with `REQ_LIMITER` takes effect at once but only survives a reboot after `REQ_SAVE_OUTPUT_CONFIG`, exactly like a pin change. Switching the mode applies nothing by itself. The new mode takes effect at the next preset load or boot.
+The defaults are every limiter off, -1 dBFS, 100 ms, unlinked. In independent mode a change made with a `DYN.LIMITER_*` SET takes effect at once but only survives a reboot after `STORE.OUTPUT_CONFIG_SAVE`, exactly like a pin change. Switching the mode applies nothing by itself. The new mode takes effect at the next preset load or boot.
 
 Whenever a context change alters whether any limiter is on, the lookahead delay switches under the fade in section 2.3.
 
@@ -208,7 +206,7 @@ Static RAM: RP2350 about 2.1 KB of BSS (nine 128-byte delay rings, per-output st
 - `audio_pipeline.c`: `limiter_packet_begin()` on Core 0 before the Core 1 dispatch, `limiter_process_outputs()` for each core's outputs after loudness and before the delay lines, and `limiter_packet_end()` after both cores finish.
 - `pdm_generator.c`: `limiter_process_outputs()` for Core 1's outputs in the EQ worker.
 - `main.c`: coefficient recompute on the pending flag and the engage service (soft-mute hold, or a direct switch when nothing is streaming).
-- `vendor_commands.c`: `REQ_LIMITER` in both the SET and GET dispatchers.
-- `control_surfaces_nouns.c`: the caps v20 limiter nouns, dispatched through `REQ_LIMITER`.
+- `vendor/vc_page_dyn.c`: the `DYN.LIMITER_*` handlers, table in `vendor/pages/dyn.def`.
+- `control_surfaces_nouns.c`: the caps v20 limiter nouns, dispatched through `vc_set()` to the `DYN.LIMITER_*` commands.
 - `bulk_params.c`: wire V32 section; the limiter section is applied only when `output_config_mode` is with-preset.
-- `flash_storage.c`: preset slot V39, directory V22 `FlashLimiterConfig`, and `apply_output_config_from_mode()`, the single owner of the live limiter settings across boot, preset load, active-slot delete and factory reset. `preset_save_output_config()` (0x52) also saves the limiter.
+- `flash_storage.c`: preset slot V39, directory V22 `FlashLimiterConfig`, and `apply_output_config_from_mode()`, the single owner of the live limiter settings across boot, preset load, active-slot delete and factory reset. `preset_save_output_config()` (`STORE.OUTPUT_CONFIG_SAVE`) also saves the limiter.

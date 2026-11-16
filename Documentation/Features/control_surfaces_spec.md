@@ -3,14 +3,15 @@
 *Firmware capability format version: 22*
 *Config (flash) version: 2; IR config version: 2*
 *Directory version: 22*
+*Last updated: 2026-11-16 (host commands on the paged protocol of firmware 1.1.7)*
 
 This document is the complete, self-contained specification for the DSPi
 Control Surfaces feature: user-wired push buttons, toggle switches,
 potentiometers, quadrature rotary encoders, indicator LEDs, PWM-dimmed
-LEDs, and an IR remote receiver on spare GPIOs, configured over vendor
-commands `0x84`-`0x87`, `0x8B`/`0x8C` (per-slot names), `0x8D`-`0x8F`
-(IR remote commands and learn), and `0x9D`/`0x9E` (save / revert). The caps v9
-target-group and macro commands `0x20`-`0x26` are specified in the companion
+LEDs, and an IR remote receiver on spare GPIOs, configured over the vendor
+commands of the `CS` page (0x0A): bindings, capabilities and status,
+per-slot names, IR remote commands and learn, and save / revert (section 3).
+The caps v9 target-group and macro commands are specified in the companion
 document `control_surfaces_groups_macros_spec.md`. It is
 written for a host-app developer (e.g. DSPi Console) or an LLM adding Control
 Surfaces support to an app, or extending the firmware feature itself. No DSPi
@@ -29,8 +30,8 @@ Caps v3 adds two things on top of v2 (section 11.6):
   from any remote by pressing its button at the device. Sections 2.7, 3.6,
   6.8, 7.5.
 - **The Apply / Save / Revert preview model**: binding and IR command SETs
-  now apply live only; `REQ_CS_SAVE` persists the whole live config in one
-  flash write and `REQ_CS_REVERT` reloads the stored one. Section 3.5.
+  now apply live only; `CS.SAVE` persists the whole live config in one
+  flash write and `CS.REVERT` reloads the stored one. Section 3.5.
 
 Caps v4 adds 14 nouns and one unit on top of v3, with no structure or
 stored-config changes (section 11.5): the stereo upmixer (35-40, RP2350
@@ -76,17 +77,19 @@ effect itself is `subharmonic_synth_spec.md`.
 
 Caps v19 appends nouns 70-73 for the tube preamp (`TUBE`, `TUBE_DRIVE`,
 `TUBE_TYPE`, `TUBE_MIX`; sections 4.3 and 5) with no structure or
-stored-config change; `noun_count` reads 74. All four dispatch through the one
-indexed command `REQ_SET_TUBE_PARAM`, whose payload is a float32 for every
-parameter kind, the bool and the enum included. The authority for the effect
+stored-config change; `noun_count` reads 74. Each dispatches through its own
+`FX.TUBE_*` command (`FX.TUBE_ENABLE`, `FX.TUBE_DRIVE`, `FX.TUBE_TYPE`,
+`FX.TUBE_MIX`), whose payload is a float32 for every parameter kind, the bool
+and the enum included. The authority for the effect
 itself is `tube_preamp_spec.md`.
 
 Caps v20 appends nouns 74-78 for the output limiter (`LIMITER`,
 `LIMITER_THRESHOLD`, `LIMITER_RELEASE`, `LIMITER_LINK`, `LIMITER_GR`; sections
 4.3 and 5), each targeting an output, and one unit, `CS_UNIT_MS_LOG` (6,
 section 2.1). No structure or stored-config changes; `noun_count` reads 79. The
-four writable nouns dispatch through `REQ_LIMITER` with the output and parameter
-index packed into wValue and a float32 payload. A host must learn unit 6 before
+four writable nouns dispatch through `DYN.LIMITER_ENABLE`,
+`DYN.LIMITER_THRESHOLD`, `DYN.LIMITER_RELEASE` and `DYN.LIMITER_LINK_GROUP`,
+with the output in `wValue` and a float32 payload. A host must learn unit 6 before
 it can label or encode `LIMITER_RELEASE`. The authority for the effect itself
 is `output_limiter_spec.md`.
 
@@ -143,9 +146,9 @@ v2 adds four orthogonal concepts to this model:
 ### 1.2 Why apply goes through the shared vendor dispatcher
 
 Every control action is applied by dispatching **the same vendor command a host
-would send**, through `vendor_dispatch_set` / `vendor_dispatch_get` with source
+would send**, through `vc_set()` with source
 `CTRL_SOURCE_GPIO`. Turning the master-volume encoder one detent calls exactly
-the `REQ_SET_MASTER_VOLUME` handler that a USB or UART host would reach. This
+the `ROUTE.MASTER_VOLUME` SET handler that a USB or UART host would reach. This
 buys three things for free:
 
 - **Zero duplication.** No parameter-apply logic is re-implemented in the
@@ -158,14 +161,15 @@ buys three things for free:
   protocol (USB EP `0x83`, UART type-`0x40` frames), letting a UI track a
   physical control in real time with no extra path.
 - **Transport-neutral safety.** The engine runs from main-loop context and gets
-  the same `CTRL_DISPATCH_BUSY` back-pressure a USB control SET in flight would
+  the same `VC_ERR_BUSY` back-pressure a USB control SET in flight would
   cause, so it never races the USB stack.
 
 Per-filter nouns use a read-modify-write: the engine copies the live filter
 recipe, replaces the one field the binding drives, and dispatches the full
-packet through `REQ_SET_EQ_PARAM`. The EQ handlers share a single deferred
-apply slot, so the engine additionally treats "an EQ apply is still owed" as
-BUSY and retries next tick rather than overwriting a pending write.
+16-byte band through `FILTER.BAND`. The band handlers share a single deferred
+apply slot. `FILTER.BAND` and `FILTER.BAND_BYPASS` answer `VC_ERR_BUSY` while
+an earlier band write is still owed, and the engine retries next tick rather
+than overwriting a pending write.
 
 ### 1.3 Why the config is device-global (not per-preset)
 
@@ -215,7 +219,7 @@ un-partitioned command table.
 ## 2. Wire reference (byte-by-byte)
 
 All structures are `__attribute__((packed))`, little-endian, no padding. The
-same `CsBinding` bytes appear on the wire (the `REQ_SET`/`GET_CS_BINDING`
+same `CsBinding` bytes appear on the wire (the `CS.BINDING`
 payload) and in flash.
 
 ### 2.1 Units and fixed-point conventions
@@ -293,7 +297,7 @@ button INC/DEC are rejected with `CS_STATUS_INVALID_VALUE`.
 ### 2.3 `CsFlashConfig` (388 bytes)
 
 The device-global persisted blob. Not sent by any single command; it is what
-the firmware stores and what `REQ_GET_ALL_PARAMS` does **not** contain.
+the firmware stores and what `STORE.ALL_PARAMS` does **not** contain.
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -311,7 +315,7 @@ the firmware stores and what `REQ_GET_ALL_PARAMS` does **not** contain.
 | 2 | 1 | `pin_count` | GPIOs consumed (1 or 2) |
 | 3 | 1 | `pin_class` | `CS_PINCLASS_ANY` (0) or `CS_PINCLASS_ADC` (1) |
 
-`CsCapsHeader` (returned by `REQ_GET_CS_CAPS` with `wValue = 0xFFFF`):
+`CsCapsHeader` (returned by `CS.CAPS`):
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -342,7 +346,7 @@ reads `max_bindings`. See `control_surfaces_aux_spec.md`.
 
 ### 2.5 `CsNounDesc` (12 bytes)
 
-Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20, 0-79 at caps v21 and 0-80 at caps v22).
+Returned by `CS.NOUN_DESC` with `wValue = noun index` (0..`noun_count`-1, 0-69 at caps v18, 0-73 at caps v19, 0-78 at caps v20, 0-79 at caps v21 and 0-80 at caps v22).
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -358,7 +362,7 @@ Returned by `REQ_GET_CS_CAPS` with `wValue = noun index` (0..`noun_count`-1, 0-6
 
 ### 2.6 `CsStatusPacket` (41 bytes)
 
-Returned by `REQ_GET_CS_STATUS`.
+Returned by `CS.STATUS`.
 
 | Off | Size | Field | Meaning |
 |----|------|-------|---------|
@@ -375,7 +379,7 @@ Returned by `REQ_GET_CS_STATUS`.
 ### 2.7 `IrCommand` (16 bytes)
 
 One learned remote-button command; identical on the wire (the
-`REQ_SET`/`GET_CS_IR_CMD` payload) and in flash. Semantically a button-shaped
+`CS.IR_CMD` payload) and in flash. Semantically a button-shaped
 binding: the noun / action / target / value / step fields follow exactly the
 `CsBinding` rules of the same names (sections 2.1, 2.2, 4), fired by the
 learned `code` instead of a GPIO edge.
@@ -430,74 +434,72 @@ and is not part of `WireBulkParams`.
 
 ---
 
-## 3. Command reference (`0x84`-`0x87`, `0x8B`-`0x8F`, `0x9D`-`0x9E`)
+## 3. Command reference (`CS` page 0x0A)
 
-The caps v9 group and macro commands `0x20`-`0x26` follow the same conventions
-but are documented in `control_surfaces_groups_macros_spec.md`; `REQ_CS_SAVE`
-and `REQ_CS_REVERT` below cover their config too. The caps v18 auxiliary
-output runtime commands `0x04`-`0x07` are specified in
-`control_surfaces_aux_spec.md`. An auxiliary output's configuration is an
-ordinary binding, so `REQ_SET_CS_BINDING`, `REQ_SET_CS_NAME`, `REQ_CS_SAVE`
-and `REQ_CS_REVERT` cover it with no special case. Its live on/off flag and
-level are runtime values, never dirty, and are carried across a revert.
+The caps v9 group and macro commands follow the same conventions
+but are documented in `control_surfaces_groups_macros_spec.md`; `CS.SAVE`
+and `CS.REVERT` below cover their config too. The caps v18 auxiliary
+output runtime commands (`CS.AUX_STATE`, `CS.AUX_LEVEL`, `CS.AUX_ALL`) are
+specified in `control_surfaces_aux_spec.md`. An auxiliary output's
+configuration is an ordinary binding, so `CS.BINDING`, `CS.SLOT_NAME`,
+`CS.SAVE` and `CS.REVERT` cover it with no special case. Its live on/off flag
+and level are runtime values, never dirty, and are carried across a revert.
 
-| Command | Code | Dir | wValue | wLength / payload | Response |
-|---------|------|-----|--------|-------------------|----------|
-| `REQ_SET_CS_BINDING` | `0x84` | OUT | slot (0-15) | 24-byte `CsBinding` | none (deferred; poll `0x87`) |
-| `REQ_GET_CS_BINDING` | `0x85` | IN | slot (0-15) | - | 24-byte `CsBinding` (live) |
-| `REQ_GET_CS_CAPS` | `0x86` | IN | `0xFFFF` = header+types; else noun index | - | 40-byte `CsCapsHeader` or 12-byte `CsNounDesc` |
-| `REQ_GET_CS_STATUS` | `0x87` | IN | - | - | 41-byte `CsStatusPacket` |
-| `REQ_SET_CS_NAME` | `0x8B` | OUT | slot (0-15) | 1-32 byte name | none (deferred; poll `0x87`) |
-| `REQ_GET_CS_NAME` | `0x8C` | IN | slot (0-15) | - | 32-byte NUL-terminated name (live) |
-| `REQ_SET_CS_IR_CMD` | `0x8D` | OUT | sub-slot (0-15) | 16-byte `IrCommand` | none (deferred; poll `0x87`) |
-| `REQ_GET_CS_IR_CMD` | `0x8E` | IN | sub-slot (0-15) | - | 16-byte `IrCommand` (live) |
-| `REQ_CS_IR_LEARN` | `0x8F` | IN | 1 = arm, 0 = cancel, 2 = read result | - | 1 ack byte (arm/cancel) or 8-byte result (3.6.1) |
-| `REQ_CS_SAVE` | `0x9D` | IN | - | - | 1 ack byte (deferred; poll `0x87`) |
-| `REQ_CS_REVERT` | `0x9E` | IN | - | - | 1 ack byte (deferred; poll `0x87`) |
-
-(`0x88`-`0x8A` are reserved for another feature branch.)
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `CS.BINDING` | 0x0A | 0x20 | GET, SET | slot 0-15 | GET 24, SET 24 | `CsBinding`. GET reads the live binding. SET is deferred (poll `CS.STATUS`) |
+| `CS.CAPS` | 0x0A | 0x10 | GET | none (0) | GET 52 | `CsCapsHeader` with the type table |
+| `CS.NOUN_DESC` | 0x0A | 0x11 | GET | noun 0 to `noun_count`-1 | GET 12 | `CsNounDesc` |
+| `CS.STATUS` | 0x0A | 0x12 | GET | none (0) | GET 41 | `CsStatusPacket` |
+| `CS.SLOT_NAME` | 0x0A | 0x21 | GET, SET | slot 0-15 | GET 32, SET 1-32 | NUL-terminated name. GET reads the live name. SET is deferred (poll `CS.STATUS`) |
+| `CS.IR_CMD` | 0x0A | 0x30 | GET, SET | sub-slot 0-15 | GET 16, SET 16 | `IrCommand`. GET reads the live record. SET is deferred (poll `CS.STATUS`) |
+| `CS.IR_LEARN_STATUS` | 0x0A | 0x31 | GET | none (0) | GET 8 | Learn result (3.6.1) |
+| `CS.IR_LEARN_ARM` | 0x0A | 0x32 | SET (zero-length) | none (0) | SET 0 | Arm learn (3.6.1) |
+| `CS.IR_LEARN_CANCEL` | 0x0A | 0x33 | SET (zero-length) | none (0) | SET 0 | Cancel learn |
+| `CS.SAVE` | 0x0A | 0x18 | SET (zero-length) | none (0) | SET 0 | Deferred (poll `CS.STATUS`) |
+| `CS.REVERT` | 0x0A | 0x19 | SET (zero-length) | none (0) | SET 0 | Deferred (poll `CS.STATUS`) |
 
 ### 3.1 Transport note (UART / I2C)
 
 Every one of these commands works identically over USB, UART, and I2C (the
-transport-neutral dispatcher). On the external transports, the direction bit
-matters: `0x85`, `0x86`, `0x87`, `0x8C`, `0x8E`, `0x8F`, `0x9D`, `0x9E` are IN
-(GET-type) frames; `0x84`, `0x8B`, and `0x8D` are OUT (SET-type) frames
-carrying their payload. `0x8F`, `0x9D`, and `0x9E` are GET-type action
-commands in the mold of `REQ_SIGGEN_CONTROL`: the "GET" carries the action in
-`wValue` and returns an acknowledgement byte.
+transport-neutral paged dispatcher, `vc_dispatch()`). The request direction
+selects GET or SET for a command that has both. The four actions
+(`CS.IR_LEARN_ARM`, `CS.IR_LEARN_CANCEL`, `CS.SAVE`, `CS.REVERT`) are
+zero-length SETs. A request the dispatcher or handler refuses STALLs on USB,
+and UART and I2C return the `VC_*` result in the response status byte. Every
+transport can read the reason from `SYS.LAST_RESULT` (see `../commands.md`).
 
-### 3.2 Deferred-apply model (`REQ_SET_CS_BINDING`, `REQ_SET_CS_IR_CMD`)
+### 3.2 Deferred-apply model (`CS.BINDING`, `CS.IR_CMD`)
 
-`REQ_SET_CS_BINDING` does **not** apply synchronously. The USB/transport handler
-only validates the slot index and payload length and latches the 24-byte binding
-into a pending buffer, then returns immediately (no response payload). The main
+A `CS.BINDING` SET does **not** apply synchronously. The dispatcher checks the
+slot index and payload length, the handler latches the 24-byte binding into a
+pending buffer, and the SET is ACKed at once (no reply payload). The main
 loop then:
 
 1. Runs `control_surfaces_apply_binding` (releases the slot's old pins, validates
    the new binding, claims the new pins, seeds runtime state).
 2. Records the result in `last_status` / `last_slot`.
 3. **Marks the live config dirty on `PIN_CONFIG_SUCCESS`.** Nothing is written
-   to flash; the apply is a live preview until `REQ_CS_SAVE` (section 3.5).
+   to flash; the apply is a live preview until `CS.SAVE` (section 3.5).
 
-`REQ_SET_CS_IR_CMD` follows the identical model for a 16-byte `IrCommand`
+A `CS.IR_CMD` SET follows the identical model for a 16-byte `IrCommand`
 into a sub-slot, reported in `last_slot` as `0x80 | sub-slot`. A rejected SET
 of either kind leaves the previous binding/command intact and the dirty flag
 untouched.
 
 On accept, the handler immediately records `CS_STATUS_PENDING` (`0x16`) in
 `last_status` / `last_slot`; the main-loop apply then overwrites it with the
-real result. The host learns the outcome by polling `REQ_GET_CS_STATUS` until
+real result. The host learns the outcome by polling `CS.STATUS` until
 `last_status != CS_STATUS_PENDING` for the slot named in `last_slot`. A short
 poll (a few ms) is ample; the apply is GPIO/engine work only.
 
 If the slot index in `wValue` is out of range (binding slot `>= 16`, IR
-sub-slot `>= 16`), the handler records `CS_STATUS_INVALID_SLOT` immediately (no
-main-loop round trip) and no apply is queued. A payload shorter than the
-record size (24 or 16 bytes) records `CS_STATUS_INVALID_VALUE` immediately. A
-SET arriving while a previous SET of the same kind is still queued for the
-main-loop apply is dropped and records `CS_STATUS_BUSY` (`0x1B`); a host that
-polls for the PENDING result before sending the next SET (as this section
+sub-slot `>= 16`), the SET STALLs with `VC_ERR_ADDRESS`. A payload other than
+the record size (24 or 16 bytes) STALLs with `VC_ERR_LENGTH`. Neither queues
+an apply or touches the status packet. A SET arriving while a previous SET of
+the same kind is still queued for the main-loop apply is dropped: it STALLs
+with `VC_ERR_BUSY` and records `CS_STATUS_BUSY` (`0x1B`). A host that polls
+for the PENDING result before sending the next SET (as this section
 prescribes) never sees it.
 
 Because binding SETs, IR command SETs, name SETs, save, and revert all report
@@ -520,7 +522,7 @@ Surfaces extends it from `0x10`.
 | `0x03` | `PIN_CONFIG_INVALID_OUTPUT` | (shared namespace; not produced by CS) |
 | `0x04` | `PIN_CONFIG_OUTPUT_ACTIVE` | (shared namespace; not produced by CS) |
 | `0x05` | `PIN_CONFIG_INVALID_PARAM` | (shared namespace; not produced by CS) |
-| `0x10` | `CS_STATUS_INVALID_SLOT` | slot index >= 16 |
+| `0x10` | `CS_STATUS_INVALID_SLOT` | slot index >= 16. Internal only: a host SET with a bad index is refused with `VC_ERR_ADDRESS` before any status is posted |
 | `0x11` | `CS_STATUS_INVALID_TYPE` | `type` >= `CS_TYPE_COUNT` |
 | `0x12` | `CS_STATUS_INVALID_NOUN` | `noun` >= `CS_NOUN_COUNT` |
 | `0x13` | `CS_STATUS_INVALID_ACTION` | `action` invalid, or not allowed for this type+noun (including a platform-disabled noun, whose action mask is 0) |
@@ -531,13 +533,13 @@ Surfaces extends it from `0x10`.
 | `0x18` | `CS_STATUS_INVALID_EVENT` | bad `event` value, an event on a non-button, or MOMENTARY/REPEAT bound to a non-press event |
 | `0x19` | `CS_STATUS_PWM_CONFLICT` | PWM LED collides with another PWM LED on the same PWM slice+channel |
 | `0x1A` | `CS_STATUS_EVENT_IN_USE` | another button binding already has this GPIO+event pair |
-| `0x1B` | `CS_STATUS_BUSY` | SET dropped; a previous SET of the same kind is still queued for apply (retry after polling); also a save/revert while one is already queued |
-| `0x1C` | `CS_STATUS_FLASH_ERROR` | the directory persist failed (`REQ_CS_SAVE`) |
+| `0x1B` | `CS_STATUS_BUSY` | SET dropped (and refused with `VC_ERR_BUSY`); a previous SET of the same kind is still queued for apply (retry after polling); also a save/revert while one is already queued |
+| `0x1C` | `CS_STATUS_FLASH_ERROR` | the directory persist failed (`CS.SAVE`) |
 | `0x1D` | `CS_STATUS_IR_IN_USE` | another slot already holds the IR component (one receiver per device) |
 | `0x1E` | `CS_STATUS_NO_IR` | learn was armed with no live `CS_TYPE_IR` binding |
 | `0x26` | `CS_STATUS_INVALID_AUX` | the target slot is not an auxiliary output, or `CS_NOUN_AUX_LEVEL` targets a non-PWM aux slot (`control_surfaces_aux_spec.md`) |
 
-### 3.4 Per-slot names (`REQ_SET_CS_NAME` / `REQ_GET_CS_NAME`)
+### 3.4 Per-slot names (`CS.SLOT_NAME`)
 
 Each of the 16 slots carries a device-persistent user label (`CS_NAME_LEN` =
 32 bytes, NUL-terminated; same convention as preset and channel names), so an
@@ -554,17 +556,18 @@ Semantics:
   binding table; saved names survive preset changes and factory reset (an
   unsaved live name is preview state and is lost on reboot, section 3.5).
   All-zero = unnamed, so a fresh directory needs no seeding.
-- `REQ_SET_CS_NAME` uses the **same deferred model** as the binding SET
+- A `CS.SLOT_NAME` SET uses the **same deferred model** as the binding SET
   (section 3.2): the handler validates the slot, latches the name, records
   `CS_STATUS_PENDING` in `last_status`/`last_slot`, and the main loop applies
   it to the live name table and overwrites the status with
   `PIN_CONFIG_SUCCESS`. Binding and name SETs share the single status
-  channel; poll `REQ_GET_CS_STATUS` until the PENDING result resolves before
+  channel; poll `CS.STATUS` until the PENDING result resolves before
   sending the next SET of either kind. A name SET arriving while a previous
-  name SET is still queued records `CS_STATUS_BUSY`; an empty payload records
-  `CS_STATUS_INVALID_VALUE`. Payloads longer than 31 characters are
+  name SET is still queued STALLs with `VC_ERR_BUSY` and records
+  `CS_STATUS_BUSY`. An empty payload, or one longer than 32 bytes, STALLs with
+  `VC_ERR_LENGTH` and records nothing. Payloads longer than 31 characters are
   truncated.
-- `REQ_GET_CS_NAME` is synchronous and reads the live name table; it always
+- A `CS.SLOT_NAME` GET is synchronous and reads the live name table; it always
   returns 32 bytes with guaranteed NUL termination. While `dirty` is set the
   returned name may be an unsaved preview.
 - Names are **not** part of `WireBulkParams` and emit **no notification**;
@@ -572,50 +575,51 @@ Semantics:
   connect (16 GETs, one round trip each).
 - Names are **inside the Apply/Save/Revert preview** (section 3.5), exactly
   like bindings and IR commands: a name SET is live-only and sets `dirty`,
-  `REQ_CS_SAVE` persists the names with the rest of the config, and
-  `REQ_CS_REVERT` restores the stored names.
+  `CS.SAVE` persists the names with the rest of the config, and
+  `CS.REVERT` restores the stored names.
 
-### 3.5 Apply / Save / Revert (`REQ_CS_SAVE` / `REQ_CS_REVERT`)
+### 3.5 Apply / Save / Revert (`CS.SAVE` / `CS.REVERT`)
 
 Binding, IR command, and slot-name SETs are **live-only previews**: they
 claim pins and start behaving immediately, but nothing is written to flash.
 This lets a host wire up a panel or a remote, try it, and only then commit:
 
-- **Apply** = `REQ_SET_CS_BINDING` / `REQ_SET_CS_IR_CMD` / `REQ_SET_CS_NAME`.
+- **Apply** = a `CS.BINDING` / `CS.IR_CMD` / `CS.SLOT_NAME` SET.
   Each successful apply sets the `dirty` flag in the status packet.
-- **Save** = `REQ_CS_SAVE`: persists the **whole live config** (the 16
+- **Save** = `CS.SAVE`: persists the **whole live config** (the 16
   bindings, the 8 IR commands, and the 16 slot names together) in one
-  directory-sector flash write, then clears `dirty`. Deferred like a SET: the handler acknowledges
-  with one status byte, records `CS_STATUS_PENDING` with `last_slot = 0xFF`,
+  directory-sector flash write, then clears `dirty`. Deferred like a SET: the
+  zero-length SET is ACKed, records `CS_STATUS_PENDING` with `last_slot = 0xFF`,
   and the main loop overwrites it with `PIN_CONFIG_SUCCESS` or
   `CS_STATUS_FLASH_ERROR`.
-- **Revert** = `REQ_CS_REVERT`: discards the preview by re-applying the
+- **Revert** = `CS.REVERT`: discards the preview by re-applying the
   stored config from the directory cache (releases and reclaims GPIOs, PWM
   slices, and the IR receiver exactly as at boot), then clears `dirty`. Same
   deferred acknowledgement shape (`last_slot = 0xFF`); no flash write.
-- A save or revert issued while either is still queued records
-  `CS_STATUS_BUSY` and does nothing.
+- A save or revert issued while either is still queued STALLs with
+  `VC_ERR_BUSY`, records `CS_STATUS_BUSY` and does nothing.
 - **A reboot is an implicit revert**: unsaved changes do not survive power
   loss. That is the preview semantics, not a defect.
 
 Hosts should surface `dirty` ("unsaved changes") and offer Save / Revert
 whenever it is set. Serialize SETs against save/revert per section 3.2.
 
-### 3.6 IR commands and learning (`0x8D`-`0x8F`)
+### 3.6 IR commands and learning (`CS.IR_CMD`, `CS.IR_LEARN_*`)
 
 Prerequisite: a live `CS_TYPE_IR` binding (the receiver; sections 2.7, 6.8).
 Commands may be SET before the component exists; they validate and store, and
 activate the moment the component comes up (`ir_active_mask` tracks this).
 
-`REQ_SET_CS_IR_CMD` / `REQ_GET_CS_IR_CMD` write and read one 16-byte
+`CS.IR_CMD` writes and reads one 16-byte
 `IrCommand` sub-slot (deferred model, section 3.2). A command whose
 `protocol` is `NONE` (all-zero record) clears the sub-slot.
 
-#### 3.6.1 Learn flow (`REQ_CS_IR_LEARN`)
+#### 3.6.1 Learn flow (`CS.IR_LEARN_ARM`, `CS.IR_LEARN_STATUS`, `CS.IR_LEARN_CANCEL`)
 
-1. Host sends `GET 0x8F, wValue = 1` (arm). With no live IR component the
-   request STALLs (USB) / returns ERROR (UART/I2C) and records
-   `CS_STATUS_NO_IR`; otherwise it acknowledges with one byte and the
+1. Host sends the zero-length SET `CS.IR_LEARN_ARM`. With no live IR
+   component the request is refused with `VC_ERR_STATE` (a STALL on USB, the
+   code in the status byte on UART/I2C) and records `CS_STATUS_NO_IR`. During
+   a revert it is refused with `VC_ERR_BUSY`. Otherwise it is ACKed and the
    firmware listens on the receiver for up to **10 seconds**.
 2. The user presses the desired button on the remote. The first cleanly
    decoded press is captured (NEC repeat frames and undecodable noise are
@@ -625,14 +629,14 @@ activate the moment the component comes up (`ir_active_mask` tracks this).
 3. Completion is pushed on the notification stream as event `0x0A`
    (section 7.5.1) with the state (`2` = done, `3` = timeout), the protocol,
    and the code. Hosts without the notify stream (e.g. I2C) poll
-   `GET 0x8F, wValue = 2`, which returns 8 bytes:
+   `CS.IR_LEARN_STATUS`, which returns 8 bytes:
    `{state, protocol, 0, 0, code_le32}`; `ir_learn_state` in the status
    packet carries the same state.
 4. The host writes the captured protocol+code into an `IrCommand` along with
-   the chosen noun/action and sends it via `REQ_SET_CS_IR_CMD`, then
-   `REQ_CS_SAVE` when the user commits.
+   the chosen noun/action and sends it via `CS.IR_CMD`, then
+   `CS.SAVE` when the user commits.
 
-`GET 0x8F, wValue = 0` cancels an armed learn (state returns to idle, no
+`CS.IR_LEARN_CANCEL` cancels an armed learn (state returns to idle, no
 notification). Re-arming replaces a previous result. Removing the IR
 component while armed aborts the learn as a timeout (with the notification),
 since it can never complete without a receiver.
@@ -649,7 +653,7 @@ Validation order: type -> noun -> action-in-range -> flags/reserved ->
 action-allowed-by-type-AND-noun -> event -> target/index -> value/step/range ->
 pins -> PWM slice.
 
-> **Hosts MUST build their UI from `REQ_GET_CS_CAPS` at runtime, not from
+> **Hosts MUST build their UI from `CS.CAPS` and `CS.NOUN_DESC` at runtime, not from
 > hardcoded tables.** The firmware serves these exact tables, so a host that
 > reads them can never disagree with the device about which combinations are
 > legal, and new types/nouns/actions in a future firmware appear in the UI with
@@ -659,11 +663,12 @@ pins -> PWM slice.
 
 ### 4.1 Reading the caps responses
 
-- `REQ_GET_CS_CAPS`, `wValue = 0xFFFF` -> 40-byte `CsCapsHeader`: version, limits,
-  the 8-entry type table (indexed by `CsType`), and the v3 tail
-  (`max_ir_commands`).
-- `REQ_GET_CS_CAPS`, `wValue = 0..51` (a noun index) -> 12-byte `CsNounDesc` for
-  that noun. An out-of-range noun STALLs (USB) / returns ERROR (UART/I2C).
+- `CS.CAPS` -> 52-byte `CsCapsHeader`: version, limits,
+  the type table (indexed by `CsType`, `type_count` entries), and the v3 tail
+  (`max_ir_commands`, `max_groups`, `max_macros`, `max_macro_steps`).
+- `CS.NOUN_DESC`, `wValue = 0..noun_count-1` (a noun index) -> 12-byte
+  `CsNounDesc` for that noun. An out-of-range noun is refused with
+  `VC_ERR_ADDRESS` (a STALL on USB, the code in the status byte on UART/I2C).
 - A noun whose `actions == 0` is unavailable on this platform (currently only
   `ADAT_ACTIVE` on RP2040); grey it out.
 
@@ -820,33 +825,33 @@ target and dispatches it.
 
 | Noun | Underlying command | Value semantics |
 |------|--------------------|-----------------|
-| `USER_VOLUME` | `REQ_SET_USER_VOLUME` (`0xDA`, float dB) | The user/OS-slider volume, shared with UAC1; range -60..0 dB. |
-| `MASTER_VOLUME` | `REQ_SET_MASTER_VOLUME` (`0xD2`, float dB) | Device output ceiling; range -127..0 dB. The `-128 dB` mute sentinel is **not reachable** from a pot or encoder; use a mute noun. |
-| `USER_MUTE` | `REQ_SET_USER_MUTE` (`0xDC`, uint8 0/1) | User mute, shared with UAC1. |
-| `LOUDNESS` | `REQ_SET_LOUDNESS` (`0x58`) | Loudness compensation enable. |
-| `CROSSFEED` | `REQ_SET_CROSSFEED` (`0x5E`) | Crossfeed enable. |
-| `LEVELLER` | `REQ_SET_LEVELLER_ENABLE` (`0xB4`) | Volume leveller enable. |
-| `PRESET` | `REQ_PRESET_LOAD` (`0x91`, GET, wValue = slot) | Active preset 0-9, deferred pipeline-safe load. **Stepping moves across OCCUPIED slots only.** |
-| `INPUT_SOURCE` | `REQ_SET_INPUT_SOURCE` (`0xE0`) | 0 = USB, 1 = SPDIF, 2 = I2S. |
-| `CLIP` | `REQ_CLEAR_CLIPS` (`0x83`, GET) | Any-channel clip latch. LED (`IND_EQUALS`, value 1): lit while any clip bit is set. Button (`TRIGGER`): clears all clip flags. |
-| `EQ_BYPASS` | `REQ_SET_BYPASS` (`0x46`) | Master EQ bypass; value 1 = EQ bypassed. |
-| `LG_SYNC` | `REQ_SET_LG_SOUND_SYNC_ENABLE` (`0xE6`) | LG Sound Sync enable. |
-| `CROSSFEED_PRESET` | `REQ_SET_CROSSFEED_PRESET` (`0x60`) | Crossfeed voicing 0-3; INC+WRAP makes a preset-cycle button. |
-| `CROSSFEED_ITD` | `REQ_SET_CROSSFEED_ITD` (`0x66`) | Crossfeed inter-aural time delay enable. |
-| `LEVELLER_AMOUNT` | `REQ_SET_LEVELLER_AMOUNT` (`0xB6`, float) | Leveller strength 0..100 %. |
-| `LEVELLER_SPEED` | `REQ_SET_LEVELLER_SPEED` (`0xB8`) | 0 slow, 1 medium, 2 fast. |
-| `LEVELLER_LOOKAHEAD` | `REQ_SET_LEVELLER_LOOKAHEAD` (`0xBC`) | Lookahead enable (toggling resets the leveller delay line; that is the handler's documented behavior, not a CS side effect). |
-| `PREAMP` | `REQ_SET_PREAMP_CH` (`0xD0`, wValue = `target`, float dB) | Per-input-channel preamp, -24..+24 dB bindable span. |
-| `OUTPUT_GAIN` | `REQ_SET_OUTPUT_GAIN` (`0x74`, wValue = `target`, float dB) | Per-output gain, -60..+12 dB bindable span. |
-| `OUTPUT_MUTE` | `REQ_SET_OUTPUT_MUTE` (`0x76`, wValue = `target`) | Per-output soft mute. |
-| `OUTPUT_ENABLE` | `REQ_SET_OUTPUT_ENABLE` (`0x72`, wValue = `target`) | Per-output enable. Subject to the PDM/EQ-worker Core 1 interlock; a blocked enable is silently skipped by the handler (the switch/LED will show the true state). |
-| `FILTER_FREQ` | `REQ_SET_EQ_PARAM` (`0x42`, RMW) | Per-filter frequency, 20..20000 Hz, log stepping. Valid on PEQ bands and (outputs only) crossover bands 20-23; a sub-crossover frequency knob is `target = <sub output>`, `index = 20`. |
-| `FILTER_GAIN` | `REQ_SET_EQ_PARAM` (RMW) | Per-filter gain, -24..+24 dB. PEQ bands only. |
-| `FILTER_Q` | `REQ_SET_EQ_PARAM` (RMW) | Per-filter Q, 0.1..10, log stepping. PEQ bands only. |
-| `FILTER_TYPE` | `REQ_SET_EQ_PARAM` (RMW) | PEQ `FilterType` 0-10 (flat, peaking, low-shelf, high-shelf, low-pass, high-pass, notch, all-pass, all-pass-1, low-shelf-1, high-shelf-1). PEQ bands only. |
-| `FILTER_BYPASS` | `REQ_SET_BAND_BYPASS` (`0xD8`, wValue = `(target << 8) \| index`) | Per-band user bypass; value 1 = bypassed. PEQ and (outputs only) crossover bands. |
-| `SIGGEN` | `REQ_SIGGEN_CONTROL` (`0xA6`, GET, wValue = start/stop) | Test signal generator run state (uses the applied `SiggenConfig`). 1 = running (any non-idle state). `MOMENTARY` gives hold-to-test. |
-| `DAC_MUTE_TEST` | `REQ_TEST_DAC_HW_MUTE` (`0xEC`, GET) | `TRIGGER` pulses the DAC hardware mute for ~1 s so an installer can verify pin and polarity by ear. |
+| `USER_VOLUME` | `ROUTE.USER_VOLUME` (float dB) | The user/OS-slider volume, shared with UAC1; range -60..0 dB. |
+| `MASTER_VOLUME` | `ROUTE.MASTER_VOLUME` (float dB) | Device output ceiling; range -127..0 dB. The `-128 dB` mute sentinel is **not reachable** from a pot or encoder; use a mute noun. |
+| `USER_MUTE` | `ROUTE.USER_MUTE` (uint8 0/1) | User mute, shared with UAC1. |
+| `LOUDNESS` | `DYN.LOUDNESS_ENABLE` (uint8) | Loudness compensation enable. |
+| `CROSSFEED` | `FX.CROSSFEED_ENABLE` (uint8) | Crossfeed enable. |
+| `LEVELLER` | `DYN.LEVELLER_ENABLE` (uint8) | Volume leveller enable. |
+| `PRESET` | `STORE.PRESET_LOAD` (zero-length SET, `wValue` = slot) | Active preset 0-9, deferred pipeline-safe load. **Stepping moves across OCCUPIED slots only.** |
+| `INPUT_SOURCE` | `INPUT.SOURCE` (uint8) | 0 = USB, 1 = SPDIF, 2 = I2S. |
+| `CLIP` | `MEAS.CLIP_CLEAR` (zero-length SET) | Any-channel clip latch. LED (`IND_EQUALS`, value 1): lit while any clip bit is set. Button (`TRIGGER`): clears all clip flags. |
+| `EQ_BYPASS` | `FILTER.EQ_BYPASS` (uint8) | Master EQ bypass; value 1 = EQ bypassed. |
+| `LG_SYNC` | `INPUT.LG_SOUND_SYNC_ENABLE` (uint8) | LG Sound Sync enable. |
+| `CROSSFEED_PRESET` | `FX.CROSSFEED_PRESET` (uint8) | Crossfeed voicing 0-3; INC+WRAP makes a preset-cycle button. |
+| `CROSSFEED_ITD` | `FX.CROSSFEED_ITD` (uint8) | Crossfeed inter-aural time delay enable. |
+| `LEVELLER_AMOUNT` | `DYN.LEVELLER_AMOUNT` (float) | Leveller strength 0..100 %. |
+| `LEVELLER_SPEED` | `DYN.LEVELLER_SPEED` (uint8) | 0 slow, 1 medium, 2 fast. |
+| `LEVELLER_LOOKAHEAD` | `DYN.LEVELLER_LOOKAHEAD` (uint8) | Lookahead enable (toggling resets the leveller delay line; that is the handler's documented behavior, not a CS side effect). |
+| `PREAMP` | `ROUTE.PREAMP` (`wValue` = `target`, float dB) | Per-input-channel preamp, -24..+24 dB bindable span. |
+| `OUTPUT_GAIN` | `ROUTE.OUTPUT_GAIN` (`wValue` = `target`, float dB) | Per-output gain, -60..+12 dB bindable span. |
+| `OUTPUT_MUTE` | `ROUTE.OUTPUT_MUTE` (`wValue` = `target`, uint8) | Per-output soft mute. |
+| `OUTPUT_ENABLE` | `ROUTE.OUTPUT_ENABLE` (`wValue` = `target`, uint8) | Per-output enable. Subject to the PDM/EQ-worker Core 1 interlock. A blocked enable is refused by the handler (`VC_ERR_STATE`) and not retried, so the switch/LED shows the true state. |
+| `FILTER_FREQ` | `FILTER.BAND` (RMW of the 16-byte band, `wValue` = `(target << 8) \| index`) | Per-filter frequency, 20..20000 Hz, log stepping. Valid on PEQ bands and (outputs only) crossover bands 20-23; a sub-crossover frequency knob is `target = <sub output>`, `index = 20`. |
+| `FILTER_GAIN` | `FILTER.BAND` (RMW) | Per-filter gain, -24..+24 dB. PEQ bands only. |
+| `FILTER_Q` | `FILTER.BAND` (RMW) | Per-filter Q, 0.1..10, log stepping. PEQ bands only. |
+| `FILTER_TYPE` | `FILTER.BAND` (RMW) | PEQ `FilterType` 0-10 (flat, peaking, low-shelf, high-shelf, low-pass, high-pass, notch, all-pass, all-pass-1, low-shelf-1, high-shelf-1). PEQ bands only. |
+| `FILTER_BYPASS` | `FILTER.BAND_BYPASS` (`wValue` = `(target << 8) \| index`, uint8) | Per-band user bypass; value 1 = bypassed. PEQ and (outputs only) crossover bands. |
+| `SIGGEN` | `MEAS.SIGGEN_START` / `MEAS.SIGGEN_STOP` (zero-length SETs) | Test signal generator run state (uses the applied `SiggenConfig`). 1 = running (any non-idle state). `MOMENTARY` gives hold-to-test. |
+| `DAC_MUTE_TEST` | `OUTPUT.DAC_MUTE_TEST` (zero-length SET) | `TRIGGER` pulses the DAC hardware mute for ~1 s so an installer can verify pin and polarity by ear. |
 | `CLIP_CH` | (read-only) | Per-channel clip latch bit (`target` = DSP channel). Clearing is global via the `CLIP` noun. |
 | `LEVEL` | (read-only) | Per-channel peak meter in dB (-60..0), `target` = DSP channel. Drives `IND_ABOVE` (signal-present LED) and `IND_LEVEL` (PWM meter LED). |
 | `INPUT_LEVEL_MAX` | (read-only) | Loudest channel of the active input in dB (-60..0), untargeted; the max over `peaks[0..active_input_channel_count())`, gated on `pipeline_producer_is_streaming()` so a stopped stream reads -60 (the silence floor) instead of the last frozen peak. Signal presence for the whole source; with `IND_ABOVE` and `off_delay` it drives an amplifier trigger output (8.2g). |
@@ -856,39 +861,39 @@ target and dispatches it.
 | `ADAT_ACTIVE` | (read-only, RP2350) | 1 while the ADAT output is streaming at a supported rate. |
 | `LG_PRESENT` | (read-only) | 1 while an LG Sound Sync source is detected. |
 | `LG_MUTED` | (read-only) | 1 while an LG source is present and reports muted. |
-| `UPMIX` | `REQ_UPMIX_SET_PARAM` (`0x4C`, wValue = 0, float) | Stereo upmixer enable (RP2350 only, mask 0 on RP2040; likewise the five nouns below). |
-| `UPMIX_CENTER_MODE` | `REQ_UPMIX_SET_PARAM` (wValue = 1) | Centre engine: 0 = Passive (fixed 0.7071 sum; displayed "Sinner"), 1 = Adaptive (correlation-steered extraction; displayed "Logician"), 2 = Off (no centre output, L/R untouched; surrounds keep working). INC+WRAP cycles. |
-| `UPMIX_SURROUND_MODE` | `REQ_UPMIX_SET_PARAM` (wValue = 2) | Surround engine: 0 = Off, 1 = Passive (difference feed; displayed "Sinner"), 2 = Adaptive (Dolby low-complexity steering; displayed "Logician"). INC+WRAP cycles. |
-| `UPMIX_STRENGTH` | `REQ_UPMIX_SET_PARAM` (wValue = 3) | Centre extraction strength 0..100 %. |
-| `UPMIX_WIDTH` | `REQ_UPMIX_SET_PARAM` (wValue = 4) | Centre width 0..100 % (0 = full removal from L/R, 100 = phantom kept). |
-| `UPMIX_PRESENCE` | `REQ_UPMIX_SET_PARAM` (wValue = 13) | Centre presence bell -12..+12 dB (both centre modes). |
-| `PSYBASS` | `REQ_SET_PSYBASS` (`0x30`, uint8 0/1) | Psychoacoustic bass enable. |
-| `PSYBASS_CUTOFF` | `REQ_SET_PSYBASS_CUTOFF` (`0x32`, float Hz) | Speaker LF limit 30..300 Hz, log stepping. |
-| `PSYBASS_HARMONICS` | `REQ_SET_PSYBASS_HARMONICS` (`0x34`, float dB) | Generated-harmonics mix level -24..+12 dB. |
-| `PSYBASS_DRIVE` | `REQ_SET_PSYBASS_DRIVE` (`0x36`, float dB) | Odd-path clipper drive 0..18 dB. |
-| `PSYBASS_CHARACTER` | `REQ_SET_PSYBASS_CHARACTER` (`0x38`, float %) | Even<->odd harmonic blend 0..100 % (warm to aggressive). |
-| `PSYBASS_ORIGINAL` | `REQ_SET_PSYBASS_ORIGINAL` (`0x3A`, float dB) | Original low-band level -60..0 dB. |
-| `SUBHARM` | `REQ_SET_SUBHARM` (`0x10`, uint8 0/1) | Subharmonic synthesizer enable. |
-| `SUBHARM_LOW` | `REQ_SET_SUBHARM_LOW` (`0x12`, float dB) | 24-36 Hz sub level -30..+6 dB; the floor turns the band off. |
-| `SUBHARM_HIGH` | `REQ_SET_SUBHARM_HIGH` (`0x14`, float dB) | 36-56 Hz sub level -30..+6 dB; the floor turns the band off. |
-| `SUBHARM_BOOST` | `REQ_SET_SUBHARM_BOOST` (`0x16`, float dB) | LF boost bell 0..+6 dB, applied after the subs are summed. |
-| `OUTPUT_DELAY` | `REQ_SET_OUTPUT_DELAY` (`0x78`, wValue = `target`, float ms) | Per-output delay; bindable span is the full delay ring at 48 kHz (21 ms RP2040 / 42 ms RP2350). At 96 kHz the pipeline clamps in samples, exactly as for a host-set delay; the ms value round-trips unclamped. |
-| `PRESET_RELOAD` | `REQ_PRESET_LOAD` (`0x91`, GET, wValue = active slot) | `TRIGGER` reloads the currently active preset from flash via the deferred pipeline-safe path, discarding unsaved live edits. Device-global state (master volume in independent mode, output config, CS bindings) is untouched. |
-| `LOUDNESS_SPL` | `REQ_SET_LOUDNESS_REF` (`0x5A`, float dB SPL) | Reference listening level 40..100 dB SPL: the level at which the ISO 226 compensation reads flat. Lower it and the curve engages sooner as volume drops. |
-| `LOUDNESS_INTENSITY` | `REQ_SET_LOUDNESS_INTENSITY` (`0x5C`, float %) | Compensation depth, 100 % = the full ISO 226 contour difference. The vendor command accepts 0..200 %, but 8.8 percent caps the bindable span at 0..127 %. |
-| `AUX` | `REQ_SET_CS_AUX_STATE` (`0x04`, wValue = `target` = the aux slot, uint8 0/1) | Auxiliary output on/off; a pin with no audio meaning. See `control_surfaces_aux_spec.md`. |
-| `AUX_LEVEL` | `REQ_SET_CS_AUX_LEVEL` (`0x06`, wValue = `target` = the aux slot, uint16 LE 8.8 percent) | Auxiliary PWM output level, clamped at 100 % (25600). No rounding to whole percent, so any `step` is valid. |
-| `TUBE` | `REQ_SET_TUBE_PARAM` (`0x3E`, wValue = 0, float32 LE) | Tube preamp enable. The payload is a float32, not a byte, like every other index of this command. |
-| `TUBE_DRIVE` | `REQ_SET_TUBE_PARAM` (wValue = 3, float32 LE) | Knee position with automatic makeup gain, -30..24 dB. Small-signal level does not change with the setting. |
-| `TUBE_TYPE` | `REQ_SET_TUBE_PARAM` (wValue = 2, float32 LE) | Tube style 0..16; 0 is Custom, 1..16 each load a bias / asymmetry / hardness / sag row. INC+WRAP cycles. Sent as an integer-valued float, which the handler rounds and clamps. |
-| `TUBE_MIX` | `REQ_SET_TUBE_PARAM` (wValue = 13, float32 LE) | Dry/wet blend 0..100 %. |
-| `LIMITER` | `REQ_LIMITER` (`0x81`, wValue = `(target << 8) \| 0`, float32 LE) | Output limiter enable. On a linked output it switches every member of the link group, exactly as a host SET does. Enabling the first limiter or disabling the last one goes through the limiter's silent delay switch. |
-| `LIMITER_THRESHOLD` | `REQ_LIMITER` (wValue = `(target << 8) \| 1`, float32 LE) | Ceiling -30..0 dBFS; ganged across the link group. |
-| `LIMITER_RELEASE` | `REQ_LIMITER` (wValue = `(target << 8) \| 2`, float32 LE) | Release 10..1000 ms, log stepping (`CS_UNIT_MS_LOG`); ganged across the link group. |
-| `LIMITER_LINK` | `REQ_LIMITER` (wValue = `(target << 8) \| 3`, float32 LE) | Link group 0..4, 0 = unlinked. Joining a group adopts the group's enable, threshold and release. INC+WRAP cycles. Sent as an integer-valued float. |
+| `UPMIX` | `FX.UPMIX_ENABLE` (float) | Stereo upmixer enable (RP2350 only, mask 0 on RP2040; likewise the five nouns below). |
+| `UPMIX_CENTER_MODE` | `FX.UPMIX_CENTER_MODE` (float) | Centre engine: 0 = Passive (fixed 0.7071 sum; displayed "Sinner"), 1 = Adaptive (correlation-steered extraction; displayed "Logician"), 2 = Off (no centre output, L/R untouched; surrounds keep working). INC+WRAP cycles. |
+| `UPMIX_SURROUND_MODE` | `FX.UPMIX_SURROUND_MODE` (float) | Surround engine: 0 = Off, 1 = Passive (difference feed; displayed "Sinner"), 2 = Adaptive (Dolby low-complexity steering; displayed "Logician"). INC+WRAP cycles. |
+| `UPMIX_STRENGTH` | `FX.UPMIX_STRENGTH` (float) | Centre extraction strength 0..100 %. |
+| `UPMIX_WIDTH` | `FX.UPMIX_CENTER_WIDTH` (float) | Centre width 0..100 % (0 = full removal from L/R, 100 = phantom kept). |
+| `UPMIX_PRESENCE` | `FX.UPMIX_PRESENCE` (float) | Centre presence bell -12..+12 dB (both centre modes). |
+| `PSYBASS` | `FX.PSYBASS_ENABLE` (uint8 0/1) | Psychoacoustic bass enable. |
+| `PSYBASS_CUTOFF` | `FX.PSYBASS_CUTOFF` (float Hz) | Speaker LF limit 30..300 Hz, log stepping. |
+| `PSYBASS_HARMONICS` | `FX.PSYBASS_HARMONICS` (float dB) | Generated-harmonics mix level -24..+12 dB. |
+| `PSYBASS_DRIVE` | `FX.PSYBASS_DRIVE` (float dB) | Odd-path clipper drive 0..18 dB. |
+| `PSYBASS_CHARACTER` | `FX.PSYBASS_CHARACTER` (float %) | Even<->odd harmonic blend 0..100 % (warm to aggressive). |
+| `PSYBASS_ORIGINAL` | `FX.PSYBASS_ORIGINAL` (float dB) | Original low-band level -60..0 dB. |
+| `SUBHARM` | `FX.SUBHARM_ENABLE` (uint8 0/1) | Subharmonic synthesizer enable. |
+| `SUBHARM_LOW` | `FX.SUBHARM_LOW` (float dB) | 24-36 Hz sub level -30..+6 dB; the floor turns the band off. |
+| `SUBHARM_HIGH` | `FX.SUBHARM_HIGH` (float dB) | 36-56 Hz sub level -30..+6 dB; the floor turns the band off. |
+| `SUBHARM_BOOST` | `FX.SUBHARM_BOOST` (float dB) | LF boost bell 0..+6 dB, applied after the subs are summed. |
+| `OUTPUT_DELAY` | `ROUTE.OUTPUT_DELAY` (`wValue` = `target`, float ms) | Per-output delay; bindable span is the full delay ring at 48 kHz (21 ms RP2040 / 42 ms RP2350). At 96 kHz the pipeline clamps in samples, exactly as for a host-set delay; the ms value round-trips unclamped. |
+| `PRESET_RELOAD` | `STORE.PRESET_LOAD` (zero-length SET, `wValue` = active slot) | `TRIGGER` reloads the currently active preset from flash via the deferred pipeline-safe path, discarding unsaved live edits. Device-global state (master volume in independent mode, output config, CS bindings) is untouched. |
+| `LOUDNESS_SPL` | `DYN.LOUDNESS_REF` (float dB SPL) | Reference listening level 40..100 dB SPL: the level at which the ISO 226 compensation reads flat. Lower it and the curve engages sooner as volume drops. |
+| `LOUDNESS_INTENSITY` | `DYN.LOUDNESS_INTENSITY` (float %) | Compensation depth, 100 % = the full ISO 226 contour difference. The vendor command accepts 0..200 %, but 8.8 percent caps the bindable span at 0..127 %. |
+| `AUX` | `CS.AUX_STATE` (`wValue` = `target` = the aux slot, uint8 0/1) | Auxiliary output on/off; a pin with no audio meaning. See `control_surfaces_aux_spec.md`. |
+| `AUX_LEVEL` | `CS.AUX_LEVEL` (`wValue` = `target` = the aux slot, uint16 LE 8.8 percent) | Auxiliary PWM output level, clamped at 100 % (25600). No rounding to whole percent, so any `step` is valid. |
+| `TUBE` | `FX.TUBE_ENABLE` (float32 LE) | Tube preamp enable. The payload is a float32, not a byte, like every other `FX.TUBE_*` command. |
+| `TUBE_DRIVE` | `FX.TUBE_DRIVE` (float32 LE) | Knee position with automatic makeup gain, -30..24 dB. Small-signal level does not change with the setting. |
+| `TUBE_TYPE` | `FX.TUBE_TYPE` (float32 LE) | Tube style 0..16; 0 is Custom, 1..16 each load a bias / asymmetry / hardness / sag row. INC+WRAP cycles. Sent as an integer-valued float, which the handler rounds and clamps. |
+| `TUBE_MIX` | `FX.TUBE_MIX` (float32 LE) | Dry/wet blend 0..100 %. |
+| `LIMITER` | `DYN.LIMITER_ENABLE` (`wValue` = `target`, float32 LE) | Output limiter enable. On a linked output it switches every member of the link group, exactly as a host SET does. Enabling the first limiter or disabling the last one goes through the limiter's silent delay switch. |
+| `LIMITER_THRESHOLD` | `DYN.LIMITER_THRESHOLD` (`wValue` = `target`, float32 LE) | Ceiling -30..0 dBFS; ganged across the link group. |
+| `LIMITER_RELEASE` | `DYN.LIMITER_RELEASE` (`wValue` = `target`, float32 LE) | Release 10..1000 ms, log stepping (`CS_UNIT_MS_LOG`); ganged across the link group. |
+| `LIMITER_LINK` | `DYN.LIMITER_LINK_GROUP` (`wValue` = `target`, float32 LE) | Link group 0..4, 0 = unlinked. Joining a group adopts the group's enable, threshold and release. INC+WRAP cycles. Sent as an integer-valued float. |
 | `LIMITER_GR` | (read-only) | Gain reduction the output applied during the latest audio packet, in dB (0 = none), clamped to 30. Drives `IND_ABOVE` (a "limiting" LED) and `IND_LEVEL` (a PWM gain-reduction meter). |
-| `PRESET_SAVE` | `REQ_PRESET_SAVE` (`0x90`, GET, wValue = active slot) | `TRIGGER` saves the live state to the currently active preset slot via the deferred pipeline-safe path a host save takes. Device-global state (output config in independent mode, CS bindings) is not saved; those keep `REQ_SAVE_OUTPUT_CONFIG` and `REQ_CS_SAVE`. |
-| `OUTPUT_LATENCY` | `REQ_OUTPUT_LATENCY` (`0x03`, SET, 1-byte option ID = value + 1) | Requests an output latency option. Deferred (`CS_NDF_DEFERRED`): the main loop stores it in the directory and restarts every output together at the new target, exactly as a host SET does, so detents in flight coalesce and slot alignment is kept. Reads the *requested* option, not the one in force; a stream-only option (0.67 or 1 ms) chosen on USB input runs as 2 ms but still reads as chosen. INC+WRAP cycles. |
+| `PRESET_SAVE` | `STORE.PRESET_SAVE` (zero-length SET, `wValue` = active slot) | `TRIGGER` saves the live state to the currently active preset slot via the deferred pipeline-safe path a host save takes. Device-global state (output config in independent mode, CS bindings) is not saved; those keep `STORE.OUTPUT_CONFIG_SAVE` and `CS.SAVE`. |
+| `OUTPUT_LATENCY` | `OUTPUT.LATENCY` (SET, 1-byte option ID = value + 1) | Requests an output latency option. Deferred (`CS_NDF_DEFERRED`): the main loop stores it in the directory and restarts every output together at the new target, exactly as a host SET does, so detents in flight coalesce and slot alignment is kept. Reads the *requested* option, not the one in force; a stream-only option (0.67 or 1 ms) chosen on USB input runs as 2 ms but still reads as chosen. INC+WRAP cycles. |
 
 ### 5.1 Enum stepping detail
 
@@ -901,7 +906,7 @@ requested direction for the next value actually on offer (honoring wrap):
 `PRESET` skips empty slots, `DISPLAY_PAGE` skips inactive pages, and
 `INPUT_SOURCE` skips sources that are not selectable, meaning a disabled
 optional SPDIF input (2-4) and ADAT when disabled or unsupported. Without the
-skip, a step lands on one of those values, its setter silently refuses it,
+skip, a step lands on one of those values, its setter refuses it,
 and the control reads as dead at the ends of the range.
 
 ### 5.2 Continuous stepping / adjust detail
@@ -1118,7 +1123,7 @@ Buttons debounce per **pin group**, not per binding, so sharing costs nothing.
 ### 7.1 BUSY retry latch (absolute targets, no double-toggle)
 
 Actions resolve to an **absolute target** at event time, never a relative "toggle
-again". If a dispatch returns `CTRL_DISPATCH_BUSY` (a USB control SET is
+again". If a dispatch returns `VC_ERR_BUSY` (a USB control SET is
 mid-flight, or a shared deferred-apply slot is owed), the engine latches the
 resolved target and retries it on the next tick, before sampling new events.
 Because the target is absolute, a retry can never double-apply (e.g. a toggle
@@ -1139,7 +1144,7 @@ enabled control interface, etc.):
   live table, so it round-trips unchanged and re-activates once the conflict
   clears.
 - The failure code appears in that slot's `slot_status[]` (readable via
-  `REQ_GET_CS_STATUS`); the `active_mask` bit stays 0.
+  `CS.STATUS`); the `active_mask` bit stays 0.
 
 Pot and switch boot-sync dispatches do not fire from `init`; they happen from the
 first main-loop ticks.
@@ -1149,10 +1154,10 @@ first main-loop ticks.
 - **Parameter changes a control makes DO notify.** Each dispatch is tagged
   `PARAM_SRC_GPIO` (5), so hosts see the normal `PARAM_CHANGED` event and can
   reflect a physical knob live.
-- **Binding-config changes do NOT notify.** `REQ_SET_CS_BINDING` only does
+- **Binding-config changes do NOT notify.** A `CS.BINDING` SET only does
   GPIO/flash work; there is no `PARAM_CHANGED` for the binding table itself. A
-  host that just wrote a binding should **re-read** it (`REQ_GET_CS_BINDING`) and
-  poll `REQ_GET_CS_STATUS` for the result; it will not receive a push.
+  host that just wrote a binding should **re-read** it (`CS.BINDING` GET) and
+  poll `CS.STATUS` for the result; it will not receive a push.
 
 ### 7.4 Concurrent writers
 
@@ -1227,11 +1232,11 @@ All multi-byte fields little-endian. `slot` is 0-15. Field offsets per 2.2:
 
 ### 8.1 Enumerate capabilities (do this at connect)
 
-1. `GET 0x86, wValue=0xFFFF` -> 52-byte `CsCapsHeader`. Read `type_count`,
+1. GET `CS.CAPS` -> 52-byte `CsCapsHeader`. Read `type_count`,
    `noun_count`, `max_bindings`, and the `type_count` `CsTypeDesc` entries.
    Locate the tail fields at offset `4 + 4*type_count`; never assume a fixed
    header length.
-2. For each noun `n` in `0 .. noun_count-1`: `GET 0x86, wValue=n` -> 12-byte
+2. For each noun `n` in `0 .. noun_count-1`: GET `CS.NOUN_DESC`, `wValue=n` -> 12-byte
    `CsNounDesc`. Cache kind, unit, enum_count, range, target kind/count,
    dflags, and the accepted-action mask. Skip nouns with `actions == 0`.
 3. Build the picker UI: for each type, offer the nouns whose action mask
@@ -1248,7 +1253,7 @@ All multi-byte fields little-endian. `slot` is 0-15. Field offsets per 2.2:
 04 01 01 08 1B 1C 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00
 ```
 
-Send `SET 0x84, wValue=<slot>, payload=<24 bytes>`, then poll `GET 0x87` until
+Send SET `CS.BINDING`, `wValue=<slot>`, payload=<24 bytes>, then poll GET `CS.STATUS` until
 `last_slot == slot` and `last_status != 0x16` (expect `0x00`).
 
 ### 8.2b LED on GPIO 20 indicating loudness is on
@@ -1307,7 +1312,7 @@ RP2350 example: output 1 is DSP channel 8. `type=LED_PWM(6)`,
 01 19 09 00 11 FF 00 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00
 ```
 
-Configure the signal first (`REQ_SIGGEN_SET_CONFIG`); the button starts and
+Configure the signal first (`MEAS.SIGGEN_CONFIG`); the button starts and
 stops whatever config is applied.
 
 ### 8.2g Amplifier trigger on GPIO 22: on with signal, off after 10 min idle
@@ -1325,7 +1330,7 @@ below it.
 
 Two integration cautions. Keep the threshold above -60 dB: the meter floor
 is -60 (silence and "no stream" both read as it), and `IND_ABOVE` at exactly
--60 matches everything. And any rebind, `REQ_CS_REVERT`, or boot re-apply of
+-60 matches everything. And any rebind, `CS.REVERT`, or boot re-apply of
 the slot briefly releases the GPIO and restarts the filter from "off"; for a
 real amplifier trigger that is a power cycle, so reconfigure the panel with
 the amp path muted or expect the amp to drop out.
@@ -1336,15 +1341,15 @@ Send a binding with `type = 0` (`CS_TYPE_NONE`) to the slot; the rest of the
 bytes are ignored. This releases the slot's pins and marks it idle.
 
 ```
-SET 0x84, wValue=<slot>, payload = 24 x 00
+SET CS.BINDING, wValue=<slot>, payload = 24 x 00
 ```
 
 `last_status` returns `PIN_CONFIG_SUCCESS`.
 
 ### 8.4 Read back and display live status
 
-- `GET 0x85, wValue=<slot>` -> the live 24-byte `CsBinding` for editing/display.
-- `GET 0x87` -> `CsStatusPacket`: `active_mask` (uint16) tells you which slots
+- GET `CS.BINDING`, `wValue=<slot>` -> the live 24-byte `CsBinding` for editing/display.
+- GET `CS.STATUS` -> `CsStatusPacket`: `active_mask` (uint16) tells you which slots
   are live; `slot_status[slot]` gives per-slot health (0 = ok, else a failure
   code from section 3.3, e.g. a boot pin collision).
 - To reflect live control activity (a knob being turned), subscribe to the
@@ -1361,29 +1366,30 @@ remote", receiver on GPIO 22:
    ```
    07 00 00 00 16 FF 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
    ```
-   `SET 0x84, wValue=<slot>`, poll `0x87` until not PENDING. Optionally name
-   the slot ("Living Room Remote") via `0x8B`.
-2. **Learn the first button.** `GET 0x8F, wValue=1`, then prompt the user to
+   SET `CS.BINDING`, `wValue=<slot>`, poll `CS.STATUS` until not PENDING.
+   Optionally name the slot ("Living Room Remote") via `CS.SLOT_NAME`.
+2. **Learn the first button.** SET `CS.IR_LEARN_ARM`, then prompt the user to
    press volume-up on the remote. Wait for notify event `0x0A` (or poll
-   `GET 0x8F, wValue=2` until `state != 1`). Suppose the result is
+   GET `CS.IR_LEARN_STATUS` until `state != 1`). Suppose the result is
    `protocol=1 (NEC), code=0xE718FF00`.
 3. **Write the command.** Sub-slot 0: `noun=USER_VOLUME(0)`, `action=INC(2)`,
    `flags=REPEAT(0x10)` so holding the button ramps, `step=0x0100` (1 dB):
    ```
    00 02 10 00 00 01 00 00 00 01 00 00 00 FF 18 E7
    ```
-   `SET 0x8D, wValue=0`, poll `0x87` (`last_slot` reads `0x80`).
+   SET `CS.IR_CMD`, `wValue=0`, poll `CS.STATUS` (`last_slot` reads `0x80`).
 4. **Repeat** for volume-down (`action=DEC`) into sub-slot 1 and mute
    (`action=TOGGLE`, `noun=USER_MUTE`) into sub-slot 2, learning each button
    first.
 5. The commands are already live (that is the Apply); the user tries the
-   remote. When happy: `GET 0x9D` (**Save**), poll `0x87` until not PENDING
-   with `last_slot=0xFF`. To abandon instead: `GET 0x9E` (**Revert**).
+   remote. When happy: SET `CS.SAVE` (**Save**), poll `CS.STATUS` until not
+   PENDING with `last_slot=0xFF`. To abandon instead: SET `CS.REVERT`
+   (**Revert**).
 
-To display the component later: `GET 0x85` per slot to find `type=7`,
-`GET 0x8E` per sub-slot for the commands (protocol `0` = empty),
-`GET 0x87` for `ir_active_mask` / `ir_cmd_status` health, and `GET 0x8C`
-for the component name.
+To display the component later: GET `CS.BINDING` per slot to find `type=7`,
+GET `CS.IR_CMD` per sub-slot for the commands (protocol `0` = empty),
+GET `CS.STATUS` for `ir_active_mask` / `ir_cmd_status` health, and GET
+`CS.SLOT_NAME` for the component name.
 
 ---
 
@@ -1399,11 +1405,13 @@ does not break existing hosts.
 2. Add a `CsNounDesc` row in `cs_noun_table[]` (kind, unit, action mask, range,
    target kind/count, dflags) in control_surfaces_nouns.c.
 3. Add a `case` in `cs_noun_get()` (live read, natural units) and in
-   `cs_noun_dispatch()` (map to the underlying vendor command). For a
-   deferred/pipeline-safe apply, dispatch through `vendor_dispatch_get` like
-   `PRESET` does, and set `CS_NDF_DEFERRED` so the engine uses a target shadow.
-   If the apply shares a pending slot with other commands (like the EQ packet),
-   return `false` (BUSY) while that slot is owed.
+   `cs_noun_dispatch()` (map to the underlying paged command, sent with
+   `vc_set()`). For a deferred/pipeline-safe apply, dispatch the command's
+   deferred SET like `PRESET` does (`STORE.PRESET_LOAD`), and set
+   `CS_NDF_DEFERRED` so the engine uses a target shadow. If the apply shares a
+   pending slot with other commands (like `FILTER.BAND`), the handler answers
+   `VC_ERR_BUSY` while that slot is owed and `cs_noun_dispatch()` returns
+   `false` so the engine retries.
 4. If the noun is targeted, extend `cs_noun_validate_target()` if the generic
    kinds do not cover it.
 5. Document it in section 5 here.
@@ -1560,7 +1568,7 @@ configured on a V20 build is lost and must be recreated as a binding slot.
   `noun_count` reads 51. No new units or actions, so a v6 host that enumerates
   nouns from `noun_count` picks them up with no code change.
 - The intensity noun's bindable span stops at 127 % even though
-  `REQ_SET_LOUDNESS_INTENSITY` accepts 0..200 %: 8.8 percent cannot encode a
+  `DYN.LOUDNESS_INTENSITY` accepts 0..200 %: 8.8 percent cannot encode a
   larger value in the int16 wire fields. A host wanting 128..200 % must set it
   over the vendor command directly.
 
@@ -1570,9 +1578,9 @@ configured on a V20 build is lost and must be recreated as a binding slot.
   first boot: `cs_ir` is the last directory member, so every earlier field keeps
   its offset, the eight learned commands carry over verbatim, and sub-slots 8-15
   start empty. Bindings and names are untouched.
-- **Response sizes grew.** `REQ_GET_CS_STATUS` returns 41 bytes: `ir_active_mask`
+- **Response sizes grew.** `CS.STATUS` returns 41 bytes: `ir_active_mask`
   is now a uint16 at offset 22, pushing `ir_learn_state` to 24 and
-  `ir_cmd_status[16]` to 25. `REQ_GET_CS_CAPS` is unchanged at 40 bytes, but
+  `ir_cmd_status[16]` to 25. `CS.CAPS` is unchanged at 40 bytes, but
   `max_ir_commands` now reads 16.
 - Hosts must size the IR command list from `max_ir_commands` rather than assume
   8, and must not read the status packet at the v5 offsets.
@@ -1599,8 +1607,8 @@ configured on a V20 build is lost and must be recreated as a binding slot.
 - **No stored-config change.** The directory stays V11; bindings, IR commands,
   and names are byte-identical, so no migration runs and firmware
   up/downgrades across this boundary keep the stored CS config.
-- **No structure size change.** `REQ_GET_CS_CAPS` still returns 40 bytes and
-  `REQ_GET_CS_STATUS` 32 bytes. The `caps_version` bump to 4 signals the 14
+- **No structure size change.** `CS.CAPS` still returns 40 bytes and
+  `CS.STATUS` 32 bytes. The `caps_version` bump to 4 signals the 14
   new nouns (35-48: stereo upmixer, psychoacoustic bass, per-output delay,
   preset reload) and the new `CS_UNIT_MS` unit (5) that `OUTPUT_DELAY` uses.
 - A v3 host keeps working unchanged for nouns 0-34; before offering the new
@@ -1614,13 +1622,13 @@ configured on a V20 build is lost and must be recreated as a binding slot.
   on first boot by appending the (empty) IR command table; bindings and
   names are untouched. All v2 types, nouns, actions, flags, and status
   codes kept their numeric values.
-- **Response sizes grew.** `REQ_GET_CS_CAPS` (`wValue = 0xFFFF`) now returns
-  40 bytes (8 type entries plus the v3 tail) and `REQ_GET_CS_STATUS` returns
+- **Response sizes grew.** `CS.CAPS` now returns
+  40 bytes (8 type entries plus the v3 tail) and `CS.STATUS` returns
   32 bytes. Hosts must read `caps_version` (3) and use the v3 sizes; the
   first 22 status bytes kept their v2 layout except that the reserved byte
   at offset 3 became `dirty`.
-- **`REQ_SET_CS_BINDING` semantics changed: it no longer persists.** A v2
-  host that writes bindings and never sends `REQ_CS_SAVE` will find them
+- **`CS.BINDING` SET semantics changed: it no longer persists.** A v2
+  host that writes bindings and never sends `CS.SAVE` will find them
   gone after a reboot. This is the one breaking behavioral change of v3;
   hosts must add Save (and should surface `dirty` / offer Revert).
 - Firmware downgrade: an older firmware reading a V11 directory fails the
@@ -1635,9 +1643,9 @@ configured on a V20 build is lost and must be recreated as a binding slot.
   v1 nouns, actions, flags, and status codes kept their numeric values.
   A V9 directory migrates to V10 by appending the (empty) name block; the
   bindings are untouched.
-- **The control wire format is NOT backward compatible.** `REQ_SET_CS_BINDING`
-  requires 24 bytes (a 16-byte payload gets `CS_STATUS_INVALID_VALUE`);
-  `REQ_GET_CS_BINDING`, `REQ_GET_CS_CAPS`, and `REQ_GET_CS_STATUS` responses
+- **The control wire format is NOT backward compatible.** A `CS.BINDING` SET
+  requires 24 bytes (a 16-byte payload is refused, now with `VC_ERR_LENGTH`);
+  `CS.BINDING`, `CS.CAPS`, and `CS.STATUS` GET responses
   grew. Hosts must read `caps_version` and use the current sizes.
 - v1's `IND_EQUALS`-only LED bindings behave identically after migration; the
   `CLIP` noun's semantics are unchanged.

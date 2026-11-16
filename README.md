@@ -38,7 +38,7 @@ Feel free to join the [official Discord server](https://discord.gg/RCyqxAQ5xS) f
   - [System Architecture](#system-architecture)
   - [Performance Tuning](#performance-tuning)
   - [Control Interfaces](#control-interfaces)
-  - [System Telemetry](#reqgetstatus-0x50---system-telemetry)
+  - [System Telemetry](#system-telemetry)
   - [Runtime Pin Configuration](#runtime-pin-configuration)
   - [USB Audio Loopback Capture (DSPI_LOOPBACK)](#usb-audio-loopback-capture-dspi_loopback)
 - [Building from Source](#building-from-source)
@@ -548,9 +548,11 @@ Flash access is also tuned. `PICO_FLASH_SPI_CLKDIV` is set to 6 to keep XIP and 
 *   **Notifications:** The device pushes change events (parameter changes, preset loads, volume, input state, and more) to the host on bulk IN endpoint `0x83`, so a host app never has to poll.
 *   **UART and I2C:** Both ship disabled and are enabled once over USB. They carry the same command set as USB, except the commands that configure the UART and I2C transports themselves, which are USB-only. UART defaults to 115200 baud 8N1 on GPIO 16/17 and can also push notifications. The I2C target defaults to address `0x42` on GPIO 18/19. See [`control_interfaces_spec.md`](Documentation/Features/control_interfaces_spec.md).
 
-The firmware defines about 250 vendor commands. Each feature's command set is documented in its spec under [`Documentation/Features/`](Documentation/Features/), and [`Documentation/commands.md`](Documentation/commands.md) covers the core commands.
+Since firmware 1.1.7 the vendor interface speaks a paged protocol. The page (the subsystem) travels in the high byte of `wIndex`, with the interface number 2 in the low byte. The command number within the page is `bRequest`, `wValue` is only an address (a channel, slot or band), and values go in the payload. One command covers both directions: an IN transfer reads it and an OUT transfer writes it. Actions are zero-length writes. A rejected write STALLs, and the reason is readable from `SYS.LAST_RESULT`. There are 204 commands in 13 pages, written `PAGE.NAME` (for example `FILTER.BAND`).
 
-**`REQ_GET_PLATFORM` (0x7F)** returns 7 bytes:
+[`Documentation/commands.md`](Documentation/commands.md) is the full reference, and [`Documentation/protocol/dspi_commands.json`](Documentation/protocol/dspi_commands.json) is the machine-readable registry. Each feature's spec under [`Documentation/Features/`](Documentation/Features/) documents its own commands. `tools/dspi_poke/dspi_poke.py` reads and writes any command by name, for example `dspi_poke.py get SYS.PLATFORM`. Firmware 1.1.6 and older used a flat opcode set that 1.1.7 no longer answers. [`Documentation/protocol/legacy_map.json`](Documentation/protocol/legacy_map.json) maps every old opcode to its new command.
+
+**`SYS.PLATFORM`** (page 0x01, command 0x20) returns 7 bytes:
 
 | Byte | Meaning |
 |------|---------|
@@ -562,61 +564,43 @@ The firmware defines about 250 vendor commands. Each feature's command set is do
 | 5 | Firmware patch version |
 | 6 | Beta number (0 = final release) |
 
-### REQ_GET_STATUS (0x50) - System Telemetry
+### System Telemetry
 
-The `REQ_GET_STATUS` request returns data based on the `wValue` field. Every field is a 4-byte value except wValue 9.
+Telemetry is read as a few fixed structs. Each replaces a group of the old 1.1.6 `GET_STATUS` selectors.
 
-| wValue | Description |
-| :--- | :--- |
-| `0`-`2` | Legacy packed peaks for channels 0-4; wValue 2 also carries CPU0/CPU1 load |
-| `3`-`6` | PDM ring overruns, ring underruns, DMA overruns, DMA underruns |
-| `7` | Retired (always 0) |
-| `8` | S/PDIF underruns |
-| `9` | Combined packet: 16-bit peak per channel, CPU0 and CPU1 load, 32-bit clip flags, active input count (21 bytes on RP2040, 41 on RP2350) |
-| `10` | USB audio packet count |
-| `11` | USB alt setting |
-| `12` | USB audio mounted state |
-| `13` | System clock frequency (Hz) |
-| `14` | Core voltage (millivolts) |
-| `15` | Sample rate (Hz) |
-| `16` | Temperature (centi-degrees C, signed) |
-| `17` | Total S/PDIF DMA starvations |
-| `18`-`21` | S/PDIF starvations for slots 0-3 |
-| `22` | USB audio ring overruns |
-| `23` | Active input channel count |
-| `24`-`25` | Loopback capture overflows and underruns (`DSPI_LOOPBACK` builds only) |
-| `26` | Output ring underrun episodes |
-| `27` | Blocks refused by ring admission |
-| `28` | Lowest ring fill before a write (frames) |
-| `29` | Worst input delivery gap (µs) |
-| `30` | Worst USB packet gap (µs) |
-| `31` | Background job steps over budget |
-| `32` | Measured S/PDIF input rate (mHz; 0 = no signal) |
-| `33` | Soft VCXO trim (ppm × 100, signed) |
-
-`REQ_CLEAR_CLIPS` (0x83) reads and clears the clip flags.
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Contents |
+|---|---|---|---|---|---|---|
+| `SYS.SYSTEM_STATUS` | 0x01 | 0x40 | GET | none (0) | GET 16 | u32 clk_sys Hz, u32 sample rate Hz, u16 core mV, i16 temperature (centi-degrees C), u8 CPU0 load, u8 CPU1 load |
+| `SYS.USB_AUDIO_STATUS` | 0x01 | 0x41 | GET | none (0) | GET 16 | u32 USB audio packets, u32 USB ring overruns, u32 worst USB packet gap (µs), u8 alt setting, u8 mounted |
+| `SYS.BUFFER_STATS` | 0x01 | 0x42 | GET | none (0) | GET 44 | Output ring and PDM fill levels and watermarks |
+| `SYS.PIPELINE_STATS` | 0x01 | 0x43 | GET | none (0) | GET 24 | u32 output ring underrun episodes, blocks refused by ring admission, lowest ring fill before a write (frames), worst input delivery gap (µs), background job steps over budget |
+| `SYS.PDM_STATS` | 0x01 | 0x44 | GET | none (0) | GET 16 | u32 PDM ring overruns, ring underruns, DMA overruns, DMA underruns |
+| `SYS.SPDIF_TX_STATS` | 0x01 | 0x45 | GET | none (0) | GET 24 | u32 USB audio packet gaps of 2 to 50 ms, total S/PDIF DMA starvations, starvations for slots 0-3 |
+| `SYS.STATS_RESET` | 0x01 | 0x4F | SET | none (0) | SET 1 | Bit 0 resets watermarks and worst-gap fields |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | none (0) | GET 12 | u8 source, u8 active input channels, u16 reserved, u32 measured S/PDIF input rate (mHz, 0 = no signal), i32 soft VCXO trim (ppm × 100) |
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | none (0) | GET var | 16-bit peak per channel, CPU0 and CPU1 load, 32-bit clip flags, active input count (21 bytes on RP2040, 41 on RP2350) |
+| `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | GET | none (0) | GET 4 | Clip flags, not cleared by the read |
+| `MEAS.CLIP_CLEAR` | 0x09 | 0x12 | SET (zero-length) | none (0) | SET 0 | Clears the clip flags |
 
 ### Runtime Pin Configuration
 
-**`REQ_SET_OUTPUT_PIN` (0x7C)** is an IN transfer that returns a 1-byte status.
+**`OUTPUT.PIN`** (page 0x04, command 0x11) moves an output's GPIO. Its address in `wValue` is the pin output, and the GPIO is a 1-byte payload. A GET with the same address returns the current GPIO.
 
-*   `wValue` = `(new_pin << 8) | output_index`.
-*   RP2350: `output_index` 0-3 for output slots 0-3, 4 for the PDM sub.
-*   RP2040: `output_index` 0-1 for output slots 0-1, 2 for the PDM sub.
+*   RP2350: pin output 0-3 for output slots 0-3, 4 for the PDM sub.
+*   RP2040: pin output 0-1 for output slots 0-1, 2 for the PDM sub.
 *   Slot pin moves restart all slots together so they stay aligned.
-*   The PDM pin can only be moved while PDM is disabled; otherwise the request returns `PIN_CONFIG_OUTPUT_ACTIVE`.
+*   The PDM pin can only be moved while PDM is disabled. Otherwise the write is refused with `VC_ERR_STATE`.
 *   On every pin SET command, a pin value of `0xFF` resets that pin to its default. A value of 0 always means GPIO 0.
 
-| Status Code | Value | Meaning |
-|-------------|-------|---------|
-| `PIN_CONFIG_SUCCESS` | 0x00 | Pin changed successfully |
-| `PIN_CONFIG_INVALID_PIN` | 0x01 | Pin out of range or reserved (GPIO 23-25) |
-| `PIN_CONFIG_PIN_IN_USE` | 0x02 | Pin already assigned to another function |
-| `PIN_CONFIG_INVALID_OUTPUT` | 0x03 | Output index out of range |
-| `PIN_CONFIG_OUTPUT_ACTIVE` | 0x04 | PDM output must be disabled before changing its pin |
-| `PIN_CONFIG_INVALID_PARAM` | 0x05 | Invalid parameter |
+A refused write STALLs. `SYS.LAST_RESULT` gives the reason.
 
-**`REQ_GET_OUTPUT_PIN` (0x7D)** takes `wValue` = output_index and returns the current GPIO for that output.
+| Result | Value | Meaning |
+|-------------|-------|---------|
+| `VC_OK` | 0x00 | Pin change accepted (the write ACKs) |
+| `VC_ERR_ADDRESS` | 0x13 | Pin output out of range |
+| `VC_ERR_PIN_INVALID` | 0x19 | Pin out of range or reserved (GPIO 23-25) |
+| `VC_ERR_PIN_IN_USE` | 0x1A | Pin already assigned to another function |
+| `VC_ERR_STATE` | 0x18 | PDM output must be disabled before changing its pin |
 
 ### USB Audio Loopback Capture (DSPI_LOOPBACK)
 
@@ -635,7 +619,7 @@ cmake --build build-rp2350-loopback -j
 *   **Topology:** The capture function is appended after the vendor interface as interfaces 3 and 4, so the existing interfaces keep their numbers. It uses isochronous asynchronous IN endpoint `0x81`.
 *   **Tap:** Slot 0's finished samples are copied after all DSP and immediately before the output encoder, so the capture matches slot 0 whether it is S/PDIF or I2S. The tap is read-only and cannot disturb output alignment.
 *   **Rate matching:** A servo varies the packet size each USB frame to keep a 1024-frame ring near its target fill, with no resampling.
-*   **Glitch counters:** `REQ_GET_STATUS` wValue 24 and 25 count capture overflows and underruns.
+*   **Glitch counters:** `DIAG.LOOPBACK_STATS` (page 0xF0, command 0x20, 8 bytes, loopback builds only) returns two u32 counters, capture overflows then underruns.
 
 The verification harness uses it directly: `python3 -m tools.dspi_test.run --group audio` plays signals into DSPi, records slot 0, and checks the measured response against the firmware's filter math. See `tools/dspi_test/test_harness.md` for the rig guide and `Documentation/current_architecture.md` ("USB Audio Loopback Capture") for firmware detail.
 
@@ -687,7 +671,7 @@ Optional CMake flags, all off by default, enable bench instrumentation: `DSPI_LO
 1.  Hold the **BOOTSEL** button on your board while plugging it in.
 2.  Drag and drop the generated `.uf2` file onto the `RPI-RP2` (or `RP2350`) drive.
 
-Alternatively, an already-running DSPi can be put into bootloader mode without a button press by sending `REQ_ENTER_BOOTLOADER` (0xF0). The DSPi Console application uses this for one-click firmware updates. See [`Documentation/Features/firmware_update.md`](Documentation/Features/firmware_update.md) for the protocol details.
+Alternatively, an already-running DSPi can be put into bootloader mode without a button press by sending `SYS.ENTER_BOOTLOADER` (page 0x01, command 0x30, a zero-length write). The DSPi Console application uses this for one-click firmware updates. See [`Documentation/Features/firmware_update.md`](Documentation/Features/firmware_update.md) for the protocol details.
 
 ---
 

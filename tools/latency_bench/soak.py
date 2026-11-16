@@ -18,15 +18,16 @@ from collections import Counter, deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.dspi_test.device import DspiDevice, OP, Stall  # noqa: E402
+from tools.dspi_test.device import DspiDevice, Stall  # noqa: E402
 from tools.dspi_test.profile import build_profile  # noqa: E402
 from tools.dspi_test import lifecycle  # noqa: E402
 from tools.dspi_test.actions import live_param_actions  # noqa: E402
-from tools.batch_bench.batch_bench import Player  # noqa: E402
-from tools.clkdiag_poll import decode as clkdiag_decode  # noqa: E402
 from tools.latency_bench import loop_prof  # noqa: E402
 from tools.latency_bench.latency_bench import (  # noqa: E402
-    SRC_USB, SRC_SPDIF, SRC_I2S, latency_status, set_latency, set_source, status_u32, wait_rate)
+    SRC_USB, SRC_SPDIF, SRC_I2S, Player, audio_available, latency_get, sample_rate, set_latency,
+    set_source, wait_rate)
+from tools.latency_bench.paged import (  # noqa: E402
+    has_command, pget_ready, pipeline_stats, spdif_tx_stats, stats_reset, usb_audio_status)
 
 SOURCES = {"usb": (SRC_USB, None), "spdif": (SRC_SPDIF, None), "i2s48": (SRC_I2S, 48000)}
 CS_TYPE_POT, CS_TYPE_BUTTON = 3, 1
@@ -40,13 +41,27 @@ RTA_READ_S = 0.05           # Console's band polling cadence
 
 def feedback_window(dev):
     """USB feedback min/max (Q16 frames per ms) since the last read, or None unless
-    the firmware was built with DSPI_CLOCK_DIAG (REQ_GET_CLOCK_DIAG 0x82)."""
+    the firmware was built with DSPI_CLOCK_DIAG (DIAG.CLOCK_DIAG)."""
+    if getattr(dev, "_clock_diag", None) is None:
+        dev._clock_diag = has_command(dev, "DIAG.CLOCK_DIAG")
+    if not dev._clock_diag:
+        return None
+    from tools.clkdiag_poll import decode as clkdiag_decode
     try:
-        buf = dev.get(0x82, 256)
+        buf = dev.pget("DIAG.CLOCK_DIAG", length=256)
     except Stall:
         return None
     d = clkdiag_decode(buf) if buf else {}
     return (d["fb_min"], d["fb_max"]) if "fb_min" in d else None
+
+
+def second_counters(dev):
+    """Underruns, drops, USB ring overruns, USB packet gaps of 2-50 ms, packets, background
+    steps over budget; then the worst delivery gap, lowest pre-write fill and worst packet gap."""
+    p, u, t = pipeline_stats(dev), usb_audio_status(dev), spdif_tx_stats(dev)
+    c = [p["ring_underruns"], p["ring_drops"], u["ring_overruns"], t["spdif_underruns"],
+         u["usb_audio_packets"], p["bg_over_budget_count"]]
+    return c, p["input_delivery_worst_gap_us"], p["min_prewrite"], u["worst_packet_gap_us"]
 
 
 def binding(kind, noun, action, gpio, target=0):
@@ -64,16 +79,23 @@ class Soak:
         self.rta_ch = 0
         no = prof.num_output_channels
         live = live_param_actions(dev, prof, rng)
-        toggles = [("crossfeed_on_off", lambda: dev.set_u8(OP.SET_CROSSFEED, rng.randrange(2))),
-                   ("loudness_on_off", lambda: dev.set_u8(OP.SET_LOUDNESS, rng.randrange(2))),
-                   ("leveller_on_off", lambda: dev.set_u8(OP.SET_LEVELLER_ENABLE, rng.randrange(2))),
-                   ("subharm_on_off", lambda: dev.set_u8(OP.SET_SUBHARM, rng.randrange(2))),
-                   ("psybass_on_off", lambda: dev.set_u8(OP.SET_PSYBASS, rng.randrange(2))),
-                   ("limiter_on_off", lambda: dev.set(OP.LIMITER, struct.pack("<f", rng.randrange(2)),
-                                                      wvalue=(rng.randrange(no) << 8) | 0)),
-                   ("output_mute", lambda: dev.set_u8(OP.SET_OUTPUT_MUTE, rng.randrange(2),
-                                                      wvalue=rng.randrange(no)))]
-        host = [("bulk_read", lambda: dev.get_ready(OP.GET_ALL_PARAMS, max(prof.bulk_payload_len, 2960))),
+
+        def flag(cmd, per_output=False):
+            # Value is drawn before the address. Reordering changes what a given seed replays.
+            return lambda: dev.pset(cmd, bytes([rng.randrange(2)]),
+                                    addr=rng.randrange(no) if per_output else 0)
+
+        toggles = [("crossfeed_on_off", flag("FX.CROSSFEED_ENABLE")),
+                   ("loudness_on_off", flag("DYN.LOUDNESS_ENABLE")),
+                   ("leveller_on_off", flag("DYN.LEVELLER_ENABLE")),
+                   ("subharm_on_off", flag("FX.SUBHARM_ENABLE")),
+                   ("psybass_on_off", flag("FX.PSYBASS_ENABLE")),
+                   ("limiter_on_off", lambda: dev.pset("DYN.LIMITER_ENABLE",
+                                                       struct.pack("<f", rng.randrange(2)),
+                                                       addr=rng.randrange(no))),
+                   ("output_mute", flag("ROUTE.OUTPUT_MUTE", per_output=True))]
+        host = [("bulk_read", lambda: pget_ready(dev, "STORE.ALL_PARAMS",
+                                                 length=max(prof.bulk_payload_len, 2960))),
                 ("rta_reconfigure", self.rta_reconfigure),
                 ("siggen_toggle", self.siggen_toggle),
                 ("cs_bind_or_revert", self.cs_bind_or_revert)]
@@ -83,35 +105,35 @@ class Soak:
     # --- host-side behaviours --------------------------------------------------------
     def rta_read(self):
         try:
-            self.dev.get(OP.RTA_GET_BANDS, 82, wvalue=self.rta_ch)
+            self.dev.pget("MEAS.RTA_BANDS", addr=self.rta_ch, length=82)
         except Stall:
             pass
         self.rta_ch = (self.rta_ch + 1) % self.prof.num_output_channels
 
     def rta_reconfigure(self):
-        cfg = bytearray(self.dev.get(OP.RTA_GET_CONFIG, 12))
+        cfg = bytearray(self.dev.pget("MEAS.RTA_CONFIG", length=12))
         cfg[4] = self.rng.choice((8, 9, 10))
-        self.dev.set(OP.RTA_SET_CONFIG, bytes(cfg))
+        self.dev.pset("MEAS.RTA_CONFIG", cfg)
 
     def siggen_toggle(self):
         if self.siggen_on:
-            self.dev.get(OP.SIGGEN_CONTROL, 1, wvalue=0)
+            self.dev.pset("MEAS.SIGGEN_STOP")
         else:
             mask = 1 << self.rng.randrange(self.prof.num_output_channels)
             cfg = struct.pack("<BBHHBBfIHHffff", 1, self.rng.choice((0, 2, 4)), mask, 0, 0, 0, -40.0,
                               0, 0, 0, self.rng.uniform(40, 8000), 18000.0, 0, 0)
-            self.dev.set(OP.SIGGEN_SET_CONFIG, cfg)
-            self.dev.get(OP.SIGGEN_CONTROL, 1, wvalue=1)
+            self.dev.pset("MEAS.SIGGEN_CONFIG", cfg)
+            self.dev.pset("MEAS.SIGGEN_START")
         self.siggen_on = not self.siggen_on
 
     def cs_bind_or_revert(self):
         """Bind a pot (ADC pin, floating: noise drives real dispatches) or a button,
         or revert every binding this run made. Input-only types: no pin is driven."""
         if self.cs_slots and self.rng.random() < 0.4:
-            self.dev.get(OP.CS_REVERT, 1)
+            self.dev.pset("CS.REVERT")
             self.cs_slots = []
             return
-        st = self.dev.get(OP.GET_CS_STATUS, 41)
+        st = self.dev.pget("CS.STATUS", length=41)
         active = struct.unpack_from("<H", st, 4)[0]
         free = [s for s in range(st[2]) if not active & (1 << s) and s not in self.cs_slots]
         if not free:
@@ -122,9 +144,9 @@ class Soak:
                         self.rng.randrange(self.prof.num_output_channels))
         else:
             b = binding(CS_TYPE_BUTTON, CS_NOUN_LOUDNESS, CS_ACT_TOGGLE, self.rng.choice((14, 15, 16)))
-        self.dev.set(OP.SET_CS_BINDING, b, wvalue=slot)
+        self.dev.pset("CS.BINDING", b, addr=slot)
         time.sleep(0.05)
-        st = self.dev.get(OP.GET_CS_STATUS, 41)
+        st = self.dev.pget("CS.STATUS", length=41)
         if st[6 + slot] == CS_STATUS_OK and struct.unpack_from("<H", st, 4)[0] & (1 << slot):
             self.cs_slots.append(slot)
 
@@ -140,33 +162,33 @@ class Soak:
 
     def cleanup(self):
         if self.siggen_on:
-            self.dev.get(OP.SIGGEN_CONTROL, 1, wvalue=2)
+            self.dev.pset("MEAS.SIGGEN_STOP_NOW")
         if self.cs_slots:
-            self.dev.get(OP.CS_REVERT, 1)
+            self.dev.pset("CS.REVERT")
 
 
 def profile_actions(dev, soak, reps, out):
     """Each action alone, reps times: the worst input delivery gap in the second after it.
     The analyser is held stopped (manual mode) so its own steps do not mask the action."""
     res = {}
-    cfg = bytearray(dev.get(OP.RTA_GET_CONFIG, 12))
+    cfg = bytearray(dev.pget("MEAS.RTA_CONFIG", length=12))
     cfg[9] |= 0x01                                   # RTA_FLAG_MANUAL
-    dev.set(OP.RTA_SET_CONFIG, bytes(cfg))
-    dev.get(OP.RTA_CONTROL, 1, wvalue=0)             # RTA_CTL_STOP
+    dev.pset("MEAS.RTA_CONFIG", cfg)
+    dev.pset("MEAS.RTA_STOP")
     actions = {k: v for k, v in dict(soak.actions).items() if k != "rta_reconfigure"}
     actions["baseline"] = lambda: None
     for name, fn in actions.items():
         passes, sect, jobs, ops = [], {}, {}, {}
         for _ in range(reps):
             time.sleep(0.6)
-            dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
+            stats_reset(dev)
             loop_prof.reset(dev)
             try:
                 fn()
             except Stall:
                 pass
             time.sleep(1.0)
-            passes.append(status_u32(dev, 29))
+            passes.append(pipeline_stats(dev)["input_delivery_worst_gap_us"])
             loop_prof.merge_worst(sect, loop_prof.sections(dev))
             loop_prof.merge_worst(jobs, loop_prof.jobs(dev))
             loop_prof.merge_worst(ops, loop_prof.commands(dev))
@@ -185,18 +207,20 @@ def run(args):
     prof = build_profile(dev)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    cs = dev.get(OP.GET_CS_STATUS, 41)
+    if args.source == "usb" and not audio_available():
+        raise SystemExit("--source usb plays to the device from the host and needs sounddevice")
+    cs = dev.pget("CS.STATUS", length=41)
     if cs[3]:
         raise SystemExit("Control Surfaces has an unsaved preview; the soak's revert would discard it")
     snap = lifecycle.capture(dev, prof)
-    lat0 = latency_status(dev)["requested_id"]
-    rta0 = bytes(dev.get(OP.RTA_GET_CONFIG, 12))
+    lat0 = latency_get(dev)
+    rta0 = dev.pget("MEAS.RTA_CONFIG", length=12)
     (out / "soak_state.pkl").write_bytes(pickle.dumps(dict(snap=snap, lat=lat0, rta=rta0)))
     rng = random.Random(args.seed)
     soak = Soak(dev, prof, rng)
     src, rate = SOURCES[args.source]
     player = None
-    dev.set_bytes(OP.SET_USER_MUTE, b"\x01")   # undriven inputs read as noise; mute is gain only
+    dev.pset("ROUTE.USER_MUTE", b"\x01")   # undriven inputs read as noise; mute is gain only
     rows, events, counts = [], [], Counter()
     try:
         set_source(dev, src, rate)
@@ -210,15 +234,12 @@ def run(args):
         if args.profile_actions:
             profile_actions(dev, soak, args.profile_actions, out)
             return
-        # Underruns, drops, USB ring overruns, USB packet gaps of 2-50 ms, packets,
-        # background steps over budget.
-        counters = (26, 27, 22, 8, 10, 31)
-        fs = status_u32(dev, 15) or 48000
+        fs = sample_rate(dev) or 48000
         gap_limit_us = (st["target_frames"] - st["batch_frames"]) * 1_000_000 // fs
         loop_prof.reset(dev)                   # the run's profiler worsts start from zero
-        c_prev = [status_u32(dev, w) for w in counters]
+        c_prev = second_counters(dev)[0]
         uf_prev = player.underflows if player else 0
-        dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
+        stats_reset(dev)
         t0 = time.time()
         end = t0 + args.minutes * 60
         next_action, next_read, next_sec = t0 + 1, t0, t0 + 1
@@ -231,12 +252,10 @@ def run(args):
                 counts[soak.act(now)] += 1
                 next_action = now + rng.uniform(1.0, 3.0)
             if now >= next_sec:
-                c = [status_u32(dev, w) for w in counters]
+                c, worst, minpre, host_gap = second_counters(dev)
                 fb = feedback_window(dev)
                 uf = player.underflows if player else 0
-                worst, minpre = status_u32(dev, 29), status_u32(dev, 28)
-                host_gap = status_u32(dev, 30)
-                dev.get(OP.RESET_BUFFER_STATS, 1, wvalue=1)
+                stats_reset(dev)
                 d = [a - b for a, b in zip(c, c_prev)] + [uf - uf_prev]
                 c_prev, uf_prev = c, uf
                 t = round(now - t0, 1)
@@ -263,11 +282,11 @@ def run(args):
         if player:
             player.__exit__()
         set_latency(dev, lat0)
-        dev.set(OP.RTA_SET_CONFIG, rta0)
+        dev.pset("MEAS.RTA_CONFIG", rta0)
         set_source(dev, snap.input_source)
         time.sleep(2)
         lifecycle.restore_live(dev, snap, settle_s=1.0)
-        dev.set_bytes(OP.SET_USER_MUTE, bytes([snap.user_mute]))
+        dev.pset("ROUTE.USER_MUTE", bytes([snap.user_mute]))
     diffs = lifecycle.diff_bulk(dev, snap, prof)
     if args.profile_actions:
         print(f"restore bulk diffs {len(diffs)}")

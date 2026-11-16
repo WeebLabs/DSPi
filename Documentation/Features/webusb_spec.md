@@ -4,6 +4,8 @@
 *Status: design — not yet implemented*
 *Platforms: RP2040 + RP2350*
 
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+
 This spec defines WebUSB-ready firmware additions for DSPi, letting browser-based control apps (Chrome, Edge, Opera on desktop + Android) talk to the device's existing vendor interface over the WebUSB API. The change is purely additive — no existing behavior, descriptor, or wire format is altered, and the change is verifiable as a no-op for users who never visit a WebUSB-enabled page.
 
 ---
@@ -120,7 +122,7 @@ Total URL descriptor size: 3 + 25 = 28 bytes. Well under the 255-byte descriptor
 
 ### 4.3 Vendor-handler addition
 
-The existing `tud_vendor_control_xfer_cb()` in `vendor_commands.c` already handles MS OS 2.0 GET_DESCRIPTOR transfers (`bRequest = MS_VENDOR_CODE = 0x01`, `wIndex = 0x07`). The new WebUSB GET_URL handler is symmetric:
+The existing `tud_vendor_control_xfer_cb()` in `firmware/DSPi/vendor/vc_usb.c` already serves MS OS 2.0 GET_DESCRIPTOR transfers (`bRequest = MS_VENDOR_CODE = 0x01`, `wIndex = 0x07`) at SETUP, before the paged front end sees the request. The new WebUSB GET_URL handler is symmetric and sits beside it:
 
 - `bmRequestType = 0xC0` (vendor IN device-to-host)
 - `bRequest = WEBUSB_VENDOR_CODE = 0x02`
@@ -139,9 +141,9 @@ Both descriptors share the same control endpoint (EP0) and the same vendor handl
 |------------|--------|----------------|
 | `0x01` (MS_VENDOR_CODE) + `wIndex = 0x07` | Windows requesting MS OS 2.0 descriptor | Return existing MS OS 2.0 descriptor set |
 | `0x02` (WEBUSB_VENDOR_CODE) + `wIndex = 0x02` | Browser requesting URL descriptor | Return URL descriptor |
-| Any other `bRequest` ≥ 0x42 (DSPi opcode range) | DSPi vendor command | Dispatch to existing case-switch |
+| Anything else | DSPi vendor command (firmware 1.1.7 paged protocol) | Pass to the paged front end, `vc_dispatch()` |
 
-No collision because the codes are assigned by us in the BOS — we control both sides.
+No collision is possible. We assign both vendor codes in the BOS, so we control both sides. The paged protocol reserves `bRequest` 0x00-0x0F in every page, with 0x01 for MS OS 2.0 and 0x02 for WebUSB (`vendor_command_overhaul_plan.md` section 3.2, rule 11). A GET_URL request also carries 0 in the `wIndex` high byte, which is page 0, and page 0 holds no DSPi command.
 
 ### 4.5 File touchpoints
 
@@ -149,7 +151,7 @@ No collision because the codes are assigned by us in the BOS — we control both
 |------|--------|
 | `firmware/DSPi/usb_descriptors.h` | Add `WEBUSB_VENDOR_CODE`, `WEBUSB_LANDING_URL`, descriptor-type and request-index constants. |
 | `firmware/DSPi/usb_descriptors.c` | Extend BOS descriptor with WebUSB Platform Capability. Define static URL descriptor byte array. Update `wTotalLength` in BOS header. Update `tud_descriptor_bos_cb()` if needed (TinyUSB usually serves BOS via a single array). |
-| `firmware/DSPi/vendor_commands.c` | Add WebUSB GET_URL case to `tud_vendor_control_xfer_cb()`. |
+| `firmware/DSPi/vendor/vc_usb.c` | Add WebUSB GET_URL case to `tud_vendor_control_xfer_cb()`, next to the MS OS 2.0 case. |
 | `Documentation/current_architecture.md` | New "WebUSB" subsection under "USB Audio Pipeline" or as a sibling top-level section. |
 
 No changes to: audio path, DSP, flash storage, bulk-params wire format, preset system, host app. Existing vendor opcodes unchanged.
@@ -188,7 +190,7 @@ Both claim vendor interface #2. The OS gives the handle to whichever process ope
 By default Chrome prompts the user every session unless the origin is allow-listed via enterprise policy (`WebUsbAllowDevicesForUrls`). This is browser policy, not firmware. We don't try to defeat or work around it.
 
 ### 5.10 Firmware update via web app while WebUSB is open?
-Firmware update uses `REQ_ENTER_BOOTLOADER` (0xF0) which reboots into UF2. From the browser's perspective the device disappears mid-session; the browser closes the WebUSB handle cleanly. After reboot the device appears as a UF2 mass-storage drive — browsers can't talk to that (no WebUSB descriptor). User drops the UF2, device reboots, web app reconnects. Standard flow.
+Firmware update uses `SYS.ENTER_BOOTLOADER` (page 0x01, command 0x30, a zero-length SET), which reboots into UF2. From the browser's perspective the device disappears mid-session; the browser closes the WebUSB handle cleanly. After reboot the device appears as a UF2 mass-storage drive. Browsers can't talk to that (no WebUSB descriptor). User drops the UF2, device reboots, web app reconnects. Standard flow.
 
 ### 5.11 URL length > 252 bytes
 Descriptor `bLength` is a single byte and the URL must fit in `255 - 3 = 252` bytes. Compile-time `_Static_assert` on `sizeof(WEBUSB_LANDING_URL)` catches over-long URLs at build time.
@@ -197,12 +199,13 @@ Descriptor `bLength` is a single byte and the URL must fit in `255 - 3 = 252` by
 WebUSB URL descriptors are UTF-8 encoded. ASCII is a valid UTF-8 subset. If anyone ever needs IDN (internationalized domains), use punycode (xn--…) — keeps the URL ASCII-clean. Spec doc notes this; the firmware doesn't validate.
 
 ### 5.13 What if a future firmware needs a different vendor bRequest for an unrelated feature?
-The vendor `bRequest` namespace is currently:
-- `0x01` = MS_VENDOR_CODE (MS OS 2.0)
-- `0x02` = WEBUSB_VENDOR_CODE (this spec)
-- `0x42..0xFF` = DSPi vendor opcodes (REQ_*)
+Since firmware 1.1.7 the vendor `bRequest` namespace is per page (the page travels in the `wIndex` high byte):
+- `0x00` and `0x03..0x0F` are reserved for protocol-level use in every page.
+- `0x01` = MS_VENDOR_CODE (MS OS 2.0).
+- `0x02` = WEBUSB_VENDOR_CODE (this spec), held in every page.
+- `0x10..0xFF` = DSPi commands within each page.
 
-We have `0x03..0x41` available for future platform-style extensions (which is plenty). Document the namespace allocation in `config.h` so the next person to add a vendor code looks at this list first.
+A future platform-style vendor code takes a number from `0x03..0x0F`. The allocation rules are in `vendor_command_overhaul_plan.md` section 3.2.
 
 ### 5.14 Cold-boot ordering with the host app
 Browser opens device → reads BOS → sees WebUSB capability → asks for URL → firmware responds. This sequence happens entirely via control transfers on EP0, before any audio streaming starts. No interaction with audio init, presets, or anything else. Cold-boot ordering unchanged.
@@ -239,7 +242,7 @@ If a real use case appears later (e.g., enterprise deployments with private cont
 | Item | Cost |
 |------|------|
 | `usb_descriptors.c` BOS extension | +24 bytes flash (Platform Capability) + 28 bytes (URL descriptor) = **52 bytes flash** |
-| `vendor_commands.c` handler additions | ~30 lines of code, ~80 bytes flash |
+| `vendor/vc_usb.c` handler additions | ~30 lines of code, ~80 bytes flash |
 | BSS | **0 bytes** — no module-level state; descriptor is `const` in flash |
 | Audio path | **0 cycles** — never touched by audio path |
 | USB enumeration time | Negligible (one extra 24-byte BOS read at descriptor-set fetch; happens once per plug) |
@@ -276,13 +279,13 @@ If a real use case appears later (e.g., enterprise deployments with private cont
    - Add 24-byte WebUSB Platform Capability struct to the BOS array.
    - Update `wTotalLength` in the BOS header.
    - Define the URL descriptor as a `static const uint8_t webusb_url_descriptor[]`.
-3. **`vendor_commands.c`**: extend `tud_vendor_control_xfer_cb`
+3. **`vendor/vc_usb.c`**: extend `tud_vendor_control_xfer_cb`
    - Add a SETUP-stage case for `req->bRequest == WEBUSB_VENDOR_CODE && req->wIndex == WEBUSB_REQUEST_GET_URL`.
    - Validate `wValue == 1`; STALL otherwise.
    - Return the URL descriptor via `tud_control_xfer()`.
    - Comment thoroughly with W3C-spec section references.
 4. **`Documentation/current_architecture.md`**: add a "WebUSB" subsection under USB Audio Pipeline.
-   - Document the vendor `bRequest` namespace (0x01=MS OS 2.0, 0x02=WebUSB, 0x42+=DSPi opcodes).
+   - Document the vendor `bRequest` namespace (0x01 = MS OS 2.0, 0x02 = WebUSB, 0x10 and up = DSPi commands in each page).
    - Note the one-claim-at-a-time interaction with the native host app.
 5. **Build both platforms.** Verify size deltas are within spec (~130 bytes text).
 6. **Manual test plan §8.**

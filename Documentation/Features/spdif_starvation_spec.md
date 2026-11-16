@@ -1,6 +1,6 @@
 # SPDIF Starvation Metric Spec
 
-*Last updated: 2026-10-12*
+*Last updated: 2026-11-16 (read through `SYS.SPDIF_TX_STATS` on the paged protocol of firmware 1.1.7)*
 
 ## 1. Purpose
 
@@ -23,27 +23,33 @@ This is a **direct output-side starvation** signal. The counters are in **frames
 
 It is different from:
 
-- `spdif_underruns` (`REQ_GET_STATUS wValue=8`): USB packet-gap heuristic.
-- `REQ_GET_STATUS wValue=7` is retired and always reads 0.
+- `spdif_underruns` (offset 0 of `SYS.SPDIF_TX_STATS`): USB packet-gap heuristic.
+- The 1.1.6 `GET_STATUS` selector 7, which always read 0, is retired with no replacement.
 
 ## 3. USB API
 
-Use the existing vendor status request:
+Firmware 1.1.7 reports every S/PDIF output counter in one struct read on the paged protocol (`../commands.md`). It replaces the 1.1.6 `GET_STATUS` selectors 8 and 17 to 21.
 
-- `bmRequestType`: `0xC1` (IN, Vendor, Interface)
-- `bRequest`: `0x50` (`REQ_GET_STATUS`)
-- `wIndex`: `2` (vendor interface)
-- `wLength`: `4`
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `SYS.SPDIF_TX_STATS` | 0x01 | 0x45 | GET | none (0) | GET 24 |
 
-Response format is a little-endian `uint32_t`.
+On USB that is `bmRequestType` `0xC1`, `bRequest` `0x45`, `wValue` 0, `wIndex` `0x0102` (page 0x01 in the high byte, interface 2 in the low byte), `wLength` 24.
 
-### 3.1 New `wValue` mappings
+### 3.1 Reply layout
 
-- `17`: total SPDIF DMA starvations (all SPDIF instances combined)
-- `18`: SPDIF instance 0 starvations (Output 1/2)
-- `19`: SPDIF instance 1 starvations (Output 3/4)
-- `20`: SPDIF instance 2 starvations (Output 5/6, RP2350 only)
-- `21`: SPDIF instance 3 starvations (Output 7/8, RP2350 only)
+All fields are little-endian `uint32_t`.
+
+| Offset | Field |
+|---|---|
+| 0 | `spdif_underruns`, the USB packet-gap heuristic |
+| 4 | Total SPDIF DMA starvations (all SPDIF instances combined) |
+| 8 | SPDIF instance 0 starvations (Output 1/2) |
+| 12 | SPDIF instance 1 starvations (Output 3/4) |
+| 16 | SPDIF instance 2 starvations (Output 5/6, RP2350 only, 0 on RP2040) |
+| 20 | SPDIF instance 3 starvations (Output 7/8, RP2350 only, 0 on RP2040) |
+
+The current sample rate is the u32 at offset 4 of `SYS.SYSTEM_STATUS` (page 0x01, command 0x40, 16 bytes).
 
 ## 4. Counter Lifecycle
 
@@ -54,10 +60,10 @@ Response format is a little-endian `uint32_t`.
 
 ## 5. App Integration (Step-by-Step)
 
-1. Start polling `wValue=17` once per second while stream is active.
-2. Keep previous sample and compute `delta` each poll.
-3. If `delta > 0`, immediately read `wValue=18..21` to locate which output starved.
-4. Log timestamp, total delta, per-instance values, current sample rate (`wValue=15`), and the packet-gap counter (`wValue=8`).
+1. Read `SYS.SPDIF_TX_STATS` once per second while stream is active.
+2. Keep the previous total (offset 4) and compute `delta` each poll.
+3. If `delta > 0`, the per-instance fields of the same reply (offsets 8 to 20) show which output starved.
+4. Log timestamp, total delta, per-instance values, current sample rate (`SYS.SYSTEM_STATUS` offset 4), and the packet-gap counter (offset 0).
 5. Show total and per-output counters in your diagnostics UI.
 
 Use unsigned wrap-safe delta:
@@ -69,32 +75,27 @@ uint32_t delta = current - previous; // uint32_t wrap-safe arithmetic
 ## 6. Minimal Host Pseudocode
 
 ```c
-uint32_t get_status_u32(Device dev, uint16_t wValue) {
-    // control IN transfer, 4-byte response
-    // bmRequestType=0xC1, bRequest=0x50, wValue=wValue, wIndex=2, wLength=4
-    uint8_t b[4] = control_in(dev, 0xC1, 0x50, wValue, 2, 4);
-    return (uint32_t)b[0] |
-           ((uint32_t)b[1] << 8) |
-           ((uint32_t)b[2] << 16) |
-           ((uint32_t)b[3] << 24);
+// Paged GET: bmRequestType 0xC1, bRequest = cmd, wIndex = (page << 8) | 2.
+static uint32_t u32_at(const uint8_t *b, int off) {
+    return (uint32_t)b[off] | ((uint32_t)b[off + 1] << 8) |
+           ((uint32_t)b[off + 2] << 16) | ((uint32_t)b[off + 3] << 24);
 }
 
 void poll_starvation(Device dev) {
     static bool has_prev = false;
     static uint32_t prev_total = 0;
 
-    uint32_t total = get_status_u32(dev, 17);
+    uint8_t tx[24], sys[16];
+    control_in(dev, 0xC1, 0x45, 0, 0x0102, tx, 24);    // SYS.SPDIF_TX_STATS
+    uint32_t total = u32_at(tx, 4);
     if (has_prev) {
         uint32_t delta = total - prev_total;
         if (delta > 0) {
-            uint32_t s0 = get_status_u32(dev, 18);
-            uint32_t s1 = get_status_u32(dev, 19);
-            uint32_t s2 = get_status_u32(dev, 20);
-            uint32_t s3 = get_status_u32(dev, 21);
-            uint32_t spdif_underruns = get_status_u32(dev, 8);
-            uint32_t sample_rate_hz  = get_status_u32(dev, 15);
-            log_event(total, delta, s0, s1, s2, s3,
-                      spdif_underruns, sample_rate_hz);
+            control_in(dev, 0xC1, 0x40, 0, 0x0102, sys, 16);  // SYS.SYSTEM_STATUS
+            log_event(total, delta,
+                      u32_at(tx, 8), u32_at(tx, 12), u32_at(tx, 16), u32_at(tx, 20),
+                      u32_at(tx, 0),     // spdif_underruns
+                      u32_at(sys, 4));   // sample rate Hz
         }
     }
     prev_total = total;
@@ -124,7 +125,7 @@ Add a warning indicator when `delta > 0`.
 
 ## 9. Compatibility Notes
 
-Older firmware may not support this metric. If unsupported, values may stay at zero indefinitely.
+Every paged firmware (1.1.7 and later) has `SYS.SPDIF_TX_STATS`. Firmware 1.1.6 and older read these counters through `GET_STATUS` selectors and does not answer the paged protocol. Values may stay at zero for a long time on a healthy link.
 
 Recommended behavior in app:
 

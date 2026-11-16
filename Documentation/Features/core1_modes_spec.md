@@ -1,5 +1,7 @@
 # Core 1 Dual-Mode: EQ Worker + PDM
 
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7)*
+
 ## Overview
 
 Core 1 operates in one of three modes on **both platforms**, selected automatically based on which outputs are enabled. When PDM is disabled and any outputs in the Core 1 range are enabled, Core 1 runs as an EQ worker that processes per-output equalization, gain, delay, and S/PDIF conversion in parallel with Core 0.
@@ -12,8 +14,8 @@ Core 1 operates in one of three modes on **both platforms**, selected automatica
 | CORE1_MODE_PDM | Yes | Yes |
 | CORE1_MODE_EQ_WORKER | Yes (outputs 2-3) | Yes (outputs 2-7) |
 | Dual-core EQ split | Yes | Yes |
-| REQ_GET_CORE1_MODE | Yes | Yes |
-| REQ_GET_CORE1_CONFLICT | Yes | Yes |
+| `SYS.CORE1_MODE` | Yes | Yes |
+| `ROUTE.OUTPUT_ENABLE_CONFLICT` | Yes | Yes |
 | EQ worker data type | int32_t (Q28) | float |
 
 ---
@@ -26,7 +28,7 @@ Core 1 operates in one of three modes on **both platforms**, selected automatica
 | 1 | `CORE1_MODE_PDM` | PDM output enabled | Sigma-delta modulation on PIO1 |
 | 2 | `CORE1_MODE_EQ_WORKER` | Any Core 1 EQ output enabled, PDM disabled | EQ + gain + delay + S/PDIF for Core 1 outputs |
 
-The mode is **derived** from the `matrix_mixer.outputs[]` enable state after each `REQ_SET_OUTPUT_ENABLE` command. There is no explicit "set mode" command. The derivation priority is:
+The mode is **derived** from the `matrix_mixer.outputs[]` enable state after each `ROUTE.OUTPUT_ENABLE` SET. There is no explicit "set mode" command. The derivation priority is:
 
 **RP2350:** (9 outputs, indices 0-8)
 1. If output index 8 (PDM) is enabled -> `CORE1_MODE_PDM`
@@ -85,13 +87,13 @@ Core 1 EQ worker outputs and the PDM output **cannot be simultaneously enabled**
 
 ### Firmware Behavior
 
-The interlock is enforced in the `REQ_SET_OUTPUT_ENABLE` handler on **both platforms**:
+The interlock is enforced in the `ROUTE.OUTPUT_ENABLE` SET handler on **both platforms**:
 
-- **Enabling PDM:** The firmware checks whether any output in the Core 1 EQ range is currently enabled. If so, the enable request is **silently refused**.
-- **Enabling a Core 1 EQ output:** The firmware checks whether the PDM output is currently enabled. If so, the enable request is **silently refused**.
+- **Enabling PDM:** The firmware checks whether any output in the Core 1 EQ range is currently enabled. If so, the enable request is **refused** with `VC_ERR_STATE`.
+- **Enabling a Core 1 EQ output:** The firmware checks whether the PDM output is currently enabled. If so, the enable request is **refused** with `VC_ERR_STATE`.
 - **Disabling any output:** Always succeeds. No conflict check is needed.
 
-The firmware does **not** return an error code for refused enables. The request completes normally via USB control transfer; the app must read back the output state to confirm.
+A refused enable STALLs on USB (UART and I2C return the code in the response status byte), and `SYS.LAST_RESULT` reads `VC_ERR_STATE`. Firmware 1.1.6 ACKed a refused enable and changed nothing. Reading back the output state still confirms the result.
 
 ### Required App Pattern
 
@@ -99,32 +101,32 @@ Applications **must** follow this pattern to safely enable conflicting outputs:
 
 ```
 1. Check conflict BEFORE attempting enable:
-   REQ_GET_CORE1_CONFLICT(wValue=output_index) -> conflict (0 or 1)
+   GET ROUTE.OUTPUT_ENABLE_CONFLICT(wValue=output_index) -> conflict (0 or 1)
 
-2. If conflict == 0, proceed with enable:
-   REQ_SET_OUTPUT_ENABLE(wValue=output_index, data=0x01)
+2. If conflict == 0, proceed with enable (a STALL means it was refused):
+   SET ROUTE.OUTPUT_ENABLE(wValue=output_index, data=0x01)
 
-3. ALWAYS read back to confirm the enable took effect:
-   REQ_GET_OUTPUT_ENABLE(wValue=output_index) -> enabled (0 or 1)
+3. Read back to confirm the enable took effect:
+   GET ROUTE.OUTPUT_ENABLE(wValue=output_index) -> enabled (0 or 1)
 ```
 
 To **switch** from one conflicting group to the other (e.g., disable Core 1 EQ outputs and enable PDM):
 
 ```
 1. Disable all conflicting outputs first:
-   REQ_SET_OUTPUT_ENABLE(wValue=2, data=0x00)
-   REQ_SET_OUTPUT_ENABLE(wValue=3, data=0x00)
+   SET ROUTE.OUTPUT_ENABLE(wValue=2, data=0x00)
+   SET ROUTE.OUTPUT_ENABLE(wValue=3, data=0x00)
    ... (repeat for all enabled outputs in Core 1 EQ range)
 
 2. Confirm mode has transitioned (optional):
-   REQ_GET_CORE1_MODE() -> should return 0 (IDLE)
+   GET SYS.CORE1_MODE -> should return 0 (IDLE)
 
 3. Enable the new output:
-   REQ_SET_OUTPUT_ENABLE(wValue=PDM_index, data=0x01)
+   SET ROUTE.OUTPUT_ENABLE(wValue=PDM_index, data=0x01)
 
 4. Confirm:
-   REQ_GET_OUTPUT_ENABLE(wValue=PDM_index) -> 1
-   REQ_GET_CORE1_MODE() -> should return 1 (PDM)
+   GET ROUTE.OUTPUT_ENABLE(wValue=PDM_index) -> 1
+   GET SYS.CORE1_MODE -> should return 1 (PDM)
 ```
 
 ### UI Guidance
@@ -136,79 +138,44 @@ The control app should **grey out or disable** conflicting outputs in the UI to 
 - Outputs 1-2 are always available on both platforms
 - Display a tooltip or message explaining the hardware constraint
 
-The `REQ_GET_CORE1_CONFLICT` command enables the app to query the conflict state for any specific output without maintaining its own shadow state.
+The `ROUTE.OUTPUT_ENABLE_CONFLICT` command enables the app to query the conflict state for any specific output without maintaining its own shadow state.
 
 ---
 
 ## Vendor Commands
 
-All commands use EP0 control transfers on the vendor interface. SET commands use Host-to-Device direction; GET commands use Device-to-Host direction.
+The commands use the paged protocol of `../commands.md`. The page travels in the `wIndex` high byte and the command in `bRequest`. `wValue` carries the address and the payload carries the value. One command serves both directions, and the transfer direction selects GET or SET. A refused SET STALLs, and the reason is readable from `SYS.LAST_RESULT`.
 
-### REQ_SET_OUTPUT_ENABLE (0x72)
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.OUTPUT_ENABLE` | 0x05 | 0x20 | GET, SET | output 0-8 (RP2350), 0-4 (RP2040) | GET 1, SET 1 | `0x01` = enabled, `0x00` = disabled. Subject to the interlock |
+| `ROUTE.OUTPUT_ENABLE_CONFLICT` | 0x05 | 0x24 | GET | proposed output 0-8 (RP2350), 0-4 (RP2040) | GET 1 | `0x00` = no conflict, `0x01` = would conflict |
+| `SYS.CORE1_MODE` | 0x01 | 0x23 | GET | none (0) | GET 1 | `0` = IDLE, `1` = PDM, `2` = EQ_WORKER |
+| `SYS.SYSTEM_STATUS` | 0x01 | 0x40 | GET | none (0) | GET 16 | `cpu0_load` at offset 12, `cpu1_load` at offset 13 |
 
-Enables or disables a matrix mixer output. Subject to the mutual exclusion interlock.
+An output index past the end STALLs with `VC_ERR_ADDRESS` in both directions.
 
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0x40 (Vendor, Host-to-Device) |
-| bRequest | 0x72 |
-| wValue | Output index (0-8 on RP2350, 0-4 on RP2040) |
-| wIndex | 0 |
-| wLength | 1 |
-| Data | `0x01` = enable, `0x00` = disable |
+### `ROUTE.OUTPUT_ENABLE`
+
+Enables or disables a matrix mixer output.
 
 **Behavior:**
-- If enabling and a conflict exists, the request is silently ignored (output stays disabled).
+- If enabling and a conflict exists, the SET STALLs with `VC_ERR_STATE` and the output stays disabled.
 - After applying the change, the firmware re-derives the Core 1 mode and transitions Core 1 if needed.
 - Mode transitions are immediate: Core 1 exits its current loop at the next iteration boundary.
 
-### REQ_GET_OUTPUT_ENABLE (0x73)
-
-Reads the current enable state of an output.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (Vendor, Device-to-Host) |
-| bRequest | 0x73 |
-| wValue | Output index (0-8 on RP2350, 0-4 on RP2040) |
-| wIndex | 0 |
-| wLength | 1 |
-| Response | 1 byte: `0x01` = enabled, `0x00` = disabled |
-
-### REQ_GET_CORE1_MODE (0x7A)
-
-Returns the current Core 1 operating mode.
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (Vendor, Device-to-Host) |
-| bRequest | 0x7A |
-| wValue | 0 |
-| wIndex | 0 |
-| wLength | 1 |
-| Response | 1 byte: `0` = IDLE, `1` = PDM, `2` = EQ_WORKER |
-
-### REQ_GET_CORE1_CONFLICT (0x7B)
+### `ROUTE.OUTPUT_ENABLE_CONFLICT`
 
 Pre-flight check: would enabling a given output conflict with the current state?
-
-| Field | Value |
-|-------|-------|
-| bmRequestType | 0xC0 (Vendor, Device-to-Host) |
-| bRequest | 0x7B |
-| wValue | Proposed output index (0-8 on RP2350, 0-4 on RP2040) |
-| wIndex | 0 |
-| wLength | 1 |
-| Response | 1 byte: `0x00` = no conflict, `0x01` = would conflict |
 
 **Conflict rules checked (platform-adaptive):**
 - If proposed output is the PDM index (RP2350: 8, RP2040: 4): conflict if any Core 1 EQ output is enabled
 - If proposed output is in the Core 1 EQ range (RP2350: 2-7, RP2040: 2-3): conflict if PDM is enabled
 - If proposed output is index 0-1: never conflicts (always returns 0)
 
-### REQ_GET_STATUS (0x50)
+### CPU load
 
-The existing status command includes Core 1 CPU load. The `cpu1_load` field reflects the active mode:
+`SYS.SYSTEM_STATUS` and `MEAS.LEVELS` both include Core 1 CPU load. The `cpu1_load` field reflects the active mode:
 
 - **IDLE mode:** `cpu1_load = 0`
 - **PDM mode:** percentage of time spent in sigma-delta modulation (per ~1ms sample window)
@@ -216,9 +183,9 @@ The existing status command includes Core 1 CPU load. The `cpu1_load` field refl
 
 Both loads are reported as `uint8_t` values in the range 0-100.
 
-**Combined status (wValue=9):** 12-byte response, bytes 10-11 are cpu0_load and cpu1_load respectively.
+**`SYS.SYSTEM_STATUS`:** 16-byte reply, bytes 12-13 are cpu0_load and cpu1_load respectively.
 
-**Legacy status (wValue=2):** 4-byte response, bits 16-23 are cpu0_load, bits 24-31 are cpu1_load.
+**`MEAS.LEVELS`:** `2N+7`-byte reply for N channels (u16 peak per channel first), so cpu0_load and cpu1_load are at offsets `2N` and `2N+1`. The 1.1.6 packed status (`GET_STATUS` selector 2) is retired.
 
 ---
 
@@ -332,7 +299,7 @@ Mode transitions always pass through the mode dispatcher loop in `pdm_core1_entr
 
 ### Transition Mechanism
 
-1. `REQ_SET_OUTPUT_ENABLE` handler applies the enable/disable (with interlock check)
+1. `ROUTE.OUTPUT_ENABLE` SET handler applies the enable/disable (with interlock check)
 2. `derive_core1_mode()` computes the new mode from output state
 3. If mode changed, `core1_mode` is written (word-sized volatile = atomic on ARM)
 4. `__sev()` wakes Core 1
@@ -381,7 +348,7 @@ Disabling interrupts prevents the USB audio packet callback from running, which 
 ### App Considerations
 
 - EQ parameter updates are **safe at any time** from the app's perspective. The firmware handles all synchronization internally.
-- There is no need for the app to check Core 1 mode before sending `REQ_SET_EQ_PARAM`.
+- There is no need for the app to check Core 1 mode before sending `FILTER.BAND`.
 - The coefficient update may cause a brief increase in `cpu0_load` due to the spin-wait, but this is negligible (sub-microsecond).
 
 ---
@@ -395,7 +362,7 @@ On power-up:
 2. `core0_init()` derives `core1_mode` from the restored output state
 3. Core 1 is launched and enters the derived mode
 
-The mutual exclusion invariant is guaranteed during flash save because it is enforced at the point of every `REQ_SET_OUTPUT_ENABLE`. A valid flash image can never contain a state where both outputs 2-7 and output 9 are simultaneously enabled.
+The mutual exclusion invariant is guaranteed during flash save because it is enforced at the point of every `ROUTE.OUTPUT_ENABLE` SET. A valid flash image can never contain a state where both outputs 2-7 and output 9 are simultaneously enabled.
 
 ---
 
@@ -411,7 +378,7 @@ typedef enum {
 } Core1Mode;
 ```
 
-Defined in `config.h`. The integer values are stable and used in the `REQ_GET_CORE1_MODE` response.
+Defined in `config.h`. The integer values are stable and used in the `SYS.CORE1_MODE` response.
 
 ### Core1EqWork (struct)
 
@@ -456,12 +423,12 @@ The `__dmb()` (Data Memory Barrier) ensures that all preceding memory writes are
 
 | Symptom | Likely Cause | Check |
 |---------|-------------|-------|
-| cpu1_load stuck at 0 with Core 1 outputs enabled | Mode not transitioning | `REQ_GET_CORE1_MODE` -- should be 2 |
-| Enabling PDM has no effect | Core 1 EQ outputs still enabled (interlock) | `REQ_GET_CORE1_CONFLICT(wValue=PDM_index)` |
-| Enabling Core 1 output has no effect | PDM enabled (interlock) | `REQ_GET_CORE1_CONFLICT(wValue=output_index)` |
+| cpu1_load stuck at 0 with Core 1 outputs enabled | Mode not transitioning | `SYS.CORE1_MODE` -- should be 2 |
+| Enabling PDM STALLs with `VC_ERR_STATE` | Core 1 EQ outputs still enabled (interlock) | `ROUTE.OUTPUT_ENABLE_CONFLICT(wValue=PDM_index)` |
+| Enabling Core 1 output STALLs with `VC_ERR_STATE` | PDM enabled (interlock) | `ROUTE.OUTPUT_ENABLE_CONFLICT(wValue=output_index)` |
 | Audio glitches on Core 1 outputs after EQ change | Coefficient race (should not happen) | Verify firmware has the coefficient guard |
 | cpu1_load reads impossibly high | Metering formula mismatch | Verify EQ worker uses `(us * 137) >> 16` |
-| Core 1 output audio silent but cpu1_load > 0 | Matrix routes not configured | Check `REQ_GET_MATRIX_ROUTE` for those outputs |
+| Core 1 output audio silent but cpu1_load > 0 | Matrix routes not configured | Check `ROUTE.MATRIX_ROUTE` for those outputs |
 
 ---
 
@@ -473,25 +440,25 @@ The `__dmb()` (Data Memory Barrier) ensures that all preceding memory writes are
 
 for output_index in 0..7:
     // Check for conflict (only relevant for indices 2-7)
-    conflict = REQ_GET_CORE1_CONFLICT(wValue=output_index)
+    conflict = GET ROUTE.OUTPUT_ENABLE_CONFLICT(wValue=output_index)
     if conflict:
         error("Cannot enable output -- PDM is active")
         break
 
-    REQ_SET_OUTPUT_ENABLE(wValue=output_index, data=0x01)
+    SET ROUTE.OUTPUT_ENABLE(wValue=output_index, data=0x01)
 
     // Confirm
-    enabled = REQ_GET_OUTPUT_ENABLE(wValue=output_index)
+    enabled = GET ROUTE.OUTPUT_ENABLE(wValue=output_index)
     assert(enabled == 1)
 
 // Verify dual-core mode is active
-mode = REQ_GET_CORE1_MODE()
+mode = GET SYS.CORE1_MODE
 assert(mode == 2)  // CORE1_MODE_EQ_WORKER
 
 // Monitor load distribution
-status = REQ_GET_STATUS(wValue=9)  // 12-byte combined status
-cpu0 = status[10]  // Should show reduced load vs single-core
-cpu1 = status[11]  // Should show > 0, processing outputs 3-8
+status = GET SYS.SYSTEM_STATUS  // 16 bytes
+cpu0 = status[12]  // Should show reduced load vs single-core
+cpu1 = status[13]  // Should show > 0, processing outputs 3-8
 ```
 
 ## Example: Switch from 8-Channel to PDM Sub (RP2350)
@@ -499,20 +466,20 @@ cpu1 = status[11]  // Should show > 0, processing outputs 3-8
 ```
 // Disable outputs 3-8 (indices 2-7) to free Core 1
 for output_index in 2..7:
-    REQ_SET_OUTPUT_ENABLE(wValue=output_index, data=0x00)
+    SET ROUTE.OUTPUT_ENABLE(wValue=output_index, data=0x00)
 
 // Confirm transition to IDLE
-mode = REQ_GET_CORE1_MODE()
+mode = GET SYS.CORE1_MODE
 assert(mode == 0)  // CORE1_MODE_IDLE
 
 // Now enable PDM (no conflict)
-conflict = REQ_GET_CORE1_CONFLICT(wValue=8)
+conflict = GET ROUTE.OUTPUT_ENABLE_CONFLICT(wValue=8)
 assert(conflict == 0)
 
-REQ_SET_OUTPUT_ENABLE(wValue=8, data=0x01)
-enabled = REQ_GET_OUTPUT_ENABLE(wValue=8)
+SET ROUTE.OUTPUT_ENABLE(wValue=8, data=0x01)
+enabled = GET ROUTE.OUTPUT_ENABLE(wValue=8)
 assert(enabled == 1)
 
-mode = REQ_GET_CORE1_MODE()
+mode = GET SYS.CORE1_MODE
 assert(mode == 1)  // CORE1_MODE_PDM
 ```

@@ -1,8 +1,8 @@
 VC_PAGE(XPORT, 0x0B, 1, "UART and I2C control transports")
 
 VC_CMD(0x10, UART_CONFIG, xport_uart_config_get, xport_uart_config_set,
-       NONE, 8, 8, 8, VC_F_SET_USB_ONLY | VC_F_DEFERRED | VC_F_FLASH, 0, "Stored UART control config; the apply result is in STATUS")
+       NONE, 8, 8, 8, VC_F_SET_USB_ONLY | VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Stored UART control config; the apply result is in STATUS")
 VC_CMD(0x11, I2C_CONFIG, xport_i2c_config_get, xport_i2c_config_set,
-       NONE, 8, 8, 8, VC_F_SET_USB_ONLY | VC_F_DEFERRED | VC_F_FLASH, 0, "Stored I2C target control config; the apply result is in STATUS")
+       NONE, 8, 8, 8, VC_F_SET_USB_ONLY | VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Stored I2C target control config; the apply result is in STATUS")
 VC_CMD(0x12, STATUS, xport_status_get, VC_NONE,
        NONE, 8, 0, 0, 0, 0, "Last apply result and live state of each control transport")

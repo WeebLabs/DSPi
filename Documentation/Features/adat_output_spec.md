@@ -1,6 +1,6 @@
 # ADAT Bulk Output
 
-*Last updated: 2026-10-11*
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7)*
 
 ## Overview
 
@@ -52,28 +52,33 @@ Alignment guarantees:
 
 ## Vendor commands
 
-Commands follow the standard vendor EP0 conventions (also reachable over the
-UART and I2C control transports through the shared dispatcher). All SET
-commands carry their payload in `wValue` and return a single status byte from
-the shared `PIN_CONFIG_*` set (config.h): `0x00` SUCCESS, `0x01` INVALID_PIN,
-`0x02` PIN_IN_USE, `0x03` INVALID_OUTPUT, `0x05` INVALID_PARAM.
+Commands use the paged protocol of `../commands.md` and are also reachable
+over the UART and I2C control transports through the same dispatcher. Each
+SET carries its value in a 1-byte payload. There is no status byte: success
+is ACK, and a refused SET STALLs with a result code readable from
+`SYS.LAST_RESULT` (UART and I2C return the code in the response status byte).
 
-| Command | ID | Direction | wValue | Response |
-|---|---|---|---|---|
-| `REQ_SET_ADAT_ENABLE` | 0xCA | SET | 0 = disable, 1 = enable (low byte) | 1 status byte |
-| `REQ_GET_ADAT_ENABLE` | 0xCB | GET | - | 1 byte: configured enable (0/1) |
-| `REQ_SET_ADAT_PIN` | 0xCC | SET | GPIO number (low byte) | 1 status byte |
-| `REQ_GET_ADAT_PIN` | 0xCD | GET | - | 1 byte: configured GPIO |
-| `REQ_GET_ADAT_STATUS` | 0xCE | GET | - | 8-byte `AdatStatus` |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `OUTPUT.ADAT_TX_ENABLE` | 0x04 | 0x30 | GET, SET | none (0) | GET 1, SET 1 | 0 = disable, 1 = enable. GET returns the configured enable |
+| `OUTPUT.ADAT_TX_PIN` | 0x04 | 0x31 | GET, SET | none (0) | GET 1, SET 1 | Data GPIO. 0xFF restores the default |
+| `OUTPUT.ADAT_TX_STATUS` | 0x04 | 0x32 | GET | none (0) | GET 8 | `AdatStatus` |
+
+| Result | Meaning |
+|---|---|
+| `VC_ERR_PIN_INVALID` | GPIO not usable for ADAT output |
+| `VC_ERR_PIN_IN_USE` | GPIO owned by another function |
+| `VC_ERR_VALUE` | Enable value above 1 |
+| `VC_ERR_UNKNOWN` | RP2040: the commands do not exist |
 
 Behavioral notes:
 
-- `REQ_SET_ADAT_ENABLE` with the current value is a no-op success. Enabling
-  validates the configured pin first (INVALID_PIN / PIN_IN_USE on conflict).
-  Disabling always succeeds.
-- `REQ_SET_ADAT_PIN` validates the GPIO (23..25 and out-of-range rejected,
+- `OUTPUT.ADAT_TX_ENABLE` with the current value is a no-op success. Enabling
+  validates the configured pin first (`VC_ERR_PIN_INVALID` or
+  `VC_ERR_PIN_IN_USE` on conflict). Disabling always succeeds.
+- `OUTPUT.ADAT_TX_PIN` validates the GPIO (23..25 and out-of-range rejected,
   conflicts with any owned pin rejected) and may be issued while enabled; the
-  stream is re-routed under a muted restart. `wValue = 0xFF`
+  stream is re-routed under a muted restart. A payload of `0xFF`
   (`PIN_RESET_TO_DEFAULT`, the escape hatch shared by every single-pin SET
   command) resets to the platform default pin; 0 means GPIO 0. (The
   flash/bulk "0 = default" decoding is a persistence-layer migration
@@ -81,11 +86,11 @@ Behavioral notes:
 - Config changes apply from the main loop inside the same muted
   pipeline-restart bracket used by output type/pin switches; expect the brief
   global mute-and-resync that any output reconfiguration produces.
-- On RP2040 both SETs return `0x03` (INVALID_OUTPUT); the GETs return zeros.
+- On RP2040 the three commands do not exist and answer `VC_ERR_UNKNOWN`.
 - While ADAT is enabled its GPIO is owned: every other pin-assignment command
-  rejects that pin with PIN_IN_USE, and vice versa.
+  rejects that pin with `VC_ERR_PIN_IN_USE`, and vice versa.
 
-### `AdatStatus` (REQ_GET_ADAT_STATUS, 8 bytes, packed, little-endian)
+### `AdatStatus` (`OUTPUT.ADAT_TX_STATUS`, 8 bytes, packed, little-endian)
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
@@ -109,11 +114,12 @@ rate-policy auto-suspend/resume. 8-byte v2 packet:
 [4] enabled          [5] active         [6] pin         [7] 0
 ```
 
-Apps that track ADAT state should consume this instead of polling 0xCE.
-Config changes made via 0xCA/0xCC additionally produce the usual
+Apps that track ADAT state should consume this instead of polling
+`OUTPUT.ADAT_TX_STATUS`. Config changes made via `OUTPUT.ADAT_TX_ENABLE` or
+`OUTPUT.ADAT_TX_PIN` additionally produce the usual
 `PARAM_CHANGED` events for the `adat_config` wire fields.
 
-## Bulk params (REQ_GET/SET_ALL_PARAMS)
+## Bulk params (`STORE.ALL_PARAMS`)
 
 `WIRE_FORMAT_VERSION` is now **17** (was 16). Hosts must fetch the new layout;
 apply rejects any other version. The new section is the final member of
@@ -135,14 +141,14 @@ the live pin, and defers the hardware apply exactly like the vendor commands.
 
 ADAT config persists identically to the other physical IO config (output
 types, I2S BCK/MCK, SPDIF RX pin) and honors `output_config_mode`
-(REQ 0x98/0x99):
+(`STORE.OUTPUT_CONFIG_MODE`):
 
 - **WITH_PRESET (1, default):** `adat_enabled`/`adat_pin` are stored in each
   preset slot (`SLOT_DATA_VERSION` 23) and applied on preset load. Slots saved
   before V23 leave the current device-level ADAT config untouched.
 - **INDEPENDENT (0):** ADAT config lives in the device-global directory block
   (`PresetDirectory` V8, `FlashOutputConfig`), is applied at boot, and preset
-  load / factory reset never touch it. `REQ_SAVE_OUTPUT_CONFIG` (0x52) stores
+  load / factory reset never touch it. `STORE.OUTPUT_CONFIG_SAVE` stores
   the live ADAT config with the rest of the IO block.
 
 `adat_pin == 0` in flash means "unset, use the platform default". Old
@@ -154,21 +160,23 @@ ignored).
 
 Enable flow:
 
-1. (Optional) `REQ_SET_ADAT_PIN` if the hardware uses a non-default GPIO.
-2. `REQ_SET_ADAT_ENABLE` wValue=1; check the status byte.
-3. Wait for `NOTIFY_EVT_ADAT_STATE` with `active=1` (or poll 0xCE). If
+1. (Optional) `OUTPUT.ADAT_TX_PIN` if the hardware uses a non-default GPIO.
+2. `OUTPUT.ADAT_TX_ENABLE` with payload 1. A STALL means it was refused, and
+   `SYS.LAST_RESULT` says why.
+3. Wait for `NOTIFY_EVT_ADAT_STATE` with `active=1` (or poll
+   `OUTPUT.ADAT_TX_STATUS`). If
    `rate_ok=0` the device is above 48 kHz; the stream starts when the rate
    drops, with another 0x08 event.
-4. Persist: in WITH_PRESET mode save the preset (0x90, `PRESET_SAVE`); in INDEPENDENT mode
-   send `REQ_SAVE_OUTPUT_CONFIG` (0x52).
+4. Persist: in WITH_PRESET mode save the preset (`STORE.PRESET_SAVE`); in INDEPENDENT mode
+   send `STORE.OUTPUT_CONFIG_SAVE`.
 
 Rate handling: apps do not need to manage the 48 kHz restriction. Selecting
 96 kHz suspends the stream (event with `active=0, enabled=1`); returning to
 44.1/48 kHz resumes it automatically.
 
 Platform detection: check the platform ID (RP2350 = 1) from the device ident
-before exposing ADAT UI, or treat `0xCA` returning INVALID_OUTPUT as "not
-available".
+before exposing ADAT UI, or check the `OUTPUT.ADAT_TX_ENABLE` bit in
+`SYS.PAGE_COMMANDS` for page 0x04 (absent on RP2040).
 
 Level mapping: ADAT sample N is the same 24-bit value the SPDIF outputs
 carry: float clamp to [-1, +1] then scale by 8388607.

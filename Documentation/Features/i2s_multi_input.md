@@ -1,6 +1,6 @@
 # DSPi Multichannel I2S Input - App Developer Guide
 
-*Last updated: 2026-06-29*
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
 
 This document is the single, self-contained reference an app developer needs to
 add support for DSPi's I2S input channel modes (2 / 4 / 6 / 8 channels). It
@@ -43,18 +43,18 @@ Key facts up front:
 The minimal sequence to get 8-channel I2S input running (RP2350):
 
 ```
-1. Set channel count:        REQ_SET_I2S_INPUT_CHANNELS  wValue = 8
-2. Assign the 3 extra pins:  REQ_SET_I2S_RX_PIN  wValue = (1<<8)|gpio1
-                             REQ_SET_I2S_RX_PIN  wValue = (2<<8)|gpio2
-                             REQ_SET_I2S_RX_PIN  wValue = (3<<8)|gpio3
+1. Set channel count:        INPUT.I2S_RX_CHANNELS SET  payload = 8
+2. Assign the 3 extra pins:  INPUT.I2S_RX_PIN SET  wValue = 1, payload = gpio1
+                             INPUT.I2S_RX_PIN SET  wValue = 2, payload = gpio2
+                             INPUT.I2S_RX_PIN SET  wValue = 3, payload = gpio3
    (pair 0's data pin and the shared BCK pin already have valid defaults)
-3. Switch the source to I2S: REQ_SET_INPUT_SOURCE  payload = 2  (INPUT_SOURCE_I2S)
-4. (optional) Select rate:   REQ_SET_INPUT_RATE   payload = 48000
-5. Route inputs to outputs:  REQ_SET_MATRIX_ROUTE  (per crosspoint)
+3. Switch the source to I2S: INPUT.SOURCE SET  payload = 2  (INPUT_SOURCE_I2S)
+4. (optional) Select rate:   INPUT.I2S_RX_RATE SET  payload = 48000 (u32)
+5. Route inputs to outputs:  ROUTE.MATRIX_ROUTE SET  (per crosspoint)
 ```
 
-Each step returns a status byte where relevant; check it (see "Validation &
-errors"). After step 3 the device emits a `NOTIFY_EVT_INPUT_FORMAT` push so your
+Any step can be refused. A refused SET STALLs, and the reason is readable from
+`SYS.LAST_RESULT` (see "Validation & errors"). After step 3 the device emits a `NOTIFY_EVT_INPUT_FORMAT` push so your
 UI can relayout to the active channel count.
 
 Recommended order is **count first, then pins** (the default extra pins are
@@ -149,8 +149,9 @@ the output side. If your app exposes loudness/leveller/crossfeed, grey them out
 | Input channels (`NUM_INPUT_CHANNELS`) | 2 | 8 |
 | Output channels (`NUM_OUTPUT_CHANNELS`) | 5 (4 S/PDIF + PDM) | 9 (8 S/PDIF + PDM) |
 
-On RP2040, `REQ_SET_I2S_INPUT_CHANNELS` accepts only `2`; `4/6/8` are rejected.
-`REQ_SET_I2S_RX_PIN` accepts only pair `0`. Write your app to read the supported
+On RP2040, `INPUT.I2S_RX_CHANNELS` accepts only `2`; `4/6/8` are rejected with
+`VC_ERR_UNSUPPORTED`. `INPUT.I2S_RX_PIN` accepts only pair `0` (other pairs are
+`VC_ERR_ADDRESS`). Write your app to read the supported
 maximum from the device rather than hard-coding 8 (see "Capability detection").
 
 ---
@@ -187,58 +188,72 @@ data pins to match their board, then save a preset.
 
 ## 6. Transport: how to send a command
 
-All commands are **USB control transfers on the vendor interface**:
+All commands are **USB control transfers on the vendor interface**, using the
+paged protocol of firmware 1.1.7 (full reference in `../commands.md`):
 
 - `bmRequestType`: vendor type (bits 6:5 = `10`). Direction bit 7 = `1` (IN) for
-  GET / commands that return data, `0` (OUT) for SET.
-- `bRequest`: the opcode (e.g. `0xF3`).
-- `wValue`: per-command (see each command below).
-- `wIndex`: vendor interface number (the firmware routes all vendor-type control
-  transfers regardless of `wIndex`).
-- Data stage: the payload (SET) or the response (GET).
+  GET, `0` (OUT) for SET. The same command number serves both directions.
+- `bRequest`: the command number within its page (e.g. `0x31` for `INPUT.I2S_RX_CHANNELS`).
+- `wIndex`: `(page << 8) | interface`. The page is the high byte (`0x03` for
+  `INPUT`); the low byte is the vendor interface number, 2.
+- `wValue`: the address only (a stereo pair, a channel, a crosspoint), else 0.
+- Data stage: the payload (SET) or the response (GET). Values always travel in
+  the payload.
 
 In `pyusb` terms:
 
 ```python
+def windex(page): return (page << 8) | 2
 # SET (host -> device), OUT
-dev.ctrl_transfer(0x40, bRequest, wValue, wIndex, payload_bytes)
+dev.ctrl_transfer(0x41, cmd, wValue, windex(page), payload_bytes)
 # GET (device -> host), IN, request `length` bytes
-resp = dev.ctrl_transfer(0xC0, bRequest, wValue, wIndex, length)
+resp = dev.ctrl_transfer(0xC1, cmd, wValue, windex(page), length)
 ```
 
-`0x40` = OUT|vendor|device, `0xC0` = IN|vendor|device. Use the recipient your
-existing DSPi integration already uses; the device does not filter on recipient.
+`0x41` = OUT|vendor|interface, `0xC1` = IN|vendor|interface. The device does not
+filter on recipient. A refused SET raises a pipe error (STALL). Read
+`SYS.LAST_RESULT` (page `0x01`, command `0x14`) for the `VC_*` reason.
 
 ---
 
 ## 7. Vendor command reference (I2S-input relevant)
 
-Status-returning SET commands return a single byte from the `PIN_CONFIG_*` set
-(see "Validation & errors"). `0x00` = success.
+A SET has no status byte. It is ACKed, or it STALLs with a `VC_*` result code
+(see "Validation & errors").
+
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `INPUT.I2S_RX_CHANNELS` | 0x03 | 0x31 | GET, SET | none (0) | GET 1, SET 1 |
+| `INPUT.I2S_RX_PIN` | 0x03 | 0x30 | GET, SET | stereo pair 0-3 (0 on RP2040) | GET 1, SET 1 |
+| `CLOCK.I2S_BCK_PIN` | 0x0C | 0x10 | GET, SET | role 0-1 | GET 1, SET 1 |
+| `INPUT.SOURCE` | 0x03 | 0x10 | GET, SET | none (0) | GET 1, SET 1 |
+| `INPUT.I2S_RX_RATE` | 0x03 | 0x32 | GET, SET | none (0) | GET 4, SET 4 |
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | none (0) | GET var |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | none (0) | GET 12 |
+| `ROUTE.PREAMP` | 0x05 | 0x40 | GET, SET | input channel 0-7 | GET 4, SET 4 |
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 |
+| `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(input << 8) \| output` | GET 8, SET 8 |
+| `ROUTE.CHANNEL_NAME` | 0x05 | 0x31 | GET, SET | channel | GET 32, SET 1-32 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 |
 
 ### 7.1 Channel count
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_I2S_INPUT_CHANNELS` | `0xF3` | channel count `2/4/6/8` | returns 1 status byte |
-| `REQ_GET_I2S_INPUT_CHANNELS` | `0xF4` | 0 | returns 1 byte: active count |
+`INPUT.I2S_RX_CHANNELS`: SET payload is the channel count `2/4/6/8` (1 byte). The
+GET returns the configured count (1 byte).
 
 Setting the count (de)allocates the stereo pairs and, if I2S is the active
 source, restarts the input so all pairs re-sync. A count *increase* validates
 each newly-activated pair's data pin first (valid GPIO, no peripheral / clock /
 cross-pair conflict) and is **rejected** if any clashes; fix the offending pin
-then retry. RP2040 accepts only `2`.
+then retry. A count other than 2/4/6/8 is `VC_ERR_VALUE`. RP2040 accepts only
+`2`. A larger valid count there is `VC_ERR_UNSUPPORTED`.
 
 ### 7.2 Per-pair data pins
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_I2S_RX_PIN` | `0xF1` | `(pair << 8) | gpio` | returns 1 status byte |
-| `REQ_GET_I2S_RX_PIN` | `0xF2` | `pair` (0..3) | returns 1 byte: that pair's GPIO |
-
-`pair` is the stereo-pair index 0..3 (high byte of `wValue`); the low byte is the
-GPIO number. A bare `wValue = gpio` (high byte 0) addresses pair 0, which keeps
-older two-channel hosts working unchanged.
+`INPUT.I2S_RX_PIN`: `wValue` is the stereo-pair index 0..3. The SET payload is
+the GPIO number (1 byte), and 0xFF restores that pair's default. The GET returns
+that pair's GPIO. A pair past the platform maximum is `VC_ERR_ADDRESS` in either
+direction.
 
 The firmware keeps all four data pins mutually distinct and clear of the clocks:
 a SET is rejected if the GPIO is invalid, is the BCK or LRCLK pin, is already
@@ -249,22 +264,18 @@ pair re-syncs.
 
 ### 7.3 BCK (clock) pin
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_I2S_BCK_PIN` | `0xC2` | new BCK GPIO | returns 1 status byte |
-| `REQ_GET_I2S_BCK_PIN` | `0xC3` | 0 | returns 1 byte: BCK GPIO |
+`CLOCK.I2S_BCK_PIN`: `wValue` is the clock-pair role (0 = master/unified pair,
+the one described here, or 1 = the separate slave pair of `clock_pins_spec.md`).
+The SET payload is the BCK GPIO, and the GET returns it.
 
 LRCLK is always BCK+1, so both BCK and BCK+1 must be valid GPIOs. The SET is
-rejected while an I2S *output* is active (`PIN_CONFIG_OUTPUT_ACTIVE`) and on a
-peripheral conflict. Changing BCK affects both I2S input and I2S output (shared
-clock).
+rejected while an I2S *output* is active (`VC_ERR_STATE`) and on a
+peripheral conflict (`VC_ERR_PIN_IN_USE`). Changing BCK affects both I2S input
+and I2S output (shared clock).
 
 ### 7.4 Input source
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_INPUT_SOURCE` | `0xE0` | 0 | payload: 1 byte `InputSource` |
-| `REQ_GET_INPUT_SOURCE` | `0xE1` | 0 | returns 1 byte `InputSource` |
+`INPUT.SOURCE`: SET payload is 1 byte `InputSource`. The GET returns the active one.
 
 `InputSource`: `0` = USB, `1` = S/PDIF, `2` = I2S. Switching to I2S brings up the
 input on the configured pins/count/rate and runs a glitch-free prefill handshake
@@ -272,22 +283,19 @@ before unmuting.
 
 ### 7.5 Input rate
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_INPUT_RATE` | `0xED` | 0 | payload: `uint32` Hz (44100 / 48000 / 96000) |
-| `REQ_GET_INPUT_RATE` | `0xEE` | 0 | returns 2 x `uint32`: {current Hz, selected I2S Hz} |
+`INPUT.I2S_RX_RATE`: `uint32` Hz (44100 / 48000 / 96000) both ways. The GET
+returns the selected I2S rate. The current pipeline rate is the sample-rate
+field of `SYS.SYSTEM_STATUS` (u32 at offset 4). Any other rate is `VC_ERR_VALUE`.
 
 In I2S mode the device is the rate authority; set the rate to match your ADC.
 The change brackets the input cleanly (mute, divider update, re-sync).
 
 ### 7.6 Status + metering
 
-| Command | Opcode | wValue | Response |
-|---|---|---|---|
-| `REQ_GET_STATUS` | `0x50` | `9` | combined status packet (see below) |
-| `REQ_GET_STATUS` | `0x50` | `23` | `uint32`: live active input channel count |
+- `MEAS.LEVELS`: combined meter packet (see below).
+- `INPUT.STATUS`: byte 1 is the live active input channel count (`uint8`).
 
-The **combined packet** (`wValue = 9`) is the one to poll for meters + the live
+The **combined packet** (`MEAS.LEVELS`) is the one to poll for meters + the live
 input count in a single round-trip. Layout:
 
 ```
@@ -301,7 +309,7 @@ offset 0 .. NUM_CHANNELS*2-1 : peaks[NUM_CHANNELS], uint16 LE each
 
 Total length: RP2350 = 17*2 + 7 = 41 bytes; RP2040 = 7*2 + 7 = 21 bytes.
 
-`active_input_channels` (the `+6` byte, and the scalar `wValue == 23`) is
+`active_input_channels` (the `+6` byte, and byte 1 of `INPUT.STATUS`) is
 **source-aware**: it reports the I2S count when I2S is the active source, the USB
 alt count for USB, and 2 for S/PDIF. Use it to drive your channel-strip layout;
 do not assume it equals the I2S count unless I2S is the active source.
@@ -310,55 +318,49 @@ Input peak meters are `peaks[0 .. active_input_channels-1]`.
 
 ### 7.7 Per-input preamp
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_PREAMP_CH` | `0xD0` | channel index (0..7) | payload: `float` dB |
-| `REQ_GET_PREAMP_CH` | `0xD1` | channel index | returns `float` dB |
+`ROUTE.PREAMP`: `wValue` is the input channel index (0..7); payload and reply
+are a `float` dB.
 
 Per-input-channel preamp gain, applied at capture before EQ/matrix. Use this to
-trim individual ADC inputs. (Legacy `REQ_SET_PREAMP` / `0x44` sets all channels;
-`REQ_GET_PREAMP` / `0x45` returns channel 0.)
+trim individual ADC inputs. (The 1.1.6 all-channel preamp, opcodes 0x44/0x45, is
+retired. Set each channel through `ROUTE.PREAMP`.)
 
 ### 7.8 Per-input parametric EQ
 
-| Command | Opcode | Payload (`EqParamPacket`, 16 bytes) |
-|---|---|---|
-| `REQ_SET_EQ_PARAM` | `0x42` | see struct |
-| `REQ_GET_EQ_PARAM` | `0x43` | wValue selects channel/band; returns the packet |
+`FILTER.BAND`: `wValue = (channel << 8) | band`. SET and GET both carry the
+16-byte band record below. The GET returns the whole band.
 
 ```c
+// wValue = (channel << 8) | band; channel 0..7 = inputs (unified model)
 typedef struct __attribute__((packed)) {
-    uint8_t channel;   // 0..7 = inputs (unified model)
-    uint8_t band;      // 0..(per-channel PEQ count-1) for PEQ
-    uint8_t type;      // FilterType (see below)
-    uint8_t bypass;    // exactly 1 = bypassed; anything else = active
-    float   freq;      // Hz
-    float   Q;
-    float   gain_db;
-} EqParamPacket;       // 16 bytes
+    uint8_t  type;     // FilterType (see below)
+    uint8_t  bypass;   // exactly 1 = bypassed; anything else = active (reads back 0/1)
+    uint16_t qp_x512;  // Linkwitz transform Qp x 512; send it for every band
+    float    freq;     // Hz
+    float    Q;
+    float    gain_db;
+} FilterBand;          // 16 bytes
 ```
 
 `FilterType`: `0` FLAT, `1` PEAKING, `2` LOWSHELF, `3` HIGHSHELF, `4` LOWPASS,
 `5` HIGHPASS, `6` NOTCH, `7` ALLPASS, `8` ALLPASS1 (first-order), `9` LOWSHELF1,
 `10` HIGHSHELF1. (Crossover band types are output-channel-only; see the crossover
-spec.) PEQ on input channels works exactly as on any channel; just set
-`channel` to the input index 0..7.
+spec.) PEQ on input channels works exactly as on any channel; just put the
+input index 0..7 in the `wValue` high byte.
 
 ### 7.9 Matrix routing (inputs -> outputs)
 
-| Command | Opcode | Payload (`MatrixRoutePacket`, 12 bytes) |
-|---|---|---|
-| `REQ_SET_MATRIX_ROUTE` | `0x70` | see struct |
-| `REQ_GET_MATRIX_ROUTE` | `0x71` | returns crosspoint state |
+`ROUTE.MATRIX_ROUTE`: `wValue = (input << 8) | output`, with input
+0..NUM_INPUT_CHANNELS-1 (0..7 on RP2350) and output 0..NUM_OUTPUT_CHANNELS-1
+(0..8 on RP2350). SET and GET carry the same 8-byte record:
 
 ```c
 typedef struct __attribute__((packed)) {
-    uint8_t input;        // 0..NUM_INPUT_CHANNELS-1 (0..7 on RP2350)
-    uint8_t output;       // 0..NUM_OUTPUT_CHANNELS-1 (0..8 on RP2350)
-    uint8_t enabled;      // 0 or 1
-    uint8_t phase_invert; // 0 or 1
-    float   gain_db;      // up to +12 dB
-} MatrixRoutePacket;      // 12 bytes
+    uint8_t  enabled;      // 0 or 1
+    uint8_t  phase_invert; // 0 or 1
+    uint16_t reserved;     // 0
+    float    gain_db;      // up to +12 dB
+} MatrixRoute;             // 8 bytes
 ```
 
 The matrix is how multichannel input reaches the outputs. With 8 inputs you have
@@ -368,10 +370,8 @@ slots (L,R interleaved), `8` is PDM (RP2350).
 
 ### 7.10 Channel names
 
-| Command | Opcode | wValue | Payload / Response |
-|---|---|---|---|
-| `REQ_SET_CHANNEL_NAME` | `0x9B` | channel index | 1..32 byte UTF-8 name |
-| `REQ_GET_CHANNEL_NAME` | `0x9C` | channel index | returns 32 bytes |
+`ROUTE.CHANNEL_NAME`: `wValue` is the channel index. The SET takes a 1..32 byte
+UTF-8 name (at most 31 bytes are kept). The GET returns 32 bytes.
 
 Default input names are source-aware. I2S input uses numbered stereo pairs in the
 same `<prefix> <pair> <L/R>` form as the outputs: `"I2S 1 L"`, `"I2S 1 R"`,
@@ -383,10 +383,8 @@ the preset.
 
 ### 7.11 Bulk parameter transfer (snapshot / restore)
 
-| Command | Opcode | Notes |
-|---|---|---|
-| `REQ_GET_ALL_PARAMS` | `0xA0` | read the entire DSP state in one control transfer |
-| `REQ_SET_ALL_PARAMS` | `0xA1` | write the entire DSP state in one control transfer |
+`STORE.ALL_PARAMS` reads (GET) or writes (SET) the entire DSP state in one
+control transfer.
 
 The bulk `WireInputConfig` section carries the I2S input config:
 `i2s_rx_pin` (pair 0), `i2s_input_rate`, `i2s_input_channels`, and
@@ -401,15 +399,18 @@ edits and bulk only for full snapshot/restore.
 
 ## 8. Validation & errors
 
-Status-returning SET commands return one byte:
+A SET is ACKed when applied. A refused SET STALLs, and `SYS.LAST_RESULT` gives
+the reason:
 
-| Value | Name | Meaning |
+| Code | Name | Meaning |
 |---|---|---|
-| `0x00` | `PIN_CONFIG_SUCCESS` | applied |
-| `0x01` | `PIN_CONFIG_INVALID_PIN` | not a usable GPIO, or an invalid channel count |
-| `0x02` | `PIN_CONFIG_PIN_IN_USE` | conflicts with another peripheral / clock / I2S pair |
-| `0x03` | `PIN_CONFIG_INVALID_OUTPUT` | no such pair, or count exceeds the platform max |
-| `0x04` | `PIN_CONFIG_OUTPUT_ACTIVE` | BCK change rejected while an I2S output is active |
+| `0x00` | `VC_OK` | applied |
+| `0x19` | `VC_ERR_PIN_INVALID` | not a usable GPIO |
+| `0x14` | `VC_ERR_VALUE` | channel count other than 2/4/6/8 |
+| `0x1A` | `VC_ERR_PIN_IN_USE` | conflicts with another peripheral / clock / I2S pair |
+| `0x13` | `VC_ERR_ADDRESS` | no such pair (or BCK role) |
+| `0x15` | `VC_ERR_UNSUPPORTED` | count exceeds the platform max |
+| `0x18` | `VC_ERR_STATE` | BCK change rejected while an I2S output is active |
 
 Pin rules the firmware enforces (so your app does not have to, but should mirror
 for good UX):
@@ -424,7 +425,7 @@ for good UX):
 - Raising the channel count validates each newly-activated pair's pin and rejects
   the increase if any clashes.
 
-Recommended UX: when a SET returns non-zero, surface the reason and keep your UI
+Recommended UX: when a SET is refused, surface the reason and keep your UI
 in sync by issuing the matching GET (the device did not change state on a
 rejected SET).
 
@@ -442,7 +443,7 @@ The I2S input config participates in DSPi's normal persistence:
   physical IO (pins, BCK, count, rate) is stored once and applied at boot.
 - **Bulk (`WireInputConfig`):** for full host-driven snapshot/restore.
 
-You do not need to manage versions; just use `REQ_PRESET_SAVE` / load and the
+You do not need to manage versions; just use `STORE.PRESET_SAVE` / `STORE.PRESET_LOAD` and the
 bulk commands. Restores are validated (see 7.11) so a stale or cross-device
 config degrades gracefully (the bad fields are ignored) rather than producing a
 broken or clashing setup.
@@ -469,8 +470,8 @@ changed (e.g. an I2S pin, the count, a crosspoint). Use it to keep multiple
 clients or views consistent. The dedicated SETs above also emit these so a
 second app sees your edits.
 
-If your app does not subscribe to notifications, polling `REQ_GET_STATUS`
-(`wValue = 9`) for meters already includes the live count, so you will pick up
+If your app does not subscribe to notifications, polling `MEAS.LEVELS`
+for meters already includes the live count, so you will pick up
 changes on the next poll.
 
 ---
@@ -482,46 +483,45 @@ changes on the next poll.
 Do not hard-code 8 channels. Probe what the device supports rather than assuming:
 
 ```
-# Attempt the count you want; the status byte tells you if the part supports it.
-status = SET_I2S_INPUT_CHANNELS(8)
-if status == PIN_CONFIG_INVALID_OUTPUT:
+# Attempt the count you want; the result tells you if the part supports it.
+result = SET(INPUT.I2S_RX_CHANNELS, 8)       # None on ACK, else the VC_* code
+if result == VC_ERR_UNSUPPORTED:
     # stereo-only part (RP2040): cap the UI at 2 channels / 1 pair
     max_channels = 2
-elif status == PIN_CONFIG_SUCCESS:
+elif result is None:
     max_channels = 8
 ```
 
-`PIN_CONFIG_INVALID_OUTPUT` from a count SET means "this part cannot do that many
-pairs"; treat it as the capability signal. (You can also distinguish the model
-from the USB product string / descriptor if you prefer not to issue a probing
-SET.)
+`VC_ERR_UNSUPPORTED` from a count SET means "this part cannot do that many
+pairs"; treat it as the capability signal. (You can also read the platform from
+byte 0 of `SYS.PLATFORM` if you prefer not to issue a probing SET.)
 
 ### 11.2 Enable a multichannel I2S setup
 
 ```
 # 1. Pick the channel count
-status = SET_I2S_INPUT_CHANNELS(count)         # 2/4/6/8
-assert status == SUCCESS
+result = SET(INPUT.I2S_RX_CHANNELS, count)      # 2/4/6/8
+assert result is None                           # ACK
 
 # 2. Assign data pins for the active pairs (pair 0 + (count/2 - 1) extras)
 for pair in range(count // 2):
-    status = SET_I2S_RX_PIN((pair << 8) | gpio_for[pair])
-    if status != SUCCESS: show_error(pair, status); abort()
+    result = SET(INPUT.I2S_RX_PIN, gpio_for[pair], wValue=pair)
+    if result is not None: show_error(pair, result); abort()
 
 # 3. (optional) BCK pin + rate
-SET_I2S_BCK_PIN(bck_gpio)                       # only if changing from default
-SET_INPUT_RATE(48000)
+SET(CLOCK.I2S_BCK_PIN, bck_gpio, wValue=0)      # only if changing from default
+SET(INPUT.I2S_RX_RATE, u32(48000))
 
 # 4. Make I2S the active source
-SET_INPUT_SOURCE(2)                             # INPUT_SOURCE_I2S
+SET(INPUT.SOURCE, 2)                            # INPUT_SOURCE_I2S
 # -> NOTIFY_EVT_INPUT_FORMAT arrives; relayout to `count` strips
 
 # 5. Route inputs to outputs
 for (inp, outp, gain) in routing:
-    SET_MATRIX_ROUTE(inp, outp, enabled=1, gain_db=gain)
+    SET(ROUTE.MATRIX_ROUTE, route(enabled=1, gain_db=gain), wValue=(inp << 8) | outp)
 
 # 6. Persist
-REQ_PRESET_SAVE(slot)
+SET(STORE.PRESET_SAVE, wValue=slot)             # zero-length SET
 ```
 
 ### 11.3 Relayout on the fly
@@ -530,24 +530,24 @@ REQ_PRESET_SAVE(slot)
 on NOTIFY_EVT_INPUT_FORMAT(count):
     rebuild_channel_strips(count)          # show inputs 0..count-1
     grey_out_stereo_only_fx = (count > 2)  # loudness/leveller/crossfeed
-# (or poll REQ_GET_STATUS wValue=9 and read the +6 byte)
+# (or poll MEAS.LEVELS and read the +6 byte)
 ```
 
 ### 11.4 Per-input processing
 
 ```
 # Trim input 2 by -3 dB, add a 1 kHz bell on input 2 band 0:
-SET_PREAMP_CH(channel=2, dB=-3.0)
-SET_EQ_PARAM(channel=2, band=0, type=PEAKING, freq=1000, Q=1.0, gain_db=+4)
+SET(ROUTE.PREAMP, f32(-3.0), wValue=2)
+SET(FILTER.BAND, band(type=PEAKING, freq=1000, Q=1.0, gain_db=+4), wValue=(2 << 8) | 0)
 # Name it:
-SET_CHANNEL_NAME(channel=2, "Sub L")
+SET(ROUTE.CHANNEL_NAME, b"Sub L", wValue=2)
 ```
 
 ### 11.5 Meter the inputs
 
 ```
 loop:
-    packet = REQ_GET_STATUS(wValue=9)
+    packet = GET(MEAS.LEVELS)
     count  = packet[NUM_CHANNELS*2 + 6]
     for ch in range(count):
         peak = u16le(packet, ch*2)
@@ -557,7 +557,7 @@ loop:
 ### 11.6 Changing count live
 
 You can change the count while I2S is the active source; the device restarts the
-input transparently and re-syncs. Just issue `SET_I2S_INPUT_CHANNELS(new)` and
+input transparently and re-syncs. Just SET `INPUT.I2S_RX_CHANNELS` to the new count and
 relayout on the resulting `NOTIFY_EVT_INPUT_FORMAT`. A *raise* whose new pins
 clash is rejected (fix the pins first); a *lower* always succeeds.
 
@@ -584,37 +584,29 @@ clash is rejected (fix the pins first); a *lower* always succeeds.
 - **Alignment is guaranteed.** You do not need to (and cannot) phase-align the
   channels yourself; the firmware starts all pairs in sync.
 - **A rejected SET does not change state.** Re-issue the matching GET to resync
-  your UI after a non-zero status.
+  your UI after a STALL.
 
 ---
 
 ## 13. Quick reference
 
-### Opcodes
+### Commands
 
-| Opcode | Command | wValue | Data |
-|---|---|---|---|
-| `0xF3` | SET I2S input channels | 2/4/6/8 | -> status |
-| `0xF4` | GET I2S input channels | 0 | <- count (1 B) |
-| `0xF1` | SET I2S RX pin | (pair<<8)\|gpio | -> status |
-| `0xF2` | GET I2S RX pin | pair | <- gpio (1 B) |
-| `0xC2` | SET I2S BCK pin | gpio | -> status |
-| `0xC3` | GET I2S BCK pin | 0 | <- gpio (1 B) |
-| `0xE0` | SET input source | 0 | -> 1 B (2=I2S) |
-| `0xE1` | GET input source | 0 | <- 1 B |
-| `0xED` | SET input rate | 0 | -> u32 Hz |
-| `0xEE` | GET input rate | 0 | <- 2x u32 |
-| `0x50` | GET status | 9 / 23 | <- packet / u32 count |
-| `0xD0` | SET preamp (per ch) | channel | -> float dB |
-| `0xD1` | GET preamp (per ch) | channel | <- float dB |
-| `0x42` | SET EQ param | - | -> EqParamPacket |
-| `0x43` | GET EQ param | ch/band | <- EqParamPacket |
-| `0x70` | SET matrix route | - | -> MatrixRoutePacket |
-| `0x71` | GET matrix route | - | <- crosspoint |
-| `0x9B` | SET channel name | channel | -> 1..32 B |
-| `0x9C` | GET channel name | channel | <- 32 B |
-| `0xA0` | GET all params | 0 | <- bulk blob |
-| `0xA1` | SET all params | 0 | -> bulk blob |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Data |
+|---|---|---|---|---|---|---|
+| `INPUT.I2S_RX_CHANNELS` | 0x03 | 0x31 | GET, SET | none (0) | GET 1, SET 1 | count 2/4/6/8 |
+| `INPUT.I2S_RX_PIN` | 0x03 | 0x30 | GET, SET | pair | GET 1, SET 1 | gpio (0xFF = default) |
+| `CLOCK.I2S_BCK_PIN` | 0x0C | 0x10 | GET, SET | role (0) | GET 1, SET 1 | gpio |
+| `INPUT.SOURCE` | 0x03 | 0x10 | GET, SET | none (0) | GET 1, SET 1 | 2 = I2S |
+| `INPUT.I2S_RX_RATE` | 0x03 | 0x32 | GET, SET | none (0) | GET 4, SET 4 | u32 Hz (selected) |
+| `SYS.SYSTEM_STATUS` | 0x01 | 0x40 | GET | none (0) | GET 16 | live rate u32 at offset 4 |
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | none (0) | GET var | meter packet |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | none (0) | GET 12 | active input count at byte 1 |
+| `ROUTE.PREAMP` | 0x05 | 0x40 | GET, SET | input channel | GET 4, SET 4 | float dB |
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(ch << 8) \| band` | GET 16, SET 16 | band record |
+| `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(in << 8) \| out` | GET 8, SET 8 | crosspoint |
+| `ROUTE.CHANNEL_NAME` | 0x05 | 0x31 | GET, SET | channel | GET 32, SET 1-32 | name |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | bulk blob |
 
 ### Enums / constants
 
@@ -622,7 +614,8 @@ clash is rejected (fix the pins first); a *lower* always succeeds.
 InputSource:   USB=0  SPDIF=1  I2S=2
 Channel count: 2 / 4 / 6 / 8   (1..4 stereo pairs)
 Pairs:         pair p -> input channels 2p, 2p+1
-PIN_CONFIG:    SUCCESS=0  INVALID_PIN=1  PIN_IN_USE=2  INVALID_OUTPUT=3  OUTPUT_ACTIVE=4
+VC result:     OK=0x00  ADDRESS=0x13  VALUE=0x14  UNSUPPORTED=0x15  STATE=0x18
+               PIN_INVALID=0x19  PIN_IN_USE=0x1A
 NOTIFY_EVT:    PARAM_CHANGED=0x02  INPUT_FORMAT=0x05
 RP2350:        NUM_INPUT_CHANNELS=8  NUM_OUTPUT_CHANNELS=9  pairs<=4
 RP2040:        NUM_INPUT_CHANNELS=2  NUM_OUTPUT_CHANNELS=5  pairs=1

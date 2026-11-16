@@ -1,5 +1,7 @@
 # Subharmonic Synthesizer Specification
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 The subharmonic synthesizer ("subharm") is a dbx 120A style octave divider, extended. It listens to the bass already in the program (48 to 160 Hz in three bands), synthesizes a new note exactly one octave below it (24 to 80 Hz), and mixes that note back in at a user-set level. It is the opposite of psychoacoustic bass: where psybass adds harmonics above the bass so a small speaker can imply a fundamental it cannot play, subharm adds a real fundamental below the bass for systems that can reproduce it (subwoofers, large full-range systems, club and cinema playback).
@@ -76,7 +78,7 @@ With `link_pairs` on (the default), an S/PDIF pair whose two outputs are both el
 
 ## 2. Parameters
 
-All floats on the wire are little-endian IEEE 754 single-precision. All SET values are clamped by the firmware to the documented range; a GET after a SET returns the clamped value.
+All floats on the wire are little-endian IEEE 754 single-precision. All finite SET values are clamped by the firmware to the documented range; a GET after a SET returns the clamped value. A NaN or infinite float is refused with `VC_ERR_VALUE`.
 
 ### 2.1 enabled
 
@@ -85,8 +87,7 @@ All floats on the wire are little-endian IEEE 754 single-precision. All SET valu
 | **Type** | `bool` (uint8_t on wire) |
 | **Range** | 0 (off) or 1 (on) |
 | **Default** | 0 (disabled) |
-| **SET command** | `0x10` (`REQ_SET_SUBHARM`) |
-| **GET command** | `0x11` (`REQ_GET_SUBHARM`) |
+| **Command** | `FX.SUBHARM_ENABLE` (page 0x08, command 0x20), GET and SET |
 | **Payload** | 1 byte: `0x00` = disabled, `0x01` = enabled |
 
 Master enable. When disabled the coefficient pointer is unpublished and per-output processing is skipped entirely (zero per-sample CPU cost); per-output state is cleared so re-enabling starts transient-free.
@@ -98,8 +99,7 @@ Master enable. When disabled the coefficient pointer is unpublished and per-outp
 | **Type** | `float` |
 | **Range** | -30.0 to +12.0 (dB); -30.0 = band off |
 | **Default** | 0.0 |
-| **SET command** | `0x12` (`REQ_SET_SUBHARM_LOW`) |
-| **GET command** | `0x13` (`REQ_GET_SUBHARM_LOW`) |
+| **Command** | `FX.SUBHARM_LOW` (page 0x08, command 0x21), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Level of the 24 to 36 Hz sub, synthesized from program content in 48 to 72 Hz. At 0 dB the sub's fundamental is 0.85 of the band amplitude (the divider's natural gain). The floor value turns the band off and skips its processing.
@@ -111,8 +111,7 @@ Level of the 24 to 36 Hz sub, synthesized from program content in 48 to 72 Hz. A
 | **Type** | `float` |
 | **Range** | -30.0 to +12.0 (dB); -30.0 = band off |
 | **Default** | 0.0 |
-| **SET command** | `0x14` (`REQ_SET_SUBHARM_HIGH`) |
-| **GET command** | `0x15` (`REQ_GET_SUBHARM_HIGH`) |
+| **Command** | `FX.SUBHARM_HIGH` (page 0x08, command 0x22), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Level of the 36 to 56 Hz sub, synthesized from program content in 72 to 112 Hz. Same semantics as `low_db`.
@@ -124,8 +123,7 @@ Level of the 36 to 56 Hz sub, synthesized from program content in 72 to 112 Hz. 
 | **Type** | `float` |
 | **Range** | 0.0 to +6.0 (dB) |
 | **Default** | 0.0 |
-| **SET command** | `0x16` (`REQ_SET_SUBHARM_BOOST`) |
-| **GET command** | `0x17` (`REQ_GET_SUBHARM_BOOST`) |
+| **Command** | `FX.SUBHARM_BOOST` (page 0x08, command 0x24), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Gain of the LF boost bell (70 Hz, Q 0.9, roughly 40 to 120 Hz at half gain), applied to the whole output after the subs are summed. 0 dB skips the stage. The +6 dB ceiling keeps the RP2040 Q28 sum inside its representable range at every legal setting; the boost is meant to be gentle, as on the dbx.
@@ -137,8 +135,7 @@ Gain of the LF boost bell (70 Hz, Q 0.9, roughly 40 to 120 Hz at half gain), app
 | **Type** | `uint16_t` |
 | **Range** | bit k = process output channel k; bits above the platform's channel count are ignored |
 | **Default** | 0xFFFF (all outputs) |
-| **SET command** | `0x18` (`REQ_SET_SUBHARM_MASK`) |
-| **GET command** | `0x19` (`REQ_GET_SUBHARM_MASK`) |
+| **Command** | `FX.SUBHARM_MASK` (page 0x08, command 0x25), GET and SET |
 | **Payload** | 2 bytes: little-endian uint16 |
 
 Selects which output channels are processed. Output channel indexing:
@@ -156,7 +153,7 @@ Masked-off outputs cost zero per-sample CPU and have their state cleared each pa
 |----------|-------|
 | **Type** | `float` |
 | **Range** | 0.0 upward (dB); 0.0 while disabled |
-| **GET command** | `0x1A` (`REQ_GET_SUBHARM_HEADROOM`) |
+| **Command** | `FX.SUBHARM_HEADROOM` (page 0x08, command 0x2E), GET only |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 The worst-case gain of the current configuration: the amount by which a full-scale input could exceed full scale after the effect, and therefore the preamp headroom a host must free so the effect cannot clip. It is computed from the live configuration on every GET (no cached value can race the coefficient recompute after a SET), so a host can SET and immediately GET.
@@ -188,8 +185,7 @@ Because the divider preserves the band amplitude and every other stage is linear
 | **Type** | `float` |
 | **Range** | -30.0 to +12.0 (dB); -30.0 = band off |
 | **Default** | -30.0 (off) |
-| **SET command** | `0x1B` (`REQ_SET_SUBHARM_TOP`) |
-| **GET command** | `0x1C` (`REQ_GET_SUBHARM_TOP`) |
+| **Command** | `FX.SUBHARM_TOP` (page 0x08, command 0x23), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 Level of the 56 to 80 Hz sub, synthesized from program content in 112 to 160 Hz. Same semantics as `low_db` and `high_db`. It ships at the floor because the third band reaches up into the range where a divided sub starts to compete with the program's own fundamentals.
@@ -201,8 +197,7 @@ Level of the 56 to 80 Hz sub, synthesized from program content in 112 to 160 Hz.
 | **Type** | `uint8_t` |
 | **Range** | 0 = all, 1 = percussive, 2 = sustained; values above 2 clamp to 2 |
 | **Default** | 0 (all) |
-| **SET command** | `0x1D` (`REQ_SET_SUBHARM_SELECT`) |
-| **GET command** | `0x1E` (`REQ_GET_SUBHARM_SELECT`) |
+| **Command** | `FX.SUBHARM_SELECT` (page 0x08, command 0x26), GET and SET |
 | **Payload** | 1 byte |
 
 Chooses which kind of bass material gets a synthesized sub. `all` treats every band signal alike. `percussive` favours short bursts after an attack. `sustained` favours notes that have already been ringing. `select_depth` sets how strongly the unfavoured material is suppressed and `select_hold_ms` sets the time span the choice is made over. This is a clamp, not a drop: a mode byte of 7 reads back as 2.
@@ -214,8 +209,7 @@ Chooses which kind of bass material gets a synthesized sub. `all` treats every b
 | **Type** | `float` |
 | **Range** | 0.0 to 100.0 (percent) |
 | **Default** | 100.0 |
-| **SET command** | `0xA9` (`REQ_SET_SUBHARM_DEPTH`) |
-| **GET command** | `0xAA` (`REQ_GET_SUBHARM_DEPTH`) |
+| **Command** | `FX.SUBHARM_DEPTH` (page 0x08, command 0x27), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 How far the material `select_mode` does not favour is gated down. 0 % makes the selectivity inaudible whatever the mode; 100 % is full gating. Ignored when `select_mode` is 0.
@@ -227,8 +221,7 @@ How far the material `select_mode` does not favour is gated down. 0 % makes the 
 | **Type** | `float` |
 | **Range** | 50.0 to 400.0 (ms) |
 | **Default** | 150.0 |
-| **SET command** | `0xAB` (`REQ_SET_SUBHARM_HOLD`) |
-| **GET command** | `0xAC` (`REQ_GET_SUBHARM_HOLD`) |
+| **Command** | `FX.SUBHARM_HOLD` (page 0x08, command 0x28), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 The time span the selectivity decision is made over. In `percussive` mode it is the burst length after an attack; in `sustained` mode it is how long a band must ring before the sub opens. Ignored when `select_mode` is 0.
@@ -240,8 +233,7 @@ The time span the selectivity decision is made over. In `percussive` mode it is 
 | **Type** | `float` |
 | **Range** | -40.0 to 0.0 (dBFS); 0.0 = off |
 | **Default** | 0.0 (off) |
-| **SET command** | `0xAD` (`REQ_SET_SUBHARM_CEILING`) |
-| **GET command** | `0xAE` (`REQ_GET_SUBHARM_CEILING`) |
+| **Command** | `FX.SUBHARM_CEILING` (page 0x08, command 0x29), GET and SET |
 | **Payload** | 4 bytes: little-endian IEEE 754 float |
 
 A soft limit on the synthesized sub just before it is mixed back into the output. It caps how far the sub can push a driver without touching the program signal. A ceiling at full scale limits nothing useful, so 0 dBFS means the stage is off.
@@ -253,8 +245,7 @@ A soft limit on the synthesized sub just before it is mixed back into the output
 | **Type** | `bool` (uint8_t on wire) |
 | **Range** | 0 or 1 |
 | **Default** | 1 (linked) |
-| **SET command** | `0x2E` (`REQ_SET_SUBHARM_LINK`) |
-| **GET command** | `0x2F` (`REQ_GET_SUBHARM_LINK`) |
+| **Command** | `FX.SUBHARM_LINK` (page 0x08, command 0x2A), GET and SET |
 | **Payload** | 1 byte |
 
 When set, each output pair's sub is synthesized from the pair's mono sum rather than from each channel on its own, so the two channels of a pair always receive the same sub. Bass is near-mono in most material and two independent dividers can otherwise land on opposite polarities. Like the mask, the pipeline reads this live each packet; no coefficient recompute is involved.
@@ -266,8 +257,7 @@ When set, each output pair's sub is synthesized from the pair's mono sum rather 
 | **Type** | `bool` (uint8_t on wire) |
 | **Range** | 0 or 1 |
 | **Default** | 0 (off) |
-| **SET command** | `0x2C` (`REQ_SET_SUBHARM_SOLO`) |
-| **GET command** | `0x2D` (`REQ_GET_SUBHARM_SOLO`) |
+| **Command** | `FX.SUBHARM_SOLO` (page 0x08, command 0x2B), GET and SET |
 | **Payload** | 1 byte |
 
 A monitoring aid: masked outputs carry only the synthesized sub, with the program signal removed, so the effect can be heard on its own while it is being set up. It is **never** written to a preset slot and **never** appears in the bulk wire format, so no saved configuration and no bulk apply can leave a device playing with the program signal missing. A preset load leaves it untouched; a factory reset clears it. Read live each packet like the mask, so it needs no recompute. A host that offers solo should make it a momentary control and clear it when the panel closes.
@@ -278,68 +268,58 @@ A monitoring aid: masked outputs carry only the synthesized sub, with the progra
 |----------|-------|
 | **Type** | array of `uint16_t` LE, one per output channel |
 | **Range** | 0 to 32767 per entry |
-| **GET command** | `0x1F` (`REQ_GET_SUBHARM_METER`) |
+| **Command** | `FX.SUBHARM_METER` (page 0x08, command 0x2F), GET only |
 | **Payload** | `NUM_OUTPUT_CHANNELS` x 2 bytes: 18 on RP2350, 10 on RP2040 |
 
-A decaying peak of the synthesized sub that was mixed into each output, on the same 0 to 32767 scale as `SystemStatusPacket.peaks`, so one host meter widget can be driven from either source. Entry k is output channel k in the same order the output mask uses. The reading is of the sub alone, not the output, which is what makes it useful while dialling the band levels in.
+A decaying peak of the synthesized sub that was mixed into each output, on the same 0 to 32767 scale as the `MEAS.LEVELS` peaks, so one host meter widget can be driven from either source. Entry k is output channel k in the same order the output mask uses. The reading is of the sub alone, not the output, which is what makes it useful while dialling the band levels in.
 
 ---
 
 ## 3. Vendor Command Transport
 
-Subharm uses the standard DSPi vendor command surface, so it is reachable over every control transport (USB EP0, UART, I2C target, control surfaces engine) with the same command bytes. These are the first application commands allocated inside 0x00 to 0x1F; 0x01 remains the Microsoft OS descriptor vendor code and is intercepted before the dispatcher. The block occupies 0x10 to 0x1F, 0x2C to 0x2F and 0xA9 to 0xAE.
+Subharm uses the standard DSPi vendor command surface, the `FX` page (0x08) of the paged protocol (see `../commands.md`), so it is reachable over every control transport (USB EP0, UART, I2C target, control surfaces engine) with the same commands. Each parameter is one command, and the transfer direction selects GET or SET. The block occupies commands 0x20 to 0x2F of the page (0x2C and 0x2D are unused).
 
 **Control Surfaces** (caps v15+): eleven front-panel nouns map onto these commands: `SUBHARM` (57, enable), `SUBHARM_LOW` (58), `SUBHARM_HIGH` (59), `SUBHARM_BOOST` (60), `SUBHARM_TOP` (61), `SUBHARM_SELECT` (62), `SUBHARM_DEPTH` (63), `SUBHARM_HOLD` (64), `SUBHARM_CEILING` (65), `SUBHARM_LINK` (66), `SUBHARM_SOLO` (67). Nouns 57-60 are caps v14; 61-67 are caps v15; caps v16 widens the band-level nouns to +12 dB. The output mask, the headroom reading and the sub meter stay host-only. The hold noun's front-panel span stops at 127 ms because the caps table encodes ranges as signed 8.8 fixed point; the command itself still accepts the full 50 to 400 ms. See `control_surfaces_spec.md` sections 4.3 and 5.
 
 ### USB (primary transport)
 
-- **SET**: control transfer, `bmRequestType = 0x40` (vendor, host-to-device), `bRequest = <command>`, `wValue = 0`, `wIndex = 0`, data stage = payload as documented per parameter.
-- **GET**: control transfer, `bmRequestType = 0xC0` (vendor, device-to-host), `bRequest = <command>`, `wLength` >= response size; the device returns the payload in the data stage.
+- **SET**: control transfer, `bmRequestType = 0x41` (vendor, interface, host-to-device), `bRequest = <command>`, `wValue = 0`, `wIndex = (0x08 << 8) | 2`, data stage = payload as documented per parameter.
+- **GET**: control transfer, `bmRequestType = 0xC1` (vendor, interface, device-to-host), `bRequest = <command>`, `wValue = 0`, `wIndex = (0x08 << 8) | 2`, `wLength` = response size; the device returns the payload in the data stage.
 
 ### Command summary
 
-| Command | Direction | Payload | Meaning |
-|---------|-----------|---------|---------|
-| 0x10 | SET | 1 byte bool | Enable/disable |
-| 0x11 | GET | 1 byte bool | Enabled state |
-| 0x12 | SET | 4-byte float | 24-36 Hz band level (dB, clamps -30..+12; -30 = off) |
-| 0x13 | GET | 4-byte float | 24-36 Hz band level |
-| 0x14 | SET | 4-byte float | 36-56 Hz band level (dB, clamps -30..+12; -30 = off) |
-| 0x15 | GET | 4-byte float | 36-56 Hz band level |
-| 0x16 | SET | 4-byte float | LF boost (dB, clamps 0..+6) |
-| 0x17 | GET | 4-byte float | LF boost |
-| 0x18 | SET | 2-byte uint16 LE | Output mask |
-| 0x19 | GET | 2-byte uint16 LE | Output mask |
-| 0x1A | GET | 4-byte float | Headroom to free (dB, 0 while disabled) |
-| 0x1B | SET | 4-byte float | 56-80 Hz band level (dB, clamps -30..+12; -30 = off) |
-| 0x1C | GET | 4-byte float | 56-80 Hz band level |
-| 0x1D | SET | 1 byte | Selectivity mode (clamps to 0..2) |
-| 0x1E | GET | 1 byte | Selectivity mode |
-| 0x1F | GET | 2 bytes x outputs | Per-output sub peak (0..32767 each) |
-| 0x2C | SET | 1 byte bool | Solo the synthesized sub (runtime only) |
-| 0x2D | GET | 1 byte bool | Solo state |
-| 0x2E | SET | 1 byte bool | Link output pairs to their mono sum |
-| 0x2F | GET | 1 byte bool | Pair link state |
-| 0xA9 | SET | 4-byte float | Selectivity depth (%, clamps 0..100) |
-| 0xAA | GET | 4-byte float | Selectivity depth |
-| 0xAB | SET | 4-byte float | Selectivity hold (ms, clamps 50..400) |
-| 0xAC | GET | 4-byte float | Selectivity hold |
-| 0xAD | SET | 4-byte float | Sub ceiling (dBFS, clamps -40..0; 0 = off) |
-| 0xAE | GET | 4-byte float | Sub ceiling |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Meaning |
+|---|---|---|---|---|---|---|
+| `FX.SUBHARM_ENABLE` | 0x08 | 0x20 | GET, SET | none (0) | GET 1, SET 1 | Enable (u8 bool) |
+| `FX.SUBHARM_LOW` | 0x08 | 0x21 | GET, SET | none (0) | GET 4, SET 4 | 24-36 Hz band level (dB, clamps -30..+12; -30 = off) |
+| `FX.SUBHARM_HIGH` | 0x08 | 0x22 | GET, SET | none (0) | GET 4, SET 4 | 36-56 Hz band level (dB, clamps -30..+12; -30 = off) |
+| `FX.SUBHARM_TOP` | 0x08 | 0x23 | GET, SET | none (0) | GET 4, SET 4 | 56-80 Hz band level (dB, clamps -30..+12; -30 = off) |
+| `FX.SUBHARM_BOOST` | 0x08 | 0x24 | GET, SET | none (0) | GET 4, SET 4 | LF boost (dB, clamps 0..+6) |
+| `FX.SUBHARM_MASK` | 0x08 | 0x25 | GET, SET | none (0) | GET 2, SET 2 | Output mask (u16 LE) |
+| `FX.SUBHARM_SELECT` | 0x08 | 0x26 | GET, SET | none (0) | GET 1, SET 1 | Selectivity mode (u8, clamps to 0..2) |
+| `FX.SUBHARM_DEPTH` | 0x08 | 0x27 | GET, SET | none (0) | GET 4, SET 4 | Selectivity depth (%, clamps 0..100) |
+| `FX.SUBHARM_HOLD` | 0x08 | 0x28 | GET, SET | none (0) | GET 4, SET 4 | Selectivity hold (ms, clamps 50..400) |
+| `FX.SUBHARM_CEILING` | 0x08 | 0x29 | GET, SET | none (0) | GET 4, SET 4 | Sub ceiling (dBFS, clamps -40..0; 0 = off) |
+| `FX.SUBHARM_LINK` | 0x08 | 0x2A | GET, SET | none (0) | GET 1, SET 1 | Link output pairs to their mono sum (u8 bool) |
+| `FX.SUBHARM_SOLO` | 0x08 | 0x2B | GET, SET | none (0) | GET 1, SET 1 | Solo the synthesized sub (u8 bool, runtime only) |
+| `FX.SUBHARM_HEADROOM` | 0x08 | 0x2E | GET | none (0) | GET 4 | Headroom to free (dB float, 0 while disabled) |
+| `FX.SUBHARM_METER` | 0x08 | 0x2F | GET | none (0) | GET var | Per-output sub peak (u16 per output, 0..32767 each) |
+
+Floats are 4-byte IEEE 754 LE. A SET payload of any other length is `VC_ERR_LENGTH`, a non-zero `wValue` is `VC_ERR_ADDRESS`, and a NaN or infinite float is `VC_ERR_VALUE` (nothing is stored). A rejected SET STALLs on USB and the reason is readable from `SYS.LAST_RESULT`.
 
 ### Apply semantics
 
 - Every SET updates live state immediately. Enable, the four level parameters, the selectivity settings and the ceiling raise an internal recompute flag; the firmware main loop rebuilds the coefficient set (double-buffered, glitch-free) and publishes it, typically within a few milliseconds. No stream interruption, no click, no alignment disturbance.
 - The mask, the pair link and solo take effect on the next audio packet directly, with no recompute.
-- SETs are **not persisted** to flash by themselves. Persistence happens when the user saves a preset (`REQ_PRESET_SAVE` 0x90) or via `REQ_SAVE_PARAMS` (0x51), following the same convention as psybass.
+- SETs are **not persisted** to flash by themselves. Persistence happens when the user saves a preset (`STORE.PRESET_SAVE`), following the same convention as psybass. The 1.1.6 save-to-active-slot opcode is retired. A host saves to the active slot by reading `STORE.PRESET_ACTIVE` and sending `STORE.PRESET_SAVE` to that slot.
 
 ### Change notifications
 
-Each SET emits a parameter-write notification on the notification endpoint whose offset/length identify the changed field inside the bulk wire structure (section 4). A second host UI can mirror subharm changes live and re-read the headroom (0x1A) after any of them. Solo is the exception: it has no wire offset, so it emits no notification and a second UI must poll 0x2D if it wants to show it.
+Each SET emits a parameter-write notification on the notification endpoint whose offset/length identify the changed field inside the bulk wire structure (section 4). A second host UI can mirror subharm changes live and re-read the headroom (`FX.SUBHARM_HEADROOM`) after any of them. Solo is the exception: it has no wire offset, so it emits no notification and a second UI must poll `FX.SUBHARM_SOLO` if it wants to show it.
 
 ---
 
-## 4. Bulk Wire Format (GET/SET_ALL_PARAMS 0xA0/0xA1)
+## 4. Bulk Wire Format (`STORE.ALL_PARAMS`)
 
 Subharm appears in `WireBulkParams` from **wire format version 29** as the final section. **Wire format version 30** grows the section from 16 to 36 bytes by tail-appending, taking the total packet size from 5960 to **5980 bytes**.
 
@@ -361,15 +341,15 @@ Subharm appears in `WireBulkParams` from **wire format version 29** as the final
 | +33 | 1 | uint8 | link_pairs (V30+) |
 | +34 | 2 | uint8[2] | reserved (write 0) |
 
-On bulk SET (0xA1), all subharm fields are applied and coefficients recompute automatically. On bulk GET (0xA0), the section reflects live state including clamping. Two readings are not part of the wire structure. Read the headroom with 0x1A and the sub meter with 0x1F. `solo` is deliberately absent as well, so a bulk apply never changes it.
+On a bulk SET, all subharm fields are applied and coefficients recompute automatically. On a bulk GET, the section reflects live state including clamping. Two readings are not part of the wire structure. Read the headroom with `FX.SUBHARM_HEADROOM` and the sub meter with `FX.SUBHARM_METER`. `solo` is deliberately absent as well, so a bulk apply never changes it.
 
 ---
 
 ## 5. Persistence
 
-- **Preset slots (flash):** subharm fields are stored per preset from `SLOT_DATA_VERSION` 36 (16 bytes tail-appended). Presets saved by older firmware (V21 to V35) load with subharm defaults (disabled, mask 0xFFFF, both bands 0 dB, boost 0 dB); no data is lost or misread. Preset save (0x90) captures the live state; preset load (0x91) restores it and recomputes coefficients.
+- **Preset slots (flash):** subharm fields are stored per preset from `SLOT_DATA_VERSION` 36 (16 bytes tail-appended). Presets saved by older firmware (V21 to V35) load with subharm defaults (disabled, mask 0xFFFF, both bands 0 dB, boost 0 dB); no data is lost or misread. Preset save (`STORE.PRESET_SAVE`) captures the live state; preset load (`STORE.PRESET_LOAD`) restores it and recomputes coefficients.
 - **Preset slots, V37:** the third band, the selectivity settings, the ceiling and the pair link are stored per preset from `SLOT_DATA_VERSION` 37 (a further 20 bytes tail-appended). V36 slots load the defaults for those fields (top -30 dB, mode 0, depth 100 %, hold 150 ms, ceiling 0 dB, link on). `solo` is not stored, and a preset load leaves it exactly as it was.
-- **Factory reset (0x53):** restores the defaults above, and is the only operation that clears `solo`.
+- **Factory reset (`STORE.FACTORY_RESET`):** restores the defaults above, and is the only operation that clears `solo`.
 - **Startup:** the boot preset (or factory defaults) determines the state at power-on; the effect is fully initialized before audio starts.
 
 ---
@@ -378,14 +358,14 @@ On bulk SET (0xA1), all subharm fields are applied and coefficients recompute au
 
 ### Startup / reconnect sync
 
-1. Read `GET_ALL_PARAMS` (0xA0) and parse the subharm section at offset 5944 (verify `format_version == 30` first), **or** issue the individual GETs (0x11, 0x13, 0x15, 0x17, 0x19, 0x1C, 0x1E, 0x2F, 0xAA, 0xAC, 0xAE).
-2. Read the headroom (0x1A) and show it next to the effect.
-3. Read solo (0x2D) separately; it is not in the bulk blob.
+1. Read `STORE.ALL_PARAMS` and parse the subharm section at offset 5944 (verify `format_version` first), **or** issue the individual GETs (`FX.SUBHARM_ENABLE` to `FX.SUBHARM_LINK`, commands 0x20 to 0x2A).
+2. Read the headroom (`FX.SUBHARM_HEADROOM`) and show it next to the effect.
+3. Read solo (`FX.SUBHARM_SOLO`) separately; it is not in the bulk blob.
 
 ### Live control
 
 - Sliders send SETs on change; the firmware clamps silently, so an app that enforces the documented ranges keeps identical state.
-- After any SET, re-read 0x1A. Offer a "free headroom" action that lowers the per-channel preamp (`REQ_SET_PREAMP_CH`) on the inputs feeding the masked outputs by the reported amount. Show the reading as a requirement, not a suggestion: the effect is amplitude-linear, so the number is exact.
+- After any SET, re-read `FX.SUBHARM_HEADROOM`. Offer a "free headroom" action that lowers the per-channel preamp (`ROUTE.PREAMP`) on the inputs feeding the masked outputs by the reported amount. Show the reading as a requirement, not a suggestion: the effect is amplitude-linear, so the number is exact.
 - The headroom reading does not depend on the mask or the sample rate, only on enable, the two band levels and the boost.
 
 ### Typical UI
@@ -403,7 +383,7 @@ Enable; two sliders labelled "24-36 Hz" and "36-56 Hz" (-30 to +12 dB, floor sho
 
 ### Feature detection
 
-There is no capability bit. Detect support by firmware version, by `format_version >= 29` in the bulk header, or by issuing `REQ_GET_SUBHARM` (0x11) and treating a failed control transfer as "unsupported". The parameters added at V30 need `format_version >= 30`, or the same failed-transfer probe on 0x1C.
+Every firmware that speaks the paged protocol (1.1.7 and later) has every subharm command in this document. A host that gates features on the command table checks the GET bit of `FX.SUBHARM_ENABLE` in `SYS.PAGE_COMMANDS` for page 0x08, or the FX page revision in `SYS.PAGE_LIST`. Firmware 1.1.6 and older does not answer the paged protocol (`vendor_command_overhaul_plan.md` section 5.14).
 
 ---
 
@@ -444,8 +424,8 @@ There is no capability bit. Detect support by firmware version, by `format_versi
 | State | `subharm_output_state[NUM_OUTPUT_CHANNELS]`, 160 bytes per output, owned by the core that owns the output, reset whenever the output is skipped (ceiling gain idles at unity); a fresh output is seeded from a running pair partner; skipped bands, gate, ceiling and bell keep zeroed state (the bell also while soloed); a linked pair mirrors its state into the odd output, which keeps only its own bell |
 | Pass | `subharm_process_outputs(coeffs, mask, flags, first, last, ...)` runs once per packet per core range before the per-output loop: eligibility per output, linked pairs when both outputs of an S/PDIF pair are eligible, singles otherwise, resets for the rest |
 | Dual-core | Coefficient pointer + mask + flags (link, solo) + decimation phase snapshotted once per packet into `Core1EqWork` (`subharm_coeffs` / `subharm_mask` / `subharm_flags` / `subharm_phase`) |
-| Headroom | `subharm_headroom_db()`: pure function of the config, analog-prototype magnitudes on a 37-point eighth-octave grid (16 to 362 Hz); with a ceiling, bisection on the input level for the smallest safe headroom; computed on each 0x1A GET |
+| Headroom | `subharm_headroom_db()`: pure function of the config, analog-prototype magnitudes on a 37-point eighth-octave grid (16 to 362 Hz); with a ceiling, bisection on the input level for the smallest safe headroom; computed on each `FX.SUBHARM_HEADROOM` GET |
 | Latency | Dry path untouched; the sub lags by one low-rate period (6 samples at 48 kHz) on every processed output alike; inter-slot alignment preserved by construction |
-| Versions | Vendor commands 0x10-0x1F, 0x2C-0x2F and 0xA9-0xAE; wire format V30; preset slot V37; control surfaces caps v16 (nouns 57-67; band levels to +12 dB) |
+| Versions | Vendor commands `FX.SUBHARM_*` (page 0x08, 0x20-0x2B, 0x2E, 0x2F); wire format V30; preset slot V37; control surfaces caps v16 (nouns 57-67; band levels to +12 dB) |
 | RAM | about 1.2 KB (RP2040) / 1.9 KB (RP2350) of state and coefficient buffers, plus about 3 KB of RAM-resident code |
 | Status | Implemented, verified against an offline model of the kernel (the C float kernel matches the model to 6e-7, output is bit-identical across block sizes, Q28 error about -102 dBFS); hardware listening test pending |

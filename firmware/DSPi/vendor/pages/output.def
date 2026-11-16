@@ -22,6 +22,6 @@ VC_CMD(0x32, ADAT_TX_STATUS, output_adat_tx_status_get, VC_NONE,
 #endif
 
 VC_CMD(0x40, DAC_MUTE_CONFIG, output_dac_mute_config_get, output_dac_mute_config_set,
-       NONE, 16, 16, 16, VC_F_DEFERRED | VC_F_FLASH, 0, "DAC hardware mute pin, polarity and timing")
+       NONE, 16, 16, 16, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "DAC hardware mute pin, polarity and timing")
 VC_CMD(0x41, DAC_MUTE_TEST, VC_NONE, output_dac_mute_test_set,
-       NONE, 0, 0, 0, VC_F_DEFERRED, 0, "Pulse the DAC hardware mute pin for about one second")
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_RESTART, 0, "Pulse the DAC hardware mute pin for about one second")

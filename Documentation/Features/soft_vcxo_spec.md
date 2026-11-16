@@ -1,6 +1,6 @@
 # Soft VCXO: Fractional-N System PLL Trim for Input Clock Tracking
 
-*Last updated: 2026-10-11 (clock plan read from pll_sys at init)*
+*Last updated: 2026-11-16 (clock diagnostic command renamed for the paged protocol). Previously 2026-10-11 (clock plan read from pll_sys at init)*
 *Status: implemented, merged into release/v1.1.6 through `merge/spdif-rx-overhaul` (2026-10-11); RP2350 mechanism bench-proven standalone; full-firmware behavior HW-untested; RP2040 fbdiv dithering HW-untested.*
 
 ## 1. Purpose
@@ -323,7 +323,7 @@ I2S RX 5-8, spare 9-10, VCXO 11-12, ADAT out 13-14, ADAT in 15.
   DREQ credits being cleared on channel trigger. It stays on the RP2040
   bench checklist since that platform has not been measured.
 - First full-firmware hardware capture (2026-07-22, RP2350, SPDIF input
-  48 k, 130 s via REQ_GET_CLOCK_DIAG): PLL locked throughout, measured
+  48 k, 130 s via 1.1.6 opcode 0x82, now `DIAG.CLOCK_DIAG`): PLL locked throughout, measured
   sys_clk tracks the commanded ppm 1:1, VCXO DMA/PWM loop alive, zero
   slot starvation at 192 kwords/s, input locked with zero parity errors,
   main-loop gaps under 0.5 ms. The same capture exposed the integrator

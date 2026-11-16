@@ -1,6 +1,6 @@
 # ADAT Input
 
-*Last updated: 2026-07-15*
+*Last updated: 2026-11-16 (vendor commands on the paged protocol of firmware 1.1.7)*
 
 ## Overview
 
@@ -15,7 +15,7 @@ analog-in to analog-out processor.
 | Property | Value |
 |---|---|
 | Platform | RP2350 only (RP2040 lacks the channels, PIO and DMA budget) |
-| Input source value | 3 (`INPUT_SOURCE_ADAT`, `REQ_SET_INPUT_SOURCE` 0xE0) |
+| Input source value | 3 (`INPUT_SOURCE_ADAT`, set with `INPUT.SOURCE`) |
 | Channels | 8 (input channels 0..7) |
 | Sample rates | 44.1 kHz and 48 kHz only |
 | Bit depth | 24-bit |
@@ -46,7 +46,7 @@ DSPi ADAT IN   <-  ADC/DAC box ADAT OUT  (returns at the same clock)
 Because the box locks to DSPi's ADAT output, the stream returning into the
 ADAT input is already in DSPi's own clock domain. There is no rate
 detection, no clock servo, and no drift by construction. The device is the
-sample-rate authority via `REQ_SET_INPUT_RATE` (0xED), shared with I2S
+sample-rate authority via `INPUT.I2S_RX_RATE`, shared with I2S
 master mode (same stored rate). Only 44.1/48 kHz are usable: selecting a
 higher device rate parks the input (`rate_ok = 0` in the status packet,
 outputs muted) until the rate returns to 44.1/48 kHz; this mirrors the ADAT
@@ -99,56 +99,67 @@ alignment is preserved through every ADAT event.
 
 ## Vendor commands
 
-Standard vendor EP0 conventions (also reachable over the UART and I2C
-control transports). SET payloads ride in `wValue`; SETs return one status
-byte from the shared `PIN_CONFIG_*` set (config.h): `0x00` SUCCESS, `0x01`
-INVALID_PIN, `0x02` PIN_IN_USE, `0x03` INVALID_OUTPUT, `0x05` INVALID_PARAM.
+The commands use the paged protocol of `../commands.md` and are also
+reachable over the UART and I2C control transports. Each SET carries its
+value in a 1-byte payload. There is no status byte: success is ACK, and a
+refused SET STALLs with a result code readable from `SYS.LAST_RESULT` (UART
+and I2C return the code in the response status byte). All four commands are
+RP2350 only.
 
-| Command | ID | Direction | wValue | Response |
-|---|---|---|---|---|
-| `REQ_SET_ADAT_INPUT_ENABLE` | 0x68 | SET | 0 = disable, 1 = enable | 1 status byte |
-| `REQ_GET_ADAT_INPUT_ENABLE` | 0x69 | GET | - | 1 byte: enable (0/1) |
-| `REQ_SET_ADAT_INPUT_PIN` | 0x6A | SET | GPIO, or 0xFF to clear | 1 status byte |
-| `REQ_GET_ADAT_INPUT_PIN` | 0x6B | GET | - | 1 byte: GPIO (0xFF = unset) |
-| `REQ_SET_ADAT_INPUT_CLOCK_MODE` | 0x6C | SET | 0 = master, 1 = slave | 1 status byte |
-| `REQ_GET_ADAT_INPUT_CLOCK_MODE` | 0x6D | GET | - | 1 byte: live mode (0/1) |
-| `REQ_GET_ADAT_INPUT_STATUS` | 0x6E | GET | - | 20-byte `AdatInputStatusPacket` |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `INPUT.ADAT_RX_ENABLE` | 0x03 | 0x40 | GET, SET | none (0) | GET 1, SET 1 | 0 = disable, 1 = enable |
+| `INPUT.ADAT_RX_PIN` | 0x03 | 0x41 | GET, SET | none (0) | GET 1, SET 1 | GPIO, or 0xFF to clear. GET 0xFF = unset |
+| `INPUT.ADAT_RX_CLOCK_MODE` | 0x03 | 0x42 | GET, SET | none (0) | GET 1, SET 1 | 0 = master, 1 = slave. GET returns the live mode |
+| `INPUT.ADAT_RX_STATUS` | 0x03 | 0x43 | GET | none (0) | GET 20 | `AdatInputStatusPacket` |
 
-0x6F is reserved for future ADAT-input use. Source selection itself is the
-existing `REQ_SET_INPUT_SOURCE` (0xE0) with value 3.
+| Result | Meaning |
+|---|---|
+| `VC_ERR_PIN_INVALID` | GPIO not usable for ADAT input, or enable with no pin set |
+| `VC_ERR_PIN_IN_USE` | GPIO owned by another function |
+| `VC_ERR_STATE` | Disable while ADAT is the live or pending source, or clear the pin while enabled |
+| `VC_ERR_VALUE` | Enable or clock mode above 1 |
+| `VC_ERR_UNKNOWN` | RP2040: the commands do not exist |
+
+Commands 0x44-0x4F of the INPUT page are free for future ADAT input use.
+Source selection itself is `INPUT.SOURCE` with value 3.
 
 Behavioral notes:
 
-- Order matters: set the pin (0x6A) BEFORE enabling (0x68). Enabling with no
-  pin returns INVALID_PIN. Selecting source 3 while disabled or pin-less is
-  consumed as a no-op by the switch handler.
-- `0x6A` validates the GPIO and rejects conflicts with any owned pin
-  (PIN_IN_USE), with one deliberate exception: the pin MAY equal the ADAT
+- Order matters: set the pin (`INPUT.ADAT_RX_PIN`) BEFORE enabling
+  (`INPUT.ADAT_RX_ENABLE`). Enabling with no pin returns `VC_ERR_PIN_INVALID`.
+  Selecting source 3 while disabled or pin-less is refused by `INPUT.SOURCE`
+  with `VC_ERR_STATE`.
+- `INPUT.ADAT_RX_PIN` validates the GPIO and rejects conflicts with any owned
+  pin (`VC_ERR_PIN_IN_USE`), with one deliberate exception: the pin MAY equal the ADAT
   output's pin. The receiver only listens (input-enable, never drives), so
   jumpering or simply sharing the TX GPIO is the supported zero-hardware
   loopback self-test (see below). Setting the current pin again is a no-op
-  success. `0xFF` (clear) is accepted only while disabled. If ADAT is the
+  success. `0xFF` (clear) is accepted only while disabled, and is
+  `VC_ERR_STATE` otherwise. If ADAT is the
   live source, a pin change re-routes under a brief muted restart.
-- `0x68` disable is REFUSED (PIN_IN_USE) while ADAT is the active source or
+- Disable through `INPUT.ADAT_RX_ENABLE` is REFUSED (`VC_ERR_STATE`) while ADAT is the active source or
   the target of a pending source switch; switch away first. Enable
   re-validates the stored pin.
-- `0x6C` is deferred: the main loop applies it, instantly when ADAT is not
-  the active source, or under a muted receiver restart when it is. `0x6D`
-  reports the LIVE mode, so a just-sent change may read back stale for a few
+- An `INPUT.ADAT_RX_CLOCK_MODE` SET is deferred: the main loop applies it,
+  instantly when ADAT is not the active source, or under a muted receiver
+  restart when it is. The GET reports the LIVE mode, so a just-sent change may read back stale for a few
   milliseconds; the apply emits the PARAM_CHANGED notify for the wire field.
 - While ADAT input is enabled its GPIO counts as owned: other pin-assignment
-  commands reject it with PIN_IN_USE (the ADAT output keeps its own claim;
+  commands reject it with `VC_ERR_PIN_IN_USE` (the ADAT output keeps its own claim;
   the sharing exception is one-directional, input onto output).
-- Rate selection in master mode uses the existing `REQ_SET_INPUT_RATE`
-  (0xED) / `REQ_GET_INPUT_RATE` (0xEE), the same stored rate I2S master mode
-  uses. 96000 is accepted by 0xED but parks the ADAT input (`rate_ok = 0`);
-  hosts should grey out 96 kHz while source 3 is active in master mode.
-  In slave mode 0xED is ignored for ADAT (the wire rate is the authority).
-- On RP2040: 0x68/0x6A SETs return INVALID_OUTPUT, 0x6E returns 20 zero
-  bytes; 0x69/0x6B/0x6D GETs and 0x6C SET still round-trip the stored config
-  so presets and bulk pushes behave identically on both platforms.
+- Rate selection in master mode uses `INPUT.I2S_RX_RATE`, the same stored
+  rate I2S master mode uses. 96000 is accepted but parks the ADAT input
+  (`rate_ok = 0`); hosts should grey out 96 kHz while source 3 is active in
+  master mode. In slave mode the SET only stores the rate and does not apply
+  it to ADAT (the wire rate is the authority).
+- On RP2040 the four ADAT input commands do not exist and answer
+  `VC_ERR_UNKNOWN`, and `INPUT.SOURCE` refuses source 3 with
+  `VC_ERR_UNSUPPORTED`. 1.1.6 still round-tripped the stored clock mode
+  there. Presets and bulk params carry the stored fields on both platforms
+  as before.
 
-### `AdatInputStatusPacket` (REQ_GET_ADAT_INPUT_STATUS, 20 bytes, packed, little-endian)
+### `AdatInputStatusPacket` (`INPUT.ADAT_RX_STATUS`, 20 bytes, packed, little-endian)
 
 | Offset | Type | Field | Meaning |
 |---|---|---|---|
@@ -182,10 +193,10 @@ signal dropouts or a rate change upstream.
 ```
 
 Apps that track ADAT input state should consume this instead of polling
-0x6E. Config changes (enable/pin/clock mode) additionally produce the usual
+`INPUT.ADAT_RX_STATUS`. Config changes (enable/pin/clock mode) additionally produce the usual
 `PARAM_CHANGED` events for the `WireInputConfig` fields below.
 
-## Bulk params (REQ_GET/SET_ALL_PARAMS)
+## Bulk params (`STORE.ALL_PARAMS`)
 
 `WIRE_FORMAT_VERSION` is **24** (was 23). The three fields claim reserved
 bytes of `WireInputConfig` (Section 15), so the total wire size is unchanged
@@ -200,7 +211,8 @@ zeros pushed by an old host change nothing:
 
 Apply validates the pin (invalid or conflicting pins keep the live value;
 the ADAT-output-pin sharing exception applies), refuses to disable the live
-source, and routes the clock mode through the same deferred apply as 0x6C.
+source, and routes the clock mode through the same deferred apply as
+`INPUT.ADAT_RX_CLOCK_MODE`.
 
 ## Persistence
 
@@ -220,21 +232,23 @@ Same dual-layer model as the other physical IO config:
 
 ### Bring-up (typical, master mode with an ADA8200-class box)
 
-1. `REQ_SET_ADAT_INPUT_PIN` (0x6A) with the wired GPIO; check status.
-2. `REQ_SET_ADAT_INPUT_CLOCK_MODE` (0x6C) wValue 0 (master; the default).
-3. Configure the ADAT OUTPUT (0xCA/0xCC, see adat_output_spec.md) and
-   connect it to the box's ADAT input; set the box to sync to ADAT.
-4. `REQ_SET_ADAT_INPUT_ENABLE` (0x68) wValue 1; check status.
-5. `REQ_SET_INPUT_SOURCE` (0xE0) wValue 3.
+1. `INPUT.ADAT_RX_PIN` with the wired GPIO. A STALL means it was refused.
+2. `INPUT.ADAT_RX_CLOCK_MODE` with payload 0 (master, the default).
+3. Configure the ADAT OUTPUT (`OUTPUT.ADAT_TX_PIN`, `OUTPUT.ADAT_TX_ENABLE`,
+   see adat_output_spec.md) and connect it to the box's ADAT input; set the
+   box to sync to ADAT.
+4. `INPUT.ADAT_RX_ENABLE` with payload 1. A STALL means it was refused.
+5. `INPUT.SOURCE` with payload 3.
 6. Wait for `NOTIFY_EVT_ADAT_INPUT_STATE` with state 3 (LOCKED), or poll
-   0x6E. Audio flows once the prefill completes (milliseconds after lock).
-7. Route the 8 input channels through the matrix (`REQ_SET_MATRIX_ROUTE`
-   0x70) as with 8-channel USB; per-input PEQ and metering work unchanged.
+   `INPUT.ADAT_RX_STATUS`. Audio flows once the prefill completes
+   (milliseconds after lock).
+7. Route the 8 input channels through the matrix (`ROUTE.MATRIX_ROUTE`)
+   as with 8-channel USB; per-input PEQ and metering work unchanged.
 8. Persist by saving the preset.
 
 ### Slave mode (DSPi hangs off an interface's ADAT out)
 
-Same flow with 0x6C wValue 1. After selecting the source, the device
+Same flow with `INPUT.ADAT_RX_CLOCK_MODE` payload 1. After selecting the source, the device
 detects the wire rate (well under a second), retunes the pipeline if
 needed, locks, and servoes all outputs to the external clock. Rate changes
 at the source are followed automatically (brief mute + relock). Unplugging
@@ -246,12 +260,13 @@ automatically.
 Because the RX pin may equal the ADAT output pin, a board with ADAT output
 enabled can validate the entire input path with no cabling:
 
-1. Enable ADAT output (0xCA) on its pin.
-2. Set the ADAT input pin (0x6A) to THE SAME GPIO; enable (0x68); master
+1. Enable ADAT output (`OUTPUT.ADAT_TX_ENABLE`) on its pin.
+2. Set the ADAT input pin (`INPUT.ADAT_RX_PIN`) to THE SAME GPIO; enable
+   (`INPUT.ADAT_RX_ENABLE`); master
    mode; select source 3.
 3. The receiver locks onto the device's own transmitted frames. Play audio
    into the outputs (USB is not the source, so use the signal generator,
-   cmds 0xA4-0xA8, injected on output channels) and observe the input
+   `MEAS.SIGGEN_CONFIG` and `MEAS.SIGGEN_START`, injected on output channels) and observe the input
    meters; assert state LOCKED, `header_err` static, `slip_count` 0.
 
 The same test with a physical jumper between two GPIOs exercises real pad
@@ -261,15 +276,15 @@ the clock).
 
 ### Detection / capability probing
 
-Treat 0x68 returning INVALID_OUTPUT (or the platform ID = RP2040) as "ADAT
-input unavailable". There is no free default GPIO, so a host UI must always
+Treat a missing `INPUT.ADAT_RX_ENABLE` bit in `SYS.PAGE_COMMANDS` for page
+0x03 (or the platform ID = RP2040) as "ADAT input unavailable". There is no free default GPIO, so a host UI must always
 collect a pin from the user before offering enable.
 
 ### Channel names and metering
 
 While source 3 is active the default input channel names are "ADAT 1" ..
-"ADAT 8" (custom names persist as usual). Input metering (`REQ_GET_METERING`
-family) covers all 8 channels, which is what the loopback self-test reads to
+"ADAT 8" (custom names persist as usual). Input metering (`MEAS.LEVELS`)
+covers all 8 channels, which is what the loopback self-test reads to
 verify channel ordering end to end.
 
 ## Signal path and latency

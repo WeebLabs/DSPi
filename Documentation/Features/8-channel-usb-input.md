@@ -1,6 +1,6 @@
 # Multichannel USB Input — App Developer Integration Guide
 
-*Last updated: 2026-10-17*
+*Last updated: 2026-11-16 (sections 3, 4, 6, 7 and 10 to 15: vendor commands on the paged protocol of firmware 1.1.7)*
 
 > **Updated for the unified channel model (firmware wire V16 / slot V21).** Three things
 > changed from the original 8-channel-only design and supersede older framing anywhere in this
@@ -106,12 +106,16 @@ macOS/Linux.
   `{9D9B8609-E6D1-4FF0-92AF-403119CB7692}` (SetupDiGetClassDevs → WinUsb_Initialize). On
   macOS/Linux use libusb by VID/PID and claim interface 2.
 - **Every control transfer:**
-  - `bmRequestType` = `0x40` for SET (host→device, OUT) or `0xC0` for GET (device→host, IN).
-    (Bit layout: direction | vendor(0x20) | device-recipient.)
-  - `bRequest` = the command code (Section 7).
-  - `wValue` = command-specific (often a channel/output index, or an encoded field).
-  - `wIndex` = `2` (the vendor interface number).
-  - `wLength` / data = the payload.
+  - `bmRequestType` = `0x41` for SET (host→device, OUT) or `0xC1` for GET (device→host, IN).
+    (Bit layout: direction | vendor(0x20) | interface-recipient.)
+  - `bRequest` = the command number within its page (Section 7).
+  - `wValue` = the address only (a channel, output, slot or band), or 0.
+  - `wIndex` = `(page << 8) | 2`. The high byte is the page, the low byte the vendor
+    interface number.
+  - `wLength` / data = the payload. Values always travel in the payload.
+- **Paged protocol.** This is the protocol of firmware 1.1.7 and later (`../commands.md`).
+  One command serves both directions, and the transfer direction selects GET or SET. A refused
+  SET STALLs, and `SYS.LAST_RESULT` gives the reason.
 - **All multi-byte values are little-endian.** All `float` are IEEE-754 single precision.
 - **dB convention:** the device converts dB → linear as `linear = 10^(dB/20)`.
 
@@ -124,10 +128,10 @@ macOS/Linux.
 
 Before showing any 8-channel UI, confirm the connected device supports it. The authoritative
 signal is the **bulk-params header** (Section 8): read the full state once with
-`REQ_GET_ALL_PARAMS` (0xA0) and inspect the 16-byte header.
+`STORE.ALL_PARAMS` (GET) and inspect the 16-byte header.
 
 ```
-struct WireHeader {            // first 16 bytes of the GET_ALL_PARAMS response
+struct WireHeader {            // first 16 bytes of the STORE.ALL_PARAMS reply
   u8  format_version;          // 16 == this firmware (unified channel model)
   u8  platform_id;             // 0 = RP2040, 1 = RP2350
   u8  num_channels;            // 7 (RP2040) or 17 (RP2350)
@@ -160,7 +164,7 @@ read presets.
 If false, show your existing stereo UI (2 matrix inputs). If true, show 8 matrix inputs and the
 8-channel features below.
 
-You can also call `REQ_GET_PLATFORM` (0x7F) for a platform string, but the header fields above
+You can also read `SYS.PLATFORM` for the platform and firmware version, but the header fields above
 are the canonical machine-readable capability check.
 
 ---
@@ -222,20 +226,20 @@ or `+8` — read `num_input_channels` from the bulk header and use it as `CH_OUT
 ## 6. Signal flow in multichannel mode
 
 ```
-USB ch0..N-1 ─► per-input preamp (0xD0) ─► per-input EQ + meter ─► ┌────────────────────┐
-                                            (0x42, ch 0..N-1;      │  MATRIX MIXER 8×9   │
+USB ch0..N-1 ─► per-input preamp        ─► per-input EQ + meter ─► ┌────────────────────┐
+                (ROUTE.PREAMP)              (FILTER.BAND ch 0..N-1;│  MATRIX MIXER 8×9   │
                                              peaks/clip per input) │  crosspoint[in][out]│
                                                                    │  gain + phase       │
                                                                    └─────────┬──────────┘
                                                         │ (per output)
                                        ┌────────────────┼───────────────┐
                                        ▼                ▼               ▼
-                                  Output EQ (0x42)  Output gain    Output delay
-                                  + crossover       (0x74)         (0x78)
+                                  Output EQ         Output gain    Output delay
+                                  + crossover       (OUTPUT_GAIN)  (OUTPUT_DELAY)
                                        │                │               │
                                        └────────────────┴───────────────┘
                                                         ▼
-                                              Mute (0x76) + master volume
+                                              Mute (OUTPUT_MUTE) + master volume
                                                         ▼
                                           S/PDIF 1-4 (8 ch) + PDM sub
 ```
@@ -250,67 +254,72 @@ channels 0/1 is exactly what older firmware called "master EQ".)
 
 ## 7. The commands you need
 
-All on interface 2 (`wIndex = 2`). `dir` is the `bmRequestType`: `OUT`=0x40, `IN`=0xC0.
+Every command is a paged command on interface 2 (Section 3). The tables give the page and
+command number. `Dir` says which directions the command answers. A SET that is refused STALLs,
+and `SYS.LAST_RESULT` gives the reason.
 
 ### Capability & whole-state
-| Code | Name | dir | wValue | Data | Notes |
-|---|---|---|---|---|---|
-| 0xA0 | `REQ_GET_ALL_PARAMS` | IN | 0 | 5864 B `WireBulkParams` (V16) | Read everything (Section 8) |
-| 0xA1 | `REQ_SET_ALL_PARAMS` | OUT | 0 | 5864 B `WireBulkParams` (V16) | Write everything (Section 8) |
-| 0x7F | `REQ_GET_PLATFORM` | IN | 0 | platform info | Optional; header is canonical |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | `WireBulkParams`, read or write everything (Section 8). 6136 bytes is the current V32 layout. This guide describes V16 (5864 bytes) |
+| `SYS.PLATFORM` | 0x01 | 0x20 | GET | none (0) | GET 7 | Optional; header is canonical |
 
 ### Matrix routing (inputs 0-7 on RP2350)
-| Code | Name | dir | wValue | Data | Notes |
-|---|---|---|---|---|---|
-| 0x70 | `REQ_SET_MATRIX_ROUTE` | OUT | 0 | 9 B `MatrixRoutePacket` | One crosspoint |
-| 0x71 | `REQ_GET_MATRIX_ROUTE` | IN | `(input<<8)\|output` | 9 B `MatrixRoutePacket` | One crosspoint |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(input << 8) \| output` | GET 8, SET 8 | One crosspoint |
 
-`MatrixRoutePacket` (9 bytes): `u8 input` (0-7), `u8 output` (0-8), `u8 enabled`,
-`u8 phase_invert`, `float gain_db` (-60..+12). **The only change for 8 channels: `input` may be
-0-7** (was 0-1). Out-of-range indices are silently ignored.
+The crosspoint payload (8 bytes, both directions): `u8 enabled`, `u8 phase_invert`,
+`u16 reserved`, `float gain_db` (-60..+12). The input and output are in `wValue`, not in the
+payload. **The only change for 8 channels: `input` may be 0-7** (was 0-1). An out-of-range
+input or output STALLs with `VC_ERR_ADDRESS`, and a NaN or infinite gain with `VC_ERR_VALUE`.
 
 ### Per-input preamp (channels 0-7 on RP2350)
-| Code | Name | dir | wValue | Data | Notes |
-|---|---|---|---|---|---|
-| 0xD0 | `REQ_SET_PREAMP_CH` | OUT | channel (0-7) | `float` dB | Per-input gain |
-| 0xD1 | `REQ_GET_PREAMP_CH` | IN | channel (0-7) | `float` dB | |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.PREAMP` | 0x05 | 0x40 | GET, SET | input channel (0-7) | GET 4, SET 4 | `float` dB, per-input gain |
 
 ### Per-output controls (output 0-8)
-| Code | Name | dir | wValue | Data |
-|---|---|---|---|---|
-| 0x72 / 0x73 | SET/GET `OUTPUT_ENABLE` | OUT/IN | output | `u8` 0/1 |
-| 0x74 / 0x75 | SET/GET `OUTPUT_GAIN` | OUT/IN | output | `float` dB (-60..+12) |
-| 0x76 / 0x77 | SET/GET `OUTPUT_MUTE` | OUT/IN | output | `u8` 0/1 |
-| 0x78 / 0x79 | SET/GET `OUTPUT_DELAY` | OUT/IN | output | `float` ms (0..170 RP2350) |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `ROUTE.OUTPUT_ENABLE` | 0x05 | 0x20 | GET, SET | output | GET 1, SET 1 | `u8` 0/1 |
+| `ROUTE.OUTPUT_GAIN` | 0x05 | 0x21 | GET, SET | output | GET 4, SET 4 | `float` dB (-60..+12) |
+| `ROUTE.OUTPUT_MUTE` | 0x05 | 0x22 | GET, SET | output | GET 1, SET 1 | `u8` 0/1 |
+| `ROUTE.OUTPUT_DELAY` | 0x05 | 0x23 | GET, SET | output | GET 4, SET 4 | `float` ms (0..170 RP2350) |
 
 ### Per-input AND per-output EQ (same command; channel = the EQ index)
-| Code | Name | dir | wValue | Data |
-|---|---|---|---|---|
-| 0x42 | `REQ_SET_EQ_PARAM` | OUT | 0 | 16 B `EqParamPacket` |
-| 0x43 | `REQ_GET_EQ_PARAM` | IN | `(channel<<8)\|(band<<4)\|param` | 4 B |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | One whole band, same layout both ways |
 
-`EqParamPacket` (16 bytes): `u8 channel`, `u8 band` (0-9), `u8 type`, `u8 reserved=0`,
-`float freq`, `float Q`, `float gain_db`. The **channel** field is the unified channel index:
+Band payload (16 bytes): `u8 type`, `u8 bypass`, `u16 qp_x512`, `float freq`, `float Q`,
+`float gain_db`. Always send `qp_x512` (it only matters for the Linkwitz transform). The
+**channel** in `wValue` is the unified channel index:
 
 - **Input EQ:** `channel` = input index `0..N-1` (the active inputs). Same command, no new
-  opcode — inputs are just channels now. (Crossover commands are rejected for input channels.)
+  command. Inputs are just channels now. (A crossover band on an input channel STALLs with
+  `VC_ERR_ADDRESS`.)
 - **Output EQ:** `channel` = `output + CH_OUT_1` (= `output + 8` on RP2350, `+2` on RP2040).
 
 ### 7.7 Live active-input count + per-input metering (status)
-| Code | Name | dir | wValue | Data |
-|---|---|---|---|---|
-| 0x30 | `REQ_GET_STATUS` | IN | 9 | combined status packet (see below) |
-| 0x30 | `REQ_GET_STATUS` | IN | 23 | `u32` active input channel count (2/4/6/8) |
-| 0x31 | `REQ_CLEAR_CLIPS` | IN | 0 | `u32` cleared clip flags |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | none (0) | GET var | Combined meter packet (see below), `2 * NUM_CHANNELS + 7` bytes |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | none (0) | GET 12 | `u8` active input channel count (2/4/6/8) at offset 1 |
+| `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | GET | none (0) | GET 4 | `u32` clip flags. Reading does not clear them |
+| `MEAS.CLIP_CLEAR` | 0x09 | 0x12 | SET (zero-length) | none (0) | SET 0 | Clears the clip flags |
 
-The **combined status packet** (`wValue=9`) is what you poll for meters; it now also carries the
+The **combined meter packet** (`MEAS.LEVELS`) is what you poll for meters; it also carries the
 active input count:
-- `peaks[NUM_CHANNELS]` — `u16` each (channel-indexed; inputs `0..N-1` then outputs). Inactive
+- `peaks[NUM_CHANNELS]`: `u16` each (channel-indexed; inputs `0..N-1` then outputs). Inactive
   inputs read 0.
 - `u8 cpu0_load`, `u8 cpu1_load`
-- `u32 clip_flags` — **4 bytes** (one bit per channel; bit `ch` set = that channel clipped).
-- `u8 active_input_channels` — the live count (2/4/6/8). **Use this to lay out your mixer/
+- `u32 clip_flags`: **4 bytes** (one bit per channel; bit `ch` set = that channel clipped).
+- `u8 active_input_channels`: the live count (2/4/6/8). **Use this to lay out your mixer/
   sidebar** (show exactly this many input strips).
+
+A clip that lands between a `MEAS.CLIP_FLAGS` read and a `MEAS.CLIP_CLEAR` is lost. 1.1.6 read
+and cleared in one request.
 
 **Push notification.** When the host switches the audio format (alt), the device sends a
 `NOTIFY_EVT_INPUT_FORMAT` (0x05) event on the notification endpoint:
@@ -318,10 +327,10 @@ active input count:
 immediately rather than waiting for the next status poll.
 
 ### Persistence
-| Code | Name | dir | wValue | Data |
-|---|---|---|---|---|
-| 0x90 | `REQ_PRESET_SAVE` | IN | slot (0-9) | result byte |
-| 0x91 | `REQ_PRESET_LOAD` | IN | slot (0-9) | result byte |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `STORE.PRESET_SAVE` | 0x02 | 0x10 | SET (zero-length) | slot (0-9) | SET 0 | ACK on success, STALL with the reason |
+| `STORE.PRESET_LOAD` | 0x02 | 0x11 | SET (zero-length) | slot (0-9) | SET 0 | ACK on success, STALL with the reason |
 
 > There are many more commands (loudness, crossfeed, leveller, input source, I2S, etc.). They
 > are unchanged by this feature and are documented in their own specs. For multichannel work you
@@ -334,10 +343,10 @@ immediately rather than waiting for the next status poll.
 For anything beyond a single tweak, use the **bulk parameter transfer** rather than dozens of
 small commands. It moves the entire DSP state in one control transfer.
 
-- **GET** (`0xA0`, dir IN): the device returns a `WireBulkParams` (**5864 bytes for V16** —
+- **GET** (`STORE.ALL_PARAMS`, dir IN): the device returns a `WireBulkParams` (**5864 bytes for V16**;
   always trust `header.payload_length`). Read this on connect, parse the header, then parse the
   sections you care about.
-- **SET** (`0xA1`, dir OUT): you send a full `WireBulkParams`. V16 is **all-or-nothing**: the
+- **SET** (`STORE.ALL_PARAMS`, dir OUT): you send a full `WireBulkParams`. V16 is **all-or-nothing**: the
   firmware accepts the payload only when it matches exactly, so you MUST send a complete V16
   packet:
   - `header.format_version = 16`
@@ -423,7 +432,7 @@ parsing and bulk parsing use the same math. The `eq` channel index is the unifie
 ## 10. Step-by-step
 
 ### A. On connect
-1. `REQ_GET_ALL_PARAMS` (0xA0) → parse `WireHeader`.
+1. `STORE.ALL_PARAMS` (GET) → parse `WireHeader`.
 2. Compute `supports_8ch_input` (Section 4). Cache it.
 3. Parse `outputs[9]`, `eq[][]`, `crosspoints[2][9]`, and (if 8ch) `input_ext` into your model.
 
@@ -433,9 +442,10 @@ parsing and bulk parsing use the same math. The `eq` channel index is the unifie
 - Each cell = a crosspoint: enabled toggle, gain (dB), phase invert.
 
 ### C. Apply a change
-- **Single tweak:** `REQ_SET_MATRIX_ROUTE` (0x70) with a `MatrixRoutePacket` (input 0-7).
+- **Single tweak:** `ROUTE.MATRIX_ROUTE` (SET) with `wValue = (input << 8) | output` (input 0-7)
+  and the 8-byte crosspoint payload.
 - **Bulk apply:** mutate your local `WireBulkParams`, set `format_version=16`,
-  `payload_length=5864`, `REQ_SET_ALL_PARAMS` (0xA1) with all 5864 bytes.
+  `payload_length=5864`, `STORE.ALL_PARAMS` (SET) with all 5864 bytes.
 
 ### D. Offer a "1:1" default for newcomers
 The device's factory routing is **stereo only** (FL→S/PDIF1 L, FR→S/PDIF1 R). It does **not**
@@ -444,26 +454,26 @@ S/PDIF 1. Give users a one-click "1:1 / direct" button that routes input *i* →
 i=0..7. (See recipe 11.1.)
 
 ### E. Per-output DSP
-For each of outputs 0-7 (the 8 speaker channels), expose EQ (channels 2-9), gain (0x74),
-delay (0x78), mute (0x76). Output 8 is the PDM sub (EQ channel 10).
+For each of outputs 0-7 (the 8 speaker channels), expose EQ (channels 2-9), gain
+(`ROUTE.OUTPUT_GAIN`), delay (`ROUTE.OUTPUT_DELAY`), mute (`ROUTE.OUTPUT_MUTE`). Output 8 is the PDM sub (EQ channel 10).
 
 ### F. Save
-`REQ_PRESET_SAVE` (0x90) with the target slot in `wValue`. The 8-channel routing + preamp are
+`STORE.PRESET_SAVE` (a zero-length SET) with the target slot in `wValue`. The 8-channel routing + preamp are
 persisted (the device stores them in its flash preset, V20).
 
 ---
 
 ## 11. Worked routing recipes
 
-Each recipe = a set of crosspoints + output enables. Send via `REQ_SET_MATRIX_ROUTE` per cell,
+Each recipe = a set of crosspoints + output enables. Send via `ROUTE.MATRIX_ROUTE` per cell,
 or build them into a bulk SET.
 
 ### 11.1 Direct 1:1 (8-in → 8-out)
 ```
 for i in 0..7:
-    SET_MATRIX_ROUTE { input=i, output=i, enabled=1, phase_invert=0, gain_db=0 }
-    SET_OUTPUT_ENABLE(output=i, 1)
-SET_OUTPUT_ENABLE(output=8, 0)   // PDM off unless you want a sub
+    SET ROUTE.MATRIX_ROUTE(wValue=(i << 8) | i) { enabled=1, phase_invert=0, gain_db=0 }
+    SET ROUTE.OUTPUT_ENABLE(wValue=i) { 1 }
+SET ROUTE.OUTPUT_ENABLE(wValue=8) { 0 }   // PDM off unless you want a sub
 ```
 FL→S/PDIF1L, FR→S/PDIF1R, FC→S/PDIF2L, LFE→S/PDIF2R, BL→S/PDIF3L, BR→S/PDIF3R, SL→S/PDIF4L,
 SR→S/PDIF4R.
@@ -497,8 +507,8 @@ FR(1)→Out1, FC(2)→Out1(-3dB), BR(5)→Out1(-3dB), SR(7)→Out1(-3dB)
 
 ## 12. Persistence (presets)
 
-- The device has 10 preset slots (0-9). `REQ_PRESET_SAVE`(0x90, wValue=slot) /
-  `REQ_PRESET_LOAD`(0x91, wValue=slot) capture the **full** DSP state, including the matrix,
+- The device has 10 preset slots (0-9). `STORE.PRESET_SAVE` (wValue=slot) /
+  `STORE.PRESET_LOAD` (wValue=slot) capture the **full** DSP state, including the matrix,
   per-input preamp, and **per-input EQ** (stored in flash slot format **V21**; the slot spans 2
   flash sectors on RP2350).
 - **No migration.** A slot saved by pre-V21 firmware fails validation and loads **factory
@@ -543,10 +553,10 @@ Compatibility is **intentionally broken at V16/V21** — there is no forward/bac
 - **"Which input is which?"** USB channel order is 7.1 (FL FR FC LFE BL BR SL SR) =
   matrix inputs / EQ channels 0-7 (Section 5).
 - **"Can I EQ and meter the inputs?"** Yes — that's new. Each active input is EQ channel `0..N-1`
-  (`REQ_SET_EQ_PARAM`), and the status packet reports its peak/clip (`peaks[0..N-1]`,
+  (`FILTER.BAND`), and the meter packet reports its peak/clip (`peaks[0..N-1]`,
   `clip_flags`). Inputs ≥ active count are inert.
 - **"Do I name the inputs?"** Inputs 0..7 now have channel-name storage like outputs (defaults
-  "USB L/R", "USB 3".."USB 8"); set them with the channel-name commands or label in your UI.
+  "USB L/R", "USB 3".."USB 8"); set them with `ROUTE.CHANNEL_NAME` or label in your UI.
 - **Buffer size:** allocate 8192 bytes for bulk transfers even though V16 is 5864 — matches the
   device buffer and leaves room for growth.
 - **macOS/Windows host channel mapping** can reorder channels per the OS's speaker layout. Test
@@ -557,24 +567,23 @@ Compatibility is **intentionally broken at V16/V21** — there is no forward/bac
 ## 15. Quick reference tables
 
 ### Commands for multichannel work
-| Code | Name | dir | wValue | Data |
-|---|---|---|---|---|
-| 0xA0 | GET_ALL_PARAMS | IN | 0 | 5864 B WireBulkParams (V16) |
-| 0xA1 | SET_ALL_PARAMS | OUT | 0 | 5864 B WireBulkParams (V16) |
-| 0x30 | GET_STATUS | IN | 9 / 23 | combined status / active input count |
-| 0x31 | CLEAR_CLIPS | IN | 0 | u32 cleared clip flags |
-| 0x70 | SET_MATRIX_ROUTE | OUT | 0 | 9 B (input 0-7) |
-| 0x71 | GET_MATRIX_ROUTE | IN | (in<<8)\|out | 9 B |
-| 0xD0 | SET_PREAMP_CH | OUT | ch 0-7 | float dB |
-| 0xD1 | GET_PREAMP_CH | IN | ch 0-7 | float dB |
-| 0x72/73 | SET/GET_OUTPUT_ENABLE | OUT/IN | out 0-8 | u8 |
-| 0x74/75 | SET/GET_OUTPUT_GAIN | OUT/IN | out 0-8 | float dB |
-| 0x76/77 | SET/GET_OUTPUT_MUTE | OUT/IN | out 0-8 | u8 |
-| 0x78/79 | SET/GET_OUTPUT_DELAY | OUT/IN | out 0-8 | float ms |
-| 0x42 | SET_EQ_PARAM | OUT | 0 | 16 B (ch = input 0-7 or output+8) |
-| 0x43 | GET_EQ_PARAM | IN | encoded | 4 B |
-| 0x90/91 | PRESET_SAVE/LOAD | IN | slot 0-9 | result byte |
-| 0x7F | GET_PLATFORM | IN | 0 | platform info |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | 0 | GET 6136, SET 6136 | WireBulkParams (V32 today. This guide describes V16) |
+| `MEAS.LEVELS` | 0x09 | 0x10 | GET | 0 | GET var | combined meter packet |
+| `INPUT.STATUS` | 0x03 | 0x11 | GET | 0 | GET 12 | active input count at offset 1 |
+| `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | GET | 0 | GET 4 | u32 clip flags, not cleared |
+| `MEAS.CLIP_CLEAR` | 0x09 | 0x12 | SET (zero-length) | 0 | SET 0 | clear clip flags |
+| `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | (in<<8)\|out | GET 8, SET 8 | one crosspoint (input 0-7) |
+| `ROUTE.PREAMP` | 0x05 | 0x40 | GET, SET | ch 0-7 | GET 4, SET 4 | float dB |
+| `ROUTE.OUTPUT_ENABLE` | 0x05 | 0x20 | GET, SET | out 0-8 | GET 1, SET 1 | u8 |
+| `ROUTE.OUTPUT_GAIN` | 0x05 | 0x21 | GET, SET | out 0-8 | GET 4, SET 4 | float dB |
+| `ROUTE.OUTPUT_MUTE` | 0x05 | 0x22 | GET, SET | out 0-8 | GET 1, SET 1 | u8 |
+| `ROUTE.OUTPUT_DELAY` | 0x05 | 0x23 | GET, SET | out 0-8 | GET 4, SET 4 | float ms |
+| `FILTER.BAND` | 0x06 | 0x10 | GET, SET | (ch<<8)\|band | GET 16, SET 16 | ch = input 0-7 or output+8 |
+| `STORE.PRESET_SAVE` | 0x02 | 0x10 | SET (zero-length) | slot 0-9 | SET 0 | |
+| `STORE.PRESET_LOAD` | 0x02 | 0x11 | SET (zero-length) | slot 0-9 | SET 0 | |
+| `SYS.PLATFORM` | 0x01 | 0x20 | GET | 0 | GET 7 | platform info |
 
 ### Data types
 | Type | Size | Range |

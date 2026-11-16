@@ -1,5 +1,7 @@
 # Loudness Compensation Specification
 
+*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7)*
+
 ## 1. Overview
 
 Loudness Compensation counteracts the ear's loss of bass and treble sensitivity at low listening levels. Human hearing is not flat: as playback volume drops, perceived low-frequency and high-frequency content falls away faster than the midrange (the ISO 226:2003 equal-loudness contours). This feature applies a volume-keyed pair of shelving filters that boost the spectral extremes by exactly the amount the contours predict, so a mix turned down for late-night listening keeps its perceived tonal balance.
@@ -105,7 +107,7 @@ The firmware precomputes filter coefficients for all 61 user-volume steps (`inde
 - Recomputes are deferred to the main loop (`loudness_recompute_pending`) and are triggered by: boot, `SET_LOUDNESS_REF`, `SET_LOUDNESS_INTENSITY`, sample-rate change, preset load, bulk-parameter apply, and factory reset. A recompute finishes within one main-loop pass (milliseconds); audio continues on the old table until the swap.
 - Volume changes do **not** recompute anything; they just re-point `current_loudness_coeffs` at a different row (done in lock-step with the gain change by `apply_vol_index_to_audio()`, so compensation always matches the gain actually applied).
 
-The volume that keys the table is the **user-perceived volume**: the UAC1 host slider, the `SET_USER_VOLUME` vendor channel (0xDA), and LG Sound Sync all drive the same underlying index. Master volume (0xD2), per-channel preamp, and matrix gains do NOT key loudness; they are treated as fixed system calibration.
+The volume that keys the table is the **user-perceived volume**: the UAC1 host slider, the `ROUTE.USER_VOLUME` vendor command, and LG Sound Sync all drive the same underlying index. Master volume (`ROUTE.MASTER_VOLUME`), per-channel preamp, and matrix gains do NOT key loudness; they are treated as fixed system calibration.
 
 ### 2.4 Filters
 
@@ -182,9 +184,8 @@ Mask and enable changes switch the correction in or out as a step (there is no c
 | **Type** | bool (1 byte on wire) |
 | **Range** | 0 (off) or 1 (on) |
 | **Default** | 0 (disabled) |
-| **SET command** | `0x58` (`REQ_SET_LOUDNESS`) |
-| **GET command** | `0x59` (`REQ_GET_LOUDNESS`) |
-| **Payload** | 1 byte: `0x00` = disabled, nonzero = enabled |
+| **Command** | `DYN.LOUDNESS_ENABLE` (page 0x07, command 0x30), GET and SET |
+| **Payload** | exactly 1 byte: `0x00` = disabled, nonzero = enabled |
 
 Master switch. Disabling costs zero CPU (a per-packet pointer check). Enabling immediately re-selects coefficients for the *currently active* volume index (whether that volume came from the USB slider, the vendor channel, or LG Sound Sync), so the correction is right from the first packet.
 
@@ -193,11 +194,10 @@ Master switch. Disabling costs zero CPU (a per-packet pointer check). Enabling i
 | Property | Value |
 |----------|-------|
 | **Type** | float (IEEE 754 single, little-endian) |
-| **Range** | 40.0 to 100.0 (values outside are clamped by the firmware) |
+| **Range** | 40.0 to 100.0 (finite values outside are clamped by the firmware, NaN and infinity are refused with `VC_ERR_VALUE`) |
 | **Default** | 87.0 |
-| **SET command** | `0x5A` (`REQ_SET_LOUDNESS_REF`) |
-| **GET command** | `0x5B` (`REQ_GET_LOUDNESS_REF`) |
-| **Payload** | 4 bytes: little-endian IEEE 754 float |
+| **Command** | `DYN.LOUDNESS_REF` (page 0x07, command 0x31), GET and SET |
+| **Payload** | exactly 4 bytes: little-endian IEEE 754 float |
 
 The calibration anchor: the acoustic SPL (in dB, treated as phon at 1 kHz) that the listener experiences at **0 dB user volume**. At that level no correction is applied; every dB of volume reduction below it is compensated per the contours. 87 dB SPL corresponds to a fairly loud home playback level; users with quieter systems should lower it. GET returns the clamped, stored value.
 
@@ -206,11 +206,10 @@ The calibration anchor: the acoustic SPL (in dB, treated as phon at 1 kHz) that 
 | Property | Value |
 |----------|-------|
 | **Type** | float (IEEE 754 single, little-endian) |
-| **Range** | 0.0 to 200.0 (values outside are clamped by the firmware) |
+| **Range** | 0.0 to 200.0 (finite values outside are clamped by the firmware, NaN and infinity are refused with `VC_ERR_VALUE`) |
 | **Default** | 100.0 |
-| **SET command** | `0x5C` (`REQ_SET_LOUDNESS_INTENSITY`) |
-| **GET command** | `0x5D` (`REQ_GET_LOUDNESS_INTENSITY`) |
-| **Payload** | 4 bytes: little-endian IEEE 754 float |
+| **Command** | `DYN.LOUDNESS_INTENSITY` (page 0x07, command 0x32), GET and SET |
+| **Payload** | exactly 4 bytes: little-endian IEEE 754 float |
 
 Scales the computed correction. 100% applies the ISO-derived amount exactly; 50% halves it (in dB); 200% doubles it for listeners who prefer an exaggerated contour. 0% is equivalent to disabled (but still burns the bypass check). GET returns the clamped, stored value.
 
@@ -221,30 +220,38 @@ Scales the computed correction. 100% applies the ISO-derived amount exactly; 50%
 | **Type** | uint16 (little-endian) |
 | **Range** | any 16-bit value; bits above the platform's output count are ignored |
 | **Default** | 0xFFFF (all outputs compensated) |
-| **SET command** | `0xFA` (`REQ_SET_LOUDNESS_MASK`) |
-| **GET command** | `0xFB` (`REQ_GET_LOUDNESS_MASK`) |
-| **Payload** | 2 bytes: little-endian uint16, bit k = output channel k (see section 3.1) |
+| **Command** | `DYN.LOUDNESS_MASK` (page 0x07, command 0x33), GET and SET |
+| **Payload** | exactly 2 bytes: little-endian uint16, bit k = output channel k (see section 3.1) |
 
 Selects which output channels the volume-keyed filters process. Only selected outputs cost CPU. Changing the mask does not trigger a table recompute, mute, or pipeline reset; it applies from the next packet. Newly selected outputs start from cleared filter state.
 
-Firmware support detection: this parameter exists from wire format **V19** (bulk header `format_version >= 19`). On older firmware, commands 0xFA/0xFB are unrecognized (the control transfer stalls); apps should gate the mask UI on the bulk header version.
+Firmware support detection: the mask is in the bulk payload from wire format **V19** (bulk header `format_version >= 19`). Every firmware that speaks the paged protocol (1.1.7 and later) has `DYN.LOUDNESS_MASK`. Firmware 1.1.6 and older does not answer the paged protocol at all (`vendor_command_overhaul_plan.md` section 5.14).
 
 ---
 
 ## 5. Vendor protocol details
 
-All four parameter pairs use the standard DSPi vendor control-transfer conventions (see `commands.md` sections 1-2): writes are `bmRequestType 0x41` with `bRequest` = command ID, `wValue = 0`, data stage = payload; reads are `bmRequestType 0xC1`, data stage = response. The same commands work unchanged over the UART and I2C control transports (no USB-only gating).
+The four parameters are four commands in the `DYN` page (0x07) of the paged protocol (see `../commands.md`). Each command is one number for both directions: writes are `bmRequestType 0x41`, reads are `bmRequestType 0xC1`. `bRequest` is the command number, `wIndex` is `(0x07 << 8) | 2`, `wValue` is 0 and the data stage is the payload or the response. The same commands work over the UART and I2C control transports (no USB-only gating).
 
-Byte-level examples:
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `DYN.LOUDNESS_ENABLE` | 0x07 | 0x30 | GET, SET | none (0) | GET 1, SET 1 |
+| `DYN.LOUDNESS_REF` | 0x07 | 0x31 | GET, SET | none (0) | GET 4, SET 4 |
+| `DYN.LOUDNESS_INTENSITY` | 0x07 | 0x32 | GET, SET | none (0) | GET 4, SET 4 |
+| `DYN.LOUDNESS_MASK` | 0x07 | 0x33 | GET, SET | none (0) | GET 2, SET 2 |
+
+A SET with the wrong payload length is `VC_ERR_LENGTH`, a non-zero `wValue` is `VC_ERR_ADDRESS`, and a NaN or infinite float is `VC_ERR_VALUE` (nothing is stored). A rejected SET STALLs on USB and the reason is readable from `SYS.LAST_RESULT`.
+
+Byte-level examples (page 0x07):
 
 ```
-Enable loudness:                 SET 0x58, payload [01]
-Set reference to 80 dB SPL:      SET 0x5A, payload [00 00 A0 42]      (80.0f LE)
-Set intensity to 75%:            SET 0x5C, payload [00 00 96 42]      (75.0f LE)
-Headphones on outputs 1-2 only:  SET 0xFA, payload [03 00]            (mask 0x0003)
-Stereo mains + PDM sub (RP2350): SET 0xFA, payload [03 01]            (mask 0x0103)
-Everything:                      SET 0xFA, payload [FF FF]            (mask 0xFFFF)
-Read mask back:                  GET 0xFB -> 2 bytes LE
+Enable loudness:                 SET 0x30, payload [01]
+Set reference to 80 dB SPL:      SET 0x31, payload [00 00 A0 42]      (80.0f LE)
+Set intensity to 75%:            SET 0x32, payload [00 00 96 42]      (75.0f LE)
+Headphones on outputs 1-2 only:  SET 0x33, payload [03 00]            (mask 0x0003)
+Stereo mains + PDM sub (RP2350): SET 0x33, payload [03 01]            (mask 0x0103)
+Everything:                      SET 0x33, payload [FF FF]            (mask 0xFFFF)
+Read mask back:                  GET 0x33 -> 2 bytes LE
 ```
 
 ### 5.1 Notifications
@@ -271,13 +278,13 @@ offset 24: f32 loudness_ref_spl
 offset 28: f32 loudness_intensity_pct
 ```
 
-The mask occupies what were reserved bytes, so the section (and the whole payload) did not change size at V19. `REQ_SET_ALL_PARAMS` applies the mask along with everything else; `REQ_GET_ALL_PARAMS` returns the live value.
+The mask occupies what were reserved bytes, so the section (and the whole payload) did not change size at V19. A `STORE.ALL_PARAMS` SET applies the mask along with everything else, and its GET returns the live value.
 
 ---
 
 ## 6. Persistence
 
-- **User presets (flash):** all four parameters are stored per preset. The mask was tail-appended at slot version **V26**; presets saved by older firmware (V21-V25) load with the mask defaulted to 0xFFFF. Preset save/load commands: 0x90/0x91 (see `user_presets_spec.md`).
+- **User presets (flash):** all four parameters are stored per preset. The mask was tail-appended at slot version **V26**; presets saved by older firmware (V21-V25) load with the mask defaulted to 0xFFFF. Preset save and load commands: `STORE.PRESET_SAVE` and `STORE.PRESET_LOAD` (see `user_presets_spec.md`).
 - **Factory reset:** enabled = 0, ref_spl = 87.0, intensity = 100.0, mask = 0xFFFF.
 - Like every other parameter, the mask takes effect immediately on write but persists only when the user saves a preset.
 
@@ -287,8 +294,8 @@ The mask occupies what were reserved bytes, so the section (and the whole payloa
 
 | Feature | Interaction |
 |---------|-------------|
-| User volume (0xDA) / UAC1 slider / LG Sound Sync | Keys the compensation. All three drive the same volume index, so compensation tracks whichever is in control. |
-| Master volume (0xD2) | Does NOT key compensation; it is calibration, not listening level. Set `ref_spl` with master volume at its normal value. |
+| User volume (`ROUTE.USER_VOLUME`) / UAC1 slider / LG Sound Sync | Keys the compensation. All three drive the same volume index, so compensation tracks whichever is in control. |
+| Master volume (`ROUTE.MASTER_VOLUME`) | Does NOT key compensation; it is calibration, not listening level. Set `ref_spl` with master volume at its normal value. |
 | Volume Leveller | Independent (input-side vs output-side). The leveller's detector sees the *uncompensated* signal, so loudness boost cannot pump the leveller. Both can be enabled together. |
 | Crossfeed | Independent; crossfeed runs input-side in stereo modes. |
 | Per-output crossover / EQ / delay | Commute with loudness (all LTI); the audible result is identical to loudness-before-crossover. |
@@ -328,22 +335,22 @@ Clear that output's bit. It receives the mix at unit-calibrated level regardless
 
 A minimal, correct integration:
 
-1. **Detect support.** Read the bulk header (`REQ_GET_ALL_PARAMS`, first 16 bytes) and check `format_version`. `>= 19` means the output mask exists; older firmware supports only enable/ref/intensity (and applies loudness to everything, stereo modes only).
-2. **Read state on connect.** Either parse the `global` section of the bulk payload (offsets in section 5.2) or issue the four GETs (0x59, 0x5B, 0x5D, 0xFB).
+1. **Detect support.** Read the bulk header (`STORE.ALL_PARAMS` GET, first 16 bytes) and check `format_version`. `>= 19` means the output mask exists; older firmware supports only enable/ref/intensity (and applies loudness to everything, stereo modes only).
+2. **Read state on connect.** Either parse the `global` section of the bulk payload (offsets in section 5.2) or issue the four GETs (`DYN.LOUDNESS_ENABLE`, `DYN.LOUDNESS_REF`, `DYN.LOUDNESS_INTENSITY`, `DYN.LOUDNESS_MASK`).
 3. **Build the UI.**
    - Enable toggle.
    - Reference SPL slider, 40-100 dB, default 87, step 1 dB. Label it as "SPL at full volume" and consider a calibration hint (play pink noise at 0 dB volume, measure, enter the number).
    - Intensity slider, 0-200%, default 100.
-   - One checkbox per output channel for the mask, labeled with the user's output names (readable via the channel-name commands 0x9B/0x9C) and gated to the platform's output count (`REQ_GET_PLATFORM` 0x7F or the bulk header's `num_output_channels`). Warn or auto-group when the user splits a bass-managed pair (see section 8).
-4. **Write changes.** Fire the SET for the parameter that changed; no ordering constraints, no busy window. Read back with the paired GET if you want confirmation, or rely on the notification.
+   - One checkbox per output channel for the mask, labeled with the user's output names (readable via `ROUTE.CHANNEL_NAME`) and gated to the platform's output count (`SYS.PLATFORM` or the bulk header's `num_output_channels`). Warn or auto-group when the user splits a bass-managed pair (see section 8).
+4. **Write changes.** Fire the SET for the parameter that changed; no ordering constraints, no busy window. Read back with a GET of the same command if you want confirmation, or rely on the notification.
 5. **Stay in sync.** Subscribe to `PARAM_WRITE` notifications and patch your model at the offsets in section 5.1, so changes made by another controller are reflected live. A preset load does not renotify individual parameters; it emits `PRESET_LOADED` / bulk-invalidated events, after which the app should re-read the bulk payload (or the four GETs).
-6. **Persistence.** Remind the user that settings live in presets; call `REQ_PRESET_SAVE` (0x90) to persist.
+6. **Persistence.** Remind the user that settings live in presets; call `STORE.PRESET_SAVE` to persist.
 
 Common mistakes to avoid:
 
 - Do not key any UI logic off master volume; loudness ignores it by design.
 - Do not assume mask bits above the output count read back as zero; they are stored verbatim. Mask them off in the app when displaying.
-- Do not treat a 0xFA/0xFB stall on old firmware as a device error; it is the expected "not supported" signal.
+- A STALL from a loudness SET is a real refusal (bad length, `wValue` or non-finite float). Read `SYS.LAST_RESULT` for the reason.
 - Send the mask as little-endian bytes (`[low, high]`); it is not a bitfield of pairs, it is one bit per output channel.
 
 ---
@@ -352,5 +359,6 @@ Common mistakes to avoid:
 
 | Date | Change |
 |------|--------|
-| 2026-07-09 | Per-output rework: loudness moved from the stereo input bus (pre-matrix, stereo-input modes only) to per-output processing after the output gain; added `loudness_output_mask` (cmds 0xFA/0xFB, wire V19, preset slot V26); multichannel input modes now supported; per-output state with deterministic clearing. |
-| earlier | Stereo-only implementation: two shelves on the input bus, enable/ref/intensity (cmds 0x58-0x5D), skipped when a multichannel USB alt was active. |
+| 2026-11-16 | Firmware 1.1.7: the four parameters moved to the paged protocol as `DYN.LOUDNESS_ENABLE`, `DYN.LOUDNESS_REF`, `DYN.LOUDNESS_INTENSITY` and `DYN.LOUDNESS_MASK`. |
+| 2026-07-09 | Per-output rework: loudness moved from the stereo input bus (pre-matrix, stereo-input modes only) to per-output processing after the output gain; added `loudness_output_mask` (1.1.6 opcodes 0xFA/0xFB, now `DYN.LOUDNESS_MASK`, wire V19, preset slot V26); multichannel input modes now supported; per-output state with deterministic clearing. |
+| earlier | Stereo-only implementation: two shelves on the input bus, enable/ref/intensity (1.1.6 opcodes 0x58-0x5D), skipped when a multichannel USB alt was active. |

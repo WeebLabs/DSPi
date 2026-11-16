@@ -1,6 +1,6 @@
 # LG Sound Sync (Optical) — Specification & Implementation Plan
 
-*Status: implemented (`firmware/DSPi/lg_sound_sync.c`, vendor commands 0xE6-0xE8, bulk section `lg_sound_sync`). Written 2026-05-08 as the design and implementation plan; the plan wording ("DSPi will...") is kept as written. Last updated: 2026-11-15.*
+*Status: implemented (`firmware/DSPi/lg_sound_sync.c`, vendor commands `INPUT.LG_SOUND_SYNC_ENABLE` and `INPUT.LG_SOUND_SYNC_STATUS`, bulk section `lg_sound_sync`). Written 2026-05-08 as the design and implementation plan; the plan wording ("DSPi will...") is kept as written. Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7, sections 7.1, 7.4 and 8.1). The opcode numbers 0xE6 to 0xE8 in the implementation history (sections 4.2, 10 and 11) are those of firmware 1.1.6.*
 
 ## 1. Overview
 
@@ -25,7 +25,7 @@ Sound Sync drives the same internal control as the USB host volume slider, **not
 
 LG drives the **user-facing volume** directly: `audio_state.volume` (the host's cached UAC1 value), `vol_mul` (the audio path), and the `WireUserVolume.user_volume_db` notify all move together. Mute drives `user_mute` (the vendor mute flag, OR'd with UAC1 mute by the audio pipeline). The host UI's main volume widget tracks TV remote presses with no special-case binding — it just listens to the existing `user_volume.user_volume_db` notification.
 
-Implementation funnel: `lg_sound_sync.c` calls `update_user_volume(db)` (in `usb_audio.c`), which is the same single funnel used by `REQ_SET_USER_VOLUME` and the bulk-params apply path. That funnel writes `audio_state.volume`, calls `apply_vol_index_to_audio()`, repoints loudness coefficients, invalidates the LG apply-cache, and pushes the user-volume notify — atomically from the main thread.
+Implementation funnel: `lg_sound_sync.c` calls `update_user_volume(db)` (in `usb_audio.c`), which is the same single funnel used by `ROUTE.USER_VOLUME` and the bulk-params apply path. That funnel writes `audio_state.volume`, calls `apply_vol_index_to_audio()`, repoints loudness coefficients, invalidates the LG apply-cache, and pushes the user-volume notify, all atomically from the main thread.
 
 Trade-off accepted: when SPDIF input switches back to USB or LG demotes, `audio_state.volume` stays wherever LG last set it. There is **no thaw cache**. The OS may re-issue UAC1 SET_CUR with its remembered per-device volume on enumeration / default-device-change events; for DSPi-internal input switches the user's slider position simply picks up from LG's last value. This is a deliberate UX choice — the dual-widget alternative (separate "user volume" and "effective volume" indicators) was rejected as more confusing than the occasional volume-stays-where-LG-left-it surprise.
 
@@ -35,7 +35,7 @@ Trade-off accepted: when SPDIF input switches back to USB or LG demotes, `audio_
 | SPDIF + Sound Sync **inactive** | Last value set by anyone (no implicit thaw) |
 | SPDIF + Sound Sync **active**   | `lg_sound_sync` → `update_user_volume()` (LG-decoded) |
 
-Master volume (the device-side ceiling, `0xD2`/`0xD3`) is not affected by Sound Sync at all.
+Master volume (the device-side ceiling, `ROUTE.MASTER_VOLUME`) is not affected by Sound Sync at all.
 
 Mute ownership is symmetric. While present, LG drives `user_mute`. On demote, LG-imposed mute is cleared (so the user isn't stuck silent if the TV stops broadcasting) but a mute the user set manually before LG took over is preserved (`s_lg_imposed_mute` tracks the distinction).
 
@@ -190,7 +190,7 @@ typedef enum {
     LG_SS_PRESENT = 1,   // Signature stable; LG volume is being applied
 } LgSoundSyncState;
 
-// Aggregate runtime status.  Returned by REQ_GET_LG_SOUND_SYNC_STATUS.
+// Aggregate runtime status.  Returned by INPUT.LG_SOUND_SYNC_STATUS.
 typedef struct __attribute__((packed)) {
     uint8_t enabled;   // User-controlled feature gate (0/1)
     uint8_t present;   // Detection state machine: 1 if PRESENT, else 0
@@ -208,7 +208,7 @@ void lg_sound_sync_set_enabled(bool en);  // Persists to directory + applies liv
 bool lg_sound_sync_get_enabled(void);
 void lg_sound_sync_get_status(LgSoundSyncStatus *out);
 
-// Lifecycle hooks (called by main.c / vendor_commands.c on relevant transitions).
+// Lifecycle hooks (called by main.c on relevant transitions).
 void lg_sound_sync_on_input_source_change(uint8_t new_source);
 ```
 
@@ -232,7 +232,7 @@ Five small seams; everything else is internal to the module:
 1. **Channel-status read.** Reuses the existing `spdif_input_get_channel_status(uint8_t out[24])` function (`spdif_input.c:464`). No changes.
 2. **Apply-only vol/loudness helper.** Refactor of `audio_set_volume()`: extract the `vol_mul` + `current_loudness_coeffs` write into a new `apply_vol_index_to_audio(uint8_t vol_index)` helper. Both `audio_set_volume()` and `lg_sound_sync` call this. No behavior change for the host-volume path.
 3. **Input source change notification.** `main.c`'s input-source switch handler calls `lg_sound_sync_on_input_source_change(new_source)` so the module can demote to ABSENT and let the existing thaw path restore vol_mul.
-4. **Vendor command dispatch.** `vendor_commands.c` adds three handlers (0xE6 / 0xE7 / 0xE8).
+4. **Vendor command dispatch.** The INPUT page (`firmware/DSPi/vendor/vc_page_input.c`) holds the handlers. In firmware 1.1.6 they were three opcodes (0xE6 / 0xE7 / 0xE8) in `vendor_commands.c`.
 5. **Bulk params + notifications.** `bulk_params.c` reads/writes the new `WireLgSoundSync` section; `lg_sound_sync.c` uses `notify_param_write()` on state changes.
 
 ### 4.3 Signal chain effect (where vol_mul is consumed)
@@ -490,16 +490,14 @@ So: a Sound Sync write to `vol_mul` is consumed at the next packet boundary, fad
 
 ## 7. Vendor Commands & Notifications
 
-### 7.1 Command IDs (config.h)
+### 7.1 Commands (`vendor/pages/input.def`)
 
-```c
-// LG Sound Sync (optical) Commands
-#define REQ_SET_LG_SOUND_SYNC_ENABLE   0xE6  // payload uint8_t (0=off, 1=on); persists to directory
-#define REQ_GET_LG_SOUND_SYNC_ENABLE   0xE7  // returns uint8_t
-#define REQ_GET_LG_SOUND_SYNC_STATUS   0xE8  // returns LgSoundSyncStatus (16 bytes)
-```
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `INPUT.LG_SOUND_SYNC_ENABLE` | 0x03 | 0x50 | GET, SET | none (0) | GET 1, SET 1 | 0 off, any non-zero value on. Live state only, persisted with the preset (section 8) |
+| `INPUT.LG_SOUND_SYNC_STATUS` | 0x03 | 0x51 | GET | none (0) | GET 16 | `LgSoundSyncStatus` |
 
-`0xE6`/`0xE7`/`0xE8` are the next free IDs after the SPDIF input block (`0xE0`..`0xE5`), keeping all SPDIF-related commands clustered.
+The commands sit in the LG block of the INPUT page, beside the S/PDIF receiver commands. In firmware 1.1.6 they were opcodes 0xE6 (SET enable), 0xE7 (GET enable) and 0xE8 (GET status). A SET payload other than exactly 1 byte, or a non-zero `wValue`, STALLs with `VC_ERR_LENGTH` or `VC_ERR_ADDRESS` (readable from `SYS.LAST_RESULT`).
 
 ### 7.2 Wire format extension
 
@@ -528,7 +526,7 @@ Standard `NOTIFY_EVT_PARAM_CHANGED` events on the WireBulkParams offset of each 
 
 | Field changed | When                                  | Source tag              |
 |---------------|---------------------------------------|--------------------------|
-| `enabled`     | Vendor SET (0xE6) or bulk SET         | `PARAM_SRC_HOST_SET`     |
+| `enabled`     | `INPUT.LG_SOUND_SYNC_ENABLE` SET or bulk SET | `PARAM_SRC_HOST_SET` |
 | `present`     | Detection state crosses threshold     | `PARAM_SRC_INTERNAL`     |
 | `volume`      | LG-decoded value changes              | `PARAM_SRC_INTERNAL`     |
 | `muted`       | LG-decoded mute toggles               | `PARAM_SRC_INTERNAL`     |
@@ -541,9 +539,9 @@ When `present` flips to 1 and the same poll also produces a `volume` change (the
 
 | Command | Effect |
 |---------|--------|
-| `REQ_SET_LG_SOUND_SYNC_ENABLE` (1 byte payload) | Updates the live `lg_sound_sync_enabled` flag immediately. **No flash write fires** — the value persists only when the user saves the active preset (matches loudness/crossfeed/leveller toggle semantics). If transitioning enabled→disabled while PRESENT, demotes to ABSENT and restores host volume. If transitioning disabled→enabled while on SPDIF and locked, begins polling on next tick. Pushes a PARAM_CHANGED on the `enabled` offset. |
-| `REQ_GET_LG_SOUND_SYNC_ENABLE` | Returns 1 byte of the live flag. |
-| `REQ_GET_LG_SOUND_SYNC_STATUS` | Returns the 16-byte `LgSoundSyncStatus` struct (= the WireLgSoundSync section minus the bulk-only positioning). |
+| `INPUT.LG_SOUND_SYNC_ENABLE` SET (1 byte payload) | Updates the live `lg_sound_sync_enabled` flag immediately. **No flash write fires.** The value persists only when the user saves the active preset (matches loudness/crossfeed/leveller toggle semantics). If transitioning enabled→disabled while PRESENT, demotes to ABSENT and restores host volume. If transitioning disabled→enabled while on SPDIF and locked, begins polling on next tick. Pushes a PARAM_CHANGED on the `enabled` offset. |
+| `INPUT.LG_SOUND_SYNC_ENABLE` GET | Returns 1 byte of the live flag. |
+| `INPUT.LG_SOUND_SYNC_STATUS` GET | Returns the 16-byte `LgSoundSyncStatus` struct (the WireLgSoundSync section minus the bulk-only positioning). |
 
 ---
 
@@ -554,10 +552,10 @@ When `present` flips to 1 and the same poll also produces a `volume` change (the
 The `lg_sound_sync_enabled` flag is **per-preset**. It lives in `PresetSlot` alongside other per-preset behavior settings (loudness enable, crossfeed config, leveller config, channel names, EQ bands, …). The flag follows the same lifecycle as those settings:
 
 - Live state is the source of truth — a single global `bool lg_sound_sync_enabled` in `usb_audio.c` (or the module — see §10).
-- Vendor SET (`0xE6`) writes live state immediately. No flash write fires.
-- On `REQ_SAVE_PRESET`, the live value is captured into the active `PresetSlot` and written to its sector.
-- On `REQ_LOAD_PRESET`, the slot's stored value is restored to live state. `apply_factory_defaults()` resets it to the firmware default.
-- Bulk SET (`REQ_SET_ALL_PARAMS`) writes the wire `enabled` byte directly to live state, same as any other live-write parameter.
+- A vendor SET (`INPUT.LG_SOUND_SYNC_ENABLE`) writes live state immediately. No flash write fires.
+- On a preset save (`STORE.PRESET_SAVE`), the live value is captured into the active `PresetSlot` and written to its sector.
+- On a preset load (`STORE.PRESET_LOAD`), the slot's stored value is restored to live state. `apply_factory_defaults()` resets it to the firmware default.
+- Bulk SET (`STORE.ALL_PARAMS`) writes the wire `enabled` byte directly to live state, same as any other live-write parameter.
 
 **Why per-preset?** Different listening profiles legitimately want different Sound Sync behavior. A "Headphone" preset selected on a different output may not want the TV remote to drive its level; a "Mastering" preset may want a known-fixed volume independent of TV state; a "TV Listening" preset wants Sound Sync on. Putting the flag in the preset matches every other "what does the audio path do here" toggle in the firmware (loudness, leveller, crossfeed, master EQ bypass).
 
@@ -569,7 +567,7 @@ The default for a fresh slot or a legacy slot pre-V13 is **off** — non-LG user
 
 ### 8.3 Wire-format bump
 
-`WIRE_FORMAT_VERSION` bumps `7 → 8`. Bulk SET payloads from a pre-V8 host are rejected at the EP0 dispatcher's `wLength == sizeof(WireBulkParams)` gate (`vendor_commands.c`, in the `REQ_SET_ALL_PARAMS` setup-stage handler) — a V7 host sends `wLength = 2912` and the new `sizeof(WireBulkParams) = 2928`, so the dispatcher returns `false` and TinyUSB STALLs the transfer. The version-check guard inside `bulk_params_apply()` is a defense-in-depth backup that catches mismatches if the dispatcher gate is ever loosened (e.g. for forward-compat smaller payloads); the V8 LG-section apply has its own size assertion (`payload_length >= sizeof(WireBulkParams)`) so a relaxed dispatcher gate cannot result in a read past the transferred bytes.
+`WIRE_FORMAT_VERSION` bumps `7 → 8`. Bulk SET payloads from a pre-V8 host are rejected at the EP0 dispatcher's `wLength == sizeof(WireBulkParams)` gate. In firmware 1.1.7 that gate is the `STORE.ALL_PARAMS` SETUP check in `vc_bulk_usb_setup()` (`firmware/DSPi/vendor/vc_bulk.c`), which STALLs with `VC_ERR_LENGTH`. A V7 host sends `wLength = 2912` and the V8 `sizeof(WireBulkParams) = 2928`, so the transfer STALLs. The version-check guard inside `bulk_params_apply()` is a defense-in-depth backup that catches mismatches if the dispatcher gate is ever loosened (e.g. for forward-compat smaller payloads); the V8 LG-section apply has its own size assertion (`payload_length >= sizeof(WireBulkParams)`) so a relaxed dispatcher gate cannot result in a read past the transferred bytes.
 
 ### 8.4 Default value
 
@@ -642,11 +640,11 @@ The streak reset is intentional. Stored `volume`/`muted` from the old preset are
 | Path                                                | Changes                                                                                                                                                          |
 |-----------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `firmware/DSPi/CMakeLists.txt`                      | Add `lg_sound_sync.c` to source list.                                                                                                                            |
-| `firmware/DSPi/config.h`                            | Add `REQ_SET_LG_SOUND_SYNC_ENABLE` / `REQ_GET_LG_SOUND_SYNC_ENABLE` / `REQ_GET_LG_SOUND_SYNC_STATUS` (0xE6/E7/E8). Bump `WIRE_FORMAT_VERSION` from 7 to 8.        |
+| `firmware/DSPi/config.h`                            | Add the three LG Sound Sync opcodes (0xE6/E7/E8 in firmware 1.1.6; `INPUT.LG_SOUND_SYNC_*` in `vendor/pages/input.def` since 1.1.7). Bump `WIRE_FORMAT_VERSION` from 7 to 8. |
 | `firmware/DSPi/usb_audio.h`                         | Declare `apply_vol_index_to_audio()`.                                                                                                                            |
 | `firmware/DSPi/usb_audio.c`                         | Implement `apply_vol_index_to_audio()`. Refactor `audio_set_volume()` to call it. No behavior change on USB path.                                                |
 | `firmware/DSPi/main.c`                              | Call `lg_sound_sync_init()` after flash/audio init. Call `lg_sound_sync_tick()` once per main loop iteration. Hook input-source-change to call `lg_sound_sync_on_input_source_change()`. |
-| `firmware/DSPi/vendor_commands.c`                   | Add 0xE6/E7/E8 dispatch cases. The SET handler updates live state only — no deferred-flash dance, matching the loudness/crossfeed/leveller pattern.              |
+| `firmware/DSPi/vendor_commands.c` (since 1.1.7 `firmware/DSPi/vendor/vc_page_input.c`) | Add 0xE6/E7/E8 dispatch cases. The SET handler updates live state only, with no deferred-flash dance, matching the loudness/crossfeed/leveller pattern. |
 | `firmware/DSPi/bulk_params.h`                       | Add `WireLgSoundSync` struct definition. Append `WireLgSoundSync lg_sound_sync;` to `WireBulkParams`. Total grows by 16 bytes (2912 → 2928). Bump `WIRE_BULK_PARAMS_SIZE` consumer comments. |
 | `firmware/DSPi/bulk_params.c`                       | `bulk_params_collect()` populates all four fields from live module state. `bulk_params_apply()` honors only `enabled`; logs (or silently drops) writes to read-only fields. |
 | `firmware/DSPi/flash_storage.h`                     | Add `uint8_t lg_sound_sync_enabled` to `PresetSlot`. Bump `SLOT_DATA_VERSION` (e.g. 12 → 13). Add `LG_SOUND_SYNC_DEFAULT_ENABLED` constant.                      |
@@ -683,7 +681,7 @@ Add `lg_sound_sync.c/h` with detection and decoding only — no application yet.
 
 Connect detection to `apply_vol_index_to_audio()`. Add 0xE6/E7/E8 vendor commands writing live state only. Verify TV-volume changes drive DSPi `vol_mul`; verify `enabled=0` disables takeover. Persistence is not yet wired — the flag survives a reboot only if Phase 4 ships.
 
-**Files:** `lg_sound_sync.c`, `vendor_commands.c`, `config.h`.
+**Files:** `lg_sound_sync.c`, `vendor_commands.c` (since 1.1.7 `vendor/vc_page_input.c`), `config.h`.
 
 ### Phase 4 — Persistence + wire format + notifications
 
@@ -775,7 +773,7 @@ These are explicitly out of scope for v1 and are listed for future work:
 1. **Configurable LG-vol → vol_index curve.** Expose `min_db` and curve type (linear-in-dB vs. perceptual). Default unchanged.
 2. **Decode redundant copies and cross-check.** Volume is encoded in multiple CS bytes (HiFiBerry doc §"Conclusions"). Cross-checking would let us reject single-bit flips before the present_streak hysteresis kicks in. Marginal robustness gain at the cost of code complexity; defer until field evidence shows it's needed.
 3. **Samsung Anynet+ / Sony Bravia Sync.** Other TV brands have analogous one-way SPDIF control protocols. The same module shape (signature + decode + apply via `apply_vol_index_to_audio()`) supports them — would just become a per-protocol decoder behind a common detection layer.
-4. **Channel-status diagnostics.** The 24 raw CS bytes are already exposed via `REQ_GET_SPDIF_RX_CH_STATUS` (0xE3). Add a debug overlay in the host app that highlights bytes 15–18 to make protocol bring-up easier.
+4. **Channel-status diagnostics.** The 24 raw CS bytes are already exposed via `INPUT.SPDIF_RX_CH_STATUS`. Add a debug overlay in the host app that highlights bytes 15 to 18 to make protocol bring-up easier.
 5. **Device-wide override flag.** Add a directory-level "Sound Sync globally disabled" master switch that overrides every preset's per-preset flag. Useful for users who want to leave Sound Sync wired into their preferred presets but temporarily globally suppress it (e.g. while doing measurements). Trivial to layer on: an additional `&&` against the per-preset check in the tick path.
 
 ---

@@ -1,5 +1,7 @@
 # Firmware Versioning Specification
 
+*Last updated: 2026-11-16 (version read through `SYS.PLATFORM` on the paged protocol of firmware 1.1.7, probe order for older firmware)*
+
 ## TL;DR
 
 - A firmware version is three plain numbers plus a beta ordinal, such as 1.1.6 beta 2. A final release is beta 0 and drops the word entirely.
@@ -8,12 +10,12 @@
 - Private test builds keep the version they are based on and get a build label instead. No software ever compares a label.
 - The macOS Console app and the firmware ship as a matched pair with the same version. The app turns features on and off based on the version the device reports.
 - Legal ranges are major 0 to 255, minor 0 to 15, patch 0 to 255. The minor limit is a real trap and is explained under "Legal ranges" below.
-- Old hosts keep working without any change. They ask for 4 bytes and get exactly the same 4 bytes they always got.
-- Separately from the version, every binary carries an automatic git stamp readable via `REQ_GET_BUILD_INFO` (0x80) and `picotool info`. The version is the contract; the stamp is provenance. See "Build provenance" below.
+- Firmware 1.1.7 reports the version through `SYS.PLATFORM` on the paged protocol, with the same 7 bytes the old opcode 0x7F returned. A host written for 1.1.6 cannot read it, because 1.1.7 refuses every request on page 0. A current host probes `SYS.PROTOCOL_INFO` first and falls back to opcode 0x7F only on older firmware (see "Reading the version" below).
+- Separately from the version, every binary carries an automatic git stamp readable via `SYS.BUILD_INFO` (1.1.6 opcode 0x80) and `picotool info`. The version is the contract; the stamp is provenance. See "Build provenance" below.
 
 ## Beta builds
 
-`REQ_GET_PLATFORM` (0x7F) is the only way a host learns which firmware is running. It used to carry exactly three numbers, so both `1.1.6-beta1` and `1.1.6-beta2` reported themselves as `1.1.6`. The Console's feature gating and any auto-updater saw one build, not two, and a bug report that said "1.1.6" did not say which build it meant. That is why beta suffixes were banned.
+`SYS.PLATFORM` (1.1.6 opcode 0x7F) is the only way a host learns which firmware is running. It used to carry exactly three numbers, so both `1.1.6-beta1` and `1.1.6-beta2` reported themselves as `1.1.6`. The Console's feature gating and any auto-updater saw one build, not two, and a bug report that said "1.1.6" did not say which build it meant. That is why beta suffixes were banned.
 
 Byte 6 fixes the cause rather than the symptom. The beta ordinal rides on the wire alongside the three numbers, so the host can tell betas apart and betas no longer have to burn a patch number each.
 
@@ -25,7 +27,7 @@ Tags carry the ordinal as a suffix (`v1.1.6-beta2`) because git tags are for hum
 
 ## App and firmware are a matched pair
 
-DSPi Console reads the version the device reports and uses it to decide which features to offer. Wire-format versions, capability versions, and the per-feature `firmwareSupportsX >= N` checks all key off the answer to 0x7F. A firmware version bump must therefore ship alongside the matching app release, beta ordinal included. The app reads the whole thing, ordinal and all, from its own `MARKETING_VERSION`, which carries the tag spelling during a beta run (`1.1.6-beta2`). Bumping only one side breaks the gating contract. The app also bundles the matching `.uf2` images for its updater.
+DSPi Console reads the version the device reports and uses it to decide which features to offer. Wire-format versions, capability versions, and the per-feature `firmwareSupportsX >= N` checks all key off the answer to `SYS.PLATFORM`. On paged firmware a host can also gate a feature on the command bits of `SYS.PAGE_COMMANDS` or the page revisions in `SYS.PAGE_LIST`, which `vendor_command_overhaul_plan.md` section 5.14 prefers to version compares. A firmware version bump must therefore ship alongside the matching app release, beta ordinal included. The app reads the whole thing, ordinal and all, from its own `MARKETING_VERSION`, which carries the tag spelling during a beta run (`1.1.6-beta2`). Bumping only one side breaks the gating contract. The app also bundles the matching `.uf2` images for its updater.
 
 ## Version macros
 
@@ -34,14 +36,14 @@ DSPi Console reads the version the device reports and uses it to decide which fe
 ```c
 #define FW_VERSION_MAJOR            1
 #define FW_VERSION_MINOR            1
-#define FW_VERSION_PATCH            6
+#define FW_VERSION_PATCH            7
 #define FW_VERSION_PACKED           ((FW_VERSION_MAJOR << 8) | (FW_VERSION_MINOR << 4) | FW_VERSION_PATCH)
-#define FW_VERSION_BETA             0
+#define FW_VERSION_BETA             1
 ```
 
 `FW_VERSION_BETA` is independent of the packed macro and never touches the legacy bytes. It reaches the host only as byte 6.
 
-`FW_VERSION_PACKED` was once called `FW_VERSION_BCD`, which was a misleading name. It is plain nibble packing rather than BCD. Minor and patch each get 4 bits, and the macro does no range checking at all, so anything that does not fit simply overlaps its neighbour. The packed form exists only to build the legacy bytes of `REQ_GET_PLATFORM`. Nothing else may use it.
+`FW_VERSION_PACKED` was once called `FW_VERSION_BCD`, which was a misleading name. It is plain nibble packing rather than BCD. Minor and patch each get 4 bits, and the macro does no range checking at all, so anything that does not fit simply overlaps its neighbour. The packed form exists only to build the legacy bytes of `SYS.PLATFORM`. Nothing else may use it.
 
 ## Legal ranges
 
@@ -62,14 +64,20 @@ If the firmware ever needs a minor number above 15, mask the packed macro first 
 #define FW_VERSION_PACKED  ((FW_VERSION_MAJOR << 8) | ((FW_VERSION_MINOR & 0xF) << 4) | (FW_VERSION_PATCH & 0xF))
 ```
 
-The bulk parameter header carries the version separately as two `uint16_t` fields, so it is not affected by any of this. `REQ_GET_PLATFORM` is the only place the limits bite.
+The bulk parameter header carries the version separately as two `uint16_t` fields, so it is not affected by any of this. `SYS.PLATFORM` is the only place the limits bite.
 
-## Wire encoding: REQ_GET_PLATFORM (0x7F)
+## Wire encoding: `SYS.PLATFORM`
 
-**Direction:** Device to Host (GET)
-**wValue:** 0 (unused)
-**wIndex:** Vendor interface number
-**wLength:** any length. Current hosts ask for 7, earlier ones ask for 6 or 4, and the firmware truncates to whatever was asked for.
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size |
+|---|---|---|---|---|---|
+| `SYS.PLATFORM` | 0x01 | 0x20 | GET | none (0) | GET 7 |
+
+**Direction:** Device to Host (GET, `bmRequestType` 0xC1, `bRequest` 0x20)
+**wValue:** 0. Any other value STALLs with `VC_ERR_ADDRESS`
+**wIndex:** `0x0102`, page 0x01 in the high byte and the vendor interface number in the low byte
+**wLength:** any length. Current hosts ask for 7, and the firmware truncates to whatever was asked for.
+
+Firmware 1.1.6 and older answered the same bytes to opcode 0x7F with `wIndex` 0 or 2. That is the request the compatibility notes below call the legacy read.
 
 ### Response (7 bytes)
 
@@ -85,7 +93,7 @@ The bulk parameter header carries the version separately as two `uint16_t` field
 
 Bytes 0 to 3 are byte-for-byte identical to the historical 4-byte response. Bytes 4 and 5 repeat the minor and patch from byte 2, but each gets a whole `uint8_t`, so they stay correct past 15. Once patch goes above 15 the low nibble of byte 2 is no longer trustworthy and only byte 5 should be believed.
 
-Byte 6 has no legacy counterpart. Firmware that answers with fewer than 7 bytes predates the ordinal, and every such build was a final release, so a short reply decodes as beta 0 rather than as unknown.
+Byte 6 has no legacy counterpart. Every paged firmware answers all 7 bytes. Older firmware that answers opcode 0x7F with fewer than 7 bytes predates the ordinal, and every such build was a final release, so a short reply decodes as beta 0 rather than as unknown.
 
 ### Why the old 4-byte encoding capped at 15
 
@@ -93,9 +101,20 @@ The original response was 4 bytes, and minor and patch shared byte 2 with one ni
 
 ### Short reads
 
-The firmware always offers 7 bytes and the transfer layer cuts the data stage down to the host's `wLength`. TinyUSB does this in `tud_control_xfer` with `tu_min16(len, request->wLength)`, and the UART and I2C dispatch paths apply the same cap. A legacy host that asks for 4 bytes therefore receives exactly the old 4-byte response, and one that asks for 6 receives exactly the pre-beta 6-byte response.
+The firmware always offers 7 bytes and the transfer layer cuts the data stage down to the host's `wLength`. On paged firmware the USB front end in `firmware/DSPi/vendor/vc_usb.c` caps the reply at `wLength`, and `ctrl_dispatch_get()` applies the same cap for UART and I2C. A legacy host that asks for 4 bytes therefore receives exactly the old 4-byte response, and one that asks for 6 receives exactly the pre-beta 6-byte response.
+
+## Reading the version
+
+Follow the start-up order of `vendor_command_overhaul_plan.md` section 5.14.
+
+1. Send GET `SYS.PROTOCOL_INFO` (page 0x01, command 0x10). A reply that starts with the magic `"DSPi"` means paged firmware. Read `SYS.PLATFORM`.
+2. A STALL means firmware 1.1.6 or older. Read the legacy opcode 0x7F with `wIndex` 2 and decode it with the fallback rule below. Offer the update, and send that device no paged command, because old firmware ignores `wIndex` and would run a paged number as the old opcode with that number.
+
+Firmware 1.1.7 refuses opcode 0x7F on page 0 like every other page 0 request, so a host built for 1.1.6 cannot read the version of a 1.1.7 device.
 
 ## Compatibility matrix
+
+This matrix covers the legacy 0x7F read on firmware 1.1.6 and older, and `SYS.PLATFORM` on paged firmware, which always offers 7.
 
 | Host | Firmware | Behavior |
 |------|----------|----------|
@@ -114,10 +133,12 @@ The firmware always offers 7 bytes and the transfer layer cuts the data stage do
 
 ```c
 uint8_t info[7];
+/* SYS.PLATFORM on paged firmware. After a failed SYS.PROTOCOL_INFO probe, send
+   bRequest 0x7F with wIndex VENDOR_INTF instead (firmware 1.1.6 and older). */
 int n = libusb_control_transfer(handle,
     LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE,
-    0x7F /* REQ_GET_PLATFORM */,
-    0, VENDOR_INTF,
+    paged ? 0x20 : 0x7F,
+    0, paged ? ((0x01 << 8) | VENDOR_INTF) : VENDOR_INTF,
     info, 7, 1000);
 if (n < 4) {
     return -1;  /* identification unavailable, do not read info[] */
@@ -129,7 +150,7 @@ int beta  = (n >= 7) ? info[6] : 0;
 int rank  = beta ? beta : 256;   /* final outranks every beta of the patch */
 ```
 
-## Build provenance: REQ_GET_BUILD_INFO (0x80)
+## Build provenance: `SYS.BUILD_INFO`
 
 The version number answers "what does this build promise to hosts". It cannot answer "which exact source built this binary", because two bench builds and a release can all legally report the same three numbers. The build stamp answers that second question.
 
@@ -137,7 +158,7 @@ Every build automatically embeds the output of `git describe --always --dirty` p
 
 The stamp is readable three ways.
 
-- `REQ_GET_BUILD_INFO` (0x80) returns a 64-byte blob from the running device. Bytes 0 to 47 are the describe string and bytes 48 to 59 are the build date `YYYY-MM-DD`, both ASCII and NUL-padded. Old firmware STALLs the request.
+- `SYS.BUILD_INFO` (page 0x01, command 0x22, 1.1.6 opcode 0x80) returns a 64-byte blob from the running device. Bytes 0 to 47 are the describe string and bytes 48 to 59 are the build date `YYYY-MM-DD`, both ASCII and NUL-padded. Firmware older than the stamp STALLs opcode 0x80.
 - `picotool info <file>.uf2` reads the same string from the UF2's binary info, identifying a build file with no device attached.
 - `tools/dspi_test` prints it in the profile summary and checks it in the identity tests.
 
@@ -145,4 +166,4 @@ Two rules keep it honest. First, the stamp is for humans only; no software may g
 
 Wire layout details live in `Documentation/Features/device_identification_spec.md`.
 
-See `Documentation/Features/device_identification_spec.md` for the full `REQ_GET_PLATFORM` and `REQ_GET_SERIAL` reference.
+See `Documentation/Features/device_identification_spec.md` for the full `SYS.PLATFORM` and `SYS.SERIAL` reference.

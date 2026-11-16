@@ -2,6 +2,8 @@
 
 *Written 2026-10-10. Status: plan only, nothing merged.*
 
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+
 ## TL;DR
 
 The overhaul branch carries three upgrades. The first is the soft VCXO: every output clock follows the input by trimming the system PLL by parts per million, instead of nudging each output's divider. The second is output rings: each output slot plays from a free-running DMA ring with no interrupts, instead of a pool of buffers fed by an interrupt per buffer. The third is a better SPDIF input rate estimator with word-by-word delivery. Producer pools were not removed. The pipeline still writes into producer pools, and the rings are filled from those.

@@ -25,9 +25,9 @@ VC_CMD(0x40, PREAMP, route_preamp_get, route_preamp_set,
 VC_CMD(0x50, MASTER_VOLUME, route_master_vol_get, route_master_vol_set,
        NONE, 4, 4, 4, 0, 0, "Master volume ceiling, f32 dB, clamped to -128..0 (-128 mutes)")
 VC_CMD(0x51, MASTER_VOLUME_MODE, route_master_mode_get, route_master_mode_set,
-       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_FLASH, 0, "0 independent, 1 per preset; other values store 0")
+       NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "0 independent, 1 per preset; other values store 0")
 VC_CMD(0x52, MASTER_VOLUME_SAVE, VC_NONE, route_master_save_set,
-       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH, 0, "Save the live master volume as the independent value")
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Save the live master volume as the independent value")
 VC_CMD(0x53, MASTER_VOLUME_SAVED, route_master_saved_get, VC_NONE,
        NONE, 4, 0, 0, 0, 0, "Saved independent master volume, f32 dB")
 

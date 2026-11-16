@@ -21,9 +21,9 @@ VC_CMD(0x21, OUTPUT_CONFIG_SAVE, VC_NONE, store_output_config_save_set,
        NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Persist the live IO config to the device-wide block")
 
 VC_CMD(0x30, FACTORY_RESET, VC_NONE, store_factory_reset_set,
-       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Erase every preset and restore factory defaults")
+       NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_RESTART, 0, "Reset the live state to factory defaults; stored presets are kept and no flash is written")
 
 VC_CMD(0x40, ALL_PARAMS, store_all_params_get, store_all_params_set,
        NONE, 6136, 0, 0, VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams V32; a SET must be the whole struct")
 VC_CMD(0x41, ALL_PARAMS_CHUNK, store_all_params_chunk_get, store_all_params_chunk_set,
-       OFFSET, VC_LEN_VAR, 0, 0, VC_F_USB_ONLY | VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams in pieces at a byte offset, sequential from 0")
+       OFFSET, VC_LEN_VAR, 0, 0, VC_F_USB_ONLY | VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams in pieces at a byte offset; offset 0 opens the session and SET chunks must follow in order")

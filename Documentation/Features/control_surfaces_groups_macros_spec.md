@@ -4,6 +4,8 @@
 `control_surfaces_spec.md`, which remains authoritative for everything a
 single-target binding already did.*
 
+*Last updated: 2026-11-16 (section 3 on the paged protocol of firmware 1.1.7)*
+
 Groups let one physical control (or IR command via a macro, or macro step)
 address a named set of channels as a unit: mute a speaker group, trim gain or
 delay on a stereo pair, light an LED when any (or every) member satisfies a
@@ -13,7 +15,7 @@ monitor A/B, run a timed mute sequence.
 
 Both features ride the existing engine unchanged in kind: every resulting
 parameter change still dispatches the same vendor command a host would send,
-through `vendor_dispatch_set/get` with `CTRL_SOURCE_GPIO`. Nothing in this
+through `vc_set()` with `CTRL_SOURCE_GPIO`. Nothing in this
 feature adds a new path to the audio pipeline, so preset loads, input
 switches and output-config changes triggered from a macro inherit the
 existing deferred, pipeline-safe apply machinery. Output slot alignment is
@@ -95,7 +97,7 @@ Macros are fired through a new noun, `CS_NOUN_MACRO` (52): an enum of
 `max_macros` positions accepting `SET` (fire macro `value`) and `IND_EQUALS`
 (LED lit while macro `value` is running). Any button gesture, or IR command
 can therefore fire a macro with no structural change to `CsBinding` or
-`IrCommand`. `REQ_CS_MACRO_FIRE` gives hosts and external MCUs the same
+`IrCommand`. `CS.MACRO_FIRE` gives hosts and external MCUs the same
 trigger. The live read of the noun is the running macro's index, or 255
 when idle (matches no `IND_EQUALS` comparand).
 
@@ -186,25 +188,33 @@ commands.
 pre-v9 host read them as zeros). `caps_version` = 9. `noun_count` grows to
 53 (`CS_NOUN_MACRO`).
 
-## 3. Commands (`0x20`-`0x26`)
+## 3. Commands (`CS` page 0x0A)
 
 All follow the existing CS conventions: SETs are deferred single-deep
 handoffs applied on the main loop with results in `cs_last_status` /
-`cs_last_slot`; applies are live-only previews; `REQ_CS_SAVE` persists the
+`cs_last_slot`; applies are live-only previews; `CS.SAVE` persists the
 whole CS config (now including groups and macros) in one directory write and
-`REQ_CS_REVERT` restores the stored one; the shared dirty flag covers all of
+`CS.REVERT` restores the stored one; the shared dirty flag covers all of
 it. `cs_last_slot` tags: `0x40 | group` for group SETs, `0x60 | macro` for
 macro header and step SETs (IR keeps `0x80 | sub`).
 
-| Cmd | Name | Dir | wValue | Payload / response |
-|-----|------|-----|--------|--------------------|
-| 0x20 | `REQ_SET_CS_GROUP` | SET | group 0-7 | 40-byte `CsGroup`; all-zero clears |
-| 0x21 | `REQ_GET_CS_GROUP` | GET | group 0-7 | 40-byte live `CsGroup` |
-| 0x22 | `REQ_SET_CS_MACRO` | SET | macro 0-7 | 36-byte `CsMacroHeaderWire` |
-| 0x23 | `REQ_GET_CS_MACRO` | GET | macro 0-7 | 132-byte live `CsMacro` |
-| 0x24 | `REQ_SET_CS_MACRO_STEP` | SET | `(step << 8) \| macro` | 12-byte `CsMacroStep`; all-zero clears |
-| 0x25 | `REQ_CS_MACRO_FIRE` | GET-style | macro 0-7; 0xFFFF = cancel | 1 status byte |
-| 0x26 | `REQ_GET_CS_EXT_STATUS` | GET | 0 | 24-byte `CsExtStatusPacket` |
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `CS.GROUP` | 0x0A | 0x40 | GET, SET | group 0-7 | GET 40, SET 40 | `CsGroup`. GET returns the live group, SET stages a preview. All-zero clears |
+| `CS.MACRO` | 0x0A | 0x50 | GET | macro 0-7 | GET 132 | Live `CsMacro`, header and every step |
+| `CS.MACRO_HEADER` | 0x0A | 0x51 | GET, SET | macro 0-7 | GET 36, SET 36 | `CsMacroHeaderWire`. The GET returns exactly what the SET accepts |
+| `CS.MACRO_STEP` | 0x0A | 0x52 | GET, SET | `(step << 8) \| macro` | GET 12, SET 12 | `CsMacroStep`. All-zero clears |
+| `CS.MACRO_FIRE` | 0x0A | 0x58 | SET (zero-length) | macro 0-7 | SET 0 | Runs the macro. An empty macro is a successful no-op |
+| `CS.MACRO_CANCEL` | 0x0A | 0x59 | SET (zero-length) | none (0) | SET 0 | Stops the running macro |
+| `CS.EXT_STATUS` | 0x0A | 0x13 | GET | none (0) | GET 24 | `CsExtStatusPacket` |
+
+A bad index or a wrong length STALLs with `VC_ERR_ADDRESS` or
+`VC_ERR_LENGTH` and does not touch the status packet. A SET while one of the
+same kind is still pending STALLs with `VC_ERR_BUSY` and posts BUSY. During
+a revert, `CS.MACRO_FIRE` STALLs with `VC_ERR_BUSY` and leaves the status
+packet alone. A SET that passes these checks is ACKed and its main-loop
+result arrives in the status packet as before. The reason for any STALL is
+readable from `SYS.LAST_RESULT` (see `../commands.md`).
 
 Recommended edit order for hosts: write steps first, header (with the final
 `step_count`) last, so a concurrently-fired macro never sees a length that
@@ -267,7 +277,7 @@ for the step's dispatches to leave the BUSY-pending state before starting
 the next step's delay. A queued preset load, factory reset or bulk apply
 also counts as unfinished work until it lands after the pipeline fade, and
 no step fires while one is queued, so later steps are never overwritten by
-it. Cancellation (new fire, `REQ_CS_MACRO_FIRE` 0xFFFF,
+it. Cancellation (new fire, `CS.MACRO_CANCEL`,
 or revert) drops remaining steps; anything already dispatched stands.
 
 ## 5. Persistence (directory V18)

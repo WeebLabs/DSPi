@@ -1,6 +1,6 @@
 # DAC Hardware Mute Support — Implementation Spec
 
-*Last updated: 2026-05-29*
+*Last updated: 2026-11-16 (sections 5, 7, 9, 10 and 11: vendor commands on the paged protocol of firmware 1.1.7)*
 *Status: implemented*
 *Platforms: RP2040 + RP2350*
 
@@ -106,11 +106,11 @@ typedef struct __attribute__((packed)) {
 // Reserves GPIOs and drives them un-muted per polarity.  Idempotent.
 void dac_hw_mute_init(const DacHwMuteConfig *cfg);
 
-// Validate + apply + persist.  Called by REQ_SET_DAC_HW_MUTE_CONFIG and
-// bulk_params_apply().  Returns PIN_CONFIG_* status (config.h).
+// Validate + apply + persist.  Called by the main loop for a queued
+// OUTPUT.DAC_MUTE_CONFIG SET and by bulk_params_apply().  Returns PIN_CONFIG_* status (config.h).
 uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg);
 
-// Snapshot current live config.  Called by REQ_GET_DAC_HW_MUTE_CONFIG
+// Snapshot current live config.  Called by the OUTPUT.DAC_MUTE_CONFIG GET
 // and bulk_params_collect().
 void dac_hw_mute_get_config(DacHwMuteConfig *out);
 
@@ -141,7 +141,7 @@ void dac_hw_mute_tick(void);
 bool dac_hw_mute_is_asserted(void);
 
 // Test pulse: assert mute for ~1 s then release asynchronously.  For
-// installer verification (REQ_TEST_DAC_HW_MUTE).
+// installer verification (OUTPUT.DAC_MUTE_TEST).
 uint8_t dac_hw_mute_test_start(void);
 
 // Returns true iff `pin` is the configured mute pin.  Used by
@@ -295,20 +295,18 @@ Persistence:
 
 ## 5. Vendor commands
 
-```c
-// config.h additions — next free range after 0xE9
-#define REQ_SET_DAC_HW_MUTE_CONFIG    0xEA  // payload = 16-byte DacHwMuteConfig
-#define REQ_GET_DAC_HW_MUTE_CONFIG    0xEB  // returns 16-byte DacHwMuteConfig
-#define REQ_TEST_DAC_HW_MUTE          0xEC  // no payload; asserts mute for ~1s
-                                            // then releases, so installer can
-                                            // verify pin + polarity audibly
-```
+The commands use the paged protocol of `../commands.md` (handlers in `firmware/DSPi/vendor/vc_page_output.c`).
 
-**SET:** payload is the full struct. Firmware validates, persists to directory on success, applies live (re-init GPIOs). Returns `PIN_CONFIG_*` status byte.
+| Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
+|---|---|---|---|---|---|---|
+| `OUTPUT.DAC_MUTE_CONFIG` | 0x04 | 0x40 | GET, SET | none (0) | GET 16, SET 16 | `DacHwMuteConfig` both ways |
+| `OUTPUT.DAC_MUTE_TEST` | 0x04 | 0x41 | SET (zero-length) | none (0) | SET 0 | Asserts mute for about 1 s, then releases, so an installer can verify pin and polarity audibly |
+
+**SET:** payload is the full 16-byte struct. When `enabled` is set, a bad `active_low` flag, `hold_ms` outside 1 to 500 or `release_ms` above 500 STALLs at once with `VC_ERR_VALUE`. Otherwise the SET is ACKed and queued. The main loop then validates the pins, persists to the directory on success and applies live (re-init GPIOs). Pin range and pin conflicts are only checked there, so a host reads the config back to confirm. There is no status byte.
 
 **GET:** returns live config.
 
-**TEST:** queues a deferred-to-main-loop asynchronous test pulse. `dac_hw_mute_test_start()` asserts the pin, records a ~1 s deadline, and returns; `dac_hw_mute_tick()` releases when the deadline expires. Audible result: audio silences for ~1 s, then returns. Confirms pin number, polarity, and that the DAC is actually being muted (not just receiving zero data).
+**TEST:** a zero-length SET. While the feature is disabled it STALLs with `VC_ERR_STATE`. Otherwise it queues a deferred-to-main-loop asynchronous test pulse. `dac_hw_mute_test_start()` asserts the pin, records a ~1 s deadline, and returns; `dac_hw_mute_tick()` releases when the deadline expires. Audible result: audio silences for ~1 s, then returns. Confirms pin number, polarity, and that the DAC is actually being muted (not just receiving zero data).
 
 **Notify:** SET pushes a `notify_param_write()` on the `WireBulkParams.dac_hw_mute` field so other connected hosts re-render their UI.
 
@@ -344,7 +342,7 @@ typedef struct __attribute__((packed)) {
 
 ### 7.1 Feature toggle mid-playback
 
-`REQ_SET_DAC_HW_MUTE_CONFIG` arriving during active audio: the SET handler is deferred to the main loop. Apply runs between audio packets. If the new config disables the feature, pins are released (driven to safe high-Z input state) and any held assert is cleared. If it changes pins, old pins are released and new pins are claimed with the un-muted level driven first to avoid an audible mute glitch on reconfiguration.
+An `OUTPUT.DAC_MUTE_CONFIG` SET arriving during active audio: the SET handler is deferred to the main loop. Apply runs between audio packets. If the new config disables the feature, pins are released (driven to safe high-Z input state) and any held assert is cleared. If it changes pins, old pins are released and new pins are claimed with the un-muted level driven first to avoid an audible mute glitch on reconfiguration.
 
 ### 7.2 Reboot / factory reset
 
@@ -352,7 +350,7 @@ typedef struct __attribute__((packed)) {
 
 ### 7.3 Pin pre-empted by another feature
 
-If `REQ_SET_OUTPUT_PIN` (or I²S BCK / MCK / SPDIF RX pin set) tries to claim a GPIO currently held by the mute config, the pin-setting command rejects with `PIN_CONFIG_PIN_IN_USE`. The user must `REQ_SET_DAC_HW_MUTE_CONFIG` to release the mute pin first. Convention matches every other pin conflict in the firmware — never silently steal.
+If `OUTPUT.PIN` (or an I²S BCK / MCK / SPDIF RX pin set) tries to claim a GPIO currently held by the mute config, the pin-setting command STALLs with `VC_ERR_PIN_IN_USE`. The user must send `OUTPUT.DAC_MUTE_CONFIG` to release the mute pin first. Convention matches every other pin conflict in the firmware. Never silently steal.
 
 ### 7.4 Sample-rate dependency on `hold_ms`
 
@@ -396,19 +394,19 @@ The audio-path zero-overhead is critical: the inner DSP loops never see this fea
 3. **`hold_ms` = 0:** confirm pop returns (proves the hold is doing its job — minus one).
 4. **`hold_ms` = 500 ms:** confirm the un-mute is delayed 500+ ms with no audible artifacts beyond the delay, **and that the main loop never stalls** — USB stays responsive (host control requests answered, no enumeration hiccup) and SPDIF input keeps draining throughout the hold (no consumer-fill growth / RX FIFO overflow). This is the non-blocking-hold regression check.
 5. **Polarity inverted (`active_low` flipped):** confirm DAC stays muted permanently. Re-flip, confirm normal operation. (Proves polarity is honored.)
-6. **Pin conflict rejection:** try setting mute pin to GPIO 6 (S/PDIF out slot 0). Expect `PIN_CONFIG_PIN_IN_USE`.
+6. **Pin conflict rejection:** try setting mute pin to GPIO 6 (S/PDIF out slot 0). Expect the main loop to refuse it, so the config reads back unchanged.
 7. **Bulk apply:** send V10 bulk_params with dac_hw_mute section, confirm config takes effect identically to vendor command path.
 8. **Old host on new firmware:** send V9 bulk_params, confirm dac_hw_mute config preserved (not zeroed).
 9. **Factory reset:** confirm dac_hw_mute returns to `{enabled=0}`, pins released.
 10. **Power-cycle:** confirm config persists across power loss.
 11. **Inter-slot alignment with mute enabled:** play a phase-coherent test signal across all I²S slots, perform multiple input switches, verify sample-level alignment unchanged via loopback measurement.
-12. **REQ_TEST_DAC_HW_MUTE:** confirm audio mutes for ~1 s, then returns. Confirm scope shows assertion transition matches configured polarity.
-13. **`REQ_SET_OUTPUT_PIN` to currently-claimed mute pin:** confirm rejection with `PIN_CONFIG_PIN_IN_USE`.
+12. **`OUTPUT.DAC_MUTE_TEST`:** confirm audio mutes for ~1 s, then returns. Confirm scope shows assertion transition matches configured polarity.
+13. **`OUTPUT.PIN` to currently-claimed mute pin:** confirm rejection with `VC_ERR_PIN_IN_USE`.
 14. **AK4493 with ATS=11 (11 ms ramp) and `hold_ms`=20:** verify no pop. Set `hold_ms`=5, verify pop returns.
 15. **`release_ms` with SPDIF input:** set a nonzero release hold, switch/relock SPDIF, and confirm the mute pin remains asserted for the configured period while `spdif_input_poll()` continues feeding output buffers without consumer fill growth.
 16. **Non-blocking hold on SPDIF paths (`hold_ms` = 200):** boot into a preset whose default source is SPDIF, and separately switch USB→SPDIF at runtime. Scope the mute pin: assert→clock-stop gap must be ≥ `hold_ms` on every run, and the main loop must keep servicing USB/SPDIF during the hold (the reported symptom — boot/switch no longer blocks).
 17. **Fast SPDIF re-lock honors the hold:** with SPDIF already present and stable, force a brief re-lock (e.g. momentary source toggle) so lock returns within a few ms. Confirm `drain_and_disable_outputs()` still waits for `dac_hw_mute_hold_elapsed()` — the assert→clock-stop gap stays ≥ `hold_ms` even though lock was near-instant.
-18. **Metadata-only write releases the mute (USB input):** with EMC enabled, hold_ms = 100, and USB as the active input streaming audio, issue a preset rename (`REQ_PRESET_SET_NAME`). Confirm the mute pin asserts during the flash blackout and **deasserts within `release_ms` afterward** — i.e. audio returns. Repeat for startup-policy, include_pins, master-volume-mode, master-volume save, and a DAC-mute config write. Before this fix the pin stayed asserted indefinitely (DAC silent until the next reset). With SPDIF input, confirm the pin instead releases after RX re-locks and prefills (lock-acquisition path owns it).
+18. **Metadata-only write releases the mute (USB input):** with EMC enabled, hold_ms = 100, and USB as the active input streaming audio, issue a preset rename (`STORE.PRESET_NAME` SET). Confirm the mute pin asserts during the flash blackout and **deasserts within `release_ms` afterward**, so audio returns. Repeat for startup-policy, include_pins, master-volume-mode, master-volume save, and a DAC-mute config write. Before this fix the pin stayed asserted indefinitely (DAC silent until the next reset). With SPDIF input, confirm the pin instead releases after RX re-locks and prefills (lock-acquisition path owns it).
 
 ---
 
@@ -418,7 +416,7 @@ The audio-path zero-overhead is critical: the inner DSP loops never see this fea
 2. Add `DacHwMuteConfig` field to `PresetDirectory` in `flash_storage.c`; bump directory version.
 3. Add `WireDacHwMute` section to `WireBulkParams`; bump `WIRE_FORMAT_VERSION` to 10.
 4. Add bulk_params collect/apply integration (`bulk_params.c`).
-5. Add vendor commands `REQ_SET_DAC_HW_MUTE_CONFIG` (0xEA), `REQ_GET_DAC_HW_MUTE_CONFIG` (0xEB), `REQ_TEST_DAC_HW_MUTE` (0xEC) in `vendor_commands.c`.
+5. Add vendor commands `OUTPUT.DAC_MUTE_CONFIG` and `OUTPUT.DAC_MUTE_TEST` in `firmware/DSPi/vendor/vc_page_output.c` and `pages/output.def`.
 6. Add pin-conflict-check integration: extend the existing `is_pin_in_use()` (or equivalent) to consult `dac_hw_mute_owns_pin()`.
 7. Add lifecycle hooks `dac_hw_mute_assert()` in `prepare_pipeline_reset()`; `_release()` in `complete_pipeline_reset()`. Both in `main.c`.
 8. Add init call in `core0_init()` after `preset_boot_load()`.
@@ -431,7 +429,7 @@ The audio-path zero-overhead is critical: the inner DSP loops never see this fea
 ## 11. Open questions
 
 - **Default `hold_ms` value:** the firmware accepts a minimum of 1; user is expected to set a value matching their DAC's published ramp time. Recommended starting points: 5 ms for PCM5102A, 100 ms for WM8741, 100 ms for AK4493 (ATS=00).
-- **Should `REQ_TEST_DAC_HW_MUTE` be gated on `enabled = 1` and a valid pin?** Yes — testing while feature off or with no pin is meaningless. Returns `PIN_CONFIG_INVALID_OUTPUT` if either is missing.
+- **Should `OUTPUT.DAC_MUTE_TEST` be gated on `enabled = 1` and a valid pin?** Yes. Testing while the feature is off or with no pin is meaningless. The SET STALLs with `VC_ERR_STATE` while the feature is disabled. A missing pin is not checked by the command, so the pulse then does nothing.
 
 ---
 
