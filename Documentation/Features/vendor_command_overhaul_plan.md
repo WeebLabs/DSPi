@@ -1,8 +1,8 @@
 # Vendor Command Overhaul Plan
 
-*Last updated: 2026-11-16 (status line, 8.14 As built (Phase 7), Phase 7 as done). Previously 2026-11-16 (status line, 8.13 As built (Phase 6), 7.5 and Phase 6 as done, items awaiting a decision in 14.1); 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text); 2026-11-16 (8.11, Phase 4)*
+*Last updated: 2026-11-17 (status line, 8.13 RTA test, 8.14 short guide, decisions on `CLOCK_DIAG`, `VC_F_RESTART` and the RTA test moved from 14.1 to 14). Previously 2026-11-16 (status line, 8.14 As built (Phase 7), Phase 7 as done); 2026-11-16 (status line, 8.13 As built (Phase 6), 7.5 and Phase 6 as done, items awaiting a decision in 14.1); 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text); 2026-11-16 (8.11, Phase 4)*
 
-Status: approved by the user on 2026-11-15 with the decisions in section 14. Phases 0 to 7 are done, and sections 8.8 to 8.14 record what was built. The host migration guide is complete, with four host appendices (8.14). The Windows run of the `wIndex` test is still owed by the user (11.1). What remains is release readiness (Phase 8). Four questions await the user's decision (14.1). Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
+Status: approved by the user on 2026-11-15 with the decisions in section 14. Phases 0 to 7 are done, and sections 8.8 to 8.14 record what was built. The host migration guide is complete, with four host appendices (8.14), and a short client update guide sits beside it. The Windows run of the `wIndex` test is still owed by the user (11.1). What remains is release readiness (Phase 8). The open questions were decided on 2026-11-17 (14). Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
 
 ## 1. TL;DR
 
@@ -848,7 +848,7 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - **Transport API.** `vendor/vc_ctrl.h` holds what UART, I2C and internal callers need: `CtrlSource`, `VcResult`, the `CTRL_STATUS_*` codes and the entry points. The transports call `ctrl_dispatch_get()` and `ctrl_dispatch_set()`, which return the wire status byte. The bulk lock and `vendor_is_bulk_set()` live in `vc_bulk.c`.
 - **Status byte on UART and I2C.** 0x00 is OK. 0x01 to 0x07 are transport conditions where the command did not run (busy, bulk lock held, CRC, oversize, bad frame). 0x10 and up is the `VcResult` itself. Any non-zero value is a failure. 0x01, 0x04 and 0x17 are worth a retry.
 - **Reply size.** Both transports carry replies up to the 256-byte reply buffer.
-- **Bulk.** `STORE.ALL_PARAMS` works over UART and I2C with the same zero-copy streaming and lock rules the old opcodes had. `ALL_PARAMS_CHUNK`, `RTA_BANDS_ALL`, `CLOCK_DIAG` and the `XPORT` config SETs stay USB only.
+- **Bulk.** `STORE.ALL_PARAMS` works over UART and I2C with the same zero-copy streaming and lock rules the old opcodes had. `ALL_PARAMS_CHUNK`, `RTA_BANDS_ALL` and the `XPORT` config SETs stay USB only. `CLOCK_DIAG` was USB only too until 2026-11-17 (14).
 - **Control Surfaces.** `cs_noun_dispatch()` sends every noun through `vc_set()` with `CTRL_SOURCE_GPIO`. It returns false only on `VC_ERR_BUSY`, which the engine retries on the next tick.
 - **Loop profiler.** `DIAG` 0x30 to 0x34 replace the `GET_STATUS` selectors. Reads no longer clear, and `LOOP_PROF_RESET` does. Per-command times are kept by table index and read by command ID.
 - **Page 0 on the external transports** still reaches the old code through one marked call-through in `vendor_commands.c`, which the flip deletes.
@@ -890,12 +890,13 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - **Opt-in CS revert tests.** `tests/control_surfaces.py` (three `CS.REVERT` tests) SKIPs unless `DSPI_TEST_CS_REVERT=1` is set, because `CS.REVERT` takes stored non-button bindings down on current firmware (14.1).
 - **Selftest.** A section that needs a missing optional module (`numpy`, `sounddevice`) reports SKIP and the run exits 0. The result is OK 170, SKIP 1, FAILURES 0.
 - **Hardware result.** The whole suite with `--allow-flash` on the bench RP2350 gave 180 of 191 passing, 1 failing and 10 SKIPs. The skips are the bootloader policy (1), no `sounddevice` (1), the CS revert opt-in (3) and the bench-build `DIAG` commands (5). The audio loopback group was not part of this run.
-- **The one failure** is `rta.rta_busy_within_budget`. The analyser's worst frame time measures 1.04 to 1.08 ms at FFT order 10 on RP2350, where `spectrum_analyser_spec.md` section 3.1 says "a fraction of a millisecond". It is left failing until the user decides whether the spec or the firmware is wrong (14.1).
+- **The one failure** was `rta.rta_busy_within_budget`. The analyser's worst frame time measures 1.04 to 1.08 ms at FFT order 10 on RP2350, where `spectrum_analyser_spec.md` section 3.1 says "a fraction of a millisecond". That sentence describes the capture gap, while the test measured the summed processing time of the transform's slices. On 2026-11-17 the user chose to change the test (14).
 - **Not ported.** `tools/batch_bench/` drives an experimental firmware command that this firmware does not have. It still imports `OP` and fails at import, and its README says so.
 
 ### 8.14 As built (Phase 7)
 
 - **The guide.** `Documentation/Features/vendor_protocol_migration_guide.md` is the one document a host maintainer needs. After a TL;DR it has 13 sections. They are who reads what (1), what changed (2), the request field by field with byte-level examples (3), the probe and discovery (4), errors and result codes (5), the old-to-new map for all 246 opcodes with a recipe for every split, reshaped, retired and former write-as-read opcode (6), every GET reply (7), per-page notes (8), bulk parameters (9), notifications (10), per-transport notes (11), the porting checklist and tests (12) and the host appendices (13). The map, the `GET_STATUS` table, the write-as-read and retired lists and the reply lengths are generated blocks, which `scripts/gen_vendor_protocol.py --check` keeps in step with the registry and `legacy_map.json`.
+- **The short guide.** `Documentation/Features/vendor_protocol_client_update.md` (added 2026-11-17) keeps only what a client must change. The generator fills its map, `GET_STATUS` and retired tables, and their links fall back to the full guide's sections.
 - **Four host appendices** in section 13, each written from a read-only audit of the host repository and naming the branch and commit it audited.
     - 13.1 ESP32 front panel (UART). Self-contained for a maintainer who reads nothing else. It has a row and an old and new frame for each of the panel's 69 opcodes, the probe with a protocol state, the new status codes, the RP2040 ADAT gate and the 1.1.6 number collisions of the panel's own requests.
     - 13.2 DSPi Console for macOS. The 16-bit transport, the probe with a legacy state that keeps the firmware update working for 1.1.6 devices, a SET path that reports refusals, a band writer for `VC_ERR_BUSY`, the statistics struct reads and the rekeying of the embedded Link hub.
@@ -1125,7 +1126,7 @@ Agents split the 13 older test modules in `tools/dspi_test/tests/` (the ones tha
 
 When every module was ported, `legacy_map.py` and the protocol modes were deleted from the harness, and `crosscut.py`, `stress.py` and `selftest.py` were fixed. `Documentation/protocol/legacy_map.json` stays as migration data, checked by the generator.
 
-Verification: the full native harness ran on hardware with 180 of 191 passing. The one failure is a spec question (14.1). The golden regression was re-expressed in native requests, and the native reference was captured in the same session as a matching translated replay.
+Verification: the full native harness ran on hardware with 180 of 191 passing. The one failure was a test that measured the wrong quantity, since changed (14). The golden regression was re-expressed in native requests, and the native reference was captured in the same session as a matching translated replay.
 
 ### Phase 7. Migration guide
 
@@ -1171,6 +1172,9 @@ The user answered the open questions on 2026-11-15. Three were left to the desig
 | DSPi Link | The repo is at `/Users/weeblabs/DSPi-Link`, read-only for this work. Its port is covered by a guide appendix |
 | Harness translation layer | Temporary. The tests were ported to native paged calls and the layer was deleted in Phase 6 (8.13) |
 | Commits | One commit per finished and verified phase, on `vendor-command-overhaul` only. No push, tag or merge |
+| `DIAG.CLOCK_DIAG` transports | Served on USB, UART and I2C (2026-11-17, designer's call at the user's request). The USB-only flag existed because the packet outgrew the old 132-byte UART and I2C reply. Replies are now 256 bytes everywhere, and a static assert keeps the packet inside that |
+| Meaning of `VC_F_RESTART` | Kept wide (2026-11-17, designer's call at the user's request). It marks every command that can interrupt audio, including `OUTPUT.DAC_MUTE_TEST` and `SYS.ENTER_BOOTLOADER`, because a host uses it to warn before a write that drops audio, whatever the cause |
+| RTA frame-time test | The test changed, not the spec or firmware (2026-11-17, the user's decision). `last_frame_us` sums slice run time, so `rta.rta_busy_within_budget` now asserts that no background step overruns and that the per-frame cost stays under 15% (RP2350) or 30% (RP2040) of the frame period |
 
 ### 14.1 Still open
 
@@ -1179,7 +1183,4 @@ None blocks the remaining phases. These inputs and decisions are outstanding, re
 | Item | Status |
 |---|---|
 | Phase 0 Windows `wIndex` result | The user runs `tools/windex_page_test.py` on Windows (11.1). It passes on macOS |
-| `DIAG.CLOCK_DIAG` transports | It is USB only (`USB_ONLY`, 8.10). Replies are now up to 256 bytes on every transport, so it could also be served on UART and I2C. Awaiting the user's decision |
-| Meaning of `VC_F_RESTART` | Today it marks every command that can interrupt audio (8.12), flash writes and live input restarts included. The alternative is to mark output restarts only. Awaiting the user's decision |
-| RTA frame time | `spectrum_analyser_spec.md` section 3.1 says a frame's transform takes "a fraction of a millisecond on RP2350". It measures 1.04 to 1.08 ms at FFT order 10. Either the spec sentence or the firmware is wrong. `rta.rta_busy_within_budget` fails until this is decided |
 | `CS.REVERT` takes stored bindings down | A firmware bug, out of scope for this work and tracked separately. A revert leaves every stored non-button binding down with a pin-in-use status. The three `control_surfaces` tests are opt-in (`DSPI_TEST_CS_REVERT=1`) until it is fixed |

@@ -1529,7 +1529,7 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `CLOCK.MCK_ENABLE` | 0x0C | 0x20 | none | 1 |  |  |
 | `CLOCK.MCK_PIN` | 0x0C | 0x21 | none | 1 |  |  |
 | `CLOCK.MCK_MULTIPLIER` | 0x0C | 0x22 | none | 1 |  |  |
-| `DIAG.CLOCK_DIAG` | 0xF0 | 0x10 | none | var | `DSPI_CLOCK_DIAG`, USB only | `ClockDiagPacket`. 226 on RP2040, 248 on RP2350 |
+| `DIAG.CLOCK_DIAG` | 0xF0 | 0x10 | none | var | `DSPI_CLOCK_DIAG` | `ClockDiagPacket`. 226 on RP2040, 248 on RP2350 |
 | `DIAG.LOOPBACK_STATS` | 0xF0 | 0x20 | none | 8 | `DSPI_LOOPBACK` |  |
 | `DIAG.LOOP_PROF_SECTION` | 0xF0 | 0x30 | index | 4 | `DSPI_LOOP_PROF` |  |
 | `DIAG.LOOP_PROF_JOB` | 0xF0 | 0x31 | index | 4 | `DSPI_LOOP_PROF` |  |
@@ -1840,7 +1840,7 @@ The preview, Save and Revert model of Control Surfaces is unchanged. Preview SET
 
 | Old | New | Difference |
 |---|---|---|
-| `0x82` | `DIAG.CLOCK_DIAG` | Exists only in `DSPI_CLOCK_DIAG` builds. Elsewhere it is `VC_ERR_UNKNOWN` (1.1.6 answered zero bytes). USB only, so UART and I2C get `VC_ERR_BLOCKED` |
+| `0x82` | `DIAG.CLOCK_DIAG` | Exists only in `DSPI_CLOCK_DIAG` builds. Elsewhere it is `VC_ERR_UNKNOWN` (1.1.6 answered zero bytes). Served on UART and I2C as well as USB, where 1.1.6 was USB only |
 | `0x50` selectors 24, 25 | `DIAG.LOOPBACK_STATS` | Exists only in `DSPI_LOOPBACK` builds. 1.1.6 answered the selectors with 0 elsewhere |
 | `0x50` selectors 64 and up | `DIAG.LOOP_PROF_*` | Exist only in `DSPI_LOOP_PROF` builds, as before |
 
@@ -2025,7 +2025,7 @@ A 1.1.6-era client that leaves the `wIndex` high byte at 0 gets status `0x10` fo
 
 **Sizes.** SET payloads are at most 64 bytes. GET replies are at most 256 bytes and arrive whole, except `STORE.ALL_PARAMS`, which streams 6136 bytes. 1.1.6 limited UART and I2C replies to 132 bytes, so a receive buffer sized for 132 must grow to 256. The largest fixed-length reply is still `CS.MACRO` at 132 bytes. `MEAS.RTA_BINS` returns up to 256 bytes per read. `wLength` caps the reply as on USB, and `wLength` 0 means "the whole reply".
 
-**USB-only commands** answer `VC_ERR_BLOCKED` (`0x16`) over UART. They are the `XPORT.UART_CONFIG` and `XPORT.I2C_CONFIG` SETs, both directions of `STORE.ALL_PARAMS_CHUNK`, `MEAS.RTA_BANDS_ALL` and `DIAG.CLOCK_DIAG`. `SYS.COMMAND_INFO` flag bits 0 and 1 mark them.
+**USB-only commands** answer `VC_ERR_BLOCKED` (`0x16`) over UART. They are the `XPORT.UART_CONFIG` and `XPORT.I2C_CONFIG` SETs, both directions of `STORE.ALL_PARAMS_CHUNK` and `MEAS.RTA_BANDS_ALL`. `SYS.COMMAND_INFO` flag bits 0 and 1 mark them.
 
 **Start-up order for a UART client.**
 

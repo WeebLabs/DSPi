@@ -1,6 +1,6 @@
 # External Control Interfaces (UART and I2C Target)
 
-*Last updated: 2026-11-16 (paged vendor protocol, firmware 1.1.7)*
+*Last updated: 2026-11-17 (`DIAG.CLOCK_DIAG` no longer USB only). Previously 2026-11-16 (paged vendor protocol, firmware 1.1.7)*
 
 *Transport framing version: 1. Command protocol: paged, major version 1.*
 
@@ -83,7 +83,6 @@ A few commands are reachable over USB only. Over UART or I2C they answer `VC_ERR
 | `XPORT.I2C_CONFIG` | `0x0B`, `0x11` | SET | Same. The GET works |
 | `STORE.ALL_PARAMS_CHUNK` | `0x02`, `0x41` | GET and SET | Exists only for the 4 KB WinUSB control limit. Use `STORE.ALL_PARAMS` |
 | `MEAS.RTA_BANDS_ALL` | `0x09`, `0x26` | GET | Read `MEAS.RTA_BANDS` per channel instead |
-| `DIAG.CLOCK_DIAG` | `0xF0`, `0x10` | GET | Bench builds only |
 
 The device itself is the authority. `SYS.COMMAND_INFO` reports a command's flags in bytes 0 and 1, and bit 0 (`0x0001`, USB only) or bit 1 (`0x0002`, SET USB only) marks a command this table would list.
 

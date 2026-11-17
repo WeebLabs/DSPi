@@ -1869,7 +1869,7 @@ Bench and diagnostic commands with no stability promise. Release firmware builds
 
 | Cmd | Name | Dir | wValue | GET bytes | SET bytes | Flags | Notes |
 |---|---|---|---|---|---|---|---|
-| 0x10 | `CLOCK_DIAG` | G | none | var | - | USB_ONLY | Latest 1 Hz ClockDiagPacket snapshot (build: `DSPI_CLOCK_DIAG` only) |
+| 0x10 | `CLOCK_DIAG` | G | none | var | - |  | Latest 1 Hz ClockDiagPacket snapshot (build: `DSPI_CLOCK_DIAG` only) |
 | 0x20 | `LOOPBACK_STATS` | G | none | 8 | - |  | Loopback capture overflow and underrun frame counts (build: `DSPI_LOOPBACK` only) |
 | 0x30 | `LOOP_PROF_SECTION` | G | index | 4 | - |  | Worst time of main-loop section wValue (LOOP_PROF_SECTION_LIST) (build: `DSPI_LOOP_PROF` only) |
 | 0x31 | `LOOP_PROF_JOB` | G | index | 4 | - |  | Worst step of background job wValue (BG_JOB_LIST) (build: `DSPI_LOOP_PROF` only) |
@@ -1879,7 +1879,7 @@ Bench and diagnostic commands with no stability promise. Release firmware builds
 
 <!-- VC:END DIAG -->
 
-- `DIAG.CLOCK_DIAG` returns the latest once-per-second `ClockDiagPacket` (sysclk, clock trim, servo, per-slot ring, PDM, input and USB feedback state). The authoritative layout is the packed struct in `firmware/DSPi/clock_diag.h`, and `tools/clkdiag_poll.py` decodes it. USB only.
+- `DIAG.CLOCK_DIAG` returns the latest once-per-second `ClockDiagPacket` (sysclk, clock trim, servo, per-slot ring, PDM, input and USB feedback state). The authoritative layout is the packed struct in `firmware/DSPi/clock_diag.h`, and `tools/clkdiag_poll.py` decodes it.
 - `DIAG.LOOPBACK_STATS` returns two u32 counts, loopback capture overflow frames then underrun frames.
 - `DIAG.LOOP_PROF_SECTION`, `DIAG.LOOP_PROF_JOB` and `DIAG.LOOP_PROF_COMMAND` return a u32 worst time in us, since boot or the last `DIAG.LOOP_PROF_RESET`, for one main-loop section, one background job or one paged command (GET and SET together). Section and job numbers follow the lists in `firmware/DSPi/loop_prof.h`. Reads never clear them. `DIAG.LOOP_PROF_BG_PACE` is a u16 pacing divider for background jobs, where 0 stores 1.
 
@@ -2102,7 +2102,7 @@ The UART and the I2C target carry exactly the same commands as USB. A client bui
 
 - **Status byte.** Every response starts with one status byte. `0x00` is success. `0x01` to `0x07` are transport conditions, and the command did not run. They are `0x01` busy, `0x04` bulk buffer held, `0x05` CRC error, `0x06` payload too large and `0x07` bad frame. `0x10` and up is the command's own result code (section 1.5), the same one a USB host reads from `SYS.LAST_RESULT`. Any non-zero status is a failure. Only `0x01`, `0x04` and `0x17` are worth retrying unchanged. Codes `0x02` and `0x03` are never sent by firmware 1.1.7, and old firmware answers the `SYS.PROTOCOL_INFO` probe with `0x02`.
 - **Sizes.** SET payloads are at most 64 bytes and GET replies at most 256 bytes, delivered whole, except `STORE.ALL_PARAMS`, which streams through the bulk buffer. A GET's `wLength` caps the reply as on USB, but `wLength` 0 means "the whole reply".
-- **USB only.** A few requests answer `VC_ERR_BLOCKED` (`0x16`) on UART and I2C. They are the `XPORT.UART_CONFIG` and `XPORT.I2C_CONFIG` SETs, both directions of `STORE.ALL_PARAMS_CHUNK`, `MEAS.RTA_BANDS_ALL` and `DIAG.CLOCK_DIAG`. `SYS.COMMAND_INFO` flag bits 0 and 1 mark them.
+- **USB only.** A few requests answer `VC_ERR_BLOCKED` (`0x16`) on UART and I2C. They are the `XPORT.UART_CONFIG` and `XPORT.I2C_CONFIG` SETs, both directions of `STORE.ALL_PARAMS_CHUNK` and `MEAS.RTA_BANDS_ALL`. `SYS.COMMAND_INFO` flag bits 0 and 1 mark them.
 - **Bootloader.** `SYS.ENTER_BOOTLOADER` reboots once the response frame has gone out.
 - **`SYS.LAST_RESULT`** is kept per transport, so a UART client reads its own.
 

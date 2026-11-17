@@ -255,7 +255,7 @@
      "reserved": []},
     {"page": 240, "mnemonic": "DIAG", "revision": 1, "doc": "Bench and diagnostic commands with no stability promise",
      "commands": [
-       {"cmd": 16, "name": "CLOCK_DIAG", "id": 61456, "get": true, "set": false, "addr": "NONE", "get_len": "var", "set_min": 0, "set_max": 0, "flags": ["USB_ONLY"], "arg": "0", "build": "DSPI_CLOCK_DIAG", "doc": "Latest 1 Hz ClockDiagPacket snapshot"},
+       {"cmd": 16, "name": "CLOCK_DIAG", "id": 61456, "get": true, "set": false, "addr": "NONE", "get_len": "var", "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_CLOCK_DIAG", "doc": "Latest 1 Hz ClockDiagPacket snapshot"},
        {"cmd": 32, "name": "LOOPBACK_STATS", "id": 61472, "get": true, "set": false, "addr": "NONE", "get_len": 8, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOPBACK", "doc": "Loopback capture overflow and underrun frame counts"},
        {"cmd": 48, "name": "LOOP_PROF_SECTION", "id": 61488, "get": true, "set": false, "addr": "INDEX", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst time of main-loop section wValue (LOOP_PROF_SECTION_LIST)"},
        {"cmd": 49, "name": "LOOP_PROF_JOB", "id": 61489, "get": true, "set": false, "addr": "INDEX", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst step of background job wValue (BG_JOB_LIST)"},

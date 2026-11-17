@@ -291,9 +291,9 @@ Any host-driven format change (SET_INTERFACE between AS alts for a bit-depth swi
 **Output dividers at rate changes (`apply_nominal_output_rate()`, main.c):** output dividers are never trimmed. Input clock tracking pulls `sys_clk` in ppm through the soft VCXO, which moves every output together (see "Soft VCXO" and "Clock Servo"). `perform_rate_change()` therefore only programs the nominal divider for the new rate on each set-up S/PDIF slot and MCK, while `audio_i2s_update_all_frequencies()` retunes the I2S slots. Leaving a tracked input (SPDIF, ADAT slave, I2S slave) needs no divider work at all: its stop path calls `input_servo_reset()`, which parks the VCXO at nominal. `input_servo_reset()` must never run on the pipeline-reset path, because it would park a locked VCXO mid-lock. *Last updated: 2026-10-10*
 
 ### Clock Diagnostics (bench instrument)
-*Last updated: 2026-11-16 (read through `DIAG.CLOCK_DIAG`; config.h default corrected). Previously 2026-10-16 (packet version 2: USB feedback controller block and `usbfb:` line)*
+*Last updated: 2026-11-17 (`DIAG.CLOCK_DIAG` served on UART and I2C too). Previously 2026-11-16 (read through `DIAG.CLOCK_DIAG`; config.h default corrected); 2026-10-16 (packet version 2: USB feedback controller block and `usbfb:` line)*
 
-**Building it.** Diagnostics are compiled in only with `-DDSPI_CLOCK_DIAG=ON` at configure time (a CMake option, OFF by default, like `DSPI_LOOPBACK`). `DIAG.CLOCK_DIAG` exists only in such a build. A release build has no such command, so a request STALLs with `VC_ERR_UNKNOWN`. The command is flagged USB only, so UART and I2C get `VC_ERR_BLOCKED`. The `ClockDiagPacket` is 226 bytes on RP2040 and 248 on RP2350, static-asserted to fit the 256-byte reply buffer. Read it over USB with `tools/clkdiag_poll.py`.
+**Building it.** Diagnostics are compiled in only with `-DDSPI_CLOCK_DIAG=ON` at configure time (a CMake option, OFF by default, like `DSPI_LOOPBACK`). `DIAG.CLOCK_DIAG` exists only in such a build. A release build has no such command, so a request STALLs with `VC_ERR_UNKNOWN`. It is served on every transport. The `ClockDiagPacket` is 226 bytes on RP2040 and 248 on RP2350, static-asserted to fit the 256-byte reply buffer that UART and I2C also use. Read it over USB with `tools/clkdiag_poll.py`.
 
 `clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and the read-only `DIAG.CLOCK_DIAG` GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf output is otherwise discarded). Gated entirely by `DSPI_CLOCK_DIAG`. `config.h` defaults it to 0, which compiles everything to no-op inlines and leaves `DIAG.CLOCK_DIAG` out of the table; the CMake option sets it to 1. `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
 
@@ -3172,7 +3172,7 @@ detail lives in `Documentation/Features/control_interfaces_spec.md`; this sectio
 covers the firmware-side structure.
 
 ### Entry points (`vendor/vc_ctrl.h`)
-*Last updated: 2026-11-16 (`DIAG.CLOCK_DIAG` USB-only reason). Previously 2026-11-16 (page 0 call-through and `CtrlDispatchResult` removed)*
+*Last updated: 2026-11-17 (`DIAG.CLOCK_DIAG` no longer USB only). Previously 2026-11-16 (`DIAG.CLOCK_DIAG` USB-only reason); 2026-11-16 (page 0 call-through and `CtrlDispatchResult` removed)*
 
 USB (EP0), UART and I2C each parse their own wire framing into the same
 `bRequest` / `wValue` / `wIndex` / `wLength` shape. The external transports call
@@ -3221,10 +3221,8 @@ command and `MEAS.RTA_BANDS_ALL` carry `VC_F_USB_ONLY` and answer
 
 **USB-only commands.** Off USB, `vc_check()` refuses `VC_F_USB_ONLY` commands in
 both directions and `VC_F_SET_USB_ONLY` SETs with `VC_ERR_BLOCKED`. Today these
-are the XPORT config SETs, `STORE.ALL_PARAMS_CHUNK`, `MEAS.RTA_BANDS_ALL` and
-`DIAG.CLOCK_DIAG`. The flags live in the `.def` files, so no separate list exists.
-`DIAG.CLOCK_DIAG` fits the 256-byte reply buffer on every transport, so its
-USB-only flag is a choice for a bench readout, not a size limit.
+are the XPORT config SETs, `STORE.ALL_PARAMS_CHUNK` and `MEAS.RTA_BANDS_ALL`.
+The flags live in the `.def` files, so no separate list exists.
 
 **Bootloader entry.** `SYS.ENTER_BOOTLOADER` from UART or I2C sets a per-source
 flag (`ctrl_reboot_request()`) instead of rebooting in the handler. The UART poll

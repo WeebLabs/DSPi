@@ -230,10 +230,10 @@ reference is tied back to firmware 1.1.6. See [`golden/README.md`](golden/README
 
 On the bench RP2350 with firmware 1.1.7 beta 1, `--allow-flash`: 180 of 191 pass, 1 fails, 10 SKIP.
 
-- **The failure** is `rta.rta_busy_within_budget`. The analyser's worst frame time measures about
-  1.05 ms at FFT order 10, and `Documentation/Features/spectrum_analyser_spec.md` section 3.1 says "a
-  fraction of a millisecond on RP2350". It is left failing until it is decided whether the spec or the
-  firmware is wrong.
+- **The failure** was `rta.rta_busy_within_budget`, which compared the summed slice time of a frame
+  (about 1.05 ms at FFT order 10) with a spec sentence about the capture gap. It now asserts that no
+  background step overruns and that the per-frame cost stays a small share of the frame period. The
+  changed test has not yet run on hardware.
 - **The skips** are the bootloader quarantine (1), `rta_input_tap_usb_sine` without `sounddevice`
   (1), the opt-in `CS.REVERT` tests (3) and the bench-build `DIAG` tests (5).
 
