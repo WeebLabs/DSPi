@@ -18,7 +18,8 @@ DEFAULT_PAGES = os.path.join(REPO, "firmware", "DSPi", "vendor", "pages")
 DEFAULT_CORE_H = os.path.join(REPO, "firmware", "DSPi", "vendor", "vc_core.h")
 DEFAULT_JSON = os.path.join(REPO, "Documentation", "protocol", "dspi_commands.json")
 DEFAULT_GUIDE = os.path.join(REPO, "Documentation", "Features", "vendor_protocol_migration_guide.md")
-DEFAULT_DOCS = [os.path.join(REPO, "Documentation", "commands.md"), DEFAULT_GUIDE]
+DEFAULT_CLIENT_UPDATE = os.path.join(REPO, "Documentation", "Features", "vendor_protocol_client_update.md")
+DEFAULT_DOCS = [os.path.join(REPO, "Documentation", "commands.md"), DEFAULT_GUIDE, DEFAULT_CLIENT_UPDATE]
 DEFAULT_LEGACY_MAP = os.path.join(REPO, "Documentation", "protocol", "legacy_map.json")
 
 ADDR_KINDS = (
@@ -660,20 +661,22 @@ def heading_anchors(text):
     return out
 
 
-def _heading_link(anchors, needle):
+def _heading_link(anchors, needle, prefix=""):
     for title, slug in anchors:
         if needle in title:
-            return "#" + slug
+            return prefix + "#" + slug
     return None
 
 
 class _Guide:
-    """Shared lookups for the guide blocks. Errors collect in self.errs, prefixed with the doc path."""
+    """Shared lookups for the guide blocks. Errors collect in self.errs, prefixed with the doc path.
+    xref is (relative link, text) of the full guide; links fall back to its headings."""
 
-    def __init__(self, pages, legacy, text, path):
+    def __init__(self, pages, legacy, text, path, xref=None):
         self.cmds = {"%s.%s" % (p["mnemonic"], c["name"]): (p, c) for p in pages for c in p["commands"]}
         self.doc = legacy
         self.anchors = heading_anchors(text)
+        self.xref = (xref[0], heading_anchors(xref[1])) if xref else None
         self.path = path
         self.errs = []
         self.ops = sorted(legacy.get("opcodes", {}).items(), key=lambda kv: kv[1]["code"])
@@ -693,6 +696,8 @@ class _Guide:
 
     def link(self, needle, required_for=None):
         href = _heading_link(self.anchors, needle)
+        if href is None and self.xref:
+            href = _heading_link(self.xref[1], needle, self.xref[0])
         if href is None and required_for:
             self.errs.append("%s: no heading contains %s, which %s needs" % (self.path, needle, required_for))
         return href
@@ -1045,9 +1050,9 @@ def render_retired(g):
     return rows
 
 
-def rewrite_doc_blocks(text, pages, path="<docs>", legacy=None):
+def rewrite_doc_blocks(text, pages, path="<docs>", legacy=None, xref=None):
     """Replace every VC:BEGIN/VC:END block in text. Returns (new_text, blocks_rewritten).
-    The guide blocks (GUIDE_MARKERS) need legacy, the parsed legacy_map.json."""
+    The guide blocks (GUIDE_MARKERS) need legacy, the parsed legacy_map.json. xref: see _Guide."""
     by_mnem = {p["mnemonic"]: p for p in pages}
     anchors = page_anchors(text)
     guide = None
@@ -1086,7 +1091,7 @@ def rewrite_doc_blocks(text, pages, path="<docs>", legacy=None):
                     rows = None
                 elif mnem in GUIDE_MARKERS:
                     if guide is None:
-                        guide = _Guide(pages, legacy, text, path)
+                        guide = _Guide(pages, legacy, text, path, xref)
                     rows = {"LEGACY_MAP": lambda: render_legacy_map(guide),
                             "LEGACY_WASR": lambda: render_legacy_wasr(guide),
                             "LEGACY_STATUS": lambda: render_legacy_status(guide),
@@ -1244,7 +1249,7 @@ def main(argv=None):
     ap.add_argument("--json", default=DEFAULT_JSON, help="registry JSON path")
     ap.add_argument("--docs", action="append", metavar="PATH",
                     help="Markdown file with VC:BEGIN/VC:END blocks (repeatable; default "
-                         "Documentation/commands.md and Features/vendor_protocol_migration_guide.md)")
+                         "Documentation/commands.md and the two Features/vendor_protocol_*.md guides)")
     ap.add_argument("--legacy-map", default=None,
                     help="old-opcode migration map that --check validates against the registry "
                          "(default Documentation/protocol/legacy_map.json when --pages is the default)")
@@ -1273,13 +1278,18 @@ def main(argv=None):
     except ValueError as e:
         sys.stderr.write("error: %s: %s\n" % (_rel(a.legacy_map), e))
         return 1
+    guide_text = _read(DEFAULT_GUIDE)
     for path in docs:
         old = _read(path)
         if old is None:
             errs.append("%s: not found" % path)
             continue
+        xref = None
+        if guide_text is not None and os.path.abspath(path) != DEFAULT_GUIDE:
+            rel = os.path.relpath(DEFAULT_GUIDE, os.path.dirname(os.path.abspath(path)))
+            xref = (rel.replace(os.sep, "/"), guide_text)
         try:
-            new, count = rewrite_doc_blocks(old, reg["pages"], _rel(path), lm_doc)
+            new, count = rewrite_doc_blocks(old, reg["pages"], _rel(path), lm_doc, xref)
         except DefError as e:
             errs.extend(e.messages)
             continue

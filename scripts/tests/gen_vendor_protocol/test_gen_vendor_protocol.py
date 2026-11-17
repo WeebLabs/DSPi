@@ -496,6 +496,14 @@ class GuideBlocks(unittest.TestCase):
                 g.rewrite_doc_blocks(GUIDE_DOC.replace(heading, ""), self.pages, "guide.md", self.legacy)
             self.assertIn("no heading contains %s" % want, str(cm.exception))
 
+    def test_links_fall_back_to_the_full_guide(self):
+        short = GUIDE_DOC.replace("### `GET_MATRIX_ROUTE` recipe\n", "").replace("### Retired opcodes\n", "")
+        new, _n = g.rewrite_doc_blocks(short, self.pages, "short.md", self.legacy, ("full.md", GUIDE_DOC))
+        self.assertIn("[see recipe](full.md#get_matrix_route-recipe)", new)
+        self.assertIn("[replacement](full.md#retired-opcodes)", new)
+        # A heading in the doc itself wins over the full guide.
+        self.assertIn("[`GET_STATUS`](#get_status-recipe)", new)
+
     def test_write_as_read_rows_and_status_override(self):
         rows = self.rows(self.render(), "LEGACY_WASR")
         self.assertEqual([r.split(" | ")[1] for r in rows],

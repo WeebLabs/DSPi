@@ -6,6 +6,8 @@ This guide is for the maintainers of every program that talks to a DSPi over its
 
 The full reference for the new protocol is `Documentation/commands.md`. This guide repeats what a porter needs from it, so you only open that file for detail you choose to look up.
 
+A short version with only the changes a client must make is [`vendor_protocol_client_update.md`](vendor_protocol_client_update.md).
+
 ---
 
 ## TL;DR
