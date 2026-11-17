@@ -42,8 +42,9 @@ def pdiag_clock_diag_shape(dev, profile, chk):
     if CLOCK_DIAG not in _diag_cmds(dev):
         raise Skip("not a DSPI_CLOCK_DIAG build: DIAG.CLOCK_DIAG absent")
     pkt = dev.pget("DIAG.CLOCK_DIAG", length=256)
-    chk.ok(len(pkt) >= 16, f"packet length {len(pkt)}")
-    chk.eq(pkt[0], 1, "format version")
+    # Version and sizes follow ClockDiagPacket in firmware/DSPi/clock_diag.h.
+    chk.eq(len(pkt), {0: 226, 1: 248}.get(profile.platform_id), "packet length")
+    chk.eq(pkt[0], 2, "format version")
     chk.eq((pkt[1], pkt[2]), (profile.platform_id, profile.num_spdif), "platform and slot count match the profile")
     chk.member(pkt[3], (0, 1), "PLL lock flag")
     expect_stall(chk, lambda: dev.pget("DIAG.CLOCK_DIAG", addr=1, length=256), "VC_ERR_ADDRESS", "wValue 1")
