@@ -1,8 +1,8 @@
 # Vendor Command Overhaul Plan
 
-*Last updated: 2026-11-16 (status line, 8.13 As built (Phase 6), 7.5 and Phase 6 as done, items awaiting a decision in 14.1). Previously 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text); 2026-11-16 (8.11, Phase 4)*
+*Last updated: 2026-11-16 (status line, 8.14 As built (Phase 7), Phase 7 as done). Previously 2026-11-16 (status line, 8.13 As built (Phase 6), 7.5 and Phase 6 as done, items awaiting a decision in 14.1); 2026-11-16 (8.12 As built (Phase 5), 5.1 and 6.1 `SPDIF_TX_STATS` wording, Phase 5 text); 2026-11-16 (8.11, Phase 4)*
 
-Status: approved by the user on 2026-11-15 with the decisions in section 14. Phases 0 to 6 are done, and sections 8.8 to 8.13 record what was built. The Windows run of the `wIndex` test is still owed by the user (11.1). What remains is the migration guide (Phase 7) and release readiness (Phase 8). Four questions await the user's decision (14.1). Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
+Status: approved by the user on 2026-11-15 with the decisions in section 14. Phases 0 to 7 are done, and sections 8.8 to 8.14 record what was built. The host migration guide is complete, with four host appendices (8.14). The Windows run of the `wIndex` test is still owed by the user (11.1). What remains is release readiness (Phase 8). Four questions await the user's decision (14.1). Branch `vendor-command-overhaul`, cut from `main` at fb9a254 (firmware 1.1.6).
 
 ## 1. TL;DR
 
@@ -840,7 +840,7 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - `FILTER.BAND` and `FILTER.BAND_BYPASS` return `VC_ERR_BUSY` while an earlier band write is still waiting for the main loop. The old opcodes overwrote the single pending slot.
 - `MEAS.RTA_BINS` returns at most 256 bytes per request.
 - `DIAG.CLOCK_DIAG` is guarded by `#if DSPI_CLOCK_DIAG`, because `config.h` defines the symbol as 0 when the option is off.
-- Every place the new behaviour differs from 1.1.6 is recorded in `vendor_protocol_migration_notes.md`, which feeds the migration guide.
+- Every place the new behaviour differs from 1.1.6 was recorded in a working notes file. Phase 7 absorbed it into the migration guide (`vendor_protocol_migration_guide.md`) and removed it.
 - The harness had a third mode, hybrid, which sent an old call through the paged commands only when the device had every command it needed. It was used to run the existing tests and the golden replay through each page as it landed. Phase 6 removed it (8.13).
 
 ### 8.10 As built (Phase 3)
@@ -873,7 +873,7 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 ### 8.12 As built (Phase 5)
 
 - **`commands.md` is generated per page.** Each page section holds its command table between `<!-- VC:BEGIN <MNEM> -->` and `<!-- VC:END <MNEM> -->`, the page map sits in a `PAGES` block, and the name-sorted command index at the end is an `INDEX` block. The index links each command to its page section when the `## N. MNEM (0xPP)` heading exists. `PAGES` and `INDEX` are reserved mnemonics. `scripts/gen_vendor_protocol.py --check` fails when any block, or the JSON registry, differs from the `.def` files. The prose around the blocks stays hand-written.
-- **Old numbers** appear only in section 25 of `commands.md`, which points to `vendor_protocol_migration_notes.md` and `legacy_map.json`. `current_architecture.md`, the feature specs and `README.md` name commands as `PAGE.NAME`.
+- **Old numbers** appear only in section 25 of `commands.md`, which points to the migration guide (`vendor_protocol_migration_guide.md`) and `legacy_map.json`. `current_architecture.md`, the feature specs and `README.md` name commands as `PAGE.NAME`.
 - **Tools.** `tools/dspi_poke/` reads names, directions, address kinds and sizes from `dspi_commands.json`, found by walking up from the script or the working directory, and also accepts numeric forms without it. `tools/latency_bench/` resolves names through `tools.dspi_test.device` (`resolve_command`, `pget`), with the shared struct readers in `tools/latency_bench/paged.py` (moved to `tools/dspi_test/telemetry.py` in Phase 6). `tools/clkdiag_poll.py` and `tools/ring_health_poll.py` stay standalone pyusb scripts with page and command numbers as named constants. `dspi_poke`, `clkdiag_poll.py` and `ring_health_poll.py` probe `SYS.PROTOCOL_INFO` first and stop on older firmware. The latency bench relies on the harness device's own protocol probe.
 - **Flag audit.** `RESTART` now marks every command that can interrupt audio. Every flash-writing command carries it, because each ends in `complete_flash_write_operation_full()`. So do the input pin and clock commands that restart a live input under mute (`INPUT.SPDIF_RX_PIN`, `INPUT.I2S_RX_PIN`, `INPUT.I2S_RX_CHANNELS`, `INPUT.ADAT_RX_PIN`, `CLOCK.I2S_BCK_PIN`, `CLOCK.I2S_CLOCK_PIN_MODE`), `OUTPUT.DAC_MUTE_TEST` and `SYS.ENTER_BOOTLOADER`. `STORE.FACTORY_RESET` lost `FLASH`: it resets the live state, writes no flash and keeps every stored preset, as 1.1.6 did. The protocol is unreleased, so no page revision changed.
 - **Doc strings.** `SYS.SPDIF_TX_STATS` describes its first field as the USB packet-gap count it is, `SYS.PLATFORM` lists its bytes, and `STORE.ALL_PARAMS_CHUNK` says that only SET chunks must arrive in order.
@@ -892,6 +892,23 @@ All 13 pages are implemented: 206 commands on RP2350 release builds, with the ol
 - **Hardware result.** The whole suite with `--allow-flash` on the bench RP2350 gave 180 of 191 passing, 1 failing and 10 SKIPs. The skips are the bootloader policy (1), no `sounddevice` (1), the CS revert opt-in (3) and the bench-build `DIAG` commands (5). The audio loopback group was not part of this run.
 - **The one failure** is `rta.rta_busy_within_budget`. The analyser's worst frame time measures 1.04 to 1.08 ms at FFT order 10 on RP2350, where `spectrum_analyser_spec.md` section 3.1 says "a fraction of a millisecond". It is left failing until the user decides whether the spec or the firmware is wrong (14.1).
 - **Not ported.** `tools/batch_bench/` drives an experimental firmware command that this firmware does not have. It still imports `OP` and fails at import, and its README says so.
+
+### 8.14 As built (Phase 7)
+
+- **The guide.** `Documentation/Features/vendor_protocol_migration_guide.md` is the one document a host maintainer needs. After a TL;DR it has 13 sections. They are who reads what (1), what changed (2), the request field by field with byte-level examples (3), the probe and discovery (4), errors and result codes (5), the old-to-new map for all 246 opcodes with a recipe for every split, reshaped, retired and former write-as-read opcode (6), every GET reply (7), per-page notes (8), bulk parameters (9), notifications (10), per-transport notes (11), the porting checklist and tests (12) and the host appendices (13). The map, the `GET_STATUS` table, the write-as-read and retired lists and the reply lengths are generated blocks, which `scripts/gen_vendor_protocol.py --check` keeps in step with the registry and `legacy_map.json`.
+- **Four host appendices** in section 13, each written from a read-only audit of the host repository and naming the branch and commit it audited.
+    - 13.1 ESP32 front panel (UART). Self-contained for a maintainer who reads nothing else. It has a row and an old and new frame for each of the panel's 69 opcodes, the probe with a protocol state, the new status codes, the RP2040 ADAT gate and the 1.1.6 number collisions of the panel's own requests.
+    - 13.2 DSPi Console for macOS. The 16-bit transport, the probe with a legacy state that keeps the firmware update working for 1.1.6 devices, a SET path that reports refusals, a band writer for `VC_ERR_BUSY`, the statistics struct reads and the rekeying of the embedded Link hub.
+    - 13.3 DSPi Link. The policy table keyed on the 16-bit ID with a rule that derives each class, the 15 SETs that a table carried over by number would open to `control` sessions, the bridge's probe, bulk path and analyser arbitration, and the Link spec text to rewrite.
+    - 13.4 DSPi Terminal. The transport widened to a command ID type, constants generated from the registry, the probe in `probe()` and `dspi raw`, every parameter row that is more than a renumber, and older packing and direction bugs that the port fixes.
+- **Generic hazards in the core.** Audit findings that apply to any host went into the core sections, not into one appendix. Section 4 covers the 1.1.6 number collisions of GETs and SETs, with the unclamped `SET_PREAMP` write as the worst SET. Section 5 says to retry only busy results, which codes mean busy on each transport, and how to trust `SYS.LAST_RESULT`. Section 6.3 covers the short-read trap of the struct reads. Section 9 covers bulk handlers keyed on the old opcode. Section 11.5 covers status codes from `0x10` up, 256-byte reply buffers and the firmware's own 50 ms retry. Section 12 covers the 8-bit narrowing trap and tables keyed on `bRequest` alone.
+- **Notes file absorbed.** The working notes file that recorded each behaviour difference since Phase 2 is folded into the guide and deleted. `commands.md` section 25, this plan and the feature specs that cited it point to the guide.
+- **Appendices only for the four audited hosts.** Section 10.3 lists them. Any other host follows the core sections, and DSPi Console on Windows in particular follows the WinUSB notes (guide 11.2) and the porting checklist (guide 12).
+- **Several writers, not one.** The plan named a single writer. Each appendix had its own writer working from its audit, and an integration pass spliced them in and made them agree with each other and with the core. Where an audit disagreed with the registry or the firmware, the registry and the firmware won.
+
+Verification: by script, with no device attached. `scripts/gen_vendor_protocol.py --check` and its 31 tests pass. All 246 opcodes of the 1.1.6 `config.h` are in the guide's map and in `legacy_map.json`. Every `PAGE.NAME` in the guide (211 distinct) is in the registry, and the 529 IDs written beside them match. The 238 reply lengths a script could extract match the registry or the variable-length rule. All 244 UART frames have a correct CRC and field layout, and the 10 I2C frames are well formed. The 33 USB SETUP lines match their labels. The 73 request rows, 146 frames and 23 collision rows of the ESP32 appendix match the registry, the 1.1.6 numbers and `legacy_map.json`. Every map link resolves, no added line has a dash, and every item of the deleted notes file is in the guide.
+
+Not verified on hardware. The reply bytes in the guide's USB examples and the variable reply lengths were derived from the firmware and the registry, not read from a device. No UART or I2C host exists on the bench, so every UART and I2C frame is computed only. The Windows run of the page byte is still owed (11.1). No host has been ported yet, so no appendix has been tried on a real port. With a device attached, run `python3 -m tools.dspi_test.run --group crosscut`, send each USB example of guide sections 3, 4 and 6.6 on an RP2350 and an RP2040 and compare the bytes, and run `tools/windex_page_test.py` on Windows.
 
 ## 9. Generated docs and capability data
 
@@ -927,7 +944,7 @@ At runtime the device reports the same data through `SYS.PAGE_LIST`, `SYS.PAGE_C
 
 ### 10.3 The migration guide
 
-`Documentation/vendor_protocol_migration.md` is the deliverable for host maintainers. It must be complete enough to port a host without reading firmware source. Its contents:
+`Documentation/Features/vendor_protocol_migration_guide.md` is the deliverable for host maintainers. It must be complete enough to port a host without reading firmware source. Its contents:
 
 1. **What changed and why**, in one page.
 2. **The request format.** Every field of the control transfer, with worked byte-level examples for a GET, a SET with payload and a zero-length action.
@@ -944,13 +961,11 @@ At runtime the device reports the same data through `SYS.PAGE_LIST`, `SYS.PAGE_C
 
 | Host | Repo |
 |---|---|
-| DSPi Console (macOS) | `/Users/weeblabs/DSPi Console` |
-| DSPi Console (iOS) | `/Users/weeblabs/DSPi-Console-iOS` |
-| DSPi Console (Linux) | `/Users/weeblabs/DSPi-Console-Linux`, `/Users/weeblabs/DSPi Console for Linux` |
-| DSPi Console (Windows) | Not on this machine. Covered by the WinUSB notes and the generic recipe |
+| DSPi ESP32 Front Panel | `/Users/weeblabs/DSPi-ESP32-Front-Panel` |
+| DSPi Console for macOS | `/Users/weeblabs/DSPi Console` |
 | DSPi Link | `/Users/weeblabs/DSPi-Link` |
 | DSPi Terminal | `/Users/weeblabs/DSPi Terminal` |
-| ESP32 front panel | `/Users/weeblabs/DSPi-ESP32-Front-Panel` |
+| DSPi Console for Windows | Not on this machine. Covered by the WinUSB notes (guide 11.2) and the generic recipe (guide 12) |
 
 The machine-readable companions are `Documentation/protocol/dspi_commands.json` (the new command set) and `Documentation/protocol/legacy_map.json` (old to new).
 
@@ -1094,7 +1109,7 @@ Five agents in parallel, one per row below, then one closing pass. Done. Section
 
 | Owned files | Work |
 |---|---|
-| `Documentation/commands.md` | Rewritten by page around generated tables. Old numbers appear only in the pointer to the migration notes |
+| `Documentation/commands.md` | Rewritten by page around generated tables. Old numbers appear only in the pointer to the migration guide |
 | `Documentation/current_architecture.md` | Vendor Command Reference and Vendor Protocol sections rewritten, old opcode references replaced, timestamps |
 | `Documentation/Features/*.md`, `README.md` | Opcode references replaced by `PAGE.NAME` |
 | `tools/dspi_poke/`, `tools/clkdiag_poll.py`, `tools/ring_health_poll.py` | Ported to paged calls. `dspi_poke` reads the registry |
@@ -1114,9 +1129,11 @@ Verification: the full native harness ran on hardware with 180 of 191 passing. T
 
 ### Phase 7. Migration guide
 
-One read-only audit agent per host repo in section 10.3, then one writer who owns `Documentation/vendor_protocol_migration.md`. The audits can start as soon as Phase 2 fixes the command set. The guide is finished after Phase 4, when the firmware behaviour is final.
+Done. Section 8.14 records the result.
 
-Verification: every row of the old-to-new table is checked against `legacy_map.json` by script. Every byte-level example in the guide is executed against the device.
+The core of `Documentation/Features/vendor_protocol_migration_guide.md` was written against the final 1.1.7 beta 1 firmware, and the working notes file was absorbed into it and deleted. One read-only audit agent per host repository in section 10.3 then reported every place that host touches the protocol. One writer per host turned each audit into an appendix, and an integration pass spliced the four appendices into section 13 and made them agree with the core. Hazards common to every host were folded into the core sections rather than repeated in each appendix.
+
+Verification: every row of the old-to-new table, every reply length and every UART and I2C frame was checked by script against the registry, `legacy_map.json` and the 1.1.6 sources. No device was attached during this phase, so the byte-level examples have not yet been run against hardware. Section 8.14 lists what remains and the commands to run.
 
 ### Phase 8. Release readiness
 

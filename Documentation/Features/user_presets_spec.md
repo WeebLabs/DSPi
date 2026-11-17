@@ -123,7 +123,7 @@ Each preset stores the following parameters:
 
 ## Vendor Commands
 
-*Updated 2026-11-16 for the paged protocol of firmware 1.1.7. Firmware 1.1.6 used opcodes 0x90-0x9C and 0xA0-0xA1 for the same functions. The old to new mapping is in `vendor_protocol_migration_notes.md`.*
+*Updated 2026-11-16 for the paged protocol of firmware 1.1.7. Firmware 1.1.6 used opcodes 0x90-0x9C and 0xA0-0xA1 for the same functions. The old to new mapping is in the host migration guide, `vendor_protocol_migration_guide.md`.*
 
 All preset commands are on the `STORE` page (0x02) of the paged protocol (see `../commands.md`), except the channel names, which live on the `ROUTE` page (0x05) with the other per-channel settings. The page travels in the high byte of `wIndex` and the vendor interface (2) in the low byte, so a `STORE` request carries `wIndex` 0x0202 and a `ROUTE` request 0x0502. `bRequest` is the command number. `wValue` is the address (slot or channel) and is 0 for a command with no address. Bulk parameter transfer (`STORE.ALL_PARAMS`) is also documented here because it is closely related to the preset workflow.
 

@@ -2174,7 +2174,7 @@ Inter-slot sample alignment is a hard product invariant. The firmware keeps ever
 
 ## 25. Coming from firmware 1.1.6
 
-Firmware 1.1.7 replaced the flat opcode space of 1.1.6 with the paged protocol in this document. The old opcode numbers are gone. A request with a zero `wIndex` high byte reaches page 0 and is refused. Many commands also changed shape, because values moved out of `wValue` into the payload and write-as-read commands became SETs. The behaviour differences, command by command, are listed in `Features/vendor_protocol_migration_notes.md`. The machine-readable map from every old opcode to its new command is `Documentation/protocol/legacy_map.json`.
+Firmware 1.1.7 replaced the flat opcode space of 1.1.6 with the paged protocol in this document. The old opcode numbers are gone. A request with a zero `wIndex` high byte reaches page 0 and is refused. Many commands also changed shape, because values moved out of `wValue` into the payload and write-as-read commands became SETs. A host written for 1.1.6 should follow the host migration guide, `Documentation/Features/vendor_protocol_migration_guide.md`. It covers the probe a host must send first, the old-to-new map for every opcode, every reply and refusal that changed, per-transport notes and a porting checklist. The machine-readable map from every old opcode to its new command is `Documentation/protocol/legacy_map.json`.
 
 ---
 

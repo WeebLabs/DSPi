@@ -2,7 +2,7 @@
 
 *Written 2026-10-10. Status: plan only, nothing merged.*
 
-*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping, and how to port a host, is in the host migration guide `vendor_protocol_migration_guide.md`. The same mapping as data is `../protocol/legacy_map.json`.*
 
 ## TL;DR
 

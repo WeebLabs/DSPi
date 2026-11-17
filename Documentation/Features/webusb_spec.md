@@ -4,7 +4,7 @@
 *Status: design — not yet implemented*
 *Platforms: RP2040 + RP2350*
 
-*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping, and how to port a host, is in the host migration guide `vendor_protocol_migration_guide.md`. The same mapping as data is `../protocol/legacy_map.json`.*
 
 This spec defines WebUSB-ready firmware additions for DSPi, letting browser-based control apps (Chrome, Edge, Opera on desktop + Android) talk to the device's existing vendor interface over the WebUSB API. The change is purely additive — no existing behavior, descriptor, or wire format is altered, and the change is verifiable as a no-op for users who never visit a WebUSB-enabled page.
 

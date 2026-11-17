@@ -17,7 +17,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PAGES = os.path.join(REPO, "firmware", "DSPi", "vendor", "pages")
 DEFAULT_CORE_H = os.path.join(REPO, "firmware", "DSPi", "vendor", "vc_core.h")
 DEFAULT_JSON = os.path.join(REPO, "Documentation", "protocol", "dspi_commands.json")
-DEFAULT_DOCS = [os.path.join(REPO, "Documentation", "commands.md")]
+DEFAULT_GUIDE = os.path.join(REPO, "Documentation", "Features", "vendor_protocol_migration_guide.md")
+DEFAULT_DOCS = [os.path.join(REPO, "Documentation", "commands.md"), DEFAULT_GUIDE]
 DEFAULT_LEGACY_MAP = os.path.join(REPO, "Documentation", "protocol", "legacy_map.json")
 
 ADDR_KINDS = (
@@ -61,7 +62,9 @@ MAX_SET_PAYLOAD = 64
 MAX_GET_REPLY = 256   # vc_core.c reply buffer; larger replies must be VC_F_BULK
 DOCS_PAGES_MARKER = "PAGES"
 DOCS_INDEX_MARKER = "INDEX"
-DOCS_MARKERS = (DOCS_PAGES_MARKER, DOCS_INDEX_MARKER)
+# Migration guide blocks, rendered from legacy_map.json plus the registry.
+GUIDE_MARKERS = ("LEGACY_MAP", "LEGACY_WASR", "LEGACY_STATUS", "GET_LENGTHS", "RETIRED")
+DOCS_MARKERS = (DOCS_PAGES_MARKER, DOCS_INDEX_MARKER) + GUIDE_MARKERS
 
 UPPER_IDENT = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 C_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -591,10 +594,463 @@ def render_index_table(pages, anchors):
     return rows
 
 
-def rewrite_doc_blocks(text, pages, path="<docs>"):
-    """Replace every VC:BEGIN/VC:END block in text. Returns (new_text, blocks_rewritten)."""
+# ---------------------------------------------------------------------------
+# Migration guide blocks (legacy_map.json + registry)
+# ---------------------------------------------------------------------------
+
+# Reply-length rules for VC_LEN_VAR GETs, which the registry cannot express.
+VAR_RULES = {
+    "SYS.PAGE_LIST": "2 x pages (`SYS.PROTOCOL_INFO` byte 6). 24 on a release build",
+    "STORE.ALL_PARAMS_CHUNK": "min(wLength, 6136 - offset). wLength 0 is `VC_ERR_LENGTH`",
+    "OUTPUT.LATENCY_OPTIONS": "8 x options (`OUTPUT.LATENCY_STATUS` byte 9). 56 today",
+    "DYN.LIMITER_METERS": "2 x outputs. 10 on RP2040, 18 on RP2350",
+    "FX.SUBHARM_METER": "2 x outputs. 10 on RP2040, 18 on RP2350",
+    "MEAS.LEVELS": "2 x channels + 7. 21 on RP2040, 41 on RP2350",
+    "MEAS.RTA_BAND_CENTRES": "2 x min(32, bands - 32n) for chunk n. 64, then 10 with 37 bands",
+    "MEAS.RTA_BINS": "min(256, frame - offset). The frame is 145, 273 or 529 bytes for FFT order 8, 9 or 10",
+    "MEAS.RTA_BANDS_ALL": "82 x live channels at the tap, 0 when none",
+    "DIAG.CLOCK_DIAG": "`ClockDiagPacket`. 226 on RP2040, 248 on RP2350",
+}
+
+# What each GET_STATUS (0x50) selector meant in 1.1.6. legacy_map.json holds where it lives now.
+STATUS_SELECTORS = {
+    0: "Peaks of channels 0 and 1", 1: "Peaks of channels 2 and 3",
+    2: "Peak of channel 4, CPU loads", 3: "PDM ring overruns", 4: "PDM ring underruns",
+    5: "PDM DMA overruns", 6: "PDM DMA underruns", 7: "Retired, always 0",
+    8: "USB audio packet gaps of 2 to 50 ms (`spdif_underruns`)", 9: "Combined meter packet",
+    10: "USB audio packets", 11: "USB audio alt setting", 12: "USB audio mounted",
+    13: "clk_sys, Hz", 14: "Core voltage, mV", 15: "Device sample rate, Hz",
+    16: "Temperature, centi-degrees C", 17: "Output DMA starvations, total",
+    18: "Output DMA starvations, slot 0", 19: "Output DMA starvations, slot 1",
+    20: "Output DMA starvations, slot 2", 21: "Output DMA starvations, slot 3",
+    22: "USB audio ring overruns", 23: "Active input channel count",
+    24: "Loopback capture overflows", 25: "Loopback capture underruns",
+    26: "Output ring underrun episodes", 27: "Output ring drops",
+    28: "Lowest ring fill before a write, frames", 29: "Worst input delivery gap, us",
+    30: "Worst USB packet gap, us", 31: "Background steps over budget",
+    32: "S/PDIF input measured rate, mHz", 33: "Clock trim, ppm x 100",
+}
+
+# The documented replacement of every retired opcode (legacy_map.json marks them "retired").
+RETIRED_TEXT = {
+    "SET_PREAMP": "Write `ROUTE.PREAMP` (`0x0540`) once per input channel, `wValue` = input channel "
+                  "(0 to 1 on RP2040, 0 to 7 on RP2350), payload f32 dB",
+    "GET_PREAMP": "Read `ROUTE.PREAMP` (`0x0540`) with `wValue` 0. 1.1.6 returned input channel 0",
+    "SAVE_PARAMS": "Read `STORE.PRESET_ACTIVE` (`0x0214`), then send `STORE.PRESET_SAVE` (`0x0210`) "
+                   "with `wValue` = that slot",
+    "GET_USB_ERROR_STATS": "None. Its six counters always read 0. Live USB health is in "
+                           "`SYS.USB_AUDIO_STATUS` and `SYS.PIPELINE_STATS`",
+    "RESET_USB_ERROR_STATS": "None. It did nothing. `SYS.STATS_RESET` resets the watermarks",
+}
+
+LEVELS_CMD = "MEAS.LEVELS"   # what GET_STATUS "peaks", "peak_cpu" and "levels_raw" selectors read
+STATUS_REPLY = {"pin": "1 byte `PIN_CONFIG_*`", "preset": "1 byte `PRESET_*`",
+                "flash": "1 byte `FLASH_OK`", "ack1": "1 byte `0x01`"}
+_TYPE_SIZE = {"u8": 1, "u16": 2, "i16": 2, "u32": 4, "i32": 4}
+
+
+def heading_anchors(text):
+    """[(heading text, GitHub anchor)] for every Markdown heading, duplicates suffixed as GitHub does."""
+    out, seen = [], {}
+    for m in re.finditer(r"^#{1,6}[ \t]+(.+?)[ \t]*$", text, re.M):
+        slug = re.sub(r"[^\w\- ]", "", m.group(1).strip().lower()).replace(" ", "-")
+        n = seen.get(slug, 0)
+        seen[slug] = n + 1
+        out.append((m.group(1), slug if n == 0 else "%s-%d" % (slug, n)))
+    return out
+
+
+def _heading_link(anchors, needle):
+    for title, slug in anchors:
+        if needle in title:
+            return "#" + slug
+    return None
+
+
+class _Guide:
+    """Shared lookups for the guide blocks. Errors collect in self.errs, prefixed with the doc path."""
+
+    def __init__(self, pages, legacy, text, path):
+        self.cmds = {"%s.%s" % (p["mnemonic"], c["name"]): (p, c) for p in pages for c in p["commands"]}
+        self.doc = legacy
+        self.anchors = heading_anchors(text)
+        self.path = path
+        self.errs = []
+        self.ops = sorted(legacy.get("opcodes", {}).items(), key=lambda kv: kv[1]["code"])
+        self.direct_dirs = {}   # target -> {(opcode, "in"/"out")}, for the "folded" kind
+        for op, rec in self.ops:
+            for usb_dir in ("out", "in"):
+                if usb_dir in rec:
+                    for node in _adapters(rec[usb_dir]):
+                        if node.get("kind") == "direct" and "target" in node:
+                            self.direct_dirs.setdefault(node["target"], set()).add((op, usb_dir))
+
+    def cmd(self, name):
+        if name not in self.cmds:
+            self.errs.append("%s: legacy map names %s, which is not in the registry" % (self.path, name))
+            return None
+        return self.cmds[name][1]
+
+    def link(self, needle, required_for=None):
+        href = _heading_link(self.anchors, needle)
+        if href is None and required_for:
+            self.errs.append("%s: no heading contains %s, which %s needs" % (self.path, needle, required_for))
+        return href
+
+    def cmd_cell(self, name):
+        c = self.cmd(name)
+        if c is None:
+            return "`%s`" % name
+        return "`%s`%s" % (name, " (%s)" % _availability(c["build"]).replace("`", "")
+                           if c["build"] else "")
+
+    def id_cell(self, name):
+        c = self.cmd(name)
+        return "-" if c is None else "`0x%04X`" % c["id"]
+
+
+def _field_text(spec, default):
+    """An address or value rule as an expression of the old wValue ('old')."""
+    if spec is None:
+        return default
+    if "const" in spec:
+        return str(spec["const"])
+    sh, m, add = spec.get("shift", 0), spec.get("mask", 0xFFFF), spec.get("add", 0)
+    if (sh, m) == (0, 0xFFFF):
+        base = "old"
+    elif sh == 0:
+        base = "old & 0x%X" % m
+    elif m == 0xFFFF >> sh:
+        base = "old >> %d" % sh
+    else:
+        base = "(old >> %d) & 0x%X" % (sh, m)
+    if add:
+        base += " %s %d" % ("-" if add < 0 else "+", abs(add))
+    return base
+
+
+def _code(text):
+    return "`%s`" % text
+
+
+def _selector_text(sel, key):
+    k = int(key)
+    sh, m = sel.get("shift", 0), sel.get("mask", 0xFFFF)
+    shown = ("0x%X" % k) if k > 255 else str(k)
+    if (sh, m) == (0, 0xFFFF):
+        return shown
+    return "%s = %s" % (_field_text(sel, "old"), shown)
+
+
+def _value_text(node):
+    v = _field_text(node["value"], "old")
+    enc = node["encode"]
+    if enc == "u8":
+        return "u8 `%s`" % v
+    if enc == "u8_sat":
+        return "u8 `min(%s, 255)`" % v
+    if enc == "bool":
+        return "u8 `%s != 0` (1 or 0)" % v
+    raise ValueError("unknown encode %r" % enc)
+
+
+def _new_dir(c, is_get):
+    if is_get:
+        return "G"
+    return "S0" if c["set_max"] == 0 and "BULK" not in c["flags"] else "S"
+
+
+def _len_cell(c, is_get):
+    if is_get:
+        return str(c["get_len"])
+    if "BULK" in c["flags"]:
+        return str(c["get_len"]) if isinstance(c["get_len"], int) else "chunk"
+    if c["set_min"] == c["set_max"]:
+        return str(c["set_max"])
+    return "%d-%d" % (c["set_min"], c["set_max"])
+
+
+def _cases(node):
+    """[(selector cell, case node or None)] of a split adapter, numeric keys ascending, default last."""
+    keys = sorted(node["cases"], key=int)
+    out = [(_selector_text(node["selector"], k), node["cases"][k]) for k in keys]
+    out.append(("any other", node.get("default")))
+    return out
+
+
+def _kind(g, op, usb_dir, node):
+    if node.get("retired"):
+        return "retired"
+    k = node["kind"]
+    if k in ("act_value", "act_addr", "act_packed"):
+        return "action"
+    if k == "custom":
+        return "custom"
+    if k == "split":
+        return "split"
+    others = {d for o, d in g.direct_dirs.get(node["target"], ()) if o != op}
+    return "folded" if others - {usb_dir} else "same"
+
+
+def _map_row(g, code, op, old_dir, sel, usb_dir, node, kind):
+    name_cell = "`%s`" % op
+    href = g.link("`%s`" % op)
+    if href:
+        name_cell = "[`%s`](%s)" % (op, href)
+    lead = "| 0x%02X | %s | %s | %s | %s |" % (code, name_cell, old_dir, sel, kind)
+    if node is None:
+        return lead + " none | - | - | - | %s | - |" % (
+            "1.1.6 STALLed it" if usb_dir == "in" else "1.1.6 ignored it")
+    if node.get("retired"):
+        ret = g.link("Retired opcodes", "a retired row")
+        return lead + " none | - | - | - | [replacement](%s) | - |" % (ret or "#")
+    k = node["kind"]
+    if k == "custom":
+        href = g.link("`%s`" % op, "custom opcode %s" % op)
+        cmds, ids = [], []
+        for use in node.get("uses", []):
+            tgt, _, how = use.partition(":")
+            cmds.append("%s %s" % (g.cmd_cell(tgt), how))
+            ids.append(g.id_cell(tgt))
+        return lead + " %s | %s | - | see recipe | [see recipe](%s) | see recipe |" % (
+            ", ".join(cmds) or "none", ", ".join(ids) or "-", href or "#")
+    c = g.cmd(node["target"])
+    if c is None:
+        return lead + " ? | ? | ? | ? | ? | ? |"
+    is_get = k == "direct" and usb_dir == "in"
+    if k == "direct":
+        addr = _field_text(node.get("addr"), "old")
+        if is_get:
+            payload = "-"
+        elif node.get("trunc"):
+            payload = "first %d bytes" % node["trunc"]
+        else:
+            payload = "unchanged"
+    elif k == "act_addr":
+        addr, payload = _field_text(node.get("addr"), "old"), "none"
+    elif k == "act_value":
+        addr, payload = _field_text(node.get("addr"), "0"), _value_text(node)
+    elif k == "act_packed":
+        addr, payload = _field_text(node["addr"], "old"), _value_text(node)
+    else:
+        raise ValueError("%s: unknown adapter kind %r" % (op, k))
+    if c["addr"] == "NONE":
+        addr = "0"   # 1.1.6 ignored wValue here, 1.1.7 requires 0
+    return lead + " %s | %s | %s | %s | %s | %s |" % (
+        g.cmd_cell(node["target"]), g.id_cell(node["target"]), _new_dir(c, is_get),
+        _code(addr), payload, _len_cell(c, is_get))
+
+
+def render_legacy_map(g):
+    rows = ["| Old | Old name | Old dir | Old wValue | Change | New command | ID | New dir | New wValue "
+            "| Payload | Bytes |",
+            "|---|---|---|---|---|---|---|---|---|---|---|"]
+    for op, rec in g.ops:
+        for usb_dir in ("out", "in"):
+            if usb_dir not in rec:
+                continue
+            old_dir = {"WR": "W-as-R"}.get(rec["old_dir"], "W" if usb_dir == "out" else "R")
+            node = rec[usb_dir]
+            if node.get("kind") == "split" and not node.get("retired"):
+                for sel, case in _cases(node):
+                    rows.append(_map_row(g, rec["code"], op, old_dir, sel, usb_dir, case, "split"))
+            else:
+                rows.append(_map_row(g, rec["code"], op, old_dir, "any", usb_dir, node,
+                                     _kind(g, op, usb_dir, node)))
+    return rows
+
+
+def _status_cell(g, node):
+    fam_name = node.get("status")
+    fam = g.doc.get("status_families", {}).get(fam_name)
+    if fam is None:
+        g.errs.append("%s: status family %r is not in legacy_map.json" % (g.path, fam_name))
+        return "?"
+    if fam_name == "ack1" or (not fam["from_vc"] and not node.get("status_overrides")):
+        if fam["success"] == 1:
+            return "0x01 was success. Every refusal STALLed then and STALLs now"
+        return "0x%02X was success. 1.1.6 never refused it" % fam["success"]
+    by_byte = {}
+    table = dict(fam["from_vc"])
+    table.update(node.get("status_overrides", {}))
+    for vc, byte in table.items():
+        by_byte.setdefault(byte, []).append(vc)
+    parts = ["0x%02X for OK" % fam["success"]]
+    for byte in sorted(by_byte):
+        names = ["`%s`" % n[len("VC_ERR_"):]
+                 for n in sorted(by_byte[byte], key=lambda n: g.doc.get("vc_results", {}).get(n, 0))]
+        names = names[0] if len(names) == 1 else "%s or %s" % (", ".join(names[:-1]), names[-1])
+        parts.append("0x%02X for %s" % (byte, names))
+    return ". ".join(parts)
+
+
+def _wasr_row(g, rec, op, sel, node):
+    name_cell = "`%s`" % op
+    href = g.link("`%s`" % op)
+    if href:
+        name_cell = "[`%s`](%s)" % (op, href)
+    lead = "| 0x%02X | %s |" % (rec["code"], name_cell)
+    if node is None:
+        return lead + " %s | - | none | - | - | 1.1.6 STALLed it |" % sel
+    k = node["kind"]
+    if k == "custom" or node.get("retired"):
+        need = "Retired opcodes" if node.get("retired") else "`%s`" % op
+        href = g.link(need, "write-as-read %s" % op)
+        cmds = ", ".join(g.cmd_cell(u.partition(":")[0]) for u in node.get("uses", [])) or "none"
+        return lead + " %s | %s | %s | see recipe | [see recipe](%s) | see recipe |" % (
+            sel, STATUS_REPLY.get(node.get("status"), "see recipe"), cmds, href or "#")
+    c = g.cmd(node["target"])
+    if c is None:
+        return lead + " %s | ? | ? | ? | ? | ? |" % sel
+    cmd = "%s %s" % (g.cmd_cell(node["target"]), g.id_cell(node["target"]))
+    if k == "direct":
+        return lead + " %s | %s bytes | %s | `%s` | none, it is a GET | reply unchanged |" % (
+            sel, c["get_len"], cmd, _field_text(node.get("addr"), "old"))
+    if k == "act_addr":
+        spec = node.get("addr")
+        addr = _field_text(spec, "old")
+        old = sel if sel != "any" else (
+            "0" if spec and "const" in spec else "%s in `%s`" % (ADDR_DOC[c["addr"]], addr))
+        payload = "none (zero-length)"
+    elif k == "act_value":
+        addr = _field_text(node.get("addr"), "0")
+        old = sel if sel != "any" else "value in `%s`" % _field_text(node["value"], "old")
+        payload = "1 byte: " + _value_text(node)
+    else:   # act_packed
+        addr = _field_text(node["addr"], "old")
+        old = "%s in `%s`, value in `%s`" % (ADDR_DOC[c["addr"]], addr,
+                                            _field_text(node["value"], "old"))
+        payload = "1 byte: " + _value_text(node)
+    return lead + " %s | %s | %s | `%s` | %s | %s |" % (
+        old, STATUS_REPLY.get(node.get("status"), "?"), cmd, addr, payload, _status_cell(g, node))
+
+
+def render_legacy_wasr(g):
+    rows = ["| Old | Old name | Old wValue | Old reply | New command | New wValue | SET payload "
+            "| Old status byte: new result |",
+            "|---|---|---|---|---|---|---|---|"]
+    for op, rec in g.ops:
+        if rec.get("old_dir") != "WR":
+            continue
+        node = rec["in"]
+        if node.get("kind") == "split":
+            for sel, case in _cases(node):
+                rows.append(_wasr_row(g, rec, op, sel, case))
+        else:
+            rows.append(_wasr_row(g, rec, op, "any", node))
+    return rows
+
+
+def _status_entry(g):
+    rec = g.doc.get("opcodes", {}).get("GET_STATUS")
+    if rec is None or rec.get("in", {}).get("fn") != "get_status":
+        g.errs.append("%s: legacy_map.json has no GET_STATUS custom entry" % g.path)
+        return None
+    return rec["in"]
+
+
+def _status_rows(g, e):
+    """{selector: (command cell, offset cell, type cell, old-value cell)} from the GET_STATUS entry."""
+    out = {}
+    for sel in e.get("levels_raw", []):
+        out[int(sel)] = (g.cmd_cell(LEVELS_CMD), "whole reply", "var",
+                         "same bytes as the old reply")
+    for sel, (a, b) in e.get("peaks", {}).items():
+        out[int(sel)] = (g.cmd_cell(LEVELS_CMD), "%d, %d" % (2 * a, 2 * b), "u16, u16",
+                         "bits 0-15 = u16 at %d, bits 16-31 = u16 at %d" % (2 * a, 2 * b))
+    for sel, (ch, src, c0, c1) in e.get("peak_cpu", {}).items():
+        out[int(sel)] = ("%s, %s" % (g.cmd_cell(LEVELS_CMD), g.cmd_cell(src)),
+                         "%d, then %d and %d" % (2 * ch, c0, c1), "u16, then u8, u8",
+                         "bits 0-15 = peak, 16-23 = byte %d, 24-31 = byte %d" % (c0, c1))
+    for sel in e.get("zero", []):
+        out[int(sel)] = ("none", "-", "-", "always 0")
+    for sel, (src, typ, off) in e.get("fields", {}).items():
+        ext = "sign-extend" if typ.startswith("i") and _TYPE_SIZE[typ] < 4 else \
+            ("as is" if _TYPE_SIZE[typ] == 4 else "zero-extend")
+        cell = g.cmd_cell(src)
+        if src in e.get("zero_if_absent", []):
+            cell += ", read 0 if `VC_ERR_UNKNOWN`"
+        out[int(sel)] = (cell, str(off), typ, ext)
+    return out
+
+
+def render_legacy_status(g):
+    rows = ["| Old wValue | 1.1.6 meaning | Read now | Offset | Type | Old 4-byte value |",
+            "|---|---|---|---|---|---|"]
+    e = _status_entry(g)
+    if e is None:
+        return rows
+    data = _status_rows(g, e)
+    if set(data) != set(STATUS_SELECTORS):
+        g.errs.append("%s: GET_STATUS selectors in legacy_map.json %s differ from STATUS_SELECTORS %s"
+                      % (g.path, sorted(data), sorted(STATUS_SELECTORS)))
+    for sel in sorted(data):
+        rows.append("| %d | %s | %s | %s | %s | %s |" % ((sel, STATUS_SELECTORS.get(sel, "?")) + data[sel]))
+    rows.append("| any other | Unused (4 zero bytes) | none | - | - | no equivalent |")
+    return rows
+
+
+def render_get_lengths(g, pages):
+    rows = ["| Command | Page | Cmd | wValue | Reply bytes | Availability | Notes |",
+            "|---|---|---|---|---|---|---|"]
+    for p in pages:
+        for c in p["commands"]:
+            if not c["get"]:
+                continue
+            name = "%s.%s" % (p["mnemonic"], c["name"])
+            avail = [_availability(c["build"])] if c["build"] else []
+            if "USB_ONLY" in c["flags"]:
+                avail.append("USB only")
+            note = ""
+            if c["get_len"] == "var":
+                if name not in VAR_RULES:
+                    g.errs.append("%s: %s has a variable reply and no rule in VAR_RULES" % (g.path, name))
+                note = VAR_RULES.get(name, "?")
+            elif "BULK" in c["flags"]:
+                note = "Bulk buffer, `min(wLength, %d)`" % c["get_len"]
+            rows.append("| `%s` | 0x%02X | 0x%02X | %s | %s | %s | %s |" % (
+                name, p["page"], c["cmd"], ADDR_DOC[c["addr"]],
+                "var" if c["get_len"] == "var" else c["get_len"], ", ".join(avail), note))
+    for name in sorted(set(VAR_RULES) - {n for n, (_p, c) in g.cmds.items() if c["get_len"] == "var"}):
+        if name in g.cmds:
+            g.errs.append("%s: VAR_RULES names %s, whose reply is not variable" % (g.path, name))
+    return rows
+
+
+def render_retired(g):
+    rows = ["| Old | Old name | Old dir | Replacement |", "|---|---|---|---|"]
+    retired = set()
+    for op, rec in g.ops:
+        for usb_dir in ("out", "in"):
+            if usb_dir in rec and rec[usb_dir].get("retired"):
+                retired.add(op)
+                old_dir = {"WR": "W-as-R"}.get(rec["old_dir"], "W" if usb_dir == "out" else "R")
+                if op not in RETIRED_TEXT:
+                    g.errs.append("%s: retired opcode %s has no entry in RETIRED_TEXT" % (g.path, op))
+                rows.append("| 0x%02X | `%s` | %s | %s |" % (rec["code"], op, old_dir,
+                                                            RETIRED_TEXT.get(op, "?")))
+        if op == "GET_STATUS":
+            e, text = rec["in"], {}
+            for sel, (a, b) in e.get("peaks", {}).items():
+                text[int(sel)] = "%s, u16 at offsets %d and %d" % (g.cmd_cell(LEVELS_CMD), 2 * a, 2 * b)
+            for sel, (ch, src, c0, c1) in e.get("peak_cpu", {}).items():
+                text[int(sel)] = "%s, u16 at offset %d, then %s bytes %d and %d" % (
+                    g.cmd_cell(LEVELS_CMD), 2 * ch, g.cmd_cell(src), c0, c1)
+            for sel in e.get("zero", []):
+                text[int(sel)] = "None. It always read 0"
+            for sel in sorted(text):
+                rows.append("| 0x%02X | `%s` `wValue` %d | R | %s |" % (rec["code"], op, sel, text[sel]))
+    for op in sorted(set(RETIRED_TEXT) - retired):
+        g.errs.append("%s: RETIRED_TEXT names %s, which legacy_map.json does not retire" % (g.path, op))
+    return rows
+
+
+def rewrite_doc_blocks(text, pages, path="<docs>", legacy=None):
+    """Replace every VC:BEGIN/VC:END block in text. Returns (new_text, blocks_rewritten).
+    The guide blocks (GUIDE_MARKERS) need legacy, the parsed legacy_map.json."""
     by_mnem = {p["mnemonic"]: p for p in pages}
     anchors = page_anchors(text)
+    guide = None
     lines = text.splitlines(True)
     nl = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
     out, errs, seen = [], [], {}
@@ -624,7 +1080,19 @@ def rewrite_doc_blocks(text, pages, path="<docs>"):
                             % (path, n, e.group(1) or "(no name)", open_blk[0], open_blk[1]))
             else:
                 mnem = open_blk[0]
-                if mnem == DOCS_PAGES_MARKER:
+                if mnem in GUIDE_MARKERS and legacy is None:
+                    errs.append("%s:%d: block %s needs the legacy map (--legacy-map)"
+                                % (path, open_blk[1], mnem))
+                    rows = None
+                elif mnem in GUIDE_MARKERS:
+                    if guide is None:
+                        guide = _Guide(pages, legacy, text, path)
+                    rows = {"LEGACY_MAP": lambda: render_legacy_map(guide),
+                            "LEGACY_WASR": lambda: render_legacy_wasr(guide),
+                            "LEGACY_STATUS": lambda: render_legacy_status(guide),
+                            "GET_LENGTHS": lambda: render_get_lengths(guide, pages),
+                            "RETIRED": lambda: render_retired(guide)}[mnem]()
+                elif mnem == DOCS_PAGES_MARKER:
                     rows = render_pages_table(pages)
                 elif mnem == DOCS_INDEX_MARKER:
                     rows = render_index_table(pages, anchors)
@@ -642,6 +1110,8 @@ def rewrite_doc_blocks(text, pages, path="<docs>"):
             out.append(ln)
     if open_blk:
         errs.append("%s:%d: VC:BEGIN %s never closed" % (path, open_blk[1], open_blk[0]))
+    if guide is not None:
+        errs.extend(dict.fromkeys(guide.errs))   # each problem once, however many rows hit it
     if errs:
         raise DefError(errs)
     return "".join(out), count
@@ -773,8 +1243,8 @@ def main(argv=None):
     ap.add_argument("--core-h", default=DEFAULT_CORE_H, help="header holding VC_PROTOCOL_MAJOR/MINOR")
     ap.add_argument("--json", default=DEFAULT_JSON, help="registry JSON path")
     ap.add_argument("--docs", action="append", metavar="PATH",
-                    help="Markdown file with VC:BEGIN/VC:END blocks (repeatable; "
-                         "default Documentation/commands.md)")
+                    help="Markdown file with VC:BEGIN/VC:END blocks (repeatable; default "
+                         "Documentation/commands.md and Features/vendor_protocol_migration_guide.md)")
     ap.add_argument("--legacy-map", default=None,
                     help="old-opcode migration map that --check validates against the registry "
                          "(default Documentation/protocol/legacy_map.json when --pages is the default)")
@@ -797,13 +1267,19 @@ def main(argv=None):
 
     outputs = [(a.json, render_json(reg), _read(a.json))]
     errs = []
+    lm = _read(a.legacy_map) if a.legacy_map else None
+    try:
+        lm_doc = None if lm is None else json.loads(lm)
+    except ValueError as e:
+        sys.stderr.write("error: %s: %s\n" % (_rel(a.legacy_map), e))
+        return 1
     for path in docs:
         old = _read(path)
         if old is None:
             errs.append("%s: not found" % path)
             continue
         try:
-            new, count = rewrite_doc_blocks(old, reg["pages"], _rel(path))
+            new, count = rewrite_doc_blocks(old, reg["pages"], _rel(path), lm_doc)
         except DefError as e:
             errs.extend(e.messages)
             continue
@@ -816,8 +1292,7 @@ def main(argv=None):
 
     stale = [(p, new, old) for p, new, old in outputs if new != old]
     if a.check:
-        lm = _read(a.legacy_map) if a.legacy_map else None
-        lm_errs = [] if lm is None else check_legacy_map(reg, json.loads(lm))
+        lm_errs = [] if lm_doc is None else check_legacy_map(reg, lm_doc)
         for m in lm_errs:
             print("MISMATCH %s: %s" % (_rel(a.legacy_map), m))
         for p, new, old in stale:

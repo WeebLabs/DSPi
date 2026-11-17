@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
@@ -368,6 +369,237 @@ class LegacyMap(unittest.TestCase):
             rc, out, _ = run_cli(base + ["--check"])
             self.assertEqual(rc, 1)
             self.assertIn("commands.SYS.PLATFORM: get_len 9", out)
+
+
+GUIDE_DOC = """# Guide
+
+### `GET_MATRIX_ROUTE` recipe
+### `GET_STATUS` recipe
+### Retired opcodes
+
+<!-- VC:BEGIN LEGACY_MAP -->
+<!-- VC:END LEGACY_MAP -->
+<!-- VC:BEGIN LEGACY_WASR -->
+<!-- VC:END LEGACY_WASR -->
+<!-- VC:BEGIN LEGACY_STATUS -->
+<!-- VC:END LEGACY_STATUS -->
+<!-- VC:BEGIN GET_LENGTHS -->
+<!-- VC:END GET_LENGTHS -->
+<!-- VC:BEGIN RETIRED -->
+<!-- VC:END RETIRED -->
+"""
+
+
+def guide_legacy():
+    """A legacy map over the fixture registry with one adapter of every kind."""
+    return {
+        "vc_results": {"VC_OK": 0, "VC_ERR_UNKNOWN": 16, "VC_ERR_ADDRESS": 19, "VC_ERR_VALUE": 20,
+                       "VC_ERR_STATE": 24, "VC_ERR_PIN_INVALID": 25, "VC_ERR_PIN_IN_USE": 26},
+        "status_families": {
+            "pin": {"success": 0, "from_vc": {"VC_ERR_PIN_INVALID": 1, "VC_ERR_PIN_IN_USE": 2,
+                                              "VC_ERR_ADDRESS": 3, "VC_ERR_STATE": 4, "VC_ERR_VALUE": 5}},
+            "preset": {"success": 0, "from_vc": {"VC_ERR_ADDRESS": 1, "VC_ERR_STATE": 2}},
+            "ack1": {"success": 1, "from_vc": {}},
+        },
+        "opcodes": {
+            "GET_PLATFORM": {"code": 0x7F, "old_dir": "R", "in": {"kind": "direct", "target": "SYS.PLATFORM"}},
+            "SET_OUTPUT_GAIN": {"code": 0x74, "old_dir": "W",
+                                "out": {"kind": "direct", "target": "ROUTE.OUTPUT_GAIN"}},
+            "GET_OUTPUT_GAIN": {"code": 0x75, "old_dir": "R",
+                                "in": {"kind": "direct", "target": "ROUTE.OUTPUT_GAIN"}},
+            "MASTER": {"code": 0x03, "old_dir": "W+R",
+                       "out": {"kind": "direct", "target": "ROUTE.MASTER_VOLUME"},
+                       "in": {"kind": "split", "selector": {"shift": 0, "mask": 255}, "cases": {
+                           "1": {"kind": "direct", "target": "SYS.PLATFORM", "addr": {"const": 0}},
+                           "0": {"kind": "direct", "target": "ROUTE.MASTER_VOLUME"}},
+                           "default": None}},
+            "SET_OUTPUT_TYPE": {"code": 0xC0, "old_dir": "WR", "in": {
+                "kind": "act_packed", "target": "ROUTE.OUTPUT_ENABLE", "addr": {"shift": 0, "mask": 255},
+                "value": {"shift": 8, "mask": 255}, "encode": "u8", "status": "pin",
+                "status_overrides": {"VC_ERR_VALUE": 1}}},
+            "PRESET_SAVE": {"code": 0x90, "old_dir": "WR", "in": {
+                "kind": "act_addr", "target": "STORE.PRESET_SAVE", "status": "preset",
+                "addr": {"shift": 0, "mask": 255}}},
+            "BOOT": {"code": 0xF0, "old_dir": "WR", "in": {"kind": "split", "selector": {"shift": 0, "mask": 65535},
+                     "cases": {"65535": {"kind": "act_addr", "target": "SYS.ENTER_BOOTLOADER", "status": "ack1",
+                                         "addr": {"const": 0}}},
+                     "default": {"kind": "act_value", "target": "ROUTE.OUTPUT_MUTE", "status": "pin",
+                                 "value": {"shift": 0, "mask": 65535}, "encode": "bool"}}},
+            "GET_MATRIX_ROUTE": {"code": 0x71, "old_dir": "R", "in": {
+                "kind": "custom", "fn": "get_matrix_route", "uses": ["ROUTE.MATRIX_ROUTE:G"]}},
+            "SET_PREAMP": {"code": 0x44, "old_dir": "W", "out": {
+                "kind": "custom", "fn": "x", "uses": ["ROUTE.MASTER_VOLUME:S"], "retired": True}},
+            "GET_STATUS": {"code": 0x50, "old_dir": "R", "in": {
+                "kind": "custom", "fn": "get_status", "uses": ["SYS.PLATFORM:G"],
+                "fields": {"3": ["SYS.PLATFORM", "u8", 3], "16": ["SYS.CLOCK_DIAG", "i16", 10]},
+                "peaks": {"0": [0, 1]}, "peak_cpu": {"2": [4, "SYS.PLATFORM", 5, 6]},
+                "levels_raw": [9], "zero": [7], "zero_if_absent": ["SYS.CLOCK_DIAG"]}},
+        },
+    }
+
+
+class GuideBlocks(unittest.TestCase):
+    """The migration guide blocks rendered from a legacy map over the fixture registry."""
+
+    def setUp(self):
+        self.pages = g.parse_pages(FIX_PAGES)
+        self.legacy = guide_legacy()
+        patches = [mock.patch.object(g, "LEVELS_CMD", "SYS.PAGE_LIST"),
+                   mock.patch.object(g, "RETIRED_TEXT", {"SET_PREAMP": "Use `ROUTE.MASTER_VOLUME`"}),
+                   mock.patch.object(g, "STATUS_SELECTORS", {0: "p01", 2: "p4", 3: "out", 7: "zero",
+                                                             9: "levels", 16: "temp"})]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def render(self, text=GUIDE_DOC):
+        new, n = g.rewrite_doc_blocks(text, self.pages, "guide.md", self.legacy)
+        self.assertEqual(n, 5)
+        return new
+
+    def block(self, new, name):
+        return new.split("<!-- VC:BEGIN %s -->" % name)[1].split("<!-- VC:END %s -->" % name)[0]
+
+    def rows(self, new, name):
+        return [r for r in self.block(new, name).splitlines() if r.startswith("| 0x") or r.startswith("| `")
+                or r.startswith("| any") or r[2:3].isdigit()]
+
+    def test_legacy_map_order_kinds_and_idempotent(self):
+        new = self.render()
+        rows = self.rows(new, "LEGACY_MAP")
+        codes = [int(r.split(" | ")[0][2:], 16) for r in rows]
+        self.assertEqual(codes, sorted(codes))
+        # W+R: the OUT row comes first, then one IN row per selector and the refused remainder.
+        master = [r for r in rows if "`MASTER`" in r]
+        self.assertEqual(len(master), 4)
+        self.assertIn("| W | any | same | `ROUTE.MASTER_VOLUME` | `0x0550` | S | `0` | unchanged | 4 |", master[0])
+        self.assertIn("| R | old & 0xFF = 0 | split | `ROUTE.MASTER_VOLUME` | `0x0550` | G | `0` | - | 4 |",
+                      master[1])
+        self.assertIn("| R | old & 0xFF = 1 | split | `SYS.PLATFORM` | `0x0120` | G | `0` | - | 7 |", master[2])
+        self.assertIn("| R | any other | split | none | - | - | - | 1.1.6 STALLed it | - |", master[3])
+        gain = [r for r in rows if "OUTPUT_GAIN`" in r]
+        self.assertTrue(all("| folded |" in r and "`old` |" in r for r in gain), gain)
+        self.assertIn("| W-as-R | any | action | `ROUTE.OUTPUT_ENABLE` | `0x0520` | S | `old & 0xFF` "
+                      "| u8 `old >> 8` | 1 |", new)
+        self.assertEqual(g.rewrite_doc_blocks(new, self.pages, "guide.md", self.legacy), (new, 5))
+
+    def test_custom_and_retired_rows_link_their_sections(self):
+        new = self.render()
+        self.assertIn("| 0x71 | [`GET_MATRIX_ROUTE`](#get_matrix_route-recipe) | R | any | custom "
+                      "| `ROUTE.MATRIX_ROUTE` G | `0x0510` | - | see recipe | [see recipe](#get_matrix_route-recipe) |",
+                      new)
+        self.assertIn("| 0x44 | `SET_PREAMP` | W | any | retired | none | - | - | - "
+                      "| [replacement](#retired-opcodes) | - |", new)
+        for heading, want in (("### `GET_MATRIX_ROUTE` recipe\n", "`GET_MATRIX_ROUTE`"),
+                              ("### Retired opcodes\n", "Retired opcodes")):
+            with self.subTest(want=want), self.assertRaises(g.DefError) as cm:
+                g.rewrite_doc_blocks(GUIDE_DOC.replace(heading, ""), self.pages, "guide.md", self.legacy)
+            self.assertIn("no heading contains %s" % want, str(cm.exception))
+
+    def test_write_as_read_rows_and_status_override(self):
+        rows = self.rows(self.render(), "LEGACY_WASR")
+        self.assertEqual([r.split(" | ")[1] for r in rows],
+                         ["`PRESET_SAVE`", "`SET_OUTPUT_TYPE`", "`BOOT`", "`BOOT`"])
+        # The per-entry override moves VC_ERR_VALUE from the family's 0x05 to 0x01.
+        self.assertIn("0x00 for OK. 0x01 for `VALUE` or `PIN_INVALID`. 0x02 for `PIN_IN_USE`. 0x03 for `ADDRESS`. "
+                      "0x04 for `STATE` |", rows[1])
+        self.assertIn("| output, 0xFF = all (SET) in `old & 0xFF`, value in `old >> 8` | 1 byte `PIN_CONFIG_*` |", rows[1])
+        self.assertIn("| preset slot in `old & 0xFF` | 1 byte `PRESET_*` | `STORE.PRESET_SAVE` `0x0210` "
+                      "| `old & 0xFF` | none (zero-length) | 0x00 for OK. 0x01 for `ADDRESS`. 0x02 for `STATE` |", rows[0])
+        self.assertIn("| 0xFFFF | 1 byte `0x01` | `SYS.ENTER_BOOTLOADER` `0x0130` | `0` |", rows[2])
+        self.assertIn("| any other | 1 byte `PIN_CONFIG_*` | `ROUTE.OUTPUT_MUTE` `0x0522` | `0` "
+                      "| 1 byte: u8 `old != 0` (1 or 0) |", rows[3])
+
+    def test_status_block(self):
+        rows = self.rows(self.render(), "LEGACY_STATUS")
+        self.assertEqual([r.split(" | ")[0][2:] for r in rows], ["0", "2", "3", "7", "9", "16", "any other"])
+        self.assertIn("| 0 | p01 | `SYS.PAGE_LIST` | 0, 2 | u16, u16 | bits 0-15 = u16 at 0, bits 16-31 = u16 at 2 |",
+                      rows[0])
+        self.assertIn("| 16 | temp | `SYS.CLOCK_DIAG` (DSPI_CLOCK_DIAG), read 0 if `VC_ERR_UNKNOWN` | 10 | i16 "
+                      "| sign-extend |", rows[5])
+        with mock.patch.object(g, "STATUS_SELECTORS", {0: "p01"}), self.assertRaises(g.DefError) as cm:
+            self.render()
+        self.assertIn("differ from STATUS_SELECTORS", str(cm.exception))
+
+    def test_get_lengths_block(self):
+        rows = self.rows(self.render(), "GET_LENGTHS")
+        names = [r.split(" | ")[0][2:] for r in rows]
+        want = ["`%s.%s`" % (p["mnemonic"], c["name"]) for p in self.pages for c in p["commands"] if c["get"]]
+        self.assertEqual(names, want)
+        self.assertIn("| `SYS.PAGE_LIST` | 0x01 | 0x11 | none | var |  | 2 x pages", rows[1])
+        self.assertIn("| `SYS.CLOCK_DIAG` | 0x01 | 0x60 | none | 48 | `DSPI_CLOCK_DIAG` |  |", rows)
+        self.assertIn("| `STORE.ALL_PARAMS` | 0x02 | 0x40 | none | 6136 | USB only | Bulk buffer", "\n".join(rows))
+        rules = dict(g.VAR_RULES)
+        del rules["SYS.PAGE_LIST"]
+        with mock.patch.object(g, "VAR_RULES", rules), self.assertRaises(g.DefError) as cm:
+            self.render()
+        self.assertIn("SYS.PAGE_LIST has a variable reply and no rule", str(cm.exception))
+
+    def test_retired_block(self):
+        rows = self.rows(self.render(), "RETIRED")
+        self.assertEqual(rows, [
+            "| 0x44 | `SET_PREAMP` | W | Use `ROUTE.MASTER_VOLUME` |",
+            "| 0x50 | `GET_STATUS` `wValue` 0 | R | `SYS.PAGE_LIST`, u16 at offsets 0 and 2 |",
+            "| 0x50 | `GET_STATUS` `wValue` 2 | R | `SYS.PAGE_LIST`, u16 at offset 8, then `SYS.PLATFORM` bytes 5 and 6 |",
+            "| 0x50 | `GET_STATUS` `wValue` 7 | R | None. It always read 0 |"])
+        for text, want in (({}, "retired opcode SET_PREAMP has no entry"),
+                           ({"SET_PREAMP": "x", "GONE": "y"}, "RETIRED_TEXT names GONE")):
+            with self.subTest(want=want), mock.patch.object(g, "RETIRED_TEXT", text), \
+                    self.assertRaises(g.DefError) as cm:
+                self.render()
+            self.assertIn(want, str(cm.exception))
+
+    def test_guide_block_needs_legacy_map(self):
+        with self.assertRaises(g.DefError) as cm:
+            g.rewrite_doc_blocks(GUIDE_DOC, self.pages, "guide.md")
+        self.assertIn("block LEGACY_MAP needs the legacy map", str(cm.exception))
+
+    def test_unknown_target_reported(self):
+        self.legacy["opcodes"]["GET_PLATFORM"]["in"]["target"] = "SYS.NOPE"
+        with self.assertRaises(g.DefError) as cm:
+            self.render()
+        self.assertIn("names SYS.NOPE, which is not in the registry", str(cm.exception))
+
+    def test_block_names_reserved_from_page_mnemonics(self):
+        for name in g.GUIDE_MARKERS:
+            with self.subTest(name=name), self.assertRaises(g.DefError) as cm:
+                g.parse_def_text('VC_PAGE(%s, 0x0A, 1, "x")\n' % name, "x.def")
+            self.assertIn("reserved for a docs block", str(cm.exception))
+
+    def test_cli_check_flags_stale_guide_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            js, doc, lm = (os.path.join(td, n) for n in ("r.json", "guide.md", "lm.json"))
+            base = ["--pages", FIX_PAGES, "--core-h", FIX_CORE, "--json", js, "--docs", doc,
+                    "--legacy-map", lm]
+            with open(doc, "w", encoding="utf-8") as fh:
+                fh.write(GUIDE_DOC)
+            # --check also validates the map's commands catalog, so give it one from the fixture registry.
+            self.legacy["pages"] = {p["mnemonic"]: p["page"] for p in self.pages}
+            self.legacy["commands"] = {
+                "%s.%s" % (p["mnemonic"], c["name"]): dict(
+                    {"page": p["mnemonic"], "cmd": c["cmd"], "addr": c["addr"],
+                     "dir": ("G" if c["get"] else "") + ("S" if c["set"] else ""), "get_len": c["get_len"],
+                     "set": [c["set_min"], c["set_max"]], "build": c["build"]})
+                for p in self.pages for c in p["commands"]}
+            with open(lm, "w", encoding="utf-8") as fh:
+                json.dump(self.legacy, fh)
+            self.assertEqual(run_cli(base)[0], 0)
+            rc, out, _ = run_cli(base + ["--check"])
+            self.assertEqual(rc, 0, out)
+            with open(doc, encoding="utf-8") as fh:
+                text = fh.read()
+            with open(doc, "w", encoding="utf-8") as fh:
+                fh.write(text.replace("| 0x7F |", "| 0x7E |", 1))
+            rc, out, _ = run_cli(base + ["--check"])
+            self.assertEqual(rc, 1)
+            self.assertIn("STALE", out)
+            self.assertEqual(run_cli(base)[0], 0)
+            self.legacy["opcodes"]["GET_PLATFORM"]["code"] = 0x7E   # map edit, doc untouched
+            with open(lm, "w", encoding="utf-8") as fh:
+                json.dump(self.legacy, fh)
+            rc, out, _ = run_cli(base + ["--check"])
+            self.assertEqual(rc, 1)
+            self.assertIn("guide.md", out)
 
 
 if __name__ == "__main__":

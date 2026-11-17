@@ -2,7 +2,7 @@
 
 *Written 2026-10-11; updated 2026-10-12 for images built from `9cc9f1e` on `merge/spdif-rx-overhaul` (includes the post-merge audit fixes, the ring performance changes and the S/PDIF PIO biphase-mark encoder).*
 
-*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping, and how to port a host, is in the host migration guide `vendor_protocol_migration_guide.md`. The same mapping as data is `../protocol/legacy_map.json`.*
 
 This is the hardware verification the merge plan (`spdif_rx_overhaul_merge_plan.md`, Phase 4) calls for. Nothing in the merge has run on hardware yet. The RP2040 output-ring path and RP2040 PLL dithering have never run on hardware at all, so treat every RP2040 step as a first run.
 

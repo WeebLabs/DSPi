@@ -2,7 +2,7 @@
 
 *Drafted 2026-10-24 on branch `output-latency` (after dbfb8ca), jointly by two reviewers who checked each other's claims against the code. Phases 1 to 4 implemented 2026-10-24 (see the status sections at the end); RP2040 measurements outstanding.*
 
-*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping is in `vendor_protocol_migration_notes.md` and `../protocol/legacy_map.json`.*
+*Note (2026-11-16): the vendor command names and numbers in this document are those of firmware 1.1.6. Firmware 1.1.7 uses the paged protocol described in `../commands.md`. The old to new mapping, and how to port a host, is in the host migration guide `vendor_protocol_migration_guide.md`. The same mapping as data is `../protocol/legacy_map.json`.*
 
 ## TL;DR
 
