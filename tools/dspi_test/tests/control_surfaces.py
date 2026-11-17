@@ -1,11 +1,9 @@
 """
-Control Surfaces group: CS.REVERT as a background job. Every test SKIPs before any request unless
-DSPI_TEST_CS_REVERT=1 is set, because CS.REVERT takes stored bindings down on current firmware.
-Previews only pots on empty slots and ends on a revert; a failed revert falls back to
-restore_preview (tests/_cs.py), whose CS.SAVE then stores the unchanged config (one flash write).
+Control Surfaces group: CS.REVERT as a background job. Previews only pots on empty slots and ends
+on a revert; a failed revert falls back to restore_preview (tests/_cs.py), whose CS.SAVE then
+stores the unchanged config (one flash write).
 """
 
-import os
 import struct
 
 from ..framework import Skip, test
@@ -13,9 +11,6 @@ from ..helpers import (expect_result, expect_stall, has_command, require_page, s
                        wait_for)
 from ._cs import CS, PENDING, cs_limits, cs_snapshot, cs_status, restore_preview
 
-GATE_ENV = "DSPI_TEST_CS_REVERT"
-GATE_MSG = ("CS.REVERT takes stored bindings down on this firmware (known bug); "
-            "set DSPI_TEST_CS_REVERT=1 to run")
 CS_TYPE_POT = 3
 CS_NOUN_OUTPUT_GAIN = 17
 CS_ACT_ADJUST = 0
@@ -65,9 +60,7 @@ def _wait_settled(dev, timeout_s=2.0):
 
 
 def _begin(dev):
-    """The gate, then the clean start each test returns to: CS.STATUS, limits and record snapshot."""
-    if os.environ.get(GATE_ENV) != "1":
-        raise Skip(GATE_MSG)
+    """The clean start each test returns to: CS.STATUS, limits and record snapshot."""
     require_page(dev, CS)
     st = cs_status(dev)
     if st["dirty"]:
@@ -215,5 +208,28 @@ def cs_set_during_revert_waits(dev, profile, chk):
         chk.ok(_bindings(dev, n) == snap["binding"], "stored bindings restored")
         if end:
             chk.eq(_runtime(end), _runtime(st0), "live binding and IR status equal the clean start")
+    finally:
+        _restore(dev, lim, snap)
+
+
+@test("control_surfaces", mutating=True, flash=2)
+def cs_revert_reloads_stored_pot(dev, profile, chk):
+    """A stored non-button binding comes back live after CS.REVERT, with SUCCESS in its slot status."""
+    st0, lim, snap = _begin(dev)
+    slot = _free_slots(snap, 1)[0]
+    pot = _pot(POT_PINS[0])
+    try:
+        _preview_pots(dev, chk, [slot])
+        dev.pset("CS.SAVE")
+        saved = _wait_settled(dev, timeout_s=5.0)
+        chk.ok(saved is not None and saved["dirty"] == 0, "CS.SAVE stores the pot")
+        _revert(dev, chk, "CS.REVERT accepted")
+        done = _wait_settled(dev)
+        chk.ok(done is not None, "revert completes")
+        if done:
+            active = struct.unpack_from("<H", done["raw"], 4)[0]
+            chk.ok(active & (1 << slot), f"slot {slot} is live after the revert (active mask 0x{active:04X})")
+            chk.eq(done["raw"][6 + slot], 0, f"slot {slot} apply status after the revert")
+        chk.eq(dev.pget("CS.BINDING", slot), pot, "the stored pot is the binding after the revert")
     finally:
         _restore(dev, lim, snap)

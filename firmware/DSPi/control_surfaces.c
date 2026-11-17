@@ -2331,6 +2331,9 @@ uint8_t control_surfaces_apply_macro_step(uint8_t idx, uint8_t step,
 // ---------------------------------------------------------------------------
 
 static const CsBinding *cs_reverted_binding(uint8_t slot);
+// True while a revert unit runs. Nothing else can claim a pin inside a unit, so
+// the reload validates against live bindings only, as at boot.
+static bool s_rl_in_unit;
 
 bool control_surfaces_owns_pin(uint8_t pin) {
     for (int s = 0; s < CS_MAX_BINDINGS; s++) {
@@ -2340,7 +2343,7 @@ bool control_surfaces_owns_pin(uint8_t pin) {
             if (b->gpio[i] == pin) return true;
     }
     // Mid-revert, a pin the stored config is about to reclaim is not free.
-    if (control_surfaces_busy()) {
+    if (control_surfaces_busy() && !s_rl_in_unit) {
         for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
             const CsBinding *b = cs_reverted_binding(s);
             for (int i = 0; i < cs_pin_count(b->type); i++)
@@ -2637,7 +2640,9 @@ static bool cs_revert_step(void *ctx, uint32_t deadline_us) {
     for (;;) {
         uint16_t *est = cs_reload_estimate();
         uint32_t t0 = time_us_32();
+        s_rl_in_unit = true;
         bool done = cs_reload_unit();
+        s_rl_in_unit = false;
         uint32_t dt = time_us_32() - t0;
         *est = (uint16_t)(dt >= BG_UNIT_UNMEASURED ? BG_UNIT_UNMEASURED - 1u : dt);
         if (done) break;

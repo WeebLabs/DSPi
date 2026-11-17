@@ -107,9 +107,6 @@ From `python3 -m tools.dspi_test.run --list` (191 tests in 27 groups, plus the o
 
 - **`audio`.** Runs only with `--audio`, `--all` or an explicit `--group audio`. Needs the
   `DSPI_LOOPBACK` firmware and `sounddevice`. See [Audio loopback](#audio-loopback-optional).
-- **`control_surfaces`.** Its three `CS.REVERT` tests SKIP unless `DSPI_TEST_CS_REVERT=1` is set. On
-  current firmware a revert leaves stored non-button bindings down with a pin-in-use status, so the
-  tests stay off until that firmware bug is fixed.
 - **Bench-build `DIAG` tests.** `DIAG.CLOCK_DIAG`, `DIAG.LOOPBACK_STATS` and `DIAG.LOOP_PROF_*` exist
   only in the `DSPI_CLOCK_DIAG`, `DSPI_LOOPBACK` and `DSPI_LOOP_PROF` builds. Their shape tests SKIP
   on a release build.
@@ -228,14 +225,16 @@ reference is tied back to firmware 1.1.6. See [`golden/README.md`](golden/README
 
 ## Current results
 
-On the bench RP2350 with firmware 1.1.7 beta 1, `--allow-flash`: 180 of 191 pass, 1 fails, 10 SKIP.
+On the bench RP2350 with firmware 1.1.7 beta 1 on 2026-11-17, `--allow-flash --flash-cap 60`: 179 of 192
+pass, 1 fails, 12 SKIP. Five of the skips are flash tests past the erase cap, because the whole suite
+needs more than 60 erases. Their three groups pass on their own (41 of 41).
 
-- **The failure** was `rta.rta_busy_within_budget`, which compared the summed slice time of a frame
-  (about 1.05 ms at FFT order 10) with a spec sentence about the capture gap. It now asserts that no
-  background step overruns and that the per-frame cost stays a small share of the frame period. The
-  changed test has not yet run on hardware.
-- **The skips** are the bootloader quarantine (1), `rta_input_tap_usb_sine` without `sounddevice`
-  (1), the opt-in `CS.REVERT` tests (3) and the bench-build `DIAG` tests (5).
+- **The failure** is `rta.rta_pink_noise_flat`, which fails about half the time. Every output's
+  graded bands sit within 1 to 2 dB, in 0.5 dB steps, and one step of noise takes an output to 2.5 dB
+  against the 2 dB limit. The tolerance is tight for the measurement, not a firmware fault.
+- **The other skips** are the bootloader quarantine (1), `rta_input_tap_usb_sine` without
+  `sounddevice` (1) and the bench-build `DIAG` tests (5). `pdiag_clock_diag_shape` passes on a
+  `DSPI_CLOCK_DIAG` build.
 
 ## Layout
 

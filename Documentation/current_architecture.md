@@ -3692,7 +3692,7 @@ value for LEDs that opt in; `CsBinding.flags` has no free bit, so that opt-in
 is earmarked for a flags byte out of `reserved2`.
 
 ### Deferred SET, Apply/Save/Revert, and boot bring-up
-*Last updated: 2026-11-16 (revert tests are opt-in behind `DSPI_TEST_CS_REVERT`). Previously 2026-11-16 (CS SETs named by `CS.*` command; length and busy refusals are `VcResult` codes); 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`); 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
+*Last updated: 2026-11-17 (a revert unit validates pins against live bindings; revert tests no longer opt-in). Previously 2026-11-16 (revert tests are opt-in behind `DSPI_TEST_CS_REVERT`); 2026-11-16 (CS SETs named by `CS.*` command; length and busy refusals are `VcResult` codes); 2026-11-16 (revert-test pacing named as `DIAG.LOOP_PROF_BG_PACE`); 2026-10-26 (audit fixes: revert result ownership, status snapshot, pin ownership during a revert). Previously 2026-10-24 (revert is a background job with a busy gate and stored-image reads), 2026-10-23 (bulk applies rebuild derived state once)*
 
 `CS.BINDING` SET requires the full 24-byte payload. Any other length is refused
 by the dispatcher with `VC_ERR_LENGTH` before the handler runs, so it never
@@ -3753,6 +3753,11 @@ that nothing interleaves with it or sees it half done:
 - **Pins stay claimed.** `control_surfaces_owns_pin()` also reports the pins of
   the stored bindings while the revert runs, so a pin SET landing between a
   slot's teardown and its reload cannot take a GPIO the reload is about to claim.
+  The reservation is for other subsystems only. While a reload unit runs
+  (`s_rl_in_unit`), nothing else can claim a pin, so the slot validates against
+  live bindings exactly as at boot. Before 2026-11-17 the reservation also
+  applied inside the unit, so a stored non-button binding found its own pin
+  reserved and came back down with `PIN_CONFIG_PIN_IN_USE`.
 - **The tick keeps running.** Torn-down slots are inactive, the button groups
   are rebuilt only at the finish, and a macro fired by a control mid-revert is
   refused.
@@ -3763,9 +3768,8 @@ it, and binding reads polled across 20 reverts all equal the stored image. A
 revert lasts about a millisecond, shorter than one host read, so on a
 `DSPI_LOOP_PROF` build the test slows background jobs to one unit per 50 passes
 (`DIAG.LOOP_PROF_BG_PACE`) to land reads mid-revert (159 of them on 2026-10-24).
-The group SKIPs unless `DSPI_TEST_CS_REVERT=1` is set. On current firmware a revert
-leaves stored non-button bindings down with a pin-in-use status, so the tests stay
-off until that bug is fixed.
+`cs_revert_reloads_stored_pot` saves a pot binding, reverts and checks that the
+slot comes back live with SUCCESS, which covers the stored-pin reservation above.
 
 The per-slot work and the state derived from the whole binding set are split.
 `cs_apply_binding_slot()` releases, validates, claims and seeds one slot, and
