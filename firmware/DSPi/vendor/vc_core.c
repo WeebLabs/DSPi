@@ -110,6 +110,7 @@ static bool vc_addr_ok(uint8_t kind, uint16_t a, bool is_get) {
         case VC_A_PAGE_CMD:
         case VC_A_OFFSET:
         case VC_A_INDEX:         return true;
+        case VC_A_CS_SLOT_TYPE:  return lo < CS_MAX_BINDINGS && hi != CS_TYPE_NONE && hi < CS_TYPE_COUNT;
         default:                 return false;
     }
 }

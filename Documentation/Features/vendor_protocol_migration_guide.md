@@ -1363,6 +1363,8 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `SYS.PIPELINE_STATS` | 0x01 | 0x43 | none | 24 |  |  |
 | `SYS.PDM_STATS` | 0x01 | 0x44 | none | 16 |  |  |
 | `SYS.SPDIF_TX_STATS` | 0x01 | 0x45 | none | 24 |  |  |
+| `SYS.PIN_STATE` | 0x01 | 0x50 | none | 24 |  |  |
+| `SYS.PIN_CLAIMS` | 0x01 | 0x51 | none | var |  | 8 + 4 x claims (`SYS.PIN_STATE` byte 5). At most 208 on RP2040, 236 on RP2350 |
 | `STORE.PRESET_NAME` | 0x02 | 0x13 | preset slot | 32 |  |  |
 | `STORE.PRESET_ACTIVE` | 0x02 | 0x14 | none | 1 |  |  |
 | `STORE.DIRECTORY` | 0x02 | 0x15 | none | 7 |  |  |
@@ -1378,24 +1380,30 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `INPUT.SPDIF_RX_PIN` | 0x03 | 0x22 | S/PDIF input | 1 |  |  |
 | `INPUT.SPDIF_RX_ENABLE` | 0x03 | 0x23 | S/PDIF input | 1 |  |  |
 | `INPUT.SPDIF_RX_CONFIG` | 0x03 | 0x24 | none | 6 |  |  |
+| `INPUT.SPDIF_RX_PIN_AVAIL` | 0x03 | 0x25 | S/PDIF input | 24 |  |  |
 | `INPUT.I2S_RX_PIN` | 0x03 | 0x30 | I2S pair | 1 |  |  |
 | `INPUT.I2S_RX_CHANNELS` | 0x03 | 0x31 | none | 1 |  |  |
 | `INPUT.I2S_RX_RATE` | 0x03 | 0x32 | none | 4 |  |  |
+| `INPUT.I2S_RX_PIN_AVAIL` | 0x03 | 0x33 | I2S pair | 24 |  |  |
 | `INPUT.ADAT_RX_ENABLE` | 0x03 | 0x40 | none | 1 | RP2350 only |  |
 | `INPUT.ADAT_RX_PIN` | 0x03 | 0x41 | none | 1 | RP2350 only |  |
 | `INPUT.ADAT_RX_CLOCK_MODE` | 0x03 | 0x42 | none | 1 | RP2350 only |  |
 | `INPUT.ADAT_RX_STATUS` | 0x03 | 0x43 | none | 20 | RP2350 only |  |
+| `INPUT.ADAT_RX_PIN_AVAIL` | 0x03 | 0x44 | none | 24 | RP2350 only |  |
 | `INPUT.LG_SOUND_SYNC_ENABLE` | 0x03 | 0x50 | none | 1 |  |  |
 | `INPUT.LG_SOUND_SYNC_STATUS` | 0x03 | 0x51 | none | 16 |  |  |
 | `OUTPUT.TYPE` | 0x04 | 0x10 | output slot | 1 |  |  |
 | `OUTPUT.PIN` | 0x04 | 0x11 | pin output | 1 |  |  |
+| `OUTPUT.PIN_AVAIL` | 0x04 | 0x12 | pin output | 24 |  |  |
 | `OUTPUT.LATENCY` | 0x04 | 0x20 | none | 1 |  |  |
 | `OUTPUT.LATENCY_STATUS` | 0x04 | 0x21 | none | 12 |  |  |
 | `OUTPUT.LATENCY_OPTIONS` | 0x04 | 0x22 | none | var |  | 8 x options (`OUTPUT.LATENCY_STATUS` byte 9). 56 today |
 | `OUTPUT.ADAT_TX_ENABLE` | 0x04 | 0x30 | none | 1 | RP2350 only |  |
 | `OUTPUT.ADAT_TX_PIN` | 0x04 | 0x31 | none | 1 | RP2350 only |  |
 | `OUTPUT.ADAT_TX_STATUS` | 0x04 | 0x32 | none | 8 | RP2350 only |  |
+| `OUTPUT.ADAT_TX_PIN_AVAIL` | 0x04 | 0x33 | none | 24 | RP2350 only |  |
 | `OUTPUT.DAC_MUTE_CONFIG` | 0x04 | 0x40 | none | 16 |  |  |
+| `OUTPUT.DAC_MUTE_PIN_AVAIL` | 0x04 | 0x42 | none | 24 |  |  |
 | `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | `(input << 8) \| output` | 8 |  |  |
 | `ROUTE.OUTPUT_ENABLE` | 0x05 | 0x20 | output | 1 |  |  |
 | `ROUTE.OUTPUT_GAIN` | 0x05 | 0x21 | output | 4 |  |  |
@@ -1506,6 +1514,7 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `CS.EXT_STATUS` | 0x0A | 0x13 | none | 24 |  |  |
 | `CS.BINDING` | 0x0A | 0x20 | CS slot | 24 |  |  |
 | `CS.SLOT_NAME` | 0x0A | 0x21 | CS slot | 32 |  |  |
+| `CS.BINDING_PIN_AVAIL` | 0x0A | 0x22 | `(CS type << 8) \| slot` | 80 |  |  |
 | `CS.IR_CMD` | 0x0A | 0x30 | CS sub-slot | 16 |  |  |
 | `CS.IR_LEARN_STATUS` | 0x0A | 0x31 | none | 8 |  |  |
 | `CS.GROUP` | 0x0A | 0x40 | CS group | 40 |  |  |
@@ -1522,13 +1531,17 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `XPORT.UART_CONFIG` | 0x0B | 0x10 | none | 8 |  |  |
 | `XPORT.I2C_CONFIG` | 0x0B | 0x11 | none | 8 |  |  |
 | `XPORT.STATUS` | 0x0B | 0x12 | none | 8 |  |  |
+| `XPORT.UART_PIN_AVAIL` | 0x0B | 0x13 | none | 72 |  |  |
+| `XPORT.I2C_PIN_AVAIL` | 0x0B | 0x14 | none | 72 |  |  |
 | `CLOCK.I2S_BCK_PIN` | 0x0C | 0x10 | role 0-1 | 1 |  |  |
 | `CLOCK.I2S_CLOCK_PIN_MODE` | 0x0C | 0x11 | none | 1 |  |  |
 | `CLOCK.I2S_CLOCK_MODE` | 0x0C | 0x12 | none | 1 |  |  |
 | `CLOCK.I2S_SLAVE_STATUS` | 0x0C | 0x13 | none | 16 |  |  |
+| `CLOCK.I2S_BCK_PIN_AVAIL` | 0x0C | 0x14 | role 0-1 | 24 |  |  |
 | `CLOCK.MCK_ENABLE` | 0x0C | 0x20 | none | 1 |  |  |
 | `CLOCK.MCK_PIN` | 0x0C | 0x21 | none | 1 |  |  |
 | `CLOCK.MCK_MULTIPLIER` | 0x0C | 0x22 | none | 1 |  |  |
+| `CLOCK.MCK_PIN_AVAIL` | 0x0C | 0x23 | none | 24 |  |  |
 | `DIAG.CLOCK_DIAG` | 0xF0 | 0x10 | none | var | `DSPI_CLOCK_DIAG` | `ClockDiagPacket`. 226 on RP2040, 248 on RP2350 |
 | `DIAG.LOOPBACK_STATS` | 0xF0 | 0x20 | none | 8 | `DSPI_LOOPBACK` |  |
 | `DIAG.LOOP_PROF_SECTION` | 0xF0 | 0x30 | index | 4 | `DSPI_LOOP_PROF` |  |

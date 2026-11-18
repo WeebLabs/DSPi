@@ -70,6 +70,9 @@ void i2s_input_prefill_silence(uint32_t frames);
 // Get current state
 I2sInputState i2s_input_get_state(void);
 
+// BCK of the clock pair the running input drives or listens on, or 0xFF.
+uint8_t i2s_input_live_bck_pin(void);
+
 // True if RUNNING in the clock-master role
 bool i2s_input_is_clock_master(void);
 

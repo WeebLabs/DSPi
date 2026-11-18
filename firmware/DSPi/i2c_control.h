@@ -61,9 +61,8 @@ uint8_t i2c_ctrl_validate(const I2cCtrlConfig *cfg);
 // Bounded: at most one dispatch per call.
 void i2c_ctrl_poll(void);
 
-// True iff the interface is live and `pin` is its SDA or SCL GPIO.
-// Consulted by pin_used_by_fixed_peripheral() in vendor/vc_pins.c.
-bool i2c_ctrl_owns_pin(uint8_t pin);
+// The config last applied (its pins are claimed only while live). Returns live.
+bool i2c_ctrl_live_config(I2cCtrlConfig *out);
 
 // True when the peripheral is up and listening at the configured address.
 bool i2c_ctrl_is_live(void);

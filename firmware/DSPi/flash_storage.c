@@ -46,8 +46,7 @@
 #include "tube.h"            // tube_config + TUBE_DEFAULT_*
 #include "limiter.h"         // limiter_config + limiter_config_defaults
 #include "notify.h"
-#include "uart_control.h"    // uart_ctrl_owns_pin (io_pin_valid guard)
-#include "i2c_control.h"     // i2c_ctrl_owns_pin (io_pin_valid guard)
+#include "vc_pins.h"         // pin_restore_apply: the restore paths' one pin check
 #include "bulk_params.h"     // WireBulkParams offsets for user_mute notify
 #include "dac_hw_mute.h"     // hold query for flash_mute_hold_samples floor
 #include "audio_pipeline.h"  // output-ring stall bracket around the flash window
@@ -3060,33 +3059,6 @@ static void dir_ensure(void) {
 // (USB vs SPDIF) is NOT part of this block — it stays per-preset.
 // The output limiter settings follow the same mode (limiter spec section 5).
 
-// True if `pin` is a usable output/RX GPIO on this platform.  (0 is allowed for
-// output pins; the SPDIF RX path additionally rejects 0 as "absent".)
-static bool io_pin_valid(uint8_t pin) {
-    // GPIO 16/17 are assignable again (debug UART removed).  Live UART/I2C
-    // control pins are rejected here so a stored or pushed IO config can
-    // never steal the control link applying it (self-lockout guard); at
-    // boot the interfaces are not yet up, so stored audio pins win and a
-    // colliding control config stays down (visible via XPORT.STATUS).
-    if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return false;
-#ifdef DSPI_PLATFORM_PINS
-    bool valid = dspi_platform_pin_valid(DSPI_PIN_FN_ANY, pin);
-#else
-    bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-    if (pin > 28) valid = false;
-#endif
-#endif
-    return valid;
-}
-
-// io_pin_valid() for one function: a DSPI_PLATFORM_PINS build adds the platform's rule for it.
-#ifdef DSPI_PLATFORM_PINS
-#define IO_PIN_VALID_FOR(fn, pin) (io_pin_valid(pin) && dspi_platform_pin_valid(fn, pin))
-#else
-#define IO_PIN_VALID_FOR(fn, pin) io_pin_valid(pin)
-#endif
-
 // Firmware IO factory defaults: all-SPDIF outputs, default pins, MCK off,
 // default SPDIF RX pin.  Matches apply_factory_defaults' former IO block.
 static void io_config_defaults(FlashOutputConfig *cfg) {
@@ -3300,196 +3272,57 @@ static void io_config_from_slot(const PresetSlot *slot, FlashOutputConfig *cfg) 
     }
 }
 
-// Apply a FlashOutputConfig to the live IO globals.  Validates pins (invalid →
-// platform default), checks MCK GPOUT-capability (falls back + disables MCK if
-// the pin can't drive clk_gpoutN here), and — if the SPDIF RX pin changed while
-// RX is the active input — schedules the running RX library's GPIO hot-swap.
-// Sets output_types[]/i2s_* that the boot setup and the main loop's pipeline
-// reset consume; it does NOT itself reconfigure hardware.  Input source is
-// deliberately untouched.
-static void io_config_apply(const FlashOutputConfig *cfg) {
-    // Snapshot the BCK pair the running input actually uses before any clock /
-    // clock-pin change below; used at the end to restart the input if it moved.
-    uint8_t old_eff_bck = i2s_effective_bck_pin();
-
-    static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
-#if PICO_RP2350
-        PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
-#else
-        PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_PDM_PIN
-#endif
-    };
-    for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
-        uint8_t pin = cfg->output_pins[i];
-        output_pins[i] = IO_PIN_VALID_FOR(i < NUM_SPDIF_INSTANCES ? DSPI_PIN_FN_OUTPUT : DSPI_PIN_FN_PDM, pin)
-                             ? pin : default_pins[i];
-    }
-
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) output_types[i] = cfg->output_types[i];
-
-    // SPDIF RX pin (reject 0 = "absent"; hot-swap if it changed while RX active).
-    if (cfg->spdif_rx_pin != 0 && IO_PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, cfg->spdif_rx_pin) &&
-        cfg->spdif_rx_pin != spdif_rx_pin) {
-        spdif_rx_pin = cfg->spdif_rx_pin;
-        if (input_source_is_spdif(active_input_source) &&
-            spdif_index_for_source(active_input_source) == 0)
-            spdif_rx_pin_change_pending = true;
-    }
-
-    // Optional SPDIF inputs 2..4: pins first (0 = unset, platform default),
-    // then disables.  Enables wait until after BCK, since their conflict check
-    // includes the clock pairs while I2S is in use.
+// Apply a FlashOutputConfig to the live IO globals: one proposed pin config, judged
+// as a unit and installed (vc_pins.h, pin_availability_query_spec.md section 7).
+// Sets output_types[]/i2s_* that the boot setup and the main loop's pipeline reset
+// consume; it does NOT itself reconfigure hardware. 0 in a pin field means unset.
+static void io_config_apply(const FlashOutputConfig *cfg, uint8_t flags) {
+    PinConfig pc;
+    pin_config_capture(&pc);
+    if (input_source_change_pending) pc.input_source = pending_input_source;
+    if (i2s_clock_mode_change_pending) pc.clock_mode = pending_i2s_clock_mode;
+    memcpy(pc.output_pins, cfg->output_pins, NUM_PIN_OUTPUTS);
+    memcpy(pc.output_types, cfg->output_types, NUM_SPDIF_INSTANCES);
+    if (cfg->spdif_rx_pin != 0) pc.spdif_rx_pin[0] = cfg->spdif_rx_pin;
     for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-        uint8_t dflt = spdif_rx_pin_default_for_index((uint8_t)(i + 1));
         uint8_t stored = cfg_spdif_ext_pin_get(cfg, i);
-        uint8_t pin = stored ? stored : dflt;
-        if (!IO_PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, pin)) pin = dflt;
-        if (pin != spdif_rx_pin_ext[i]) {
-            spdif_rx_pin_ext[i] = pin;
-            if (input_source_is_spdif(active_input_source) &&
-                spdif_index_for_source(active_input_source) == (uint8_t)(i + 1))
-                spdif_rx_pin_change_pending = true;
-        }
+        pc.spdif_rx_pin[i + 1] = stored ? stored : spdif_rx_pin_default_for_index((uint8_t)(i + 1));
     }
-    const uint8_t want_ext = cfg->spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
-    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++) {
-        uint8_t bit = (uint8_t)(1u << (i - 1));
-        if ((want_ext & bit) || !spdif_input_enabled(i)) continue;
-        if (input_source_is_spdif(active_input_source) &&
-            spdif_index_for_source(active_input_source) == i) {
-            printf("io_config: SPDIF input %u kept enabled (active source)\n",
-                   (unsigned)(i + 1));
-            continue;   // never disable the live input
-        }
-        spdif_rx_enabled_ext &= (uint8_t)~bit;
-    }
-
-#if PICO_RP2350
-    // Release ADAT claims this cfg drops or moves, so MCK and BCK are not judged
-    // against them; the ADAT blocks at the end re-claim against the final clocks.
-    // The snapshots keep a net no-op from dirtying or restarting ADAT.
-    const bool    adat_out_was_en    = adat_output_config_enabled();
-    const uint8_t adat_out_was_pin   = adat_output_pin();
-    const bool    adat_out_was_dirty = adat_output_config_dirty;
-    const uint8_t adat_in_was_pin    = adat_input_pin;
-    const uint8_t adat_in_was_en     = adat_input_enabled;
-    const bool    adat_in_live = (active_input_source == INPUT_SOURCE_ADAT ||
-                                  (input_source_change_pending &&
-                                   pending_input_source == INPUT_SOURCE_ADAT));
-    {
-        uint8_t want_pin = cfg->adat_pin ? cfg->adat_pin : PICO_ADAT_PIN;
-        if (adat_out_was_en && !(cfg->adat_enabled && want_pin == adat_out_was_pin))
-            adat_output_set_config(false, adat_out_was_pin);
-        if (adat_in_was_en && !adat_in_live &&
-            !(cfg->adat_input_enabled && cfg->adat_input_pin == adat_in_was_pin))
-            adat_input_enabled = 0;
-    }
-#endif
-
-    // MCK pin must map to clk_gpoutN on this platform (see the V9 apply note);
-    // otherwise reset to default and force MCK off so the change is visible.
-    // An enabled MCK on a pin another fixed peripheral owns is forced off too.
-    if (GPIO_TO_GPOUT_CLOCK_HANDLE(cfg->i2s_mck_pin, clk_sys) == clk_sys) {
-        printf("Output-config MCK pin %u not GPOUT-capable on this platform; "
-               "resetting to default %u and disabling MCK\n",
-               (unsigned)cfg->i2s_mck_pin, (unsigned)PICO_I2S_MCK_PIN);
-        i2s_mck_pin = PICO_I2S_MCK_PIN;
-        i2s_mck_enabled = false;
-    } else {
-        bool en = (cfg->i2s_mck_enabled != 0);
-        if (en && !i2s_mck_pin_acceptable(cfg->i2s_mck_pin)) {
-            printf("io_config: MCK pin %u in use; MCK disabled\n",
-                   (unsigned)cfg->i2s_mck_pin);
-            en = false;
-        }
-        i2s_mck_pin = cfg->i2s_mck_pin;
-        i2s_mck_enabled = en;
-    }
-    i2s_mck_multiplier = (cfg->i2s_mck_multiplier == 1) ? 256 : 128;
-
-    // BCK/LRCLK are clock outputs, so validate before installing.  The check reads
-    // live globals: a cfg pin it covers that is installed below is judged at its
-    // stale value (the compile-time default at boot) and can falsely reject BCK.
-    if (i2s_bck_pin_acceptable(cfg->i2s_bck_pin)) {
-        i2s_bck_pin = cfg->i2s_bck_pin;
-    } else {
-        printf("io_config: I2S BCK pin %u rejected (invalid/conflict); kept %u\n",
-               (unsigned)cfg->i2s_bck_pin, (unsigned)i2s_bck_pin);
-    }
-
-    // I2S clock-pin mode + slave-pair BCK.  Installed here (after the master BCK
-    // above, before the RX validation below) because that RX block reads the live
-    // i2s_clock_pin_mode / i2s_bck_pin_slave to keep RX pins off the slave pair.
-    // The pin mode has no pending mechanism (unlike the clock mode): apply it live.
-    if (cfg->i2s_clock_pin_mode <= 1) i2s_clock_pin_mode = cfg->i2s_clock_pin_mode;
-    {
-        // 0 = unset → keep the live slave pin.  Reject an invalid GPIO or one that
-        // overlaps the just-installed master BCK/LRCLK pair (both are clock lines);
-        // keep the live pin on rejection, mirroring the master-BCK message style.
-        uint8_t p = cfg->i2s_bck_pin_slave ? cfg->i2s_bck_pin_slave : i2s_bck_pin_slave;
-        bool overlap = (p == i2s_bck_pin) || (p == (uint8_t)(i2s_bck_pin + 1)) ||
-                       ((uint8_t)(p + 1) == i2s_bck_pin);
-        if (I2S_BCK_SLAVE_PIN_ACCEPTABLE(p) && !overlap) {
-            i2s_bck_pin_slave = p;
-        } else {
-            printf("io_config: I2S slave BCK pin %u rejected (invalid/conflict); kept %u\n",
-                   (unsigned)p, (unsigned)i2s_bck_pin_slave);
-        }
-    }
-
-    // Optional SPDIF input enables: after BCK and the slave pair, so the
-    // conflict check sees the final clock pins.  Disables ran above.
-    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++) {
-        uint8_t bit = (uint8_t)(1u << (i - 1));
-        if (!(want_ext & bit) || spdif_input_enabled(i)) continue;
-        if (spdif_input_enable_acceptable(i)) {
-            spdif_rx_enabled_ext |= bit;
-        } else {
-            printf("io_config: SPDIF input %u enable rejected (pin %u in use)\n",
-                   (unsigned)(i + 1), (unsigned)spdif_rx_pin_for_index(i));
-        }
-    }
-
-    // I2S RX data pins (pair 0 + multichannel extras) and channel count, applied
-    // as a validated SET (i2s_rx_pin_set_acceptable) so a stored config can't
-    // bring two state machines up on one GPIO or on a clock pin.  0 = keep-live
-    // per field; an invalid count keeps the live count.  BCK is applied above,
-    // so the live i2s_bck_pin is the value the proposed pins must avoid.
-    // Rejected as a unit (live retained) if inconsistent; a change restarts the
-    // input so every pair re-syncs.
-    {
-        uint8_t proposed[I2S_RX_MAX_PAIRS];
-        proposed[0] = (cfg->i2s_rx_pin != 0) ? cfg->i2s_rx_pin : i2s_rx_pin[0];
+    pc.spdif_rx_enabled_ext = cfg->spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
+    pc.mck_pin = cfg->i2s_mck_pin;
+    pc.mck_enabled = (cfg->i2s_mck_enabled != 0);
+    pc.bck_pin[0] = cfg->i2s_bck_pin;
+    if (cfg->i2s_bck_pin_slave) pc.bck_pin[1] = cfg->i2s_bck_pin_slave;
+    if (cfg->i2s_clock_pin_mode <= 1) pc.clock_pin_mode = cfg->i2s_clock_pin_mode;
+    if (cfg->i2s_clock_mode <= 1) pc.clock_mode = cfg->i2s_clock_mode;
+    if (cfg->i2s_rx_pin != 0) pc.i2s_rx_pin[0] = cfg->i2s_rx_pin;
 #if I2S_RX_MAX_PAIRS > 1
-        for (int p = 1; p < I2S_RX_MAX_PAIRS; p++) {
-            uint8_t pin = cfg->i2s_rx_pin_ext[p - 1];
-            proposed[p] = (pin != 0) ? pin : i2s_rx_pin[p];
-        }
+    for (int p = 1; p < I2S_RX_MAX_PAIRS; p++)
+        if (cfg->i2s_rx_pin_ext[p - 1] != 0) pc.i2s_rx_pin[p] = cfg->i2s_rx_pin_ext[p - 1];
 #endif
-        uint8_t ch = cfg->i2s_input_channels;
-        uint8_t count = (ch == 2 || ch == 4 || ch == 6 || ch == 8)
-                            ? ch : i2s_input_channels;
-        if (count / 2 > I2S_RX_MAX_PAIRS) count = i2s_input_channels;
-
-        if (i2s_rx_pin_set_acceptable(proposed, count / 2, i2s_bck_pin,
-                                      (i2s_clock_pin_mode == I2S_CLOCK_PIN_MODE_SPLIT)
-                                          ? i2s_bck_pin_slave : 0xFF)) {
-            bool changed = false;
-            for (int p = 0; p < I2S_RX_MAX_PAIRS; p++)
-                if (proposed[p] != i2s_rx_pin[p]) {
-                    i2s_rx_pin[p] = proposed[p];
-                    changed = true;
-                }
-            if (count != i2s_input_channels) {
-                i2s_input_channels = count;
-                changed = true;
-            }
-            if (changed && active_input_source == INPUT_SOURCE_I2S)
-                i2s_input_restart_pending = true;
-        } else {
-            printf("io_config: I2S RX pin/count config rejected (conflict); kept live\n");
-        }
+    uint8_t ch = cfg->i2s_input_channels;
+    if ((ch == 2 || ch == 4 || ch == 6 || ch == 8) && ch / 2 <= I2S_RX_MAX_PAIRS)
+        pc.i2s_rx_pairs = (uint8_t)(ch / 2);
+#if PICO_RP2350
+    pc.adat_tx_pin = cfg->adat_pin ? cfg->adat_pin : PICO_ADAT_PIN;
+    pc.adat_tx_enabled = (cfg->adat_enabled != 0);
+    pc.adat_rx_pin = cfg->adat_input_pin;
+    pc.adat_rx_enabled = (cfg->adat_input_enabled != 0);
+#endif
+    // The input the device is listening to, or is switching to, is never switched off
+    // by a restore.
+    if (!(flags & PIN_VALIDATE_BOOT)) {
+        uint8_t live_src = input_source_change_pending ? pending_input_source : active_input_source;
+        if (input_source_is_spdif(live_src) && spdif_index_for_source(live_src) > 0)
+            pc.spdif_rx_enabled_ext |= (uint8_t)(1u << (spdif_index_for_source(live_src) - 1));
+#if PICO_RP2350
+        if (live_src == INPUT_SOURCE_ADAT) pc.adat_rx_enabled = 1;
+#endif
     }
+
+    PinValidateResult res;
+    pin_restore_apply(&pc, flags, &res);
+    i2s_mck_multiplier = (cfg->i2s_mck_multiplier == 1) ? 256 : 128;
 
     // I2S input rate (+1 sentinel: 0 = unset, leave live value alone).
     // No rate-change trigger here; the preset-load / bulk-apply handlers
@@ -3499,85 +3332,20 @@ static void io_config_apply(const FlashOutputConfig *cfg) {
         i2s_input_rate = i2s_rate_decode((uint8_t)(cfg->i2s_input_rate_p1 - 1));
     }
 
-    // I2S clock master/slave mode (both platforms).  Live-vs-dormant split,
-    // same as io_config_from_slot(): dormant applies the global directly;
+    // I2S clock master/slave mode, as validated.  Dormant applies the global directly;
     // live defers entirely to the main-loop handler, which flips the global
     // and rebuilds input + output clocking atomically (pre-setting it here
     // would let intermediate restarts adopt the new role against outputs
-    // still holding the old clocking).  In WITH_PRESET the from_slot pass
-    // already resolved the same value, so re-arming here is idempotent.
-    if (cfg->i2s_clock_mode <= 1 && cfg->i2s_clock_mode != i2s_clock_mode) {
+    // still holding the old clocking).
+    if (pc.clock_mode != i2s_clock_mode) {
         if (active_input_source == INPUT_SOURCE_I2S) {
-            pending_i2s_clock_mode = cfg->i2s_clock_mode;
+            pending_i2s_clock_mode = pc.clock_mode;
             __dmb();
             i2s_clock_mode_change_pending = true;
         } else {
-            i2s_clock_mode = cfg->i2s_clock_mode;   // dormant/boot apply
+            i2s_clock_mode = pc.clock_mode;   // dormant/boot apply
         }
     }
-
-    // If the effective BCK pair moved (clock-pin mode / slave pin change) while
-    // I2S is the live input, restart it so RX re-latches onto the new pair.
-    // Redundant arming is cleared by the bracketed restore paths in main.c; this
-    // covers paths without a bracket.  (If the clock-mode block above just
-    // deferred a flip, its handler rebuilds everything and consumes this flag.)
-    if (i2s_effective_bck_pin() != old_eff_bck && active_input_source == INPUT_SOURCE_I2S)
-        i2s_input_restart_pending = true;
-
-#if PICO_RP2350
-    // ADAT bulk output: 0 = unset; a stored pin that fails the full ownership
-    // check (adat_pin_acceptable, against the outputs applied above) falls back
-    // to the default.  set_config only marks adat_output_config_dirty; the PIO
-    // reconfigure is deferred to the main loop's pipeline-reset bracket, never
-    // done here.  RP2040 ignores both fields (feature absent).
-    {
-        uint8_t pin = cfg->adat_pin ? cfg->adat_pin : PICO_ADAT_PIN;
-        bool pin_ok = adat_pin_acceptable(pin);
-        if (!pin_ok && pin != PICO_ADAT_PIN) {
-            pin = PICO_ADAT_PIN;               // stored pin conflicts; try default
-            pin_ok = adat_pin_acceptable(pin);
-        }
-        adat_output_set_config(cfg->adat_enabled != 0 && pin_ok, pin);
-        if (adat_output_config_enabled() == adat_out_was_en &&
-            adat_output_pin() == adat_out_was_pin)
-            adat_output_config_dirty = adat_out_was_dirty;
-    }
-#endif
-
-#if PICO_RP2350
-    // ADAT input pin + enable (RP2350).  adat_input_pin 0xFF = unset.  A stored
-    // pin that differs from the live one and fails the ownership check falls back
-    // to unset + disabled (an enabled input with no valid pin is inconsistent and
-    // unselectable).  A disable of the live source is refused (mirrors the
-    // SPDIF-ext precedent); a pin/enable change while ADAT is active arms a
-    // deferred input restart.
-    {
-        uint8_t pin = cfg->adat_input_pin;
-        uint8_t en  = cfg->adat_input_enabled ? 1 : 0;
-        if (pin != 0xFF && pin != adat_input_pin && !adat_input_pin_acceptable(pin)) {
-            printf("io_config: ADAT input pin %u rejected (invalid/conflict); unset\n",
-                   (unsigned)pin);
-            pin = 0xFF;
-        } else if (pin != 0xFF && en && !adat_input_enabled &&
-                   !adat_input_pin_acceptable(pin)) {
-            // Unchanged pin being newly enabled: keep the pin, leave input off.
-            printf("io_config: ADAT input pin %u in use; input left disabled\n",
-                   (unsigned)pin);
-            en = 0;
-        }
-        if (pin == 0xFF) en = 0;   // no valid pin -> cannot be enabled
-        if (en == 0 && adat_input_enabled && adat_in_live) {
-            printf("io_config: ADAT input kept enabled (active source)\n");
-            pin = adat_input_pin;
-            en  = 1;
-        }
-        bool changed = (pin != adat_in_was_pin) || (en != adat_in_was_en);
-        adat_input_pin     = pin;
-        adat_input_enabled = en;
-        if (changed && active_input_source == INPUT_SOURCE_ADAT)
-            adat_input_restart_pending = true;
-    }
-#endif
 
     // ADAT input clock master/slave mode (both platforms; round-trips on RP2040).
     // Live-vs-dormant split like i2s_clock_mode: dormant writes the global
@@ -3647,20 +3415,29 @@ static void limiter_to_dir(void) {
 // `is_boot` is true only on the power-on restore path.
 static void apply_output_config_from_mode(const PresetSlot *slot_or_null, bool is_boot) {
     FlashOutputConfig cfg;
+    const uint8_t pin_flags = is_boot ? PIN_VALIDATE_BOOT : 0;
     if (dir_cache.output_config_mode == OUTPUT_CONFIG_MODE_WITH_PRESET) {
         if (slot_or_null) io_config_from_slot(slot_or_null, &cfg);
         else              io_config_defaults(&cfg);
-        io_config_apply(&cfg);
+        io_config_apply(&cfg, pin_flags);
         // Slots before V39 carry no limiter: every output off at the defaults.
         if (slot_or_null && slot_or_null->version >= 39) limiter_from_slot(slot_or_null);
         else                                             limiter_config_defaults();
         limiter_update_pending = true;
     } else if (is_boot) {
-        io_config_apply(&dir_cache.output_config);
+        io_config_apply(&dir_cache.output_config, pin_flags);
         limiter_from_dir();
         limiter_update_pending = true;
+    } else {
+        // INDEPENDENT + runtime: live IO and limiter survive, but the preset's PDM
+        // enable and input source still have to claim their pins.
+        PinConfig pc;
+        PinValidateResult res;
+        pin_config_capture(&pc);
+        if (input_source_change_pending) pc.input_source = pending_input_source;
+        if (i2s_clock_mode_change_pending) pc.clock_mode = pending_i2s_clock_mode;
+        pin_restore_apply(&pc, PIN_VALIDATE_FIXED_PINS, &res);
     }
-    // INDEPENDENT + runtime: intentionally a no-op (live IO and limiter survive).
 }
 
 // ============================================================================

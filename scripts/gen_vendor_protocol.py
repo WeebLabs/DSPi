@@ -26,7 +26,7 @@ ADDR_KINDS = (
     "NONE", "CHANNEL", "INPUT", "OUTPUT", "OUTPUT_ALL", "SLOT", "PIN_OUTPUT",
     "PRESET", "CH_BAND", "IN_OUT", "SOURCE", "SPDIF_RX", "I2S_PAIR", "ROLE",
     "CS_SLOT", "CS_SUB", "CS_GROUP", "CS_MACRO", "CS_MACRO_STEP", "CS_PAGE",
-    "CS_NOUN", "PAGE", "PAGE_CMD", "OFFSET", "INDEX",
+    "CS_NOUN", "PAGE", "PAGE_CMD", "OFFSET", "INDEX", "CS_SLOT_TYPE",
 )
 # Canonical order; JSON lists flags in this order whatever the source order was.
 FLAGS = ("USB_ONLY", "SET_USB_ONLY", "BULK", "DEFERRED", "FLASH", "RESTART", "KEEPALIVE")
@@ -57,6 +57,7 @@ ADDR_DOC = {
     "PAGE_CMD": "`(page << 8) \\| cmd`",
     "OFFSET": "byte offset",
     "INDEX": "index",
+    "CS_SLOT_TYPE": "`(CS type << 8) \\| slot`",
 }
 
 MAX_SET_PAYLOAD = 64
@@ -611,6 +612,7 @@ VAR_RULES = {
     "MEAS.RTA_BINS": "min(256, frame - offset). The frame is 145, 273 or 529 bytes for FFT order 8, 9 or 10",
     "MEAS.RTA_BANDS_ALL": "82 x live channels at the tap, 0 when none",
     "DIAG.CLOCK_DIAG": "`ClockDiagPacket`. 226 on RP2040, 248 on RP2350",
+    "SYS.PIN_CLAIMS": "8 + 4 x claims (`SYS.PIN_STATE` byte 5). At most 208 on RP2040, 236 on RP2350",
 }
 
 # What each GET_STATUS (0x50) selector meant in 1.1.6. legacy_map.json holds where it lives now.

@@ -24,15 +24,16 @@ static VcResult xport_uart_config_get(VcCtx *c) {
     return VC_OK;
 }
 
-// Refuses only what uart_ctrl_validate() refuses regardless of pin ownership. The
-// live interface's own pins look taken until the apply tears it down, so the rest waits.
+// Refuses only what uart_ctrl_validate() refuses regardless of pin ownership (scalars
+// and the mux rules). Ownership is judged by the apply, after the live interface is down.
 static VcResult xport_uart_config_set(VcCtx *c) {
     UartCtrlConfig cfg;
     memcpy(&cfg, c->in, sizeof(cfg));
     if (cfg.enabled > 1 || cfg.notify_enable > 1 ||
         cfg.baud < UART_CTRL_BAUD_MIN || cfg.baud > UART_CTRL_BAUD_MAX)
         return VC_ERR_VALUE;
-    if (!is_valid_gpio_pin(cfg.tx_pin) || !is_valid_gpio_pin(cfg.rx_pin)) return VC_ERR_PIN_INVALID;
+    PinRequest rq = { PIN_FN_UART_CTRL, 0, { cfg.tx_pin, cfg.rx_pin } };
+    if (pin_check(pin_state_live(), &rq, PIN_CHECK_STORE) != PIN_CONFIG_SUCCESS) return VC_ERR_PIN_INVALID;
     memcpy((void *)&ctrl_set_uart_val, &cfg, sizeof(cfg));
     __dmb();
     ctrl_set_uart_pending = true;
@@ -46,16 +47,26 @@ static VcResult xport_i2c_config_get(VcCtx *c) {
     return VC_OK;
 }
 
-// Same split as the UART SET: scalar and GPIO range checks here, ownership on the main loop.
+// Same split as the UART SET: scalars and mux rules here, ownership on the main loop.
 static VcResult xport_i2c_config_set(VcCtx *c) {
     I2cCtrlConfig cfg;
     memcpy(&cfg, c->in, sizeof(cfg));
     if (cfg.enabled > 1 || cfg.address < I2C_CTRL_ADDRESS_MIN || cfg.address > I2C_CTRL_ADDRESS_MAX)
         return VC_ERR_VALUE;
-    if (!is_valid_gpio_pin(cfg.sda_pin) || !is_valid_gpio_pin(cfg.scl_pin)) return VC_ERR_PIN_INVALID;
+    PinRequest rq = { PIN_FN_I2C_CTRL, 0, { cfg.sda_pin, cfg.scl_pin } };
+    if (pin_check(pin_state_live(), &rq, PIN_CHECK_STORE) != PIN_CONFIG_SUCCESS) return VC_ERR_PIN_INVALID;
     memcpy((void *)&ctrl_set_i2c_val, &cfg, sizeof(cfg));
     __dmb();
     ctrl_set_i2c_pending = true;
+    return VC_OK;
+}
+
+// Two groups (hardware instances) of two roles (TX/RX, SDA/SCL); a pair is valid when
+// both pins are set in the same group.
+static VcResult xport_pin_avail_get(VcCtx *c) {
+    PinAvail a;
+    pin_avail(c->arg ? PIN_FN_I2C_CTRL : PIN_FN_UART_CTRL, 0, &a);
+    c->out_len = pin_avail_serialize(&a, pin_generation_sync(false), c->out, c->out_cap, false);
     return VC_OK;
 }
 

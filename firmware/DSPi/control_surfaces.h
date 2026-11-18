@@ -744,9 +744,15 @@ void control_surfaces_tick(void);
 // binding is restored.  Caller persists on success.
 uint8_t control_surfaces_apply_binding(uint8_t slot, const CsBinding *b);
 
-// True if `pin` is claimed by any live binding.  Wired into
-// pin_used_by_fixed_peripheral so no other subsystem can take a CS pin.
-bool control_surfaces_owns_pin(uint8_t pin);
+// Every binding's pins as claims (active while the binding is live), plus mid-revert
+// the pins the stored config is about to reclaim. See vendor/vc_pins.h.
+struct PinState;
+void control_surfaces_add_pin_claims(struct PinState *st);
+
+// CS.BINDING_PIN_AVAIL: the masks for a binding of `type` in `slot` (PinAvail in
+// vendor/vc_pins.h; status in CS_STATUS_* space).
+struct PinAvail;
+void control_surfaces_pin_avail(uint8_t slot, uint8_t type, struct PinAvail *out);
 
 // Live config (the persistence source for CS.SAVE) and read-only
 // accessors for the vendor GET handlers.

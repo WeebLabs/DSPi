@@ -7,6 +7,7 @@
 #include "vc_core.h"
 #include "config.h"
 #include "control_surfaces.h"
+#include "vc_pins.h"
 #include "notify.h"
 #include "hardware/sync.h"
 
@@ -97,6 +98,14 @@ static VcResult cs_binding_get(VcCtx *c) {
     const CsBinding *b = control_surfaces_get_binding((uint8_t)c->addr);
     if (b == NULL) return VC_ERR_ADDRESS;
     memcpy(c->out, b, sizeof(CsBinding));
+    return VC_OK;
+}
+
+// wValue = (type << 8) | slot. Status is in CS_STATUS_* space.
+static VcResult cs_binding_pin_avail_get(VcCtx *c) {
+    PinAvail a;
+    control_surfaces_pin_avail((uint8_t)c->addr, (uint8_t)(c->addr >> 8), &a);
+    c->out_len = pin_avail_serialize(&a, pin_generation_sync(false), c->out, c->out_cap, true);
     return VC_OK;
 }
 

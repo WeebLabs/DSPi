@@ -27,11 +27,14 @@ static VcResult output_type_get(VcCtx *c) {
 }
 
 // Notified at request time against the eventual type; the main loop applies it.
+// A slot that brings the I2S clocks up checks the clock pair first.
 static VcResult output_type_set(VcCtx *c) {
     uint8_t slot = (uint8_t)c->addr;
     uint8_t new_type = vc_in_u8(c, 0);
     if (new_type > OUTPUT_TYPE_I2S) return VC_ERR_VALUE;
     if (new_type != output_types[slot]) {
+        uint8_t st = pin_start_check_output_type(slot, new_type);
+        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
         pending_output_types[slot] = new_type;
         __dmb();
         output_type_change_mask |= (uint8_t)(1u << slot);
@@ -46,33 +49,35 @@ static VcResult output_pin_get(VcCtx *c) {
     return VC_OK;
 }
 
+// A stopped PDM stores its pin; only a running one claims it (vc_pins.c).
 static VcResult output_pin_set(VcCtx *c) {
     uint8_t out_idx = (uint8_t)c->addr;
     uint8_t new_pin = vc_in_u8(c, 0);
-    uint8_t status;
     if (new_pin == PIN_RESET_TO_DEFAULT) new_pin = default_output_pins[out_idx];
-
-    if (!PIN_VALID_FOR(out_idx < NUM_SPDIF_INSTANCES ? DSPI_PIN_FN_OUTPUT : DSPI_PIN_FN_PDM, new_pin)) {
-        status = PIN_CONFIG_INVALID_PIN;
-    } else if (is_pin_in_use(new_pin, out_idx)) {
-        status = PIN_CONFIG_PIN_IN_USE;
-    } else if (new_pin == output_pins[out_idx]) {
-        status = PIN_CONFIG_SUCCESS;
-    } else if (out_idx < NUM_SPDIF_INSTANCES) {
-        // RAM-only; process_pin_changes() restarts the slot in phase with the others.
-        output_pins[out_idx] = new_pin;
-        output_pin_change_mask |= (uint8_t)(1u << out_idx);
-        status = PIN_CONFIG_SUCCESS;
-    } else if (pdm_enabled || core1_mode == CORE1_MODE_PDM || pdm_hw_is_active()) {
-        status = PIN_CONFIG_OUTPUT_ACTIVE;   // PDM must be disabled first
-    } else {
-        pdm_change_pin(new_pin);
-        output_pins[out_idx] = new_pin;
-        status = PIN_CONFIG_SUCCESS;
+    bool is_pdm = out_idx >= NUM_SPDIF_INSTANCES;
+    if (new_pin != output_pins[out_idx]) {
+        uint8_t status = pin_check_set(is_pdm ? PIN_FN_PDM : PIN_FN_OUTPUT,
+                                       is_pdm ? 0 : out_idx, new_pin, 0xFF);
+        if (status != PIN_CONFIG_SUCCESS) return vc_from_pin_status(status);
+        if (!is_pdm) {
+            // RAM-only; process_pin_changes() restarts the slot in phase with the others.
+            output_pins[out_idx] = new_pin;
+            output_pin_change_mask |= (uint8_t)(1u << out_idx);
+        } else {
+            pdm_change_pin(new_pin);
+            output_pins[out_idx] = new_pin;
+        }
     }
-    if (status != PIN_CONFIG_SUCCESS) return vc_from_pin_status(status);
     notify_param_write((uint16_t)(offsetof(WireBulkParams, pins.pins) + out_idx),
                        1, &output_pins[out_idx]);
+    return VC_OK;
+}
+
+static VcResult output_pin_avail_get(VcCtx *c) {
+    PinAvail a;
+    bool is_pdm = c->addr >= NUM_SPDIF_INSTANCES;
+    pin_avail(is_pdm ? PIN_FN_PDM : PIN_FN_OUTPUT, is_pdm ? 0 : (uint8_t)c->addr, &a);
+    c->out_len = pin_avail_serialize(&a, pin_generation_sync(false), c->out, c->out_cap, false);
     return VC_OK;
 }
 
@@ -154,11 +159,9 @@ static VcResult output_adat_tx_enable_set(VcCtx *c) {
     if (value == (adat_output_config_enabled() ? 1 : 0)) {
         // Unchanged; the notify below still runs.
     } else if (value) {
-        // ADAT is not yet enabled, so it never blocks its own pin.
-        uint8_t pin = adat_output_pin();
-        if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_OUT, pin)) return VC_ERR_PIN_INVALID;
-        if (is_pin_in_use(pin, 0xFF)) return VC_ERR_PIN_IN_USE;
-        adat_output_set_config(true, pin);
+        uint8_t st = pin_start_check(PIN_FN_ADAT_TX, 0);
+        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+        adat_output_set_config(true, adat_output_pin());
     } else {
         adat_output_set_config(false, adat_output_pin());
     }
@@ -173,16 +176,22 @@ static VcResult output_adat_tx_pin_get(VcCtx *c) {
 }
 
 // A re-route is allowed while enabled; the deferred apply moves the stream under mute.
+// A disabled output stores its pin; enable checks it.
 static VcResult output_adat_tx_pin_set(VcCtx *c) {
     uint8_t pin = vc_in_u8(c, 0);
     if (pin == PIN_RESET_TO_DEFAULT) pin = PICO_ADAT_PIN;
-    if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_OUT, pin)) return VC_ERR_PIN_INVALID;
-    if (pin != adat_output_pin()) {
-        if (is_pin_in_use(pin, 0xFF)) return VC_ERR_PIN_IN_USE;
-        adat_output_set_config(adat_output_config_enabled(), pin);
-    }
+    uint8_t st = pin_check_set(PIN_FN_ADAT_TX, 0, pin, 0xFF);
+    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    if (pin != adat_output_pin()) adat_output_set_config(adat_output_config_enabled(), pin);
     uint8_t p = adat_output_pin();
     notify_param_write(offsetof(WireBulkParams, adat_config.pin), 1, &p);
+    return VC_OK;
+}
+
+static VcResult output_adat_tx_pin_avail_get(VcCtx *c) {
+    PinAvail a;
+    pin_avail(PIN_FN_ADAT_TX, 0, &a);
+    c->out_len = pin_avail_serialize(&a, pin_generation_sync(false), c->out, c->out_cap, false);
     return VC_OK;
 }
 
@@ -203,19 +212,27 @@ static VcResult output_dac_mute_config_get(VcCtx *c) {
     return VC_OK;
 }
 
-// Scalar fields the deferred dac_hw_mute_set_config() would refuse are refused here.
-// Pin validity and conflicts still resolve on the main loop; read back to confirm.
+// Scalar fields and pin validity the deferred dac_hw_mute_set_config() would refuse
+// are refused here. Ownership still resolves on the main loop; read back to confirm.
 static VcResult output_dac_mute_config_set(VcCtx *c) {
     DacHwMuteConfig cfg;
     memcpy(&cfg, c->in, sizeof(cfg));
-    if (cfg.enabled != 0 &&
-        (cfg.active_low > 1 ||
-         cfg.hold_ms < DAC_HW_MUTE_HOLD_MS_MIN || cfg.hold_ms > DAC_HW_MUTE_HOLD_MS_MAX ||
-         cfg.release_ms > DAC_HW_MUTE_RELEASE_MS_MAX))
-        return VC_ERR_VALUE;
+    if (!dac_hw_mute_scalars_valid(&cfg)) return VC_ERR_VALUE;
+    if (cfg.pin != DAC_HW_MUTE_PIN_NONE) {
+        PinRequest rq = { PIN_FN_DAC_MUTE, 0, { cfg.pin, 0xFF } };
+        if (pin_check(pin_state_live(), &rq, PIN_CHECK_STORE) != PIN_CONFIG_SUCCESS)
+            return VC_ERR_PIN_INVALID;
+    }
     memcpy((void *)&flash_set_dac_hw_mute_val, &cfg, sizeof(cfg));
     __dmb();
     flash_set_dac_hw_mute_pending = true;
+    return VC_OK;
+}
+
+static VcResult output_dac_mute_pin_avail_get(VcCtx *c) {
+    PinAvail a;
+    pin_avail(PIN_FN_DAC_MUTE, 0, &a);
+    c->out_len = pin_avail_serialize(&a, pin_generation_sync(false), c->out, c->out_cap, false);
     return VC_OK;
 }
 

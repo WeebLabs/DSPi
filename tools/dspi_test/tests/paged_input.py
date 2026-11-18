@@ -152,7 +152,8 @@ def value_errors_leave_state(dev, profile, chk):
         E(chk, lambda: dev.pset("INPUT.SPDIF_RX_PIN", bytes([out0]), addr=0), "VC_ERR_PIN_IN_USE",
           f"S/PDIF input 0 onto output pin {out0}")
     E(chk, lambda: dev.pset("INPUT.I2S_RX_PIN", bytes([BAD_GPIO]), addr=0), "VC_ERR_PIN_INVALID", "I2S pin 0xFE")
-    if dev.pget_u8("INPUT.I2S_RX_PIN", 0) != out0:
+    # Pair 0 claims its pin only while I2S is the source.
+    if src == INPUT_I2S and dev.pget_u8("INPUT.I2S_RX_PIN", 0) != out0:
         E(chk, lambda: dev.pset("INPUT.I2S_RX_PIN", bytes([out0]), addr=0), "VC_ERR_PIN_IN_USE",
           f"I2S pair 0 onto output pin {out0}")
     if has_command(dev, "INPUT.ADAT_RX_ENABLE"):

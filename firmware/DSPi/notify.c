@@ -141,11 +141,12 @@ static uint8_t ring_find_coalesce_locked(uint16_t offset, uint16_t size) {
     return 0xFF;
 }
 
-// Find a fully-unsent BULK_INVALIDATED entry.  At most one is ever useful.
-static uint8_t ring_find_invalidated_locked(void) {
+// Find a fully-unsent entry of a coalesced event (BULK_INVALIDATED,
+// PIN_MAP_CHANGED).  At most one of each is ever useful.
+static uint8_t ring_find_event_locked(uint8_t event_id) {
     uint8_t i = ring_coalesce_start_locked();
     while (i != notify_head) {
-        if (notify_ring[i].event_id == NOTIFY_EVT_BULK_INVALIDATED) return i;
+        if (notify_ring[i].event_id == event_id) return i;
         i = (i + 1) & NOTIFY_RING_MASK;
     }
     return 0xFF;
@@ -470,6 +471,20 @@ void notify_push_device_name(const char *name, ParamSource src) {
     restore_interrupts(flags);
 }
 
+void notify_push_pin_map_changed(uint32_t generation) {
+    uint32_t flags = save_and_disable_interrupts();
+    uint8_t idx = ring_find_event_locked(NOTIFY_EVT_PIN_MAP_CHANGED);
+    if (idx != 0xFF) {
+        memcpy(notify_ring[idx].value, &generation, 4);
+        restore_interrupts(flags);
+        return;
+    }
+    NotifyRingEntry e = { .event_id = NOTIFY_EVT_PIN_MAP_CHANGED };
+    memcpy(e.value, &generation, 4);
+    ring_push_locked(&e);
+    restore_interrupts(flags);
+}
+
 void notify_push_bulk_invalidated(ParamSource src) {
     uint32_t flags = save_and_disable_interrupts();
 
@@ -478,7 +493,7 @@ void notify_push_bulk_invalidated(ParamSource src) {
     // (The pre-multi-consumer code also had a displace-oldest-on-full path
     // here; ring_push_locked's force-advance now guarantees delivery
     // without it, at the cost of the laggard's oldest entry.)
-    uint8_t idx = ring_find_invalidated_locked();
+    uint8_t idx = ring_find_event_locked(NOTIFY_EVT_BULK_INVALIDATED);
     if (idx != 0xFF) {
         notify_ring[idx].source = (uint8_t)src;
         restore_interrupts(flags);
@@ -732,6 +747,17 @@ uint16_t notify_peek_next_for(NotifyConsumer c, uint8_t *out_buf, uint16_t max_l
             out_buf[7] = 0;
             memcpy(&out_buf[8], &e.value[1], NOTIFY_INPUT_SOURCE_NAME_LEN);
             return 8 + NOTIFY_INPUT_SOURCE_NAME_LEN;
+        }
+
+        case NOTIFY_EVT_PIN_MAP_CHANGED: {
+            // 8 bytes: pin map generation (LE) in bytes 4..7.
+            if (max_len < 8) return 0;
+            out_buf[0] = NOTIFY_V2_VERSION;
+            out_buf[1] = NOTIFY_EVT_PIN_MAP_CHANGED;
+            out_buf[2] = 0;
+            out_buf[3] = seq;
+            memcpy(&out_buf[4], e.value, 4);
+            return 8;
         }
 
         default:

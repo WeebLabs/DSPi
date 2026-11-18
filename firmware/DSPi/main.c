@@ -29,6 +29,7 @@
 #include "i2s_input.h"
 #include "spdif_rx.h"
 #include "lg_sound_sync.h"
+#include "vc_pins.h"
 #include "dac_hw_mute.h"
 #include "dsp_pipeline.h"
 #include "crossover.h"
@@ -372,6 +373,15 @@ static uint8_t live_slot_data_pin(int i) {
     }
     audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
     return (inst && inst->ring) ? (uint8_t)inst->pin : 0xFF;
+}
+
+uint8_t i2s_outputs_live_bck_pin(void) {
+    extern audio_i2s_instance_t *i2s_instance_ptrs[];
+    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+        if (output_types[i] == OUTPUT_TYPE_I2S && inst && inst->ring) return (uint8_t)inst->clock_pin_base;
+    }
+    return 0xFF;
 }
 
 // Release a slot-owned pin to high-Z.  Skips a pad another subsystem has since
@@ -1779,6 +1789,8 @@ void core0_init() {
     {
         DacHwMuteConfig hw;
         preset_get_dac_hw_mute(&hw);
+        // Judged against the IO just restored; a clash leaves the mute off and its pin stored.
+        if (hw.enabled && dac_hw_mute_validate(&hw) != PIN_CONFIG_SUCCESS) hw.enabled = 0;
         dac_hw_mute_init(&hw);
     }
 
@@ -2203,6 +2215,17 @@ int main(void) {
         // and post-clock-restart release holds on schedule.  Two loads +
         // branches when no deadline is in flight (the steady state).
         dac_hw_mute_tick();
+
+        // Pin map generation (pin_availability_query_spec.md section 9): recomputed at
+        // most every 50 ms; PIN_MAP_CHANGED is only ever pushed from here.
+        {
+            static uint32_t pin_gen_last_us;
+            uint32_t now_us = time_us_32();
+            if ((uint32_t)(now_us - pin_gen_last_us) >= 50000u) {
+                pin_gen_last_us = now_us;
+                pin_generation_sync(true);
+            }
+        }
 
         // Stream input is delivered between every segment that can run long
         // (host commands, housekeeping, a background step, deferred work), so

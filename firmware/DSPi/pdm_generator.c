@@ -37,9 +37,10 @@ static volatile uint8_t pdm_tail = 0;
 static uint32_t __attribute__((aligned(PDM_DMA_BUFFER_SIZE * 4))) pdm_dma_buffer[PDM_DMA_BUFFER_SIZE];
 static int pdm_dma_chan = -1;
 
-// PIO program offset and current pin (needed for pdm_change_pin)
+// PIO program offset and current pin (needed for pdm_change_pin). The pin is
+// written by Core 0 only while the hardware is stopped and read by Core 1 at start.
 static uint pdm_pio_offset;
-static uint8_t pdm_current_pin = PICO_PDM_PIN;
+static volatile uint8_t pdm_current_pin = PICO_PDM_PIN;
 
 // Enable/disable flag — set by Core 0 via pdm_set_enabled(), read by Core 1
 volatile bool pdm_enabled = false;
@@ -132,6 +133,28 @@ void pdm_set_enabled(bool enabled) {
     __sev();  // Wake Core 1 if sleeping
 }
 
+// The PDM GPIO is muxed to the PIO, and its PIO direction is an output, only while the
+// modulator runs, so a stopped PDM leaves the pin high-Z and claims nothing. Call only
+// with the SM stopped. RAM-resident (gpio_set_function() lives in flash).
+static void __not_in_flash_func(pdm_pin_attach)(uint8_t pin) {
+    pio_sm_exec(PDM_PIO, PDM_SM, pio_encode_set(pio_pindirs, 1));   // SM stopped; set pins = pin
+    hw_write_masked(&pads_bank0_hw->io[pin], PADS_BANK0_GPIO0_IE_BITS,
+                    PADS_BANK0_GPIO0_IE_BITS | PADS_BANK0_GPIO0_OD_BITS);
+    io_bank0_hw->io[pin].ctrl = (uint32_t)pio_get_funcsel(PDM_PIO) << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+#if HAS_PADS_BANK0_ISOLATION
+    hw_clear_bits(&pads_bank0_hw->io[pin], PADS_BANK0_GPIO0_ISO_BITS);
+#endif
+}
+
+// Only a pin still muxed to our PIO is released; another owner's mux is left alone.
+static void __not_in_flash_func(pdm_pin_detach)(uint8_t pin) {
+    pio_sm_exec(PDM_PIO, PDM_SM, pio_encode_set(pio_pindirs, 0));   // SM stopped
+    uint32_t fsel = (io_bank0_hw->io[pin].ctrl & IO_BANK0_GPIO0_CTRL_FUNCSEL_BITS)
+                    >> IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+    if (fsel != (uint32_t)pio_get_funcsel(PDM_PIO)) return;
+    io_bank0_hw->io[pin].ctrl = (uint32_t)GPIO_FUNC_NULL << IO_BANK0_GPIO0_CTRL_FUNCSEL_LSB;
+}
+
 // Fill the PDM DMA ring with the modulator's 50% duty silence pattern and arm
 // a lead re-anchor for the processing loop.
 //
@@ -174,12 +197,12 @@ void pdm_setup_hw(uint8_t pin) {
     sm_config_set_out_shift(&c, true, true, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
 
-    pio_gpio_init(PDM_PIO, pdm_current_pin);
-    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, pdm_current_pin, 1, true);
+    // The SM stays stopped, the pin unmuxed and its direction an input until Core 1
+    // starts PDM: other SMs on this block may listen on a stored PDM pin.
+    sm_config_set_set_pins(&c, pdm_current_pin, 1);
     pio_sm_init(PDM_PIO, PDM_SM, pdm_pio_offset, &c);
 
     pdm_update_clock(48000);
-    pio_sm_set_enabled(PDM_PIO, PDM_SM, true);
 
     pdm_dma_chan = dma_claim_unused_channel(true);
     dma_channel_config dmac = dma_channel_get_default_config(pdm_dma_chan);
@@ -188,7 +211,7 @@ void pdm_setup_hw(uint8_t pin) {
     channel_config_set_write_increment(&dmac, false);
     channel_config_set_dreq(&dmac, pio_get_dreq(PDM_PIO, PDM_SM, true));
     channel_config_set_ring(&dmac, false, PDM_DMA_RING_BITS);
-    dma_channel_configure(pdm_dma_chan, &dmac, &PDM_PIO->txf[PDM_SM], pdm_dma_buffer, 0xFFFFFFFF, true);
+    dma_channel_configure(pdm_dma_chan, &dmac, &PDM_PIO->txf[PDM_SM], pdm_dma_buffer, 0xFFFFFFFF, false);
 }
 
 void pdm_change_pin(uint8_t new_pin) {
@@ -198,20 +221,14 @@ void pdm_change_pin(uint8_t new_pin) {
     pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
     dma_channel_abort(pdm_dma_chan);
 
-    // Release old pin → high-Z, only while it is still muxed to our PIO.
-    if (gpio_get_function(pdm_current_pin) == (gpio_function_t)pio_get_funcsel(PDM_PIO)) {
-        gpio_set_function(pdm_current_pin, GPIO_FUNC_NULL);
-        gpio_set_dir(pdm_current_pin, GPIO_IN);
-    }
-
-    // Init new pin for PIO
-    pio_gpio_init(PDM_PIO, new_pin);
-    pio_sm_set_consecutive_pindirs(PDM_PIO, PDM_SM, new_pin, 1, true);
+    // The stop path already released the old pin, which another PIO1 function may now
+    // hold: never touch it here. The new pin is muxed and driven by the Core 1 start path.
 
     // Rebuild SM config with new pin
     pio_sm_config c = pio_get_default_sm_config();
     sm_config_set_wrap(&c, pdm_pio_offset, pdm_pio_offset + (pio_pdm_program.length - 1));
     sm_config_set_out_pins(&c, new_pin, 1);
+    sm_config_set_set_pins(&c, new_pin, 1);
     sm_config_set_out_shift(&c, true, true, 32);
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
     pio_sm_init(PDM_PIO, PDM_SM, pdm_pio_offset, &c);
@@ -346,6 +363,7 @@ static void __not_in_flash_func(pdm_processing_loop)() {
             fade_out_pos = 0;
             fade_base_pcm = 0;
 
+            pdm_pin_attach(pdm_current_pin);
             pio_sm_set_enabled(PDM_PIO, PDM_SM, true);
 
             dma_channel_config dmac = dma_channel_get_default_config(pdm_dma_chan);
@@ -438,6 +456,7 @@ static void __not_in_flash_func(pdm_processing_loop)() {
                 // Fade-out complete — stop hardware
                 pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
                 dma_channel_abort(pdm_dma_chan);
+                pdm_pin_detach(pdm_current_pin);
                 hw_running = false;
                 __dmb();
                 pdm_hw_active = false;
@@ -526,6 +545,7 @@ static void __not_in_flash_func(pdm_processing_loop)() {
     if (hw_running) {
         pio_sm_set_enabled(PDM_PIO, PDM_SM, false);
         dma_channel_abort(pdm_dma_chan);
+        pdm_pin_detach(pdm_current_pin);
         hw_running = false;
         __dmb();
         pdm_hw_active = false;

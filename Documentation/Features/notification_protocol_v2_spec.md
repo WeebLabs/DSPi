@@ -1,7 +1,7 @@
 # Notification Protocol v2 Specification
 
 *Status: implemented*
-*Last updated: 2026-11-16 (vendor command names on the paged protocol of firmware 1.1.7)*
+*Last updated: 2026-11-18 (event 0x11 PIN_MAP_CHANGED). Previously 2026-11-16 (vendor command names on the paged protocol of firmware 1.1.7)*
 
 ## 1. Motivation
 
@@ -80,6 +80,7 @@ Bytes 4..N are event-specific. Host MUST size its read by `actual_length`, not b
 | 0x0E | reserved                      |              | Held for the AC-3/DTS work; not emitted by this firmware. |
 | 0x0F | `NOTIFY_EVT_INPUT_SOURCE_NAME`| Discrete     | An input source name was stored. 40-byte packet `[ver=2, 0x0F, 0, seq, source_id, src, 0, 0, name (32 bytes)]`; name all zero when cleared. See `input_source_names_spec.md`. |
 | 0x10 | `NOTIFY_EVT_DEVICE_NAME`      | Discrete     | The board name was stored. 40-byte packet `[ver=2, 0x10, 0, seq, 0, src, 0, 0, name (32 bytes)]`. See `device_name_spec.md`. |
+| 0x11 | `NOTIFY_EVT_PIN_MAP_CHANGED`  | Coalesced    | The pin map generation changed. 8-byte packet `[ver=2, 0x11, 0, seq, generation (LE32)]`. See `pin_availability_query_spec.md`. |
 | 0x11..0x7F | reserved (coalesceable) |              | |
 | 0x80..0xFF | reserved (discrete)     |              | |
 

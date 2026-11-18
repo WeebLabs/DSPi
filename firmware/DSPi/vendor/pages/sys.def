@@ -40,3 +40,8 @@ VC_CMD(0x45, SPDIF_TX_STATS, sys_spdif_tx_stats_get, VC_NONE,
        NONE, 24, 0, 0, 0, 0, "USB audio packet gaps of 2 to 50 ms, total output DMA starvations, starvations of instances 0-3")
 VC_CMD(0x4F, STATS_RESET, VC_NONE, sys_stats_reset_set,
        NONE, 0, 1, 1, 0, 0, "Bitmask; bit 0 resets buffer watermarks and worst-gap fields")
+
+VC_CMD(0x50, PIN_STATE, sys_pin_state_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Pin map generation, GPIO count, claim count, last restore substitutions, GPIO mask")
+VC_CMD(0x51, PIN_CLAIMS, sys_pin_claims_get, VC_NONE,
+       NONE, VC_LEN_VAR, 0, 0, 0, 0, "Generation, entry count, then one 4-byte claim per pin use, sorted by GPIO")

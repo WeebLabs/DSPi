@@ -6,3 +6,7 @@ VC_CMD(0x11, I2C_CONFIG, xport_i2c_config_get, xport_i2c_config_set,
        NONE, 8, 8, 8, VC_F_SET_USB_ONLY | VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Stored I2C target control config; the apply result is in STATUS")
 VC_CMD(0x12, STATUS, xport_status_get, VC_NONE,
        NONE, 8, 0, 0, 0, 0, "Last apply result and live state of each control transport")
+VC_CMD(0x13, UART_PIN_AVAIL, xport_pin_avail_get, VC_NONE,
+       NONE, 72, 0, 0, 0, 0, "UART TX and RX pins by instance: status, flags, generation, valid and free masks")
+VC_CMD(0x14, I2C_PIN_AVAIL, xport_pin_avail_get, VC_NONE,
+       NONE, 72, 0, 0, 0, 1, "I2C SDA and SCL pins by instance: status, flags, generation, valid and free masks")

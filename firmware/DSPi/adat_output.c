@@ -337,6 +337,7 @@ uint8_t adat_output_pin(void)            { return adat_cfg_pin; }
 // (see output_s24.h); must stay RAM-resident like its caller.
 DSP_TIME_CRITICAL
 bool    adat_output_is_active(void)      { return adat_running; }
+uint8_t adat_output_hw_pin(void)         { return adat_hw_pin; }
 
 void adat_output_get_status(AdatStatus *out) {
     out->enabled      = adat_cfg_enabled;

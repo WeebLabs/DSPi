@@ -152,19 +152,21 @@ def spdif_rx_pin_validation(dev, profile, chk):
 @test("inputs", mutating=True)
 def i2s_rx_pin_validation(dev, profile, chk):
     """INPUT.I2S_RX_PIN pair 0 refuses invalid and held GPIOs and moves to a free one and back (not on I2S).
-    Invalid GPIOs are VC_ERR_PIN_INVALID, an output's or S/PDIF input 0's GPIO VC_ERR_PIN_IN_USE."""
+    Invalid GPIOs are VC_ERR_PIN_INVALID; on I2S input an output's or S/PDIF input 0's GPIO is VC_ERR_PIN_IN_USE."""
     pin = lambda: dev.pget_u8("INPUT.I2S_RX_PIN", 0)  # noqa: E731
     orig = pin()
     for g in invalid_gpios(profile):
         expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", g, 0), "VC_ERR_PIN_INVALID", f"GPIO {g}")
     expect_result(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", orig, 0), "VC_OK", "same pin")
-    out_pin = dev.pget_u8("OUTPUT.PIN", 0)
-    expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", out_pin, 0), "VC_ERR_PIN_IN_USE",
-                 f"GPIO {out_pin} held by output 0")
-    spdif_pin = dev.pget_u8("INPUT.SPDIF_RX_PIN", 0)
-    if spdif_pin != orig:
-        expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", spdif_pin, 0), "VC_ERR_PIN_IN_USE",
-                     f"GPIO {spdif_pin} held by S/PDIF input 0")
+    # Pair 0 claims its pin only while I2S is the source; otherwise it stores any valid GPIO.
+    if _source(dev) == INPUT_I2S:
+        out_pin = dev.pget_u8("OUTPUT.PIN", 0)
+        expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", out_pin, 0), "VC_ERR_PIN_IN_USE",
+                     f"GPIO {out_pin} held by output 0")
+        spdif_pin = dev.pget_u8("INPUT.SPDIF_RX_PIN", 0)
+        if spdif_pin != orig:
+            expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", spdif_pin, 0), "VC_ERR_PIN_IN_USE",
+                         f"GPIO {spdif_pin} held by S/PDIF input 0")
     chk.eq(pin(), orig, "pin unchanged by refused SETs")
     if _source(dev) == INPUT_I2S:
         chk.note("on I2S input: live I2S RX pin move skipped")

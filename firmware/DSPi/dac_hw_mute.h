@@ -182,16 +182,17 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg);
  * deferred to the main loop).  No need for explicit interlock. */
 uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg);
 
-/*
- * Validate + apply + persist (continued).  Validation rules:
- *   - enabled ∈ {0,1}
- *   - active_low ∈ {0,1}
- *   - pin is either DAC_HW_MUTE_PIN_NONE or in the platform's valid GPIO range
- *   - pin does not collide with output_pins[], i2s_bck_pin (or +1 LRCLK),
- *     i2s_mck_pin (if enabled), spdif_rx_pin, or an enabled ADAT pin
- *   - hold_ms ∈ [DAC_HW_MUTE_HOLD_MS_MIN, _MAX]
- *   - release_ms ∈ [DAC_HW_MUTE_RELEASE_MS_MIN, _MAX]
- */
+/* Timing and polarity ranges of an enabled config (a disabled one has none). */
+bool dac_hw_mute_scalars_valid(const DacHwMuteConfig *cfg);
+
+/* Validation alone, against the live pin state (vendor/vc_pins.c): scalar
+ * ranges for an enabled config, pin validity always, ownership only while
+ * enabled.  Returns PIN_CONFIG_*. */
+uint8_t dac_hw_mute_validate(const DacHwMuteConfig *cfg);
+
+/* Apply + persist + notify with no validation.  For the restore paths, whose
+ * unit validator (pin_config_validate) has already judged the config. */
+void dac_hw_mute_commit(const DacHwMuteConfig *cfg);
 
 /* Snapshot the current live config into *out.  Used by
  * OUTPUT.DAC_MUTE_CONFIG GET and bulk_params_collect().  Always
@@ -275,9 +276,8 @@ uint8_t dac_hw_mute_test_start(void);
  * (main thread only). */
 void dac_hw_mute_tick(void);
 
-/* Returns true iff `pin` is currently claimed by this module.  Used
- * by the pin-conflict check (is_pin_in_use in vendor/vc_pins.c) so
- * other pin-setting commands reject the mute pin. */
+/* Returns true iff `pin` is currently claimed by this module, which makes
+ * it an active claim in the pin state (vendor/vc_pins.c). */
 bool dac_hw_mute_owns_pin(uint8_t pin);
 
 #endif /* DAC_HW_MUTE_H */

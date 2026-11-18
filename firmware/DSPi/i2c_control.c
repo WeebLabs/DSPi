@@ -12,7 +12,6 @@
 #include "vc_pins.h"
 #include "usb_audio.h"
 #include "bulk_params.h"
-#include "control_surfaces_display.h"   // display instance exclusion
 
 #include <string.h>
 #include "pico/stdlib.h"
@@ -359,26 +358,10 @@ uint8_t i2c_ctrl_validate(const I2cCtrlConfig *cfg) {
     if (cfg->enabled > 1) return PIN_CONFIG_INVALID_PARAM;
     if (cfg->address < I2C_CTRL_ADDRESS_MIN || cfg->address > I2C_CTRL_ADDRESS_MAX)
         return PIN_CONFIG_INVALID_PARAM;
-    if (!is_valid_gpio_pin(cfg->sda_pin) || !is_valid_gpio_pin(cfg->scl_pin))
-        return PIN_CONFIG_INVALID_PIN;
-    if (!cfg->enabled) return PIN_CONFIG_SUCCESS;
-#ifdef DSPI_PLATFORM_PINS
-    if (!dspi_platform_pin_pair_valid(DSPI_PIN_FN_I2C_CTRL, cfg->sda_pin, cfg->scl_pin))
-        return PIN_CONFIG_INVALID_PIN;
-#else
-    if ((cfg->sda_pin & 1) != 0 || (cfg->scl_pin & 1) != 1)
-        return PIN_CONFIG_INVALID_PIN;
-    if (i2c_instance_index(cfg->sda_pin) != i2c_instance_index(cfg->scl_pin))
-        return PIN_CONFIG_INVALID_PIN;
-#endif
-    // The CS display holds the other hardware instance as I2C master; a
-    // target config on the same instance (even on different pins) would
-    // reset that block out from under it.
-    if (cs_display_live_instance() == (int)i2c_instance_index(cfg->sda_pin))
-        return PIN_CONFIG_PIN_IN_USE;
-    uint8_t st = ctrl_iface_check_pin(cfg->sda_pin);
-    if (st == PIN_CONFIG_SUCCESS) st = ctrl_iface_check_pin(cfg->scl_pin);
-    return st;
+    // Mux rules hold even while disabled; ownership, including the CS display's
+    // I2C instance, only once enabled (vc_pins.c).
+    PinRequest rq = { PIN_FN_I2C_CTRL, 0, { cfg->sda_pin, cfg->scl_pin } };
+    return pin_check(pin_state_live(), &rq, cfg->enabled ? PIN_CHECK_CLAIM : PIN_CHECK_STORE);
 }
 
 static void i2c_ctrl_down(void) {
@@ -446,8 +429,9 @@ uint8_t i2c_ctrl_init(const I2cCtrlConfig *cfg) {
     return st;
 }
 
-bool i2c_ctrl_owns_pin(uint8_t pin) {
-    return live && (pin == live_cfg.sda_pin || pin == live_cfg.scl_pin);
+bool i2c_ctrl_live_config(I2cCtrlConfig *out) {
+    *out = live_cfg;
+    return live;
 }
 
 bool i2c_ctrl_is_live(void) { return live; }

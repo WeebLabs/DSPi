@@ -1,6 +1,6 @@
 /*
  * vc_page_input.c: INPUT page. Command set: vendor_command_overhaul_plan.md section 5.3.
- * Pin and enable SETs keep the 1.1.6 checks; PIN_CONFIG_* refusals become VC_ERR_* results.
+ * Pin and enable SETs run the shared checks (vc_pins.h); PIN_CONFIG_* refusals become VC_ERR_* results.
  */
 
 #include "vc_core.h"
@@ -37,6 +37,8 @@ static VcResult input_source_set(VcCtx *c) {
     if (src == INPUT_SOURCE_ADAT) return VC_ERR_UNSUPPORTED;
 #endif
     if (!input_source_selectable(src)) return VC_ERR_STATE;   // a disabled optional input
+    uint8_t st = pin_start_check_source(src);                   // I2S claims its clocks and data pins
+    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
     pending_input_source = src;
     __dmb();
     input_source_change_pending = true;
@@ -90,10 +92,10 @@ static VcResult input_spdif_rx_pin_set(VcCtx *c) {
     uint8_t index = (uint8_t)c->addr;
     uint8_t new_pin = vc_in_u8(c, 0);
     if (new_pin == PIN_RESET_TO_DEFAULT) new_pin = spdif_rx_pin_default_for_index(index);
-    if (!PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, new_pin)) return VC_ERR_PIN_INVALID;
-    if (new_pin == spdif_rx_pin_for_index(index)) return VC_OK;
     // A disabled optional input stores its pin as a preference; enable re-checks it.
-    if (spdif_input_enabled(index) && is_pin_in_use(new_pin, 0xFF)) return VC_ERR_PIN_IN_USE;
+    uint8_t st = pin_check_set(PIN_FN_SPDIF_RX, index, new_pin, 0xFF);
+    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    if (new_pin == spdif_rx_pin_for_index(index)) return VC_OK;
 
     if (index == 0) spdif_rx_pin = new_pin;
     else            spdif_rx_pin_ext[index - 1] = new_pin;
@@ -120,9 +122,8 @@ static VcResult input_spdif_rx_enable_set(VcCtx *c) {
     if (enable == (spdif_input_enabled(index) ? 1 : 0)) return VC_OK;
 
     if (enable) {
-        uint8_t pin = spdif_rx_pin_for_index(index);
-        if (!PIN_VALID_FOR(DSPI_PIN_FN_SPDIF_RX, pin)) return VC_ERR_PIN_INVALID;
-        if (is_pin_in_use(pin, 0xFF)) return VC_ERR_PIN_IN_USE;
+        uint8_t st = pin_start_check(PIN_FN_SPDIF_RX, index);
+        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
         spdif_rx_enabled_ext |= (uint8_t)(1u << (index - 1));
     } else {
         // The host must switch the source away first.
@@ -136,6 +137,17 @@ static VcResult input_spdif_rx_enable_set(VcCtx *c) {
     uint8_t enc = (uint8_t)(spdif_rx_enabled_ext + 1);   // wire field is the mask plus one
     notify_param_write(offsetof(WireBulkParams, input_config.spdif_rx_enabled_ext_p1), 1, &enc);
     return VC_OK;
+}
+
+static VcResult avail_reply(VcCtx *c, uint8_t fn, uint8_t idx) {
+    PinAvail a;
+    pin_avail(fn, idx, &a);
+    c->out_len = pin_avail_serialize(&a, pin_generation_sync(false), c->out, c->out_cap, false);
+    return VC_OK;
+}
+
+static VcResult input_spdif_rx_pin_avail_get(VcCtx *c) {
+    return avail_reply(c, PIN_FN_SPDIF_RX, (uint8_t)c->addr);
 }
 
 static VcResult input_spdif_rx_config_get(VcCtx *c) {
@@ -158,9 +170,10 @@ static VcResult input_i2s_rx_pin_set(VcCtx *c) {
     uint8_t new_pin = vc_in_u8(c, 0);
     // Defaults are the contiguous block from pair 0's default (audio_input.c).
     if (new_pin == PIN_RESET_TO_DEFAULT) new_pin = (uint8_t)(PICO_I2S_RX_PIN_DEFAULT + pair);
-    if (new_pin == i2s_rx_pin[pair]) return VC_OK;
-    uint8_t st = check_i2s_rx_pin(new_pin, pair, (uint8_t)(i2s_input_channels / 2));
+    // A pair claims its pin only while I2S is the source and the pair is counted.
+    uint8_t st = pin_check_set(PIN_FN_I2S_RX, pair, new_pin, 0xFF);
     if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    if (new_pin == i2s_rx_pin[pair]) return VC_OK;
 
     i2s_rx_pin[pair] = new_pin;
     if (active_input_source == INPUT_SOURCE_I2S) {
@@ -177,6 +190,10 @@ static VcResult input_i2s_rx_pin_set(VcCtx *c) {
     return VC_OK;
 }
 
+static VcResult input_i2s_rx_pin_avail_get(VcCtx *c) {
+    return avail_reply(c, PIN_FN_I2S_RX, (uint8_t)c->addr);
+}
+
 static VcResult input_i2s_rx_channels_get(VcCtx *c) {
     c->out[0] = i2s_input_channels;
     return VC_OK;
@@ -187,13 +204,9 @@ static VcResult input_i2s_rx_channels_set(VcCtx *c) {
     if (count != 2 && count != 4 && count != 6 && count != 8) return VC_ERR_VALUE;
     if (count / 2 > I2S_RX_MAX_PAIRS) return VC_ERR_UNSUPPORTED;
 
-    // Each newly active pair's parked pin is checked against the NEW pair count.
-    uint8_t old_pairs = (uint8_t)(i2s_input_channels / 2);
-    uint8_t new_pairs = (uint8_t)(count / 2);
-    for (uint8_t p = old_pairs; p < new_pairs; p++) {
-        uint8_t st = check_i2s_rx_pin(i2s_rx_pin[p], p, new_pairs);
-        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
-    }
+    // Pairs the new count brings into use claim their stored pins (only while I2S is the source).
+    uint8_t st = pin_start_check_i2s_rx_pairs((uint8_t)(count / 2));
+    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
     if (count != i2s_input_channels) {
         i2s_input_channels = count;
         if (active_input_source == INPUT_SOURCE_I2S) {
@@ -235,15 +248,6 @@ static VcResult input_i2s_rx_rate_set(VcCtx *c) {
 #if PICO_RP2350
 _Static_assert(sizeof(AdatInputStatusPacket) == 20, "INPUT.ADAT_RX_STATUS is 20 bytes");
 
-// The RX only listens, so sharing the ADAT TX pin (loopback self-test) is allowed.
-static bool adat_rx_pin_taken(uint8_t pin) {
-    return pin != adat_output_pin() && is_pin_in_use(pin, 0xFF)
-#ifdef DSPI_PLATFORM_PINS
-           && pin != spdif_rx_pin     // shared receiver pin (adat_input_pin_acceptable())
-#endif
-           ;
-}
-
 static VcResult input_adat_rx_enable_get(VcCtx *c) {
     c->out[0] = adat_input_enabled;
     return VC_OK;
@@ -255,9 +259,8 @@ static VcResult input_adat_rx_enable_set(VcCtx *c) {
     if (value == (adat_input_enabled ? 1 : 0)) {
         // Unchanged; the notify below still runs.
     } else if (value) {
-        uint8_t pin = adat_input_pin;
-        if (pin == 0xFF || !PIN_VALID_FOR(DSPI_PIN_FN_ADAT_IN, pin)) return VC_ERR_PIN_INVALID;
-        if (adat_rx_pin_taken(pin)) return VC_ERR_PIN_IN_USE;
+        uint8_t st = pin_start_check(PIN_FN_ADAT_RX, 0);
+        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
         adat_input_enabled = 1;
     } else {
         bool is_active  = (active_input_source == INPUT_SOURCE_ADAT);
@@ -278,16 +281,15 @@ static VcResult input_adat_rx_pin_get(VcCtx *c) {
 
 static VcResult input_adat_rx_pin_set(VcCtx *c) {
     uint8_t pin = vc_in_u8(c, 0);
+    uint8_t st;
     if (pin == PIN_RESET_TO_DEFAULT) {
         // No free default GPIO exists, so reset means unset, which an enabled input cannot be.
         if (adat_input_enabled) return VC_ERR_STATE;
         adat_input_pin = 0xFF;
-    } else if (!PIN_VALID_FOR(DSPI_PIN_FN_ADAT_IN, pin)) {
-        return VC_ERR_PIN_INVALID;
+    } else if ((st = pin_check_set(PIN_FN_ADAT_RX, 0, pin, 0xFF)) != PIN_CONFIG_SUCCESS) {
+        return vc_from_pin_status(st);
     } else if (pin == adat_input_pin) {
         // Unchanged; the notify below still runs.
-    } else if (adat_rx_pin_taken(pin)) {
-        return VC_ERR_PIN_IN_USE;
     } else {
         adat_input_pin = pin;
         if (active_input_source == INPUT_SOURCE_ADAT) adat_input_restart_pending = true;
@@ -311,6 +313,10 @@ static VcResult input_adat_rx_clock_mode_set(VcCtx *c) {
     __dmb();
     adat_clock_mode_change_pending = true;
     return VC_OK;
+}
+
+static VcResult input_adat_rx_pin_avail_get(VcCtx *c) {
+    return avail_reply(c, PIN_FN_ADAT_RX, 0);
 }
 
 static VcResult input_adat_rx_status_get(VcCtx *c) {

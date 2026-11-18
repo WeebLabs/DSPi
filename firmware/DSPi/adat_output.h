@@ -40,10 +40,8 @@ void    adat_output_get_status(AdatStatus *out);
 bool    adat_output_config_enabled(void);
 uint8_t adat_output_pin(void);
 bool    adat_output_is_active(void);
+uint8_t adat_output_hw_pin(void);          // GPIO routed to the PIO now, or 0xFF
 
-// Restore-path acceptability check for the ADAT data GPIO (full ownership
-// check; ADAT's own claim never blocks).  Defined in vendor/vc_pins.c.
-bool adat_pin_acceptable(uint8_t pin);
 
 // Rate policy: record the new rate, stop the stream if it left 44.1/48 kHz.
 // Called from perform_rate_change() inside the pipeline-reset bracket; the

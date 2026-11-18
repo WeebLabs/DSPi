@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stddef.h>
 #include "vc_core.h"
+#include "vc_pins.h"
 #include "config.h"
 #include "usb_audio.h"
 #include "dsp_pipeline.h"
@@ -76,6 +77,11 @@ static VcResult route_out_enable_set(VcCtx *c) {
     uint8_t out = (uint8_t)c->addr;
     bool want_enable = (vc_in_u8(c, 0) != 0);
     if (want_enable && route_enable_conflicts(out)) return VC_ERR_STATE;
+    // A stopped PDM holds no pin, so enabling it claims its stored one.
+    if (want_enable && out == NUM_OUTPUT_CHANNELS - 1 && !matrix_mixer.outputs[out].enabled) {
+        uint8_t st = pin_start_check_pdm();
+        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    }
 
     matrix_mixer.outputs[out].enabled = want_enable ? 1 : 0;
 

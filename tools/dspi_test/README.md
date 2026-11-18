@@ -74,6 +74,7 @@ There are two families of test modules, with different jobs.
   specification in `Documentation/commands.md`. Discovery data matches the registry, every reply has
   its documented shape, values round-trip, and wrong lengths, addresses, directions and non-finite
   floats are refused with the documented `VC_*` code. `paged_page0` proves page 0 answers nothing.
+  `paged_pins` checks the pin availability queries against what the real pin SETs do.
 - **The other modules: feature behaviour.** Clamps and ranges, interactions between features, bulk
   parameter round trips, stress and fuzz, the spectrum analyser, preset isolation, pin moves and the
   audio loopback. They assume the protocol works and test what the device does with it.
@@ -83,7 +84,7 @@ A new test goes in the family that matches its purpose. A shape or refusal check
 
 ### Groups
 
-From `python3 -m tools.dspi_test.run --list` (191 tests in 27 groups, plus the opt-in `audio` group).
+From `python3 -m tools.dspi_test.run --list` (201 tests in 28 groups, plus the opt-in `audio` group).
 
 | Group | Tests | Group | Tests |
 |---|---|---|---|
@@ -102,6 +103,7 @@ From `python3 -m tools.dspi_test.run --list` (191 tests in 27 groups, plus the o
 | `audio` | opt-in, `--audio` | `paged_cs_nouns` | 1 |
 | | | `paged_diag` | 6 |
 | | | `paged_page0` | 2 |
+| | | `paged_pins` | 10 |
 
 ### Opt-in tests and gates
 

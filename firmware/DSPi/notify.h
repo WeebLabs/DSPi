@@ -101,6 +101,11 @@
 // 0, 0, name(32)]
 #define NOTIFY_EVT_DEVICE_NAME       0x10
 
+// v2 pin map changed: an availability answer or the claim list may differ
+// from the host's cached copy (pin_availability_query_spec.md section 9).
+// Coalesced.  Packet (8 bytes): [ver=2, evt=0x11, flags=0, seq, generation(4)]
+#define NOTIFY_EVT_PIN_MAP_CHANGED   0x11
+
 // v2 protocol version byte (first byte of every v2 packet)
 #define NOTIFY_V2_VERSION            0x02
 
@@ -195,6 +200,9 @@ void notify_push_input_source_name(uint8_t source_id, const char *name, ParamSou
 // Board name stored (NOTIFY_EVT_DEVICE_NAME).  name is the 32-byte stored
 // entry.  Safe from any dispatch context.
 void notify_push_device_name(const char *name, ParamSource src);
+
+// Pin map generation changed (NOTIFY_EVT_PIN_MAP_CHANGED).  Main loop only.
+void notify_push_pin_map_changed(uint32_t generation);
 
 // ---------------------------------------------------------------------------
 // Consumers

@@ -532,24 +532,9 @@ uint8_t uart_ctrl_validate(const UartCtrlConfig *cfg) {
     if (cfg->notify_enable > 1) return PIN_CONFIG_INVALID_PARAM;
     if (cfg->baud < UART_CTRL_BAUD_MIN || cfg->baud > UART_CTRL_BAUD_MAX)
         return PIN_CONFIG_INVALID_PARAM;
-    if (!is_valid_gpio_pin(cfg->tx_pin) || !is_valid_gpio_pin(cfg->rx_pin))
-        return PIN_CONFIG_INVALID_PIN;
-
-    if (!cfg->enabled) return PIN_CONFIG_SUCCESS;
-
-    // Enabled: pins must land on the correct UART mux and the same instance.
-#ifdef DSPI_PLATFORM_PINS
-    if (!dspi_platform_pin_pair_valid(DSPI_PIN_FN_UART_CTRL, cfg->tx_pin, cfg->rx_pin))
-        return PIN_CONFIG_INVALID_PIN;
-#else
-    if ((cfg->tx_pin & 3u) != 0u) return PIN_CONFIG_INVALID_PIN;   // TX at pin%4==0
-    if ((cfg->rx_pin & 3u) != 1u) return PIN_CONFIG_INVALID_PIN;   // RX at pin%4==1
-    if (uart_instance_index(cfg->tx_pin) != uart_instance_index(cfg->rx_pin))
-        return PIN_CONFIG_INVALID_PIN;
-#endif
-    uint8_t st = ctrl_iface_check_pin(cfg->tx_pin);
-    if (st == PIN_CONFIG_SUCCESS) st = ctrl_iface_check_pin(cfg->rx_pin);
-    return st;
+    // Mux rules hold even while disabled; ownership only once enabled (vc_pins.c).
+    PinRequest rq = { PIN_FN_UART_CTRL, 0, { cfg->tx_pin, cfg->rx_pin } };
+    return pin_check(pin_state_live(), &rq, cfg->enabled ? PIN_CHECK_CLAIM : PIN_CHECK_STORE);
 }
 
 // Returns the validation status so boot code can record it for
@@ -638,8 +623,9 @@ void uart_ctrl_poll(void) {
     }
 }
 
-bool uart_ctrl_owns_pin(uint8_t pin) {
-    return g_is_live && (pin == g_live.tx_pin || pin == g_live.rx_pin);
+bool uart_ctrl_live_config(UartCtrlConfig *out) {
+    *out = g_live;
+    return g_is_live;
 }
 
 bool uart_ctrl_is_live(void) {

@@ -17,6 +17,8 @@ VC_CMD(0x23, SPDIF_RX_ENABLE, input_spdif_rx_enable_get, input_spdif_rx_enable_s
        SPDIF_RX, 1, 1, 1, 0, 0, "Enable of optional S/PDIF input 1-3")
 VC_CMD(0x24, SPDIF_RX_CONFIG, input_spdif_rx_config_get, VC_NONE,
        NONE, 6, 0, 0, 0, 0, "Input count, enable mask over all inputs, then one GPIO per input")
+VC_CMD(0x25, SPDIF_RX_PIN_AVAIL, input_spdif_rx_pin_avail_get, VC_NONE,
+       SPDIF_RX, 24, 0, 0, 0, 0, "Pins one S/PDIF input could take: status, flags, generation, valid and free masks")
 
 VC_CMD(0x30, I2S_RX_PIN, input_i2s_rx_pin_get, input_i2s_rx_pin_set,
        I2S_PAIR, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "Data GPIO of one I2S RX stereo pair; 0xFF restores its default")
@@ -24,6 +26,8 @@ VC_CMD(0x31, I2S_RX_CHANNELS, input_i2s_rx_channels_get, input_i2s_rx_channels_s
        NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "I2S input channel count, 2, 4, 6 or 8")
 VC_CMD(0x32, I2S_RX_RATE, input_i2s_rx_rate_get, input_i2s_rx_rate_set,
        NONE, 4, 4, 4, VC_F_DEFERRED | VC_F_RESTART, 0, "Selected I2S and ADAT master rate in Hz: 44100, 48000 or 96000")
+VC_CMD(0x33, I2S_RX_PIN_AVAIL, input_i2s_rx_pin_avail_get, VC_NONE,
+       I2S_PAIR, 24, 0, 0, 0, 0, "Pins one I2S RX pair could take: status, flags, generation, valid and free masks")
 
 #if PICO_RP2350
 VC_CMD(0x40, ADAT_RX_ENABLE, input_adat_rx_enable_get, input_adat_rx_enable_set,
@@ -34,6 +38,8 @@ VC_CMD(0x42, ADAT_RX_CLOCK_MODE, input_adat_rx_clock_mode_get, input_adat_rx_clo
        NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "ADAT input clock mode, 0 master or 1 slave")
 VC_CMD(0x43, ADAT_RX_STATUS, input_adat_rx_status_get, VC_NONE,
        NONE, 20, 0, 0, 0, 0, "ADAT input status packet")
+VC_CMD(0x44, ADAT_RX_PIN_AVAIL, input_adat_rx_pin_avail_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Pins the ADAT input could take: status, flags, generation, valid and free masks")
 #endif
 
 VC_CMD(0x50, LG_SOUND_SYNC_ENABLE, input_lg_enable_get, input_lg_enable_set,

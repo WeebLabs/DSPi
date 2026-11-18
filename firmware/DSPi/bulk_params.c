@@ -24,17 +24,14 @@
 #include "tube.h"      // tube_config / tube_update_pending
 #include "limiter.h"   // limiter_config / limiter_update_pending
 #include "notify.h"
-#include "uart_control.h"
-#include "i2c_control.h"
+#include "vc_pins.h"
 
 #include <string.h>
-#include <stdio.h>   // printf() for rejected-config diagnostics
 #include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
 #include <assert.h>  // _Static_assert
 #include <stddef.h>  // offsetof
 
 #include "hardware/sync.h"    // __dmb()
-#include "hardware/clocks.h"  // GPIO_TO_GPOUT_CLOCK_HANDLE() — MCK pin migration
 
 // LgSoundSyncStatus (lg_sound_sync.h, used by INPUT.LG_SOUND_SYNC_STATUS)
 // and WireLgSoundSync (this file's WireBulkParams section) must have
@@ -456,343 +453,79 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         channel_delays_ms[CH_OUT_1 + o] = in->outputs[o].delay_ms;
     }
 
-    // Pin config, phase 1: installs and releases only.  The ordering of every pin
-    // step in this function is load-bearing; see current_architecture.md
-    // "Restore Order in io_config_apply() and bulk_params_apply()".
-    const uint8_t ext_enc  = in->input_config.spdif_rx_enabled_ext_p1;
-    const uint8_t ext_mask = (uint8_t)((ext_enc - 1) & SPDIF_RX_ENABLED_EXT_MASK);
+    // Pins: one proposed config from the payload, judged as a unit and installed
+    // (vc_pins.h, pin_availability_query_spec.md section 7). Fields the payload leaves
+    // absent (0, or +1-encoded 0) keep their live value. Without apply_pins the
+    // SPDIF, I2S RX and ADAT input fields stay live as well.
+    PinConfig pc;
+    pin_config_capture(&pc);
+    if (input_source_change_pending) pc.input_source = pending_input_source;
+    if (i2s_clock_mode_change_pending) pc.clock_mode = pending_i2s_clock_mode;
+    memcpy(pc.output_types, in->i2s_config.output_types, NUM_SPDIF_INSTANCES);
     if (apply_pins) {
-#if PICO_RP2350
-        static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
-            PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2,
-            PICO_SPDIF_PIN_3, PICO_SPDIF_PIN_4, PICO_PDM_PIN
-        };
-#else
-        static const uint8_t default_pins[NUM_PIN_OUTPUTS] = {
-            PICO_AUDIO_SPDIF_PIN, PICO_SPDIF_PIN_2, PICO_PDM_PIN
-        };
-#endif
-        for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
-            uint8_t pin = in->pins.pins[i];
-#ifdef DSPI_PLATFORM_PINS
-            bool valid = dspi_platform_pin_valid(i < NUM_SPDIF_INSTANCES ? DSPI_PIN_FN_OUTPUT : DSPI_PIN_FN_PDM,
-                                                 pin);
-#else
-            bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
-#endif
-            // Never let a pushed config steal a live control interface's
-            // GPIOs: over UART/I2C that would sever the link doing the push
-            // (the self-lockout the USB-only config rule exists to prevent).
-            if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
-            output_pins[i] = valid ? pin : default_pins[i];
-        }
+        memcpy(pc.output_pins, in->pins.pins, NUM_PIN_OUTPUTS);
+        if (in->input_config.spdif_rx_pin != 0) pc.spdif_rx_pin[0] = in->input_config.spdif_rx_pin;
+        for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++)
+            if (in->input_config.spdif_rx_pin_ext[i] != 0)
+                pc.spdif_rx_pin[i + 1] = in->input_config.spdif_rx_pin_ext[i];
+        uint8_t ext_enc = in->input_config.spdif_rx_enabled_ext_p1;
+        if (ext_enc != 0) pc.spdif_rx_enabled_ext = (uint8_t)((ext_enc - 1) & SPDIF_RX_ENABLED_EXT_MASK);
 
-        // SPDIF RX pin: if valid AND changed, fire the hot-swap when SPDIF
-        // input is currently active so the running RX library picks up the
-        // new GPIO without a vendor-command round trip.
-        {
-            uint8_t pin = in->input_config.spdif_rx_pin;
-#ifdef DSPI_PLATFORM_PINS
-            bool valid = (pin > 0) && dspi_platform_pin_valid(DSPI_PIN_FN_SPDIF_RX, pin);
-#else
-            bool valid = (pin > 0) && (pin <= 29) &&
-                         !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
-#endif
-            if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
-            if (valid && pin != spdif_rx_pin) {
-                spdif_rx_pin = pin;
-                if (active_input_source == INPUT_SOURCE_SPDIF) {
-                    extern volatile bool spdif_rx_pin_change_pending;
-                    spdif_rx_pin_change_pending = true;
-                }
-            }
-        }
-
-        // Optional SPDIF inputs 2..4 RX pins.  Same validation as the
-        // spdif_rx_pin block above; 0 means absent (keep the live pin).  A
-        // pin that changed for the currently-active SPDIF source fires the
-        // RX hot-swap so the running library adopts it without a round trip.
-        for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-            uint8_t pin = in->input_config.spdif_rx_pin_ext[i];
-            if (pin == 0) continue;  // absent; keep live
-#ifdef DSPI_PLATFORM_PINS
-            bool valid = dspi_platform_pin_valid(DSPI_PIN_FN_SPDIF_RX, pin);
-#else
-            bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
-#if !PICO_RP2350
-            if (pin > 28) valid = false;
-#endif
-#endif
-            if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) valid = false;
-            if (valid && pin != spdif_rx_pin_ext[i]) {
-                spdif_rx_pin_ext[i] = pin;
-                if (input_source_is_spdif(active_input_source) &&
-                    spdif_index_for_source(active_input_source) == (uint8_t)(i + 1)) {
-                    extern volatile bool spdif_rx_pin_change_pending;
-                    spdif_rx_pin_change_pending = true;
-                }
-            }
-        }
-
-        // Optional SPDIF 2..4 disables.  Encoded PLUS ONE on the wire: 0 = absent
-        // (keep the live mask), else mask = enc - 1.  A disable of the live source
-        // is refused.  Enables run in phase 2, after the I2S clocks are installed.
-        if (ext_enc != 0) {
-            for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-                uint8_t bit = (uint8_t)(1u << i);
-                if ((ext_mask & bit) || !(spdif_rx_enabled_ext & bit)) continue;
-                if (input_source_is_spdif(active_input_source) &&
-                    spdif_index_for_source(active_input_source) == (uint8_t)(i + 1)) {
-                    printf("Bulk apply: SPDIF input %u disable ignored (active source); kept enabled\n",
-                           (unsigned)(i + 2));
-                } else {
-                    spdif_rx_enabled_ext &= (uint8_t)~bit;
-                }
-            }
-        }
-    }
-
-#if PICO_RP2350
-    // Release ADAT claims this payload drops or moves, so MCK and BCK are not
-    // judged against them; the claim blocks below re-validate against the final
-    // clocks.  The snapshots keep a net no-op from dirtying or restarting ADAT.
-    const bool    adat_out_was_en    = adat_output_config_enabled();
-    const uint8_t adat_out_was_pin   = adat_output_pin();
-    const bool    adat_out_was_dirty = adat_output_config_dirty;
-    const uint8_t adat_in_was_pin    = adat_input_pin;
-    const uint8_t adat_in_was_en     = adat_input_enabled;
-    const bool    adat_in_live = (active_input_source == INPUT_SOURCE_ADAT ||
-                                  (input_source_change_pending &&
-                                   pending_input_source == INPUT_SOURCE_ADAT));
-    {
-        uint8_t want_pin = (in->adat_config.pin != 0) ? in->adat_config.pin : PICO_ADAT_PIN;
-        if (adat_out_was_en && !(in->adat_config.enabled != 0 && want_pin == adat_out_was_pin))
-            adat_output_set_config(false, adat_out_was_pin);
-        uint8_t in_pin = in->input_config.adat_input_pin;
-        uint8_t in_enc = in->input_config.adat_input_enabled_p1;
-        if (apply_pins && adat_in_was_en && !adat_in_live &&
-            (in_enc == 1 || (in_pin != 0 && in_pin != adat_in_was_pin)))
-            adat_input_enabled = 0;
-    }
-#endif
-
-    // I2S configuration.  Runs after phase 1 so MCK and BCK see the pushed SPDIF
-    // pins, and before the claims that check against the clocks.
-    {
-        extern uint8_t output_types[];
-        extern uint8_t i2s_bck_pin;
-        extern uint8_t i2s_mck_pin;
-        extern bool    i2s_mck_enabled;
-        extern uint16_t i2s_mck_multiplier;
-        memcpy(output_types, in->i2s_config.output_types, NUM_SPDIF_INSTANCES);
-        // Snapshot the effective input BCK before any pin install so we can tell
-        // whether the active pair actually moved and arm a restart below.
-        uint8_t old_eff_bck = i2s_effective_bck_pin();
-
-        // MCK must map to clk_gpoutN on this platform (a cross-platform payload
-        // may not): fall back to the default pin with MCK off.  An enabled MCK on
-        // a pin another fixed peripheral owns is forced off too.
-        if (GPIO_TO_GPOUT_CLOCK_HANDLE(in->i2s_config.mck_pin, clk_sys) == clk_sys) {
-            i2s_mck_pin = PICO_I2S_MCK_PIN;
-            i2s_mck_enabled = false;
-        } else {
-            bool en = (in->i2s_config.mck_enabled != 0);
-            if (en && !i2s_mck_pin_acceptable(in->i2s_config.mck_pin)) {
-                printf("Bulk apply: MCK pin %u in use; MCK disabled\n",
-                       (unsigned)in->i2s_config.mck_pin);
-                en = false;
-            }
-            i2s_mck_pin = in->i2s_config.mck_pin;
-            i2s_mck_enabled = en;
-        }
-        // mck_multiplier encoding: 0 = 128×, 1 = 256×.
-        i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 1) ? 256 : 128;
-
-        // BCK/LRCLK are clock outputs: validate before installing, keep the live
-        // pin on failure.  The check reads live globals; claims installed later
-        // (ext enables, DAC mute, ADAT) check against BCK themselves.
-        if (i2s_bck_pin_acceptable(in->i2s_config.bck_pin)) {
-            i2s_bck_pin = in->i2s_config.bck_pin;
-        } else {
-            printf("Bulk apply: I2S BCK pin %u rejected (invalid/conflict); kept %u\n",
-                   (unsigned)in->i2s_config.bck_pin, (unsigned)i2s_bck_pin);
-        }
-
-        // Clock-pin mode: +1 encoded, 0 = absent (keep live); only 0/1 valid.
-        if (in->i2s_config.clock_pin_mode_p1 != 0 &&
-            (uint8_t)(in->i2s_config.clock_pin_mode_p1 - 1) <= 1) {
-            i2s_clock_pin_mode = (uint8_t)(in->i2s_config.clock_pin_mode_p1 - 1);
-        }
-
-        // Slave-mode BCK pin (SPLIT): 0 = absent (keep live).  Install only if
-        // acceptable and non-overlapping with the master pair just installed
-        // (equal, +1, or its +1 equals master); otherwise keep the live pin.
-        if (in->i2s_config.bck_pin_slave != 0) {
-            uint8_t sp = in->i2s_config.bck_pin_slave;
-            bool overlap = (sp == i2s_bck_pin) ||
-                           (sp == (uint8_t)(i2s_bck_pin + 1)) ||
-                           ((uint8_t)(sp + 1) == i2s_bck_pin);
-            if (I2S_BCK_SLAVE_PIN_ACCEPTABLE(sp) && !overlap) {
-                i2s_bck_pin_slave = sp;
-            } else {
-                printf("Bulk apply: I2S slave BCK pin %u rejected (invalid/conflict); kept %u\n",
-                       (unsigned)sp, (unsigned)i2s_bck_pin_slave);
-            }
-        }
-
-        // If the effective input pair moved, arm a deferred restart.  Bracketed
-        // bulk-apply paths in main.c restart anyway and clear this flag; this
-        // covers unbracketed callers so the input re-syncs on the new pins.
-        if (i2s_effective_bck_pin() != old_eff_bck &&
-            active_input_source == INPUT_SOURCE_I2S)
-            i2s_input_restart_pending = true;
-    }
-
-    // Pin config, phase 2: claims validated against the clocks installed above.
-    if (apply_pins) {
-        // Optional SPDIF 2..4 enables.  Each bit commits as it is decided so two
-        // pushed enables on one GPIO cannot both pass.
-        if (ext_enc != 0) {
-            for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++) {
-                uint8_t bit = (uint8_t)(1u << i);
-                if (!(ext_mask & bit) || (spdif_rx_enabled_ext & bit)) continue;
-                if (spdif_input_enable_acceptable(i + 1)) {
-                    spdif_rx_enabled_ext |= bit;
-                } else {
-                    printf("Bulk apply: SPDIF input %u enable rejected (pin invalid/conflict); left disabled\n",
-                           (unsigned)(i + 2));
-                }
-            }
-        }
-
-        // I2S RX data pins (pair 0 + multichannel extras) and channel count,
-        // validated as a SET against the installed clock pairs so a pushed config
-        // can't bring two state machines up on one GPIO or on a clock pin.  0 =
-        // keep-live per field.  Rejected as a unit; a change restarts the input.
-        {
-            uint8_t proposed[I2S_RX_MAX_PAIRS];
-            proposed[0] = (in->input_config.i2s_rx_pin != 0)
-                              ? in->input_config.i2s_rx_pin : i2s_rx_pin[0];
+        if (in->input_config.i2s_rx_pin != 0) pc.i2s_rx_pin[0] = in->input_config.i2s_rx_pin;
 #if I2S_RX_MAX_PAIRS > 1
-            for (int p = 1; p < I2S_RX_MAX_PAIRS; p++) {
-                uint8_t pin = in->input_config.i2s_rx_pin_ext[p - 1];
-                proposed[p] = (pin != 0) ? pin : i2s_rx_pin[p];
-            }
+        for (int p = 1; p < I2S_RX_MAX_PAIRS; p++)
+            if (in->input_config.i2s_rx_pin_ext[p - 1] != 0)
+                pc.i2s_rx_pin[p] = in->input_config.i2s_rx_pin_ext[p - 1];
 #endif
-            uint8_t ch = in->input_config.i2s_input_channels;
-            uint8_t count = (ch == 2 || ch == 4 || ch == 6 || ch == 8)
-                                ? ch : i2s_input_channels;
-            if (count / 2 > I2S_RX_MAX_PAIRS) count = i2s_input_channels;
-
-            if (i2s_rx_pin_set_acceptable(proposed, count / 2, i2s_bck_pin,
-                                          (i2s_clock_pin_mode == I2S_CLOCK_PIN_MODE_SPLIT)
-                                              ? i2s_bck_pin_slave : 0xFF)) {
-                bool changed = false;
-                for (int p = 0; p < I2S_RX_MAX_PAIRS; p++)
-                    if (proposed[p] != i2s_rx_pin[p]) {
-                        i2s_rx_pin[p] = proposed[p];
-                        changed = true;
-                    }
-                if (count != i2s_input_channels) {
-                    i2s_input_channels = count;
-                    changed = true;
-                }
-                if (changed && active_input_source == INPUT_SOURCE_I2S)
-                    i2s_input_restart_pending = true;
-            } else {
-                printf("Bulk apply: I2S RX pin/count config rejected (conflict); kept live\n");
-            }
-        }
-
-    }
-
-    // DAC hardware mute (V10+).  Placed after the clocks and before the ADAT
-    // claims, so its collision check sees final clocks and only the ADAT pins
-    // that are kept, and the ADAT checks below see the new mute pin.
-    // Funnel through dac_hw_mute_set_config()
-    // so validation, persistence, and pin re-claim all run consistently
-    // with the vendor-command path.  An invalid config in the payload
-    // (out-of-range pin, collision, bad timing) is silently ignored —
-    // the bulk SET dispatcher has no per-section error channel, so this
-    // matches every other section that "best-effort applies" what it
-    // can.  Bulk SETs that include a dac_hw_mute section that fails
-    // validation leave the previous config in place.
-    {
-        DacHwMuteConfig hw;
-        _Static_assert(sizeof(hw) == sizeof(in->dac_hw_mute),
-                       "WireDacHwMute and DacHwMuteConfig must match");
-        memcpy(&hw, &in->dac_hw_mute, sizeof(hw));
-        (void)dac_hw_mute_set_config(&hw);
-    }
-
-    // ADAT output configuration (V17+).  RP2350 only; RP2040 ignores the section.
-    // ADAT is a push-pull output driver, so the pin gets the full ownership
-    // check (adat_pin_acceptable).  A rejected pin falls back to the live pin,
-    // which is re-checked too (the release above may have let BCK take it).
+        uint8_t ch = in->input_config.i2s_input_channels;
+        if ((ch == 2 || ch == 4 || ch == 6 || ch == 8) && ch / 2 <= I2S_RX_MAX_PAIRS)
+            pc.i2s_rx_pairs = (uint8_t)(ch / 2);
 #if PICO_RP2350
-    {
-        uint8_t enabled = (in->adat_config.enabled != 0) ? 1 : 0;
-        uint8_t pin = (in->adat_config.pin != 0) ? in->adat_config.pin : PICO_ADAT_PIN;
-        if (!adat_pin_acceptable(pin)) {
-            printf("Bulk apply: ADAT pin %u rejected (invalid/conflict); kept %u\n",
-                   (unsigned)pin, (unsigned)adat_output_pin());
-            pin = adat_output_pin();
-            if (enabled && !adat_pin_acceptable(pin)) {
-                printf("Bulk apply: ADAT pin %u also in use; ADAT disabled\n", (unsigned)pin);
-                enabled = 0;
-            }
-        }
-        adat_output_set_config(enabled != 0, pin);
-        if (adat_output_config_enabled() == adat_out_was_en &&
-            adat_output_pin() == adat_out_was_pin)
-            adat_output_config_dirty = adat_out_was_dirty;
+        if (in->input_config.adat_input_pin != 0) pc.adat_rx_pin = in->input_config.adat_input_pin;
+        uint8_t ain = in->input_config.adat_input_enabled_p1;
+        if (ain == 1 || ain == 2) pc.adat_rx_enabled = (uint8_t)(ain - 1);
+#endif
     }
-#endif
-
-    // ADAT input runs after ADAT output so the loopback share sees the final
-    // output pin.
-    if (apply_pins) {
-        // ADAT input pin + enable (V24+, RP2350).  Pin: 0 = absent (keep live).
-        // Enable encoded PLUS ONE (0 absent = keep the pre-apply state, 1 off,
-        // 2 on).  Enabling needs a valid, unclaimed pin; disabling the live source
-        // is refused.  A net change while ADAT is active arms a deferred restart.
+    pc.mck_pin = in->i2s_config.mck_pin;
+    pc.mck_enabled = (in->i2s_config.mck_enabled != 0);
+    pc.bck_pin[0] = in->i2s_config.bck_pin;
+    if (in->i2s_config.bck_pin_slave != 0) pc.bck_pin[1] = in->i2s_config.bck_pin_slave;
+    if (in->i2s_config.clock_pin_mode_p1 != 0 && (uint8_t)(in->i2s_config.clock_pin_mode_p1 - 1) <= 1)
+        pc.clock_pin_mode = (uint8_t)(in->i2s_config.clock_pin_mode_p1 - 1);
+    if (in->input_config.i2s_clock_mode <= 1) pc.clock_mode = in->input_config.i2s_clock_mode;
 #if PICO_RP2350
-        {
-            uint8_t pin = in->input_config.adat_input_pin;
-            if (pin != 0 && pin != adat_input_pin) {
-                if (adat_input_pin_acceptable(pin)) {
-                    adat_input_pin = pin;
-                } else {
-                    printf("Bulk apply: ADAT input pin %u rejected (invalid/conflict); kept live\n",
-                           (unsigned)pin);
-                }
-            }
-            uint8_t enc  = in->input_config.adat_input_enabled_p1;
-            uint8_t want = (enc == 2) ? 1 : (enc == 1) ? 0 : adat_in_was_en;
-            if (want && !adat_input_enabled) {
-                if (adat_input_pin != 0xFF && adat_input_pin_acceptable(adat_input_pin)) {
-                    adat_input_enabled = 1;
-                } else {
-                    printf("Bulk apply: ADAT input enable rejected (pin unset/conflict); left disabled\n");
-                }
-            } else if (!want && adat_input_enabled) {
-                if (adat_in_live) {
-                    printf("Bulk apply: ADAT input disable ignored (active source); kept enabled\n");
-                } else {
-                    adat_input_enabled = 0;
-                }
-            }
-            if ((adat_input_pin != adat_in_was_pin || adat_input_enabled != adat_in_was_en) &&
-                active_input_source == INPUT_SOURCE_ADAT)
-                adat_input_restart_pending = true;
-        }
+    pc.adat_tx_enabled = (in->adat_config.enabled != 0);
+    pc.adat_tx_pin = (in->adat_config.pin != 0) ? in->adat_config.pin : PICO_ADAT_PIN;
 #endif
+    if (input_source_valid(in->input_config.input_source))
+        pc.input_source = in->input_config.input_source;
+    // The input the device is listening to, or is switching to, cannot be switched off by a push.
+    {
+        uint8_t live_src = input_source_change_pending ? pending_input_source : active_input_source;
+        if (input_source_is_spdif(live_src) && spdif_index_for_source(live_src) > 0)
+            pc.spdif_rx_enabled_ext |= (uint8_t)(1u << (spdif_index_for_source(live_src) - 1));
+#if PICO_RP2350
+        if (live_src == INPUT_SOURCE_ADAT) pc.adat_rx_enabled = 1;
+#endif
+    }
+    // A DAC mute section with bad timing or a pin that can never work is ignored whole.
+    DacHwMuteConfig dac;
+    _Static_assert(sizeof(dac) == sizeof(in->dac_hw_mute), "WireDacHwMute and DacHwMuteConfig must match");
+    memcpy(&dac, &in->dac_hw_mute, sizeof(dac));
+    if (dac_hw_mute_scalars_valid(&dac) &&
+        (dac.pin == DAC_HW_MUTE_PIN_NONE || is_valid_gpio_pin(dac.pin))) {
+        pc.has_dac_mute = 1;
+        pc.dac_mute_enabled = (dac.enabled != 0);
+        pc.dac_mute_pin = dac.pin;
+    }
+
+    PinValidateResult pin_res;
+    pin_restore_apply(&pc, 0, &pin_res);
+    i2s_mck_multiplier = (in->i2s_config.mck_multiplier == 1) ? 256 : 128;
+    if (pc.has_dac_mute) {
+        dac.enabled = pc.dac_mute_enabled;
+        dac.pin = pc.dac_mute_pin;
+        dac_hw_mute_commit(&dac);
     }
 
     // EQ bands
@@ -856,9 +589,10 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         update_master_volume(db);
     }
 
-    // Input source
+    // Input source, as the pin validation left it (a switch whose pins could not
+    // claim was dropped there).
     {
-        uint8_t src = in->input_config.input_source;
+        uint8_t src = pc.input_source;
         // Gate on selectable (valid AND currently offered) so a pushed source
         // that names a disabled optional SPDIF is refused; the enable-mask apply
         // above runs first, so enabling SPDIF2 and selecting it in one payload
@@ -877,10 +611,8 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
 
     // I2S clock master/slave mode (V21+).  Deferred, same semantics as the
     // vendor path: the main loop rebuilds I2S clocking when the source is live.
-    if (in->input_config.i2s_clock_mode <= 1 &&
-        (in->input_config.i2s_clock_mode != i2s_clock_mode ||
-         i2s_clock_mode_change_pending)) {
-        pending_i2s_clock_mode = in->input_config.i2s_clock_mode;
+    if (pc.clock_mode != i2s_clock_mode || i2s_clock_mode_change_pending) {
+        pending_i2s_clock_mode = pc.clock_mode;
         __dmb();
         i2s_clock_mode_change_pending = true;
     }

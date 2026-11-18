@@ -304,28 +304,46 @@ def invalid_gpios(profile):
     return (23, 24, 25, MAX_GPIO[profile.platform_id] + 1)
 
 
-def busy_gpios(dev, profile) -> set:
-    """GPIOs owned by an output, input or clock function right now, plus those no pin SET accepts."""
-    pins = {dev.pget_u8("OUTPUT.PIN", i) for i in range(profile.num_pin_outputs)}
-    pins.add(dev.pget_u8("INPUT.I2S_RX_PIN"))
-    pins.add(dev.pget_u8("INPUT.SPDIF_RX_PIN"))
-    bck = dev.pget_u8("CLOCK.I2S_BCK_PIN")
-    pins.update((bck, bck + 1))
-    if dev.pget_u8("CLOCK.MCK_ENABLE"):
-        pins.add(dev.pget_u8("CLOCK.MCK_PIN"))
-    pins.update(invalid_gpios(profile))
-    return pins
+# SYS.PIN_CLAIMS function IDs (vendor/vc_pins.h) and the owner names the tests use.
+PIN_FN_NAMES = {1: "output", 2: "pdm", 3: "i2s_bck", 4: "mck", 5: "adat_tx", 6: "adat_rx",
+                7: "spdif_rx", 8: "i2s_rx", 9: "dac_mute", 10: "uart", 11: "i2c", 12: "cs"}
+PIN_CLAIM_ACTIVE, PIN_CLAIM_STORED = 0, 1
 
 
-def free_gpio(dev, profile, prefer=(16, 17, 18, 19, 20, 21, 22, 26, 27)):
-    """First GPIO in `prefer` no function owns, or None."""
-    busy = busy_gpios(dev, profile)
-    return next((p for p in prefer if p not in busy and p <= 29), None)
+def pin_claims(dev) -> list:
+    """SYS.PIN_CLAIMS as (gpio, fn, idx, state, role, cs_type) tuples. Retries a BUSY reply (CS revert in flight)."""
+    if not has_command(dev, "SYS.PIN_CLAIMS", "GET"):
+        raise Skip("firmware has no SYS.PIN_CLAIMS")
+    for _ in range(20):
+        try:
+            raw = dev.pget("SYS.PIN_CLAIMS", length=256)
+            break
+        except PagedStall as s:
+            if s.result_name != "VC_ERR_BUSY":
+                raise
+            time.sleep(0.02)
+    else:
+        raise Skip("SYS.PIN_CLAIMS stayed BUSY")
+    n = raw[4]
+    out = []
+    for i in range(n):
+        g, fn, idx, meta = raw[8 + 4 * i: 12 + 4 * i]
+        out.append((g, fn, idx, meta & 3, (meta >> 2) & 3, meta >> 4))
+    return out
 
 
-def gpio_owners(dev, profile) -> dict:
-    """GPIO -> functions holding it now, from every readable config. Control Surfaces bindings are not
-    readable here, so the firmware's own claim check stays the last word."""
+def _owner_name(fn, idx, profile):
+    if fn == 1:
+        return f"output{idx}"
+    if fn == 2:
+        return f"output{profile.num_pin_outputs - 1}"
+    if fn in (3, 7, 8, 12):
+        return f"{PIN_FN_NAMES[fn]}{idx}"
+    return PIN_FN_NAMES.get(fn, f"fn{fn}")
+
+
+def _gpio_owners_legacy(dev, profile) -> dict:
+    """Firmware without SYS.PIN_CLAIMS: owners from every readable config, under that firmware's rules."""
     u8 = dev.pget_u8
     own = {}
 
@@ -341,8 +359,7 @@ def gpio_owners(dev, profile) -> dict:
     pairs = 4 if profile.platform_id == 1 else 1
     for p in range(min(pairs, u8("INPUT.I2S_RX_CHANNELS") // 2)):
         add(u8("INPUT.I2S_RX_PIN", p), f"i2s_rx{p}")
-    roles = (0, 1) if u8("CLOCK.I2S_CLOCK_PIN_MODE") else (0,)
-    for r in roles:
+    for r in ((0, 1) if u8("CLOCK.I2S_CLOCK_PIN_MODE") else (0,)):
         bck = u8("CLOCK.I2S_BCK_PIN", r)
         add(bck, f"i2s_bck{r}")
         add(bck + 1, f"i2s_bck{r}")
@@ -365,6 +382,29 @@ def gpio_owners(dev, profile) -> dict:
     if has_command(dev, "INPUT.ADAT_RX_ENABLE") and u8("INPUT.ADAT_RX_ENABLE"):
         add(u8("INPUT.ADAT_RX_PIN"), "adat_rx")
     return own
+
+
+def gpio_owners(dev, profile) -> dict:
+    """GPIO -> functions holding it now, read from the device's own claim list (SYS.PIN_CLAIMS).
+    Stored pins of functions not in use hold nothing and are left out."""
+    if not has_command(dev, "SYS.PIN_CLAIMS", "GET"):
+        return _gpio_owners_legacy(dev, profile)
+    own = {}
+    for g, fn, idx, state, _role, _t in pin_claims(dev):
+        if state == PIN_CLAIM_ACTIVE:
+            own.setdefault(g, set()).add(_owner_name(fn, idx, profile))
+    return own
+
+
+def busy_gpios(dev, profile) -> set:
+    """GPIOs some function holds right now, plus those no pin SET accepts."""
+    return set(gpio_owners(dev, profile)) | set(invalid_gpios(profile))
+
+
+def free_gpio(dev, profile, prefer=(16, 17, 18, 19, 20, 21, 22, 26, 27)):
+    """First GPIO in `prefer` no function owns, or None."""
+    busy = busy_gpios(dev, profile)
+    return next((p for p in prefer if p not in busy and p <= 29), None)
 
 
 def held_by_others(owners, pins, me) -> set:

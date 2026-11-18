@@ -8,6 +8,8 @@ VC_CMD(0x12, I2S_CLOCK_MODE, clock_i2s_mode_get, clock_i2s_mode_set,
        NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "I2S clock mode, 0 master or 1 slave")
 VC_CMD(0x13, I2S_SLAVE_STATUS, clock_i2s_slave_status_get, VC_NONE,
        NONE, 16, 0, 0, 0, 0, "I2S slave clock lock state and measured rate")
+VC_CMD(0x14, I2S_BCK_PIN_AVAIL, clock_bck_pin_avail_get, VC_NONE,
+       ROLE, 24, 0, 0, 0, 0, "BCK pins one clock pair could take (LRCLK is BCK + 1): status, flags, generation, valid and free masks")
 
 VC_CMD(0x20, MCK_ENABLE, clock_mck_enable_get, clock_mck_enable_set,
        NONE, 1, 1, 1, 0, 0, "MCK output enable")
@@ -15,3 +17,5 @@ VC_CMD(0x21, MCK_PIN, clock_mck_pin_get, clock_mck_pin_set,
        NONE, 1, 1, 1, 0, 0, "MCK GPIO, a clk_gpout pin; 0xFF restores the default")
 VC_CMD(0x22, MCK_MULTIPLIER, clock_mck_mult_get, clock_mck_mult_set,
        NONE, 1, 1, 1, 0, 0, "MCK multiplier, 0 for 128x or 1 for 256x")
+VC_CMD(0x23, MCK_PIN_AVAIL, clock_mck_pin_avail_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Pins MCK could take: status, flags, generation, valid and free masks")

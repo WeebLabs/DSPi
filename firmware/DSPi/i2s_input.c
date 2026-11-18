@@ -1098,6 +1098,10 @@ void i2s_slave_get_status(I2sSlaveStatusPacket *out) {
 // STATUS
 // ============================================================================
 
+uint8_t i2s_input_live_bck_pin(void) {
+    return (i2s_input_get_state() != I2S_INPUT_INACTIVE) ? i2s_active_bck_pin : 0xFF;
+}
+
 I2sInputState i2s_input_get_state(void) {
     return i2s_state;
 }

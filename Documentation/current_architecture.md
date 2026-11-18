@@ -327,7 +327,7 @@ The `DIAG.CLOCK_DIAG` snapshot is a packed little-endian `ClockDiagPacket` (`clo
 **Persistence (compat-breaking).** Wire `WIRE_FORMAT_VERSION=16` (direct 8-input matrix/preamp + 17-channel EQ; no tail-append/version gates; 5864 B). Flash `SLOT_DATA_VERSION=21` (direct layout; the slot spans **2 flash sectors** on RP2350; 1 on RP2040). No migration — pre-version data loads factory defaults.
 
 ### Notification Endpoint (device→host push)
-*Last updated: 2026-11-16 (event sources and resync reads named by paged command). Previously 2026-11-16 (HOST_SET source tag comes from the paged dispatcher's `vc_run()` bracket); 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
+*Last updated: 2026-11-18 (NOTIFY_EVT_PIN_MAP_CHANGED 0x11 added). Previously 2026-11-16 (event sources and resync reads named by paged command); 2026-11-16 (HOST_SET source tag comes from the paged dispatcher's `vc_run()` bracket); 2026-11-01 (NOTIFY_EVT_DEVICE_NAME 0x10 added); 2026-10-31 (NOTIFY_EVT_INPUT_SOURCE_NAME 0x0F added); 2026-10-20 (NOTIFY_EVT_RTA_CONFIG 0x0D added); 2026-09-22 (notify_rebaseline collects in place, scratch copy removed; 2026-09-07: NOTIFY_EVT_CS_AUX 0x0C is now 9 bytes, carrying the binding slot and an 8.8 percent level; 2026-09-05: NOTIFY_EVT_CS_AUX 0x0C added; 2026-07-13: NOTIFY_EVT_ADAT_INPUT_STATE 0x0B added)*
 
 The vendor interface carries one **bulk IN** endpoint (EP 0x83, wMaxPacketSize = 64) for out-of-band device→host notifications. The transport runs two protocol versions in parallel: v1 (8-byte `MASTER_VOLUME` packets, kept for existing host apps) and v2 (generic `PARAM_CHANGED` + discrete events, the primary protocol going forward). `USB_BCD_DEVICE = 0x0201` so Windows re-reads descriptors after the 8→64 byte EP bump.
 
@@ -360,7 +360,7 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 
 **Bulk operations** (preset load, factory reset, bulk SET): wrapped in `notify_begin_bulk(source)` / `notify_end_bulk()`. Per-field writes don't flood the ring; the host sees one `BULK_INVALIDATED` and reads `STORE.ALL_PARAMS` for the full state. Preset load also emits `NOTIFY_EVT_PRESET_LOADED(slot)` before the bulk opens.
 
-**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), `NOTIFY_EVT_RTA_CONFIG` (0x0D), `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F; 0x0E is held by the `ac3-dts-decode` branch), and `NOTIFY_EVT_DEVICE_NAME` (0x10). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `CS.AUX_STATE` / `CS.AUX_LEVEL` SET handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `MEAS.RTA_CONFIG` SET as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `vc_param_src()` of the request's transport into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser"). INPUT_SOURCE_NAME announces each stored source name as a 40-byte packet `[ver=2, 0x0F, flags=0, seq, source_id, src, 0, 0, name(32)]`, pushed after the directory write that stores it, with `src` captured at SET time the same way *(2026-10-31; see "Input Source Names")*. DEVICE_NAME announces the stored board name in the same 40-byte layout with byte 4 zero, `[ver=2, 0x10, flags=0, seq, 0, src, 0, 0, name(32)]`, from the same write *(2026-11-01; see "Device Name")*.
+**Discrete event IDs** on this transport: `NOTIFY_EVT_PARAM_CHANGED` (0x02), `NOTIFY_EVT_BULK_INVALIDATED` (0x03), `NOTIFY_EVT_PRESET_LOADED` (0x04), `NOTIFY_EVT_INPUT_FORMAT` (0x05), `NOTIFY_EVT_SIGGEN_STATE` (0x07), `NOTIFY_EVT_ADAT_STATE` (0x08), `NOTIFY_EVT_I2S_SLAVE_STATE` (0x09, 9-byte packet `[ver=2, 0x09, flags=0, seq, state, rate_LE32]`; pushed on every I2S clock-slave lock-state transition), `NOTIFY_EVT_CS_IR_LEARN` (0x0A), `NOTIFY_EVT_ADAT_INPUT_STATE` (0x0B), `NOTIFY_EVT_CS_AUX` (0x0C), `NOTIFY_EVT_RTA_CONFIG` (0x0D), `NOTIFY_EVT_INPUT_SOURCE_NAME` (0x0F; 0x0E is held by the `ac3-dts-decode` branch), `NOTIFY_EVT_DEVICE_NAME` (0x10) and `NOTIFY_EVT_PIN_MAP_CHANGED` (0x11). Siggen announces test-signal-generator start/stop/completion as an 8-byte packet `[ver=2, 0x07, flags=0, seq, state, reason, signal_type, channel]` (state = `SiggenState`, reason = `SIGGEN_STOP_*`, channel = walk channel or 0xFF); pushed from `siggen_service()` in the main loop, never from the render path (see "Test Signal Generator"). CS_IR_LEARN announces IR learn completion as a 12-byte packet `[ver=2, 0x0A, flags=0, seq, state, protocol, 0, 0, code_LE32]` (state = `CS_IR_LEARN_DONE`/`_TIMEOUT`), pushed from the Control Surfaces tick. ADAT_INPUT_STATE (RP2350) announces every ADAT input lock-state transition as a 10-byte packet `[ver=2, 0x0B, flags=0, seq, state, rate_LE32, clock_mode]` (state = `AdatInputState`; rate = 0 unless LOCKED), pushed from the ADAT RX poll (see "ADAT Input"). CS_AUX announces every Control Surfaces auxiliary output change as a 9-byte packet `[ver=2, 0x0C, flags=0, seq, slot, state, level_q8_LE, src]` (`slot` = the binding slot holding the aux component, `level_q8` = 8.8 percent and 0 on a `CS_TYPE_AUX_OUT` slot; both values on every event; `src` = the dispatch's `ParamSource`, so a bound control reads as GPIO and a host write as HOST_SET), pushed from the `CS.AUX_STATE` / `CS.AUX_LEVEL` SET handlers (see "Control Surfaces"). RTA_CONFIG announces every applied `MEAS.RTA_CONFIG` SET as a 17-byte packet `[ver=2, 0x0D, flags=0, seq, RtaConfig (12 B, as applied), src]`, pushed from `apply_config()` in `rta.c` on the main loop *(2026-10-20)*. Because the apply runs after the dispatch has closed its source bracket, the SET handler passes `vc_param_src()` of the request's transport into `rta_set_config()`, which stores it beside the staged config (`cfg_next_src`); `src` is therefore HOST_SET on USB and UART / I2C on those transports (see "Spectrum Analyser"). INPUT_SOURCE_NAME announces each stored source name as a 40-byte packet `[ver=2, 0x0F, flags=0, seq, source_id, src, 0, 0, name(32)]`, pushed after the directory write that stores it, with `src` captured at SET time the same way *(2026-10-31; see "Input Source Names")*. DEVICE_NAME announces the stored board name in the same 40-byte layout with byte 4 zero, `[ver=2, 0x10, flags=0, seq, 0, src, 0, 0, name(32)]`, from the same write *(2026-11-01; see "Device Name")*. PIN_MAP_CHANGED announces that an availability answer or the claim list may differ from a host's copy, as an 8-byte packet `[ver=2, 0x11, flags=0, seq, generation_LE32]`. It is coalesced (an unsent entry has its generation refreshed) and pushed only from the main-loop generation tick *(2026-11-18; see "Pin Ownership and Availability")*.
 
 **Drain:** each consumer drains its own tail via `notify_peek_next_for(consumer, ...)` / `notify_commit_pop_for(consumer)`. The USB consumer (`usb_notify_drain` in usb_audio.c) claims EP 0x83 via `usbd_edpt_claim`, formats the next packet into the stable TX buffer, and submits via `usbd_edpt_xfer`; on success `notify_commit_pop_for(USB)` advances the USB tail, and on xfer rejection the entry stays queued for the next tick. The UART consumer drains from `uart_ctrl_poll` (see "Multi-consumer ring").
 
@@ -2284,15 +2284,37 @@ Default channel names are derived from current device state, not hard-coded:
 ---
 
 ## Pin Configuration
-*Last updated: 2026-07-06 (ADAT bulk output default GPIO 12 added; the ADAT pin
-is reserved in `is_pin_in_use` while ADAT is config-enabled)*
+*Last updated: 2026-11-18 (every pin decision goes through vendor/vc_pins.c; see "Pin Ownership and Availability"). Previously 2026-07-06*
 
 The debug UART was removed entirely (stdio_uart off), freeing GPIO 16/17; they
 are no longer reserved and are now the default pins for the UART control
 interface. GPIO 18/19 are the default I2C control-interface pins. Live
-control-interface pins are reserved against all other pin-assignment commands
-(they participate in `is_pin_in_use`); see the External Control Interfaces
-section.
+control-interface pins are claimed against every other pin assignment while the
+interface is live; see the External Control Interfaces section.
+
+### Pin Ownership and Availability
+*Last updated: 2026-11-18 (new)*
+
+Every pin decision in the firmware is made in vendor/vc_pins.c. The SET handlers, the deferred applies of the UART, I2C and DAC mute configs, Control Surfaces, the restore paths and the host availability queries all call the same checks, so a host query cannot disagree with a SET. The design and the wire formats are in `Documentation/Features/pin_availability_query_spec.md`.
+
+**The rule.** A function holds its pins only while it is in use. A function that is switched off keeps its pin as a stored preference that blocks nothing. A pin SET on a function not in use checks validity alone (range, mux, GPOUT, ADC and pairing rules) and accepts a GPIO another function holds. The ownership check runs where the function starts. That is an enable SET, `OUTPUT.TYPE` to I2S, `INPUT.SOURCE` to I2S, an `INPUT.I2S_RX_CHANNELS` rise, a clock-mode or clock-pin-mode change that adopts the other pair, and `ROUTE.OUTPUT_ENABLE` on the PDM output. A conflict there answers `VC_ERR_PIN_IN_USE` in the handler, before anything is queued or restarted.
+
+| Function | In use when |
+|---|---|
+| Output slot | Always |
+| PDM | Its matrix output is enabled, or its hardware is still fading out |
+| I2S clock pair | Any slot is I2S or I2S is the source, and the clock mode selects this pair |
+| MCK, ADAT TX, ADAT RX, S/PDIF inputs 2 to 4, DAC mute | Enabled |
+| S/PDIF input 1 | Always (it has no off switch) |
+| I2S RX pair | I2S is the source and the pair is within the channel count |
+| UART, I2C control | Live |
+| CS binding | Active |
+
+**The claim list.** `pin_state_live()` builds every claim from the live config. Queued output-type, input-source and clock-mode switches count as in use, so nothing can take a pin between a start check and its apply. Hardware still driving or listening on a pin its config has let go of (a dormant clock-mode flip, an ADAT reroute, a PDM fade-out) adds claims of its own. `pin_check()` validates a whole function request and, in claim mode, refuses a pin another function's active claim holds. The two I2S clock pairs are one function, because only one is ever driven and a pair swap releases the old pair first. The ADAT receiver may share the transmitter's pin. Control Surfaces resolves its own family (button sharing, PWM slices) in `cs_pin_status()`.
+
+**Host queries.** Each pin SET has an `_AVAIL` GET beside it returning a valid mask (pins the function could ever use) and a free mask (the subset no other function holds now), a function status, flags and the generation counter. `SYS.PIN_CLAIMS` lists every claim, active or stored, sorted by GPIO. `SYS.PIN_STATE` carries the generation, the counts, the GPIO mask and the substitution mask of the last restore. The main loop recomputes a hash of the claim list and the live function statuses at most every 50 ms and raises `NOTIFY_EVT_PIN_MAP_CHANGED` (0x11) when it changes. A GET recomputes it too, so a reply always carries the generation it was computed from.
+
+**PDM pin.** The PDM GPIO is muxed to PIO1, and its PIO direction set to output, only while the modulator runs. The Core 1 start path sets both with the SM stopped, and both stop paths clear them after stopping the SM (RAM-resident register writes in pdm_generator.c). This matters because PDM shares PIO1 with the S/PDIF and I2S receivers on RP2040 and with ADAT on RP2350: a stale PDM output direction on a pin another PIO1 SM listens on would drive it. Boot no longer starts the PDM SM or DMA; the first PDM enable does.
 
 ### Default Assignments
 
@@ -2330,13 +2352,13 @@ section.
 
 Vendor command `OUTPUT.PIN`, addressed by pin output in `wValue`, with the GPIO as the 1-byte payload. A refused pin STALLs on USB, and the reason (`VC_ERR_PIN_INVALID`, `VC_ERR_PIN_IN_USE`, `VC_ERR_STATE`) is in `SYS.LAST_RESULT`.
 
-**Constraints:** Valid GPIO range, not reserved (23-25 power/LED; GPIO 16/17 are no longer reserved now that the debug UART is gone), and not in use by another output, the I2S BCK/LRCLK or MCK pin, the SPDIF RX pin, the DAC hardware-mute pin, or a live UART/I2C control-interface pin (`is_pin_in_use`).
+**Constraints:** Valid GPIO range, not reserved (23-25 power/LED; GPIO 16/17 are no longer reserved now that the debug UART is gone), and not claimed by any other function in use (see "Pin Ownership and Availability"). A stopped PDM accepts any valid GPIO.
 
 **Reset-to-default escape hatch (`PIN_RESET_TO_DEFAULT`, 0xFF):** every single-pin SET command maps a pin byte of 0xFF to the platform default for the addressed target before running its normal validation chain, so a reset can still fail (e.g. `VC_ERR_PIN_IN_USE` if the default has been claimed). The commands are `OUTPUT.PIN`, `CLOCK.I2S_BCK_PIN` (per role), `CLOCK.MCK_PIN`, `OUTPUT.ADAT_TX_PIN`, `INPUT.SPDIF_RX_PIN` (per index), `INPUT.ADAT_RX_PIN` and `INPUT.I2S_RX_PIN` (per pair). 0xFF is not a valid GPIO on either platform, so pin byte 0 always means GPIO 0. The ADAT output pin once treated 0 as "reset to default 12"; that is gone. ADAT input has no free default GPIO, so its "default" is unset: 0xFF clears the pin (only while the input is disabled, since an enabled input with no pin would be unselectable). The persistence layers are unchanged: flash/bulk zero-fill "0 = default/absent" decoding is a migration artifact of zero-filled struct tails, not a wire semantic of the SET commands.
 
 **S/PDIF and I2S slots:** Deferred to the main loop, not applied in the vendor handler. `OUTPUT.PIN` writes the target into `output_pins[out_idx]` (RAM-only, like `spdif_rx_pin`) and sets a bit in `output_pin_change_mask`; the main-loop gate (shared `pipeline_reset_ready()` hold) then runs `process_pin_changes(mask)`. That helper mirrors `process_type_switches`: `prepare_pipeline_reset()` (soft mute + Core 1 fence + DAC hardware-mute assert) → suspend SPDIF RX if running → `drain_and_disable_outputs()` → `audio_spdif_change_pin()` / `audio_i2s_change_data_pin()` on each flagged slot while disabled → `complete_pipeline_reset()` for the **synchronized** restart of all slots → restart RX. The synchronized restart is the point: a moved slot re-enters in phase with the others, preserving the inviolable inter-slot sample alignment. (The prior implementation restarted only the changed slot live in the ISR, which clicked and left that slot phase-misaligned until the next full reset.) `change_pin` masks the channel's DMA IRQ before aborting the DMA so the handler can't start a conflicting transfer during PIO SM reinit, and clears any stale completion flag before unmasking. Back-to-back requests accumulate in the mask and apply in one batch. Persistence follows `output_config_mode`: in with-preset mode the pin travels with the preset (`STORE.PRESET_SAVE` captures it, applied on load); in independent mode it is device-global (`STORE.OUTPUT_CONFIG_SAVE` persists it, applied at boot).
 
-**PDM:** Applied inline (must be disabled first; rebuilds PIO config). PDM has no running audio to realign at change time, so it needs no deferral or synchronized restart. The vendor path also refuses while `pdm_hw_is_active()`, i.e. while Core 1 is still fading the sub out after a disable. `pdm_change_pin()` restores the PIO clock at `audio_state.freq` (it hard-coded 48 kHz before 2026-10-10, which left the sub at the wrong rate after a pin change at 44.1 or 96 kHz).
+**PDM:** Applied inline (must be disabled first; rebuilds PIO config without muxing the new pin, which Core 1 claims when PDM starts). PDM has no running audio to realign at change time, so it needs no deferral or synchronized restart. The vendor path also refuses while `pdm_hw_is_active()`, i.e. while Core 1 is still fading the sub out after a disable. `pdm_change_pin()` restores the PIO clock at `audio_state.freq` (it hard-coded 48 kHz before 2026-10-10, which left the sub at the wrong rate after a pin change at 44.1 or 96 kHz).
 
 **Restores and boot: one coordinated output transition.** Preset load, deleting the active preset, factory reset and bulk SET install a whole output config (`io_config_apply()` / `bulk_params_apply()` only write globals). Each handler ends in `apply_restored_outputs(old_types)`, which runs `process_type_switches()` over every slot. Boot uses the same call after `usb_sound_card_init()` creates every slot as SPDIF on the default pins. `process_type_switches()` compares the live hardware with the config (slot types, I2S clocking, each slot's data pin, the MCK pin and the PDM pin) and returns false without disruption if nothing differs; `apply_restored_outputs()` then moves a stopped PDM's pin, applies the MCK policy (which also re-pins a stopped MCK), and the handler runs its usual completion. A running MCK or sub whose pin moves forces the transition; a stopped one is bookkeeping. When preset delete runs a transition it still calls `complete_flash_write_resume_inputs()`, the input/ADAT half of the flash completion. Otherwise it performs one muted transition, in this order.
 
@@ -2353,36 +2375,17 @@ Releasing every outgoing pin before claiming any incoming one is what makes pin 
 **PDM hold handshake.** `pdm_hold_hw()` stores `pdm_hold`, issues a barrier and waits for `pdm_hw_active` to clear. Core 1 runs the PDM hardware only while `pdm_enabled && !pdm_hold`; before restarting the hardware it stores `pdm_hw_active`, barriers, and backs off if `pdm_hold` is set, so the two cores can never both believe they own the SM/DMA. Core 1 clears `pdm_hw_active` after stopping the SM and aborting DMA. `pdm_release_hw()` drops the hold, and Core 1 restarts through its normal re-anchored enable path if PDM is still enabled.
 
 ### Restore Order in `io_config_apply()` and `bulk_params_apply()`
-*Last updated: 2026-11-16 (output type and MCK commands named by paged command). Previously 2026-10-02*
+*Last updated: 2026-11-18 (one proposed pin config validated as a unit; the install order no longer matters for validation). Previously 2026-11-16*
 
-`io_config_apply()` (flash_storage.c) installs a stored `FlashOutputConfig` into the live pin globals at boot and on preset loads. `bulk_params_apply()` (bulk_params.c) does the same for a pushed `WireBulkParams`. Apart from the DAC hardware-mute GPIO claim in the bulk path, which is unrelated to the output slots, both only set globals. The audio hardware is rebuilt later in the normal pipeline-reset bracket, so the install order has no effect on slot timing.
+`io_config_apply()` (flash_storage.c) installs a stored `FlashOutputConfig` at boot and on preset loads. `bulk_params_apply()` (bulk_params.c) does the same for a pushed `WireBulkParams`. Both build one proposed `PinConfig` from the incoming fields, with absent fields (0, or a +1 encoding of 0) taken from the live config, and hand it to `pin_restore_apply()` (vendor/vc_pins.c). That call validates the whole proposal with `pin_config_validate()`, installs it with `pin_config_install()`, and only then do the callers apply the non-pin fields (MCK multiplier, I2S rate, clock modes). Nothing is judged against a half-installed state, so the old ordering hazards are gone. Before this, each check compared a pin against whatever happened to be live at that moment, which at boot was the compile-time default.
 
-The install order does matter for validation. Each pin check (`i2s_mck_pin_acceptable()`, `i2s_bck_pin_acceptable()`, `spdif_input_enable_acceptable()`, the I2S RX set check, the DAC-mute collision check, the ADAT checks) compares the incoming pin against whatever is live at that moment. A field that has not been installed yet still holds its previous value, which at boot is the compile-time default. Both paths therefore install or release pins first, then the I2S clocks, then the claims that check against the clocks.
+The validator walks the functions in a fixed priority order (spec section 7.4). Each one in use claims its pins against the claims already accepted. A function that is not in use is judged on validity alone and never conflicts. On a failure, a function with an enable flag (PDM, MCK, ADAT TX and RX, the optional S/PDIF inputs, the DAC mute) keeps its pin as a stored preference and is switched off. A function with no off state (output slots, S/PDIF input 1, the I2S clock pair and receive pins when the config uses I2S) tries the platform default, then the base value. If neither claims, the whole pin section falls back to the base, which is the live config at run time and the factory set at boot. A switch of the input to I2S whose pins cannot claim is dropped instead of moving pins. The input the device is listening to, or is queued to switch to, is never switched off by a restore.
 
-1. Output pins. The flash path also installs output types here.
-2. SPDIF RX pin 1, the optional SPDIF input 2..4 pins, and the optional-input disable pass.
-3. ADAT release (RP2350). An enabled ADAT output or input that the incoming config disables or moves is switched off, so later checks are not judged against its old pin. The live ADAT input source is never released. Snapshots taken here let the ADAT claims restore `adat_output_config_dirty` and skip the ADAT input restart when the net result is unchanged.
-4. MCK pin, enable and multiplier. The bulk path installs output types first. A non-GPOUT pin falls back to the default with MCK off. An enabled MCK on a pin another fixed peripheral owns is forced off.
-5. Master BCK/LRCLK, then clock-pin mode and the slave BCK pair.
-6. The optional-input enable pass, then the I2S RX data pins and channel count.
-7. Bulk path only: the DAC hardware mute. Its collision check sees the final clocks, and only the ADAT pins that were kept.
-8. ADAT output claim, then ADAT input claim (RP2350). Output goes first so the loopback share (ADAT input may sit on an enabled ADAT output's pin) sees the final output pin. A rejected ADAT output pin falls back to an acceptable pin or ADAT output is disabled. An ADAT input being newly enabled on its unchanged stored pin is checked too; on conflict, the flash path leaves it off and keeps the pin.
+Claims the restore does not carry come first. At run time those are the live UART and I2C control interfaces (the self-lockout guard), live Control Surfaces bindings, and the DAC mute on the flash path. At boot nothing else is up yet, so the stored audio pins win. The DAC mute boot init and the control interfaces are then judged against them, and a clash leaves that function off.
 
-With one exception, each pair of claims is checked by whichever claim is installed second. For example, MCK against BCK is caught by the BCK check, BCK against an ADAT pin by the ADAT check, and the DAC mute against ADAT by the DAC-mute check. The exception is the clock pairs. Steps 6 to 8 check against them through `is_pin_in_use()`, which reserves BCK/LRCLK and the slave pair only while an I2S output or I2S input is active. A restore can therefore place an optional SPDIF input, ADAT pin or DAC mute on an idle clock pin, exactly as the live vendor commands allow. Only the I2S RX data pins, and MCK through the later BCK check, are always checked against the clock pairs.
+In INDEPENDENT output-config mode a runtime preset load carries no IO pins. It still runs the validator with `PIN_VALIDATE_FIXED_PINS`, so the preset's PDM enable and input source must claim their pins, and no pin is moved.
 
-In `bulk_params_apply()`, the SPDIF steps, the ADAT input release and claim, and the I2S RX step run only when `apply_pins` is true. Output types, MCK, BCK, clock-pin mode, the slave pair, the DAC mute and ADAT output run on every push, as they did before the reorder.
-
-Before this order was established, the flash path checked BCK before installing SPDIF RX and MCK. At boot the BCK check then saw SPDIF RX on its default GPIO 5. A saved BCK of GPIO 4 (LRCLK 5) was rejected on every power-up and fell back to GPIO 14, even when the saved config had moved SPDIF RX elsewhere. Any new pin field added to either path must be installed before every check that reads it.
-
-**Known residuals.**
-- A rejected BCK, slave pair or RX set falls back to the live value, and that value is not re-checked against the newly installed pins.
-- An optional SPDIF input that stays enabled while its pin moves is not re-checked.
-- In the bulk path, the MCK and BCK checks still see the old DAC-mute pin, so a payload that moves the mute off a pin while moving MCK or BCK onto it is falsely rejected.
-- `OUTPUT.TYPE` does not check the clock pins when it turns an idle pair into a driven one.
-
-**MCK enable.** MCK claims its pin only while enabled, so another function can take `i2s_mck_pin` while MCK is off. A `CLOCK.MCK_ENABLE` SET therefore checks `is_pin_in_use()` before enabling, and on a conflict fails with `VC_ERR_PIN_IN_USE` with MCK left off. Like `CLOCK.MCK_PIN`, it reserves the clock pairs only while I2S is active. The restore paths use `i2s_mck_pin_acceptable()` instead, and rely on the later BCK check for the clock pair.
-
-**ADAT loopback share.** `adat_input_pin_acceptable()` lets ADAT input share the ADAT output pin only while ADAT output is enabled. A disabled output's stored pin gets the normal ownership check.
+`pin_config_install()` writes only globals and the deferred hot-swap and restart flags. The audio hardware is rebuilt later in the normal pipeline-reset bracket, which releases every outgoing pin before it claims any, so the install order has no effect on slot timing. An unchanged ADAT config is not rewritten, so a no-op restore never restarts ADAT. `SYS.PIN_STATE` reports which functions the last restore substituted or switched off.
 
 ---
 
@@ -2474,7 +2477,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2486,6 +2489,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | DCP | N/A | Double-precision coprocessor |
 | VREG | 1.15 V (`main.c`, set before the 307.2 MHz clock) | 1.15 V (identical) |
 | UART + I2C external control | Yes (identical) | Yes (identical) |
+| Pin claims, worst case (`SYS.PIN_CLAIMS`) | 50 claims, 208 B reply | 57 claims, 236 B reply (ADAT and three more I2S RX pairs) |
 | Control Surfaces nouns (caps v22) | 81 in table, `ADAT_ACTIVE` + the 6 upmixer nouns unusable (empty action mask) | 81, all usable |
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
@@ -2620,6 +2624,17 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 ---
 
 ## Memory Layout
+
+> **Pin availability (2026-11-18).** vendor/vc_pins.c adds three static claim
+> lists, so no pin check puts one on the stack: the live state
+> (`s_live_state`), the start-check state and the restore validator's context.
+> They take 330 / 330 / 348 B on RP2040 and 358 / 358 / 376 B on RP2350, plus
+> 16 B of generation state, about 1.0 KB / 1.1 KB of BSS in all. Each list holds
+> `PIN_STATE_MAX_CLAIMS` 4-byte claims (82 on RP2040, 89 on RP2350). The PDM pin
+> attach and detach helpers are RAM-resident for Core 1. Measured after the
+> change (RP2040 / RP2350): `arm-none-eabi-size` text 290,060 / 325,612 B, bss
+> 134,704 / 309,236 B; `check_ram_placement.py` `.data` 70,376 / 98,256 B, free
+> RAM 57,064 / 116,796 B.
 
 > **Vendor protocol flip (2026-11-16).** Deleting the 1.1.6 opcode switches
 > (`vendor_commands.c`) removes 19,816 B of flash text on RP2040 and
@@ -4468,30 +4483,30 @@ This section is the map of the command space. The per-command reference (number,
 A command is written `PAGE.NAME` (for example `FILTER.BAND`), and its 16-bit ID is `(page << 8) | cmd`.
 
 ### Page map
-*Last updated: 2026-11-16*
+*Last updated: 2026-11-18 (pin availability GETs on INPUT, OUTPUT, CS, XPORT and CLOCK; SYS.PIN_STATE and SYS.PIN_CLAIMS). Previously 2026-11-16*
 
 | Page | Mnemonic | Holds | Commands, RP2040 / RP2350 release | Source |
 |---|---|---|---|---|
 | 0x00 | (none) | Nothing. Every request is refused, apart from the MS OS 2.0 descriptor request | 0 | |
-| 0x01 | `SYS` | Discovery, identity, device name, last result, bootloader, system and stream telemetry | 18 / 18 | `pages/sys.def`, `vc_page_sys.c` |
+| 0x01 | `SYS` | Discovery, identity, device name, last result, bootloader, system and stream telemetry, pin map | 20 / 20 | `pages/sys.def`, `vc_page_sys.c` |
 | 0x02 | `STORE` | Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters | 12 / 12 | `pages/store.def`, `vc_page_store.c` |
-| 0x03 | `INPUT` | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names | 13 / 17 | `pages/input.def`, `vc_page_input.c` |
-| 0x04 | `OUTPUT` | Output type and pins, output latency, ADAT TX, DAC hardware mute | 7 / 10 | `pages/output.def`, `vc_page_output.c` |
+| 0x03 | `INPUT` | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names | 15 / 20 | `pages/input.def`, `vc_page_input.c` |
+| 0x04 | `OUTPUT` | Output type and pins, output latency, ADAT TX, DAC hardware mute | 9 / 13 | `pages/output.def`, `vc_page_output.c` |
 | 0x05 | `ROUTE` | Matrix, per-output controls, delays, channel names, preamp, master and user volume | 15 / 15 | `pages/route.def`, `vc_page_route.c` |
 | 0x06 | `FILTER` | EQ and crossover bands, bypasses | 3 / 3 | `pages/filter.def`, `vc_page_filter.c` |
 | 0x07 | `DYN` | Limiter, leveller, loudness | 17 / 17 | `pages/dyn.def`, `vc_page_dyn.c` |
 | 0x08 | `FX` | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer | 41 / 57 | `pages/fx.def`, `vc_page_fx.c` |
 | 0x09 | `MEAS` | Level meters, clip flags, spectrum analyser, signal generator | 20 / 20 | `pages/meas.def`, `vc_page_meas.c` |
-| 0x0A | `CS` | Control Surfaces | 25 / 25 | `pages/cs.def`, `vc_page_cs.c` |
-| 0x0B | `XPORT` | UART and I2C control transports | 3 / 3 | `pages/xport.def`, `vc_page_xport.c` |
-| 0x0C | `CLOCK` | I2S clock pins and modes, MCK | 7 / 7 | `pages/clock.def`, `vc_page_clock.c` |
+| 0x0A | `CS` | Control Surfaces | 26 / 26 | `pages/cs.def`, `vc_page_cs.c` |
+| 0x0B | `XPORT` | UART and I2C control transports | 5 / 5 | `pages/xport.def`, `vc_page_xport.c` |
+| 0x0C | `CLOCK` | I2S clock pins and modes, MCK | 9 / 9 | `pages/clock.def`, `vc_page_clock.c` |
 | 0x0D-0x7F | | Unallocated, for future subsystems | | |
 | 0x80-0xDF | | Reserved | | |
 | 0xE0-0xEF | | Private use for forks and ports, never allocated upstream | | |
 | 0xF0 | `DIAG` | Bench and diagnostic commands with no stability promise | 0 / 0 (7 in bench builds) | `pages/diag.def`, `vc_page_diag.c` |
 | 0xF1-0xFF | | Reserved | | |
 
-Every page is at revision 1. Totals: 181 commands on RP2040 and 204 on RP2350 in release builds, 211 in the `.def` files. Paths are under `firmware/DSPi/vendor/`.
+Every page is at revision 1. Totals: 192 commands on RP2040 and 217 on RP2350 in release builds, 224 in the `.def` files. Paths are under `firmware/DSPi/vendor/`.
 
 ### Conventions
 *Last updated: 2026-11-16*

@@ -436,18 +436,18 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 
 | Page | Mnemonic | Revision | Commands | Description |
 |---|---|---|---|---|
-| 0x01 | `SYS` | 1 | 18 | Discovery, identity, device name, last result, bootloader, system and stream telemetry |
+| 0x01 | `SYS` | 1 | 20 | Discovery, identity, device name, last result, bootloader, system and stream telemetry |
 | 0x02 | `STORE` | 1 | 12 | Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters |
-| 0x03 | `INPUT` | 1 | 17 | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names |
-| 0x04 | `OUTPUT` | 1 | 10 | Output type and pins, output latency, ADAT TX, DAC hardware mute |
+| 0x03 | `INPUT` | 1 | 20 | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names |
+| 0x04 | `OUTPUT` | 1 | 13 | Output type and pins, output latency, ADAT TX, DAC hardware mute |
 | 0x05 | `ROUTE` | 1 | 15 | Matrix, per-output controls, delays, channel names, preamp, master and user volume |
 | 0x06 | `FILTER` | 1 | 3 | EQ and crossover bands, bypasses |
 | 0x07 | `DYN` | 1 | 17 | Limiter, leveller, loudness |
 | 0x08 | `FX` | 1 | 57 | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer |
 | 0x09 | `MEAS` | 1 | 20 | Level meters, clip flags, spectrum analyser, signal generator |
-| 0x0A | `CS` | 1 | 25 | Control Surfaces |
-| 0x0B | `XPORT` | 1 | 3 | UART and I2C control transports |
-| 0x0C | `CLOCK` | 1 | 7 | I2S clock pins and modes, MCK |
+| 0x0A | `CS` | 1 | 26 | Control Surfaces |
+| 0x0B | `XPORT` | 1 | 5 | UART and I2C control transports |
+| 0x0C | `CLOCK` | 1 | 9 | I2S clock pins and modes, MCK |
 | 0xF0 | `DIAG` | 1 | 7 | Bench and diagnostic commands with no stability promise |
 
 <!-- VC:END PAGES -->
@@ -482,6 +482,8 @@ Discovery, identity, the device name, the last result, the bootloader jump, and 
 | 0x44 | `PDM_STATS` | G | none | 16 | - |  | PDM ring overruns, ring underruns, DMA overruns, DMA underruns |
 | 0x45 | `SPDIF_TX_STATS` | G | none | 24 | - |  | USB audio packet gaps of 2 to 50 ms, total output DMA starvations, starvations of instances 0-3 |
 | 0x4F | `STATS_RESET` | S | none | - | 1 |  | Bitmask; bit 0 resets buffer watermarks and worst-gap fields |
+| 0x50 | `PIN_STATE` | G | none | 24 | - |  | Pin map generation, GPIO count, claim count, last restore substitutions, GPIO mask |
+| 0x51 | `PIN_CLAIMS` | G | none | var | - |  | Generation, entry count, then one 4-byte claim per pin use, sorted by GPIO |
 
 <!-- VC:END SYS -->
 
@@ -675,13 +677,16 @@ Input source selection, the S/PDIF, I2S and ADAT receivers, LG Sound Sync and th
 | 0x22 | `SPDIF_RX_PIN` | G, S | S/PDIF input | 1 | 1 | DEFERRED, RESTART | GPIO of one S/PDIF input; 0xFF restores its default |
 | 0x23 | `SPDIF_RX_ENABLE` | G, S | S/PDIF input | 1 | 1 |  | Enable of optional S/PDIF input 1-3 |
 | 0x24 | `SPDIF_RX_CONFIG` | G | none | 6 | - |  | Input count, enable mask over all inputs, then one GPIO per input |
+| 0x25 | `SPDIF_RX_PIN_AVAIL` | G | S/PDIF input | 24 | - |  | Pins one S/PDIF input could take: status, flags, generation, valid and free masks |
 | 0x30 | `I2S_RX_PIN` | G, S | I2S pair | 1 | 1 | DEFERRED, RESTART | Data GPIO of one I2S RX stereo pair; 0xFF restores its default |
 | 0x31 | `I2S_RX_CHANNELS` | G, S | none | 1 | 1 | DEFERRED, RESTART | I2S input channel count, 2, 4, 6 or 8 |
 | 0x32 | `I2S_RX_RATE` | G, S | none | 4 | 4 | DEFERRED, RESTART | Selected I2S and ADAT master rate in Hz: 44100, 48000 or 96000 |
+| 0x33 | `I2S_RX_PIN_AVAIL` | G | I2S pair | 24 | - |  | Pins one I2S RX pair could take: status, flags, generation, valid and free masks |
 | 0x40 | `ADAT_RX_ENABLE` | G, S | none | 1 | 1 |  | ADAT input enable (build: `PICO_RP2350` only) |
 | 0x41 | `ADAT_RX_PIN` | G, S | none | 1 | 1 | DEFERRED, RESTART | ADAT input GPIO; 0xFF clears it while the input is disabled (build: `PICO_RP2350` only) |
 | 0x42 | `ADAT_RX_CLOCK_MODE` | G, S | none | 1 | 1 | DEFERRED, RESTART | ADAT input clock mode, 0 master or 1 slave (build: `PICO_RP2350` only) |
 | 0x43 | `ADAT_RX_STATUS` | G | none | 20 | - |  | ADAT input status packet (build: `PICO_RP2350` only) |
+| 0x44 | `ADAT_RX_PIN_AVAIL` | G | none | 24 | - |  | Pins the ADAT input could take: status, flags, generation, valid and free masks (build: `PICO_RP2350` only) |
 | 0x50 | `LG_SOUND_SYNC_ENABLE` | G, S | none | 1 | 1 |  | LG Sound Sync decoding enable |
 | 0x51 | `LG_SOUND_SYNC_STATUS` | G | none | 16 | - |  | LG Sound Sync status packet |
 
@@ -808,14 +813,17 @@ The physical output bus. This page holds slot types and pins, output latency, th
 |---|---|---|---|---|---|---|---|
 | 0x10 | `TYPE` | G, S | output slot | 1 | 1 | DEFERRED, RESTART | Type of one output slot, 0 S/PDIF or 1 I2S |
 | 0x11 | `PIN` | G, S | pin output | 1 | 1 | DEFERRED, RESTART | GPIO of one pin output; 0xFF restores its default |
+| 0x12 | `PIN_AVAIL` | G | pin output | 24 | - |  | Pins one pin output could take: status, flags, generation, valid and free masks |
 | 0x20 | `LATENCY` | G, S | none | 1 | 1 | DEFERRED, FLASH, RESTART | Requested output latency option ID |
 | 0x21 | `LATENCY_STATUS` | G | none | 12 | - |  | Requested and effective latency, ring target, batch, pending flag, option count |
 | 0x22 | `LATENCY_OPTIONS` | G | none | var | - |  | Every latency option, 8 bytes each, with its effective latency now |
 | 0x30 | `ADAT_TX_ENABLE` | G, S | none | 1 | 1 | DEFERRED, RESTART | ADAT output enable (build: `PICO_RP2350` only) |
 | 0x31 | `ADAT_TX_PIN` | G, S | none | 1 | 1 | DEFERRED, RESTART | ADAT output GPIO; 0xFF restores the default (build: `PICO_RP2350` only) |
 | 0x32 | `ADAT_TX_STATUS` | G | none | 8 | - |  | ADAT output status packet (build: `PICO_RP2350` only) |
+| 0x33 | `ADAT_TX_PIN_AVAIL` | G | none | 24 | - |  | Pins the ADAT output could take: status, flags, generation, valid and free masks (build: `PICO_RP2350` only) |
 | 0x40 | `DAC_MUTE_CONFIG` | G, S | none | 16 | 16 | DEFERRED, FLASH, RESTART | DAC hardware mute pin, polarity and timing |
 | 0x41 | `DAC_MUTE_TEST` | S0 | none | - | 0 | DEFERRED, RESTART | Pulse the DAC hardware mute pin for about one second |
+| 0x42 | `DAC_MUTE_PIN_AVAIL` | G | none | 24 | - |  | Pins the DAC hardware mute could take: status, flags, generation, valid and free masks |
 
 <!-- VC:END OUTPUT -->
 
@@ -1532,6 +1540,7 @@ Control Surfaces bind physical controls and indicators on spare GPIOs (buttons, 
 | 0x19 | `REVERT` | S0 | none | - | 0 | DEFERRED | Discard the live preview and re-apply the stored configuration |
 | 0x20 | `BINDING` | G, S | CS slot | 24 | 24 | DEFERRED | One binding, live preview |
 | 0x21 | `SLOT_NAME` | G, S | CS slot | 32 | 1-32 | DEFERRED | Slot name, NUL padded; a single NUL clears it |
+| 0x22 | `BINDING_PIN_AVAIL` | G | `(CS type << 8) \| slot` | 80 | - |  | Pins a binding of one type in one slot could take: status, flags, generation, masks, shareable |
 | 0x30 | `IR_CMD` | G, S | CS sub-slot | 16 | 16 | DEFERRED | One IR command, live preview |
 | 0x31 | `IR_LEARN_STATUS` | G | none | 8 | - |  | Learn state, protocol and the last learned code |
 | 0x32 | `IR_LEARN_ARM` | S0 | none | - | 0 |  | Arm IR learn on the live receiver |
@@ -1769,6 +1778,8 @@ The UART and I2C control transports. Both ship disabled. Their configuration is 
 | 0x10 | `UART_CONFIG` | G, S | none | 8 | 8 | SET_USB_ONLY, DEFERRED, FLASH, RESTART | Stored UART control config; the apply result is in STATUS |
 | 0x11 | `I2C_CONFIG` | G, S | none | 8 | 8 | SET_USB_ONLY, DEFERRED, FLASH, RESTART | Stored I2C target control config; the apply result is in STATUS |
 | 0x12 | `STATUS` | G | none | 8 | - |  | Last apply result and live state of each control transport |
+| 0x13 | `UART_PIN_AVAIL` | G | none | 72 | - |  | UART TX and RX pins by instance: status, flags, generation, valid and free masks |
+| 0x14 | `I2C_PIN_AVAIL` | G | none | 72 | - |  | I2C SDA and SCL pins by instance: status, flags, generation, valid and free masks |
 
 <!-- VC:END XPORT -->
 
@@ -1816,9 +1827,11 @@ The I2S clock pins and clock mode, which I2S input and I2S output share, and the
 | 0x11 | `I2S_CLOCK_PIN_MODE` | G, S | none | 1 | 1 | DEFERRED, RESTART | 0 one clock pair for both modes, 1 a separate slave pair |
 | 0x12 | `I2S_CLOCK_MODE` | G, S | none | 1 | 1 | DEFERRED, RESTART | I2S clock mode, 0 master or 1 slave |
 | 0x13 | `I2S_SLAVE_STATUS` | G | none | 16 | - |  | I2S slave clock lock state and measured rate |
+| 0x14 | `I2S_BCK_PIN_AVAIL` | G | role 0-1 | 24 | - |  | BCK pins one clock pair could take (LRCLK is BCK + 1): status, flags, generation, valid and free masks |
 | 0x20 | `MCK_ENABLE` | G, S | none | 1 | 1 |  | MCK output enable |
 | 0x21 | `MCK_PIN` | G, S | none | 1 | 1 |  | MCK GPIO, a clk_gpout pin; 0xFF restores the default |
 | 0x22 | `MCK_MULTIPLIER` | G, S | none | 1 | 1 |  | MCK multiplier, 0 for 128x or 1 for 256x |
+| 0x23 | `MCK_PIN_AVAIL` | G | none | 24 | - |  | Pins MCK could take: status, flags, generation, valid and free masks |
 
 <!-- VC:END CLOCK -->
 
@@ -2189,9 +2202,11 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | ADAT_RX_CLOCK_MODE | [`INPUT.ADAT_RX_CLOCK_MODE`](#8-input-0x03) | `0x0342` | RP2350 only |
 | ADAT_RX_ENABLE | [`INPUT.ADAT_RX_ENABLE`](#8-input-0x03) | `0x0340` | RP2350 only |
 | ADAT_RX_PIN | [`INPUT.ADAT_RX_PIN`](#8-input-0x03) | `0x0341` | RP2350 only |
+| ADAT_RX_PIN_AVAIL | [`INPUT.ADAT_RX_PIN_AVAIL`](#8-input-0x03) | `0x0344` | RP2350 only |
 | ADAT_RX_STATUS | [`INPUT.ADAT_RX_STATUS`](#8-input-0x03) | `0x0343` | RP2350 only |
 | ADAT_TX_ENABLE | [`OUTPUT.ADAT_TX_ENABLE`](#9-output-0x04) | `0x0430` | RP2350 only |
 | ADAT_TX_PIN | [`OUTPUT.ADAT_TX_PIN`](#9-output-0x04) | `0x0431` | RP2350 only |
+| ADAT_TX_PIN_AVAIL | [`OUTPUT.ADAT_TX_PIN_AVAIL`](#9-output-0x04) | `0x0433` | RP2350 only |
 | ADAT_TX_STATUS | [`OUTPUT.ADAT_TX_STATUS`](#9-output-0x04) | `0x0432` | RP2350 only |
 | ALL_PARAMS | [`STORE.ALL_PARAMS`](#7-store-0x02) | `0x0240` |  |
 | ALL_PARAMS_CHUNK | [`STORE.ALL_PARAMS_CHUNK`](#7-store-0x02) | `0x0241` |  |
@@ -2201,6 +2216,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | BAND | [`FILTER.BAND`](#11-filter-0x06) | `0x0610` |  |
 | BAND_BYPASS | [`FILTER.BAND_BYPASS`](#11-filter-0x06) | `0x0611` |  |
 | BINDING | [`CS.BINDING`](#15-cs-0x0a) | `0x0A20` |  |
+| BINDING_PIN_AVAIL | [`CS.BINDING_PIN_AVAIL`](#15-cs-0x0a) | `0x0A22` |  |
 | BUFFER_STATS | [`SYS.BUFFER_STATS`](#6-sys-0x01) | `0x0142` |  |
 | BUILD_INFO | [`SYS.BUILD_INFO`](#6-sys-0x01) | `0x0122` |  |
 | CAPS | [`CS.CAPS`](#15-cs-0x0a) | `0x0A10` |  |
@@ -2218,6 +2234,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | CROSSFEED_OUTPUTS | [`FX.CROSSFEED_OUTPUTS`](#13-fx-0x08) | `0x0815` |  |
 | CROSSFEED_PRESET | [`FX.CROSSFEED_PRESET`](#13-fx-0x08) | `0x0811` |  |
 | DAC_MUTE_CONFIG | [`OUTPUT.DAC_MUTE_CONFIG`](#9-output-0x04) | `0x0440` |  |
+| DAC_MUTE_PIN_AVAIL | [`OUTPUT.DAC_MUTE_PIN_AVAIL`](#9-output-0x04) | `0x0442` |  |
 | DAC_MUTE_TEST | [`OUTPUT.DAC_MUTE_TEST`](#9-output-0x04) | `0x0441` |  |
 | DEVICE_NAME | [`SYS.DEVICE_NAME`](#6-sys-0x01) | `0x0124` |  |
 | DIRECTORY | [`STORE.DIRECTORY`](#7-store-0x02) | `0x0215` |  |
@@ -2231,11 +2248,14 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | FACTORY_RESET | [`STORE.FACTORY_RESET`](#7-store-0x02) | `0x0230` |  |
 | GROUP | [`CS.GROUP`](#15-cs-0x0a) | `0x0A40` |  |
 | I2C_CONFIG | [`XPORT.I2C_CONFIG`](#16-xport-0x0b) | `0x0B11` |  |
+| I2C_PIN_AVAIL | [`XPORT.I2C_PIN_AVAIL`](#16-xport-0x0b) | `0x0B14` |  |
 | I2S_BCK_PIN | [`CLOCK.I2S_BCK_PIN`](#17-clock-0x0c) | `0x0C10` |  |
+| I2S_BCK_PIN_AVAIL | [`CLOCK.I2S_BCK_PIN_AVAIL`](#17-clock-0x0c) | `0x0C14` |  |
 | I2S_CLOCK_MODE | [`CLOCK.I2S_CLOCK_MODE`](#17-clock-0x0c) | `0x0C12` |  |
 | I2S_CLOCK_PIN_MODE | [`CLOCK.I2S_CLOCK_PIN_MODE`](#17-clock-0x0c) | `0x0C11` |  |
 | I2S_RX_CHANNELS | [`INPUT.I2S_RX_CHANNELS`](#8-input-0x03) | `0x0331` |  |
 | I2S_RX_PIN | [`INPUT.I2S_RX_PIN`](#8-input-0x03) | `0x0330` |  |
+| I2S_RX_PIN_AVAIL | [`INPUT.I2S_RX_PIN_AVAIL`](#8-input-0x03) | `0x0333` |  |
 | I2S_RX_RATE | [`INPUT.I2S_RX_RATE`](#8-input-0x03) | `0x0332` |  |
 | I2S_SLAVE_STATUS | [`CLOCK.I2S_SLAVE_STATUS`](#17-clock-0x0c) | `0x0C13` |  |
 | IR_CMD | [`CS.IR_CMD`](#15-cs-0x0a) | `0x0A30` |  |
@@ -2285,6 +2305,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | MCK_ENABLE | [`CLOCK.MCK_ENABLE`](#17-clock-0x0c) | `0x0C20` |  |
 | MCK_MULTIPLIER | [`CLOCK.MCK_MULTIPLIER`](#17-clock-0x0c) | `0x0C22` |  |
 | MCK_PIN | [`CLOCK.MCK_PIN`](#17-clock-0x0c) | `0x0C21` |  |
+| MCK_PIN_AVAIL | [`CLOCK.MCK_PIN_AVAIL`](#17-clock-0x0c) | `0x0C23` |  |
 | NOUN_DESC | [`CS.NOUN_DESC`](#15-cs-0x0a) | `0x0A11` |  |
 | OUTPUT_CONFIG_MODE | [`STORE.OUTPUT_CONFIG_MODE`](#7-store-0x02) | `0x0220` |  |
 | OUTPUT_CONFIG_SAVE | [`STORE.OUTPUT_CONFIG_SAVE`](#7-store-0x02) | `0x0221` |  |
@@ -2297,6 +2318,9 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | PAGE_LIST | [`SYS.PAGE_LIST`](#6-sys-0x01) | `0x0111` |  |
 | PDM_STATS | [`SYS.PDM_STATS`](#6-sys-0x01) | `0x0144` |  |
 | PIN | [`OUTPUT.PIN`](#9-output-0x04) | `0x0411` |  |
+| PIN_AVAIL | [`OUTPUT.PIN_AVAIL`](#9-output-0x04) | `0x0412` |  |
+| PIN_CLAIMS | [`SYS.PIN_CLAIMS`](#6-sys-0x01) | `0x0151` |  |
+| PIN_STATE | [`SYS.PIN_STATE`](#6-sys-0x01) | `0x0150` |  |
 | PIPELINE_STATS | [`SYS.PIPELINE_STATS`](#6-sys-0x01) | `0x0143` |  |
 | PLATFORM | [`SYS.PLATFORM`](#6-sys-0x01) | `0x0120` |  |
 | PREAMP | [`ROUTE.PREAMP`](#10-route-0x05) | `0x0540` |  |
@@ -2340,6 +2364,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | SPDIF_RX_CONFIG | [`INPUT.SPDIF_RX_CONFIG`](#8-input-0x03) | `0x0324` |  |
 | SPDIF_RX_ENABLE | [`INPUT.SPDIF_RX_ENABLE`](#8-input-0x03) | `0x0323` |  |
 | SPDIF_RX_PIN | [`INPUT.SPDIF_RX_PIN`](#8-input-0x03) | `0x0322` |  |
+| SPDIF_RX_PIN_AVAIL | [`INPUT.SPDIF_RX_PIN_AVAIL`](#8-input-0x03) | `0x0325` |  |
 | SPDIF_RX_STATUS | [`INPUT.SPDIF_RX_STATUS`](#8-input-0x03) | `0x0320` |  |
 | SPDIF_TX_STATS | [`SYS.SPDIF_TX_STATS`](#6-sys-0x01) | `0x0145` |  |
 | STARTUP | [`STORE.STARTUP`](#7-store-0x02) | `0x0216` |  |
@@ -2378,6 +2403,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | TUBE_XFMR_RES | [`FX.TUBE_XFMR_RES`](#13-fx-0x08) | `0x086B` |  |
 | TYPE | [`OUTPUT.TYPE`](#9-output-0x04) | `0x0410` |  |
 | UART_CONFIG | [`XPORT.UART_CONFIG`](#16-xport-0x0b) | `0x0B10` |  |
+| UART_PIN_AVAIL | [`XPORT.UART_PIN_AVAIL`](#16-xport-0x0b) | `0x0B13` |  |
 | UPMIX_ATTACK | [`FX.UPMIX_ATTACK`](#13-fx-0x08) | `0x0896` | RP2350 only |
 | UPMIX_CENTER_MODE | [`FX.UPMIX_CENTER_MODE`](#13-fx-0x08) | `0x0891` | RP2350 only |
 | UPMIX_CENTER_WIDTH | [`FX.UPMIX_CENTER_WIDTH`](#13-fx-0x08) | `0x0894` | RP2350 only |

@@ -50,26 +50,14 @@
 #include "flash_storage.h"     /* dir_cache, flash_storage_mark_directory_dirty */
 #include "notify.h"            /* notify_param_write */
 #include "bulk_params.h"       /* WireBulkParams offsets */
-#include "uart_control.h"      /* uart_ctrl_owns_pin */
-#include "i2c_control.h"       /* i2c_ctrl_owns_pin */
+#include "vc_pins.h"           /* pin_check */
 
 #include "hardware/gpio.h"
 #include "pico/time.h"         /* time_us_64 */
 
-#include "audio_input.h"       /* i2s_clock_pin_claimed() */
-
 #include <stddef.h>
 #include <string.h>
 
-#include "audio_input.h"       /* spdif_rx_pin(_ext), spdif_input_enabled, adat_input_* */
-#include "adat_output.h"       /* adat_output_config_enabled, adat_output_pin */
-
-/* External pin-conflict state lives in usb_audio.c and the input/output modules.
- * Imported here only for validation; we never write these. */
-extern uint8_t output_pins[];
-extern uint8_t i2s_bck_pin;
-extern uint8_t i2s_mck_pin;
-extern bool    i2s_mck_enabled;
 
 /* ----------------------------------------------------------------- */
 /* File-scope state                                                   */
@@ -134,55 +122,6 @@ static inline bool muted_level(void) {
 /* Compute the un-muted (idle) level for the configured polarity. */
 static inline bool unmuted_level(void) {
     return s_cfg.active_low ? true : false;
-}
-
-/* Platform-aware GPIO range check.  Mirrors is_valid_gpio_pin() in
- * vendor/vc_pins.c without forcing a circular include. */
-static inline bool gpio_in_range(uint8_t pin) {
-#ifdef DSPI_PLATFORM_PINS
-    return dspi_platform_pin_valid(DSPI_PIN_FN_DAC_MUTE, pin);
-#elif PICO_RP2350
-    return pin <= 47;
-#else
-    return pin <= 29;
-#endif
-}
-
-/* Return true if `pin` collides with any non-mute pin currently in
- * use by another subsystem.  Mirrors the dependency graph in
- * vendor/vc_pins.c's is_pin_in_use() but excludes mute pins (those
- * collisions are checked separately as part of the duplicate-check
- * inside the cfg's pin field).  Done as a private helper because the public
- * is_pin_in_use() includes mute pins, and using it here would
- * deadlock the validation logic (rejecting a pin we're about to
- * claim because we already claim it). */
-static bool collides_with_other_subsystem(uint8_t pin) {
-    /* SPDIF / I2S output pins */
-    for (int i = 0; i < NUM_PIN_OUTPUTS; i++) {
-        if (output_pins[i] == pin) return true;
-    }
-    /* I2S clock pair(s) if any slot is I2S; both pairs in SPLIT pin mode */
-    extern uint8_t output_types[];
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (output_types[i] == OUTPUT_TYPE_I2S) {
-            if (i2s_clock_pin_claimed(pin)) return true;
-            break;
-        }
-    }
-    /* MCK pin (only when MCK enabled) */
-    if (i2s_mck_enabled && pin == i2s_mck_pin) return true;
-    /* SPDIF RX (input 1 always; optional inputs only while enabled) */
-    if (pin == spdif_rx_pin) return true;
-    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++)
-        if (spdif_input_enabled(i) && pin == spdif_rx_pin_for_index(i)) return true;
-    /* Live UART / I2C control interface pins */
-    if (uart_ctrl_owns_pin(pin) || i2c_ctrl_owns_pin(pin)) return true;
-#if PICO_RP2350
-    /* ADAT output and input, only while enabled */
-    if (adat_output_config_enabled() && pin == adat_output_pin()) return true;
-    if (adat_input_enabled && pin == adat_input_pin) return true;
-#endif
-    return false;
 }
 
 /* Drive the configured mute pin to `level`.  Used by refresh_pin_assertion()
@@ -316,42 +255,32 @@ void dac_hw_mute_init(const DacHwMuteConfig *cfg) {
     refresh_pin_assertion();
 }
 
-uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg) {
-    if (!cfg) return PIN_CONFIG_INVALID_OUTPUT;
+bool dac_hw_mute_scalars_valid(const DacHwMuteConfig *cfg) {
+    if (cfg->enabled == 0) return true;
+    return cfg->active_low <= 1 &&
+           cfg->hold_ms >= DAC_HW_MUTE_HOLD_MS_MIN && cfg->hold_ms <= DAC_HW_MUTE_HOLD_MS_MAX &&
+           cfg->release_ms <= DAC_HW_MUTE_RELEASE_MS_MAX;
+}
 
-    /* When disabling, just release and zero-out — no other validation
-     * needed.  enabled==0 is always accepted. */
-    if (cfg->enabled == 0) {
-        dac_hw_mute_init(cfg);
-        preset_set_dac_hw_mute(cfg);
-        notify_param_write(offsetof(WireBulkParams, dac_hw_mute),
-                           sizeof(DacHwMuteConfig), cfg);
-        return PIN_CONFIG_SUCCESS;
-    }
+uint8_t dac_hw_mute_validate(const DacHwMuteConfig *cfg) {
+    if (!cfg || !dac_hw_mute_scalars_valid(cfg)) return PIN_CONFIG_INVALID_OUTPUT;
+    if (cfg->pin == DAC_HW_MUTE_PIN_NONE) return PIN_CONFIG_SUCCESS;
+    // A disabled mute stores its pin as a preference; only an enabled one claims it.
+    PinRequest rq = { PIN_FN_DAC_MUTE, 0, { cfg->pin, 0xFF } };
+    return pin_check(pin_state_live(), &rq, cfg->enabled ? PIN_CHECK_CLAIM : PIN_CHECK_STORE);
+}
 
-    /* Range checks on scalar fields */
-    if (cfg->active_low > 1) return PIN_CONFIG_INVALID_OUTPUT;
-    if (cfg->hold_ms < DAC_HW_MUTE_HOLD_MS_MIN ||
-        cfg->hold_ms > DAC_HW_MUTE_HOLD_MS_MAX) {
-        return PIN_CONFIG_INVALID_OUTPUT;
-    }
-    if (cfg->release_ms > DAC_HW_MUTE_RELEASE_MS_MAX) {
-        return PIN_CONFIG_INVALID_OUTPUT;
-    }
-
-    /* Pin validation: in-range + no collision with other subsystems.
-     * No duplicate check needed — there is only one pin to claim. */
-    if (cfg->pin != DAC_HW_MUTE_PIN_NONE) {
-        if (!gpio_in_range(cfg->pin)) return PIN_CONFIG_INVALID_PIN;
-        if (collides_with_other_subsystem(cfg->pin)) return PIN_CONFIG_PIN_IN_USE;
-    }
-
-    /* All validation passed — apply live, persist to directory,
-     * notify other hosts. */
+void dac_hw_mute_commit(const DacHwMuteConfig *cfg) {
     dac_hw_mute_init(cfg);
     preset_set_dac_hw_mute(cfg);
     notify_param_write(offsetof(WireBulkParams, dac_hw_mute),
                        sizeof(DacHwMuteConfig), cfg);
+}
+
+uint8_t dac_hw_mute_set_config(const DacHwMuteConfig *cfg) {
+    uint8_t st = dac_hw_mute_validate(cfg);
+    if (st != PIN_CONFIG_SUCCESS) return st;
+    dac_hw_mute_commit(cfg);
     return PIN_CONFIG_SUCCESS;
 }
 

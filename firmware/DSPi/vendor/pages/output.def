@@ -4,6 +4,8 @@ VC_CMD(0x10, TYPE, output_type_get, output_type_set,
        SLOT, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "Type of one output slot, 0 S/PDIF or 1 I2S")
 VC_CMD(0x11, PIN, output_pin_get, output_pin_set,
        PIN_OUTPUT, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "GPIO of one pin output; 0xFF restores its default")
+VC_CMD(0x12, PIN_AVAIL, output_pin_avail_get, VC_NONE,
+       PIN_OUTPUT, 24, 0, 0, 0, 0, "Pins one pin output could take: status, flags, generation, valid and free masks")
 
 VC_CMD(0x20, LATENCY, output_latency_get_h, output_latency_set_h,
        NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "Requested output latency option ID")
@@ -19,9 +21,13 @@ VC_CMD(0x31, ADAT_TX_PIN, output_adat_tx_pin_get, output_adat_tx_pin_set,
        NONE, 1, 1, 1, VC_F_DEFERRED | VC_F_RESTART, 0, "ADAT output GPIO; 0xFF restores the default")
 VC_CMD(0x32, ADAT_TX_STATUS, output_adat_tx_status_get, VC_NONE,
        NONE, 8, 0, 0, 0, 0, "ADAT output status packet")
+VC_CMD(0x33, ADAT_TX_PIN_AVAIL, output_adat_tx_pin_avail_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Pins the ADAT output could take: status, flags, generation, valid and free masks")
 #endif
 
 VC_CMD(0x40, DAC_MUTE_CONFIG, output_dac_mute_config_get, output_dac_mute_config_set,
        NONE, 16, 16, 16, VC_F_DEFERRED | VC_F_FLASH | VC_F_RESTART, 0, "DAC hardware mute pin, polarity and timing")
 VC_CMD(0x41, DAC_MUTE_TEST, VC_NONE, output_dac_mute_test_set,
        NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_RESTART, 0, "Pulse the DAC hardware mute pin for about one second")
+VC_CMD(0x42, DAC_MUTE_PIN_AVAIL, output_dac_mute_pin_avail_get, VC_NONE,
+       NONE, 24, 0, 0, 0, 0, "Pins the DAC hardware mute could take: status, flags, generation, valid and free masks")

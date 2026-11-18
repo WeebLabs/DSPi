@@ -177,19 +177,6 @@ static inline uint8_t i2s_effective_bck_pin(void) {
                                                     : i2s_bck_pin;
 }
 
-// True if `pin` is one of the configured I2S clock GPIOs: the master/unified
-// BCK/LRCLK pair, plus the slave pair when SPLIT mode is configured.  Used by
-// the "clock pins are always claimed" validation sites so nothing else can be
-// assigned onto a pair the next mode switch will drive or listen on.
-static inline bool i2s_clock_pin_claimed(uint8_t pin) {
-    extern uint8_t i2s_bck_pin;
-    if (pin == i2s_bck_pin || pin == (uint8_t)(i2s_bck_pin + 1)) return true;
-    if (i2s_clock_pin_mode == I2S_CLOCK_PIN_MODE_SPLIT &&
-        (pin == i2s_bck_pin_slave || pin == (uint8_t)(i2s_bck_pin_slave + 1)))
-        return true;
-    return false;
-}
-
 // True when I2S slave clocking is in force (SLAVE selected AND I2S is the
 // active input source)
 static inline bool i2s_slave_mode_active(void) {
@@ -295,51 +282,6 @@ static inline bool input_source_selectable(uint8_t src) {
 static inline uint8_t spdif_rx_active_pin(void) {
     return spdif_rx_pin_for_index(spdif_index_for_source(active_input_source));
 }
-
-// Validate a proposed I2S RX data-pin set (the first `n_pairs` entries of
-// `pins[]` are the pairs that will be active) against the effective `bck_pin`:
-// each active pin must be a valid GPIO, not a clock pin (BCK/LRCLK), not used by
-// a fixed peripheral, and mutually distinct.  The bulk/preset restore paths use
-// this to reject an inconsistent pushed/stored I2S config as a unit before it
-// can reach i2s_input_start().  Defined in vendor/vc_pins.c (alongside the
-// other pin helpers); declared here so the restore paths need no vendor header.
-// bck2_pin: secondary (slave-pair) clock base when SPLIT clock-pin mode is in
-// force, or 0xFF for none.
-bool i2s_rx_pin_set_acceptable(const uint8_t *pins, uint8_t n_pairs,
-                               uint8_t bck_pin, uint8_t bck2_pin);
-
-// True if `bck_pin` (LRCLK = bck_pin + 1) is acceptable as the I2S clock pair:
-// both valid GPIOs and neither colliding with a fixed peripheral.  The
-// bulk/preset restore paths use this to reject a pushed/stored BCK they would
-// otherwise install raw (BCK/LRCLK are clock OUTPUTS — a collision is driver
-// contention and an invalid GPIO can fault pio_gpio_init()).  Defined in
-// vendor/vc_pins.c; declared here for the same reason as above.
-bool i2s_bck_pin_acceptable(uint8_t bck_pin);
-// The same check for the SPLIT-mode slave pair. A DSPI_PLATFORM_PINS build applies the platform's
-// slave-pair rule; the RP2040 and RP2350 check both pairs alike.
-#ifdef DSPI_PLATFORM_PINS
-bool i2s_bck_slave_pin_acceptable(uint8_t bck_pin);
-#define I2S_BCK_SLAVE_PIN_ACCEPTABLE(bck_pin) i2s_bck_slave_pin_acceptable(bck_pin)
-#else
-#define I2S_BCK_SLAVE_PIN_ACCEPTABLE(bck_pin) i2s_bck_pin_acceptable(bck_pin)
-#endif
-
-// True if a restored, enabled MCK may drive `pin` (no other fixed-peripheral
-// owner; MCK's own claim ignored).  Defined in vendor/vc_pins.c.
-bool i2s_mck_pin_acceptable(uint8_t pin);
-
-// True if SPDIF input `idx` (1..SPDIF_RX_NUM_INPUTS-1) could be enabled right now: its configured
-// GPIO is valid and not claimed by any other function.  Defined in
-// vendor/vc_pins.c (alongside the other pin helpers); declared here so the
-// bulk/preset restore paths can validate a stored enable before applying it.
-bool spdif_input_enable_acceptable(uint8_t idx);
-
-// True if `pin` could be the ADAT input (RX) GPIO right now: valid GPIO and
-// either the ADAT output's configured pin (the supported loopback self-test,
-// since the RX only listens) or not claimed by any other function.  Defined in
-// vendor/vc_pins.c (RP2350 only); declared here so the bulk/preset restore
-// paths can validate a stored ADAT input pin before applying it.
-bool adat_input_pin_acceptable(uint8_t pin);
 
 // I2S input rate wire/flash encoding (1 byte): 0 = 44100, 1 = 48000,
 // 2 = 96000. Unknown values decode to 48000.

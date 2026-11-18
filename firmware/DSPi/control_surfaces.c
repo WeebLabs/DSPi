@@ -1620,6 +1620,78 @@ static uint8_t cs_validate_values(const CsBinding *b, const CsNounDesc *nd) {
     return PIN_CONFIG_SUCCESS;
 }
 
+// True if another active binding, or mid-revert a binding the stored config is about
+// to reclaim, holds `pin`.
+static bool cs_pin_held(uint8_t pin, uint8_t except_slot);
+
+// One pin of a binding of `type` in `slot`, validity only: the pin class, the platform
+// rule, the SDA/SCL role of a display, and the PWM slice the soft VCXO paces on.
+static uint8_t cs_pin_valid(uint8_t type, uint8_t role, uint8_t pin) {
+    const CsTypeDesc *td = &s_caps.types[type];
+    if (td->pin_class == CS_PINCLASS_ADC &&
+        (pin < CS_ADC_PIN_FIRST || pin > CS_ADC_PIN_LAST))
+        return CS_STATUS_PIN_NOT_ADC;
+#ifdef DSPI_PLATFORM_PINS
+    if (!dspi_platform_cs_pin_valid(type, pin)) return PIN_CONFIG_INVALID_PIN;
+#endif
+    if (!is_valid_gpio_pin(pin)) return PIN_CONFIG_INVALID_PIN;
+#ifndef DSPI_PLATFORM_PINS
+    // A platform build judges the SDA/SCL pair as a unit in the display container.
+    if (type == CS_TYPE_DISPLAY && !pin_role_valid(PIN_FN_I2C_CTRL, role, pin))
+        return CS_STATUS_PIN_NOT_I2C;
+#endif
+    // Its wrap/clkdiv are the clock servo; an LED setup would corrupt them. On RP2350
+    // no bondable GPIO maps to that slice, so the check is a no-op there.
+    if (cs_type_is_pwm(type) && pwm_gpio_to_slice_num(pin) == SOFT_VCXO_PWM_SLICE)
+        return CS_STATUS_PWM_CONFLICT;
+    return PIN_CONFIG_SUCCESS;
+}
+
+// Returned only to the availability query: the pin is held by button bindings alone.
+#define CS_PIN_SHAREABLE 0xFEu
+
+// Validity, then conflicts: other functions (vc_pins.c), other bindings, PWM slice
+// outputs, and the I2C block the control target holds. `nb` carries the event and
+// invert sense a button share needs; NULL asks only whether a share is possible.
+static uint8_t cs_pin_status(uint8_t type, uint8_t role, uint8_t pin, uint8_t slot,
+                             const CsBinding *nb, const PinState *st) {
+    uint8_t v = cs_pin_valid(type, role, pin);
+    if (v != PIN_CONFIG_SUCCESS) return v;
+    if (pin_conflicts(st, PIN_FN_CS, slot, pin)) return PIN_CONFIG_PIN_IN_USE;
+    if (cs_pin_held(pin, slot)) {
+        if (type != CS_TYPE_BUTTON) return PIN_CONFIG_PIN_IN_USE;
+        if (!nb) {
+            for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+                if (s == slot || !s_rt[s].active) continue;
+                const CsBinding *o = &s_cfg.bindings[s];
+                for (int i = 0; i < cs_pin_count(o->type); i++)
+                    if (o->gpio[i] == pin && o->type != CS_TYPE_BUTTON) return PIN_CONFIG_PIN_IN_USE;
+            }
+            return CS_PIN_SHAREABLE;
+        }
+        uint8_t sh = cs_check_button_share(nb, slot);
+        if (sh != PIN_CONFIG_SUCCESS) return sh;
+    }
+    // Two PWM outputs on different GPIOs can still share one slice output
+    // (e.g. GPIO 0 and 16 are both slice 0 channel A on RP2040).
+    if (cs_type_is_pwm(type)) {
+        uint slice = pwm_gpio_to_slice_num(pin);
+        uint chan  = pwm_gpio_to_channel(pin);
+        for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+            if (s == slot || !s_rt[s].active) continue;
+            const CsBinding *o = &s_cfg.bindings[s];
+            if (cs_type_is_pwm(o->type) &&
+                pwm_gpio_to_slice_num(o->gpio[0]) == slice &&
+                pwm_gpio_to_channel(o->gpio[0]) == chan)
+                return CS_STATUS_PWM_CONFLICT;
+        }
+    }
+    if (type == CS_TYPE_DISPLAY &&
+        pin_i2c_instance_taken(st, PIN_FN_CS) == (int)pin_pair_group(PIN_FN_I2C_CTRL, pin))
+        return CS_STATUS_I2C_IN_USE;
+    return PIN_CONFIG_SUCCESS;
+}
+
 // The IR binding is a container: the receiver pin and its idle sense are
 // the only payload; nouns/actions belong to the commands.
 static uint8_t cs_validate_ir_container(const CsBinding *b, uint8_t slot) {
@@ -1655,12 +1727,10 @@ static uint8_t cs_validate_display_container(const CsBinding *b, uint8_t slot) {
     if (!dspi_platform_pin_pair_valid(DSPI_PIN_FN_CS_DISPLAY, b->gpio[0], b->gpio[1]))
         return CS_STATUS_PIN_NOT_I2C;
 #else
-    if ((b->gpio[0] & 1) != 0 || (b->gpio[1] & 1) != 1 ||
-        ((b->gpio[0] >> 1) & 1) != ((b->gpio[1] >> 1) & 1))
+    // Per-pin SDA/SCL roles are judged by cs_pin_status(); this is the pairing.
+    if (pin_pair_group(PIN_FN_I2C_CTRL, b->gpio[0]) != pin_pair_group(PIN_FN_I2C_CTRL, b->gpio[1]))
         return CS_STATUS_PIN_NOT_I2C;
 #endif
-    if (i2c_ctrl_live_instance() == (int)((b->gpio[0] >> 1) & 1))
-        return CS_STATUS_I2C_IN_USE;
     for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
         if (s == slot || !s_rt[s].active) continue;
         if (s_cfg.bindings[s].type == CS_TYPE_DISPLAY)
@@ -1777,42 +1847,10 @@ static uint8_t cs_validate(const CsBinding *b, uint8_t slot) {
     // is several button bindings sharing a GPIO with distinct events.
     uint8_t n = td->pin_count;
     if (n == 2 && b->gpio[0] == b->gpio[1]) return PIN_CONFIG_INVALID_PIN;
+    const PinState *st = pin_state_live();
     for (int i = 0; i < n; i++) {
-        uint8_t pin = b->gpio[i];
-        if (td->pin_class == CS_PINCLASS_ADC &&
-            (pin < CS_ADC_PIN_FIRST || pin > CS_ADC_PIN_LAST))
-            return CS_STATUS_PIN_NOT_ADC;
-#ifdef DSPI_PLATFORM_PINS
-        if (!dspi_platform_cs_pin_valid(b->type, pin)) return PIN_CONFIG_INVALID_PIN;
-#endif
-        if (control_surfaces_owns_pin(pin)) {
-            if (b->type != CS_TYPE_BUTTON) return PIN_CONFIG_PIN_IN_USE;
-            uint8_t st = cs_check_button_share(b, slot);
-            if (st != PIN_CONFIG_SUCCESS) return st;
-        } else {
-            uint8_t st = ctrl_iface_check_pin(pin);
-            if (st != PIN_CONFIG_SUCCESS) return st;
-        }
-    }
-
-    // PWM outputs on different GPIOs can still land on the same PWM slice
-    // output (e.g. GPIO 0 and 16 are both slice 0 channel A on RP2040).
-    if (cs_type_is_pwm(b->type)) {
-        uint slice = pwm_gpio_to_slice_num(b->gpio[0]);
-        uint chan  = pwm_gpio_to_channel(b->gpio[0]);
-        // Reject the slice the soft VCXO paces on; its wrap/clkdiv are the
-        // clock servo and an LED setup here would corrupt them.  On RP2350 no
-        // bondable GPIO maps to slice 8, so this is a no-op there; kept
-        // unconditional for uniformity.
-        if (slice == SOFT_VCXO_PWM_SLICE) return CS_STATUS_PWM_CONFLICT;
-        for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
-            if (s == slot || !s_rt[s].active) continue;
-            const CsBinding *o = &s_cfg.bindings[s];
-            if (cs_type_is_pwm(o->type) &&
-                pwm_gpio_to_slice_num(o->gpio[0]) == slice &&
-                pwm_gpio_to_channel(o->gpio[0]) == chan)
-                return CS_STATUS_PWM_CONFLICT;
-        }
+        uint8_t ps = cs_pin_status(b->type, (uint8_t)i, b->gpio[i], slot, b, st);
+        if (ps != PIN_CONFIG_SUCCESS) return ps;
     }
     return PIN_CONFIG_SUCCESS;
 }
@@ -2335,14 +2373,8 @@ static const CsBinding *cs_reverted_binding(uint8_t slot);
 // the reload validates against live bindings only, as at boot.
 static bool s_rl_in_unit;
 
-bool control_surfaces_owns_pin(uint8_t pin) {
-    for (int s = 0; s < CS_MAX_BINDINGS; s++) {
-        if (!s_rt[s].active) continue;
-        const CsBinding *b = &s_cfg.bindings[s];
-        for (int i = 0; i < cs_pin_count(b->type); i++)
-            if (b->gpio[i] == pin) return true;
-    }
-    // Mid-revert, a pin the stored config is about to reclaim is not free.
+static bool cs_pin_held(uint8_t pin, uint8_t except_slot) {
+    if (cs_pin_used_by_other(pin, except_slot)) return true;
     if (control_surfaces_busy() && !s_rl_in_unit) {
         for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
             const CsBinding *b = cs_reverted_binding(s);
@@ -2351,6 +2383,68 @@ bool control_surfaces_owns_pin(uint8_t pin) {
         }
     }
     return false;
+}
+
+void control_surfaces_add_pin_claims(PinState *st) {
+    for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+        const CsBinding *b = &s_cfg.bindings[s];
+        uint8_t state = s_rt[s].active ? PIN_CLAIM_ACTIVE : PIN_CLAIM_STORED;
+        for (int i = 0; i < cs_pin_count(b->type); i++)
+            pin_state_add(st, b->gpio[i], PIN_FN_CS, s, (uint8_t)i, state, b->type);
+    }
+    // Mid-revert, the pins the stored config is about to reclaim are not free.
+    if (control_surfaces_busy() && !s_rl_in_unit) {
+        for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+            const CsBinding *b = cs_reverted_binding(s);
+            for (int i = 0; i < cs_pin_count(b->type); i++)
+                pin_state_add(st, b->gpio[i], PIN_FN_CS, s, (uint8_t)i, PIN_CLAIM_ACTIVE, b->type);
+        }
+    }
+}
+
+void control_surfaces_pin_avail(uint8_t slot, uint8_t type, PinAvail *a) {
+    memset(a, 0, sizeof(*a));
+    if (control_surfaces_busy()) {
+        a->status = CS_STATUS_BUSY;
+    } else {
+        for (uint8_t s = 0; s < CS_MAX_BINDINGS; s++) {
+            if (s == slot || !s_rt[s].active) continue;
+            if (type == CS_TYPE_IR && s_cfg.bindings[s].type == CS_TYPE_IR)
+                a->status = CS_STATUS_IR_IN_USE;
+            if (type == CS_TYPE_DISPLAY && s_cfg.bindings[s].type == CS_TYPE_DISPLAY)
+                a->status = CS_STATUS_DISPLAY_IN_USE;
+        }
+    }
+    const PinState *st = pin_state_live();
+    const CsBinding *cur = &s_cfg.bindings[slot];
+    if (s_rt[slot].active) a->flags |= PIN_AVAIL_IN_USE;
+    a->roles = cs_pin_count(type);
+#ifdef DSPI_PLATFORM_PINS
+    a->groups = 1;
+#else
+    a->groups = (type == CS_TYPE_DISPLAY) ? 2 : 1;
+#endif
+    if (cur->type == type) {
+        bool ok = true;
+        for (int i = 0; i < a->roles; i++)
+            if (cs_pin_status(type, (uint8_t)i, cur->gpio[i], slot, cur, st) != PIN_CONFIG_SUCCESS) ok = false;
+        if (ok && a->roles) a->flags |= PIN_AVAIL_START_OK;
+    } else {
+        a->flags |= PIN_AVAIL_UNASSIGNED;
+    }
+    uint8_t n = pin_gpio_count();
+    if (n > 64) n = 64;
+    for (uint8_t g = 0; g < n; g++) {
+        uint64_t bit = (uint64_t)1 << g;
+        for (uint8_t r = 0; r < a->roles; r++) {
+            if (cs_pin_valid(type, r, g) != PIN_CONFIG_SUCCESS) continue;
+            uint8_t grp = (a->groups == 2) ? pin_pair_group(PIN_FN_I2C_CTRL, g) : 0;
+            a->valid[grp][r] |= bit;
+            uint8_t ps = cs_pin_status(type, r, g, slot, NULL, st);
+            if (ps == PIN_CONFIG_SUCCESS)    a->free[grp][r] |= bit;
+            else if (ps == CS_PIN_SHAREABLE) a->shareable |= bit;
+        }
+    }
 }
 
 // Re-check everything addressing aux slot `slot` after its type changed:

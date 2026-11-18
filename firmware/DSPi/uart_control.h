@@ -61,8 +61,8 @@ uint8_t uart_ctrl_validate(const UartCtrlConfig *cfg);
 // blocks; safe to call every loop iteration.
 void uart_ctrl_poll(void);
 
-// True iff the interface is live and `pin` is its TX or RX GPIO.
-bool uart_ctrl_owns_pin(uint8_t pin);
+// The config last applied (its pins are claimed only while live). Returns live.
+bool uart_ctrl_live_config(UartCtrlConfig *out);
 
 // True iff the peripheral is up and listening.
 bool uart_ctrl_is_live(void);

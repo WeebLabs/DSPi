@@ -20,6 +20,8 @@ VC_CMD(0x20, BINDING, cs_binding_get, cs_binding_set,
        CS_SLOT, 24, 24, 24, VC_F_DEFERRED, 0, "One binding, live preview")
 VC_CMD(0x21, SLOT_NAME, cs_slot_name_get, cs_slot_name_set,
        CS_SLOT, 32, 1, 32, VC_F_DEFERRED, 0, "Slot name, NUL padded; a single NUL clears it")
+VC_CMD(0x22, BINDING_PIN_AVAIL, cs_binding_pin_avail_get, VC_NONE,
+       CS_SLOT_TYPE, 80, 0, 0, 0, 0, "Pins a binding of one type in one slot could take: status, flags, generation, masks, shareable")
 
 VC_CMD(0x30, IR_CMD, cs_ir_cmd_get, cs_ir_cmd_set,
        CS_SUB, 16, 16, 16, VC_F_DEFERRED, 0, "One IR command, live preview")

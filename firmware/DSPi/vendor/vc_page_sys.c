@@ -15,6 +15,7 @@
 #include "bg_job.h"
 #include "input_source_names.h"
 #include "notify.h"
+#include "vc_pins.h"
 #include "pico/audio_spdif.h"
 #include "hardware/clocks.h"
 #include "hardware/vreg.h"
@@ -173,6 +174,44 @@ static VcResult sys_serial_get(VcCtx *c) {
 static VcResult sys_build_info_get(VcCtx *c) {
     strncpy((char *)c->out, BUILD_GIT_DESCRIBE, 47);
     strncpy((char *)c->out + 48, BUILD_DATE, 11);
+    return VC_OK;
+}
+
+// ---- Pin map (pin_availability_query_spec.md section 8) ----
+
+_Static_assert(8 + 4 * PIN_CLAIMS_STEADY_MAX <= VC_REPLY_MAX,
+               "SYS.PIN_CLAIMS must hold every claim of a quiet device; add paging first");
+
+static VcResult sys_pin_state_get(VcCtx *c) {
+    uint32_t gen = pin_generation_sync(false);
+    vc_out_u32(c, 0, gen);
+    vc_out_u8(c, 4, pin_gpio_count());
+    vc_out_u8(c, 5, pin_state_live()->count);
+    vc_out_u16(c, 6, pin_restore_substituted());
+    uint64_t m = pin_gpio_mask();
+    vc_out_u32(c, 8, (uint32_t)m);
+    vc_out_u32(c, 12, (uint32_t)(m >> 32));
+    return VC_OK;
+}
+
+// Entries sorted by GPIO. Only a change in flight (a Control Surfaces revert) can
+// outgrow the reply, and it answers BUSY until the change completes.
+static VcResult sys_pin_claims_get(VcCtx *c) {
+    uint32_t gen = pin_generation_sync(false);
+    const PinState *st = pin_state_live();
+    uint16_t need = (uint16_t)(8 + 4u * st->count);
+    if (st->overflow || need > c->out_cap) return VC_ERR_BUSY;
+    vc_out_u32(c, 0, gen);
+    c->out[4] = st->count;
+    c->out[5] = c->out[6] = c->out[7] = 0;
+    PinClaim *e = (PinClaim *)(void *)(c->out + 8);
+    for (uint8_t i = 0; i < st->count; i++) {
+        PinClaim v = st->claims[i];
+        uint8_t j = i;
+        for (; j > 0 && e[j - 1].gpio > v.gpio; j--) e[j] = e[j - 1];
+        e[j] = v;
+    }
+    c->out_len = need;
     return VC_OK;
 }
 
