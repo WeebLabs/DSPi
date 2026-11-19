@@ -219,12 +219,11 @@ section 4.3.
 |---|---|
 | Output slot | Always. A slot has no off state |
 | PDM | PDM is enabled or running |
-| I2S clock pair | Any output slot is I2S, or I2S is the input source. Only the pair the clock mode selects is in use |
+| I2S clock pair | Any output slot is I2S, or the I2S input block is on. Only the pair the clock mode selects is in use |
 | MCK | Enabled |
 | ADAT TX, ADAT RX | Enabled |
-| S/PDIF input 1 | Always. See below |
-| S/PDIF inputs 2 to 4 | Enabled |
-| I2S RX pair | I2S is the input source and the pair is within the channel count |
+| S/PDIF input n | The S/PDIF block is on and n is within its count |
+| I2S RX pair | The I2S block is on and the pair is within the channel count |
 | DAC mute | Enabled |
 | UART and I2C control | Enabled and live |
 | CS binding | The binding is active |
@@ -235,17 +234,13 @@ Three reservations in the current firmware are removed by this rule.
 - The dormant pair in SPLIT clock-pin mode is no longer held.
 - PDM no longer holds its pin while it is off.
 
-I2S RX data pins are also released while I2S is not the input source. The
-I2S input cannot run without its clock pair. With the clock pair released,
-holding the data pin alone would guarantee nothing.
+*Updated 2026-11-19.* The input rows follow the input block model in
+`input_enable_plan.md`. An input block that is on holds its counted pins
+whether or not it is the selected source, so `INPUT.SOURCE` runs no pin
+check and a source switch never fails on a pin clash. S/PDIF input 1 no
+longer keeps a permanent claim. It is held while the S/PDIF block is on.
 
-**S/PDIF input 1 keeps its claim.** The firmware defines input 1 as always
-enabled, with no off state. It is treated like an enabled optional input
-that is not the selected source, which also holds its pin. Input 1 does not
-get an enable flag in this work. That decision may be revisited later, and
-an enable flag would then bring input 1 under the same rule as inputs 2 to 4.
-
-#### Pin SET on a function that is not in use
+### Pin SET on a function that is not in use
 
 The SET runs `PIN_CHECK_STORE`. It refuses a GPIO the function could never
 use and accepts a GPIO another function currently holds.
@@ -259,14 +254,14 @@ restarted and the function stays off.
 
 | Start site | Pins checked |
 |---|---|
-| S/PDIF input enable | That input's pin |
+| `INPUT.SPDIF_RX_ENABLE` on, `INPUT.SPDIF_RX_COUNT` rise | The pins of every input it brings into the block, as one unit |
 | MCK enable, ADAT TX enable, ADAT RX enable | The function's pin |
 | DAC mute, UART and I2C configuration with enable set | The function's pins, at the deferred apply |
 | CS binding apply | The binding's pins |
 | PDM start | The PDM pin |
 | `OUTPUT.TYPE` to I2S, when no clock runs yet | The clock pair the clock mode selects |
-| `INPUT.SOURCE` to I2S | The clock pair if no clock runs yet, plus the data pins of every pair within the count |
-| `INPUT.I2S_RX_CHANNELS` rise while I2S is the source | The data pins of the added pairs |
+| `INPUT.I2S_RX_ENABLE` on | The clock pair if no clock runs yet, plus the data pins of every pair within the count |
+| `INPUT.I2S_RX_CHANNELS` rise while the I2S block is on | The data pins of the added pairs |
 | `CLOCK.I2S_CLOCK_MODE` or `CLOCK.I2S_CLOCK_PIN_MODE` change that moves running clocks to the other pair | The pair being adopted |
 
 The I2S start is checked as one unit. The clock pair and the data pins
@@ -477,7 +472,13 @@ choose. A pin that is invalid rather than taken can never work, so it is
 replaced by the default, and the function stays on if the default claims.
 An ADAT input enabled with no pin is switched off.
 This applies to PDM (its enable is the matrix output enable), MCK, ADAT TX,
-ADAT RX, the optional S/PDIF inputs and DAC mute. The UART and I2C control
+ADAT RX and DAC mute. The input blocks follow the same rule with two
+refinements. An S/PDIF input that cannot claim cuts the block count below
+it, and input 1 switches the block off. The I2S block claims its clock pair
+and counted data pins as one unit and switches off whole. An input the
+device is listening to, or at boot is about to start, is never cut or
+switched off. For S/PDIF that covers every input up to it, and a failure
+there abandons the pin section to the base. The UART and I2C control
 interfaces are fixed claims at run time and are judged after the audio pins
 at boot.
 
@@ -487,9 +488,11 @@ checks each candidate.
 1. The platform default for that function.
 2. The base value. At run time that is the live value. At boot it is the factory default.
 
-This applies to output slots, S/PDIF input 1, and the I2S clock pair and I2S
-RX pairs when the proposed outputs use I2S. When only a proposed switch of
-the input to I2S needs them, the switch is dropped instead.
+This applies to output slots and to the I2S clock pair when the proposed
+outputs use it. Before validation the caller turns on the block of the
+selected source and of the live source, so a restored config never selects
+an input whose block is off. A selected source that a clash cuts out of its
+block reverts to the base source.
 
 If neither candidate passes, the whole pin section is abandoned and the
 base configuration is kept. A boot keeps the stored input source even then,
@@ -512,11 +515,10 @@ code uses today.
 3. Output slots by index, then PDM.
 4. S/PDIF input 1.
 5. MCK.
-6. The I2S clock pair in use.
-7. Optional S/PDIF inputs by index.
-8. I2S RX pairs by index.
-9. DAC mute.
-10. ADAT TX, then ADAT RX.
+6. The I2S clock pair in use, with the I2S RX pairs by index when the I2S block is on.
+7. S/PDIF inputs 2 to 4 by index.
+8. DAC mute.
+9. ADAT TX, then ADAT RX.
 
 Rule 1 keeps the existing self-lockout guard. A pushed configuration never
 takes the pins of a control link, since over UART or I2C that would cut
@@ -746,7 +748,7 @@ These are visible to hosts and belong in the release notes.
 
 **New refusals.**
 
-6. `OUTPUT.TYPE` to I2S, `INPUT.SOURCE` to I2S, `CLOCK.I2S_CLOCK_MODE`, `CLOCK.I2S_CLOCK_PIN_MODE` and the PDM start can answer `VC_ERR_PIN_IN_USE` when the pins they need are taken. `OUTPUT.TYPE` has no pin check today.
+6. `OUTPUT.TYPE` to I2S, `INPUT.I2S_RX_ENABLE`, `CLOCK.I2S_CLOCK_MODE`, `CLOCK.I2S_CLOCK_PIN_MODE` and the PDM start can answer `VC_ERR_PIN_IN_USE` when the pins they need are taken. `OUTPUT.TYPE` has no pin check today.
 7. DAC mute, when enabled, is refused on a Control Surfaces pin, an I2S RX data pin in use, a clock pair in use, GPIO 23 to 25 and any GPIO above the platform limit. A stored configuration that passes today can be refused after the update, and the function then stays disabled.
 8. A pin SET sees queued changes. A pin on the clock pair is refused as soon as a switch to I2S is queued, not only once it has been applied.
 9. A disabled UART or I2C configuration must satisfy the mux and pairing rules. Today only the GPIO range is checked while disabled.
@@ -900,7 +902,7 @@ and `control_surfaces_add_pin_claims()`. The UART, I2C and Control Surfaces
 *Added 2026-11-18.*
 
 - **PDM.** The user decided that a stopped PDM must not drive its pin. Boot no longer starts the PDM SM or DMA. The Core 1 start path sets the pin's PIO direction and mux with the SM stopped, and both stop paths clear them after stopping it, so a stored PDM pin never drives a pin another PIO1 state machine listens on. The start check sits in `ROUTE.OUTPUT_ENABLE` for the PDM output and in the restore validator.
-- **S/PDIF input 1.** It keeps its claim. The user decided against an enable flag for it for now.
+- **S/PDIF input 1.** It kept its claim at first. Since 2026-11-19 every input is a block with a switch (`input_enable_plan.md`), and input 1 is held while the S/PDIF block is on.
 - **Start paths outside host commands.** Control Surfaces bindings, IR commands and macros reach the input source and output type through `vc_set()`, so they run the same handlers and start checks. Preset load, bulk SET and factory reset go through the restore validator.
 - **Overlapping clock pairs.** `process_type_switches()` releases every outgoing pin, the old clock pair included, before it claims any, and the I2S input stops before it restarts on the new pair. Overlapping pairs therefore swap safely, and the two pairs are one function in the conflict check.
 - **Control interface defaults.** The factory UART pins 16/17 and I2C pins 18/19 pass the mux rules.

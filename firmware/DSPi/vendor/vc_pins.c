@@ -105,8 +105,10 @@ void pin_config_capture(PinConfig *cfg) {
     cfg->mck_enabled = i2s_mck_enabled ? 1 : 0;
     cfg->mck_pin = i2s_mck_pin;
     for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS; i++) cfg->spdif_rx_pin[i] = spdif_rx_pin_for_index(i);
-    cfg->spdif_rx_enabled_ext = spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
+    cfg->spdif_rx_enabled = spdif_rx_enabled ? 1 : 0;
+    cfg->spdif_rx_count = spdif_rx_count;
     memcpy(cfg->i2s_rx_pin, i2s_rx_pin, I2S_RX_MAX_PAIRS);
+    cfg->i2s_rx_enabled = i2s_input_enabled ? 1 : 0;
     cfg->i2s_rx_pairs = (uint8_t)(i2s_input_channels / 2);
 #if PICO_RP2350
     cfg->adat_tx_enabled = adat_output_config_enabled() ? 1 : 0;
@@ -131,6 +133,8 @@ void pin_config_defaults(PinConfig *cfg) {
     cfg->mck_pin = PICO_I2S_MCK_PIN;
     for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS; i++)
         cfg->spdif_rx_pin[i] = spdif_rx_pin_default_for_index(i);
+    cfg->spdif_rx_enabled = 1;
+    cfg->spdif_rx_count = 1;
     for (uint8_t p = 0; p < I2S_RX_MAX_PAIRS; p++)
         cfg->i2s_rx_pin[p] = (uint8_t)(PICO_I2S_RX_PIN_DEFAULT + p);
     cfg->i2s_rx_pairs = 1;
@@ -141,8 +145,31 @@ void pin_config_defaults(PinConfig *cfg) {
     cfg->dac_mute_pin = DAC_HW_MUTE_PIN_NONE;
 }
 
+void pin_config_admit_source(PinConfig *c, uint8_t src) {
+    if (src == INPUT_SOURCE_I2S) {
+        c->i2s_rx_enabled = 1;
+    } else if (input_source_is_spdif(src)) {
+        uint8_t need = (uint8_t)(spdif_index_for_source(src) + 1);
+        c->spdif_rx_enabled = 1;
+        if (c->spdif_rx_count < need) c->spdif_rx_count = need;
+    } else if (src == INPUT_SOURCE_ADAT && c->adat_rx_pin != 0xFF) {
+        c->adat_rx_enabled = 1;
+    }
+}
+
+bool pin_config_source_ok(const PinConfig *c) {
+    uint8_t src = c->input_source;
+    if (src == INPUT_SOURCE_I2S) return c->i2s_rx_enabled != 0;
+    if (input_source_is_spdif(src))
+        return c->spdif_rx_enabled != 0 && spdif_index_for_source(src) < c->spdif_rx_count;
+    if (src == INPUT_SOURCE_ADAT) return c->adat_rx_enabled != 0 && c->adat_rx_pin != 0xFF;
+    return true;
+}
+
+// The clock pair is reserved while the I2S input block is on, selected or not, so a
+// switch to I2S never needs a pin it does not already hold.
 static bool cfg_clocks_run(const PinConfig *c) {
-    if (c->input_source == INPUT_SOURCE_I2S) return true;
+    if (c->i2s_rx_enabled) return true;
     for (uint8_t i = 0; i < NUM_SPDIF_INSTANCES; i++)
         if (c->output_types[i] == OUTPUT_TYPE_I2S) return true;
     return false;
@@ -162,8 +189,8 @@ static bool cfg_in_use(const PinConfig *c, uint8_t fn, uint8_t idx) {
         case PIN_FN_MCK:      return c->mck_enabled != 0;
         case PIN_FN_ADAT_TX:  return c->adat_tx_enabled != 0;
         case PIN_FN_ADAT_RX:  return c->adat_rx_enabled != 0 && c->adat_rx_pin != 0xFF;
-        case PIN_FN_SPDIF_RX: return idx == 0 || (c->spdif_rx_enabled_ext & (1u << (idx - 1)));
-        case PIN_FN_I2S_RX:   return c->input_source == INPUT_SOURCE_I2S && idx < c->i2s_rx_pairs;
+        case PIN_FN_SPDIF_RX: return c->spdif_rx_enabled != 0 && idx < c->spdif_rx_count;
+        case PIN_FN_I2S_RX:   return c->i2s_rx_enabled != 0 && idx < c->i2s_rx_pairs;
         case PIN_FN_DAC_MUTE: return c->has_dac_mute && c->dac_mute_enabled &&
                                      c->dac_mute_pin != DAC_HW_MUTE_PIN_NONE;
         default:              return false;
@@ -525,13 +552,18 @@ static void edit_enable(PinConfig *c, uint8_t fn, uint8_t idx) {
         case PIN_FN_MCK:      c->mck_enabled = 1; break;
         case PIN_FN_ADAT_TX:  c->adat_tx_enabled = 1; break;
         case PIN_FN_ADAT_RX:  c->adat_rx_enabled = 1; break;
-        case PIN_FN_SPDIF_RX: if (idx) c->spdif_rx_enabled_ext |= (uint8_t)(1u << (idx - 1)); break;
         default: break;
     }
 }
 static void edit_type(PinConfig *c, uint8_t slot, uint8_t type) { c->output_types[slot] = type; }
-static void edit_source(PinConfig *c, uint8_t src, uint8_t unused) { (void)unused; c->input_source = src; }
-static void edit_pairs(PinConfig *c, uint8_t pairs, uint8_t unused) { (void)unused; c->i2s_rx_pairs = pairs; }
+static void edit_spdif_rx(PinConfig *c, uint8_t en, uint8_t count) {
+    c->spdif_rx_enabled = en;
+    c->spdif_rx_count = count;
+}
+static void edit_i2s_rx(PinConfig *c, uint8_t en, uint8_t pairs) {
+    c->i2s_rx_enabled = en;
+    c->i2s_rx_pairs = pairs;
+}
 static void edit_clock(PinConfig *c, uint8_t pin_mode, uint8_t mode) {
     c->clock_pin_mode = pin_mode;
     c->clock_mode = mode;
@@ -550,8 +582,12 @@ uint8_t pin_start_check(uint8_t fn, uint8_t idx) {
 uint8_t pin_start_check_output_type(uint8_t slot, uint8_t type) {
     return start_with(edit_type, slot, type);
 }
-uint8_t pin_start_check_source(uint8_t source) { return start_with(edit_source, source, 0); }
-uint8_t pin_start_check_i2s_rx_pairs(uint8_t pairs) { return start_with(edit_pairs, pairs, 0); }
+uint8_t pin_start_check_spdif_rx(uint8_t enabled, uint8_t count) {
+    return start_with(edit_spdif_rx, enabled, count);
+}
+uint8_t pin_start_check_i2s_rx(uint8_t enabled, uint8_t pairs) {
+    return start_with(edit_i2s_rx, enabled, pairs);
+}
 uint8_t pin_start_check_pdm(void) { return pin_start_check(PIN_FN_PDM, 0); }
 
 uint8_t pin_start_check_clock(uint8_t clock_pin_mode, uint8_t clock_mode) {
@@ -607,7 +643,11 @@ static void force_off(PinConfig *c, uint8_t fn, uint8_t idx) {
         case PIN_FN_MCK:      c->mck_enabled = 0; break;
         case PIN_FN_ADAT_TX:  c->adat_tx_enabled = 0; break;
         case PIN_FN_ADAT_RX:  c->adat_rx_enabled = 0; break;
-        case PIN_FN_SPDIF_RX: if (idx) c->spdif_rx_enabled_ext &= (uint8_t)~(1u << (idx - 1)); break;
+        case PIN_FN_SPDIF_RX:   // the count is cut below idx; input 1 switches the block off
+            if (idx == 0) c->spdif_rx_enabled = 0;
+            else if (c->spdif_rx_count > idx) c->spdif_rx_count = idx;
+            break;
+        case PIN_FN_I2S_RX:   c->i2s_rx_enabled = 0; break;
         case PIN_FN_DAC_MUTE: c->dac_mute_enabled = 0; break;
         default: break;
     }
@@ -679,12 +719,13 @@ static void unit(Vctx *v, uint8_t fn, uint8_t idx, bool can_switch_off) {
     else                claim_no_off(v, fn, idx);
 }
 
-// The input the device is listening to now cannot be switched off by a restore.
-static bool is_live_input(const Vctx *v, uint8_t fn, uint8_t idx) {
-    if (v->flags & PIN_VALIDATE_BOOT) return false;
-    uint8_t src = v->base->input_source;
+// The input the device listens to now, or at boot the one it is about to start, cannot
+// be switched off by a restore. For S/PDIF that covers every input up to it in the count.
+static bool input_kept(const Vctx *v, uint8_t fn, uint8_t idx) {
+    uint8_t src = (v->flags & PIN_VALIDATE_BOOT) ? v->cfg->input_source : v->base->input_source;
     if (fn == PIN_FN_ADAT_RX) return src == INPUT_SOURCE_ADAT;
-    if (fn == PIN_FN_SPDIF_RX) return input_source_is_spdif(src) && spdif_index_for_source(src) == idx;
+    if (fn == PIN_FN_SPDIF_RX) return input_source_is_spdif(src) && idx <= spdif_index_for_source(src);
+    if (fn == PIN_FN_I2S_RX) return src == INPUT_SOURCE_I2S;
     return false;
 }
 
@@ -702,31 +743,37 @@ static bool claim_i2s_set(Vctx *v, uint8_t pair, bool with_clock) {
     return ok;
 }
 
-// The I2S clock pair and receive pins are needed by the proposed outputs, or only by
-// a proposed switch of the input to I2S, which is dropped whole when they cannot claim.
+// The I2S input block is one unit: its clock pair (unless the outputs already need it)
+// and its counted receive pins. A unit that cannot claim switches the block off. When the
+// device is listening to I2S each pin falls back like a no-off function instead.
 static void i2s_units(Vctx *v) {
     bool outputs_need = false;
     for (uint8_t i = 0; i < NUM_SPDIF_INSTANCES; i++)
         if (v->cfg->output_types[i] == OUTPUT_TYPE_I2S) outputs_need = true;
-    bool droppable = v->cfg->input_source == INPUT_SOURCE_I2S &&
-                     v->base->input_source != INPUT_SOURCE_I2S &&
-                     !(v->flags & PIN_VALIDATE_BOOT) && !v->abandon;
     uint8_t pair = cfg_clock_pair(v->cfg);
+    bool rx_on = v->cfg->i2s_rx_enabled && !v->abandon;
     bool taken = false;   // the in-use pair and counted receive pins are already accepted
 
-    if (droppable && !outputs_need) {
+    if (rx_on && !outputs_need) {
         taken = claim_i2s_set(v, pair, true);
-    } else if (droppable) {
+    } else if (rx_on) {
         unit(v, PIN_FN_I2S_CLK, pair, false);
         taken = !v->abandon && claim_i2s_set(v, pair, false);
     }
-    if (droppable && !taken) {
-        v->cfg->input_source = v->base->input_source;
-        v->res->source_reverted = true;
+    if (rx_on && !taken && !v->abandon) {
+        if (input_kept(v, PIN_FN_I2S_RX, 0)) {
+            // A kept input has no off state: each pin tries its default, then the base pin.
+            if (!outputs_need) unit(v, PIN_FN_I2S_CLK, pair, false);
+            for (uint8_t p = 0; p < v->cfg->i2s_rx_pairs; p++) unit(v, PIN_FN_I2S_RX, p, false);
+            taken = !v->abandon;
+        } else {
+            force_off(v->cfg, PIN_FN_I2S_RX, 0);
+            note(v, PIN_FN_I2S_RX);
+        }
     }
     for (uint8_t r = 0; r < 2; r++) {
         if (taken && r == pair) continue;
-        if (droppable && outputs_need && r == pair) continue;   // judged above
+        if (rx_on && outputs_need && r == pair) continue;   // judged above
         unit(v, PIN_FN_I2S_CLK, r, false);
     }
     for (uint8_t p = 0; p < I2S_RX_MAX_PAIRS; p++) {
@@ -765,15 +812,20 @@ void pin_config_validate(PinConfig *cfg, const PinConfig *base, uint8_t flags,
 
     for (uint8_t i = 0; i < NUM_SPDIF_INSTANCES; i++) unit(&v, PIN_FN_OUTPUT, i, false);
     unit(&v, PIN_FN_PDM, 0, true);
-    unit(&v, PIN_FN_SPDIF_RX, 0, false);
+    unit(&v, PIN_FN_SPDIF_RX, 0, !input_kept(&v, PIN_FN_SPDIF_RX, 0));
     unit(&v, PIN_FN_MCK, 0, true);
+    // Kept S/PDIF inputs are a prefix and claim before I2S, which can switch off; the rest
+    // follow ascending, so a clash cuts the count at the first input that cannot claim.
+    uint8_t sp = 1;
+    for (; sp < SPDIF_RX_NUM_INPUTS && input_kept(&v, PIN_FN_SPDIF_RX, sp); sp++)
+        unit(&v, PIN_FN_SPDIF_RX, sp, false);
     i2s_units(&v);
-    for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++)
-        unit(&v, PIN_FN_SPDIF_RX, i, !is_live_input(&v, PIN_FN_SPDIF_RX, i));
+    for (; sp < SPDIF_RX_NUM_INPUTS; sp++)
+        unit(&v, PIN_FN_SPDIF_RX, sp, true);
     if (cfg->has_dac_mute) unit(&v, PIN_FN_DAC_MUTE, 0, true);
 #if PICO_RP2350
     unit(&v, PIN_FN_ADAT_TX, 0, true);
-    unit(&v, PIN_FN_ADAT_RX, 0, !is_live_input(&v, PIN_FN_ADAT_RX, 0));
+    unit(&v, PIN_FN_ADAT_RX, 0, !input_kept(&v, PIN_FN_ADAT_RX, 0));
 #endif
 
     if (v.abandon) {
@@ -785,10 +837,19 @@ void pin_config_validate(PinConfig *cfg, const PinConfig *base, uint8_t flags,
         cfg->pdm_enabled = proposed.pdm_enabled && base->pdm_enabled;
         res->substituted = (uint16_t)(((1u << PIN_FN_COUNT) - 1u) & ~1u);
         // The factory pin set serves any source, so a boot keeps the stored one.
-        if (flags & PIN_VALIDATE_BOOT) cfg->input_source = proposed.input_source;
+        if (flags & PIN_VALIDATE_BOOT) {
+            cfg->input_source = proposed.input_source;
+            pin_config_admit_source(cfg, cfg->input_source);
+            if (!pin_config_source_ok(cfg)) cfg->input_source = INPUT_SOURCE_USB;
+        }
         res->source_reverted = (proposed.input_source != cfg->input_source);
         res->pdm_disabled = (proposed.pdm_enabled && !cfg->pdm_enabled);
         return;
+    }
+    // A proposed source whose block a clash switched off or cut reverts to the base one.
+    if (!pin_config_source_ok(cfg)) {
+        cfg->input_source = (flags & PIN_VALIDATE_BOOT) ? INPUT_SOURCE_USB : base->input_source;
+        res->source_reverted = true;
     }
     res->pdm_disabled = (res->substituted & (1u << PIN_FN_PDM)) && cfg->pdm_enabled == 0;
 }
@@ -810,7 +871,9 @@ void pin_config_install(const PinConfig *c) {
         if (input_source_is_spdif(src) && spdif_index_for_source(src) == i)
             spdif_rx_pin_change_pending = true;
     }
-    spdif_rx_enabled_ext = c->spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
+    spdif_rx_enabled = c->spdif_rx_enabled ? 1 : 0;
+    spdif_rx_count = c->spdif_rx_count;
+    i2s_input_enabled = c->i2s_rx_enabled ? 1 : 0;
 
     i2s_mck_pin = c->mck_pin;
     i2s_mck_enabled = c->mck_enabled != 0;

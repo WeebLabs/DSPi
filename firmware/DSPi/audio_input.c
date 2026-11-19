@@ -40,14 +40,18 @@ volatile uint8_t active_input_source = INPUT_SOURCE_USB;
 // SPDIF RX GPIO pin — device-level setting (not per-preset)
 uint8_t spdif_rx_pin = PICO_SPDIF_RX_PIN_DEFAULT;
 
-// Optional SPDIF inputs 2..4: GPIOs and enable mask.  Disabled by default;
-// a disabled input reserves no GPIO and is absent from the source list.
+// Optional SPDIF inputs 2..4: GPIOs.  An input outside the block count reserves no
+// GPIO and is absent from the source list.
 uint8_t spdif_rx_pin_ext[SPDIF_RX_NUM_INPUTS - 1] = {
     PICO_SPDIF_RX_PIN2_DEFAULT,
     PICO_SPDIF_RX_PIN3_DEFAULT,
     PICO_SPDIF_RX_PIN4_DEFAULT,
 };
-uint8_t spdif_rx_enabled_ext = 0;
+
+// Input blocks: S/PDIF on with one input, I2S off (input_enable_plan.md section 14).
+uint8_t spdif_rx_enabled = 1;
+uint8_t spdif_rx_count = 1;
+uint8_t i2s_input_enabled = 0;
 
 // I2S RX serial-data pins, one per stereo pair.  [0] is the always-present
 // stereo pair; [1..3] (RP2350) are placeholders the host assigns when enabling

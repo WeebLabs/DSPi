@@ -235,16 +235,14 @@ void bulk_params_collect(WireBulkParams *out) {
     for (int p = 0; p < 3; p++)
         out->input_config.i2s_rx_pin_ext[p] =
             (p + 1 < I2S_RX_MAX_PAIRS) ? i2s_rx_pin[p + 1] : 0;
-    // Optional SPDIF inputs 2..4: live pins and the enable mask + 1 (so a host
-    // that pushes zeros here reads as "absent, keep live", not "disable all").
     for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++)
         out->input_config.spdif_rx_pin_ext[i] = spdif_rx_pin_ext[i];
-    out->input_config.spdif_rx_enabled_ext_p1 = (uint8_t)(spdif_rx_enabled_ext + 1);
+    out->input_config.spdif_rx_count = spdif_rx_count;
     // I2S clock master/slave mode (V21+).
     out->input_config.i2s_clock_mode = i2s_clock_mode;
-    // ADAT input (V24+): live pin (0xFF unset → 0 absent), enable + 1, mode + 1.
+    // ADAT input pin (0xFF unset → 0 absent), block switches + 1, ADAT mode + 1.
     out->input_config.adat_input_pin        = (adat_input_pin == 0xFF) ? 0 : adat_input_pin;
-    out->input_config.adat_input_enabled_p1 = (uint8_t)(adat_input_enabled + 1);
+    out->input_config.input_enable_p1       = (uint8_t)(input_enable_mask() + 1);
     out->input_config.adat_clock_mode_p1    = (uint8_t)(adat_clock_mode + 1);
 
     // LG Sound Sync (V8+).  All four fields are filled here so a single
@@ -468,8 +466,17 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         for (int i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++)
             if (in->input_config.spdif_rx_pin_ext[i] != 0)
                 pc.spdif_rx_pin[i + 1] = in->input_config.spdif_rx_pin_ext[i];
-        uint8_t ext_enc = in->input_config.spdif_rx_enabled_ext_p1;
-        if (ext_enc != 0) pc.spdif_rx_enabled_ext = (uint8_t)((ext_enc - 1) & SPDIF_RX_ENABLED_EXT_MASK);
+        uint8_t cnt = in->input_config.spdif_rx_count;
+        if (cnt >= 1 && cnt <= SPDIF_RX_NUM_INPUTS) pc.spdif_rx_count = cnt;
+        uint8_t en = in->input_config.input_enable_p1;
+        if (en >= 1 && en <= INPUT_ENABLE_MASK + 1) {
+            en = (uint8_t)(en - 1);
+            pc.spdif_rx_enabled = (en & INPUT_ENABLE_SPDIF) ? 1 : 0;
+            pc.i2s_rx_enabled = (en & INPUT_ENABLE_I2S) ? 1 : 0;
+#if PICO_RP2350
+            pc.adat_rx_enabled = (en & INPUT_ENABLE_ADAT) ? 1 : 0;
+#endif
+        }
 
         if (in->input_config.i2s_rx_pin != 0) pc.i2s_rx_pin[0] = in->input_config.i2s_rx_pin;
 #if I2S_RX_MAX_PAIRS > 1
@@ -482,8 +489,6 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
             pc.i2s_rx_pairs = (uint8_t)(ch / 2);
 #if PICO_RP2350
         if (in->input_config.adat_input_pin != 0) pc.adat_rx_pin = in->input_config.adat_input_pin;
-        uint8_t ain = in->input_config.adat_input_enabled_p1;
-        if (ain == 1 || ain == 2) pc.adat_rx_enabled = (uint8_t)(ain - 1);
 #endif
     }
     pc.mck_pin = in->i2s_config.mck_pin;
@@ -499,15 +504,11 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
 #endif
     if (input_source_valid(in->input_config.input_source))
         pc.input_source = in->input_config.input_source;
-    // The input the device is listening to, or is switching to, cannot be switched off by a push.
-    {
-        uint8_t live_src = input_source_change_pending ? pending_input_source : active_input_source;
-        if (input_source_is_spdif(live_src) && spdif_index_for_source(live_src) > 0)
-            pc.spdif_rx_enabled_ext |= (uint8_t)(1u << (spdif_index_for_source(live_src) - 1));
-#if PICO_RP2350
-        if (live_src == INPUT_SOURCE_ADAT) pc.adat_rx_enabled = 1;
-#endif
-    }
+    // The pushed source and the one the device is listening to, or switching to, keep their
+    // blocks on, so selecting an input and switching its block on can share one payload.
+    pin_config_admit_source(&pc, pc.input_source);
+    pin_config_admit_source(&pc, active_input_source);
+    if (input_source_change_pending) pin_config_admit_source(&pc, pending_input_source);
     // A DAC mute section with bad timing or a pin that can never work is ignored whole.
     DacHwMuteConfig dac;
     _Static_assert(sizeof(dac) == sizeof(in->dac_hw_mute), "WireDacHwMute and DacHwMuteConfig must match");
@@ -593,10 +594,7 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     // claim was dropped there).
     {
         uint8_t src = pc.input_source;
-        // Gate on selectable (valid AND currently offered) so a pushed source
-        // that names a disabled optional SPDIF is refused; the enable-mask apply
-        // above runs first, so enabling SPDIF2 and selecting it in one payload
-        // works.
+        // Gate on selectable: the block install above runs first.
         if (input_source_selectable(src) && src != active_input_source) {
             pending_input_source = src;
             __dmb();

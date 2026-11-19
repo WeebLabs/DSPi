@@ -718,9 +718,13 @@ class FakePagedFirmware:
         self._ro("INPUT.STATUS", struct.pack("<BBHIi", 1, 2, 0, 47999123, -250))
         self._rw("INPUT.SPDIF_RX_PIN", 1, range(4))
 
-        def spdif_en(a, d):
-            return _VC["VC_ERR_STATE"] if a == 2 and d[0] == 0 else 0
-        self._rw("INPUT.SPDIF_RX_ENABLE", 1, range(1, 4), spdif_en)
+        # The input block commands are unaddressed; values outside their range are VC_ERR_VALUE.
+        self._rw("INPUT.SPDIF_RX_ENABLE", 1, check=lambda a, d: _VC["VC_ERR_VALUE"] if d[0] > 1 else 0)
+        self._rw("INPUT.SPDIF_RX_COUNT", 1, check=lambda a, d: 0 if 1 <= d[0] <= 4 else _VC["VC_ERR_VALUE"])
+        self._rw("INPUT.I2S_RX_ENABLE", 1, check=lambda a, d: _VC["VC_ERR_VALUE"] if d[0] > 1 else 0)
+        self.put("INPUT.SPDIF_RX_ENABLE", b"\x01")
+        self.put("INPUT.SPDIF_RX_COUNT", b"\x02")
+        self._ro("INPUT.SPDIF_RX_CONFIG", bytes([4, 1, 2, 5, 20, 21, 22]))
         self._rw("INPUT.I2S_RX_RATE", 4)
         self.put("INPUT.I2S_RX_RATE", struct.pack("<I", 96000))
 
@@ -1044,6 +1048,20 @@ check(H.read_route(dv, 1, 2) == H.Route(1, 1, -4.0) and fw.stored("ROUTE.MATRIX_
       "write_route / read_route address (input << 8) | output, reserved zero")
 check(H.wait_for(lambda: 3, lambda v: v > 2, timeout_s=0) == 3 and H.wait_for(lambda: 1, 2, timeout_s=0) == 1,
       "wait_for returns the last value, matched or not")
+fw, dv = _paged_dev()
+cfg = H.spdif_rx_config(dv)
+check((cfg["limit"], cfg["enabled"], cfg["count"], cfg["pins"]) == (4, 1, 2, [5, 20, 21, 22]),
+      "spdif_rx_config decodes the 7-byte SPDIF_RX_CONFIG")
+want_blocks = dict(spdif=0, count=3, i2s=1, adat=0)
+H.restore_input_blocks(dv, want_blocks)
+check(H.input_blocks(dv) == want_blocks, "restore_input_blocks then input_blocks round-trips (no ADAT built)")
+blob = bytearray(6136)
+blob[H.INPUT_CONFIG_OFF + 11], blob[H.INPUT_CONFIG_OFF + 14] = 3, 0b110 + 1
+check(H.blob_input_blocks(bytes(blob)) == dict(spdif=0, count=3, i2s=1, adat=1)
+      and H.blob_input_blocks(bytes(6136)) is None,
+      "blob_input_blocks decodes spdif_rx_count and input_enable_p1; 0 is absent")
+check(H.spdif_source(0) == 1 and [H.spdif_source(i) for i in (1, 2, 3)] == [4, 5, 6],
+      "spdif_source maps S/PDIF inputs 1 to 4 onto sources 1, 4, 5, 6")
 
 _fmt = {"u8": "B", "u16": "H", "i16": "h", "u32": "I", "i32": "i"}
 _lmap = json.loads((ROOT / "Documentation" / "protocol" / "legacy_map.json").read_text())

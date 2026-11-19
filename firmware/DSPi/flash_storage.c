@@ -201,7 +201,11 @@
 //        release; 10 bytes x NUM_OUTPUT_CHANNELS).  Tail-append like V22..V38:
 //        older slots load with every limiter off at the defaults (apply is
 //        gated on version >= 39).
-#define SLOT_DATA_VERSION       39
+//   V41: Input blocks.  The V24 spdif_rx_enabled_ext byte becomes input_blocks
+//        (input_blocks_encode()); no size change.  V40 is held by the unmerged
+//        ac3-dts-decode branch.  Older slots map their mask through
+//        input_blocks_from_legacy().
+#define SLOT_DATA_VERSION       41
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -254,10 +258,9 @@ typedef struct __attribute__((packed)) {
                                      // struct by 2 bytes, so the V7→V8 directory migration
                                      // reads old configs via FlashOutputConfig_v7
     uint8_t adat_pin;                // ADAT data GPIO (0 = unset → PICO_ADAT_PIN)
-    uint8_t spdif_rx_enabled_ext;    // Optional SPDIF inputs enable mask (DIR V12+;
-                                     // bit 0 = SPDIF2 .. bit 2 = SPDIF4; 0 = all disabled).
-                                     // Grows the struct by 3 bytes, so pre-V12 directory
-                                     // migrations read old configs via FlashOutputConfig_v11
+    uint8_t input_blocks;            // DIR V26+: input_blocks_encode(). DIR V12..V25 held
+                                     // the SPDIF 2/3/4 enable mask here, which migration
+                                     // converts. Pre-V12 configs read via FlashOutputConfig_v11
     uint8_t spdif_rx_pin_ext[2];     // SPDIF RX 2/3 GPIOs (0 = unset; defaults 20/21).
                                      // SPDIF 4's pin is the V16 tail byte, not a third entry
                                      // here: widening this array in place would break the
@@ -1266,7 +1269,7 @@ _Static_assert(offsetof(PresetDirectory_v20, cs_display) == offsetof(PresetDirec
 _Static_assert(sizeof(PresetDirectory_v20) == 3327,
                "V20 directory geometry is frozen; snapshot any struct that grew");
 
-#define DIR_VERSION_CURRENT  25
+#define DIR_VERSION_CURRENT  26
 
 // The directory occupies exactly one flash sector; growth past it would
 // silently overrun into preset slot 0.
@@ -1395,12 +1398,9 @@ typedef struct __attribute__((packed)) {
     uint8_t adat_enabled;            // 0/1 configured ADAT enable
     uint8_t adat_pin;                // ADAT data GPIO (0 = unset → PICO_ADAT_PIN)
 
-    // Optional SPDIF inputs 2/3 (V24+, struct grows by 3 bytes).  Same 0 =
-    // unset semantics for the pins; gated on version >= 24 in
-    // io_config_from_slot() so older slots load with both inputs disabled.
-    // SPDIF 4 reuses bit 2 of this mask but stores its pin in the V35 tail
-    // byte (this array is mid-struct and cannot grow without moving fields).
-    uint8_t spdif_rx_enabled_ext;    // Enable mask: bit 0 = SPDIF2 .. bit 2 = SPDIF4
+    // Optional SPDIF inputs 2/3 (V24+). The pins use 0 = unset. SPDIF 4's pin is
+    // the V35 tail byte (this array is mid-struct and cannot grow).
+    uint8_t input_blocks;            // V41+: input_blocks_encode(); V24..V39: SPDIF 2/3/4 mask
     uint8_t spdif_rx_pin_ext[2];     // SPDIF RX 2/3 GPIOs (0 = unset; defaults 20/21)
 
     // Leveller channel masks (V25+, struct grows by 2 bytes).  Gated on
@@ -1489,8 +1489,6 @@ typedef struct __attribute__((packed)) {
     // SPDIF input 4 GPIO (V35+, struct grows by 1 byte).  Same 0 = unset
     // semantics as spdif_rx_pin_ext[]; gated on version >= 35 in
     // io_config_from_slot() so older slots keep the device-level baseline.
-    // The matching enable bit is bit 2 of spdif_rx_enabled_ext above, which
-    // pre-V35 firmware always wrote as 0.
     uint8_t spdif_rx_pin4;
 
     // V36: subharmonic synthesizer (one global config + output mask; see
@@ -1843,6 +1841,32 @@ static int flash_write_sector(uint32_t offset, const void *data, size_t len) {
     return flash_program_staged(offset, len);
 }
 
+// Input block byte (DIR V26, slot V41): bits 1:0 S/PDIF count - 1, bit 2 S/PDIF block on,
+// bit 3 I2S block on. ADAT keeps its own enable byte.
+static uint8_t input_blocks_encode(uint8_t spdif_on, uint8_t count, uint8_t i2s_on) {
+    if (count < 1) count = 1;
+    if (count > SPDIF_RX_NUM_INPUTS) count = SPDIF_RX_NUM_INPUTS;
+    return (uint8_t)((count - 1) | (spdif_on ? 0x04u : 0) | (i2s_on ? 0x08u : 0));
+}
+static uint8_t input_blocks_count(uint8_t b) {
+    uint8_t n = (uint8_t)((b & 0x03u) + 1);
+    return n > SPDIF_RX_NUM_INPUTS ? SPDIF_RX_NUM_INPUTS : n;
+}
+// An old SPDIF 2/3/4 enable mask: input 1 was always on, so the block is on and the count
+// reaches the highest enabled input. I2S held no pins unless selected, so it starts off.
+static uint8_t input_blocks_from_legacy(uint8_t mask) {
+    uint8_t count = 1;
+    for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++)
+        if (mask & (1u << i)) count = (uint8_t)(i + 2);
+    return input_blocks_encode(1, count, 0);
+}
+// Every pre-V26 directory migration that carries an old IO config ends here before its
+// flush. V1..V3 seed io_config_defaults(), which is already in the new encoding.
+static void dir_upgrade_input_blocks(void) {
+    dir_cache.output_config.input_blocks =
+        input_blocks_from_legacy(dir_cache.output_config.input_blocks);
+}
+
 // ============================================================================
 // DIRECTORY MANAGEMENT
 // ============================================================================
@@ -1885,8 +1909,32 @@ static bool dir_load_cache(void) {
         return true;
     }
 
+    if (flash_dir->version == 25) {
+        // V25 -> V26 migration.  Same layout; only the input block byte changes meaning.
+        const uint8_t *v25_data_start = (const uint8_t *)&flash_dir->startup_mode;
+        size_t v25_data_len = sizeof(PresetDirectory) - offsetof(PresetDirectory, startup_mode);
+        if (crc32(v25_data_start, v25_data_len) != flash_dir->crc32) {
+            dir_cache_valid = false;
+            return false;
+        }
+        memcpy(&dir_cache, flash_dir, sizeof(dir_cache));
+        dir_sanitize_ctrl_iface();
+        dir_sanitize_cs_config();
+        dir_sanitize_cs_ir();
+        dir_sanitize_cs_groups();
+        dir_sanitize_cs_macros();
+        dir_sanitize_cs_display();
+        dir_sanitize_limiter();
+        dir_sanitize_output_latency();
+        dir_sanitize_input_source_names();
+        dir_cache_valid = true;
+        dir_upgrade_input_blocks();
+        (void)dir_flush();   // persist at the current version
+        return true;
+    }
+
     if (flash_dir->version == 24) {
-        // V24 -> V25 migration.  V25 only appends the board name, so the whole
+        // V24 -> V26 migration.  V25 only appends the board name, so the whole
         // V24 data block copies across and the board reads as unnamed.
         const uint8_t *v24_data_start = (const uint8_t *)&flash_dir->startup_mode;
         size_t v24_data_len = PRESET_DIRECTORY_V24_SIZE - offsetof(PresetDirectory, startup_mode);
@@ -1907,6 +1955,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_output_latency();
         dir_sanitize_input_source_names();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -1932,6 +1981,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -1959,6 +2009,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -1988,6 +2039,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2016,6 +2068,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2044,6 +2097,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2073,6 +2127,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2105,6 +2160,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2148,6 +2204,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2193,6 +2250,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2237,6 +2295,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2282,6 +2341,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2326,6 +2386,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2370,6 +2431,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2412,6 +2474,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2449,6 +2512,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2493,6 +2557,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2528,6 +2593,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2561,6 +2627,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist at the current version
         return true;
     }
@@ -2596,6 +2663,7 @@ static bool dir_load_cache(void) {
         dir_sanitize_limiter();   // V22 block: defaults when never saved
         dir_sanitize_output_latency();
         dir_cache_valid = true;
+        dir_upgrade_input_blocks();
         (void)dir_flush();   // persist as V5
         return true;
     }
@@ -3078,8 +3146,8 @@ static void io_config_defaults(FlashOutputConfig *cfg) {
     cfg->i2s_mck_enabled    = 0;
     cfg->i2s_mck_multiplier = 0;             // 0 = 128x
     cfg->spdif_rx_pin       = PICO_SPDIF_RX_PIN_DEFAULT;
-    // Optional SPDIF inputs 2..4: disabled, default pins.
-    cfg->spdif_rx_enabled_ext = 0;
+    // S/PDIF block on with one input, I2S block off; default pins.
+    cfg->input_blocks = input_blocks_encode(1, 1, 0);
     for (uint8_t i = 1; i < SPDIF_RX_NUM_INPUTS; i++)
         *cfg_spdif_ext_pin(cfg, i - 1) = spdif_rx_pin_default_for_index(i);
     cfg->i2s_rx_pin         = PICO_I2S_RX_PIN_DEFAULT;
@@ -3111,7 +3179,7 @@ static void io_config_from_live(FlashOutputConfig *cfg) {
     cfg->i2s_mck_enabled    = i2s_mck_enabled ? 1 : 0;
     cfg->i2s_mck_multiplier = (i2s_mck_multiplier == 256) ? 1 : 0;  // 0=128x, 1=256x
     cfg->spdif_rx_pin       = spdif_rx_pin;
-    cfg->spdif_rx_enabled_ext = spdif_rx_enabled_ext;
+    cfg->input_blocks = input_blocks_encode(spdif_rx_enabled, spdif_rx_count, i2s_input_enabled);
     for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++)
         *cfg_spdif_ext_pin(cfg, i) = spdif_rx_pin_ext[i];
     cfg->i2s_rx_pin         = i2s_rx_pin[0];
@@ -3163,16 +3231,18 @@ static void io_config_from_slot(const PresetSlot *slot, FlashOutputConfig *cfg) 
     if (slot->version >= 13 && slot->spdif_rx_pin != 0)
         cfg->spdif_rx_pin = slot->spdif_rx_pin;
 
-    // Optional SPDIF inputs 2..4 (V24+; input 4's pin V35+): device-level
-    // baseline, slot overrides.  Pins use the 0 = unset convention; the enable
-    // mask has no unset sentinel in the slot, so it only overrides when the
-    // slot actually carries it.
-    cfg->spdif_rx_enabled_ext = dir_cache.output_config.spdif_rx_enabled_ext;
+    // Optional SPDIF inputs 2..4 (V24+; input 4's pin V35+) and the input blocks:
+    // device-level baseline, slot overrides. Pins use the 0 = unset convention.
+    // V24..V39 slots carry the old enable mask; older slots carry nothing.
+    cfg->input_blocks = dir_cache.output_config.input_blocks;
     for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS - 1; i++)
         *cfg_spdif_ext_pin(cfg, i) =
             cfg_spdif_ext_pin_get(&dir_cache.output_config, i);
+    if (slot->version >= 41)
+        cfg->input_blocks = slot->input_blocks;
+    else if (slot->version >= 24)
+        cfg->input_blocks = input_blocks_from_legacy(slot->input_blocks);
     if (slot->version >= 24) {
-        cfg->spdif_rx_enabled_ext = slot->spdif_rx_enabled_ext;
         for (int i = 0; i < 2; i++)
             if (slot->spdif_rx_pin_ext[i] != 0)
                 cfg->spdif_rx_pin_ext[i] = slot->spdif_rx_pin_ext[i];
@@ -3288,7 +3358,9 @@ static void io_config_apply(const FlashOutputConfig *cfg, uint8_t flags) {
         uint8_t stored = cfg_spdif_ext_pin_get(cfg, i);
         pc.spdif_rx_pin[i + 1] = stored ? stored : spdif_rx_pin_default_for_index((uint8_t)(i + 1));
     }
-    pc.spdif_rx_enabled_ext = cfg->spdif_rx_enabled_ext & SPDIF_RX_ENABLED_EXT_MASK;
+    pc.spdif_rx_enabled = (cfg->input_blocks & 0x04u) ? 1 : 0;
+    pc.spdif_rx_count = input_blocks_count(cfg->input_blocks);
+    pc.i2s_rx_enabled = (cfg->input_blocks & 0x08u) ? 1 : 0;
     pc.mck_pin = cfg->i2s_mck_pin;
     pc.mck_enabled = (cfg->i2s_mck_enabled != 0);
     pc.bck_pin[0] = cfg->i2s_bck_pin;
@@ -3309,16 +3381,10 @@ static void io_config_apply(const FlashOutputConfig *cfg, uint8_t flags) {
     pc.adat_rx_pin = cfg->adat_input_pin;
     pc.adat_rx_enabled = (cfg->adat_input_enabled != 0);
 #endif
-    // The input the device is listening to, or is switching to, is never switched off
-    // by a restore.
-    if (!(flags & PIN_VALIDATE_BOOT)) {
-        uint8_t live_src = input_source_change_pending ? pending_input_source : active_input_source;
-        if (input_source_is_spdif(live_src) && spdif_index_for_source(live_src) > 0)
-            pc.spdif_rx_enabled_ext |= (uint8_t)(1u << (spdif_index_for_source(live_src) - 1));
-#if PICO_RP2350
-        if (live_src == INPUT_SOURCE_ADAT) pc.adat_rx_enabled = 1;
-#endif
-    }
+    // The selected source (the preset's, queued by apply_slot_to_live) and the one the
+    // device is listening to keep their blocks on through a restore.
+    pin_config_admit_source(&pc, pc.input_source);
+    if (!(flags & PIN_VALIDATE_BOOT)) pin_config_admit_source(&pc, active_input_source);
 
     PinValidateResult res;
     pin_restore_apply(&pc, flags, &res);
@@ -3436,6 +3502,7 @@ static void apply_output_config_from_mode(const PresetSlot *slot_or_null, bool i
         pin_config_capture(&pc);
         if (input_source_change_pending) pc.input_source = pending_input_source;
         if (i2s_clock_mode_change_pending) pc.clock_mode = pending_i2s_clock_mode;
+        pin_config_admit_source(&pc, pc.input_source);
         pin_restore_apply(&pc, PIN_VALIDATE_FIXED_PINS, &res);
     }
 }
@@ -3500,9 +3567,8 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // SPDIF RX pin: stored alongside output_pins, applied per output_config_mode.
     slot->spdif_rx_pin = spdif_rx_pin;
 
-    // Optional SPDIF inputs 2..4: enable mask + pins (V24; input 4's pin V35),
-    // same apply model.
-    slot->spdif_rx_enabled_ext = spdif_rx_enabled_ext;
+    // Input blocks (V41) and the SPDIF 2..4 pins (V24; input 4's pin V35), same apply model.
+    slot->input_blocks = input_blocks_encode(spdif_rx_enabled, spdif_rx_count, i2s_input_enabled);
     slot->spdif_rx_pin_ext[0]  = spdif_rx_pin_ext[0];
     slot->spdif_rx_pin_ext[1]  = spdif_rx_pin_ext[1];
     slot->spdif_rx_pin4        = spdif_rx_pin_ext[2];
@@ -4141,7 +4207,7 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V22 \
     (offsetof(PresetSlot, adat_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V23 \
-    (offsetof(PresetSlot, spdif_rx_enabled_ext) - offsetof(PresetSlot, filter_recipes))
+    (offsetof(PresetSlot, input_blocks) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V24 \
     (offsetof(PresetSlot, leveller_detector_mask) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V25 \
@@ -4174,6 +4240,8 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     (offsetof(PresetSlot, limiter_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V39 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
+// V41 only changes what the input_blocks byte means.
+#define SLOT_DATA_SIZE_V41 SLOT_DATA_SIZE_V39
 
 // V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
 // V23 (ADAT bulk output), V24 (optional SPDIF inputs 2/3), V25 (leveller channel
@@ -4183,12 +4251,15 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // V33 (stereo upmixer), V35 (SPDIF input 4 pin), V36 (subharmonic synthesizer)
 // V37 (subharm third band / selectivity / ceiling / link), V38 (tube preamp)
 // and V39 (output limiter) are backward-compatible tail-appends; V34 (upmix
-// presence) claims a reserved byte with no size change.  V21..V38 slots are all
+// presence) and V41 (input blocks) change a byte's meaning with no size change.
+// V40 belongs to another branch and is rejected.  V21..V39 and V41 slots are all
 // accepted (an older slot loads with the newer fields defaulted to unset) while
 // older/unknown versions are invalidated and the slot loads factory defaults.
 static size_t slot_data_size_for_version(uint8_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 39
+        case SLOT_DATA_VERSION:   // 41
+            return SLOT_DATA_SIZE_V41;
+        case 39:
             return SLOT_DATA_SIZE_V39;
         case 38:
             return SLOT_DATA_SIZE_V38;

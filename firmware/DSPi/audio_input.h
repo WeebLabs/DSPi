@@ -88,19 +88,15 @@ bool pipeline_producer_is_streaming(void);
 extern uint8_t spdif_rx_pin;
 
 // GPIOs for the optional SPDIF inputs 2..4 ([0] = SPDIF2 ... [2] = SPDIF4).
-// Same persistence model as spdif_rx_pin.  A disabled input's pin is only a
-// stored preference: it is not reserved against other functions and is never
-// claimed in hardware until the input is enabled AND selected.
+// Same persistence model as spdif_rx_pin.  An input outside the S/PDIF block's
+// count, or in a block that is off, holds no GPIO (vc_pins.c decides).
 extern uint8_t spdif_rx_pin_ext[SPDIF_RX_NUM_INPUTS - 1];
 
-// Enable mask for the optional SPDIF inputs: bit 0 = SPDIF2 ... bit 2 = SPDIF4.
-// 0 by default; the extra inputs are absent from the source list and invisible
-// to pin-conflict validation.  SPDIF input 1 is always enabled.
-extern uint8_t spdif_rx_enabled_ext;
-
-// All bits of spdif_rx_enabled_ext that name a real input; anything wider
-// arriving from the wire or flash is masked off before use.
-#define SPDIF_RX_ENABLED_EXT_MASK  ((uint8_t)((1u << (SPDIF_RX_NUM_INPUTS - 1)) - 1))
+// Input block switches and counts (Documentation/Features/input_enable_plan.md).
+// An enabled block holds the pins of its count whether or not it is selected.
+extern uint8_t spdif_rx_enabled;     // S/PDIF block switch, 0 or 1
+extern uint8_t spdif_rx_count;       // S/PDIF inputs 1..N in the block, 1..SPDIF_RX_NUM_INPUTS
+extern uint8_t i2s_input_enabled;    // I2S block switch, 0 or 1; the count is i2s_input_channels
 
 // I2S RX serial-data pins, one per stereo pair, each independently
 // configurable (same per-pin persistence model as spdif_rx_pin).  [0] is the
@@ -258,13 +254,13 @@ static inline uint8_t spdif_rx_pin_default_for_index(uint8_t idx) {
     }
 }
 
-// True if SPDIF input `idx` is enabled (index 0 is always enabled)
+// True if SPDIF input `idx` is inside an enabled S/PDIF block
 static inline bool spdif_input_enabled(uint8_t idx) {
-    return idx == 0 || ((spdif_rx_enabled_ext >> (idx - 1)) & 1u) != 0;
+    return spdif_rx_enabled != 0 && idx < spdif_rx_count;
 }
 
-// Valid AND currently offered in the source list (disabled SPDIF 2/3 and
-// disabled/unsupported ADAT are not)
+// Valid AND currently offered in the source list: the input's block is on and,
+// for S/PDIF, the index is within the count.
 static inline bool input_source_selectable(uint8_t src) {
     if (!input_source_valid(src)) return false;
     if (src == INPUT_SOURCE_ADAT) {
@@ -274,8 +270,20 @@ static inline bool input_source_selectable(uint8_t src) {
         return false;   // no PIO/DMA/channel budget on RP2040
 #endif
     }
+    if (src == INPUT_SOURCE_I2S) return i2s_input_enabled != 0;
     if (!input_source_is_spdif(src)) return true;
     return spdif_input_enabled(spdif_index_for_source(src));
+}
+
+// Input block switches as one mask, the wire and flash encoding.
+#define INPUT_ENABLE_SPDIF  0x01u
+#define INPUT_ENABLE_I2S    0x02u
+#define INPUT_ENABLE_ADAT   0x04u
+#define INPUT_ENABLE_MASK   0x07u
+static inline uint8_t input_enable_mask(void) {
+    return (uint8_t)((spdif_rx_enabled ? INPUT_ENABLE_SPDIF : 0) |
+                     (i2s_input_enabled ? INPUT_ENABLE_I2S : 0) |
+                     (adat_input_enabled ? INPUT_ENABLE_ADAT : 0));
 }
 
 // GPIO the RX library should run on for the currently-active SPDIF source

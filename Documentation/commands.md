@@ -438,7 +438,7 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 |---|---|---|---|---|
 | 0x01 | `SYS` | 1 | 20 | Discovery, identity, device name, last result, bootloader, system and stream telemetry |
 | 0x02 | `STORE` | 1 | 12 | Preset slots, directory, startup, IO config persistence, factory reset, bulk parameters |
-| 0x03 | `INPUT` | 1 | 20 | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names |
+| 0x03 | `INPUT` | 1 | 22 | Source select, S/PDIF RX, I2S RX, ADAT RX, LG Sound Sync, source names |
 | 0x04 | `OUTPUT` | 1 | 13 | Output type and pins, output latency, ADAT TX, DAC hardware mute |
 | 0x05 | `ROUTE` | 1 | 15 | Matrix, per-output controls, delays, channel names, preamp, master and user volume |
 | 0x06 | `FILTER` | 1 | 3 | EQ and crossover bands, bypasses |
@@ -675,13 +675,15 @@ Input source selection, the S/PDIF, I2S and ADAT receivers, LG Sound Sync and th
 | 0x20 | `SPDIF_RX_STATUS` | G | none | 16 | - |  | S/PDIF receiver status packet |
 | 0x21 | `SPDIF_RX_CH_STATUS` | G | none | 24 | - |  | S/PDIF channel status bytes |
 | 0x22 | `SPDIF_RX_PIN` | G, S | S/PDIF input | 1 | 1 | DEFERRED, RESTART | GPIO of one S/PDIF input; 0xFF restores its default |
-| 0x23 | `SPDIF_RX_ENABLE` | G, S | S/PDIF input | 1 | 1 |  | Enable of optional S/PDIF input 1-3 |
-| 0x24 | `SPDIF_RX_CONFIG` | G | none | 6 | - |  | Input count, enable mask over all inputs, then one GPIO per input |
+| 0x24 | `SPDIF_RX_CONFIG` | G | none | 7 | - |  | Input count limit, block switch, block count, then one GPIO per input |
 | 0x25 | `SPDIF_RX_PIN_AVAIL` | G | S/PDIF input | 24 | - |  | Pins one S/PDIF input could take: status, flags, generation, valid and free masks |
+| 0x26 | `SPDIF_RX_COUNT` | G, S | none | 1 | 1 |  | S/PDIF inputs in the block, 1 to 4; inputs 1 to N hold their pins while the block is on |
+| 0x27 | `SPDIF_RX_ENABLE` | G, S | none | 1 | 1 |  | S/PDIF input block switch, 0 or 1 |
 | 0x30 | `I2S_RX_PIN` | G, S | I2S pair | 1 | 1 | DEFERRED, RESTART | Data GPIO of one I2S RX stereo pair; 0xFF restores its default |
 | 0x31 | `I2S_RX_CHANNELS` | G, S | none | 1 | 1 | DEFERRED, RESTART | I2S input channel count, 2, 4, 6 or 8 |
 | 0x32 | `I2S_RX_RATE` | G, S | none | 4 | 4 | DEFERRED, RESTART | Selected I2S and ADAT master rate in Hz: 44100, 48000 or 96000 |
 | 0x33 | `I2S_RX_PIN_AVAIL` | G | I2S pair | 24 | - |  | Pins one I2S RX pair could take: status, flags, generation, valid and free masks |
+| 0x34 | `I2S_RX_ENABLE` | G, S | none | 1 | 1 |  | I2S input block switch, 0 or 1; on holds the clock pair and counted data pins |
 | 0x40 | `ADAT_RX_ENABLE` | G, S | none | 1 | 1 |  | ADAT input enable (build: `PICO_RP2350` only) |
 | 0x41 | `ADAT_RX_PIN` | G, S | none | 1 | 1 | DEFERRED, RESTART | ADAT input GPIO; 0xFF clears it while the input is disabled (build: `PICO_RP2350` only) |
 | 0x42 | `ADAT_RX_CLOCK_MODE` | G, S | none | 1 | 1 | DEFERRED, RESTART | ADAT input clock mode, 0 master or 1 slave (build: `PICO_RP2350` only) |
@@ -1961,7 +1963,7 @@ Offsets are bytes from the start of the structure. Arrays are sized for RP2350 o
 | 4648 | 20 | `leveller` | u8 enabled; u8 speed; u8 lookahead; u8 reserved; f32 amount; f32 max_gain_db; f32 gate_threshold_db; u8 detector_mask; u8 apply_mask; u8[2] reserved |
 | 4668 | 32 | `preamp` | f32 preamp_db[8], by input channel |
 | 4700 | 16 | `master_volume` | f32 master_volume_db (-128 is mute); u8[12] reserved |
-| 4716 | 16 | `input_config` | u8 input_source; u8 spdif_rx_pin; u8 i2s_rx_pin; u8 i2s_input_rate (0 44.1k, 1 48k, 2 96k); u8 i2s_input_channels (0 absent); u8 i2s_rx_pin_ext[3]; u8 spdif_rx_pin_ext[3]; u8 spdif_rx_enabled_ext_p1; u8 i2s_clock_mode; u8 adat_input_pin (0 absent); u8 adat_input_enabled_p1; u8 adat_clock_mode_p1 |
+| 4716 | 16 | `input_config` | u8 input_source; u8 spdif_rx_pin; u8 i2s_rx_pin; u8 i2s_input_rate (0 44.1k, 1 48k, 2 96k); u8 i2s_input_channels (0 absent); u8 i2s_rx_pin_ext[3]; u8 spdif_rx_pin_ext[3]; u8 spdif_rx_count (1..4, 0 absent); u8 i2s_clock_mode; u8 adat_input_pin (0 absent); u8 input_enable_p1 (bit 0 S/PDIF, bit 1 I2S, bit 2 ADAT, plus one, 0 absent); u8 adat_clock_mode_p1 |
 | 4732 | 16 | `lg_sound_sync` | u8 enabled; u8 present; u8 volume; u8 muted; u8[12] reserved. A SET honours only `enabled` |
 | 4748 | 16 | `user_volume` | f32 user_volume_db; u8 user_mute; u8[11] reserved |
 | 4764 | 16 | `dac_hw_mute` | u8 enabled; u8 active_low; u8 pin; u8 reserved; u16 hold_ms; u16 release_ms; u8[8] reserved |
@@ -2254,6 +2256,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | I2S_CLOCK_MODE | [`CLOCK.I2S_CLOCK_MODE`](#17-clock-0x0c) | `0x0C12` |  |
 | I2S_CLOCK_PIN_MODE | [`CLOCK.I2S_CLOCK_PIN_MODE`](#17-clock-0x0c) | `0x0C11` |  |
 | I2S_RX_CHANNELS | [`INPUT.I2S_RX_CHANNELS`](#8-input-0x03) | `0x0331` |  |
+| I2S_RX_ENABLE | [`INPUT.I2S_RX_ENABLE`](#8-input-0x03) | `0x0334` |  |
 | I2S_RX_PIN | [`INPUT.I2S_RX_PIN`](#8-input-0x03) | `0x0330` |  |
 | I2S_RX_PIN_AVAIL | [`INPUT.I2S_RX_PIN_AVAIL`](#8-input-0x03) | `0x0333` |  |
 | I2S_RX_RATE | [`INPUT.I2S_RX_RATE`](#8-input-0x03) | `0x0332` |  |
@@ -2362,7 +2365,8 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | SOURCE_NAME | [`INPUT.SOURCE_NAME`](#8-input-0x03) | `0x0312` |  |
 | SPDIF_RX_CH_STATUS | [`INPUT.SPDIF_RX_CH_STATUS`](#8-input-0x03) | `0x0321` |  |
 | SPDIF_RX_CONFIG | [`INPUT.SPDIF_RX_CONFIG`](#8-input-0x03) | `0x0324` |  |
-| SPDIF_RX_ENABLE | [`INPUT.SPDIF_RX_ENABLE`](#8-input-0x03) | `0x0323` |  |
+| SPDIF_RX_COUNT | [`INPUT.SPDIF_RX_COUNT`](#8-input-0x03) | `0x0326` |  |
+| SPDIF_RX_ENABLE | [`INPUT.SPDIF_RX_ENABLE`](#8-input-0x03) | `0x0327` |  |
 | SPDIF_RX_PIN | [`INPUT.SPDIF_RX_PIN`](#8-input-0x03) | `0x0322` |  |
 | SPDIF_RX_PIN_AVAIL | [`INPUT.SPDIF_RX_PIN_AVAIL`](#8-input-0x03) | `0x0325` |  |
 | SPDIF_RX_STATUS | [`INPUT.SPDIF_RX_STATUS`](#8-input-0x03) | `0x0320` |  |

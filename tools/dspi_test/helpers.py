@@ -292,6 +292,52 @@ def write_route(dev, inp, out, enabled, gain_db=0.0, phase_invert=0):
     return dev.pset("ROUTE.MATRIX_ROUTE", pack_route(enabled, gain_db, phase_invert), route_addr(inp, out))
 
 
+# --- Input blocks -----------------------------------------------------------------------------
+# Model and rules: Documentation/Features/input_enable_plan.md sections 2 and 4.
+
+INPUT_CONFIG_OFF = 4716                 # WireBulkParams.input_config
+SPDIF_RX_INPUTS = 4
+
+
+def spdif_source(idx) -> int:
+    """INPUT.SOURCE value of S/PDIF input `idx` (0-based): 1, then 4, 5 and 6."""
+    return 1 if idx == 0 else 3 + idx
+
+
+def spdif_rx_config(dev) -> dict:
+    """INPUT.SPDIF_RX_CONFIG: input count limit, block switch, block count and one GPIO per input."""
+    cfg = dev.pget("INPUT.SPDIF_RX_CONFIG", length=7)
+    return dict(raw=cfg, limit=cfg[0], enabled=cfg[1], count=cfg[2], pins=list(cfg[3:3 + cfg[0]]))
+
+
+def input_blocks(dev) -> dict:
+    """Block switches and the S/PDIF count as the GETs report them (ADAT 0 where it is not built)."""
+    adat = dev.pget_u8("INPUT.ADAT_RX_ENABLE") if has_command(dev, "INPUT.ADAT_RX_ENABLE") else 0
+    return dict(spdif=dev.pget_u8("INPUT.SPDIF_RX_ENABLE"), count=dev.pget_u8("INPUT.SPDIF_RX_COUNT"),
+                i2s=dev.pget_u8("INPUT.I2S_RX_ENABLE"), adat=adat)
+
+
+def blob_input_blocks(blob) -> dict | None:
+    """input_blocks() as a bulk blob carries it (WireInputConfig V34); None when input_enable_p1 is absent."""
+    count, en_p1 = blob[INPUT_CONFIG_OFF + 11], blob[INPUT_CONFIG_OFF + 14]
+    if en_p1 == 0:
+        return None
+    en = en_p1 - 1
+    return dict(spdif=en & 1, count=count, i2s=(en >> 1) & 1, adat=(en >> 2) & 1)
+
+
+def restore_input_blocks(dev, saved):
+    """Put back the S/PDIF and I2S switches and the S/PDIF count from input_blocks(). The count goes first
+    when the block ends up on, so a raise is judged once against the final switch."""
+    if saved["spdif"]:
+        dev.pset_u8("INPUT.SPDIF_RX_COUNT", saved["count"])
+        dev.pset_u8("INPUT.SPDIF_RX_ENABLE", 1)
+    else:
+        dev.pset_u8("INPUT.SPDIF_RX_ENABLE", 0)
+        dev.pset_u8("INPUT.SPDIF_RX_COUNT", saved["count"])
+    dev.pset_u8("INPUT.I2S_RX_ENABLE", saved["i2s"])
+
+
 # --- GPIOs ------------------------------------------------------------------------------------
 
 BAD_GPIO = 0xFE                         # never a valid GPIO; 0xFF is the reset sentinel
@@ -352,10 +398,12 @@ def _gpio_owners_legacy(dev, profile) -> dict:
             own.setdefault(pin, set()).add(who)
     for i in range(profile.num_pin_outputs):
         add(u8("OUTPUT.PIN", i), f"output{i}")
-    cfg = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)
+    cfg = dev.pget("INPUT.SPDIF_RX_CONFIG", length=7)
     for i in range(cfg[0]):
-        if (cfg[1] >> i) & 1:
-            add(cfg[2 + i], f"spdif_rx{i}")
+        # A 6-byte reply is the older per-input enable mask, a 7-byte one the block switch and count.
+        held = (cfg[1] >> i) & 1 if len(cfg) == 6 else (cfg[1] and i < cfg[2])
+        if held:
+            add(cfg[len(cfg) - 4 + i], f"spdif_rx{i}")
     pairs = 4 if profile.platform_id == 1 else 1
     for p in range(min(pairs, u8("INPUT.I2S_RX_CHANNELS") // 2)):
         add(u8("INPUT.I2S_RX_PIN", p), f"i2s_rx{p}")

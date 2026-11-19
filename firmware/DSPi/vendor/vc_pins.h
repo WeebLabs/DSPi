@@ -98,9 +98,9 @@ typedef struct {
     uint8_t mck_enabled;
     uint8_t mck_pin;
     uint8_t spdif_rx_pin[SPDIF_RX_NUM_INPUTS];
-    uint8_t spdif_rx_enabled_ext;
+    uint8_t spdif_rx_enabled, spdif_rx_count;      // S/PDIF block switch, inputs 1..count
     uint8_t i2s_rx_pin[I2S_RX_MAX_PAIRS];
-    uint8_t i2s_rx_pairs;
+    uint8_t i2s_rx_enabled, i2s_rx_pairs;          // I2S block switch, stereo pairs
     uint8_t adat_tx_enabled, adat_tx_pin;          // RP2350 only; zero elsewhere
     uint8_t adat_rx_enabled, adat_rx_pin;          // adat_rx_pin 0xFF = unset
     uint8_t has_dac_mute;                          // bulk push only: the blob carries it
@@ -111,6 +111,11 @@ typedef struct {
 void pin_config_capture(PinConfig *cfg);
 // Factory pin set, the base a failed boot restore falls back to.
 void pin_config_defaults(PinConfig *cfg);
+// Turn on the block of `src` (and raise the S/PDIF count to reach it) so a restore
+// never carries a selected source whose block is off. ADAT with no pin stays off.
+void pin_config_admit_source(PinConfig *cfg, uint8_t src);
+// True if `cfg`'s input source is inside an enabled block.
+bool pin_config_source_ok(const PinConfig *cfg);
 
 // ---- Checks ----
 
@@ -156,11 +161,12 @@ uint8_t pin_check_set(uint8_t fn, uint8_t idx, uint8_t pin0, uint8_t pin1);
 // ---- Start checks: a function about to begin using its stored pins ----
 
 uint8_t pin_start_check(uint8_t fn, uint8_t idx);
-// Output slot `slot` becomes `type`, or the input source becomes `source`, or the clock
-// mode or clock-pin mode changes. Each refuses before anything is queued.
+// Output slot `slot` becomes `type`, an input block changes its switch or count, or the
+// clock mode or clock-pin mode changes. Each judges every pin it brings into use as one
+// unit and refuses before anything changes.
 uint8_t pin_start_check_output_type(uint8_t slot, uint8_t type);
-uint8_t pin_start_check_source(uint8_t source);
-uint8_t pin_start_check_i2s_rx_pairs(uint8_t pairs);
+uint8_t pin_start_check_spdif_rx(uint8_t enabled, uint8_t count);
+uint8_t pin_start_check_i2s_rx(uint8_t enabled, uint8_t pairs);
 uint8_t pin_start_check_clock(uint8_t clock_pin_mode, uint8_t clock_mode);
 uint8_t pin_start_check_pdm(void);
 

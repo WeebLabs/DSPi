@@ -98,10 +98,11 @@ The siggen history bytes of `MEAS.SIGGEN_STATUS` are masked too.
   slot 9, startup, output-config and master volume modes, `ROUTE.MASTER_VOLUME_SAVE`. Restored by
   writing the old values back, then `CS.SAVE`.
 - **reconfig** (`--allow-reconfig`, RP2350): input-side and storage-only IO settings that touch no
-  driven pin while USB is the source: I2S input rate, I2S and ADAT clock modes, ADAT input, optional
-  S/PDIF input enable and pins, I2S RX pins and channel count, BCK pins, clock-pin mode, MCK multiplier
-  and pin, ADAT output pin. Needs USB as source, no I2S slot, and output-config mode 1, because the
-  bulk SET is the backstop for pins the firmware will not re-set one at a time.
+  driven pin while USB is the source: I2S input rate, I2S and ADAT clock modes, ADAT input, S/PDIF
+  input pins, block switch and count, I2S RX pins and channel count, BCK pins, clock-pin mode, MCK
+  multiplier and pin, ADAT output pin. Needs USB as source, no I2S slot, the I2S input block off, and
+  output-config mode 1, because the bulk SET is the backstop for pins the firmware will not re-set one
+  at a time.
 
 ## Excluded, and why
 

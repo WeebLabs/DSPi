@@ -1,16 +1,19 @@
 """
 Input source switching, S/PDIF and I2S receiver pins, LG Sound Sync, the DAC hardware mute and source names
 (INPUT.*, OUTPUT.DAC_MUTE_*). Source switches restore the original source in a finally block, and pin moves
-run only on a source that does not use the pin and only when the original pin can be put back.
+run only on a source that does not use the pin and only when the original pin can be put back. Input block
+switches and the S/PDIF count are restored after the source, since a block cannot drop a live source.
 """
 
 import struct
 import time
 
 from ..device import Timeout
-from ..framework import test
-from ..helpers import (TYPE_I2S, TYPE_SPDIF, bool_roundtrip, expect_result, expect_stall, free_gpio, gpio_owners,
-                       held_by_others, invalid_gpios, poll_type, set_type, settle, try_set, wait_for)
+from ..framework import Skip, test
+from ..helpers import (INPUT_CONFIG_OFF, TYPE_I2S, TYPE_SPDIF, bool_roundtrip, expect_result, expect_stall,
+                       free_gpio, gpio_owners, has_command, held_by_others, input_blocks, invalid_gpios, poll_type,
+                       push_bulk, read_bulk, restore_input_blocks, set_type, settle, spdif_rx_config, spdif_source,
+                       try_set, wait_for)
 from ..profile import MAX_GPIO
 
 INPUT_USB, INPUT_SPDIF, INPUT_I2S, INPUT_ADAT = 0, 1, 2, 3
@@ -38,11 +41,22 @@ def _switch_source(dev, target, timeout_s=2.0):
     return wait_for(lambda: _source(dev), target, 0.5)
 
 
+def _i2s_block_on(dev, chk):
+    """Switch the I2S block on so I2S can be selected; True when on. A pin refusal is noted, not failed."""
+    r = try_set(dev, "INPUT.I2S_RX_ENABLE", b"\x01")
+    if r != "VC_OK":
+        chk.member(r, ("VC_ERR_PIN_IN_USE", "VC_ERR_PIN_INVALID"), "I2S block switch-on refusal")
+        chk.note(f"I2S block could not switch on ({r}); I2S cases skipped")
+    return r == "VC_OK"
+
+
 @test("inputs", mutating=True)
 def input_source_switch_roundtrip(dev, profile, chk):
     """INPUT.SOURCE: switch USB <-> S/PDIF and back (deferred, mute and reset); a source past 6 is VC_ERR_VALUE."""
     orig = _source(dev)
     other = INPUT_USB if orig == INPUT_SPDIF else INPUT_SPDIF
+    if other == INPUT_SPDIF and not spdif_rx_config(dev)["enabled"]:
+        raise Skip("the S/PDIF input block is off")
     try:
         chk.eq(_switch_source(dev, other), other, f"switched to {other}")
         expect_stall(chk, lambda: dev.pset_u8("INPUT.SOURCE", INPUT_INVALID), "VC_ERR_VALUE",
@@ -61,10 +75,13 @@ def input_source_i2s_switch(dev, profile, chk):
     if orig == INPUT_I2S:
         chk.note("already on I2S input")
         return
+    saved = input_blocks(dev)
     try:
-        chk.eq(_switch_source(dev, INPUT_I2S), INPUT_I2S, "switched to I2S")
+        if _i2s_block_on(dev, chk):
+            chk.eq(_switch_source(dev, INPUT_I2S), INPUT_I2S, "switched to I2S")
     finally:
         chk.eq(_switch_source(dev, orig), orig, "input source restored")
+        restore_input_blocks(dev, saved)
 
 
 @test("inputs", mutating=True)
@@ -73,8 +90,9 @@ def i2s_input_output_type_switch_stress(dev, profile, chk):
     Each tears down the chained capture DMA and re-elects the input clock role; the sentinel catches a hang."""
     orig_src = _source(dev)
     orig_t0 = dev.pget_u8("OUTPUT.TYPE", 0)
+    saved = input_blocks(dev)
     try:
-        if _switch_source(dev, INPUT_I2S) != INPUT_I2S:
+        if not _i2s_block_on(dev, chk) or _switch_source(dev, INPUT_I2S) != INPUT_I2S:
             chk.note("could not switch to I2S input; skipping")
             return
         other = TYPE_I2S if orig_t0 == TYPE_SPDIF else TYPE_SPDIF
@@ -91,6 +109,100 @@ def i2s_input_output_type_switch_stress(dev, profile, chk):
             chk.ok(set_type(dev, 0, orig_t0), "slot0 type restored")
         finally:
             chk.eq(_switch_source(dev, orig_src), orig_src, "input source restored")
+            restore_input_blocks(dev, saved)
+
+
+@test("inputs", mutating=True)
+def source_refused_outside_block(dev, profile, chk):
+    """INPUT.SOURCE answers VC_ERR_STATE for an S/PDIF input above the count, S/PDIF with its block off, I2S
+    with its block off and a disabled ADAT input, and nothing switches. USB source only; restores the blocks."""
+    if _source(dev) != INPUT_USB:
+        raise Skip("input source is not USB")
+    saved = input_blocks(dev)
+    E = expect_stall
+    try:
+        if saved["count"] == 4:
+            dev.pset_u8("INPUT.SPDIF_RX_COUNT", 3)
+        n = dev.pget_u8("INPUT.SPDIF_RX_COUNT")
+        E(chk, lambda: dev.pset_u8("INPUT.SOURCE", spdif_source(n)), "VC_ERR_STATE",
+          f"S/PDIF input {n + 1} above count {n}")
+        dev.pset_u8("INPUT.SPDIF_RX_ENABLE", 0)
+        E(chk, lambda: dev.pset_u8("INPUT.SOURCE", INPUT_SPDIF), "VC_ERR_STATE", "S/PDIF input 1, block off")
+        dev.pset_u8("INPUT.I2S_RX_ENABLE", 0)
+        E(chk, lambda: dev.pset_u8("INPUT.SOURCE", INPUT_I2S), "VC_ERR_STATE", "I2S, block off")
+        if has_command(dev, "INPUT.ADAT_RX_ENABLE") and not saved["adat"]:
+            E(chk, lambda: dev.pset_u8("INPUT.SOURCE", INPUT_ADAT), "VC_ERR_STATE", "ADAT, disabled")
+        time.sleep(0.05)
+        chk.eq(_source(dev), INPUT_USB, "no refused switch went through")
+    finally:
+        restore_input_blocks(dev, saved)
+        chk.eq(input_blocks(dev), saved, "input blocks restored")
+
+
+@test("inputs", mutating=True)
+def block_cut_refused_while_live(dev, profile, chk):
+    """With S/PDIF input 2, then I2S, as the source (first right after the SET, likely still pending, then once
+    applied), switching its block off, or an S/PDIF count below it, is VC_ERR_STATE and changes nothing."""
+    orig = _source(dev)
+    saved = input_blocks(dev)
+
+    def refused(cmd, val, what):
+        before = input_blocks(dev)
+        expect_stall(chk, lambda: dev.pset_u8(cmd, val), "VC_ERR_STATE", what)
+        chk.eq(input_blocks(dev), before, f"{what}: blocks unchanged")
+
+    def cuts(src, when):
+        if src == INPUT_SPDIF2:
+            refused("INPUT.SPDIF_RX_COUNT", 1, f"S/PDIF count 1 {when}")
+            refused("INPUT.SPDIF_RX_ENABLE", 0, f"S/PDIF block off {when}")
+        else:
+            refused("INPUT.I2S_RX_ENABLE", 0, f"I2S block off {when}")
+    try:
+        if saved["spdif"]:
+            spdif_ok = saved["count"] >= 2 or try_set(dev, "INPUT.SPDIF_RX_COUNT", b"\x02") == "VC_OK"
+        else:
+            dev.pset_u8("INPUT.SPDIF_RX_COUNT", max(2, saved["count"]))
+            spdif_ok = try_set(dev, "INPUT.SPDIF_RX_ENABLE", b"\x01") == "VC_OK"
+        if not spdif_ok:
+            chk.note("S/PDIF block with input 2 could not switch on; S/PDIF cases skipped")
+        for src, ready in ((INPUT_SPDIF2, spdif_ok), (INPUT_I2S, None)):
+            if ready is None:
+                ready = _i2s_block_on(dev, chk)
+            if not ready:
+                continue
+            dev.pset_u8("INPUT.SOURCE", src)
+            cuts(src, f"right after selecting source {src}")
+            if chk.eq(_switch_source(dev, src), src, f"switched to source {src}"):
+                cuts(src, f"with source {src} active")
+    finally:
+        chk.eq(_switch_source(dev, orig), orig, "input source restored")
+        restore_input_blocks(dev, saved)
+        chk.eq(input_blocks(dev), saved, "input blocks restored")
+
+
+@test("inputs", mutating=True)
+def bulk_push_keeps_live_spdif_block(dev, profile, chk):
+    """On S/PDIF input 1, a bulk SET that clears the S/PDIF switch keeps the block on and the source
+    (output-config mode WITH_PRESET only). Restores the blob and the source."""
+    if dev.pget_u8("STORE.OUTPUT_CONFIG_MODE") != 1:
+        raise Skip("output-config mode is not WITH_PRESET: a bulk SET leaves the input fields live")
+    saved = input_blocks(dev)
+    if not saved["spdif"]:
+        raise Skip("the S/PDIF input block is off")
+    orig = _source(dev)
+    blob0 = read_bulk(dev, profile)
+    try:
+        if not chk.eq(_switch_source(dev, INPUT_SPDIF), INPUT_SPDIF, "switched to S/PDIF input 1"):
+            return
+        b = bytearray(read_bulk(dev, profile))
+        b[INPUT_CONFIG_OFF + 14] = ((b[INPUT_CONFIG_OFF + 14] - 1) & 6) + 1     # input_enable_p1, S/PDIF bit off
+        push_bulk(dev, bytes(b))
+        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE"), 1, "S/PDIF block kept on")
+        chk.eq(_source(dev), INPUT_SPDIF, "source kept")
+    finally:
+        push_bulk(dev, blob0)
+        chk.eq(_switch_source(dev, orig), orig, "input source restored")
+        chk.eq(input_blocks(dev), saved, "input blocks restored")
 
 
 @test("inputs")
@@ -124,15 +236,18 @@ def _movable(chk, dev, profile, orig, me, what):
 @test("inputs", mutating=True)
 def spdif_rx_pin_validation(dev, profile, chk):
     """INPUT.SPDIF_RX_PIN input 0 refuses invalid and held GPIOs and moves to a free one and back (USB input).
-    Invalid GPIOs are VC_ERR_PIN_INVALID, an output's GPIO VC_ERR_PIN_IN_USE, the current GPIO VC_OK."""
+    Invalid GPIOs are VC_ERR_PIN_INVALID, an output's GPIO VC_ERR_PIN_IN_USE (block on), the current GPIO VC_OK."""
     pin = lambda: dev.pget_u8("INPUT.SPDIF_RX_PIN", 0)  # noqa: E731
     orig = pin()
     for g in invalid_gpios(profile):
         expect_stall(chk, lambda: dev.pset_u8("INPUT.SPDIF_RX_PIN", g, 0), "VC_ERR_PIN_INVALID", f"GPIO {g}")
     expect_result(chk, lambda: dev.pset_u8("INPUT.SPDIF_RX_PIN", orig, 0), "VC_OK", "same pin")
     out_pin = dev.pget_u8("OUTPUT.PIN", 0)
-    expect_stall(chk, lambda: dev.pset_u8("INPUT.SPDIF_RX_PIN", out_pin, 0), "VC_ERR_PIN_IN_USE",
-                 f"GPIO {out_pin} held by output 0")
+    if spdif_rx_config(dev)["enabled"]:
+        expect_stall(chk, lambda: dev.pset_u8("INPUT.SPDIF_RX_PIN", out_pin, 0), "VC_ERR_PIN_IN_USE",
+                     f"GPIO {out_pin} held by output 0")
+    else:
+        chk.note("S/PDIF block off: input 0 only stores its pin, held-GPIO refusal not probed")
     chk.eq(pin(), orig, "pin unchanged by refused SETs")
     if _source(dev) != INPUT_USB:
         chk.note("not on USB input: live S/PDIF RX pin move skipped")
@@ -152,19 +267,20 @@ def spdif_rx_pin_validation(dev, profile, chk):
 @test("inputs", mutating=True)
 def i2s_rx_pin_validation(dev, profile, chk):
     """INPUT.I2S_RX_PIN pair 0 refuses invalid and held GPIOs and moves to a free one and back (not on I2S).
-    Invalid GPIOs are VC_ERR_PIN_INVALID; on I2S input an output's or S/PDIF input 0's GPIO is VC_ERR_PIN_IN_USE."""
+    Invalid GPIOs are VC_ERR_PIN_INVALID; with the I2S block on an output's or S/PDIF input 0's GPIO is
+    VC_ERR_PIN_IN_USE."""
     pin = lambda: dev.pget_u8("INPUT.I2S_RX_PIN", 0)  # noqa: E731
     orig = pin()
     for g in invalid_gpios(profile):
         expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", g, 0), "VC_ERR_PIN_INVALID", f"GPIO {g}")
     expect_result(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", orig, 0), "VC_OK", "same pin")
-    # Pair 0 claims its pin only while I2S is the source; otherwise it stores any valid GPIO.
-    if _source(dev) == INPUT_I2S:
+    # Pair 0 claims its pin only while the I2S block is on; otherwise it stores any valid GPIO.
+    if dev.pget_u8("INPUT.I2S_RX_ENABLE"):
         out_pin = dev.pget_u8("OUTPUT.PIN", 0)
         expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", out_pin, 0), "VC_ERR_PIN_IN_USE",
                      f"GPIO {out_pin} held by output 0")
         spdif_pin = dev.pget_u8("INPUT.SPDIF_RX_PIN", 0)
-        if spdif_pin != orig:
+        if spdif_pin != orig and spdif_rx_config(dev)["enabled"]:
             expect_stall(chk, lambda: dev.pset_u8("INPUT.I2S_RX_PIN", spdif_pin, 0), "VC_ERR_PIN_IN_USE",
                          f"GPIO {spdif_pin} held by S/PDIF input 0")
     chk.eq(pin(), orig, "pin unchanged by refused SETs")

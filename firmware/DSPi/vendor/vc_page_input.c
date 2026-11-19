@@ -36,9 +36,8 @@ static VcResult input_source_set(VcCtx *c) {
 #if !PICO_RP2350
     if (src == INPUT_SOURCE_ADAT) return VC_ERR_UNSUPPORTED;
 #endif
-    if (!input_source_selectable(src)) return VC_ERR_STATE;   // a disabled optional input
-    uint8_t st = pin_start_check_source(src);                   // I2S claims its clocks and data pins
-    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    // An enabled block already holds its pins, so a switch needs no pin check.
+    if (!input_source_selectable(src)) return VC_ERR_STATE;
     pending_input_source = src;
     __dmb();
     input_source_change_pending = true;
@@ -68,7 +67,7 @@ static VcResult input_source_name_set_h(VcCtx *c) {
 // ---- S/PDIF RX ----
 
 _Static_assert(sizeof(SpdifRxStatusPacket) == 16, "INPUT.SPDIF_RX_STATUS is 16 bytes");
-_Static_assert(2 + SPDIF_RX_NUM_INPUTS == 6, "INPUT.SPDIF_RX_CONFIG is 6 bytes");
+_Static_assert(3 + SPDIF_RX_NUM_INPUTS == 7, "INPUT.SPDIF_RX_CONFIG is 7 bytes");
 
 static VcResult input_spdif_rx_status_get(VcCtx *c) {
     SpdifRxStatusPacket st;
@@ -92,7 +91,7 @@ static VcResult input_spdif_rx_pin_set(VcCtx *c) {
     uint8_t index = (uint8_t)c->addr;
     uint8_t new_pin = vc_in_u8(c, 0);
     if (new_pin == PIN_RESET_TO_DEFAULT) new_pin = spdif_rx_pin_default_for_index(index);
-    // A disabled optional input stores its pin as a preference; enable re-checks it.
+    // An input outside the block stores its pin as a preference; the block SETs re-check it.
     uint8_t st = pin_check_set(PIN_FN_SPDIF_RX, index, new_pin, 0xFF);
     if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
     if (new_pin == spdif_rx_pin_for_index(index)) return VC_OK;
@@ -109,34 +108,62 @@ static VcResult input_spdif_rx_pin_set(VcCtx *c) {
     return VC_OK;
 }
 
+// True if the active or queued source is `src`; such a source's block cannot be cut.
+static bool source_live(uint8_t src) {
+    return active_input_source == src ||
+           (input_source_change_pending && pending_input_source == src);
+}
+
+// The S/PDIF block can lose input `idx` and above only if none of them is live.
+static bool spdif_cut_allowed(uint8_t enabled, uint8_t count) {
+    for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS; i++) {
+        bool kept = enabled && i < count;
+        if (!kept && source_live(spdif_source_for_index(i))) return false;
+    }
+    return true;
+}
+
+static void notify_input_enable(void) {
+    uint8_t enc = (uint8_t)(input_enable_mask() + 1);   // wire field is the mask plus one
+    notify_param_write(offsetof(WireBulkParams, input_config.input_enable_p1), 1, &enc);
+}
+
+// One path for both S/PDIF block SETs: cut check, all-or-nothing pin check, install.
+static VcResult spdif_block_set(uint8_t enabled, uint8_t count) {
+    if (enabled == spdif_rx_enabled && count == spdif_rx_count) return VC_OK;
+    if (!spdif_cut_allowed(enabled, count)) return VC_ERR_STATE;
+    uint8_t st = pin_start_check_spdif_rx(enabled, count);
+    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    bool en_changed = enabled != spdif_rx_enabled;
+    bool count_changed = count != spdif_rx_count;
+    spdif_rx_enabled = enabled;
+    spdif_rx_count = count;
+    if (count_changed)
+        notify_param_write(offsetof(WireBulkParams, input_config.spdif_rx_count), 1, &spdif_rx_count);
+    if (en_changed) notify_input_enable();
+    return VC_OK;
+}
+
 static VcResult input_spdif_rx_enable_get(VcCtx *c) {
-    if (c->addr == 0) return VC_ERR_ADDRESS;   // input 0 is always enabled
-    c->out[0] = spdif_input_enabled((uint8_t)c->addr) ? 1 : 0;
+    c->out[0] = spdif_rx_enabled ? 1 : 0;
     return VC_OK;
 }
 
 static VcResult input_spdif_rx_enable_set(VcCtx *c) {
-    uint8_t index = (uint8_t)c->addr;
-    uint8_t enable = vc_in_u8(c, 0) ? 1 : 0;
-    if (index == 0) return VC_ERR_ADDRESS;
-    if (enable == (spdif_input_enabled(index) ? 1 : 0)) return VC_OK;
+    uint8_t v = vc_in_u8(c, 0);
+    if (v > 1) return VC_ERR_VALUE;
+    return spdif_block_set(v, spdif_rx_count);
+}
 
-    if (enable) {
-        uint8_t st = pin_start_check(PIN_FN_SPDIF_RX, index);
-        if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
-        spdif_rx_enabled_ext |= (uint8_t)(1u << (index - 1));
-    } else {
-        // The host must switch the source away first.
-        bool is_active = input_source_is_spdif(active_input_source) &&
-                         spdif_index_for_source(active_input_source) == index;
-        bool is_pending = input_source_change_pending &&
-                          pending_input_source == spdif_source_for_index(index);
-        if (is_active || is_pending) return VC_ERR_STATE;
-        spdif_rx_enabled_ext &= (uint8_t)~(1u << (index - 1));
-    }
-    uint8_t enc = (uint8_t)(spdif_rx_enabled_ext + 1);   // wire field is the mask plus one
-    notify_param_write(offsetof(WireBulkParams, input_config.spdif_rx_enabled_ext_p1), 1, &enc);
+static VcResult input_spdif_rx_count_get(VcCtx *c) {
+    c->out[0] = spdif_rx_count;
     return VC_OK;
+}
+
+static VcResult input_spdif_rx_count_set(VcCtx *c) {
+    uint8_t v = vc_in_u8(c, 0);
+    if (v < 1 || v > SPDIF_RX_NUM_INPUTS) return VC_ERR_VALUE;
+    return spdif_block_set(spdif_rx_enabled, v);
 }
 
 static VcResult avail_reply(VcCtx *c, uint8_t fn, uint8_t idx) {
@@ -152,9 +179,10 @@ static VcResult input_spdif_rx_pin_avail_get(VcCtx *c) {
 
 static VcResult input_spdif_rx_config_get(VcCtx *c) {
     c->out[0] = SPDIF_RX_NUM_INPUTS;
-    c->out[1] = (uint8_t)((spdif_rx_enabled_ext << 1) | 1);
+    c->out[1] = spdif_rx_enabled ? 1 : 0;
+    c->out[2] = spdif_rx_count;
     for (uint8_t i = 0; i < SPDIF_RX_NUM_INPUTS; i++)
-        c->out[2 + i] = spdif_rx_pin_for_index(i);
+        c->out[3 + i] = spdif_rx_pin_for_index(i);
     return VC_OK;
 }
 
@@ -170,7 +198,7 @@ static VcResult input_i2s_rx_pin_set(VcCtx *c) {
     uint8_t new_pin = vc_in_u8(c, 0);
     // Defaults are the contiguous block from pair 0's default (audio_input.c).
     if (new_pin == PIN_RESET_TO_DEFAULT) new_pin = (uint8_t)(PICO_I2S_RX_PIN_DEFAULT + pair);
-    // A pair claims its pin only while I2S is the source and the pair is counted.
+    // A pair claims its pin only while the I2S block is on and the pair is counted.
     uint8_t st = pin_check_set(PIN_FN_I2S_RX, pair, new_pin, 0xFF);
     if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
     if (new_pin == i2s_rx_pin[pair]) return VC_OK;
@@ -204,8 +232,8 @@ static VcResult input_i2s_rx_channels_set(VcCtx *c) {
     if (count != 2 && count != 4 && count != 6 && count != 8) return VC_ERR_VALUE;
     if (count / 2 > I2S_RX_MAX_PAIRS) return VC_ERR_UNSUPPORTED;
 
-    // Pairs the new count brings into use claim their stored pins (only while I2S is the source).
-    uint8_t st = pin_start_check_i2s_rx_pairs((uint8_t)(count / 2));
+    // Pairs the new count brings into use claim their stored pins while the block is on.
+    uint8_t st = pin_start_check_i2s_rx(i2s_input_enabled, (uint8_t)(count / 2));
     if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
     if (count != i2s_input_channels) {
         i2s_input_channels = count;
@@ -216,6 +244,24 @@ static VcResult input_i2s_rx_channels_set(VcCtx *c) {
         notify_param_write(offsetof(WireBulkParams, input_config.i2s_input_channels),
                            1, &i2s_input_channels);
     }
+    return VC_OK;
+}
+
+static VcResult input_i2s_rx_enable_get(VcCtx *c) {
+    c->out[0] = i2s_input_enabled ? 1 : 0;
+    return VC_OK;
+}
+
+// Reserves or releases pins only; the clocks start when I2S is selected.
+static VcResult input_i2s_rx_enable_set(VcCtx *c) {
+    uint8_t v = vc_in_u8(c, 0);
+    if (v > 1) return VC_ERR_VALUE;
+    if (v == (i2s_input_enabled ? 1 : 0)) return VC_OK;
+    if (!v && source_live(INPUT_SOURCE_I2S)) return VC_ERR_STATE;
+    uint8_t st = pin_start_check_i2s_rx(v, (uint8_t)(i2s_input_channels / 2));
+    if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
+    i2s_input_enabled = v;
+    notify_input_enable();
     return VC_OK;
 }
 
@@ -256,21 +302,16 @@ static VcResult input_adat_rx_enable_get(VcCtx *c) {
 static VcResult input_adat_rx_enable_set(VcCtx *c) {
     uint8_t value = vc_in_u8(c, 0);
     if (value > 1) return VC_ERR_VALUE;
-    if (value == (adat_input_enabled ? 1 : 0)) {
-        // Unchanged; the notify below still runs.
-    } else if (value) {
+    if (value == (adat_input_enabled ? 1 : 0)) return VC_OK;
+    if (value) {
         uint8_t st = pin_start_check(PIN_FN_ADAT_RX, 0);
         if (st != PIN_CONFIG_SUCCESS) return vc_from_pin_status(st);
         adat_input_enabled = 1;
     } else {
-        bool is_active  = (active_input_source == INPUT_SOURCE_ADAT);
-        bool is_pending = input_source_change_pending &&
-                          pending_input_source == INPUT_SOURCE_ADAT;
-        if (is_active || is_pending) return VC_ERR_STATE;
+        if (source_live(INPUT_SOURCE_ADAT)) return VC_ERR_STATE;
         adat_input_enabled = 0;
     }
-    uint8_t enc = (uint8_t)(adat_input_enabled + 1);   // wire field is the enable plus one
-    notify_param_write(offsetof(WireBulkParams, input_config.adat_input_enabled_p1), 1, &enc);
+    notify_input_enable();
     return VC_OK;
 }
 

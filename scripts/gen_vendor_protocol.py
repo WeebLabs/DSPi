@@ -644,6 +644,8 @@ RETIRED_TEXT = {
     "GET_USB_ERROR_STATS": "None. Its six counters always read 0. Live USB health is in "
                            "`SYS.USB_AUDIO_STATUS` and `SYS.PIPELINE_STATS`",
     "RESET_USB_ERROR_STATS": "None. It did nothing. `SYS.STATS_RESET` resets the watermarks",
+    "SET_SPDIF_INPUT_ENABLE": "None per input. Set `INPUT.SPDIF_RX_COUNT` (`0x0326`) to cover the "
+                              "input and `INPUT.SPDIF_RX_ENABLE` (`0x0327`) to 1",
 }
 
 LEVELS_CMD = "MEAS.LEVELS"   # what GET_STATUS "peaks", "peak_cpu" and "levels_raw" selectors read

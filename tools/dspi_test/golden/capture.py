@@ -177,6 +177,9 @@ class Golden:
             types = [b(key("OUTPUT.TYPE", s)) for s in range(self.p["nspdif"])]
             if b("INPUT.SOURCE@0x0000")[0] != 0 or any(t[0] != 0 for t in types):
                 raise SystemExit("--allow-reconfig needs USB as the input source and no I2S output slot")
+            # An enabled I2S input block holds a clock pair, so the BCK writes would move held pins.
+            if b("INPUT.I2S_RX_ENABLE@0x0000")[0] != 0:
+                raise SystemExit("--allow-reconfig needs the I2S input block off")
             # Some original pins cannot be re-set through their own command once another
             # function owns the GPIO, so the bulk SET (applied only in with-preset mode) is the backstop.
             if b("STORE.OUTPUT_CONFIG_MODE@0x0000")[0] != 1:
@@ -315,11 +318,12 @@ class Golden:
         put("INPUT.I2S_RX_CHANNELS", u8("INPUT.I2S_RX_CHANNELS@0x0000"))
         for pair in range(4):
             put("INPUT.I2S_RX_PIN", u8(key("INPUT.I2S_RX_PIN", pair)), pair)
+        # Pins first while the script leaves the S/PDIF block off, then the count before the switch.
         cfg = b("INPUT.SPDIF_RX_CONFIG@0x0000")
         for idx in range(4):
-            put("INPUT.SPDIF_RX_PIN", cfg[2 + idx:3 + idx], idx)
-        for idx in range(1, 4):
-            put("INPUT.SPDIF_RX_ENABLE", bytes([(cfg[1] >> idx) & 1]), idx)
+            put("INPUT.SPDIF_RX_PIN", cfg[3 + idx:4 + idx], idx)
+        put("INPUT.SPDIF_RX_COUNT", cfg[2:3])
+        put("INPUT.SPDIF_RX_ENABLE", cfg[1:2])
         put("INPUT.ADAT_RX_ENABLE", u8("INPUT.ADAT_RX_ENABLE@0x0000"))
         put("INPUT.ADAT_RX_PIN", u8("INPUT.ADAT_RX_PIN@0x0000"))
         put("INPUT.ADAT_RX_CLOCK_MODE", u8("INPUT.ADAT_RX_CLOCK_MODE@0x0000"))

@@ -9,9 +9,13 @@ import struct
 import time
 
 from ..framework import Skip, test
-from ..helpers import (PIN_CLAIM_ACTIVE, expect_stall, has_command, pin_claims, require_paged, try_set)
+from ..helpers import (INPUT_CONFIG_OFF, PIN_CLAIM_ACTIVE, expect_stall, has_command, input_blocks, pin_claims,
+                       push_bulk, reached, read_bulk, require_paged, restore_input_blocks, settle, spdif_rx_config,
+                       try_set)
 
 F_IN_USE, F_PAIR_PLUS1, F_UNASSIGNED, F_START_OK = 0x01, 0x02, 0x04, 0x08
+FN_SPDIF_RX, FN_I2S_RX = 7, 8
+OUTPUT_CONFIG_WITH_PRESET = 1
 
 
 def _require(dev):
@@ -45,7 +49,7 @@ def _single_functions(dev, profile):
     out = []
     for i in range(profile.num_pin_outputs):
         out.append((f"output pin {i}", "OUTPUT.PIN_AVAIL", "OUTPUT.PIN", i))
-    for i in range(dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[0]):
+    for i in range(spdif_rx_config(dev)["limit"]):
         out.append((f"S/PDIF input {i}", "INPUT.SPDIF_RX_PIN_AVAIL", "INPUT.SPDIF_RX_PIN", i))
     for p in range(4 if profile.platform_id == 1 else 1):
         out.append((f"I2S RX pair {p}", "INPUT.I2S_RX_PIN_AVAIL", "INPUT.I2S_RX_PIN", p))
@@ -210,54 +214,143 @@ def generation_tracks_pin_changes(dev, profile, chk):
         dev.pset("CLOCK.MCK_PIN", bytes([orig]))
 
 
-def _refused_start(dev, chk, label, store_cmd, store_addr, held_pin, start, restore_value=None):
-    """Store `held_pin` on a function not in use, then `start()` must answer VC_ERR_PIN_IN_USE.
-    The stored pin is restored whatever happens."""
+def _refused_start(dev, chk, label, store_cmd, store_addr, held_pin, start, restore_value=None,
+                   code="VC_ERR_PIN_IN_USE", unchanged=None):
+    """Store `held_pin` on a function not in use, then `start()` must answer `code`, and `unchanged()`, when
+    given, must read the same before and after. The stored pin is restored whatever happens."""
     orig = dev.pget_u8(store_cmd, store_addr)
     try:
         r = try_set(dev, store_cmd, bytes([held_pin]), store_addr)
         chk.eq(r, "VC_OK", f"{label}: a held GPIO is stored while not in use")
         if r != "VC_OK":
             return
-        expect_stall(chk, start, "VC_ERR_PIN_IN_USE", f"{label}: start on a held pin")
+        before = unchanged() if unchanged else None
+        expect_stall(chk, start, code, f"{label}: start on a held pin")
+        if unchanged:
+            chk.eq(unchanged(), before, f"{label}: nothing changed")
     finally:
         dev.pset(store_cmd, bytes([orig if restore_value is None else restore_value]), addr=store_addr)
         chk.eq(dev.pget_u8(store_cmd, store_addr), orig, f"{label}: stored pin restored")
 
 
 @test("paged_pins", mutating=True)
-def spdif_enable_refused_on_held_pin(dev, profile, chk):
-    """A disabled optional S/PDIF input stores output 0's GPIO, START_OK is clear, and enabling it is
-    refused with the input left disabled."""
+def spdif_count_raise_refused_on_held_pin(dev, profile, chk):
+    """With S/PDIF input 4 stored on output 0's GPIO, a count raise from 1 to 4 is refused as one unit: the
+    count and every claim are unchanged, so inputs 2 and 3 did not claim either. Restores pin and count."""
     _require(dev)
-    mask = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1]
-    idx = next((i for i in (1, 2, 3) if not (mask >> i) & 1), None)
-    if idx is None:
-        raise Skip("every optional S/PDIF input is enabled")
-    held = dev.pget_u8("OUTPUT.PIN", 0)
-    orig = dev.pget_u8("INPUT.SPDIF_RX_PIN", idx)
+    saved = input_blocks(dev)
+    if not saved["spdif"]:
+        raise Skip("the S/PDIF input block is off")
+    if dev.pget_u8("INPUT.SOURCE") in (4, 5, 6):
+        raise Skip("an S/PDIF input above 1 is the source")
     try:
-        dev.pset("INPUT.SPDIF_RX_PIN", bytes([held]), addr=idx)
-        chk.eq(_avail(dev, "INPUT.SPDIF_RX_PIN_AVAIL", idx)["flags"] & F_START_OK, 0, "START_OK clear")
-        expect_stall(chk, lambda: dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x01", addr=idx), "VC_ERR_PIN_IN_USE",
-                     "enable on output 0's GPIO")
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", idx), 0, "input still disabled")
+        dev.pset_u8("INPUT.SPDIF_RX_COUNT", 1)
+        _refused_start(dev, chk, "S/PDIF count 1 to 4", "INPUT.SPDIF_RX_PIN", 3, dev.pget_u8("OUTPUT.PIN", 0),
+                       lambda: dev.pset("INPUT.SPDIF_RX_COUNT", b"\x04"),
+                       unchanged=lambda: (dev.pget_u8("INPUT.SPDIF_RX_COUNT"), pin_claims(dev)))
     finally:
-        dev.pset("INPUT.SPDIF_RX_PIN", bytes([orig]), addr=idx)
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_PIN", idx), orig, "pin restored")
+        restore_input_blocks(dev, saved)
+        chk.eq(input_blocks(dev), saved, "S/PDIF count restored")
 
 
 @test("paged_pins", mutating=True)
-def source_switch_refused_on_held_rx_pin(dev, profile, chk):
-    """With I2S RX pair 0 stored on output 0's GPIO, INPUT.SOURCE to I2S is refused and nothing switches."""
+def source_switch_never_pin_error(dev, profile, chk):
+    """A source switch runs no pin check. A source outside its block, its stored pin on output 0's GPIO, is
+    refused with VC_ERR_STATE and never a pin error: I2S with the block off, S/PDIF input 4 above the count."""
     _require(dev)
     src = dev.pget_u8("INPUT.SOURCE")
-    if src == 2:
-        raise Skip("I2S is the source")
-    _refused_start(dev, chk, "I2S source", "INPUT.I2S_RX_PIN", 0, dev.pget_u8("OUTPUT.PIN", 0),
-                   lambda: dev.pset("INPUT.SOURCE", b"\x02"))
+    held = dev.pget_u8("OUTPUT.PIN", 0)
+    ran = 0
+    if not dev.pget_u8("INPUT.I2S_RX_ENABLE"):
+        _refused_start(dev, chk, "I2S source, block off", "INPUT.I2S_RX_PIN", 0, held,
+                       lambda: dev.pset("INPUT.SOURCE", b"\x02"), code="VC_ERR_STATE")
+        ran += 1
+    cfg = spdif_rx_config(dev)
+    if not cfg["enabled"] or cfg["count"] < 4:
+        _refused_start(dev, chk, "S/PDIF input 4 source, above the count", "INPUT.SPDIF_RX_PIN", 3, held,
+                       lambda: dev.pset("INPUT.SOURCE", b"\x06"), code="VC_ERR_STATE")
+        ran += 1
+    if not ran:
+        raise Skip("the I2S block is on and the S/PDIF block holds all four inputs")
     time.sleep(0.05)
     chk.eq(dev.pget_u8("INPUT.SOURCE"), src, "source unchanged")
+
+
+def _i2s_rx_idle(dev, profile):
+    """Skip unless the I2S block is off and no output slot is I2S, so no I2S clock pair is in use."""
+    if dev.pget_u8("INPUT.I2S_RX_ENABLE"):
+        raise Skip("the I2S input block is on")
+    if any(dev.pget_u8("OUTPUT.TYPE", i) for i in range(profile.num_spdif)):
+        raise Skip("an output slot is I2S: the clocks are running")
+
+
+def _clock_modes(dev):
+    return dev.pget_u8("CLOCK.I2S_CLOCK_PIN_MODE"), dev.pget_u8("CLOCK.I2S_CLOCK_MODE")
+
+
+def _set_clock_modes(dev, pin_mode, mode):
+    """Set the clock-pin mode, then the clock mode, which the main loop applies; True once both read back."""
+    dev.pset_u8("CLOCK.I2S_CLOCK_PIN_MODE", pin_mode)
+    dev.pset_u8("CLOCK.I2S_CLOCK_MODE", mode)
+    ok = reached(lambda: _clock_modes(dev), (pin_mode, mode))
+    settle(dev)
+    return ok
+
+
+def _in_clock_layouts(dev, chk, body):
+    """body(role, label) in UNIFIED clock-pin mode (pair 0) and in SPLIT slave mode (pair 1), the two pairs
+    the I2S input can claim, then both modes restored. Callers hold the clocks stopped first."""
+    orig = _clock_modes(dev)
+    try:
+        for pin_mode, mode, role, label in ((0, orig[1], 0, "unified"), (1, 1, 1, "split slave")):
+            if chk.ok(_set_clock_modes(dev, pin_mode, mode), f"{label}: clock modes applied"):
+                body(role, label)
+    finally:
+        _set_clock_modes(dev, *orig)
+        chk.eq(_clock_modes(dev), orig, "clock-pin mode and clock mode restored")
+
+
+def _i2s_off_unchanged(dev):
+    return dev.pget_u8("INPUT.I2S_RX_ENABLE"), pin_claims(dev)
+
+
+@test("paged_pins", mutating=True)
+def i2s_enable_refused_on_held_data_pin(dev, profile, chk):
+    """With I2S RX pair 0 stored on output 0's GPIO, switching the I2S block on is refused with
+    VC_ERR_PIN_IN_USE and nothing claims, in unified and in split slave mode. Restores pin and modes."""
+    _require(dev)
+    _i2s_rx_idle(dev, profile)
+    held = dev.pget_u8("OUTPUT.PIN", 0)
+
+    def body(role, label):
+        if not _avail(dev, "CLOCK.I2S_BCK_PIN_AVAIL", role)["flags"] & F_START_OK:
+            chk.note(f"{label}: clock pair {role} could not claim either; the data pin case is ambiguous")
+            return
+        _refused_start(dev, chk, f"{label} I2S data pin", "INPUT.I2S_RX_PIN", 0, held,
+                       lambda: dev.pset("INPUT.I2S_RX_ENABLE", b"\x01"), unchanged=lambda: _i2s_off_unchanged(dev))
+    _in_clock_layouts(dev, chk, body)
+
+
+@test("paged_pins", mutating=True)
+def i2s_enable_refused_on_held_clock_pin(dev, profile, chk):
+    """With the clock pair the I2S input would use stored on a held GPIO, switching the I2S block on is refused
+    with VC_ERR_PIN_IN_USE and nothing claims, in unified and in split slave mode. Restores pins and modes."""
+    _require(dev)
+    _i2s_rx_idle(dev, profile)
+    pairs = dev.pget_u8("INPUT.I2S_RX_CHANNELS") // 2
+
+    def body(role, label):
+        if not all(_avail(dev, "INPUT.I2S_RX_PIN_AVAIL", p)["flags"] & F_START_OK for p in range(pairs)):
+            chk.note(f"{label}: a counted data pin could not claim either; the clock case is ambiguous")
+            return
+        valid, free = _avail(dev, "CLOCK.I2S_BCK_PIN_AVAIL", role)["pairs"][0]
+        held = next((g for g in range(64) if (valid >> g) & 1 and not (free >> g) & 1), None)
+        if held is None:
+            chk.note(f"{label}: no valid clock pair overlaps a held GPIO")
+            return
+        _refused_start(dev, chk, f"{label} I2S clock pair {role}", "CLOCK.I2S_BCK_PIN", role, held,
+                       lambda: dev.pset("INPUT.I2S_RX_ENABLE", b"\x01"), unchanged=lambda: _i2s_off_unchanged(dev))
+    _in_clock_layouts(dev, chk, body)
 
 
 @test("paged_pins", mutating=True)
@@ -266,8 +359,8 @@ def output_type_refused_on_held_clock_pair(dev, profile, chk):
     refused and the type is unchanged."""
     _require(dev)
     types = [dev.pget_u8("OUTPUT.TYPE", i) for i in range(profile.num_spdif)]
-    if any(types) or dev.pget_u8("INPUT.SOURCE") == 2:
-        raise Skip("the I2S clocks are running")
+    if any(types) or dev.pget_u8("INPUT.I2S_RX_ENABLE"):
+        raise Skip("the I2S clocks are running or the I2S input block holds a pair")
     split = dev.pget_u8("CLOCK.I2S_CLOCK_PIN_MODE") == 1
     role = 1 if (split and dev.pget_u8("CLOCK.I2S_CLOCK_MODE") == 1) else 0
     slot = profile.num_spdif - 1
@@ -296,3 +389,125 @@ def pdm_enable_refused_on_held_pin(dev, profile, chk):
     _refused_start(dev, chk, "PDM enable", "OUTPUT.PIN", pdm, dev.pget_u8("OUTPUT.PIN", 0),
                    lambda: dev.pset("ROUTE.OUTPUT_ENABLE", b"\x01", addr=out))
     chk.eq(dev.pget_u8("ROUTE.OUTPUT_ENABLE", out), 0, "PDM output still disabled")
+
+
+@test("paged_pins", mutating=True)
+def availability_follows_input_blocks(dev, profile, chk):
+    """S/PDIF inputs above the count and pairs of an off I2S block report no IN_USE; inputs within the count, and
+    I2S pairs and a clock pair of an enabled block with I2S not selected, do. The generation moves on each
+    switch and count change that changes a claim. USB source only; restores."""
+    _require(dev)
+    if dev.pget_u8("INPUT.SOURCE") != 0:
+        raise Skip("input source is not USB")
+    saved = input_blocks(dev)
+    pairs = 4 if profile.platform_id == 1 else 1
+    gen = [_pin_state(dev)["gen"]]
+
+    def in_use(cmd, n):
+        return [bool(_avail(dev, cmd, i)["flags"] & F_IN_USE) for i in range(n)]
+
+    def moved(what):
+        g = _pin_state(dev)["gen"]
+        chk.ok(g != gen[0], f"generation changed after {what}")
+        gen[0] = g
+    try:
+        dev.pset_u8("INPUT.SPDIF_RX_ENABLE", 0)
+        dev.pset_u8("INPUT.SPDIF_RX_COUNT", 1)
+        gen[0] = _pin_state(dev)["gen"]
+        chk.eq(in_use("INPUT.SPDIF_RX_PIN_AVAIL", 4), [False] * 4, "no S/PDIF input in use with the block off")
+        if try_set(dev, "INPUT.SPDIF_RX_ENABLE", b"\x01") == "VC_OK":
+            moved("S/PDIF block on")
+            for n in (1, 2, 3, 4):
+                if n > 1:
+                    if try_set(dev, "INPUT.SPDIF_RX_COUNT", bytes([n])) != "VC_OK":
+                        chk.note(f"S/PDIF count {n} refused; walk stopped")
+                        break
+                    moved(f"S/PDIF count {n}")
+                chk.eq(in_use("INPUT.SPDIF_RX_PIN_AVAIL", 4), [i < n for i in range(4)], f"S/PDIF in use at count {n}")
+            dev.pset_u8("INPUT.SPDIF_RX_ENABLE", 0)
+            moved("S/PDIF block off")
+        else:
+            chk.note("S/PDIF block refused to switch on; its part skipped")
+
+        dev.pset_u8("INPUT.I2S_RX_ENABLE", 0)
+        gen[0] = _pin_state(dev)["gen"]
+        nch = dev.pget_u8("INPUT.I2S_RX_CHANNELS")
+        chk.eq(in_use("INPUT.I2S_RX_PIN_AVAIL", pairs), [False] * pairs, "no I2S pair in use with the block off")
+        if try_set(dev, "INPUT.I2S_RX_ENABLE", b"\x01") == "VC_OK":
+            moved("I2S block on")
+            chk.eq(in_use("INPUT.I2S_RX_PIN_AVAIL", pairs), [p < nch // 2 for p in range(pairs)],
+                   "counted I2S pairs in use with I2S not selected")
+            chk.ok(any(in_use("CLOCK.I2S_BCK_PIN_AVAIL", 2)), "a clock pair in use with I2S not selected")
+            dev.pset_u8("INPUT.I2S_RX_ENABLE", 0)
+            moved("I2S block off")
+        else:
+            chk.note("I2S block refused to switch on; its part skipped")
+    finally:
+        restore_input_blocks(dev, saved)
+        chk.eq(input_blocks(dev), saved, "input blocks restored")
+
+
+def _require_bulk_pins(dev):
+    """Skip unless a bulk SET applies the pin and input fields (output-config mode WITH_PRESET) on USB."""
+    if dev.pget_u8("STORE.OUTPUT_CONFIG_MODE") != OUTPUT_CONFIG_WITH_PRESET:
+        raise Skip("output-config mode is not WITH_PRESET: a bulk SET leaves the input fields live")
+    if dev.pget_u8("INPUT.SOURCE") != 0:
+        raise Skip("input source is not USB")
+
+
+def _pushed(dev, profile, chk, edit, check):
+    """Push the live bulk blob with `edit(bytearray)` applied, run check(), then push the original back."""
+    blob0 = read_bulk(dev, profile)
+    saved = input_blocks(dev)
+    b = bytearray(blob0)
+    edit(b)
+    try:
+        push_bulk(dev, bytes(b))
+        check()
+    finally:
+        push_bulk(dev, blob0)
+        chk.eq(input_blocks(dev), saved, "input blocks restored by the original blob")
+        chk.eq(read_bulk(dev, profile)[INPUT_CONFIG_OFF:INPUT_CONFIG_OFF + 16],
+               blob0[INPUT_CONFIG_OFF:INPUT_CONFIG_OFF + 16], "input config section restored")
+
+
+@test("paged_pins", mutating=True)
+def bulk_push_cuts_spdif_count_on_clash(dev, profile, chk):
+    """A bulk SET of S/PDIF count 4 with input 4 on output 0's GPIO cuts the count below 4, keeps the block
+    on and the stored pin, and sets the S/PDIF bit in PIN_STATE's substituted mask. Restores the blob."""
+    _require(dev)
+    _require_bulk_pins(dev)
+    held = dev.pget_u8("OUTPUT.PIN", 0)
+
+    def edit(b):
+        b[INPUT_CONFIG_OFF + 10] = held                                  # spdif_rx_pin_ext[2], input 4
+        b[INPUT_CONFIG_OFF + 11] = 4                                     # spdif_rx_count
+        b[INPUT_CONFIG_OFF + 14] = ((b[INPUT_CONFIG_OFF + 14] - 1) & 7 | 1) + 1   # S/PDIF bit on
+
+    def check():
+        cfg = spdif_rx_config(dev)
+        chk.eq(cfg["enabled"], 1, "S/PDIF block still on")
+        chk.ok(cfg["count"] <= 3, f"count cut below input 4 (got {cfg['count']})")
+        chk.eq(cfg["pins"][3], held, "input 4 keeps its stored pin")
+        chk.ok(_pin_state(dev)["subst"] >> FN_SPDIF_RX & 1, "S/PDIF bit set in the substituted mask")
+        chk.eq(_avail(dev, "INPUT.SPDIF_RX_PIN_AVAIL", 3)["flags"] & F_IN_USE, 0, "input 4 not in use")
+    _pushed(dev, profile, chk, edit, check)
+
+
+@test("paged_pins", mutating=True)
+def bulk_push_switches_i2s_off_on_clash(dev, profile, chk):
+    """A bulk SET of the I2S block on with pair 0 on output 0's GPIO leaves the block off, I2S unselected, and
+    sets the I2S RX bit in PIN_STATE's substituted mask. Restores the blob."""
+    _require(dev)
+    _require_bulk_pins(dev)
+    held = dev.pget_u8("OUTPUT.PIN", 0)
+
+    def edit(b):
+        b[INPUT_CONFIG_OFF + 2] = held                                   # i2s_rx_pin, pair 0
+        b[INPUT_CONFIG_OFF + 14] = ((b[INPUT_CONFIG_OFF + 14] - 1) & 7 | 2) + 1   # I2S bit on
+
+    def check():
+        chk.eq(dev.pget_u8("INPUT.I2S_RX_ENABLE"), 0, "I2S block switched off")
+        chk.eq(dev.pget_u8("INPUT.SOURCE"), 0, "source still USB")
+        chk.ok(_pin_state(dev)["subst"] >> FN_I2S_RX & 1, "I2S RX bit set in the substituted mask")
+    _pushed(dev, profile, chk, edit, check)

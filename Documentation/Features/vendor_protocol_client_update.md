@@ -426,13 +426,13 @@ Each row covers one 1.1.6 opcode and direction, or one selector value of an opco
 | 0xE6 | `SET_LG_SOUND_SYNC_ENABLE` | W | any | folded | `INPUT.LG_SOUND_SYNC_ENABLE` | `0x0350` | S | `0` | unchanged | 1 |
 | 0xE7 | `GET_LG_SOUND_SYNC_ENABLE` | R | any | folded | `INPUT.LG_SOUND_SYNC_ENABLE` | `0x0350` | G | `0` | - | 1 |
 | 0xE8 | `GET_LG_SOUND_SYNC_STATUS` | R | any | same | `INPUT.LG_SOUND_SYNC_STATUS` | `0x0351` | G | `0` | - | 16 |
-| 0xE9 | `SET_SPDIF_INPUT_ENABLE` | W-as-R | any | action | `INPUT.SPDIF_RX_ENABLE` | `0x0323` | S | `old >> 8` | u8 `old & 0xFF != 0` (1 or 0) | 1 |
+| 0xE9 | `SET_SPDIF_INPUT_ENABLE` | W-as-R | any | retired | none | - | - | - | [replacement](#retired-opcodes) | - |
 | 0xEA | `SET_DAC_HW_MUTE_CONFIG` | W | any | folded | `OUTPUT.DAC_MUTE_CONFIG` | `0x0440` | S | `0` | unchanged | 16 |
 | 0xEB | `GET_DAC_HW_MUTE_CONFIG` | R | any | folded | `OUTPUT.DAC_MUTE_CONFIG` | `0x0440` | G | `0` | - | 16 |
 | 0xEC | `TEST_DAC_HW_MUTE` | W-as-R | any | action | `OUTPUT.DAC_MUTE_TEST` | `0x0441` | S0 | `0` | none | 0 |
 | 0xED | `SET_INPUT_RATE` | W | any | same | `INPUT.I2S_RX_RATE` | `0x0332` | S | `0` | unchanged | 4 |
 | 0xEE | [`GET_INPUT_RATE`](#get_input_rate-0xee) | R | any | custom | `SYS.SYSTEM_STATUS` G, `INPUT.I2S_RX_RATE` G | `0x0140`, `0x0332` | - | see recipe | [see recipe](#get_input_rate-0xee) | see recipe |
-| 0xEF | `GET_SPDIF_INPUT_CONFIG` | R | any | same | `INPUT.SPDIF_RX_CONFIG` | `0x0324` | G | `0` | - | 6 |
+| 0xEF | `GET_SPDIF_INPUT_CONFIG` | R | any | same | `INPUT.SPDIF_RX_CONFIG` | `0x0324` | G | `0` | - | 7 |
 | 0xF0 | `ENTER_BOOTLOADER` | W-as-R | any | action | `SYS.ENTER_BOOTLOADER` | `0x0130` | S0 | `0` | none | 0 |
 | 0xF1 | `SET_I2S_RX_PIN` | W-as-R | any | action | `INPUT.I2S_RX_PIN` | `0x0330` | S | `old >> 8` | u8 `old & 0xFF` | 1 |
 | 0xF2 | `GET_I2S_RX_PIN` | R | any | same | `INPUT.I2S_RX_PIN` | `0x0330` | G | `old` | - | 1 |
@@ -569,6 +569,7 @@ These 1.1.6 requests have no command in 1.1.7.
 | 0x51 | `SAVE_PARAMS` | W-as-R | Read `STORE.PRESET_ACTIVE` (`0x0214`), then send `STORE.PRESET_SAVE` (`0x0210`) with `wValue` = that slot |
 | 0xB2 | `GET_USB_ERROR_STATS` | R | None. Its six counters always read 0. Live USB health is in `SYS.USB_AUDIO_STATUS` and `SYS.PIPELINE_STATS` |
 | 0xB3 | `RESET_USB_ERROR_STATS` | W-as-R | None. It did nothing. `SYS.STATS_RESET` resets the watermarks |
+| 0xE9 | `SET_SPDIF_INPUT_ENABLE` | W-as-R | None per input. Set `INPUT.SPDIF_RX_COUNT` (`0x0326`) to cover the input and `INPUT.SPDIF_RX_ENABLE` (`0x0327`) to 1 |
 
 <!-- VC:END RETIRED -->
 

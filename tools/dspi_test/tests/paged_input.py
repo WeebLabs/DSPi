@@ -2,18 +2,25 @@
 Native paged tests for the INPUT page (plan section 5.3): reply shapes, cross-checks between commands that
 describe the same state, round trips and the documented refusals.
 Never switches the input source, clock modes or anything live, and never moves I2S RX pair 1. Writes touch
-only settings that are storage-only while USB is the source (disabled S/PDIF inputs, inactive I2S pairs, the
-I2S rate, the disabled ADAT input pin) and restore them.
+only settings that drive no hardware while USB is the source (S/PDIF inputs outside the block, inactive I2S
+pairs, the I2S rate, the disabled ADAT input pin, the S/PDIF and I2S block switches and the S/PDIF count,
+which only reserve pins) and restore them.
 """
 
 import struct
 
 from ..framework import Skip, test
-from ..helpers import BAD_GPIO, HIGHEST_GPIO, expect_stall, has_command, read_len, require_page, try_set
+from ..helpers import (BAD_GPIO, HIGHEST_GPIO, INPUT_CONFIG_OFF, PIN_CLAIM_ACTIVE, PIN_CLAIM_STORED,
+                       blob_input_blocks, expect_stall, has_command, input_blocks, pin_claims, read_bulk, read_len,
+                       require_page, restore_input_blocks, spdif_rx_config, spdif_source, try_set)
 
 INPUT = 0x03
 INPUT_USB, INPUT_I2S, INPUT_ADAT = 0, 2, 3
 I2S_RATES = (44100, 48000, 96000)
+RETIRED_SPDIF_RX_ENABLE = 0x0323        # the per-input enable of 1.1.7 betas; its ID stays unassigned
+BLOCK_CMDS = ("SPDIF_RX_ENABLE", "SPDIF_RX_COUNT", "I2S_RX_ENABLE")
+PIN_ERRORS = ("VC_ERR_PIN_IN_USE", "VC_ERR_PIN_INVALID")
+FN_I2S_CLK, FN_SPDIF_RX, FN_I2S_RX = 3, 7, 8
 
 
 def _source(dev):
@@ -25,17 +32,17 @@ def scalar_shapes(dev, profile, chk):
     """INPUT scalar GETs have their table lengths and values inside the documented ranges."""
     require_page(dev, INPUT)
     chk.in_range(read_len(chk, dev, "INPUT.SOURCE", 1)[0], 0, 6, "source")
-    cfg = read_len(chk, dev, "INPUT.SPDIF_RX_CONFIG", 6)
-    n = cfg[0]
-    chk.in_range(n, 1, 4, "S/PDIF RX input count")
-    chk.eq(cfg[1] & 1, 1, "input 0 always enabled")
-    chk.eq(cfg[1] >> n, 0, "no enable bit past the last input")
+    cfg = read_len(chk, dev, "INPUT.SPDIF_RX_CONFIG", 7)
+    chk.eq(cfg[0], 4, "S/PDIF RX input count limit")
+    chk.member(cfg[1], (0, 1), "S/PDIF block switch")
+    chk.in_range(cfg[2], 1, cfg[0], "S/PDIF block count")
     for i in range(4):
         pin = read_len(chk, dev, "INPUT.SPDIF_RX_PIN", 1, addr=i, label=f"[{i}]")[0]
         chk.in_range(pin, 0, HIGHEST_GPIO, f"S/PDIF RX pin {i}")
-        if i < n:
-            chk.eq(cfg[2 + i], pin, f"SPDIF_RX_CONFIG pin {i} == SPDIF_RX_PIN[{i}]")
-    chk.eq(cfg[2 + n:], bytes(4 - n), "SPDIF_RX_CONFIG pin bytes past the last input")
+        chk.eq(cfg[3 + i], pin, f"SPDIF_RX_CONFIG pin {i} == SPDIF_RX_PIN[{i}]")
+    chk.member(read_len(chk, dev, "INPUT.SPDIF_RX_ENABLE", 1)[0], (0, 1), "S/PDIF block switch GET")
+    chk.in_range(read_len(chk, dev, "INPUT.SPDIF_RX_COUNT", 1)[0], 1, 4, "S/PDIF count GET")
+    chk.member(read_len(chk, dev, "INPUT.I2S_RX_ENABLE", 1)[0], (0, 1), "I2S block switch GET")
     read_len(chk, dev, "INPUT.SPDIF_RX_CH_STATUS", 24)
     pairs = 4 if profile.platform_id == 1 else 1
     chk.member(read_len(chk, dev, "INPUT.I2S_RX_CHANNELS", 1)[0], tuple(range(2, 2 * pairs + 1, 2)), "I2S channels")
@@ -93,17 +100,36 @@ def status_struct(dev, profile, chk):
     chk.in_range(nch, 0, profile.num_input_channels, "active input channels")
 
 
+def _source_in_block(src, b):
+    """True if source `src` sits inside an enabled block of input_blocks() `b` (USB has no block)."""
+    if src == INPUT_I2S:
+        return bool(b["i2s"])
+    if src == INPUT_ADAT:
+        return bool(b["adat"])
+    if src == INPUT_USB:
+        return True
+    idx = 0 if src == 1 else src - 3
+    return bool(b["spdif"]) and idx < b["count"]
+
+
 @test("paged_input")
-def spdif_rx_enable_get(dev, profile, chk):
-    """SPDIF_RX_ENABLE GET is the enable bit of inputs 1-3 in SPDIF_RX_CONFIG; input 0 is VC_ERR_ADDRESS."""
+def input_blocks_agree(dev, profile, chk):
+    """The block switch and count GETs match SPDIF_RX_CONFIG and the bulk blob, the source sits inside an
+    enabled block, and the retired per-input enable 0x0323 is VC_ERR_UNKNOWN both ways."""
     require_page(dev, INPUT)
-    mask = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1]
-    for i in (1, 2, 3):
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", i), (mask >> i) & 1, f"input {i} enable bit")
-    expect_stall(chk, lambda: dev.pget("INPUT.SPDIF_RX_ENABLE", addr=0, length=1), "VC_ERR_ADDRESS",
-                 "GET SPDIF_RX_ENABLE input 0")
-    expect_stall(chk, lambda: dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x01", addr=0), "VC_ERR_ADDRESS",
-                 "SET SPDIF_RX_ENABLE input 0")
+    cfg = spdif_rx_config(dev)
+    b = input_blocks(dev)
+    chk.eq((b["spdif"], b["count"]), (cfg["enabled"], cfg["count"]),
+           "SPDIF_RX_ENABLE, SPDIF_RX_COUNT == SPDIF_RX_CONFIG")
+    blob = read_bulk(dev, profile)
+    chk.eq(blob_input_blocks(blob), b, "bulk spdif_rx_count and input_enable_p1 == the GETs")
+    src = _source(dev)
+    chk.eq(blob[INPUT_CONFIG_OFF], src, "bulk input_source == INPUT.SOURCE")
+    chk.ok(_source_in_block(src, b), f"source {src} sits inside an enabled block ({b})")
+    expect_stall(chk, lambda: dev.pget(RETIRED_SPDIF_RX_ENABLE, addr=1, length=1), "VC_ERR_UNKNOWN",
+                 "GET of the retired 0x0323")
+    expect_stall(chk, lambda: dev.pset(RETIRED_SPDIF_RX_ENABLE, b"\x01", addr=1), "VC_ERR_UNKNOWN",
+                 "SET of the retired 0x0323")
 
 
 @test("paged_input")
@@ -124,6 +150,11 @@ def address_length_direction_errors(dev, profile, chk):
     E(chk, lambda: dev.pset("INPUT.I2S_RX_RATE", b"\x80\xbb"), "VC_ERR_LENGTH", "2-byte I2S_RX_RATE")
     E(chk, lambda: dev.pset("INPUT.SOURCE_NAME", bytes(33), addr=0), "VC_ERR_LENGTH", "33-byte SOURCE_NAME")
     E(chk, lambda: dev.pset("INPUT.SOURCE_NAME", b"", addr=0), "VC_ERR_LENGTH", "empty SOURCE_NAME")
+    for n in BLOCK_CMDS:   # unaddressed: the dispatcher refuses before the handler runs
+        E(chk, lambda: dev.pget(f"INPUT.{n}", addr=1, length=1), "VC_ERR_ADDRESS", f"{n} at wValue 1")
+        E(chk, lambda: dev.pset(f"INPUT.{n}", b"\x01", addr=1), "VC_ERR_ADDRESS", f"SET {n} at wValue 1")
+        E(chk, lambda: dev.pset(f"INPUT.{n}", b"\x01\x01"), "VC_ERR_LENGTH", f"2-byte {n}")
+        E(chk, lambda: dev.pset(f"INPUT.{n}"), "VC_ERR_LENGTH", f"empty {n}")
     for ro in ("STATUS", "SPDIF_RX_STATUS", "SPDIF_RX_CH_STATUS", "SPDIF_RX_CONFIG", "LG_SOUND_SYNC_STATUS"):
         E(chk, lambda: dev.pset(f"INPUT.{ro}", b"\x00"), "VC_ERR_DIRECTION", f"SET to {ro}")
 
@@ -136,12 +167,17 @@ def value_errors_leave_state(dev, profile, chk):
     src = _source(dev)
     rate = dev.pget("INPUT.I2S_RX_RATE", length=4)
     nch = dev.pget_u8("INPUT.I2S_RX_CHANNELS")
+    blocks = input_blocks(dev)
     E(chk, lambda: dev.pset("INPUT.SOURCE", b"\x07"), "VC_ERR_VALUE", "source 7")
-    mask = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1]
-    off = next((i for i in (1, 2, 3) if not (mask >> i) & 1), None)
-    if off is not None and src != 3 + off:
-        E(chk, lambda: dev.pset("INPUT.SOURCE", bytes([3 + off])), "VC_ERR_STATE",
-          f"disabled S/PDIF input {off} as source")
+    out = blocks["count"] if blocks["spdif"] else 0       # first S/PDIF input outside the block
+    if out < 4:
+        E(chk, lambda: dev.pset("INPUT.SOURCE", bytes([spdif_source(out)])), "VC_ERR_STATE",
+          f"S/PDIF input {out} outside the block as source")
+    E(chk, lambda: dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x02"), "VC_ERR_VALUE", "S/PDIF block switch 2")
+    E(chk, lambda: dev.pset("INPUT.SPDIF_RX_COUNT", b"\x00"), "VC_ERR_VALUE", "S/PDIF count 0")
+    E(chk, lambda: dev.pset("INPUT.SPDIF_RX_COUNT", b"\x05"), "VC_ERR_VALUE", "S/PDIF count 5")
+    E(chk, lambda: dev.pset("INPUT.I2S_RX_ENABLE", b"\x02"), "VC_ERR_VALUE", "I2S block switch 2")
+    E(chk, lambda: dev.pset("INPUT.I2S_RX_ENABLE", b"\xff"), "VC_ERR_VALUE", "I2S block switch 0xFF")
     E(chk, lambda: dev.pset("INPUT.I2S_RX_RATE", struct.pack("<I", 88200)), "VC_ERR_VALUE", "rate 88200")
     E(chk, lambda: dev.pset("INPUT.I2S_RX_CHANNELS", b"\x03"), "VC_ERR_VALUE", "3 channels")
     if profile.platform_id != 1:
@@ -152,8 +188,8 @@ def value_errors_leave_state(dev, profile, chk):
         E(chk, lambda: dev.pset("INPUT.SPDIF_RX_PIN", bytes([out0]), addr=0), "VC_ERR_PIN_IN_USE",
           f"S/PDIF input 0 onto output pin {out0}")
     E(chk, lambda: dev.pset("INPUT.I2S_RX_PIN", bytes([BAD_GPIO]), addr=0), "VC_ERR_PIN_INVALID", "I2S pin 0xFE")
-    # Pair 0 claims its pin only while I2S is the source.
-    if src == INPUT_I2S and dev.pget_u8("INPUT.I2S_RX_PIN", 0) != out0:
+    # Pair 0 claims its pin only while the I2S block is on.
+    if blocks["i2s"] and dev.pget_u8("INPUT.I2S_RX_PIN", 0) != out0:
         E(chk, lambda: dev.pset("INPUT.I2S_RX_PIN", bytes([out0]), addr=0), "VC_ERR_PIN_IN_USE",
           f"I2S pair 0 onto output pin {out0}")
     if has_command(dev, "INPUT.ADAT_RX_ENABLE"):
@@ -163,6 +199,7 @@ def value_errors_leave_state(dev, profile, chk):
     chk.eq(_source(dev), src, "source unchanged")
     chk.eq(dev.pget("INPUT.I2S_RX_RATE", length=4), rate, "I2S rate unchanged")
     chk.eq(dev.pget_u8("INPUT.I2S_RX_CHANNELS"), nch, "I2S channels unchanged")
+    chk.eq(input_blocks(dev), blocks, "block switches and S/PDIF count unchanged")
 
 
 @test("paged_input", mutating=True)
@@ -170,14 +207,15 @@ def noop_sets_of_current_values(dev, profile, chk):
     """SET of the current value is accepted and changes nothing."""
     require_page(dev, INPUT)
     src = _source(dev)
-    before = {n: dev.pget(f"INPUT.{n}", length=6) for n in ("SPDIF_RX_CONFIG",)}
+    before = dev.pget("INPUT.SPDIF_RX_CONFIG", length=7)
+    i2s_en = dev.pget_u8("INPUT.I2S_RX_ENABLE")
     chk.eq(try_set(dev, "INPUT.SOURCE", bytes([src])), "VC_OK", "SOURCE = current")
     for i in range(4):
         p = dev.pget_u8("INPUT.SPDIF_RX_PIN", i)
         chk.eq(try_set(dev, "INPUT.SPDIF_RX_PIN", bytes([p]), i), "VC_OK", f"SPDIF_RX_PIN[{i}] = current")
-    for i in (1, 2, 3):
-        e = dev.pget_u8("INPUT.SPDIF_RX_ENABLE", i)
-        chk.eq(try_set(dev, "INPUT.SPDIF_RX_ENABLE", bytes([e]), i), "VC_OK", f"SPDIF_RX_ENABLE[{i}] = current")
+    for n in BLOCK_CMDS:
+        v = dev.pget_u8(f"INPUT.{n}")
+        chk.eq(try_set(dev, f"INPUT.{n}", bytes([v])), "VC_OK", f"{n} = current")
     pairs = 4 if profile.platform_id == 1 else 1
     for p in range(pairs):
         v = dev.pget_u8("INPUT.I2S_RX_PIN", p)
@@ -193,7 +231,8 @@ def noop_sets_of_current_values(dev, profile, chk):
                 continue   # 0xFF as a payload means "clear", not "this pin"
             chk.eq(try_set(dev, f"INPUT.{n}", bytes([v])), "VC_OK", f"{n} = current")
     chk.eq(_source(dev), src, "source unchanged")
-    chk.eq(dev.pget("INPUT.SPDIF_RX_CONFIG", length=6), before["SPDIF_RX_CONFIG"], "S/PDIF config unchanged")
+    chk.eq(dev.pget("INPUT.SPDIF_RX_CONFIG", length=7), before, "S/PDIF config unchanged")
+    chk.eq(dev.pget_u8("INPUT.I2S_RX_ENABLE"), i2s_en, "I2S block switch unchanged")
     chk.eq(dev.pget_u8("INPUT.LG_SOUND_SYNC_ENABLE"), lg, "LG enable unchanged")
 
 
@@ -220,27 +259,36 @@ def i2s_rate_roundtrip(dev, profile, chk):
         chk.eq(dev.pget("INPUT.I2S_RX_RATE", length=4), orig, "rate restored")
 
 
-def _disabled_spdif_input(dev):
-    mask = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1]
-    return next((i for i in (3, 2, 1) if not (mask >> i) & 1), None)
+def _spdif_input_outside_block(dev):
+    """S/PDIF input 4 (index 3) when it is outside the block, as it is below count 4 or with the block off."""
+    cfg = spdif_rx_config(dev)
+    return 3 if not cfg["enabled"] or cfg["count"] < 4 else None
+
+
+def _claim_states(dev, fn):
+    """{index: claim state} of one pin function in SYS.PIN_CLAIMS (the first GPIO of a pair)."""
+    out = {}
+    for _g, cfn, idx, state, _role, _t in pin_claims(dev):
+        if cfn == fn:
+            out.setdefault(idx, state)
+    return out
 
 
 @test("paged_input", mutating=True)
-def spdif_rx_pin_disabled_input_roundtrip(dev, profile, chk):
-    """A disabled S/PDIF input's stored pin round-trips, shows in SPDIF_RX_CONFIG, 0xFF resets, and restores."""
+def spdif_rx_pin_outside_block_roundtrip(dev, profile, chk):
+    """An S/PDIF input outside the block stores its pin: it round-trips, shows in SPDIF_RX_CONFIG, 0xFF resets,
+    and it restores."""
     require_page(dev, INPUT)
     _require_usb_source(dev)
-    idx = _disabled_spdif_input(dev)
+    idx = _spdif_input_outside_block(dev)
     if idx is None:
-        raise Skip("every optional S/PDIF input is enabled")
+        raise Skip("the S/PDIF block is on with all four inputs")
     orig = dev.pget_u8("INPUT.SPDIF_RX_PIN", idx)
     a, b = [p for p in (19, 18, 17, 16) if p != orig][:2]
     try:
         dev.pset("INPUT.SPDIF_RX_PIN", bytes([a]), addr=idx)
         chk.eq(dev.pget_u8("INPUT.SPDIF_RX_PIN", idx), a, f"GET after SET {a}")
-        cfg = dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)
-        if idx < cfg[0]:
-            chk.eq(cfg[2 + idx], a, "SPDIF_RX_CONFIG pin byte agrees")
+        chk.eq(spdif_rx_config(dev)["pins"][idx], a, "SPDIF_RX_CONFIG pin byte agrees")
         dev.pset("INPUT.SPDIF_RX_PIN", bytes([b]), addr=idx)
         chk.eq(dev.pget_u8("INPUT.SPDIF_RX_PIN", idx), b, f"GET after SET {b}")
         dev.pset("INPUT.SPDIF_RX_PIN", b"\xff", addr=idx)
@@ -251,29 +299,91 @@ def spdif_rx_pin_disabled_input_roundtrip(dev, profile, chk):
 
 
 @test("paged_input", mutating=True)
-def spdif_rx_enable_roundtrip(dev, profile, chk):
-    """Enabling a disabled optional S/PDIF input, disabling it, and enabling it once more (USB source only)."""
+def spdif_rx_count_roundtrip(dev, profile, chk):
+    """With the block off the count takes any value and nothing claims; with it on the count walks 1 to 4 and
+    back, inputs 1 to N claim and the rest stay stored, and SPDIF_RX_CONFIG and the bulk blob follow.
+    USB source only; restores the switch and count."""
     require_page(dev, INPUT)
     _require_usb_source(dev)
-    idx = _disabled_spdif_input(dev)
-    if idx is None:
-        raise Skip("every optional S/PDIF input is enabled")
-    r = try_set(dev, "INPUT.SPDIF_RX_ENABLE", b"\x01", idx)
+    saved = input_blocks(dev)
+
+    def expect(on, n, what):
+        chk.eq(spdif_rx_config(dev)["raw"][1:3], bytes([on, n]), f"SPDIF_RX_CONFIG switch and count {what}")
+        want = {i: PIN_CLAIM_ACTIVE if on and i < n else PIN_CLAIM_STORED for i in range(4)}
+        chk.eq(_claim_states(dev, FN_SPDIF_RX), want, f"S/PDIF claims {what}")
+        blob = blob_input_blocks(read_bulk(dev, profile)) or {}
+        chk.eq((blob.get("spdif"), blob.get("count")), (on, n), f"bulk blob {what}")
     try:
+        chk.eq(try_set(dev, "INPUT.SPDIF_RX_ENABLE", b"\x00"), "VC_OK", "switch the block off")
+        for n in (4, 1, 3):
+            chk.eq(try_set(dev, "INPUT.SPDIF_RX_COUNT", bytes([n])), "VC_OK", f"count {n} while off")
+            chk.eq(dev.pget_u8("INPUT.SPDIF_RX_COUNT"), n, f"GET count {n} while off")
+        expect(0, 3, "while off")
+        dev.pset_u8("INPUT.SPDIF_RX_COUNT", 1)
+        r = try_set(dev, "INPUT.SPDIF_RX_ENABLE", b"\x01")
         if r != "VC_OK":
-            chk.member(r, ("VC_ERR_PIN_IN_USE", "VC_ERR_PIN_INVALID"), f"enable input {idx} refused")
-            chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", idx), 0, "refused enable left it disabled")
+            chk.member(r, PIN_ERRORS, "switch on with count 1 refused")
+            chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE"), 0, "refused switch left the block off")
             return
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", idx), 1, "new GET after enable")
-        chk.eq((dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1] >> idx) & 1, 1, "SPDIF_RX_CONFIG mask bit")
-        dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x00", addr=idx)
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", idx), 0, "new GET after disable")
-        chk.eq((dev.pget("INPUT.SPDIF_RX_CONFIG", length=6)[1] >> idx) & 1, 0, "SPDIF_RX_CONFIG mask bit cleared")
-        dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x01", addr=idx)
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", idx), 1, "re-enable after disable")
+        expect(1, 1, "on, count 1")
+        top = 1
+        for n in (2, 3, 4):
+            r = try_set(dev, "INPUT.SPDIF_RX_COUNT", bytes([n]))
+            if r != "VC_OK":
+                chk.member(r, PIN_ERRORS, f"raise to {n} refused")
+                chk.eq(dev.pget_u8("INPUT.SPDIF_RX_COUNT"), top, f"refused raise to {n} left the count")
+                break
+            top = n
+            expect(1, n, f"after raising to {n}")
+        for n in range(top - 1, 0, -1):
+            dev.pset_u8("INPUT.SPDIF_RX_COUNT", n)
+            expect(1, n, f"after lowering to {n}")
     finally:
-        dev.pset("INPUT.SPDIF_RX_ENABLE", b"\x00", addr=idx)
-        chk.eq(dev.pget_u8("INPUT.SPDIF_RX_ENABLE", idx), 0, "input disabled again")
+        restore_input_blocks(dev, saved)
+        chk.eq(input_blocks(dev), saved, "S/PDIF switch and count restored")
+
+
+@test("paged_input", mutating=True)
+def i2s_rx_enable_roundtrip(dev, profile, chk):
+    """The I2S block switch round-trips with I2S not selected: on, the counted data pins and a clock pair claim
+    and the source stays put; off, they are stored. I2S_RX_CHANNELS is settable while off (RP2350).
+    USB source only; restores the switch and channel count."""
+    require_page(dev, INPUT)
+    _require_usb_source(dev)
+    saved = input_blocks(dev)
+    nch = dev.pget_u8("INPUT.I2S_RX_CHANNELS")
+    pairs = 4 if profile.platform_id == 1 else 1
+    no_i2s_out = not any(dev.pget_u8("OUTPUT.TYPE", i) for i in range(profile.num_spdif))
+    try:
+        chk.eq(try_set(dev, "INPUT.I2S_RX_ENABLE", b"\x00"), "VC_OK", "switch the block off")
+        chk.eq(_claim_states(dev, FN_I2S_RX), {p: PIN_CLAIM_STORED for p in range(pairs)}, "data pins stored while off")
+        if no_i2s_out:
+            chk.ok(PIN_CLAIM_ACTIVE not in _claim_states(dev, FN_I2S_CLK).values(), "no clock pair held while off")
+        if pairs > 1:
+            for ch in (8, 2, 6):
+                chk.eq(try_set(dev, "INPUT.I2S_RX_CHANNELS", bytes([ch])), "VC_OK", f"{ch} channels while off")
+                chk.eq(dev.pget_u8("INPUT.I2S_RX_CHANNELS"), ch, f"GET {ch} channels while off")
+            dev.pset_u8("INPUT.I2S_RX_CHANNELS", nch)
+        r = try_set(dev, "INPUT.I2S_RX_ENABLE", b"\x01")
+        if r != "VC_OK":
+            chk.member(r, PIN_ERRORS, "switch on refused")
+            chk.eq(dev.pget_u8("INPUT.I2S_RX_ENABLE"), 0, "refused switch left the block off")
+            return
+        chk.eq(dev.pget_u8("INPUT.I2S_RX_ENABLE"), 1, "GET after switching on")
+        want = {p: PIN_CLAIM_ACTIVE if p < nch // 2 else PIN_CLAIM_STORED for p in range(pairs)}
+        chk.eq(_claim_states(dev, FN_I2S_RX), want, f"data pins of {nch // 2} pair(s) held")
+        chk.ok(PIN_CLAIM_ACTIVE in _claim_states(dev, FN_I2S_CLK).values(), "a clock pair is held")
+        chk.eq((blob_input_blocks(read_bulk(dev, profile)) or {}).get("i2s"), 1, "bulk blob I2S switch")
+        chk.eq(_source(dev), INPUT_USB, "the switch selects nothing")
+        dev.pset_u8("INPUT.I2S_RX_ENABLE", 0)
+        chk.eq(dev.pget_u8("INPUT.I2S_RX_ENABLE"), 0, "GET after switching off")
+        chk.eq(_claim_states(dev, FN_I2S_RX), {p: PIN_CLAIM_STORED for p in range(pairs)}, "data pins stored again")
+    finally:
+        dev.pset_u8("INPUT.I2S_RX_ENABLE", 0)
+        dev.pset_u8("INPUT.I2S_RX_CHANNELS", nch)
+        restore_input_blocks(dev, saved)
+        chk.eq(input_blocks(dev), saved, "I2S switch restored")
+        chk.eq(dev.pget_u8("INPUT.I2S_RX_CHANNELS"), nch, "I2S channels restored")
 
 
 @test("paged_input", mutating=True)
@@ -284,7 +394,7 @@ def i2s_rx_pin_inactive_pair_roundtrip(dev, profile, chk):
         raise Skip("RP2040 has one I2S RX pair")
     if _source(dev) == INPUT_I2S:
         raise Skip("I2S is the active input")
-    active = dev.pget_u8("INPUT.I2S_RX_CHANNELS") // 2
+    active = dev.pget_u8("INPUT.I2S_RX_CHANNELS") // 2 if dev.pget_u8("INPUT.I2S_RX_ENABLE") else 0
     pair = 3
     if pair < active:
         raise Skip("pair 3 is active")
