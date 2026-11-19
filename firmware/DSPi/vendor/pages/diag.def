@@ -27,3 +27,11 @@ VC_CMD(0x33, LOOP_PROF_BG_PACE, diag_lp_bg_pace_get, diag_lp_bg_pace_set,
 VC_CMD(0x34, LOOP_PROF_RESET, VC_NONE, diag_lp_reset_set,
        NONE, 0, 0, 0, 0, 0, "Zero every section, job and command worst time")
 #endif
+
+// Totals accumulate since boot; the host differences two reads. RESET_MIN only restarts the minima.
+#ifdef DSPI_EQ_PROF
+VC_CMD(0x40, EQ_PROF, diag_eq_prof_get, VC_NONE,
+       NONE, 48, 0, 0, 0, 0, "Per core: u64 cycles, u32 calls, u32 samples, u32 min call cycles, u32 its samples")
+VC_CMD(0x41, EQ_PROF_RESET_MIN, VC_NONE, diag_eq_prof_reset_min_set,
+       NONE, 0, 0, 0, 0, 0, "Restart the per-call minimum on both cores")
+#endif

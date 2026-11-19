@@ -7,6 +7,7 @@
 #include "clock_diag.h"
 #include "loopback.h"
 #include "loop_prof.h"
+#include "eq_prof.h"
 
 #if DSPI_CLOCK_DIAG
 // Served on every transport. The assert below keeps it inside the UART and I2C reply buffer.
@@ -61,6 +62,32 @@ static VcResult diag_lp_bg_pace_set(VcCtx *c) {
 static VcResult diag_lp_reset_set(VcCtx *c) {
     (void)c;
     loop_prof_reset();
+    return VC_OK;
+}
+#endif
+
+#ifdef DSPI_EQ_PROF
+// Each core's u64 total is reread until stable, since the owning core may be mid-update.
+static VcResult diag_eq_prof_get(VcCtx *c) {
+    for (int k = 0; k < 2; k++) {
+        uint64_t cyc; uint32_t calls, smp;
+        do { cyc = eq_prof[k].cycles; calls = eq_prof[k].calls; smp = eq_prof[k].samples; }
+        while (cyc != eq_prof[k].cycles);
+        uint16_t o = (uint16_t)(k * 24);
+        vc_out_u32(c, o, (uint32_t)cyc);
+        vc_out_u32(c, (uint16_t)(o + 4), (uint32_t)(cyc >> 32));
+        vc_out_u32(c, (uint16_t)(o + 8), calls);
+        vc_out_u32(c, (uint16_t)(o + 12), smp);
+        vc_out_u32(c, (uint16_t)(o + 16), eq_prof[k].min_cycles);
+        vc_out_u32(c, (uint16_t)(o + 20), eq_prof[k].min_samples);
+    }
+    return VC_OK;
+}
+
+static VcResult diag_eq_prof_reset_min_set(VcCtx *c) {
+    (void)c;
+    eq_prof[0].reset_min = true;
+    eq_prof[1].reset_min = true;
     return VC_OK;
 }
 #endif

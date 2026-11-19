@@ -7,6 +7,7 @@
 #include "dcp_inline.h"
 #include "crossover.h"
 #include "output_latency.h"   // output_ring_target_frames (sub alignment)
+#include "eq_prof.h"
 
 static inline bool is_filter_flat(const EqParamPacket *p) {
     if (p->type == FILTER_FLAT) return true;
@@ -89,7 +90,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Filter *f, float sample_rate) {
         f->bypass = true;
 #if PICO_RP2350
         f->b0 = 1.0f; f->b1 = 0.0f; f->b2 = 0.0f; f->a1 = 0.0f; f->a2 = 0.0f;
-        f->sva1 = 0.0f; f->sva2 = 0.0f; f->sva3 = 0.0f;
+        f->sva1 = 0.0f; f->sva2 = 0.0f;
         f->svm0 = 0.0f; f->svm1 = 0.0f; f->svm2 = 0.0f;
         f->use_svf = false;
         f->first_order = false;
@@ -181,7 +182,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Filter *f, float sample_rate) {
             }
             float sva1_f = 1.0f / (1.0f + g);
             float sva2_f = g * sva1_f;
-            f->sva1 = sva1_f; f->sva2 = sva2_f; f->sva3 = 0.0f;
+            f->sva1 = sva1_f; f->sva2 = sva2_f;
             f->svm0 = svm0_f; f->svm1 = svm1_f; f->svm2 = svm2_f;
             f->g = g;
             // Fallback biquad coeffs (unused in SVF path, keep sane)
@@ -218,7 +219,6 @@ void dsp_compute_coefficients(EqParamPacket *p, Filter *f, float sample_rate) {
 
         float sva1_f = 1.0f / (1.0f + g * (g + k));
         float sva2_f = g * sva1_f;
-        float sva3_f = g * sva2_f;
 
         float svm0_f = 0.0f, svm1_f = 0.0f, svm2_f = 0.0f;
         switch (p->type) {
@@ -242,7 +242,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Filter *f, float sample_rate) {
             default: break;
         }
 
-        f->sva1 = sva1_f; f->sva2 = sva2_f; f->sva3 = sva3_f;
+        f->sva1 = sva1_f; f->sva2 = sva2_f;
         f->svm0 = svm0_f; f->svm1 = svm1_f; f->svm2 = svm2_f;
         f->g = g;
 
@@ -252,7 +252,7 @@ void dsp_compute_coefficients(EqParamPacket *p, Filter *f, float sample_rate) {
     }
 
     // Clear SVF coefficients for biquad path
-    f->sva1 = 0.0f; f->sva2 = 0.0f; f->sva3 = 0.0f;
+    f->sva1 = 0.0f; f->sva2 = 0.0f;
     f->svm0 = 0.0f; f->svm1 = 0.0f; f->svm2 = 0.0f;
 #endif
 
@@ -419,38 +419,6 @@ void dsp_recalculate_all_filters(float sample_rate) {
 }
 
 #if PICO_RP2350
-DSP_TIME_CRITICAL
-float dsp_process_channel(Filter * __restrict filters, float input, uint8_t channel) {
-    float sample = input;
-    uint8_t count = channel_band_counts[channel];
-    for (int i = 0; i < count; i++) {
-        Filter *f = &filters[i];
-        if (f->bypass) continue;
-
-        if (f->use_svf) {
-            if (f->first_order) {
-                // One-pole TPT SVF (1st-order). lp = v1, hp = sample - v1.
-                float v1 = f->sva2 * sample + f->sva1 * f->svic1eq;
-                f->svic1eq = 2.0f * v1 - f->svic1eq;
-                sample = f->svm0 * sample + f->svm1 * v1 + f->svm2 * (sample - v1);
-            } else {
-                float v3 = sample - f->svic2eq;
-                float v1 = f->sva1 * f->svic1eq + f->sva2 * v3;
-                float v2 = f->svic2eq + f->sva2 * f->svic1eq + f->sva3 * v3;
-                f->svic1eq = 2.0f * v1 - f->svic1eq;
-                f->svic2eq = 2.0f * v2 - f->svic2eq;
-                sample = f->svm0 * sample + f->svm1 * v1 + f->svm2 * v2;
-            }
-        } else {
-            float out = f->b0 * sample + f->s1;
-            f->s1 = f->b1 * sample - f->a1 * out + f->s2;
-            f->s2 = f->b2 * sample - f->a2 * out;
-            sample = out;
-        }
-    }
-    return sample;
-}
-
 // A/B knob: 1 fuses shelf/Linkwitz SVF pairs (the generic arm), 0 leaves them
 // as singles.  Both settings are bit-identical; this only trades RAM text for
 // speed on the generic arm.
@@ -507,10 +475,16 @@ void dsp_cascade_block(Filter * __restrict sections, uint32_t num_sections,
     }
 }
 
+#if defined(DSPI_EQ_PROF)
+EqProfCore eq_prof[2] = { { .reset_min = true }, { .reset_min = true } };
+#endif
+
 DSP_TIME_CRITICAL
 void dsp_process_channel_block(Filter * __restrict filters, float * __restrict samples,
                                uint32_t count, uint8_t channel) {
+    EQ_PROF_START();
     dsp_cascade_block(filters, channel_band_counts[channel], samples, count);
+    EQ_PROF_END(count);
 }
 #else
 // RP2040: Per-sample implemented in dsp_process_rp2040.S

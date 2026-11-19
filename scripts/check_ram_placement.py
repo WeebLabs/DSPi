@@ -165,10 +165,8 @@ COMMON = [
 RP2350_EXTRA = [
     ("__wrap_expf", True),
     ("__wrap_logf", True),
-    # RP2350-only: QMI clkdiv helper and the separate C dsp kernel entry
-    # (folded into dsp_process_channel_block on RP2040).
+    # RP2350-only: QMI clkdiv helper.
     ("dspi_set_clkdiv", False),
-    ("dsp_process_channel", False),
     # Shared cascade walker behind the PEQ and crossover block kernels.
     ("dsp_cascade_block", False),
     # Compiler/newlib mem ops; kept in RAM by the linker script exclusions.

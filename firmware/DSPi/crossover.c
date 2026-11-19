@@ -33,6 +33,7 @@
 #include "config.h"
 #include "dsp_pipeline.h"   // Filter layout, FILTER_SHIFT, FILTER_LOWPASS/HIGHPASS
 #include "dsp_cascade.h"
+#include "eq_prof.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -266,11 +267,9 @@ static void filter_assign_2nd_order_rp2350(Filter *f,
 
         float sva1 = 1.0f / (1.0f + g * (g + k));
         float sva2 = g * sva1;
-        float sva3 = g * sva2;
 
         f->sva1 = sva1;
         f->sva2 = sva2;
-        f->sva3 = sva3;
         f->g = g;
         if (is_hp) {
             f->svm0 = 1.0f; f->svm1 = -k; f->svm2 = -1.0f;
@@ -304,7 +303,7 @@ static void filter_assign_2nd_order_rp2350(Filter *f,
     }
     f->a1 = A1 * inv;
     f->a2 = A2 * inv;
-    f->sva1 = 0.0f; f->sva2 = 0.0f; f->sva3 = 0.0f;
+    f->sva1 = 0.0f; f->sva2 = 0.0f;
     f->svm0 = 0.0f; f->svm1 = 0.0f; f->svm2 = 0.0f;
     f->bypass = false;
 }
@@ -339,7 +338,6 @@ static void filter_assign_1st_order_rp2350(Filter *f,
         float sva1 = 1.0f / (1.0f + g);
         f->sva1 = sva1;
         f->sva2 = g * sva1;
-        f->sva3 = 0.0f;
         if (is_hp) {
             f->svm0 = 0.0f; f->svm1 = 0.0f; f->svm2 = 1.0f;   // out = in - lp
         } else {
@@ -365,7 +363,7 @@ static void filter_assign_1st_order_rp2350(Filter *f,
     f->b2 = 0.0f;
     f->a1 = A1 * inv;
     f->a2 = 0.0f;
-    f->sva1 = 0.0f; f->sva2 = 0.0f; f->sva3 = 0.0f;
+    f->sva1 = 0.0f; f->sva2 = 0.0f;
     f->svm0 = 0.0f; f->svm1 = 0.0f; f->svm2 = 0.0f;
     f->bypass = false;
 }
@@ -751,7 +749,9 @@ void xover_process_channel_block(XoverFilter *bands,
         // past the sections[] array on the float path too.
         uint8_t n = band->num_sections;
         if (n > MAX_XOVER_BAND_SECTIONS) n = MAX_XOVER_BAND_SECTIONS;
+        EQ_PROF_START();
         dsp_cascade_block(band->sections, n, samples, sample_count);
+        EQ_PROF_END(sample_count);
     }
 }
 #else

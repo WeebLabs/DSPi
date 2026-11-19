@@ -276,7 +276,9 @@
        {"cmd": 49, "name": "LOOP_PROF_JOB", "id": 61489, "get": true, "set": false, "addr": "INDEX", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst step of background job wValue (BG_JOB_LIST)"},
        {"cmd": 50, "name": "LOOP_PROF_COMMAND", "id": 61490, "get": true, "set": false, "addr": "PAGE_CMD", "get_len": 4, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Worst handler time of paged command wValue, GET and SET together"},
        {"cmd": 51, "name": "LOOP_PROF_BG_PACE", "id": 61491, "get": true, "set": true, "addr": "NONE", "get_len": 2, "set_min": 2, "set_max": 2, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Background pacing n: above 1, one unit per step on one pass in n; 0 sets 1"},
-       {"cmd": 52, "name": "LOOP_PROF_RESET", "id": 61492, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Zero every section, job and command worst time"}
+       {"cmd": 52, "name": "LOOP_PROF_RESET", "id": 61492, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_LOOP_PROF", "doc": "Zero every section, job and command worst time"},
+       {"cmd": 64, "name": "EQ_PROF", "id": 61504, "get": true, "set": false, "addr": "NONE", "get_len": 48, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_EQ_PROF", "doc": "Per core: u64 cycles, u32 calls, u32 samples, u32 min call cycles, u32 its samples"},
+       {"cmd": 65, "name": "EQ_PROF_RESET_MIN", "id": 61505, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_EQ_PROF", "doc": "Restart the per-call minimum on both cores"}
      ],
      "reserved": []}
   ]

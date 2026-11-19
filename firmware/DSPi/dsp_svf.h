@@ -4,453 +4,6 @@
 #include "config.h"
 
 #if PICO_RP2350
-static inline void dsp_svf_first_order(Filter * __restrict f, float * __restrict samples, uint32_t count) {
-    // Load SVF coefficients
-    float a1 = f->sva1, a2 = f->sva2;
-    float m0 = f->svm0, m1 = f->svm1, m2 = f->svm2;
-    float ic1eq = f->svic1eq, ic2eq = f->svic2eq;
-    float *sp = samples;
-    float v0, v1;
-    uint32_t blk_count = count >> 2; // unroll loops by 4
-    // Per-type specialization: eliminates zero-multiplies in inner loop
-    switch (f->filter_type)
-    {
-        // One-pole TPT SVF: a1 = 1/(1+g), a2 = g/(1+g) (multiply-only).
-        case FILTER_LOWPASS1:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[0] = v1;
-
-                v0 = sp[1];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[1] = v1;
-
-                v0 = sp[2];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[2] = v1;
-
-                v0 = sp[3];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[3] = v1;
-
-                sp += 4;
-                blk_count--;
-            }
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                *sp++ = v1;
-                blk_count--;
-            }
-        break;
-
-        case FILTER_HIGHPASS1:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[0] = v0 - v1;
-
-                v0 = sp[1];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[1] = v0 - v1;
-
-                v0 = sp[2];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[2] = v0 - v1;
-
-                v0 = sp[3];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[3] = v0 - v1;
-
-                sp += 4;
-                blk_count--;
-            }
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                *sp++ = v0 - v1;
-                blk_count--;
-            }
-        break;
-
-        case FILTER_ALLPASS1:
-            while(blk_count > 0) {
-
-                v0 = sp[0];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[0] = v1 + v1 - v0;
-
-                v0 = sp[1];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[1] = v1 + v1 - v0;
-
-                v0 = sp[2];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[2] = v1 + v1 - v0;
-
-                v0 = sp[3];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[3] = v1 + v1 - v0;
-
-                sp += 4;
-                blk_count--;
-            }
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                float v0, v1;
-                v0 = *sp;
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                *sp++ = v1 + v1 - v0;
-                blk_count--;
-            }
-        break;
-
-        case FILTER_HIGHSHELF1:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[0] = v0 + m2 * (v0 - v1);
-
-                v0 = sp[1];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[1] = v0 + m2 * (v0 - v1);
-
-                v0 = sp[2];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[2] = v0 + m2 * (v0 - v1);
-
-                v0 = sp[3];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[3] = v0 + m2 * (v0 - v1);
-
-                sp += 4;
-                blk_count--;
-            }
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                float v0, v1;
-                v0 = *sp;
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                *sp++ = v0 + m2 * (v0 - v1);
-                blk_count--;
-            }
-        break;
-
-        case FILTER_LOWSHELF1:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[0] = v0 + m1 * v1;
-
-                v0 = sp[1];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[1] = v0 + m1 * v1;
-
-                v0 = sp[2];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[2] = v0 + m1 * v1;
-
-                v0 = sp[3];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[3] = v0 + m1 * v1;
-
-                sp += 4;
-                blk_count--;
-            }
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                *sp++ = v0 + m1 * v1;
-                blk_count--;
-            }
-        break;
-
-        default:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[0] = v0 * m0 + m1 * v1 + m2 * (v0 - v1);
-
-                v0 = sp[1];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[1] = v0 * m0 + m1 * v1 + m2 * (v0 - v1);
-
-                v0 = sp[2];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[2] = v0 * m0 + m1 * v1 + m2 * (v0 - v1);
-
-                v0 = sp[3];
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                sp[3] = v0 * m0 + m1 * v1 + m2 * (v0 - v1);
-
-                sp += 4;
-                blk_count--;
-            }
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                float v0, v1;
-                v0 = *sp;
-                v1 = a2 * v0 + a1 * ic1eq;
-                ic1eq = v1 + v1 - ic1eq;
-                *sp++ = v0 * m0 + m1 * v1 + m2 * (v0 - v1);
-                blk_count--;
-            }
-    }
-
-    f->svic1eq = ic1eq;
-}
-
-static inline void dsp_svf_second_order(Filter * __restrict f, float * __restrict samples, uint32_t count) {
-    // Load SVF coefficients
-    float a1 = f->sva1, a2 = f->sva2, a3 = f->sva3;
-    float m0 = f->svm0, m1 = f->svm1, m2 = f->svm2;
-    float ic1eq = f->svic1eq, ic2eq = f->svic2eq;
-    float g = f->g;
-    float *sp = samples;
-    float v0, v1, v2, v3;
-    uint32_t blk_count = count >> 2; // unroll loops by 4
-
-    // Per-type specialization: eliminates zero-multiplies in inner loop
-    switch (f->filter_type) {
-        case FILTER_LOWPASS:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[0] = v2;
-
-                v0 = sp[1];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[1] = v2;
-
-                v0 = sp[2];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[2] = v2;
-
-                v0 = sp[3];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[3] = v2;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                *sp++ = v2;
-                blk_count--;
-            }
-            break;
-        case FILTER_HIGHPASS:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[0] = v0 + m1 * v1 - v2;
-
-                v0 = sp[1];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[1] = v0 + m1 * v1 - v2;
-
-                v0 = sp[2];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[2] = v0 + m1 * v1 - v2;
-
-                v0 = sp[3];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[3] = v0 + m1 * v1 - v2;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                *sp++ = v0 + m1 * v1 - v2;
-                blk_count--;
-            }
-            break;
-        case FILTER_PEAKING:
-        case FILTER_NOTCH:
-        case FILTER_ALLPASS:
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[0] = v0 + m1 * v1;
-
-                v0 = sp[1];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[1] = v0 + m1 * v1;
-
-                v0 = sp[2];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[2] = v0 + m1 * v1;
-
-                v0 = sp[3];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[3] = v0 + m1 * v1;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                *sp++ = v0 + m1 * v1;
-                blk_count--;
-            }
-            break;
-        default: // FILTER_LOWSHELF, FILTER_HIGHSHELF, FILTER_LINKWITZ_TRANSFORM
-            while(blk_count > 0) {
-                v0 = sp[0];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[0] = v0 * m0 + m1 * v1 + m2 * v2;
-
-                v0 = sp[1];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[1] = v0 * m0 + m1 * v1 + m2 * v2;
-
-                v0 = sp[2];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[2] = v0 * m0 + m1 * v1 + m2 * v2;
-
-                v0 = sp[3];
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                sp[3] = v0 * m0 + m1 * v1 + m2 * v2;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                v0 = *sp;
-                v3 = v0 - ic2eq;
-                v1 = a1 * ic1eq + a2 * v3;
-                v2 = ic2eq + g * v1;
-                ic1eq = v1 + v1 - ic1eq;
-                ic2eq = v2 + v2 - ic2eq;
-                *sp++ = v0 * m0 + m1 * v1 + m2 * v2;
-                blk_count--;
-            }
-            break;
-    }
-    f->svic1eq = ic1eq;
-    f->svic2eq = ic2eq;
-}
 
 // Arm classes for the second-order SVF kernel.  Sections fuse only with a
 // partner of the same class, so every fused section keeps the op count of its
@@ -475,585 +28,120 @@ static inline DspSvfArm dsp_svf_arm_class(const Filter *f) {
     }
 }
 
+// Loop state carries h1 = ic1eq/2 (with A1 = 2*a1) and updates ic2eq by
+// 2*g*v1; Filter keeps the standard ic1eq/ic2eq meaning, converted only at
+// kernel entry and exit, so crossover state save/restore is unaffected.
+#define SVF_LOAD(f, n) \
+    const float A1_##n = (f)->sva1 + (f)->sva1, a2_##n = (f)->sva2; \
+    const float g_##n = (f)->g, G2_##n = (f)->g + (f)->g; \
+    const float m0_##n = (f)->svm0, m1_##n = (f)->svm1, m2_##n = (f)->svm2; \
+    float h1_##n = 0.5f * (f)->svic1eq, ic2_##n = (f)->svic2eq; \
+    float v1_##n, v2_##n, v3_##n, gv_##n
+
+#define SVF_STORE(f, n) \
+    (f)->svic1eq = h1_##n + h1_##n; \
+    (f)->svic2eq = ic2_##n;
+
+// Per-sample arms: section n maps input x to output y.
+#define SVF_BP(x, n) \
+    v3_##n = (x) - ic2_##n; \
+    v1_##n = A1_##n * h1_##n + a2_##n * v3_##n; \
+    h1_##n = v1_##n - h1_##n;
+#define SVF_PEAK(x, y, n) SVF_BP(x, n) \
+    ic2_##n = ic2_##n + G2_##n * v1_##n; \
+    y = (x) + m1_##n * v1_##n;
+#define SVF_V2(x, n) SVF_BP(x, n) \
+    gv_##n = g_##n * v1_##n; \
+    v2_##n = ic2_##n + gv_##n; \
+    ic2_##n = v2_##n + gv_##n;
+#define SVF_LP(x, y, n)    SVF_V2(x, n) y = v2_##n;
+#define SVF_HP(x, y, n)    SVF_V2(x, n) y = (x) + m1_##n * v1_##n - v2_##n;
+#define SVF_SHELF(x, y, n) SVF_V2(x, n) y = (x) * m0_##n + m1_##n * v1_##n + m2_##n * v2_##n;
+
+// Unrolled-by-4 sweep of sp[0..count) plus the remainder; STEP(s, ...) is one sample.
+#define SVF_UNROLL4(STEP, ...) do { \
+    uint32_t blk_ = count >> 2; \
+    while (blk_ > 0) { \
+        STEP(sp[0], __VA_ARGS__) STEP(sp[1], __VA_ARGS__) \
+        STEP(sp[2], __VA_ARGS__) STEP(sp[3], __VA_ARGS__) \
+        sp += 4; blk_--; \
+    } \
+    blk_ = count & 0x3; \
+    while (blk_ > 0) { STEP(sp[0], __VA_ARGS__) sp++; blk_--; } \
+} while (0)
+
+#define SVF_S1(s, ARM)        { x = (s); ARM(x, y, 0) (s) = y; }
+#define SVF_S2(s, ARM0, ARM1) { x = (s); ARM0(x, y, 0) ARM1(y, z, 1) (s) = z; }
+#define SVF1_S(s, OUT)        { x = (s); v1 = a2 * x + A1 * h1; h1 = v1 - h1; (s) = (OUT); }
+
+// Forced inline: an out-of-line copy lands in flash (XIP) and fails the RAM placement check.
+#define SVF_KERNEL static inline __attribute__((always_inline))
+
+SVF_KERNEL void dsp_svf_first_order(Filter * __restrict f, float * __restrict samples, uint32_t count) {
+    // One-pole TPT SVF, same half-state ic1 form as the second-order kernel.
+    const float A1 = f->sva1 + f->sva1, a2 = f->sva2;
+    const float m0 = f->svm0, m1 = f->svm1, m2 = f->svm2;
+    float h1 = 0.5f * f->svic1eq;
+    float *sp = samples;
+    float x, v1;
+
+    switch (f->filter_type) {
+        case FILTER_LOWPASS1:   SVF_UNROLL4(SVF1_S, v1); break;
+        case FILTER_HIGHPASS1:  SVF_UNROLL4(SVF1_S, x - v1); break;
+        case FILTER_ALLPASS1:   SVF_UNROLL4(SVF1_S, v1 + v1 - x); break;
+        case FILTER_HIGHSHELF1: SVF_UNROLL4(SVF1_S, x + m2 * (x - v1)); break;
+        case FILTER_LOWSHELF1:  SVF_UNROLL4(SVF1_S, x + m1 * v1); break;
+        default:                SVF_UNROLL4(SVF1_S, x * m0 + m1 * v1 + m2 * (x - v1)); break;
+    }
+
+    f->svic1eq = h1 + h1;
+}
+
+SVF_KERNEL void dsp_svf_second_order(Filter * __restrict f, float * __restrict samples, uint32_t count) {
+    SVF_LOAD(f, 0);
+    float *sp = samples;
+    float x, y;
+
+    // Per-type specialization: eliminates zero-multiplies in inner loop
+    switch (f->filter_type) {
+        case FILTER_LOWPASS:  SVF_UNROLL4(SVF_S1, SVF_LP); break;
+        case FILTER_HIGHPASS: SVF_UNROLL4(SVF_S1, SVF_HP); break;
+        case FILTER_PEAKING:
+        case FILTER_NOTCH:
+        case FILTER_ALLPASS:  SVF_UNROLL4(SVF_S1, SVF_PEAK); break;
+        default:              SVF_UNROLL4(SVF_S1, SVF_SHELF); break;
+    }
+
+    SVF_STORE(f, 0);
+}
+
 // Fused two-section SVF cascade: each sample is loaded once, pushed through
 // both sections in registers, and stored once.  Callers must pair sections of
-// equal dsp_svf_arm_class; the trailing arm assumes both are default-arm types.
-static inline void dsp_svf_second_order_x2(Filter * __restrict f0, Filter * __restrict f1,
+// equal dsp_svf_arm_class; each section runs its single-kernel arm verbatim, so
+// a fused sweep is bit-identical to two sequential single sweeps.
+SVF_KERNEL void dsp_svf_second_order_x2(Filter * __restrict f0, Filter * __restrict f1,
                                            float * __restrict samples, uint32_t count) {
-    float a1_0 = f0->sva1, a2_0 = f0->sva2;
-    float m0_0 = f0->svm0, m1_0 = f0->svm1, m2_0 = f0->svm2;
-    float ic1_0 = f0->svic1eq, ic2_0 = f0->svic2eq;
-    float g_0 = f0->g;
-    float a1_1 = f1->sva1, a2_1 = f1->sva2;
-    float m0_1 = f1->svm0, m1_1 = f1->svm1, m2_1 = f1->svm2;
-    float ic1_1 = f1->svic1eq, ic2_1 = f1->svic2eq;
-    float g_1 = f1->g;
+    SVF_LOAD(f0, 0);
+    SVF_LOAD(f1, 1);
     float *sp = samples;
-    float x, y, z, v1_0, v2_0, v3_0, v1_1, v2_1, v3_1;
-    uint32_t blk_count = count >> 2; // unroll loops by 4
+    float x, y, z;
 
     DspSvfArm arm0 = dsp_svf_arm_class(f0);
-
     if (arm0 == DSP_SVF_ARM_PEAK) {
-        // Both sections drop the m0 and m2 products (2 ops/sample each).
-        while(blk_count > 0) {
-            x = sp[0];
-            v3_0 = x - ic2_0;
-            v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-            v2_0 = ic2_0 + g_0 * v1_0;
-            ic1_0 = v1_0 + v1_0 - ic1_0;
-            ic2_0 = v2_0 + v2_0 - ic2_0;
-            y = x + m1_0 * v1_0;
-            v3_1 = y - ic2_1;
-            v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-            v2_1 = ic2_1 + g_1 * v1_1;
-            ic1_1 = v1_1 + v1_1 - ic1_1;
-            ic2_1 = v2_1 + v2_1 - ic2_1;
-            z = y + m1_1 * v1_1;
-            sp[0] = z;
-
-            x = sp[1];
-            v3_0 = x - ic2_0;
-            v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-            v2_0 = ic2_0 + g_0 * v1_0;
-            ic1_0 = v1_0 + v1_0 - ic1_0;
-            ic2_0 = v2_0 + v2_0 - ic2_0;
-            y = x + m1_0 * v1_0;
-            v3_1 = y - ic2_1;
-            v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-            v2_1 = ic2_1 + g_1 * v1_1;
-            ic1_1 = v1_1 + v1_1 - ic1_1;
-            ic2_1 = v2_1 + v2_1 - ic2_1;
-            z = y + m1_1 * v1_1;
-            sp[1] = z;
-
-            x = sp[2];
-            v3_0 = x - ic2_0;
-            v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-            v2_0 = ic2_0 + g_0 * v1_0;
-            ic1_0 = v1_0 + v1_0 - ic1_0;
-            ic2_0 = v2_0 + v2_0 - ic2_0;
-            y = x + m1_0 * v1_0;
-            v3_1 = y - ic2_1;
-            v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-            v2_1 = ic2_1 + g_1 * v1_1;
-            ic1_1 = v1_1 + v1_1 - ic1_1;
-            ic2_1 = v2_1 + v2_1 - ic2_1;
-            z = y + m1_1 * v1_1;
-            sp[2] = z;
-
-            x = sp[3];
-            v3_0 = x - ic2_0;
-            v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-            v2_0 = ic2_0 + g_0 * v1_0;
-            ic1_0 = v1_0 + v1_0 - ic1_0;
-            ic2_0 = v2_0 + v2_0 - ic2_0;
-            y = x + m1_0 * v1_0;
-            v3_1 = y - ic2_1;
-            v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-            v2_1 = ic2_1 + g_1 * v1_1;
-            ic1_1 = v1_1 + v1_1 - ic1_1;
-            ic2_1 = v2_1 + v2_1 - ic2_1;
-            z = y + m1_1 * v1_1;
-            sp[3] = z;
-
-            sp += 4;
-            blk_count--;
-        }
-
-        blk_count = count & 0x3;
-        while(blk_count > 0) {
-            x = *sp;
-            v3_0 = x - ic2_0;
-            v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-            v2_0 = ic2_0 + g_0 * v1_0;
-            ic1_0 = v1_0 + v1_0 - ic1_0;
-            ic2_0 = v2_0 + v2_0 - ic2_0;
-            y = x + m1_0 * v1_0;
-            v3_1 = y - ic2_1;
-            v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-            v2_1 = ic2_1 + g_1 * v1_1;
-            ic1_1 = v1_1 + v1_1 - ic1_1;
-            ic2_1 = v2_1 + v2_1 - ic2_1;
-            z = y + m1_1 * v1_1;
-            *sp++ = z;
-            blk_count--;
-        }
-
-        f0->svic1eq = ic1_0;
-        f0->svic2eq = ic2_0;
-        f1->svic1eq = ic1_1;
-        f1->svic2eq = ic2_1;
-        return;
-    }
-
-    if (arm0 == DSP_SVF_ARM_LPHP) {
-        // Low-pass takes v2 straight out; high-pass needs the 3-term mix
-        // with m0 = 1.0f and m2 = -1.0f folded in (v0 + m1*v1 - v2).
-        // Split so neither section pays for the other's output expression.
+        SVF_UNROLL4(SVF_S2, SVF_PEAK, SVF_PEAK);
+    } else if (arm0 == DSP_SVF_ARM_LPHP) {
         bool hp0 = (f0->filter_type == FILTER_HIGHPASS);
         bool hp1 = (f1->filter_type == FILTER_HIGHPASS);
-
-        if (!hp0 && !hp1) {
-            while(blk_count > 0) {
-                x = sp[0];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[0] = z;
-
-                x = sp[1];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[1] = z;
-
-                x = sp[2];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[2] = z;
-
-                x = sp[3];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[3] = z;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                x = *sp;
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                *sp++ = z;
-                blk_count--;
-            }
-
-            f0->svic1eq = ic1_0;
-            f0->svic2eq = ic2_0;
-            f1->svic1eq = ic1_1;
-            f1->svic2eq = ic2_1;
-            return;
-        }
-
-        if (!hp0 && hp1) {
-            while(blk_count > 0) {
-                x = sp[0];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[0] = z;
-
-                x = sp[1];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[1] = z;
-
-                x = sp[2];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[2] = z;
-
-                x = sp[3];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[3] = z;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                x = *sp;
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                *sp++ = z;
-                blk_count--;
-            }
-
-            f0->svic1eq = ic1_0;
-            f0->svic2eq = ic2_0;
-            f1->svic1eq = ic1_1;
-            f1->svic2eq = ic2_1;
-            return;
-        }
-
-        if (hp0 && !hp1) {
-            while(blk_count > 0) {
-                x = sp[0];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[0] = z;
-
-                x = sp[1];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[1] = z;
-
-                x = sp[2];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[2] = z;
-
-                x = sp[3];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                sp[3] = z;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                x = *sp;
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = v2_1;
-                *sp++ = z;
-                blk_count--;
-            }
-
-            f0->svic1eq = ic1_0;
-            f0->svic2eq = ic2_0;
-            f1->svic1eq = ic1_1;
-            f1->svic2eq = ic2_1;
-            return;
-        }
-
-        if (hp0 && hp1) {
-            while(blk_count > 0) {
-                x = sp[0];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[0] = z;
-
-                x = sp[1];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[1] = z;
-
-                x = sp[2];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[2] = z;
-
-                x = sp[3];
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                sp[3] = z;
-
-                sp += 4;
-                blk_count--;
-            }
-
-            blk_count = count & 0x3;
-            while(blk_count > 0) {
-                x = *sp;
-                v3_0 = x - ic2_0;
-                v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-                v2_0 = ic2_0 + g_0 * v1_0;
-                ic1_0 = v1_0 + v1_0 - ic1_0;
-                ic2_0 = v2_0 + v2_0 - ic2_0;
-                y = x + m1_0 * v1_0 - v2_0;
-                v3_1 = y - ic2_1;
-                v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-                v2_1 = ic2_1 + g_1 * v1_1;
-                ic1_1 = v1_1 + v1_1 - ic1_1;
-                ic2_1 = v2_1 + v2_1 - ic2_1;
-                z = y + m1_1 * v1_1 - v2_1;
-                *sp++ = z;
-                blk_count--;
-            }
-
-            f0->svic1eq = ic1_0;
-            f0->svic2eq = ic2_0;
-            f1->svic1eq = ic1_1;
-            f1->svic2eq = ic2_1;
-            return;
-        }
-
+        if (!hp0 && !hp1)     SVF_UNROLL4(SVF_S2, SVF_LP, SVF_LP);
+        else if (!hp0)        SVF_UNROLL4(SVF_S2, SVF_LP, SVF_HP);
+        else if (!hp1)        SVF_UNROLL4(SVF_S2, SVF_HP, SVF_LP);
+        else                  SVF_UNROLL4(SVF_S2, SVF_HP, SVF_HP);
+    } else {
+        SVF_UNROLL4(SVF_S2, SVF_SHELF, SVF_SHELF);
     }
 
-    // Shelves and the Linkwitz Transform: both sections need the full
-    // three-term output mix, exactly as the single kernel's default arm.
-    while(blk_count > 0) {
-        x = sp[0];
-        v3_0 = x - ic2_0;
-        v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-        v2_0 = ic2_0 + g_0 * v1_0;
-        ic1_0 = v1_0 + v1_0 - ic1_0;
-        ic2_0 = v2_0 + v2_0 - ic2_0;
-        y = x * m0_0 + m1_0 * v1_0 + m2_0 * v2_0;
-        v3_1 = y - ic2_1;
-        v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-        v2_1 = ic2_1 + g_1 * v1_1;
-        ic1_1 = v1_1 + v1_1 - ic1_1;
-        ic2_1 = v2_1 + v2_1 - ic2_1;
-        z = y * m0_1 + m1_1 * v1_1 + m2_1 * v2_1;
-        sp[0] = z;
-
-        x = sp[1];
-        v3_0 = x - ic2_0;
-        v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-        v2_0 = ic2_0 + g_0 * v1_0;
-        ic1_0 = v1_0 + v1_0 - ic1_0;
-        ic2_0 = v2_0 + v2_0 - ic2_0;
-        y = x * m0_0 + m1_0 * v1_0 + m2_0 * v2_0;
-        v3_1 = y - ic2_1;
-        v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-        v2_1 = ic2_1 + g_1 * v1_1;
-        ic1_1 = v1_1 + v1_1 - ic1_1;
-        ic2_1 = v2_1 + v2_1 - ic2_1;
-        z = y * m0_1 + m1_1 * v1_1 + m2_1 * v2_1;
-        sp[1] = z;
-
-        x = sp[2];
-        v3_0 = x - ic2_0;
-        v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-        v2_0 = ic2_0 + g_0 * v1_0;
-        ic1_0 = v1_0 + v1_0 - ic1_0;
-        ic2_0 = v2_0 + v2_0 - ic2_0;
-        y = x * m0_0 + m1_0 * v1_0 + m2_0 * v2_0;
-        v3_1 = y - ic2_1;
-        v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-        v2_1 = ic2_1 + g_1 * v1_1;
-        ic1_1 = v1_1 + v1_1 - ic1_1;
-        ic2_1 = v2_1 + v2_1 - ic2_1;
-        z = y * m0_1 + m1_1 * v1_1 + m2_1 * v2_1;
-        sp[2] = z;
-
-        x = sp[3];
-        v3_0 = x - ic2_0;
-        v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-        v2_0 = ic2_0 + g_0 * v1_0;
-        ic1_0 = v1_0 + v1_0 - ic1_0;
-        ic2_0 = v2_0 + v2_0 - ic2_0;
-        y = x * m0_0 + m1_0 * v1_0 + m2_0 * v2_0;
-        v3_1 = y - ic2_1;
-        v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-        v2_1 = ic2_1 + g_1 * v1_1;
-        ic1_1 = v1_1 + v1_1 - ic1_1;
-        ic2_1 = v2_1 + v2_1 - ic2_1;
-        z = y * m0_1 + m1_1 * v1_1 + m2_1 * v2_1;
-        sp[3] = z;
-
-        sp += 4;
-        blk_count--;
-    }
-
-    blk_count = count & 0x3;
-    while(blk_count > 0) {
-        x = *sp;
-        v3_0 = x - ic2_0;
-        v1_0 = a1_0 * ic1_0 + a2_0 * v3_0;
-        v2_0 = ic2_0 + g_0 * v1_0;
-        ic1_0 = v1_0 + v1_0 - ic1_0;
-        ic2_0 = v2_0 + v2_0 - ic2_0;
-        y = x * m0_0 + m1_0 * v1_0 + m2_0 * v2_0;
-        v3_1 = y - ic2_1;
-        v1_1 = a1_1 * ic1_1 + a2_1 * v3_1;
-        v2_1 = ic2_1 + g_1 * v1_1;
-        ic1_1 = v1_1 + v1_1 - ic1_1;
-        ic2_1 = v2_1 + v2_1 - ic2_1;
-        z = y * m0_1 + m1_1 * v1_1 + m2_1 * v2_1;
-        *sp++ = z;
-        blk_count--;
-    }
-
-    f0->svic1eq = ic1_0;
-    f0->svic2eq = ic2_0;
-    f1->svic1eq = ic1_1;
-    f1->svic2eq = ic2_1;
+    SVF_STORE(f0, 0);
+    SVF_STORE(f1, 1);
 }
 
 #endif // PICO_RP2350

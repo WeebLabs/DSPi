@@ -168,6 +168,13 @@ if (DSPI_LOOP_PROF)
     target_compile_definitions(DSPi PRIVATE DSPI_LOOP_PROF=1)
 endif()
 
+# DSPI_EQ_PROF (bench instrumentation, RP2350): DWT cycle totals around every
+# dsp_cascade_block() call, read through DIAG.EQ_PROF (eq_prof.h). Release builds leave it OFF.
+option(DSPI_EQ_PROF "Build the EQ cascade cycle profiler (DIAG.EQ_PROF)" OFF)
+if (DSPI_EQ_PROF)
+    target_compile_definitions(DSPi PRIVATE DSPI_EQ_PROF=1)
+endif()
+
 if (PICO_PLATFORM STREQUAL "rp2040")
     # RP2040: SPDIF RX on PIO1 SM2 (SM0=PDM; SM1 free since MCK moved to
     # CLK_GPOUT). I2S RX reuses the same SM when SPDIF RX is inactive.

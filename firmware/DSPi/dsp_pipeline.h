@@ -33,7 +33,6 @@ void dsp_update_delay_samples(float sample_rate);
 
 // Optimized processing function
 #if PICO_RP2350
-float dsp_process_channel(Filter * __restrict filters, float input, uint8_t channel);
 void dsp_process_channel_block(Filter * __restrict filters, float * __restrict samples,
                                uint32_t count, uint8_t channel);
 #else

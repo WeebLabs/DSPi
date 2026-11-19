@@ -448,7 +448,7 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 | 0x0A | `CS` | 1 | 26 | Control Surfaces |
 | 0x0B | `XPORT` | 1 | 5 | UART and I2C control transports |
 | 0x0C | `CLOCK` | 1 | 9 | I2S clock pins and modes, MCK |
-| 0xF0 | `DIAG` | 1 | 7 | Bench and diagnostic commands with no stability promise |
+| 0xF0 | `DIAG` | 1 | 9 | Bench and diagnostic commands with no stability promise |
 
 <!-- VC:END PAGES -->
 
@@ -1891,6 +1891,8 @@ Bench and diagnostic commands with no stability promise. Release firmware builds
 | 0x32 | `LOOP_PROF_COMMAND` | G | `(page << 8) \| cmd` | 4 | - |  | Worst handler time of paged command wValue, GET and SET together (build: `DSPI_LOOP_PROF` only) |
 | 0x33 | `LOOP_PROF_BG_PACE` | G, S | none | 2 | 2 |  | Background pacing n: above 1, one unit per step on one pass in n; 0 sets 1 (build: `DSPI_LOOP_PROF` only) |
 | 0x34 | `LOOP_PROF_RESET` | S0 | none | - | 0 |  | Zero every section, job and command worst time (build: `DSPI_LOOP_PROF` only) |
+| 0x40 | `EQ_PROF` | G | none | 48 | - |  | Per core: u64 cycles, u32 calls, u32 samples, u32 min call cycles, u32 its samples (build: `DSPI_EQ_PROF` only) |
+| 0x41 | `EQ_PROF_RESET_MIN` | S0 | none | - | 0 |  | Restart the per-call minimum on both cores (build: `DSPI_EQ_PROF` only) |
 
 <!-- VC:END DIAG -->
 
@@ -2246,6 +2248,8 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | DISPLAY_STATUS | [`CS.DISPLAY_STATUS`](#15-cs-0x0a) | `0x0A73` |  |
 | ENTER_BOOTLOADER | [`SYS.ENTER_BOOTLOADER`](#6-sys-0x01) | `0x0130` |  |
 | EQ_BYPASS | [`FILTER.EQ_BYPASS`](#11-filter-0x06) | `0x0612` |  |
+| EQ_PROF | [`DIAG.EQ_PROF`](#18-diag-0xf0) | `0xF040` | `DSPI_EQ_PROF` |
+| EQ_PROF_RESET_MIN | [`DIAG.EQ_PROF_RESET_MIN`](#18-diag-0xf0) | `0xF041` | `DSPI_EQ_PROF` |
 | EXT_STATUS | [`CS.EXT_STATUS`](#15-cs-0x0a) | `0x0A13` |  |
 | FACTORY_RESET | [`STORE.FACTORY_RESET`](#7-store-0x02) | `0x0230` |  |
 | GROUP | [`CS.GROUP`](#15-cs-0x0a) | `0x0A40` |  |
