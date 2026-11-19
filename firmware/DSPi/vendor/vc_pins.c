@@ -182,6 +182,11 @@ static uint8_t cfg_clock_pair(const PinConfig *c) {
 
 // The single definition of "in use" for every function a PinConfig carries.
 static bool cfg_in_use(const PinConfig *c, uint8_t fn, uint8_t idx) {
+    // PDM, MCK and the ADAT pair have one instance. Without this, check_started()'s
+    // walk over every index sees them as new at idx 1..3 and clashes them with their
+    // own idx 0 claim, so every enable was refused as PIN_IN_USE.
+    if (idx != 0 && (fn == PIN_FN_PDM || fn == PIN_FN_MCK ||
+                     fn == PIN_FN_ADAT_TX || fn == PIN_FN_ADAT_RX)) return false;
     switch (fn) {
         case PIN_FN_OUTPUT:   return true;
         case PIN_FN_PDM:      return c->pdm_enabled != 0;

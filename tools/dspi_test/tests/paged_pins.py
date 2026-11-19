@@ -196,6 +196,43 @@ def start_refused_on_held_stored_pin(dev, profile, chk):
 
 
 @test("paged_pins", mutating=True)
+def single_pin_start_accepted_on_free_pin(dev, profile, chk):
+    """A one-pin function (ADAT RX, MCK) switched on at a GPIO no function claims is accepted. Regression:
+    the start check walked indexes 1..3 of these functions and clashed them with their own claim, so every
+    enable answered VC_ERR_PIN_IN_USE. Puts the pin and the switch back."""
+    _require(dev)
+    claimed = {c[0] for c in pin_claims(dev)}
+    cases = [("MCK", "CLOCK.MCK_PIN_AVAIL", "CLOCK.MCK_PIN", "CLOCK.MCK_ENABLE")]
+    if has_command(dev, "INPUT.ADAT_RX_ENABLE"):
+        cases.insert(0, ("ADAT RX", "INPUT.ADAT_RX_PIN_AVAIL", "INPUT.ADAT_RX_PIN", "INPUT.ADAT_RX_ENABLE"))
+    ran = 0
+    for label, avail_cmd, pin_cmd, en_cmd in cases:
+        if dev.pget_u8(en_cmd):
+            chk.note(f"{label}: already on, not probed")
+            continue
+        valid, free = _avail(dev, avail_cmd)["pairs"][0]
+        pins = [g for g in range(64) if (valid >> g) & 1 and (free >> g) & 1 and g not in claimed]
+        if not pins:
+            chk.note(f"{label}: no unclaimed valid GPIO")
+            continue
+        orig = dev.pget_u8(pin_cmd)
+        try:
+            dev.pset(pin_cmd, bytes([pins[0]]))
+            chk.ne(_avail(dev, avail_cmd)["flags"] & F_START_OK, 0, f"{label}: START_OK on GPIO {pins[0]}")
+            chk.eq(try_set(dev, en_cmd, b"\x01"), "VC_OK", f"{label}: enable on free GPIO {pins[0]}")
+            chk.eq(dev.pget_u8(en_cmd), 1, f"{label}: on")
+            ran += 1
+        finally:
+            if dev.pget_u8(en_cmd):
+                dev.pset(en_cmd, b"\x00")
+            dev.pset(pin_cmd, bytes([0xFF if orig == 0xFF else orig]))
+            chk.eq(dev.pget_u8(en_cmd), 0, f"{label}: off again")
+            chk.eq(dev.pget_u8(pin_cmd), orig, f"{label}: pin restored")
+    if not ran:
+        raise Skip("no one-pin function could be probed")
+
+
+@test("paged_pins", mutating=True)
 def generation_tracks_pin_changes(dev, profile, chk):
     """Moving a stored pin advances the generation; the change shows within 50 ms."""
     _require(dev)
