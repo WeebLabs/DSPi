@@ -20,18 +20,22 @@ typedef float    rta_acc_t;     // butterfly accumulator
 typedef float    rta_tw_t;      // twiddle element
 typedef float    rta_binpow_t;  // one bin's power
 
-#define RTA_Q4(x)     ((x) * 0.25f)
-#define RTA_Q2(x)     ((x) * 0.5f)
-#define RTA_ISQRT2(x) ((x) * 0.707106781f)
+// Float needs no overflow scaling, so the butterflies and split run at unit
+// gain and the finish takes the whole 1/n out with an exact power of two.
+#define RTA_STAGE_Q4(x)  (x)
+#define RTA_STAGE_Q2(x)  (x)
+#define RTA_ISQRT2(x)    (x)
+#define RTA_Q2(x)        ((x) * 0.5f)   // part of the split formula, not scaling
 #define RTA_BAND_SCALE  7.9826261f    // 1 / 0.125272059, full-scale sine -> 1.0
 
 static inline rta_sample_t rta_st(rta_acc_t v) { return v; }
 
 // 4-term Blackman-Harris on X[k-3..k+3], scaled to a 0.5 centre tap so a
 // bin-centred sine keeps Hann's bin level.  Hann leaked loud bass into 250-500 Hz.
-static inline rta_acc_t rta_window(const rta_acc_t *x) {
-    return 0.5f * x[3] - 0.340271777f * (x[2] + x[4])
-         + 0.098452962f * (x[1] + x[5]) - 0.008139373f * (x[0] + x[6]);
+static inline rta_acc_t rta_window(rta_acc_t x0, rta_acc_t x1, rta_acc_t x2, rta_acc_t x3,
+                                   rta_acc_t x4, rta_acc_t x5, rta_acc_t x6) {
+    return 0.5f * x3 - 0.340271777f * (x2 + x4)
+         + 0.098452962f * (x1 + x5) - 0.008139373f * (x0 + x6);
 }
 
 static inline rta_binpow_t rta_bin_power(rta_acc_t wr, rta_acc_t wi) {
@@ -45,7 +49,8 @@ typedef int16_t  rta_tw_t;
 typedef uint32_t rta_binpow_t;
 
 // Round half up: the plain arithmetic shift would bias every stage downwards.
-#define RTA_Q4(x)     (((x) + 2) >> 2)
+#define RTA_STAGE_Q4(x) (((x) + 2) >> 2)
+#define RTA_STAGE_Q2(x) (((x) + 1) >> 1)
 #define RTA_Q2(x)     (((x) + 1) >> 1)
 #define RTA_ISQRT2(x) ((((x) * 23170) + 16384) >> 15)
 #define RTA_BAND_SCALE  7.43439986e-9f  // 1 / (32768^2 * 0.125272059)
@@ -57,9 +62,10 @@ static inline rta_sample_t rta_st(rta_acc_t v) {
 }
 
 // Same window in Q15.  Worst-case accumulator is 1.50e9, inside int32.
-static inline rta_acc_t rta_window(const rta_acc_t *x) {
-    return (16384 * x[3] - 11150 * (x[2] + x[4]) + 3226 * (x[1] + x[5])
-            - 267 * (x[0] + x[6]) + 16384) >> 15;
+static inline rta_acc_t rta_window(rta_acc_t x0, rta_acc_t x1, rta_acc_t x2, rta_acc_t x3,
+                                   rta_acc_t x4, rta_acc_t x5, rta_acc_t x6) {
+    return (16384 * x3 - 11150 * (x2 + x4) + 3226 * (x1 + x5)
+            - 267 * (x0 + x6) + 16384) >> 15;
 }
 
 // Window output reaches 45685, so squares are taken unsigned (sum <= 4.18e9).
@@ -72,12 +78,14 @@ static inline rta_binpow_t rta_bin_power(rta_acc_t wr, rta_acc_t wi) {
 #endif
 
 // v * W, W = (w[0], w[1]) = (cos, -sin).  v must already carry the stage's
-// scaling, otherwise the Q15 products overflow int32.
+// scaling, otherwise the Q15 products overflow int32.  Both twiddle loads come
+// before the stores: in float they may alias, which forces a reload otherwise.
 static inline void rta_twmul(rta_acc_t vr, rta_acc_t vi, const rta_tw_t *w,
                              rta_sample_t *outr, rta_sample_t *outi) {
 #if RTA_SAMPLE_FLOAT
-    *outr = vr * w[0] - vi * w[1];
-    *outi = vr * w[1] + vi * w[0];
+    const float wr = w[0], wi = w[1];
+    *outr = vr * wr - vi * wi;
+    *outi = vr * wi + vi * wr;
 #else
     int32_t wr = w[0], wi = w[1];
     *outr = rta_st((vr * wr - vi * wi + 16384) >> 15);
@@ -148,11 +156,13 @@ uint8_t rta_level_from_power(float power) {
     return rta_level_from_log2_q8((e * 256) + rta_log2_frac_q8((b.u >> 11) & 0xFFFu));
 }
 
-// One bin's level from its power in the format's native units.
-static inline uint8_t rta_bin_level(rta_binpow_t p) {
+// One bin's level from its power in the format's native units.  scale is the
+// float build's 16 / n^2 (see rta_fft_finish_step); Q15 ignores it.
+static inline uint8_t rta_bin_level(rta_binpow_t p, float scale) {
 #if RTA_SAMPLE_FLOAT
-    return rta_level_from_power(16.0f * p);
+    return rta_level_from_power(scale * p);
 #else
+    (void)scale;
     // p is |4*Xw|^2 in Q15 LSBs squared, so the normalised power is p / 2^26.
     if (p == 0u) return 0;
     return rta_level_from_log2_q8(rta_log2_q8_u32(p) - (26 << 8));
@@ -168,11 +178,13 @@ static inline uint8_t rta_bin_level(rta_binpow_t p) {
 // Two real samples share one complex slot, so the packed value reaches sqrt(2)
 // full scale and any later rotation would clip int16.  Scaling by 1/sqrt(2)
 // here keeps every stage inside the format; rta_split puts the factor back.
+#if !RTA_SAMPLE_FLOAT
 static void rta_prescale(rta_sample_t *buf, uint16_t i0, uint16_t i1) {
     for (uint16_t i = i0; i < i1; i++) {
         buf[i] = rta_st(RTA_ISQRT2((rta_acc_t)buf[i]));
     }
 }
+#endif
 
 // Butterflies j0..j1-1 of the stage (m / 2 in all).
 static void rta_stage_r2(rta_sample_t *c, uint16_t m, uint16_t j0, uint16_t j1) {
@@ -183,9 +195,9 @@ static void rta_stage_r2(rta_sample_t *c, uint16_t m, uint16_t j0, uint16_t j1) 
         const uint16_t i1 = (uint16_t)((j + half) << 1);
         const rta_acc_t x0r = c[i0], x0i = c[i0 + 1];
         const rta_acc_t x1r = c[i1], x1i = c[i1 + 1];
-        c[i0]     = rta_st(RTA_Q2(x0r + x1r));
-        c[i0 + 1] = rta_st(RTA_Q2(x0i + x1i));
-        const rta_acc_t ur = RTA_Q2(x0r - x1r), ui = RTA_Q2(x0i - x1i);
+        c[i0]     = rta_st(RTA_STAGE_Q2(x0r + x1r));
+        c[i0 + 1] = rta_st(RTA_STAGE_Q2(x0i + x1i));
+        const rta_acc_t ur = RTA_STAGE_Q2(x0r - x1r), ui = RTA_STAGE_Q2(x0i - x1i);
         if (j == 0) {
             c[i1] = rta_st(ur);
             c[i1 + 1] = rta_st(ui);
@@ -217,10 +229,10 @@ static void rta_stage_r4(rta_sample_t *c, uint16_t L, uint16_t q0, uint16_t q1) 
         const rta_acc_t t3r = x1r - x3r, t3i = x1i - x3i;
 
         // u1 = t1 - i*t3 and u3 = t1 + i*t3 for the e^-jw transform.
-        const rta_acc_t u0r = RTA_Q4(t0r + t2r), u0i = RTA_Q4(t0i + t2i);
-        const rta_acc_t u1r = RTA_Q4(t1r + t3i), u1i = RTA_Q4(t1i - t3r);
-        const rta_acc_t u2r = RTA_Q4(t0r - t2r), u2i = RTA_Q4(t0i - t2i);
-        const rta_acc_t u3r = RTA_Q4(t1r - t3i), u3i = RTA_Q4(t1i + t3r);
+        const rta_acc_t u0r = RTA_STAGE_Q4(t0r + t2r), u0i = RTA_STAGE_Q4(t0i + t2i);
+        const rta_acc_t u1r = RTA_STAGE_Q4(t1r + t3i), u1i = RTA_STAGE_Q4(t1i - t3r);
+        const rta_acc_t u2r = RTA_STAGE_Q4(t0r - t2r), u2i = RTA_STAGE_Q4(t0i - t2i);
+        const rta_acc_t u3r = RTA_STAGE_Q4(t1r - t3i), u3i = RTA_STAGE_Q4(t1i + t3r);
 
         c[i0] = rta_st(u0r);
         c[i0 + 1] = rta_st(u0i);
@@ -276,8 +288,8 @@ static void rta_permute(rta_sample_t *c, uint8_t mlog, uint32_t *seen, uint16_t 
 }
 
 // Real split: X[k] = S - i*W*D, X[m-k] = conj(S + i*W*D), where S and D are the
-// half sum and half difference of Z[k] and conj(Z[m-k]).  The 1/sqrt(2) that
-// rta_prescale took out comes back here, completing the 1/n scaling.
+// half sum and half difference of Z[k] and conj(Z[m-k]).  In Q15 the 1/sqrt(2)
+// that rta_prescale took out comes back here, completing the 1/n scaling.
 // Units k0..k1-1 of the pass (m / 2 + 1 in all): unit 0 is slot 0, unit k
 // pairs bins k and m - k.
 static void rta_split(rta_sample_t *c, uint8_t order, uint16_t k0, uint16_t k1) {
@@ -301,8 +313,9 @@ static void rta_split(rta_sample_t *c, uint8_t order, uint16_t k0, uint16_t k1) 
 
         // P = i * W * D
 #if RTA_SAMPLE_FLOAT
-        const rta_acc_t pr = -(dr * w[1] + di * w[0]);
-        const rta_acc_t pi = dr * w[0] - di * w[1];
+        const float wr = w[0], wi = w[1];
+        const rta_acc_t pr = -(dr * wi + di * wr);
+        const rta_acc_t pi = dr * wr - di * wi;
 #else
         const int32_t wr = w[0], wi = w[1];
         const rta_acc_t pr = -((dr * wi + di * wr + 16384) >> 15);
@@ -325,9 +338,12 @@ bool rta_fft_step(rta_sample_t *buf, uint8_t order, RtaFftCursor *c, uint16_t ma
     const uint16_t m = (uint16_t)(1u << mlog);
     const uint8_t has_r2 = (uint8_t)(mlog & 1u);
     const uint8_t n_bfly = (uint8_t)(has_r2 + (mlog >> 1));
-    // Stage 0 prescales, 1..n_bfly are butterfly stages, then the permutation
-    // and the real split.
-    const uint8_t s = c->stage;
+    // Stage 0 prescales (Q15 only; float starts at 1), 1..n_bfly are butterfly
+    // stages, then the permutation and the real split.
+    uint8_t s = c->stage;
+#if RTA_SAMPLE_FLOAT
+    if (s == 0) c->stage = s = 1;
+#endif
     uint16_t total;
     if (s == 0)                       total = (uint16_t)(1u << order);
     else if (s <= n_bfly)             total = (has_r2 && s == 1) ? (uint16_t)(m >> 1) : (uint16_t)(m >> 2);
@@ -337,7 +353,9 @@ bool rta_fft_step(rta_sample_t *buf, uint8_t order, RtaFftCursor *c, uint16_t ma
     const uint16_t from = c->pos;
     const uint16_t to = (uint32_t)from + max_units < total ? (uint16_t)(from + max_units) : total;
     if (s == 0) {
+#if !RTA_SAMPLE_FLOAT
         rta_prescale(buf, from, to);
+#endif
     } else if (s <= n_bfly) {
         if (has_r2 && s == 1) {
             rta_stage_r2(buf, m, from, to);
@@ -394,15 +412,34 @@ bool rta_fft_finish_step(RtaFinishCursor *c, const rta_sample_t *buf, uint8_t or
     uint32_t end = (uint32_t)c->next_bin + max_bins;
     if (end > n_bins || (!bins && !n_bands)) end = n_bins;
 
+    // Float bins are n = 2 * n_bins times the 1/n-scaled spectrum (see the
+    // macros at the top), so power carries n^2.  Powers of two keep this exact.
+#if RTA_SAMPLE_FLOAT
+    const float pscale = 1.0f / (float)(1u << (2u * order));
+    const float bin_scale = 16.0f * pscale;
+#else
+    const float bin_scale = 0.0f;
+#endif
+
     if (bins || n_bands) {
         uint8_t b0 = c->band;
         for (uint16_t k = c->next_bin; k < end; k++) {
-            rta_acc_t re[7], im[7];
-            for (int32_t j = 0; j < 7; j++) {
-                rta_bin_at(buf, (int32_t)k + j - 3, n_bins, &re[j], &im[j]);
+            rta_acc_t wr, wi;
+            if (k >= 4 && k + 4 <= n_bins) {
+                // Interior: all 7 taps are plain complex slots 1..n_bins-1.
+                const rta_sample_t *x = &buf[2 * k - 6];
+                wr = rta_window(x[0], x[2], x[4], x[6], x[8], x[10], x[12]);
+                wi = rta_window(x[1], x[3], x[5], x[7], x[9], x[11], x[13]);
+            } else {
+                rta_acc_t re[7], im[7];
+                for (int32_t j = 0; j < 7; j++) {
+                    rta_bin_at(buf, (int32_t)k + j - 3, n_bins, &re[j], &im[j]);
+                }
+                wr = rta_window(re[0], re[1], re[2], re[3], re[4], re[5], re[6]);
+                wi = rta_window(im[0], im[1], im[2], im[3], im[4], im[5], im[6]);
             }
-            const rta_binpow_t p = rta_bin_power(rta_window(re), rta_window(im));
-            if (bins) bins[k] = rta_bin_level(p);
+            const rta_binpow_t p = rta_bin_power(wr, wi);
+            if (bins) bins[k] = rta_bin_level(p, bin_scale);
 
             if (n_bands) {
                 while (b0 < n_bands && table->hi[b0] < k) b0++;
@@ -420,7 +457,11 @@ bool rta_fft_finish_step(RtaFinishCursor *c, const rta_sample_t *buf, uint8_t or
     if (band_power) {
         memset(band_power, 0, RTA_MAX_BANDS * sizeof(float));
         for (uint8_t b = 0; b < n_bands; b++) {
+#if RTA_SAMPLE_FLOAT
+            band_power[b] = c->acc[b] * (RTA_BAND_SCALE * pscale);
+#else
             band_power[b] = (float)c->acc[b] * RTA_BAND_SCALE;
+#endif
         }
     }
     return true;

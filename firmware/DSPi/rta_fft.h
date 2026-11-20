@@ -72,11 +72,13 @@ uint16_t rta_band_centre_hz(uint8_t b);
 // Output: n/2 complex bins packed as (re, im) pairs in buf[0..n-1], with the
 // purely real Nyquist bin X[n/2] stored in the imaginary slot of X[0].
 // Scaling: the fixed-point kernel halves every stage so the result carries a
-// 1/n factor; the float kernel applies the same 1/n so both formats agree.
+// 1/n factor.  The float kernel leaves it unscaled (n times larger, still far
+// from overflow) and rta_fft_finish_step takes the 1/n out, so outputs agree.
 //
 // Zero the cursor before the first call. Each call does at most max_units units
-// of the current stage (a prescale sample, a butterfly, a permutation cycle
+// of the current stage (a Q15 prescale sample, a butterfly, a permutation cycle
 // start or a split bin pair) and returns true once the whole transform is done.
+// Float has no prescale stage: a cursor at stage 0 starts butterfly stage 1.
 // Results do not depend on max_units.
 // ---------------------------------------------------------------------------
 typedef struct {

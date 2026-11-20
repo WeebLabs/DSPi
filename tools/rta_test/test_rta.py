@@ -139,8 +139,9 @@ def run_frame(lib, fmt, x, order, table=None):
         steps += 1
         assert steps < 16, "rta_fft_step did not finish"
     mlog = order - 1
-    # Whole stages: prescale + butterfly stages + permute + split
-    assert steps == (mlog & 1) + (mlog >> 1) + 3, (order, steps)
+    # Whole stages: Q15 prescale + butterfly stages + permute + split
+    prescale = 0 if FORMATS[fmt]["flt"] else 1
+    assert steps == (mlog & 1) + (mlog >> 1) + 2 + prescale, (order, steps)
     assert (cur.stage, cur.pos) == (0, 0), "cursor not reset for the next frame"
     # Resumed in small chunks the transform must be bit-identical.
     chunked = to_native(x[:n], fmt)
@@ -237,6 +238,39 @@ def check_bins(lib, fmt, order):
         d = np.abs(bins_db(levels)[sel] - ref_db[sel])
         worst = max(worst, float(d.max()) if d.size else 0.0)
     return worst, cfg["bin_tol"] + QUANT
+
+
+def check_edge_bins(lib, fmt, order):
+    """Bins 0..5 and the top 5 bins, where the window taps wrap through slot 0
+    or the Nyquist mirror, graded on every bin and every finish chunk size."""
+    n = 1 << order
+    tol = FORMATS[fmt]["bin_tol"] + QUANT
+    worst = 0.0
+    for f_bin in (2.5, n / 2 - 2.5):
+        x = sine(n, n, f_bin, 0.5)
+        _, levels = run_frame(lib, fmt, x, order)
+        ref = oracle_spectrum(quantised(x, fmt), n)
+        ref_db = 20.0 * np.log10(np.maximum(np.abs(ref[:n // 2]), 1e-30) / 0.25)
+        idx = np.r_[0:6, n // 2 - 5:n // 2]
+        idx = idx[np.abs(idx - f_bin) < 4]   # inside the main lobe, far above any floor
+        assert idx.size >= 5, (order, f_bin)
+        worst = max(worst, float(np.abs(bins_db(levels)[idx] - ref_db[idx]).max()))
+        buf = to_native(x, fmt)
+        cur = FftCursor(0, 0)
+        while not lib.rta_fft_step(buf.ctypes.data_as(ctypes.c_void_p), order,
+                                   ctypes.byref(cur), 0xFFFF):
+            pass
+        for chunk in (1, 3, 4):
+            cb = np.zeros(n // 2, dtype=np.uint8)
+            fc = finish_cursor(fmt)
+            lib.rta_fft_finish_begin(ctypes.byref(fc))
+            while not lib.rta_fft_finish_step(ctypes.byref(fc), buf.ctypes.data_as(ctypes.c_void_p),
+                                              order, ctypes.POINTER(BandTable)(), None,
+                                              cb.ctypes.data_as(ctypes.c_void_p), chunk):
+                pass
+            assert np.array_equal(cb, levels), ("finish chunk size changes bins", fmt, order, chunk)
+    assert worst <= tol, ("edge bins", fmt, order, worst, tol)
+    return worst
 
 
 def band_db(bp, b):
@@ -392,6 +426,12 @@ def main():
         for b in range(len(G.NOMINAL_HZ)):
             assert lib.rta_band_centre_hz(b) == G.NOMINAL_HZ[b]
     print("band tables match scripts/gen_rta_tables.py for every rate and order\n")
+
+    for fmt in FORMATS:
+        worst = max(check_edge_bins(libs[fmt], fmt, o) for o in ORDERS)
+        print("%s edge bins 0..5 and top 5 match the oracle within %.3f dB, any finish chunk"
+              % (fmt, worst))
+    print()
 
     rep = Report()
     for fmt in FORMATS:

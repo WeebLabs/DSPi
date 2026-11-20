@@ -22,6 +22,7 @@ void reset(unsigned rate) { memset(state,0,sizeof(state)); rta_bass_configure(&c
 void feed(unsigned ch, const void *x, unsigned n) { rta_bass_push(&coeff,&state[ch],x,n); }
 float power(unsigned ch,unsigned b) { return rta_bass_power(&coeff,&state[ch],b); }
 unsigned state_size(void) { return sizeof(state[0]); }
+void retune(unsigned rate) { rta_bass_configure(&coeff,rate,0); }
 '''
 
 def native(x, flt):
@@ -97,6 +98,20 @@ with tempfile.TemporaryDirectory() as t:
             lib.reset(rate)
             for start in range(0,len(x),137): feed(x[start:start+137])
             assert whole == [lib.power(0,b) for b in range(14)]
+            # Random packet sizes 1..192 must match too.
+            rng=np.random.default_rng(rate);lib.reset(rate);start=0
+            while start<len(x):
+                k=int(rng.integers(1,193));feed(x[start:start+k]);start+=k
+            assert whole == [lib.power(0,b) for b in range(14)]
+            if flt:
+                # NaN reads as silence and anything past +/-4 (inf too) as +/-4.
+                bad=np.float32([np.nan,np.inf,-np.inf,1e30,-1e30,4.5,-4.5])
+                same=np.float32([0,4,-4,4,-4,4,-4])
+                pick=rng.integers(0,len(bad),len(x)//97);at=rng.choice(len(x),len(pick),replace=False)
+                hot=np.float32(x).copy();hot[at]=bad[pick];lib.reset(rate);feed(hot)
+                hot[at]=same[pick];feed(hot,1)
+                assert all(np.isfinite(lib.power(0,b)) and lib.power(0,b)==lib.power(1,b) for b in range(14))
+                lib.reset(rate);feed(x)
             assert all(lib.power(1,b)==0 for b in range(14))
             # Feeding other channels cannot alter a channel's measurement.
             for ch in range(1,9):feed(x*.5,ch)
@@ -108,6 +123,11 @@ with tempfile.TemporaryDirectory() as t:
                 if lib.power(0,b) >= .25*.9:
                     latency[b]=(start+480)/rate;break
             assert b in latency and latency[b] < (.8 if b==0 else .5 if b==3 else .15), (flt,b,latency)
+        # A counter left mid-group by a higher decimation (96k stopped at 10 of 16,
+        # then 48k's 8) must resync; 48-sample packets never step it through 8.
+        lib.reset(96000);feed(np.zeros(16*50+10));lib.retune(48000);fc=1000*10**(-7/10)
+        for start in range(0,2*48000,48): feed(.5*np.sin(2*np.pi*fc*np.arange(start,start+48)/48000))
+        assert abs(db(lib.power(0,13))+6.0206)<1, (flt,'stalled decimation counter')
         print(f'PASS bass {"float" if flt else "Q27"}: {lib.state_size()} B/channel, '
               f'oracle {worst:.3f} dB, -60 dBFS error {quiet:.3f} dB, '
               f'alias rejection {-worst_alias:.1f} dB, one-octave rejection {-worst_octave:.1f} dB, '

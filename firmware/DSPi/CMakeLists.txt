@@ -200,6 +200,8 @@ else()
     # Float bass kernel: same FP-contraction rule as dsp_pipeline.c (8 VFMAs -> 0,
     # unmeasured). RP2040's fixed-point build keeps -O2; -O3 only added 1.6 KB of RAM code.
     set_source_files_properties(rta_bass.c PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off")
+    # Float FFT kernel: same rule (butterflies and window are short multiply-add chains).
+    set_source_files_properties(rta_fft.c PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off")
 endif()
 # PICO_FLASH_SPI_CLKDIV=6 is set at the top-level CMakeLists so it reaches
 # the boot2 build (target-level defines don't propagate to it).

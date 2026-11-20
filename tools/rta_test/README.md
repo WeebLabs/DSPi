@@ -32,6 +32,11 @@ One row per (format, order, rate):
 | floor | loudest bin more than 3 bins from a -100 dBFS sine | below -120 dBFS float, -80 dBFS Q15 |
 | dyn-rng | loudest bin more than 3 bins from a full-scale sine | reported, not graded |
 
+Before the rows it also grades bins 0 to 5 and the top 5 bins on every bin
+against the oracle, and checks that finish chunk sizes 1, 3 and 4 give the same
+bytes. Those are the bins whose window taps wrap through slot 0 or the Nyquist
+mirror, which the finish handles on a separate path from the interior.
+
 Before the rows it asserts that every band table in `rta_tables.h` matches
 `scripts/gen_rta_tables.py`, which both this harness and the firmware treat as
 the single source of truth for the band layout. Every dB comparison against a

@@ -22,7 +22,22 @@ void rta_bass_configure(RtaBassCoeffs *c, uint32_t rate, uint16_t avg_ms) {
     }
 }
 
-#if !RTA_SAMPLE_FLOAT
+#if RTA_SAMPLE_FLOAT
+/* trunc(clamp(f, +/-4) * scale), NaN -> 0; scale must be a power of two
+ * so the product is exact. VCVT saturates and maps NaN to 0 by definition. */
+static inline int32_t bass_input(float f, float scale, int32_t lim) {
+#if defined(__arm__) && defined(__ARM_FP) /* AArch32 only; AArch64 hosts fall back */
+    float t = f * scale;
+    int32_t v;
+    __asm__("vcvt.s32.f32 %0, %0" : "+t"(t));
+    __asm__("vmov %0, %1" : "=r"(v) : "t"(t));
+#else
+    int32_t v = f != f ? 0 : f >= 4.0f ? lim : f <= -4.0f ? -lim : (int32_t)(f * scale);
+#endif
+    v = v > lim ? lim : v;
+    return v < -lim ? -lim : v;
+}
+#else
 /* All fixed-point products use 64-bit intermediates; the resulting Q27
  * signals have +/-16 headroom. Saturation prevents wrap under hot inputs. */
 static inline int32_t sat(int64_t v) {
@@ -37,25 +52,32 @@ void RTA_RAM_FUNC rta_bass_push(const RtaBassCoeffs *c, RtaBassChannel *s,
                               const int32_t *samples,
 #endif
                               uint32_t n) {
+#if RTA_SAMPLE_FLOAT
+    /* Hot state in locals, written back after the loop. The Q27 path keeps
+     * it in memory: locals grow the RP2040 RAM function. */
+    uint32_t i0 = s->integrator[0], i1 = s->integrator[1], i2 = s->integrator[2];
+    uint32_t count = s->count, decimation = c->decimation;
+    // count never wraps inside the loop, so one left at or past a lowered decimation would stall forever.
+    if (count >= decimation) count = 0;
+    const float scale = (float)(1u << (27 - c->cic_shift));
+    const int32_t lim = (int32_t)(1u << (29 - c->cic_shift));
+#endif
     for (uint32_t i = 0; i < n; i++) {
         /* CIC output is always Q27. Choose input scale to leave +/-4
          * headroom after the maximum CIC gain. Integer integrators avoid
          * catastrophic cancellation of floating-point running sums. */
-        int32_t input;
 #if RTA_SAMPLE_FLOAT
-        float f = samples[i];
-        if (!(f == f)) f = 0; /* NaN */
-        if (f > 4.0f) f = 4.0f;
-        if (f < -4.0f) f = -4.0f;
-        input = (int32_t)(f * (float)(1u << (27 - c->cic_shift)));
+        uint32_t v = (uint32_t)bass_input(samples[i], scale, lim);
+        i0 += v; i1 += i0; i2 += i1; v = i2;
+        if (++count != decimation) continue;
+        count = 0;
 #else
         /* Samples reach 0 dBFS at 2^29, so int32 range is the float +/-4. */
-        input = samples[i] >> (2 + c->cic_shift);
-#endif
-        uint32_t v = (uint32_t)input;
+        uint32_t v = (uint32_t)(samples[i] >> (2 + c->cic_shift));
         for (int j = 0; j < 3; j++) { s->integrator[j] += v; v = s->integrator[j]; }
         if (++s->count != c->decimation) continue;
         s->count = 0;
+#endif
         for (int j = 0; j < 3; j++) { uint32_t old = v; v -= s->comb[j]; s->comb[j] = old; }
 #if RTA_SAMPLE_FLOAT
         float x = (float)(int32_t)v * (1.0f / 134217728.0f);
@@ -113,6 +135,10 @@ void RTA_RAM_FUNC rta_bass_push(const RtaBassCoeffs *c, RtaBassChannel *s,
 #endif
         }
     }
+#if RTA_SAMPLE_FLOAT
+    s->integrator[0] = i0; s->integrator[1] = i1; s->integrator[2] = i2;
+    s->count = (uint8_t)count;
+#endif
 }
 
 float rta_bass_power(const RtaBassCoeffs *c, const RtaBassChannel *s, uint8_t b) {

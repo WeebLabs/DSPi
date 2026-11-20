@@ -183,7 +183,7 @@ advance: next channel in the selected set, wr = 0, back to FILL
   the tail of that block is dropped.
 - **FFT.** A filled frame starts the analyser's background job (firmware
   `bg_job.h`), which runs the transform in chunks of 16 units until each step's
-  deadline: prescale samples, butterflies within a stage, permutation cycle
+  deadline: prescale samples (Q15 only), butterflies within a stage, permutation cycle
   starts, or split bin pairs (`RtaFftCursor`). `rta_service()` keeps config
   apply, fill liveness and auto-off. *Updated 2026-10-24: this was one whole
   stage per `rta_service()` call.*
@@ -325,7 +325,10 @@ scales by one half per stage and keeps bin power in 32-bit integers; its
 measured dynamic range is 78.5 dB (reported as 78 in the caps). The RP2350
 kernel's is 120 dB. Two real samples packed into one complex slot give a
 sqrt(2) full-scale magnitude, so the Q15 path prescales by 1/sqrt(2) and the
-split pass restores it; that costs 3 dB of Q15 range.
+split pass restores it; that costs 3 dB of Q15 range. The float kernel does
+none of this scaling and has no prescale stage: its spectrum is n times the Q15
+one, and the finish removes the 1/n with an exact power of two (16 / n^2 on
+bin power, `RTA_BAND_SCALE` / n^2 on band power). *Updated 2026-11-20.*
 
 ### 4.1 Generated tables
 
