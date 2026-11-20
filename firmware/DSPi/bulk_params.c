@@ -27,7 +27,7 @@
 #include "vc_pins.h"
 
 #include <string.h>
-#include <math.h>    // powf() for master volume (db_to_linear() clamps at -60 dB, insufficient)
+#include <math.h>
 #include <assert.h>  // _Static_assert
 #include <stddef.h>  // offsetof
 
@@ -68,8 +68,6 @@ _Static_assert(sizeof(WireUpmixParams) == sizeof(UpmixConfigPacket),
 
 // External variables (defined in usb_audio.c)
 extern volatile float global_preamp_db[NUM_INPUT_CHANNELS];
-extern volatile int32_t global_preamp_mul[NUM_INPUT_CHANNELS];
-extern volatile float global_preamp_linear[NUM_INPUT_CHANNELS];
 extern volatile float master_volume_db;
 extern volatile float master_volume_linear;
 extern volatile int32_t master_volume_q15;
@@ -87,17 +85,12 @@ extern volatile bool leveller_reset_pending;
 extern MatrixMixer matrix_mixer;
 extern uint8_t output_pins[NUM_PIN_OUTPUTS];
 
-// ============================================================================
-// dB-TO-LINEAR CONVERSION (duplicated from flash_storage.c — it's static there)
-// ============================================================================
-
+// Must match the vendor setters exactly, or a bulk push leaves different gains
+// than the per-parameter path for the same gain_db.
 static float db_to_linear(float db) {
-    if (db == 0.0f) return 1.0f;
-    if (db < -60.0f) db = -60.0f;
-    if (db > 20.0f) db = 20.0f;
-    float x = db * 0.1151292546f;  // ln(10)/20
-    float linear = 1.0f + x + x*x*0.5f + x*x*x*0.1666667f + x*x*x*x*0.0416667f;
-    return (linear < 0.0f) ? 0.0f : linear;
+    if (db <= -120.0f) return 0.0f;
+    if (db >=  +80.0f) db = 80.0f;
+    return powf(10.0f, db / 20.0f);
 }
 
 // ============================================================================
@@ -397,18 +390,6 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     // and one BULK_INVALIDATED(source=BULK_SET) is emitted at notify_end_bulk().
     notify_begin_bulk(PARAM_SRC_BULK_SET);
 
-    // Global params — preamp from the legacy single field (a baseline applied to
-    // all inputs); overridden by the per-channel preamp section below.
-    {
-        float db = in->global.preamp_gain_db;
-        float linear = db_to_linear(db);
-        for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
-            global_preamp_db[i]      = db;
-            global_preamp_mul[i]     = (int32_t)(linear * (float)(1 << 28));
-            global_preamp_linear[i]  = linear;
-        }
-    }
-
     bypass_master_eq = (in->global.bypass != 0);
 
     loudness_enabled = (in->global.loudness_enabled != 0);
@@ -436,8 +417,11 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
             matrix_mixer.crosspoints[inp][o].enabled = in->crosspoints[inp][o].enabled;
             matrix_mixer.crosspoints[inp][o].phase_invert = in->crosspoints[inp][o].phase_invert;
-            matrix_mixer.crosspoints[inp][o].gain_db = in->crosspoints[inp][o].gain_db;
-            matrix_mixer.crosspoints[inp][o].gain_linear = db_to_linear(in->crosspoints[inp][o].gain_db);
+            float db = in->crosspoints[inp][o].gain_db;
+            if (isfinite(db)) {   // non-finite keeps the live gain, as the vendor setter does
+                matrix_mixer.crosspoints[inp][o].gain_db = db;
+                matrix_mixer.crosspoints[inp][o].gain_linear = db_to_linear(db);
+            }
         }
     }
 
@@ -445,8 +429,11 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
         matrix_mixer.outputs[o].enabled = in->outputs[o].enabled;
         matrix_mixer.outputs[o].mute = in->outputs[o].mute;
-        matrix_mixer.outputs[o].gain_db = in->outputs[o].gain_db;
-        matrix_mixer.outputs[o].gain_linear = db_to_linear(in->outputs[o].gain_db);
+        float db = in->outputs[o].gain_db;
+        if (isfinite(db)) {
+            matrix_mixer.outputs[o].gain_db = db;
+            matrix_mixer.outputs[o].gain_linear = db_to_linear(db);
+        }
         matrix_mixer.outputs[o].delay_ms = in->outputs[o].delay_ms;
         channel_delays_ms[CH_OUT_1 + o] = in->outputs[o].delay_ms;
     }
@@ -572,22 +559,16 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     leveller_update_pending = true;
     leveller_reset_pending = true;
 
-    // Per-channel preamp — overrides the legacy single value set above.
-    for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
-        float db = in->preamp.preamp_db[i];
-        float linear = db_to_linear(db);
-        global_preamp_db[i]      = db;
-        global_preamp_mul[i]     = (int32_t)(linear * (float)(1 << 28));
-        global_preamp_linear[i]  = linear;
-    }
+    // Per-channel preamp.  The legacy global.preamp_gain_db field is ignored:
+    // this section is always present and supersedes it.
+    for (int i = 0; i < NUM_INPUT_CHANNELS; i++)
+        update_preamp((uint8_t)i, in->preamp.preamp_db[i]);
 
     // Master volume (bulk params always applies, ignoring the directory flag).
     // Delegated to update_master_volume() for consistent clamping and to emit
     // a device→host notification via interrupt EP 0x83.
     {
-        float db = in->master_volume.master_volume_db;
-        if (!isfinite(db)) db = MASTER_VOL_MAX_DB;
-        update_master_volume(db);
+        update_master_volume(in->master_volume.master_volume_db);  // non-finite keeps live
     }
 
     // Input source, as the pin validation left it (a switch whose pins could not

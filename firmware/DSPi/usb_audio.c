@@ -331,12 +331,18 @@ void get_default_channel_name(int ch, uint8_t input_source,
 // Update a single input channel's preamp gain from a dB value.
 // Computes both float (RP2350) and Q28 (RP2040) representations so the
 // audio callback can read the correct format without conversion.
+// Q28 holds gains below 8.0 (+18.06 dB); saturate rather than wrap int32.
+int32_t preamp_linear_to_q28(float linear) {
+    float q = linear * (float)(1 << 28);
+    return (q >= 2147483520.0f) ? INT32_MAX : (int32_t)q;
+}
+
 void update_preamp(uint8_t ch, float db) {
     if (!isfinite(db)) return;  // Reject NaN/Inf — would propagate through entire audio path
     if (ch >= NUM_INPUT_CHANNELS) return;
     global_preamp_db[ch] = db;
     float linear = powf(10.0f, db / 20.0f);
-    global_preamp_mul[ch]    = (int32_t)(linear * (float)(1 << 28));
+    global_preamp_mul[ch]    = preamp_linear_to_q28(linear);
     global_preamp_linear[ch] = linear;
     uint16_t off = (uint16_t)(offsetof(WireBulkParams, preamp.preamp_db) + ch * sizeof(float));
     notify_param_write(off, sizeof(float), &db);

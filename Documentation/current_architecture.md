@@ -4647,7 +4647,7 @@ PEQ and crossover share one band address space. `FILTER.BAND` and `FILTER.BAND_B
 Crossover bands (20..23) are refused on input channels (channel < `CH_OUT_1`). See `Documentation/Features/crossover_filters_spec.md` for the complete crossover spec.
 
 ### Bulk Parameter Transfer
-*Last updated: 2026-11-16 (transport, SET and buffer paragraphs describe `STORE.ALL_PARAMS` on the paged protocol). Previously 2026-11-15 (wire-format paragraph: crossover section is 1088 bytes at 17 channels, arrays sized for 17 channels, SET accepts only V32). Previously 2026-09-22 (wire V32: output limiter section appended at 6028, total 6136; 2026-09-20: wire V31 tube section revised in place: `xfmr_damping` / `xfmr_res_hz` plus a reserved float, still 48 bytes and total 6028; 2026-09-18 wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
+*Last updated: 2026-11-20 (new "Gain conversion" paragraph). Previously 2026-11-16 (transport, SET and buffer paragraphs describe `STORE.ALL_PARAMS` on the paged protocol). Previously 2026-11-15 (wire-format paragraph: crossover section is 1088 bytes at 17 channels, arrays sized for 17 channels, SET accepts only V32). Previously 2026-09-22 (wire V32: output limiter section appended at 6028, total 6136; 2026-09-20: wire V31 tube section revised in place: `xfmr_damping` / `xfmr_res_hz` plus a reserved float, still 48 bytes and total 6028; 2026-09-18 wire V31: tube preamp section appended, total 6028; 2026-09-04 wire V30: subharm section grows 16 to 36 bytes, total 5980; 2026-08-02 wire V28: input-config `spdif_rx_pin_ext` grows to 3 entries for SPDIF input 4; section and total size unchanged)*
 
 `STORE.ALL_PARAMS` transfers the complete DSP state in one control transfer (6136 bytes at V32), replacing dozens of individual vendor requests. `STORE.ALL_PARAMS_CHUNK` moves the same struct in offset-addressed pieces for hosts limited to 4 KB per transfer (see "Bulk and chunk sessions").
 
@@ -4660,6 +4660,8 @@ Crossover bands (20..23) are refused on input channels (channel < `CH_OUT_1`). S
 **GET:** `bulk_params_collect()` snapshots live state into `bulk_param_buf`, which is then sent as the reply.
 
 **SET:** The payload lands in `bulk_param_buf`. At the DATA stage `vc_bulk_params_check()` checks the header and the handler sets `bulk_params_pending`, so a bad header STALLs the status stage instead of being dropped later. Main loop processes deferred: snapshots `output_types[]`, waits for Core 1 idle, mutes audio (256 samples), calls `bulk_params_apply()` with pin application gated on `output_config_mode` (applied only in with-preset mode; independent mode leaves device-global IO to `STORE.OUTPUT_CONFIG_SAVE`), recalculates all filters and delays, transitions Core 1 mode to match the new output enable state, then diffs the new `output_types[]` against the snapshot. If any slot's type changed, dispatches `process_type_switches()` to reconfigure SPDIF/I2S hardware (mirrors the `preset_load_pending` pattern); otherwise calls `complete_pipeline_reset()` to resync output streams (or `reset_usb_feedback_loop()` when SPDIF input is active, to avoid disrupting the prefill handshake).
+
+**Gain conversion:** `bulk_params_apply()` converts matrix crosspoint and output gains with the same exact `powf` as the vendor setters and preset load (floor -120 dB to zero, ceiling +80 dB). A non-finite gain keeps the live value. Preamps go through `update_preamp()` and master volume through `update_master_volume()`, so a non-finite value keeps the live setting there too. The legacy `global.preamp_gain_db` field is ignored on apply because the per-channel preamp section always supersedes it. Until 2026-11-20 the bulk path used a 4th-order Taylor approximation that turned cuts below about -20 dB into boosts (-40 dB applied as +19.5 dB) while `gain_db` read back correctly.
 
 **Buffer:** `bulk_param_buf` in `usb_audio.c`, `WIRE_BULK_BUF_SIZE` bytes (one `WireBulkParams`), 4-byte aligned, shared between GET and SET and across transports. Platform validation rejects mismatched `platform_id` or channel counts.
 
@@ -4879,7 +4881,7 @@ The input preamp is per-channel rather than a single global value. Each USB inpu
 | Variable | Type | Description |
 |----------|------|-------------|
 | `global_preamp_db[NUM_INPUT_CHANNELS]` | `float` | Per-channel preamp gain in dB |
-| `global_preamp_mul[NUM_INPUT_CHANNELS]` | Platform-dependent | Pre-computed linear multiplier (float on RP2350, Q28 on RP2040) |
+| `global_preamp_mul[NUM_INPUT_CHANNELS]` | Platform-dependent | Pre-computed linear multiplier (float on RP2350, Q28 on RP2040). Q28 is written only through `preamp_linear_to_q28()`, which saturates at `INT32_MAX` (just under +18.06 dB) instead of wrapping (2026-11-20) |
 | `global_preamp_linear[NUM_INPUT_CHANNELS]` | `float` | Linear gain for metering/display |
 
 ### Vendor Commands

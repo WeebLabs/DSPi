@@ -217,6 +217,7 @@ extern volatile bool sync_started;
 // Ring buffer accessor (audio_ring is static in usb_audio.c)
 uint32_t usb_audio_ring_overrun_count(void);
 
+int32_t preamp_linear_to_q28(float linear);
 void update_preamp(uint8_t ch, float db);
 void update_master_volume(float db);
 

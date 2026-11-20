@@ -3859,7 +3859,7 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     for (int i = 0; i < NUM_INPUT_CHANNELS; i++) {
         global_preamp_db[i] = slot->preamp_db_per_ch[i];
         float linear = db_to_linear(slot->preamp_db_per_ch[i]);
-        global_preamp_mul[i] = (int32_t)(linear * (float)(1 << 28));
+        global_preamp_mul[i] = preamp_linear_to_q28(linear);
         global_preamp_linear[i] = linear;
     }
 
