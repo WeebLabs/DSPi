@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Cycle-level equivalence check for the proposed PIO biphase-mark S/PDIF encoder.
-Runs today's 4-instruction program on stamp_frame() words and the proposed
-16-instruction encoder on raw words, and compares pin waveforms cycle by cycle.
+"""Cycle-level equivalence check for the PIO biphase-mark S/PDIF encoder.
+Golden model: the retired 4-instruction NRZI program fed software-encoded words.
+The 14-instruction one-word-per-subframe encoder must match it cycle by cycle.
 See Documentation/Features/spdif_pio_bmc_encoder_spec.md."""
 import random
 import sys
@@ -31,7 +31,7 @@ def cs_bit(phase):
 
 
 def update_subframe(l, h, sample):
-    # Port of spdif_update_subframe(); the multiply folds the V/U/C parity.
+    # Golden software NRZI encoder; the multiply folds the V/U/C parity.
     s0 = LUT[sample & 0xFF]
     s1 = LUT[(sample >> 8) & 0xFF]
     s2 = LUT[(sample >> 16) & 0xFF]
@@ -44,7 +44,7 @@ def update_subframe(l, h, sample):
     return l & 0xFFFFFFFF, h2 & 0xFFFFFFFF
 
 
-def stamp_frame_today(phase, left, right):
+def stamp_frame_nrzi(phase, left, right):
     c = cs_bit(phase)
     l0 = PREAMBLE_Z if phase == 0 else PREAMBLE_X
     h0 = 0x55000000 | (c << 29)
@@ -55,20 +55,17 @@ def stamp_frame_today(phase, left, right):
     return [l0, h0, l1, h1]
 
 
-# Proposed raw words. Word A: lead-low count in [2:0], trail-low count in [5:3],
-# each one less than the PIO loop's cycle count. Word B: sample [23:0], V, U, C.
-WORD_A_X = 4 | (1 << 3)   # low for 6 cycles, high 2, low 2
-WORD_A_Y = 2 | (3 << 3)   # low 4, high 2, low 4
-WORD_A_Z = 0 | (5 << 3)   # low 2, high 2, low 6
+# One word per subframe: [1:0] lead low-loop count, [3:2] trail count,
+# [27:4] sample, [28] V, [29] U, [30] C. Mirrors spdif_ring_stamp.h.
+PRE_X = 2 | (0 << 2)
+PRE_Y = 1 | (1 << 2)
+PRE_Z = 0 | (2 << 2)
 
 
 def stamp_frame_new(phase, left, right):
-    c = cs_bit(phase)
-    a0 = WORD_A_Z if phase == 0 else WORD_A_X
-    b0 = (left & 0xFFFFFF) | (c << 26)
-    a1 = WORD_A_Y
-    b1 = (right & 0xFFFFFF) | (c << 26)
-    return [a0, b0, a1, b1]
+    c = cs_bit(phase) << 30
+    return [((left & 0xFFFFFF) << 4) | c | (PRE_Z if phase == 0 else PRE_X),
+            ((right & 0xFFFFFF) << 4) | c | PRE_Y]
 
 
 class PIO:
@@ -177,55 +174,53 @@ def I(op, side=None, delay=0, **kw):
     return d
 
 
-# Today's audio_spdif.pio: two cycles per half-cell, one transition bit each.
-TODAY = [
+# Retired NRZI program (golden reference): two cycles per half-cell, one transition bit each.
+NRZI_REF = [
     I('out', side=0, dst='x', n=1),
     I('jmp', side=0, cond='!x', target=0),
     I('out', side=1, dst='x', n=1),
     I('jmp', side=1, cond='!x', target=2),
 ]
 
-# Proposed encoder; labels match the spec. Wrap target 0, wrap after TRAIL.
-L_BIT, L_LOW2, COMMON, LEAD, TRAIL, H_BIT, H_HIGH2 = 0, 2, 5, 7, 10, 11, 13
+# audio_spdif_bmc.pio; labels match the source. Wrap target 0, wrap after TRAIL.
+L_BIT, L_LOW2, COMMON, LEAD, TRAIL, H_BIT, H_HIGH2 = 0, 2, 5, 6, 8, 9, 11
 NEW = [
     I('out', side=1, dst='x', n=1),                         # 0  L_bit
     I('jmp', side=1, cond='!x', target=H_HIGH2),            # 1
     I('jmp', side=0, delay=1, cond='!osre', target=L_BIT),  # 2  L_low2
     I('nop', side=1, delay=1),                              # 3  P=1 half 1
-    I('pull', side=0, delay=1),                             # 4  P=1 half 2, word A (start entry)
-    I('nop', side=1, delay=5),                              # 5  common: preamble high x6
-    I('out', side=0, dst='y', n=3),                         # 6
-    I('jmp', side=0, cond='y--', target=LEAD),              # 7  lead
-    I('out', side=1, dst='y', n=3),                         # 8
-    I('pull', side=1),                                      # 9  word B
-    I('jmp', side=0, cond='y--', target=TRAIL),             # 10 trail, then wrap
-    I('out', side=0, dst='x', n=1),                         # 11 H_bit
-    I('jmp', side=0, cond='!x', target=L_LOW2),             # 12
-    I('jmp', side=1, delay=1, cond='!osre', target=H_BIT),  # 13 H_high2
-    I('pull', side=0, delay=2),                             # 14 P=0, word A
-    I('jmp', side=0, cond='always', target=COMMON),         # 15
+    I('pull', side=0, delay=1),                             # 4  P=1 half 2 (start entry)
+    I('out', side=1, delay=5, dst='y', n=2),                # 5  common: high x6, lead count
+    I('jmp', side=0, delay=1, cond='y--', target=LEAD),     # 6  lead
+    I('out', side=1, delay=1, dst='y', n=2),                # 7  high x2, trail count
+    I('jmp', side=0, delay=1, cond='y--', target=TRAIL),    # 8  trail, then wrap
+    I('out', side=0, dst='x', n=1),                         # 9  H_bit
+    I('jmp', side=0, cond='!x', target=L_LOW2),             # 10
+    I('jmp', side=1, delay=1, cond='!osre', target=H_BIT),  # 11 H_high2
+    I('pull', side=0, delay=2),                             # 12 P=0
+    I('jmp', side=0, cond='always', target=COMMON),         # 13
 ]
 NEW_ENTRY = 4
-assert len(NEW) == 16
+assert len(NEW) == 14
 
 
 def run_compare(frames, seed):
     rng = random.Random(seed)
-    # Two spare frames: the new program pulls the next control word before the
-    # subframe ends, so a stream cut exactly at the window would stall it.
+    # Two spare frames: the encoder pulls the next word before the subframe
+    # ends, so a stream cut exactly at the window would stall it.
     samples = [(rng.getrandbits(32), rng.getrandbits(32)) for _ in range(frames + 2)]
     samples[0] = (0, 0)
     samples[1] = (0xFFFFFF, 0x800000)
     samples[2] = (0xFFFFFFFF, 0x7FFFFF)
-    fifo_today, fifo_new = [], []
+    fifo_nrzi, fifo_new = [], []
     for f, (l, r) in enumerate(samples):
-        fifo_today += stamp_frame_today(f % 192, l, r)
+        fifo_nrzi += stamp_frame_nrzi(f % 192, l, r)
         fifo_new += stamp_frame_new(f % 192, l, r)
 
     cycles = frames * 256
-    a = PIO(TODAY, wrap_target=0, wrap=3, autopull=True, thresh=32, fifo=fifo_today)
+    a = PIO(NRZI_REF, wrap_target=0, wrap=3, autopull=True, thresh=32, fifo=fifo_nrzi)
     a.run(cycles)
-    b = PIO(NEW, wrap_target=L_BIT, wrap=TRAIL, autopull=False, thresh=27, fifo=fifo_new)
+    b = PIO(NEW, wrap_target=L_BIT, wrap=TRAIL, autopull=False, thresh=31, fifo=fifo_new)
     b.pc = NEW_ENTRY
     b.run(cycles)
     assert a.stalls == 0 and b.stalls == 0, (a.stalls, b.stalls)
@@ -241,14 +236,14 @@ def main():
             i = mism[0]
             print(f"seed {seed}: MISMATCH at cycle {i} (frame {i // 256}, cycle {i % 128} of subframe)")
             lo = max(0, i - 20)
-            print(" today:", ''.join(map(str, a.trace[lo:i + 40])))
+            print(" nrzi:", ''.join(map(str, a.trace[lo:i + 40])))
             print(" new  :", ''.join(map(str, b.trace[lo:i + 40])))
             sys.exit(1)
         print(f"seed {seed}: identical waveform over {frames} frames ({frames * 256} cycles)")
     a, b, _ = run_compare(4, 0)
-    print("frame 2 subframe A, today:", ''.join(map(str, a.trace[512:640])))
+    print("frame 2 subframe A, nrzi:", ''.join(map(str, a.trace[512:640])))
     print("frame 2 subframe A, new  :", ''.join(map(str, b.trace[512:640])))
-    print("start lead-in, today:", a.trace[:8], " new:", b.trace[:8])
+    print("start lead-in, nrzi:", a.trace[:8], " new:", b.trace[:8])
 
 
 if __name__ == '__main__':

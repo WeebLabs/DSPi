@@ -1,64 +1,50 @@
 # S/PDIF Output: Biphase-Mark Encoding in the PIO
 
-*Status: implemented 2026-10-11 as a hybrid (PIO encoder by default, software encoder only when the I2S external-clock program needs the block). Waveform equivalence proven in simulation (`tools/spdif_pio_bmc_sim.py`) and the assembled program checked against the simulated one. Not yet verified on hardware.*
+*Status: implemented. First version (two words per subframe, software NRZI fallback) 2026-10-11. Replaced 2026-11-20 by a 14-instruction one-word-per-subframe encoder; the NRZI fallback is deleted. Waveform equivalence proven in simulation (`tools/spdif_pio_bmc_sim.py`). Not yet verified on hardware.*
 
-*Last updated: 2026-10-12*
+*Last updated: 2026-11-20*
 
 ## Summary
 
-Before this change each enabled S/PDIF output slot cost about 1.3% of core 0 at 307.2 MHz, almost all of it the software biphase-mark encoder in `audio_spdif_ring_write_s32()`: three table lookups plus parity per subframe, a modulo-192 phase per frame, and a block of silence restamped behind every block. The PIO now does that encoding. A 16-instruction program (`audio_spdif_bmc.pio`) fed with raw 24-bit samples produces a waveform identical, cycle for cycle, to the original 4-instruction NRZI program fed with software-encoded words: the same 256 PIO cycles per frame, the same four ring words per frame, the same DMA and consumed-word accounting, and the same two-cycle start lead-in. The CPU side is four stores and two masks per frame.
+The PIO does all biphase-mark encoding for S/PDIF output. A 14-instruction program (`audio_spdif_bmc.pio`) is fed one 32-bit word per subframe holding the preamble selector, the 24-bit sample and V/U/C, and produces a waveform identical, cycle for cycle, to the original 4-instruction NRZI program fed with software-encoded transition words. Each frame is 256 PIO cycles as before, with the same two-cycle start lead-in, but the ring now holds **2 words per frame** (8 bytes), the same as the I2S rings.
 
-The constraint that made this a hybrid is PIO instruction memory. The slot block (PIO0) holds the S/PDIF program plus either the I2S master-clock programs (8 + 8) or the checked I2S external-clock program (26). The 16-instruction encoder fits beside the master-clock programs with nothing spare, and does not fit beside the external-clock program. So the firmware selects the encoder per configuration.
+CPU work per frame is two loads, a shift/mask/or per sample, and two stores. For 152 of every 192 frames (IEC phase 40 and up) the channel-status bit is zero and the preamble is the constant X/Y pair, so the writer runs those frames through a branch-free inner loop. Silence there is two constant stores per frame.
 
-## Selection rule
+There is one ring word format. The software NRZI encoder, its lookup table, the `pio_bmc` instance flag, `audio_spdif_select_encoder()` / `audio_spdif_loaded_encoder()` and the encoder-flip rebuild in `process_type_switches()` are gone.
 
-The software encoder is used if and only if `i2s_slave_mode_active()` is true **and** at least one output slot is typed I2S. In every other configuration, including an external I2S master driving the input while every output slot is S/PDIF, the PIO encoder is loaded. The rule lives in `process_type_switches()` (main.c), which already computes `want_extclk` for the I2S slots.
+## PIO0 instruction budget
 
-| Configuration | PIO0 residents | S/PDIF encoder |
-|---|---|---|
-| No I2S output slots (any clock mode) | S/PDIF 16 | PIO |
-| I2S slots, internal clocking | S/PDIF 16 + clkout 8 + dataout 8 = 32 | PIO |
-| I2S slots, external master (clock slave) | S/PDIF 4 + extclk 26 = 30 | software |
+The slot block (PIO0) holds the S/PDIF program next to whichever I2S programs are loaded.
 
-### How the selection is applied
+| Configuration | PIO0 residents |
+|---|---|
+| No I2S output slots | S/PDIF 14 |
+| I2S slots, internal clocking | S/PDIF 14 + clkout 8 + dataout 8 = 30 |
+| I2S slots, external master (clock slave) | S/PDIF 14 + extclk program (must be 18 or fewer) |
 
-- The library keeps one requested encoder and one loaded encoder per PIO block (`audio_spdif_select_encoder()`, `audio_spdif_loaded_encoder()`). The requested value is applied the next time the block loads a program, which is the first `audio_spdif_setup()` after the block's last `audio_spdif_teardown()`. The last teardown on a block now releases the program; the I2S library does the same for its three programs when its last instance on the block goes, so the 16-slot encoder always has room when it is wanted.
-- Each instance records the format of the block's loaded program in `pio_bmc` at setup, before its ring reset stamps silence. All S/PDIF slots on a block share one program and therefore one word format.
-- `process_type_switches()` computes the wanted encoder from the target configuration before any teardown or setup, and treats a mismatch with the loaded encoder as a transition (`spdif_encoder_flip`). On a flip every S/PDIF slot that is staying S/PDIF is torn down ahead of Pass 1 and re-set-up in Pass 2 alongside the retyped slots, so the program swap and the ring restamp happen inside the existing stopped-and-restarted output rebuild. Boot sets the slots up with the default (PIO) encoder and the boot-time `apply_restored_outputs()` corrects it through the same path.
-- If a program ever fails to fit, both libraries panic with a message naming the program and block rather than storing a negative offset.
-- Instruction memory cannot fragment. Every encoder flip tears down all S/PDIF slots and (through the clocking mismatch) all I2S slots, so the block is empty before the new set loads, and within internal-clock mode the three programs are 16, 8 and 8 slots, which pack into 32 in any load order under the SDK's top-down placement.
+The extclk row depends on the I2S external-clock program being shrunk to 17 instructions (separate work). Until it is, that configuration does not fit and `audio_spdif_setup()` or the I2S setup panics at program load. Both libraries release their programs when their last instance on the block goes, so a full rebuild always starts from an empty block.
 
-## Why it is alignment-safe
+## Wire format in the ring
 
-Slot alignment depends on the frame clock, the start sequence and the ring accounting, none of which change.
+One word per subframe, OSR shift right, autopull off, pull threshold 31.
 
-- **Frame timing is unchanged.** Every subframe is exactly 128 PIO cycles (32 time slots, two half-cells each, two cycles per half-cell), so the 256 Fs PIO clock and `audio_base_divider_16_8()` are untouched.
-- **Ring geometry is unchanged.** Still 16 bytes per frame (two 32-bit words per subframe), so `RING_WORDS`, `consumed_word_rem`, the DMA ring wrap, `ring_dma_arm()`, `audio_spdif_ring_consumed_words()`, the FIFO prefill accounting and `audio_spdif_ring_skip()` keep their arithmetic. Only the meaning of the two words changes.
-- **Start is unchanged.** The synchronized start execs a jump to the program's entry instruction and enables all SMs in one mask write. Both entry points emit two low cycles before the first preamble bit, so S/PDIF slots keep their phase relative to I2S slots and PDM whichever program is loaded.
-- **Underrun behaviour is unchanged.** A `pull` on an empty FIFO stalls with the pin held, exactly as the autopull `out` does. The ring's silence margin makes that unreachable in normal operation either way.
-- **Parity cannot drift.** The PIO derives the parity bit from the line state, so every subframe ends at the same level and the preamble polarity is fixed by construction.
-- **Encoder swaps only happen inside a full output rebuild**, with every slot stopped, the rings reset and all slots restarted from one synchronized start.
+| Bits | Content |
+|---|---|
+| [1:0] | lead low-loop count: X = 2, Y = 1, Z = 0 |
+| [3:2] | trail low-loop count: X = 0, Y = 1, Z = 2 |
+| [27:4] | 24-bit sample, LSB first on the wire (time slots 4 to 27) |
+| [28], [29] | V and U, both 0 |
+| [30] | channel-status bit for this frame's phase |
+| [31] | ignored (the PIO generates parity from the line level) |
 
-## Wire format in the ring (PIO encoder)
+Constants: X = 0x2, Y = 0x5, Z = 0x8 (`SPDIF_WORD_PRE_X/Y/Z`). Frame at IEC phase p with samples l, r and channel-status bit c:
 
-Each subframe is two words, pulled in order.
+- word 0 = `((l & 0xFFFFFF) << 4) | (c << 30) | (p == 0 ? Z : X)`
+- word 1 = `((r & 0xFFFFFF) << 4) | (c << 30) | Y`
 
-| Word | Bits | Content |
-|---|---|---|
-| A (control) | [2:0] | lead-low count: 4 for X, 2 for Y, 0 for Z |
-| A | [5:3] | trail-low count: 1 for X, 3 for Y, 5 for Z |
-| B (data) | [23:0] | 24-bit sample, LSB first on the wire (time slots 4 to 27) |
-| B | [24], [25] | V and U, both 0 |
-| B | [26] | channel-status bit for this frame's phase |
-| B | [31:27] | ignored (threshold 27, no autopull) |
-
-Control word constants (`BMC_CTRL_X/Y/Z` in audio_spdif.c): X = 0x0C, Y = 0x1A, Z = 0x28. The preamble is generated as two low runs around a fixed high run, so the three preambles differ only in those two counts.
-
-CPU work per frame is two constant stores, two `(sample & 0xFFFFFF) | (c << 26)` stores, and a running IEC phase. Silence frames are the same stores with the sample at zero. The software path (`stamp_frame()`, `stamp_silence_frame()`, the lookup table) is retained unchanged for the external-clock configuration; `stamp_audio_run()` and `stamp_silence_run()` select the format once per run from `pio_bmc`. Both paths now carry a running phase counter instead of a per-frame modulo.
+Silence is the same with l = r = 0.
 
 ## The program
-
-Shift right, no autopull, pull threshold 27, one side-set pin on the output GPIO. Each data bit is four cycles: a forced transition then a conditional one, with the level tracked by which copy of the loop is executing. After 27 data bits (sample, V, U, C) the `jmp !osre` falls through, and which copy it falls out of says what the parity bit must be.
 
 ```
 .program audio_spdif_bmc
@@ -66,41 +52,46 @@ Shift right, no autopull, pull threshold 27, one side-set pin on the output GPIO
 .wrap_target
 L_bit:    out x, 1          side 1          ; bit half 1, line high
           jmp !x H_high2    side 1          ; bit 0: half 2 stays high
-L_low2:   jmp !osre L_bit   side 0 [1]      ; bit 1: half 2 low. 27 bits done at low: P=1
+L_low2:   jmp !osre L_bit   side 0 [1]      ; bit 1: half 2 low. 31 bits done at low: P=1
           nop               side 1 [1]      ;   P half 1
-          pull              side 0 [1]      ;   P half 2, OSR = word A      <- sync-start entry
-common:   nop               side 1 [5]      ; preamble: high x6
-          out y, 3          side 0          ; lead low count
-lead:     jmp y-- lead      side 0          ; low x (y+1), total lead = y+2
-          out y, 3          side 1          ; high x2, trail count
-          pull              side 1          ;   OSR = word B
-trail:    jmp y-- trail     side 0          ; low x (y+1), then wrap to L_bit
+          pull              side 0 [1]      ;   P half 2, next word   <- sync-start entry
+common:   out y, 2          side 1 [5]      ; preamble high x6, lead count
+lead:     jmp y-- lead      side 0 [1]      ; low 2(y+1)
+          out y, 2          side 1 [1]      ; high x2, trail count
+trail:    jmp y-- trail     side 0 [1]      ; low 2(y+1), then wrap to L_bit
 .wrap
 H_bit:    out x, 1          side 0          ; bit half 1, line low
           jmp !x L_low2     side 0          ; bit 0: half 2 stays low
-H_high2:  jmp !osre H_bit   side 1 [1]      ; bit 1: half 2 high. 27 bits done at high: P=0
-          pull              side 0 [2]      ;   P both halves low (3 of 4 cycles), OSR = word A
+H_high2:  jmp !osre H_bit   side 1 [1]      ; bit 1: half 2 high. 31 bits done at high: P=0
+          pull              side 0 [2]      ;   P both halves low (3 of 4 cycles)
           jmp common        side 0          ;   4th cycle
 ```
 
-Cycle budget per subframe. The preamble is 6 + lead + 2 + trail = 16 cycles with lead + trail = 8, the 27 data bits take 108, and the parity bit takes 4, for 128 in total.
+Cycle budget per subframe: preamble 6 + 2(lead+1) + 2 + 2(trail+1) = 16 with lead + trail = 2, then 27 data bits (sample, V, U, C) at 4 cycles = 108, then parity 4, for 128. The 4 preamble bits plus 27 data bits make 31 shifted bits, which is where OSRE trips with threshold 31.
 
-`spdif_bmc_program_init()` configures `sm_config_set_out_shift(&c, true, false, 27)` and jumps to `entry_point` (offset + 4); `audio_spdif_enable_sync_prepare()` jumps to the same entry through `spdif_entry_offset()`.
+`spdif_bmc_program_init()` sets `sm_config_set_out_shift(&c, true, false, 31)` and jumps to `entry_point` (offset + 4); `audio_spdif_enable_sync_prepare()` jumps to the same entry through `spdif_entry_offset()`.
+
+## Ring writer
+
+The stamping loops live in `include/pico/audio_spdif/ring_stamp.h` (plain C, no SDK dependency) so the host test compiles the real code. `spdif_stamp_audio()` and `spdif_stamp_silence()` split every run at the ring wrap and at IEC phases 0, 40 and 192. Segments at phase 40 and up use the constant X/Y words; segments below 40 read the channel-status bit per frame and use Z at phase 0. Both are always inline into the RAM-resident writer, skip and pump (the silence path runs during flash blackout). Absolute-frame phase, erase-ahead, all-or-nothing admission and the `wr_frames` / `erased_frames` / `consumed_frames` semantics are unchanged.
+
+## Why it is alignment-safe
+
+- **Frame timing is unchanged.** Every subframe is exactly 128 PIO cycles, so the 256 Fs PIO clock and `audio_base_divider_16_8()` are untouched.
+- **Start is unchanged.** The synchronized start execs a jump to the entry instruction and enables all SMs in one mask write. The entry emits two low cycles before the first preamble bit, as the NRZI program did, so S/PDIF slots keep their phase relative to I2S slots and PDM.
+- **Ring accounting is per frame.** All fill, deficit and skip math uses `consumed_frames` and `wr_frames`; only the words-to-frames divisor changed (4 to 2).
+- **FIFO depth.** The joined 8-word TX FIFO now holds 4 frames instead of 2, the same as I2S slots. The DMA read pointer, and so `consumed_frames`, leads the wire by 4 frames on both slot types. Wire alignment never depended on this (every slot starts from the same ring offset on the same cycle). The only effect is that S/PDIF and I2S fill readings no longer differ by the 2-frame FIFO term.
+- **Underrun.** A `pull` on an empty FIFO stalls with the pin held; the ring's silence margin makes that unreachable in normal operation.
+- **Parity cannot drift.** The PIO derives the parity bit from the line state.
 
 ## Verification
 
-**Simulation.** `tools/spdif_pio_bmc_sim.py` models the PIO subset both programs use (OUT, JMP including `!osre` and `y--`, PULL, side-set, delays, wrap, OSR shift count against the pull threshold, autopull versus manual pull). It feeds the original program with words from a port of `stamp_frame()` and the new program with the raw words above, and compares the pin level on every cycle. Over 1000 frames on five random seeds, including zero, full-scale, negative and sign-extended samples and five wraps of the 192-frame channel-status cycle, the two waveforms are identical, and the first eight cycles after enable match. The pioasm output in the build tree was decoded back into the simulator's instruction model and matches it instruction for instruction, with the same wrap points and entry offset.
+**Simulation.** `tools/spdif_pio_bmc_sim.py` runs the retired NRZI program (the golden model, with a Python port of the old software encoder) and the 14-instruction program on the words above, and compares the pin level every cycle on five seeds, including zero, full-scale and sign-extended samples, channel-status wraps and the first eight cycles after enable.
 
-**Build.** Both platforms build clean; `scripts/check_ram_placement.py` passes on both images (the stampers are forced inline into the RAM-resident writer, skip and pump).
+**Stamping.** `tools/spdif_ring_stamp_test/run.sh` compiles `ring_stamp.h` with the host compiler and checks both loops against a naive per-frame reference for 200,000 random runs (random and boundary-targeted start positions, lengths up to a full ring, ring wrap, phases 0, 40 and 192, uint32 counter wrap).
 
 **Bench items still open.**
 
-1. `JMP !OSRE` evaluates against the pull threshold with autopull disabled, so the data loop exits after exactly 27 bits. The datasheet defines OSRE this way; a scope check that every subframe is 128 cycles settles it.
+1. `JMP !OSRE` with autopull disabled exits after exactly 31 bits; a scope check that every subframe is 128 cycles settles it.
 2. Receiver lock on all slots at 44.1, 48 and 96 kHz, including the fractional-divider rates.
-3. Every encoder-flip transition: slave mode on and off with I2S slots present, the last I2S slot retyped to S/PDIF under slave mode, the first I2S slot added under slave mode, and a boot into a slave-mode preset with I2S slots.
-4. With PIO0 at 32 of 32 in I2S master-clock mode, slot retypes in every order (the lazy program loads must always find room).
-
-## Known limits
-
-- PIO0 has no spare instruction in the internal-clock I2S configuration, so any future PIO0 program needs this encoder off or the master-clock programs merged (slaves could run clkout with side-set on the clock pins, freeing 8).
-- The software encoder (the `spdif_lookup` table and `spdif_update_subframe()` in `sample_encoding.h`) stays in the build for the external-clock configuration.
+3. Mixed S/PDIF and I2S slots in both I2S clock modes, checking sample alignment across slot types and PDM.

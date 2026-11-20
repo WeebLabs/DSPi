@@ -35,3 +35,19 @@ VC_CMD(0x40, EQ_PROF, diag_eq_prof_get, VC_NONE,
 VC_CMD(0x41, EQ_PROF_RESET_MIN, VC_NONE, diag_eq_prof_reset_min_set,
        NONE, 0, 0, 0, 0, 0, "Restart the per-call minimum on both cores")
 #endif
+
+// Wire-capture rig: Documentation/Features/wirecap_test_rig.md has every payload layout.
+#ifdef DSPI_WIRECAP
+VC_CMD(0x50, WIRECAP_ARM, VC_NONE, diag_wirecap_arm_set,
+       NONE, 0, 10, 10, 0, 0, "Start a one-shot pin capture: u8 base, u8 count, u16 div int, u8 div frac, u8 0, u32 bytes (0 aborts)")
+VC_CMD(0x51, WIRECAP_STATUS, diag_wirecap_status_get, VC_NONE,
+       NONE, 32, 0, 0, 0, 0, "Capture state, RXSTALL flag, pins, clk_sys Hz, divider, PIO, bytes, buffer size, sequence")
+VC_CMD(0x52, WIRECAP_READ, diag_wirecap_read_get, VC_NONE,
+       INDEX, VC_LEN_VAR, 0, 0, 0, 0, "Captured bytes, 256-byte chunk wValue")
+VC_CMD(0x53, WIRECAP_CLKGEN, diag_wirecap_clkgen_get, diag_wirecap_clkgen_set,
+       NONE, 24, 5, 5, 0, 0, "I2S clock generator on GPIO 24/25: SET u8 enable, u32 rate; GET status")
+VC_CMD(0x54, WIRECAP_CLKGEN_GLITCH, VC_NONE, diag_wirecap_glitch_set,
+       NONE, 0, 2, 2, 0, 0, "Inject one clock glitch: u8 kind (1 runt, 2 missing BCK, 3 LRCLK early, 4 late), u8 cells")
+VC_CMD(0x55, WIRECAP_RATE, VC_NONE, diag_wirecap_rate_set,
+       NONE, 0, 4, 4, 0, 0, "Request an output rate change through the host path, u32 Hz (USB input only)")
+#endif

@@ -337,6 +337,10 @@ static uint8_t platform_fn(uint8_t fn, uint8_t idx) {
 }
 
 static bool single_valid(uint8_t fn, uint8_t idx, uint8_t pin) {
+#ifdef DSPI_WIRECAP
+    // Bench rig: the board-internal GPIO 24/25 may carry the I2S clocks (wirecap_test_rig.md).
+    if (fn == PIN_FN_I2S_CLK && (pin == 24 || pin == 25)) return true;
+#endif
     if (pin == 0xFF || !is_valid_gpio_pin(pin)) return false;
 #ifdef DSPI_PLATFORM_PINS
     if (!dspi_platform_pin_valid(platform_fn(fn, idx), pin)) return false;

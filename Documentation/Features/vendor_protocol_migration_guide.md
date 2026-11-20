@@ -1552,6 +1552,9 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `DIAG.LOOP_PROF_COMMAND` | 0xF0 | 0x32 | `(page << 8) \| cmd` | 4 | `DSPI_LOOP_PROF` |  |
 | `DIAG.LOOP_PROF_BG_PACE` | 0xF0 | 0x33 | none | 2 | `DSPI_LOOP_PROF` |  |
 | `DIAG.EQ_PROF` | 0xF0 | 0x40 | none | 48 | `DSPI_EQ_PROF` |  |
+| `DIAG.WIRECAP_STATUS` | 0xF0 | 0x51 | none | 32 | `DSPI_WIRECAP` |  |
+| `DIAG.WIRECAP_READ` | 0xF0 | 0x52 | index | var | `DSPI_WIRECAP` | min(256, captured bytes - 256 x wValue) |
+| `DIAG.WIRECAP_CLKGEN` | 0xF0 | 0x53 | none | 24 | `DSPI_WIRECAP` |  |
 
 <!-- VC:END GET_LENGTHS -->
 

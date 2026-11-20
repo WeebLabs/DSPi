@@ -58,6 +58,23 @@ static int i2s_slave_pio_program_offset[3] = {-1, -1, -1};    // Slave program
 static int i2s_extclk_pio_program_offset[3] = {-1, -1, -1};
 static uint8_t i2s_extclk_patched_bck[3] = {0xFF, 0xFF, 0xFF};
 static uint16_t i2s_extclk_prog_ram[I2S_EXTCLK_PROG_LEN];
+
+// Fixed layout (PICO_AUDIO_I2S_PIO_PROGRAM_BASE): the two clocking modes
+// overlay the same region and evict each other.
+#define I2S_CLKOUT_PROG_LEN \
+    (sizeof(audio_i2s_clkout_program_instructions) / sizeof(uint16_t))
+#define I2S_CLKOUT_OFFSET   (PICO_AUDIO_I2S_PIO_PROGRAM_BASE)
+#define I2S_DATAOUT_OFFSET  (PICO_AUDIO_I2S_PIO_PROGRAM_BASE + I2S_CLKOUT_PROG_LEN)
+#define I2S_EXTCLK_OFFSET   (PICO_AUDIO_I2S_PIO_PROGRAM_BASE)
+_Static_assert(I2S_CLKOUT_PROG_LEN + sizeof(audio_i2s_dataout_program_instructions) /
+               sizeof(uint16_t) == PICO_AUDIO_I2S_PIO_MASTER_LENGTH,
+               "update PICO_AUDIO_I2S_PIO_MASTER_LENGTH");
+_Static_assert(I2S_EXTCLK_PROG_LEN == PICO_AUDIO_I2S_PIO_EXTCLK_LENGTH,
+               "update PICO_AUDIO_I2S_PIO_EXTCLK_LENGTH");
+_Static_assert(PICO_AUDIO_I2S_PIO_PROGRAM_BASE + PICO_AUDIO_I2S_PIO_MASTER_LENGTH <=
+               PIO_INSTRUCTION_COUNT, "I2S master programs overflow PIO");
+_Static_assert(PICO_AUDIO_I2S_PIO_PROGRAM_BASE + PICO_AUDIO_I2S_PIO_EXTCLK_LENGTH <=
+               PIO_INSTRUCTION_COUNT, "I2S extclk program overflows PIO");
 static struct pio_program i2s_extclk_prog = {
     .instructions = i2s_extclk_prog_ram,
     .length = (uint8_t)I2S_EXTCLK_PROG_LEN,
@@ -183,6 +200,7 @@ void audio_i2s_ring_reset(audio_i2s_instance_t *inst) {
     uint32_t save = save_and_disable_interrupts();
     inst->wr_frames = 0;
     inst->erased_frames = 0;
+    inst->slip_stopped = false;
     inst->consumed_words = 0;
     inst->consumed_frames = 0;
     inst->consumed_word_rem = 0;
@@ -344,6 +362,7 @@ static void i2s_ring_dma_arm(audio_i2s_instance_t *inst) {
     restore_interrupts(save);
 }
 
+I2S_TIME_CRITICAL
 static void i2s_ring_dma_stop(audio_i2s_instance_t *inst) {
 #if !PICO_RP2350
     // Break the chain loop before aborting so the reload cannot re-arm the
@@ -401,11 +420,10 @@ static inline uint16_t i2s_patch_wait_gpio(uint16_t instr, uint8_t pin) {
 }
 
 // Remove the external-clock slave program from a PIO block if loaded.  Also
-// called from the master/dataout setup paths: the checked extclk program
-// (26 instructions) cannot share the 32-slot block with clkout (8) +
-// dataout (8) + SPDIF (4), so the two clocking modes evict each other's
-// programs.  Safe because clocking mode is global: a mode rebuild tears
-// down every I2S SM before any setup path runs.
+// called from the master/dataout setup paths: the extclk program (17) plus
+// clkout (8) and dataout (8) overflow the 32-slot block, so the two clocking
+// modes evict each other's programs.  Safe because clocking mode is global:
+// a mode rebuild tears down every I2S SM before any setup path runs.
 static void i2s_extclk_evict_program(PIO pio) {
     uint idx = pio_get_index(pio);
     if (i2s_extclk_pio_program_offset[idx] < 0) return;
@@ -415,6 +433,7 @@ static void i2s_extclk_evict_program(PIO pio) {
     }
     pio_remove_program(pio, &i2s_extclk_prog,
                        (uint)i2s_extclk_pio_program_offset[idx]);
+    pio_interrupt_clear(pio, AUDIO_I2S_EXTCLK_SLIP_IRQ);   // no stale slip across modes
     i2s_extclk_pio_program_offset[idx] = -1;
     i2s_extclk_patched_bck[idx] = 0xFF;
 }
@@ -477,9 +496,8 @@ static uint i2s_extclk_load_program(PIO pio, uint8_t bck_pin) {
         i2s_extclk_prog_ram[i] = i2s_patch_wait_gpio(instr, pin);
     }
     i2s_extclk_patched_bck[idx] = bck_pin;
-    // Cannot share the block with the 16-slot S/PDIF PIO encoder; the slot
-    // rebuild selects the software S/PDIF encoder before any setup runs.
-    int off = pio_add_program(pio, &i2s_extclk_prog);
+    // Jmp targets are relocated by the SDK; the patch above touches only WAITs.
+    int off = pio_add_program_at_offset(pio, &i2s_extclk_prog, I2S_EXTCLK_OFFSET);
     if (off < 0) panic("I2S extclk program does not fit in PIO%u", idx);
     i2s_extclk_pio_program_offset[idx] = off;
     return (uint)off;
@@ -608,8 +626,10 @@ void audio_i2s_setup(audio_i2s_instance_t *inst, uint32_t sample_freq,
         // clocking modes cannot share the block's instruction memory)
         if (i2s_pio_program_offset[config->pio] < 0) {
             i2s_extclk_evict_program(inst->pio);
-            i2s_pio_program_offset[config->pio] =
-                pio_add_program(inst->pio, &audio_i2s_clkout_program);
+            int off = pio_add_program_at_offset(inst->pio, &audio_i2s_clkout_program,
+                                                I2S_CLKOUT_OFFSET);
+            if (off < 0) panic("I2S clkout program does not fit in PIO%u", config->pio);
+            i2s_pio_program_offset[config->pio] = off;
         }
         uint offset = (uint)i2s_pio_program_offset[config->pio];
 
@@ -631,8 +651,10 @@ void audio_i2s_setup(audio_i2s_instance_t *inst, uint32_t sample_freq,
         // program first if a slave-mode session left it loaded)
         if (i2s_slave_pio_program_offset[config->pio] < 0) {
             i2s_extclk_evict_program(inst->pio);
-            i2s_slave_pio_program_offset[config->pio] =
-                pio_add_program(inst->pio, &audio_i2s_dataout_program);
+            int off = pio_add_program_at_offset(inst->pio, &audio_i2s_dataout_program,
+                                                I2S_DATAOUT_OFFSET);
+            if (off < 0) panic("I2S dataout program does not fit in PIO%u", config->pio);
+            i2s_slave_pio_program_offset[config->pio] = off;
         }
         uint offset = (uint)i2s_slave_pio_program_offset[config->pio];
 
@@ -668,6 +690,10 @@ void audio_i2s_setup(audio_i2s_instance_t *inst, uint32_t sample_freq,
 void audio_i2s_set_enabled(audio_i2s_instance_t *inst, bool enabled) {
     if (enabled != inst->enabled) {
         if (enabled) {
+            // Extclk slots start only through the primed synchronized start;
+            // a lone enable would skip the frame-0 priming and misalign the slot.
+            if (inst->external_clock)
+                panic("I2S extclk slot enabled outside enable_sync_prepare");
             i2s_ring_dma_arm(inst);
             pio_sm_set_enabled(inst->pio, inst->pio_sm, true);
         } else {
@@ -750,6 +776,31 @@ void audio_i2s_attach_data_pin(audio_i2s_instance_t *inst, uint new_pin) {
     inst->data_pin = new_pin;
 }
 
+// Prime a stopped, freshly restarted extclk SM whose DMA is armed: consume
+// frame 0 and leave one OSR bit, or the slot lands a sample off its peers.
+// Valid only right after pio_sm_restart; see current_architecture.md
+// "Extclk start priming" under "Framing-slip watchdog".
+static void i2s_extclk_prime(audio_i2s_instance_t *inst) {
+    PIO pio = inst->pio;
+    uint sm = inst->pio_sm;
+    // The armed DMA fills the FIFO in well under a microsecond; a PULL exec'd
+    // on an empty FIFO would stall latched in the stopped SM.
+    const volatile uint32_t *dma_read = &dma_channel_hw_addr(inst->dma_channel)->read_addr;
+    for (uint spin = 0; !pio_sm_is_tx_fifo_full(pio, sm); spin++)
+        if (spin > 100000u) panic("I2S extclk prime: TX FIFO not filling");
+    uint32_t before = *dma_read;
+    pio_sm_exec(pio, sm, pio_encode_pull(false, true));
+    pio_sm_exec(pio, sm, pio_encode_out(pio_null, 32));
+    pio_sm_exec(pio, sm, pio_encode_pull(false, true));
+    pio_sm_exec(pio, sm, pio_encode_out(pio_null, 31));
+    // Refilled FIFO = exactly the words the SM took. Any count but two means
+    // the SM_RESTART "OSR empty" assumption is wrong and channels would swap.
+    for (uint spin = 0; !pio_sm_is_tx_fifo_full(pio, sm); spin++)
+        if (spin > 100000u) panic("I2S extclk prime: TX FIFO not refilling");
+    uint32_t taken = ((*dma_read - before) & (I2S_RING_BYTES - 1u)) / 4u;
+    if (taken != 2u) panic("I2S extclk prime: SM took %u words", (uint)taken);
+}
+
 // ---------------------------------------------------------------------------
 // audio_i2s_enable_sync — synchronized start for multiple instances
 // ---------------------------------------------------------------------------
@@ -785,13 +836,15 @@ uint32_t audio_i2s_enable_sync_prepare(audio_i2s_instance_t *instances[], uint c
             entry_pc = (uint)i2s_slave_pio_program_offset[pio_idx] + audio_i2s_dataout_offset_entry_point;
         }
 
+        // A parked extclk SM (framing slip) must not run on from the jump.
+        if (inst->external_clock)
+            pio_sm_set_enabled(inst->pio, inst->pio_sm, false);
         pio_sm_clear_fifos(inst->pio, inst->pio_sm);
         pio_sm_restart(inst->pio, inst->pio_sm);
         pio_sm_exec(inst->pio, inst->pio_sm, pio_encode_jmp(entry_pc));
 
-        // A framing slip flagged before this restart is already being
-        // handled (this restart IS the handling); a stale flag left set
-        // would immediately re-trigger the slip watchdog after re-lock.
+        // Cleared with the SM stopped: this restart IS the slip handling, and
+        // a stale flag would re-trigger the slip watchdog after re-lock.
         if (inst->external_clock)
             pio_interrupt_clear(inst->pio, AUDIO_I2S_EXTCLK_SLIP_IRQ);
     }
@@ -800,6 +853,7 @@ uint32_t audio_i2s_enable_sync_prepare(audio_i2s_instance_t *instances[], uint c
     // then stalls on DREQ until the synchronized SM start).
     for (uint i = 0; i < count; i++) {
         i2s_ring_dma_arm(instances[i]);
+        if (instances[i]->external_clock) i2s_extclk_prime(instances[i]);
     }
 
     // All instances share one PIO block (asserted); build its SM mask
@@ -811,6 +865,7 @@ uint32_t audio_i2s_enable_sync_prepare(audio_i2s_instance_t *instances[], uint c
 
     for (uint i = 0; i < count; i++) {
         instances[i]->enabled = true;
+        instances[i]->slip_stopped = false;
     }
     return sm_mask;
 }
@@ -977,21 +1032,37 @@ int8_t audio_i2s_get_clock_master_index(void) {
 // External-clock framing-slip flag
 // ---------------------------------------------------------------------------
 
-// True if any external-clock I2S output SM flagged a framing slip since the
-// last call (read-and-clear).  The flag is block-wide (PIO irq flag
-// AUDIO_I2S_EXTCLK_SLIP_IRQ); no other program on the SPDIF/I2S TX block
-// raises PIO irq flags, so a set flag is unambiguous.  Polled by the I2S
-// clock-slave input's slip watchdog, which treats it like a clock loss.
+// Disable every extclk slot exactly as set_enabled(false) would (SM, DMA,
+// enabled flag), then clear the flag: a parked SM re-raises it every cycle.
+// Disabled slots leave admission/fade/underrun accounting; only the
+// synchronized start (enable_sync_prepare) brings them back.
+void __time_critical_func(audio_i2s_extclk_stop)(void) {
+    uint32_t save = save_and_disable_interrupts();
+    for (uint i = 0; i < i2s_instance_count; i++) {
+        audio_i2s_instance_t *inst = i2s_instances[i];
+        if (!inst->external_clock || !inst->enabled) continue;
+        pio_sm_set_enabled(inst->pio, inst->pio_sm, false);
+        i2s_ring_dma_stop(inst);
+        inst->enabled = false;
+        inst->slip_stopped = true;
+    }
+    for (uint8_t idx = 0; idx < 3; idx++) {
+        if (i2s_extclk_pio_program_offset[idx] >= 0)
+            pio_interrupt_clear(i2s_pio_block_from_index(idx), AUDIO_I2S_EXTCLK_SLIP_IRQ);
+    }
+    restore_interrupts(save);
+}
+
+// Read-and-clear; only extclk SMs raise PIO irqs on this block. Stops them
+// first (audio_i2s_extclk_stop) so one slip reads once until the restart.
 bool __time_critical_func(audio_i2s_extclk_framing_slipped)(void) {
     bool slipped = false;
     for (uint8_t idx = 0; idx < 3; idx++) {
         if (i2s_extclk_pio_program_offset[idx] < 0) continue;
-        PIO pio = i2s_pio_block_from_index(idx);
-        if (pio_interrupt_get(pio, AUDIO_I2S_EXTCLK_SLIP_IRQ)) {
-            pio_interrupt_clear(pio, AUDIO_I2S_EXTCLK_SLIP_IRQ);
+        if (pio_interrupt_get(i2s_pio_block_from_index(idx), AUDIO_I2S_EXTCLK_SLIP_IRQ))
             slipped = true;
-        }
     }
+    if (slipped) audio_i2s_extclk_stop();
     return slipped;
 }
 

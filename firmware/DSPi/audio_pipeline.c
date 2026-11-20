@@ -1778,6 +1778,32 @@ bool slot_fill_at_target(uint slot) {
     return slot_ring_fill(slot, &fill) && fill >= output_ring_target_frames;
 }
 
+// True while any set-up output slot is enabled. Slip handling disables only
+// the extclk slots; the rest keep playing and still need the producer.
+DSP_TIME_CRITICAL
+bool output_rings_any_enabled(void) {
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        if (output_types[i] == OUTPUT_TYPE_I2S) {
+            audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled) return true;
+        } else {
+            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
+            if (inst && inst->ring && inst->enabled) return true;
+        }
+    }
+    return false;
+}
+
+// True while any I2S slot is disabled by a slip stop (not a teardown).
+bool output_rings_any_slip_stopped(void) {
+    for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
+        audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
+        if (output_types[i] == OUTPUT_TYPE_I2S && inst && inst->ring && inst->slip_stopped)
+            return true;
+    }
+    return false;
+}
+
 DSP_TIME_CRITICAL
 uint32_t producer_block_bounds(uint32_t *min_frames) {
     uint32_t max = output_ring_block_cap;
@@ -1789,6 +1815,11 @@ uint32_t producer_block_bounds(uint32_t *min_frames) {
         audio_spdif_instance_t *inst = spdif_instance_ptrs[0];
         running = !inst || inst->enabled;
     }
+    // The prefill cap belongs to a real prefill. A slip-stopped slot 0 must not
+    // starve the slots, PDM and ADAT still playing, which need a normal fade.
+    if (!running && output_types[0] == OUTPUT_TYPE_I2S && i2s_instance_ptrs[0] &&
+        i2s_instance_ptrs[0]->slip_stopped)
+        running = true;
     uint32_t fill;
     if (!running && slot_ring_fill(0, &fill)) {
         uint32_t room = fill < output_ring_target_frames ? output_ring_target_frames - fill : 0;

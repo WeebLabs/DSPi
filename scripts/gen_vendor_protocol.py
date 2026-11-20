@@ -612,6 +612,7 @@ VAR_RULES = {
     "MEAS.RTA_BINS": "min(256, frame - offset). The frame is 145, 273 or 529 bytes for FFT order 8, 9 or 10",
     "MEAS.RTA_BANDS_ALL": "82 x live channels at the tap, 0 when none",
     "DIAG.CLOCK_DIAG": "`ClockDiagPacket`. 226 on RP2040, 248 on RP2350",
+    "DIAG.WIRECAP_READ": "min(256, captured bytes - 256 x wValue)",
     "SYS.PIN_CLAIMS": "8 + 4 x claims (`SYS.PIN_STATE` byte 5). At most 208 on RP2040, 236 on RP2350",
 }
 

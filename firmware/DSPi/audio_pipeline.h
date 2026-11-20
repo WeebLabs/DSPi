@@ -96,6 +96,8 @@ bool slot_fill_at_target(uint slot);
 // batch). While the slots are stopped for a prefill both shrink to what brings
 // slot 0 to the target, so the outputs start on it; 0 means wait for the start.
 uint32_t producer_block_bounds(uint32_t *min_frames);
+bool output_rings_any_enabled(void);
+bool output_rings_any_slip_stopped(void);
 
 // Ring health (SYS.PIPELINE_STATS): blocks refused by group admission
 // (cumulative), and the lowest enabled-slot fill seen just before a write, in

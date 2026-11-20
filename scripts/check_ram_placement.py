@@ -233,6 +233,7 @@ B2_LITERAL_WHITELIST = {
 # by (function, value).  A ring geometry change moves the value and fails safe.
 B2_CONSTANT_WHITELIST = {
     ("audio_i2s_ring_consumed_words", 0x1E847FFF): "I2S half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
+    ("audio_spdif_ring_consumed_words", 0x1E847FFF): "S/PDIF half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
 }
 
 # ---------------------------------------------------------------------------

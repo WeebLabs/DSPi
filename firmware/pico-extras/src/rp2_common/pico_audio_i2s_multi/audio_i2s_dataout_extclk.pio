@@ -4,105 +4,42 @@
 ; SPDX-License-Identifier: BSD-3-Clause
 ;
 
-; I2S external-clock slave output - 24-bit audio, data-only, clocked by an
-; EXTERNAL master's BCK/LRCLK (both GPIO inputs).  Used when the DSPi runs
-; in I2S clock-slave mode (external device supplies all clocks).
+; I2S external-clock slave output: 24-in-32 data only, clocked by an external
+; master's BCK/LRCLK (GPIO inputs, BCK = 64 x Fs). Wait-driven at divider 1.0.
+; Autopull 32, shift left, TX FIFO joined, JMP pin = LRCLK. Design, framing
+; check and start alignment: current_architecture.md "Framing-slip watchdog".
 ;
-; Unlike audio_i2s_dataout.pio (which is cycle-identical to the on-chip
-; clkout master and free-runs on the shared divider), this program is
-; wait-driven at divider 1.0: it frames itself on the external LRCLK, then
-; shifts one bit out per external BCK falling edge (standard I2S: data
-; transitions on the falling edge, receiver samples on the rising edge).
-;
-; FRAMING VERIFICATION: real-world external masters (USB-I2S bridges like
-; the Amanero Combo384) glitch or re-frame BCK/LRCLK around stream
-; stop/start and rate-family switches.  A free-running bit loop turns one
-; runt BCK pulse into a permanent one-bit output shift (full-scale wrapped
-; garbage at the DAC) that no rate-based watchdog can see.  The frame loop
-; below emits the 64 bits by count (deterministic 24-in-32 alignment,
-; autopull at 32), then verifies LRCLK level at the two cells straddling
-; the frame boundary:
-;
-;   bit 63 (cell R31): LRCLK must still be HIGH (it rises at cell L32)
-;   bit 64 (cell R32): LRCLK must be LOW (it falls at cell R32's start)
-;
-; Two ADJACENT cells across an LRCLK edge catch every sub-frame offset (a
-; fixed slip of k cells passes both checks only for k == 0 mod 64); slips
-; of exactly a whole frame are inherently undetectable from LRCLK.  Both
-; checks run half a BCK period after a BCK rising edge, so the pad
-; synchronizers have settled.  On a mismatch the program raises PIO irq
-; flag 7 (read and cleared by the I2S clock-slave poll, which restarts the
-; receiver and re-frames every output via the gated synchronized start)
-; and re-frames itself at the next LRCLK falling edge.  The resync path
-; from the bit-63 check first flushes the unsent remainder of the right
-; word, so OSR consumption stays in strict L,R word alternation and the
-; FIFO word order (thus channel identity) survives every slip.
-;
-; The BCK/LRCLK `wait gpio` instructions are assembled with PLACEHOLDER
-; GPIO indices (0 = BCK, 1 = LRCLK); the C layer copies the program to RAM
-; and rewrites the 5-bit GPIO index of every WAIT-source-GPIO instruction
-; before loading (i2s_bck_pin is runtime configurable).  The JMP pin
-; (EXECCTRL) must be configured to LRCLK.
-;
-; Alignment: the two `out null, 32` discards make an external-slave I2S slot
-; land on the same sample index as SPDIF slots started at the same LRCLK
-; edge.  The synchronized output start gates on an LRCLK falling edge, so a
-; SPDIF slot begins emitting sample 0 at that edge; this program's preamble
-; cannot begin output until the NEXT falling edge (one frame later), where
-; it emits sample 1 - having discarded sample 0 here.  Both slot types are
-; then emitting sample N in the same frame window, preserving the firmware's
-; inviolable inter-slot alignment.  (After a mid-stream slip that alignment
-; is already lost at the wire level; only the software restart re-establishes
-; it, which is why the slip flag is handled like a clock loss.)
-;
-; The external master must run BCK = 64 x Fs (fixed 24-in-32 wire format).
-;
-; Autopull enabled, threshold 32, shift left (MSB-first).  TX FIFO joined.
+; Wait GPIO indices are placeholders (0 = BCK, 1 = LRCLK) patched at load by
+; i2s_extclk_load_program(). The frame starts at cell R32 (the bit before the
+; left MSB), so the C side must prime the OSR to exactly one bit of frame 0
+; before starting (i2s_extclk_prime()); a plain restart lands one sample off.
 
 .program audio_i2s_dataout_extclk
 
 public entry_point:
-    out null, 32                ; discard frame 0 L (see alignment note)
-    out null, 32                ; discard frame 0 R
-reframe:
-    wait 1 gpio 1               ; [patched: LRCLK] ensure right-channel phase
-    wait 0 gpio 1               ; [patched: LRCLK] falling edge = left frame boundary
-    wait 0 gpio 0               ; [patched: BCK] skew guard: LRCLK and BCK fall
-                                ; together through independent pad synchronizers,
-                                ; so BCK can still read high for a cycle after
-                                ; LRCLK reads low; without this the next wait
-                                ; passes on the stale level and shifts the whole
-                                ; session one bit early (mirrors i2s_input.pio)
+    wait 1 gpio 1               ; [LRCLK] be in the right half
+    wait 0 gpio 1               ; [LRCLK] falling edge = start of cell R32
+top:
+    wait 0 gpio 0               ; [BCK] falling edge; also the LRCLK/BCK skew guard
+    out pins, 1                 ; last bit of the previous right word (R32)
+    wait 1 gpio 0               ; [BCK] mid R32
+    jmp pin slip                ; LRCLK must be low here
+    set y, 1
+    set x, 31                   ; 32 bits: cells L1..L32
+bit:
+    wait 0 gpio 0               ; [BCK]
+    out pins, 1
+    wait 1 gpio 0               ; [BCK]
+    jmp x-- bit
+    jmp y-- second
+    jmp pin top                 ; mid R31: LRCLK must be high
 .wrap_target
-    set x, 30                   ; 31 bit-pairs = bits 1..62 (cells L1..R30)
-bitpair:
-    wait 1 gpio 0               ; [patched: BCK] rising edge (receiver samples)
-    wait 0 gpio 0               ; [patched: BCK] falling edge: transition data
-    out pins, 1                 ; odd bit (autopull at bit 33 = right word)
-    wait 1 gpio 0               ; [patched: BCK]
-    wait 0 gpio 0               ; [patched: BCK]
-    out pins, 1                 ; even bit
-    jmp x-- bitpair
-    wait 1 gpio 0               ; [patched: BCK]
-    wait 0 gpio 0               ; [patched: BCK]
-    out pins, 1                 ; bit 63 (cell R31)
-    wait 1 gpio 0               ; [patched: BCK] mid-R31: synchronizers settled
-    jmp pin bit64               ; LRCLK high: correctly framed
-    jmp resync_flush            ; LRCLK low a cell early: slipped
-bit64:
-    wait 0 gpio 0               ; [patched: BCK] falling edge
-    out pins, 1                 ; bit 64 (cell R32)
-    wait 1 gpio 0               ; [patched: BCK] mid-R32
-    jmp pin resync              ; LRCLK still high a cell late: slipped
+slip:
+    irq 7                       ; flag the slip and park; software restarts the SM
 .wrap
-resync_flush:
-    out null, 32                ; flush the unsent right-word remainder so the
-                                ; next pull is the following LEFT word
-resync:
-    irq 7                       ; flag the slip to software (no wait)
-    jmp reframe                 ; re-frame on the next LRCLK falling edge
-
-; Total: 26 instructions.
+second:
+    set x, 30                   ; 31 bits: cells R1..R31
+    jmp bit
 
 % c-sdk {
 
@@ -118,8 +55,8 @@ resync:
 //   clock_pin_base - GPIO of the externally driven BCK; LRCLK is +1 (JMP pin)
 //
 // Divider is forced to 1.0 (wait-driven).  Caller owns input enables on the
-// BCK/LRCLK pads, clears PIO irq flag 7 before enabling, and starts
-// execution at entry_point.
+// BCK/LRCLK pads, clears PIO irq flag 7 before enabling, primes the OSR and
+// starts execution at entry_point.
 // ---------------------------------------------------------------------------
 static inline void audio_i2s_dataout_extclk_program_init(PIO pio, uint sm, uint offset,
                                                          uint data_pin, uint clock_pin_base) {

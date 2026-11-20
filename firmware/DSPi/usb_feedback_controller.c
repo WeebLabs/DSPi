@@ -94,7 +94,7 @@ static void long_window_update(usb_feedback_ctrl_t *ctrl, uint32_t words,
         long_window_seed(ctrl, words);
         return;
     }
-    // den = span * words per frame (4 or 2) must stay below 2^16 for the 32-bit
+    // den = span * words per frame (2 on both types) must stay below 2^16 for the 32-bit
     // remainder step. Rotation waits for a clean window, so a late one can push
     // the span past that; rotate early then, and drop only after a real gap.
     uint32_t span_max = 0xFFFFu >> (14 - rate_shift);

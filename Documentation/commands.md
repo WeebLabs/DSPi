@@ -448,7 +448,7 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 | 0x0A | `CS` | 1 | 26 | Control Surfaces |
 | 0x0B | `XPORT` | 1 | 5 | UART and I2C control transports |
 | 0x0C | `CLOCK` | 1 | 9 | I2S clock pins and modes, MCK |
-| 0xF0 | `DIAG` | 1 | 9 | Bench and diagnostic commands with no stability promise |
+| 0xF0 | `DIAG` | 1 | 15 | Bench and diagnostic commands with no stability promise |
 
 <!-- VC:END PAGES -->
 
@@ -1893,6 +1893,12 @@ Bench and diagnostic commands with no stability promise. Release firmware builds
 | 0x34 | `LOOP_PROF_RESET` | S0 | none | - | 0 |  | Zero every section, job and command worst time (build: `DSPI_LOOP_PROF` only) |
 | 0x40 | `EQ_PROF` | G | none | 48 | - |  | Per core: u64 cycles, u32 calls, u32 samples, u32 min call cycles, u32 its samples (build: `DSPI_EQ_PROF` only) |
 | 0x41 | `EQ_PROF_RESET_MIN` | S0 | none | - | 0 |  | Restart the per-call minimum on both cores (build: `DSPI_EQ_PROF` only) |
+| 0x50 | `WIRECAP_ARM` | S | none | - | 10 |  | Start a one-shot pin capture: u8 base, u8 count, u16 div int, u8 div frac, u8 0, u32 bytes (0 aborts) (build: `DSPI_WIRECAP` only) |
+| 0x51 | `WIRECAP_STATUS` | G | none | 32 | - |  | Capture state, RXSTALL flag, pins, clk_sys Hz, divider, PIO, bytes, buffer size, sequence (build: `DSPI_WIRECAP` only) |
+| 0x52 | `WIRECAP_READ` | G | index | var | - |  | Captured bytes, 256-byte chunk wValue (build: `DSPI_WIRECAP` only) |
+| 0x53 | `WIRECAP_CLKGEN` | G, S | none | 24 | 5 |  | I2S clock generator on GPIO 24/25: SET u8 enable, u32 rate; GET status (build: `DSPI_WIRECAP` only) |
+| 0x54 | `WIRECAP_CLKGEN_GLITCH` | S | none | - | 2 |  | Inject one clock glitch: u8 kind (1 runt, 2 missing BCK, 3 LRCLK early, 4 late), u8 cells (build: `DSPI_WIRECAP` only) |
+| 0x55 | `WIRECAP_RATE` | S | none | - | 4 |  | Request an output rate change through the host path, u32 Hz (USB input only) (build: `DSPI_WIRECAP` only) |
 
 <!-- VC:END DIAG -->
 
@@ -2431,5 +2437,11 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | USB_AUDIO_STATUS | [`SYS.USB_AUDIO_STATUS`](#6-sys-0x01) | `0x0141` |  |
 | USER_MUTE | [`ROUTE.USER_MUTE`](#10-route-0x05) | `0x0561` |  |
 | USER_VOLUME | [`ROUTE.USER_VOLUME`](#10-route-0x05) | `0x0560` |  |
+| WIRECAP_ARM | [`DIAG.WIRECAP_ARM`](#18-diag-0xf0) | `0xF050` | `DSPI_WIRECAP` |
+| WIRECAP_CLKGEN | [`DIAG.WIRECAP_CLKGEN`](#18-diag-0xf0) | `0xF053` | `DSPI_WIRECAP` |
+| WIRECAP_CLKGEN_GLITCH | [`DIAG.WIRECAP_CLKGEN_GLITCH`](#18-diag-0xf0) | `0xF054` | `DSPI_WIRECAP` |
+| WIRECAP_RATE | [`DIAG.WIRECAP_RATE`](#18-diag-0xf0) | `0xF055` | `DSPI_WIRECAP` |
+| WIRECAP_READ | [`DIAG.WIRECAP_READ`](#18-diag-0xf0) | `0xF052` | `DSPI_WIRECAP` |
+| WIRECAP_STATUS | [`DIAG.WIRECAP_STATUS`](#18-diag-0xf0) | `0xF051` | `DSPI_WIRECAP` |
 
 <!-- VC:END INDEX -->

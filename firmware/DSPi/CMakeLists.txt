@@ -168,6 +168,16 @@ if (DSPI_LOOP_PROF)
     target_compile_definitions(DSPi PRIVATE DSPI_LOOP_PROF=1)
 endif()
 
+# DSPI_WIRECAP (bench instrumentation): PIO pin sampler and I2S clock generator
+# for wire-level output tests, DIAG.WIRECAP_* (Documentation/Features/wirecap_test_rig.md).
+option(DSPI_WIRECAP "Build the wire-capture test rig (DIAG.WIRECAP_*)" OFF)
+if (DSPI_WIRECAP)
+    target_sources(DSPi PRIVATE wirecap.c wirecap.h)
+    target_compile_definitions(DSPi PRIVATE DSPI_WIRECAP=1)
+    # The rig keeps GPIO 24/25 muxed to its generator while slave mode runs (wirecap.c).
+    target_link_options(DSPi PRIVATE "LINKER:--wrap=gpio_set_function" "LINKER:--wrap=gpio_init")
+endif()
+
 # DSPI_EQ_PROF (bench instrumentation, RP2350): DWT cycle totals around every
 # dsp_cascade_block() call, read through DIAG.EQ_PROF (eq_prof.h). Release builds leave it OFF.
 option(DSPI_EQ_PROF "Build the EQ cascade cycle profiler (DIAG.EQ_PROF)" OFF)

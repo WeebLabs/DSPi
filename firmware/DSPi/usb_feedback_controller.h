@@ -62,7 +62,7 @@ static inline int32_t round_div_pow2_s32(int32_t x, uint32_t n) {
 #define FB_RATE_SANE_SHIFT         1
 
 // Long-window rate: dual anchors rotate every HALF frames, so the span is 8-16 s.
-// 2 * HALF * 4 words must stay below 65536 (the remainder division's limit).
+// 2 * HALF * 2 (words per frame) must stay below 65536 (the remainder division's limit).
 #define FB_LONG_HALF_FRAMES        8000
 #define FB_LONG_MIN_FRAMES         1000    // trust the long rate after 1 s
 #define FB_LONG_SANE_SHIFT         7       // long rate within ±nominal >> 7 (0.78%)
@@ -129,7 +129,7 @@ void fb_ctrl_stream_stop(usb_feedback_ctrl_t *ctrl);
 // number and divides by the true span, so a merged (missed) SOF cannot skew it.
 // frame_count: the SOF's 11-bit USB frame number.
 // current_total_words: sub-buffer-precise DMA word count from slot 0.
-// rate_shift: 12 for SPDIF, 13 for I2S.
+// rate_shift: log2(words per frame) + 12; 13 for both output types (2 words/frame).
 // consumer_fill_q16: slot 0 fill in Q16.16 buckets (frames * 65536 /
 // SLOT_FILL_FRAMES_PER_BUCKET); sample-granular, from the ring's snapshot pair.
 // fill_target_q16: the ring fill target in the same units.

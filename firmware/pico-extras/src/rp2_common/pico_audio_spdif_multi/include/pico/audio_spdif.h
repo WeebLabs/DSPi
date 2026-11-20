@@ -23,6 +23,14 @@ extern "C" {
 #endif
 
 
+// Fixed instruction-memory offset of the S/PDIF encoder in its PIO block.
+// Fixed placement keeps a block shared with other programs unfragmentable.
+#ifndef PICO_AUDIO_SPDIF_PIO_PROGRAM_OFFSET
+#define PICO_AUDIO_SPDIF_PIO_PROGRAM_OFFSET 0
+#endif
+// Encoder length in instructions, for layout checks by code sharing the block.
+#define PICO_AUDIO_SPDIF_PIO_PROGRAM_LENGTH 14u
+
 #ifndef PICO_AUDIO_SPDIF_PIO
 #ifdef PICO_AUDIO_PIO
 #define PICO_AUDIO_SPDIF_PIO PICO_AUDIO_PIO
@@ -53,7 +61,7 @@ extern "C" {
 // ahead of real audio so a stalled producer plays silence, never a loop of
 // stale ring content. Both values bound the selectable output latency.
 #define PICO_AUDIO_SPDIF_RING_FRAMES     512u
-#define PICO_AUDIO_SPDIF_RING_BYTES      (PICO_AUDIO_SPDIF_RING_FRAMES * 2u * 8u)
+#define PICO_AUDIO_SPDIF_RING_BYTES      (PICO_AUDIO_SPDIF_RING_FRAMES * 2u * 4u)  // 1 word per subframe
 #define PICO_AUDIO_SPDIF_ERASE_AHEAD     64u    // the idle pump extends it to a full ring
 
 typedef struct audio_spdif_instance {
@@ -68,9 +76,6 @@ typedef struct audio_spdif_instance {
     // Runtime state
     uint32_t freq;
     bool enabled;
-    // Ring word format of the block's loaded program: PIO biphase encoder
-    // (control + data words) or software NRZI transition words. Fixed at setup.
-    bool pio_bmc;
 
     // Ring state. Frame counters are monotonic since the last ring reset;
     // uint32 wrap is harmless (all consumers use differences).
@@ -218,16 +223,6 @@ void audio_spdif_ring_skip(audio_spdif_instance_t *inst, uint32_t frames);
 // reader, bounded by max_frames per call. Keeps a stalled producer from
 // ever looping stale ring content; cheap no-op while streaming.
 void audio_spdif_ring_silence_pump(audio_spdif_instance_t *inst, uint32_t max_frames);
-
-/** \brief Select a block's encoder: true = 16-instruction PIO biphase encoder,
- * false = 4-instruction NRZI program with software words. Applied at the next
- * program load (first setup after the block's last teardown); instances already
- * set up keep their format. Cannot share a block with the I2S extclk program. */
-void audio_spdif_select_encoder(uint pio_index, bool pio_bmc);
-
-/** \brief Encoder currently loaded on a block: 1 = PIO encoder, 0 = NRZI
- * program, -1 = no program loaded (no instance set up on that block). */
-int audio_spdif_loaded_encoder(uint pio_index);
 
 /** \brief Enable multiple S/PDIF instances with synchronized PIO start
  * \ingroup audio_spdif

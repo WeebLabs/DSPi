@@ -1,6 +1,6 @@
 # I2S Clock-Slave Input Mode Specification
 
-*Last updated: 2026-11-16 (host interface on the paged protocol of firmware 1.1.7). 2026-07-11 (clock-pin mode: UNIFIED vs SPLIT slave pair, role-indexed BCK pin, new clock-pin mode command, slot V29 / directory V14; wire claims two `WireI2SConfig` reserved bytes with no version bump)*
+*Last updated: 2026-11-20 (TX program parks on a slip; C-side start priming). Previously 2026-11-16 (host interface on the paged protocol of firmware 1.1.7). 2026-07-11 (clock-pin mode: UNIFIED vs SPLIT slave pair, role-indexed BCK pin, new clock-pin mode command, slot V29 / directory V14; wire claims two `WireI2SConfig` reserved bytes with no version bump)*
 
 This document specifies the I2S clock-slave input mode: behavior, wiring, the
 complete host-facing control surface (vendor commands, notifications, bulk
@@ -47,8 +47,9 @@ is RP2350-only).
 
 Inter-slot sample alignment is preserved: synchronized output starts are
 gated on an external LRCLK edge and all output slots (both types) start in a
-single `pio_enable_sm_mask_in_sync` write, with the edge-slaved I2S program
-discarding exactly one frame so I2S and SPDIF slots emit the same sample
+single `pio_enable_sm_mask_in_sync` write, with the edge-slaved I2S slots
+discarding exactly one frame (consumed by the C-side OSR priming before the
+start) so I2S and SPDIF slots emit the same sample
 index in the same frame window.
 
 ---
@@ -189,15 +190,15 @@ meters/audio show full-scale wrapped garbage).
 Both external-clock PIO programs (RX capture and edge-slaved I2S TX)
 therefore verify the LRCLK level at the two adjacent bit cells straddling
 every frame boundary, which catches every sub-frame misalignment within one
-frame. On a mismatch the program:
-
-1. re-frames itself at the next LRCLK falling edge (bounding wrong data to
-   ~2 frames, with L/R word order preserved so channels can never swap), and
-2. raises a PIO irq flag that `i2s_slave_poll()` treats exactly like a
-   clock loss: outputs mute, the receiver restarts, the device re-locks and
-   re-prefills, and every output re-frames through the gated synchronized
-   start (restoring inter-slot sample alignment, which a slip breaks at the
-   wire level).
+frame. On a mismatch the RX program re-frames itself at the next LRCLK
+falling edge (L/R word order preserved), while the TX program parks and
+holds its data pin until the restart below (the library stops the parked SMs
+when it reads the flag, so one slip counts once). Either way the program
+raises a PIO irq flag that `i2s_slave_poll()` treats exactly like a
+clock loss: outputs mute, the receiver restarts, the device re-locks and
+re-prefills, and every output re-frames through the gated synchronized
+start (restoring inter-slot sample alignment, which a slip breaks at the
+wire level).
 
 Each detected slip increments `slip_count` in the status packet (and
 `loss_count`, via the relock it forces). A steadily climbing `slip_count`

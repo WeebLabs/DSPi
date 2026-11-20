@@ -60,6 +60,7 @@
 #include "tusb.h"
 #include "pico/binary_info.h"
 #include "build_info.h"
+#include "wirecap.h"
 
 // Same stamp SYS.BUILD_INFO reports, embedded in the UF2's binary info
 // so `picotool info` can identify a build file or a BOOTSEL-mode device.
@@ -470,21 +471,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
-    // S/PDIF encoder selection (PIO0 instruction budget): the 16-slot PIO
-    // biphase encoder cannot share the block with the I2S external-clock
-    // program, so slave-clocked I2S slots force the software encoder. A flip
-    // rebuilds every S/PDIF slot, since the ring word format follows the program.
-    bool target_any_i2s = false;
-    for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-        if (target_types[i] == OUTPUT_TYPE_I2S) target_any_i2s = true;
-    }
-    const bool want_pio_spdif = !(want_extclk && target_any_i2s);
-    audio_spdif_select_encoder(PICO_AUDIO_SPDIF_PIO, want_pio_spdif);
-    const int loaded_spdif = audio_spdif_loaded_encoder(PICO_AUDIO_SPDIF_PIO);
-    const bool spdif_encoder_flip =
-        (loaded_spdif >= 0) && ((loaded_spdif != 0) != want_pio_spdif);
-
-    bool any_change = spdif_encoder_flip;
+    bool any_change = false;
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (target_types[i] != current_types[i]) {
             any_change = true;
@@ -634,20 +621,6 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
         }
     }
 
-    // Encoder flip: staying S/PDIF slots are torn down too and re-set-up in
-    // Pass 2 (the last teardown releases the block's program).  Retyped slots
-    // already pass through teardown/setup below.
-    bool spdif_rebuild[NUM_SPDIF_INSTANCES] = {false};
-    if (spdif_encoder_flip) {
-        for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
-            if (current_types[i] == OUTPUT_TYPE_I2S || target_types[i] == OUTPUT_TYPE_I2S) continue;
-            audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
-            if (!inst || !inst->ring) continue;
-            audio_spdif_teardown(inst);
-            spdif_rebuild[i] = true;
-        }
-    }
-
     // ---- Pass 1: Teardown outgoing types ----
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (target_types[i] == current_types[i]) continue;  // No type change
@@ -710,10 +683,10 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                     printf("Slot %d %s I2S master\n", i, want_master ? "promoted to" : "demoted to");
                 }
             }
-        } else if (had_i2s || spdif_rebuild[i]) {
+        } else if (had_i2s) {
             // I2S → SPDIF (the Pass 1 I2S teardown released DMA channel i and
-            // PIO SM i) or an encoder flip: fully re-set-up the S/PDIF instance
-            // on the same channel/SM (mirrors boot).
+            // PIO SM i): fully re-set-up the S/PDIF instance on the same
+            // channel/SM (mirrors boot).
             audio_spdif_instance_t *spdif_inst = spdif_instance_ptrs[i];
             audio_spdif_config_t spdif_cfg = {
                 .pin = output_pins[i],
@@ -726,7 +699,7 @@ static bool process_type_switches(uint8_t change_mask, const uint8_t new_types[]
                 .ring_base = slot_ring_store[i],
             };
             audio_spdif_setup(spdif_inst, output_rate_hz, &spdif_cfg);
-            if (had_i2s) memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
+            memset(i2s_instance_ptrs[i], 0, sizeof(audio_i2s_instance_t));
         } else {
             // SPDIF stays SPDIF: claim a moved pin (the old one was released above).
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
@@ -958,6 +931,8 @@ static void reset_usb_feedback_loop(void) {
 static uint64_t fade_last_poll_us = 0;
 static uint64_t fade_start_us = 0;
 static bool fade_drain_armed = false;
+static uint64_t fade_drain_deadline_us = 0;   // nonzero: time-based drain (no slot enabled)
+#define PDM_QUEUE_FRAMES 256u                 // Core 0 to Core 1 PDM push ring depth
 // Set when a settle has run to completion and cleared as soon as the envelope
 // is seen above zero again.  Lets a nested or back-to-back prepare (a handler
 // that runs process_type_switches() and then another bracket, say) skip a
@@ -1091,10 +1066,20 @@ static bool pipeline_fade_to_silence_poll(void) {
         if (!pipeline_mute_is_silent()) return false;
         // The envelope reached zero; delay lines still hold pre-fade audio.
         output_rings_silence_mark_arm(pipeline_max_active_delay_samples());
+        // No slot left to observe (all slip-stopped): PDM/ADAT may still play,
+        // so wait the time a slot would have taken to play the mark out.
+        fade_drain_deadline_us = 0;
+        if (!output_rings_any_enabled() && output_rings_any_slip_stopped()) {
+            uint32_t frames = output_ring_target_frames + output_ring_block_cap +
+                              pipeline_max_active_delay_samples() + PDM_QUEUE_FRAMES;
+            fade_drain_deadline_us = now + (uint64_t)frames * 1000000u / fs + 1;
+        }
         fade_drain_armed = true;
     }
 
-    if (!output_rings_silence_mark_reached()) return false;
+    if (fade_drain_deadline_us ? now < fade_drain_deadline_us
+                               : !output_rings_silence_mark_reached())
+        return false;
 
     pipeline_latch_mute_silence();
     pipeline_wire_silent = true;
@@ -1274,8 +1259,8 @@ static void teardown_output_slot(int slot_idx) {
 // across every reset: SPDIF slots begin emitting sample 0 within nanoseconds
 // of the gate edge (all priming is hoisted before the gate; only the
 // pio_enable_sm_mask_in_sync write follows it), and the external-clock I2S
-// program self-frames on the next falling edge having discarded exactly one
-// frame (see audio_i2s_dataout_extclk.pio), landing both types on the same
+// program self-frames on the next falling edge, frame 0 already consumed by
+// the prepare's OSR priming (i2s_extclk_prime), landing both types on the same
 // sample index.  Bounded wait (worst case one frame period, 22.7 us at
 // 44.1 kHz, plus margin); on timeout (external clocks absent) it just
 // returns; the slave lock machinery re-runs the synchronized start when
@@ -1309,7 +1294,7 @@ static void i2s_slave_gate_on_lrclk(void) {
 // In I2S clock-slave mode the write is additionally gated on an external
 // LRCLK edge after both types are primed (only when an extclk I2S slot
 // exists; up to ~35 us with IRQs off) so the gate-to-start latency cannot
-// smear the extclk program's one-frame discard across a frame boundary
+// smear the extclk slots' one-frame (primed) discard across a frame boundary
 // at 96 kHz.
 //
 // Caller must hold interrupts disabled across this call: the DMAs primed
@@ -3755,6 +3740,9 @@ int main(void) {
         // Bench diagnostics: once-per-second CLKDIAG console dump (internally
         // throttled).  No-op when DSPI_CLOCK_DIAG is 0.
         clock_diag_poll();
+#ifdef DSPI_WIRECAP
+        wirecap_poll();
+#endif
 
         // LED heartbeat - toggle every ~1000 iterations
         static uint32_t loop_counter = 0;

@@ -878,6 +878,9 @@ static uint32_t i2s_slave_snap_rate(float hz) {
 
 // Common lock-drop bookkeeping (clock loss or rate change while LOCKED)
 static void i2s_slave_drop_lock(void) {
+    // Outputs restart only via the prefill's synchronized start; stopping the
+    // extclk SMs here keeps a late TX flag for this same event from re-counting.
+    audio_i2s_extclk_stop();
     i2s_slave_state = I2S_SLAVE_RELOCKING;
     if (i2s_slave_loss_count < 255) i2s_slave_loss_count++;
     i2s_slave_detected_rate = 0;
@@ -888,7 +891,8 @@ static void i2s_slave_drop_lock(void) {
 }
 
 // Read and clear the framing-slip flags from both PIO blocks: the RX SMs
-// (checked slave program) and the external-clock I2S output SMs.
+// (checked slave program) and the external-clock I2S output SMs, which the
+// library stops first because they park re-raising the flag.
 DSP_TIME_CRITICAL
 static bool i2s_slave_slip_check(void) {
     bool slip = false;
@@ -897,6 +901,8 @@ static bool i2s_slave_slip_check(void) {
         slip = true;
     }
     if (audio_i2s_extclk_framing_slipped()) slip = true;
+    // An RX-only slip still stops the extclk SMs: their check trails RX's.
+    else if (slip) audio_i2s_extclk_stop();
     return slip;
 }
 
@@ -905,16 +911,10 @@ void i2s_slave_poll(void) {
     if (i2s_slave_state == I2S_SLAVE_INACTIVE || i2s_state != I2S_INPUT_RUNNING)
         return;
 
-    // Framing-slip watchdog.  The checked RX/TX programs verify LRCLK phase
-    // at every frame boundary; a BCK glitch or LRCLK phase jump from the
-    // external master (Amanero-style re-clocking around stream stop/start
-    // or rate switches) sets a PIO irq flag and the program re-frames
-    // itself.  A slip leaves the word RATE unchanged, so the rate watchdog
-    // below can never see one; and a slipped pair/slot is no longer
-    // sample-aligned with its peers, which only a full restart can fix.
-    // Treat the flag exactly like a clock loss: drop the lock and let the
-    // main loop's RELOCKING path restart the receiver and re-frame every
-    // output via the prefill's gated synchronized start.
+    // Framing-slip watchdog: a slip leaves the word rate unchanged, so only
+    // the PIO flags see it. Handled like a clock loss (slipped extclk output
+    // SMs are already stopped); see current_architecture.md "Framing-slip
+    // watchdog" for the restart path.
     if (i2s_slave_slip_check()) {
         if (i2s_slave_slip_count < 255) i2s_slave_slip_count++;
         if (i2s_slave_state != I2S_SLAVE_RELOCKING) {

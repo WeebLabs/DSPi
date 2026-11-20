@@ -8,6 +8,7 @@
 #include "loopback.h"
 #include "loop_prof.h"
 #include "eq_prof.h"
+#include "wirecap.h"
 
 #if DSPI_CLOCK_DIAG
 // Served on every transport. The assert below keeps it inside the UART and I2C reply buffer.
@@ -89,6 +90,50 @@ static VcResult diag_eq_prof_reset_min_set(VcCtx *c) {
     eq_prof[0].reset_min = true;
     eq_prof[1].reset_min = true;
     return VC_OK;
+}
+#endif
+
+#ifdef DSPI_WIRECAP
+static VcResult wirecap_vc(WirecapResult r) {
+    switch (r) {
+        case WIRECAP_OK:        return VC_OK;
+        case WIRECAP_ERR_STATE: return VC_ERR_STATE;
+        case WIRECAP_ERR_VALUE: return VC_ERR_VALUE;
+        default:                return VC_ERR_BUSY;
+    }
+}
+
+static VcResult diag_wirecap_arm_set(VcCtx *c) {
+    return wirecap_vc(wirecap_arm(vc_in_u8(c, 0), vc_in_u8(c, 1), vc_in_u16(c, 2),
+                                  vc_in_u8(c, 4), vc_in_u32(c, 6)));
+}
+
+static VcResult diag_wirecap_status_get(VcCtx *c) {
+    wirecap_status(c->out);
+    return VC_OK;
+}
+
+static VcResult diag_wirecap_read_get(VcCtx *c) {
+    c->out_len = wirecap_read((uint32_t)c->addr * 256u, c->out, 256);
+    return c->out_len ? VC_OK : VC_ERR_STATE;
+}
+_Static_assert(VC_REPLY_MAX >= 256, "DIAG.WIRECAP_READ chunks are 256 bytes");
+
+static VcResult diag_wirecap_clkgen_get(VcCtx *c) {
+    wirecap_clkgen_status(c->out);
+    return VC_OK;
+}
+
+static VcResult diag_wirecap_clkgen_set(VcCtx *c) {
+    return wirecap_vc(wirecap_clkgen_set(vc_in_u8(c, 0) != 0, vc_in_u32(c, 1)));
+}
+
+static VcResult diag_wirecap_glitch_set(VcCtx *c) {
+    return wirecap_vc(wirecap_clkgen_glitch(vc_in_u8(c, 0), vc_in_u8(c, 1)));
+}
+
+static VcResult diag_wirecap_rate_set(VcCtx *c) {
+    return wirecap_vc(wirecap_request_rate(vc_in_u32(c, 0)));
 }
 #endif
 

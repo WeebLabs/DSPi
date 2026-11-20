@@ -89,6 +89,10 @@ static void usb_audio_set_selected_rate(uint32_t rate) {
     rate_change_pending = true;
 }
 
+#ifdef DSPI_WIRECAP
+void wirecap_usb_set_selected_rate(uint32_t rate) { usb_audio_set_selected_rate(rate); }
+#endif
+
 // Output type switching — deferred to main loop (needs heap allocation).
 // Per-slot bitmask supports back-to-back requests without dropping any.
 volatile uint8_t output_type_change_mask = 0;                   // Bit N = slot N has pending change
@@ -1551,14 +1555,13 @@ static void __not_in_flash_func(uac1_driver_sof)(uint8_t rhport, uint32_t frame_
 
     // Ring path: total DMA words consumed is the unwrapped read pointer,
     // sample-exact at every SOF (no per-buffer quantization).
+    // Both output types carry 2 words per frame, so one rate_shift serves.
     uint32_t current_total;
-    uint32_t rate_shift;
+    const uint32_t rate_shift = 13;
     if (output_types[0] == OUTPUT_TYPE_I2S) {
         current_total = audio_i2s_ring_consumed_words(i2s_instance_ptrs[0]);
-        rate_shift = 13;
     } else {
         current_total = audio_spdif_ring_consumed_words(spdif_instance_ptrs[0]);
-        rate_shift = 12;
     }
 
     // Loop B input: slot 0 fill from the ring's coherent snapshot pair
@@ -1629,11 +1632,22 @@ static audio_i2s_instance_t i2s_instance_4 = {0};
 // Indexed arrays for both instance types (populated in usb_sound_card_init)
 audio_i2s_instance_t *i2s_instance_ptrs[NUM_SPDIF_INSTANCES];
 
-// One encoded output ring per slot, shared by its S/PDIF and I2S instances and
-// sized for S/PDIF (I2S uses the first half). Placed at the top of RAM by the
+// One encoded output ring per slot, shared by its S/PDIF and I2S instances
+// (both 2 words per frame, same size). Placed at the top of RAM by the
 // linker script (.slot_rings, SLOT_RINGS_BYTES); not zeroed at boot.
 uint8_t __attribute__((section(".slot_rings"), aligned(PICO_AUDIO_SPDIF_RING_BYTES)))
     slot_ring_store[NUM_SPDIF_INSTANCES][PICO_AUDIO_SPDIF_RING_BYTES];
+// Output-slot PIO block layout is fixed (S/PDIF below the I2S region) so it can
+// never fragment; see current_architecture.md, PIO0 bullet.
+_Static_assert(PICO_AUDIO_SPDIF_PIO_PROGRAM_OFFSET + PICO_AUDIO_SPDIF_PIO_PROGRAM_LENGTH <=
+               PICO_AUDIO_I2S_PIO_PROGRAM_BASE, "S/PDIF encoder overlaps the I2S region");
+_Static_assert(PICO_AUDIO_I2S_PIO_PROGRAM_BASE + PICO_AUDIO_I2S_PIO_MASTER_LENGTH <= 32u &&
+               PICO_AUDIO_I2S_PIO_PROGRAM_BASE + PICO_AUDIO_I2S_PIO_EXTCLK_LENGTH <= 32u,
+               "I2S region overflows the PIO block");
+#ifdef PICO_SPDIF_RX_PIO
+_Static_assert(PICO_SPDIF_RX_PIO != PICO_AUDIO_SPDIF_PIO,
+               "input capture must not load programs into the output-slot PIO block");
+#endif
 _Static_assert(PICO_AUDIO_I2S_RING_BYTES <= PICO_AUDIO_SPDIF_RING_BYTES,
                "slot ring store is sized for S/PDIF; the I2S ring must fit");
 _Static_assert(PICO_AUDIO_I2S_RING_FRAMES == PICO_AUDIO_SPDIF_RING_FRAMES,

@@ -38,6 +38,16 @@ extern "C" {
 /** Maximum number of I2S instances that can be registered */
 #define PICO_AUDIO_I2S_MAX_INSTANCES 4
 
+// Fixed instruction-memory base of the I2S region in its PIO block: clkout
+// then dataout (master clocking) or extclk (slave clocking), all from here.
+// Fixed placement keeps a block shared with other programs unfragmentable.
+#ifndef PICO_AUDIO_I2S_PIO_PROGRAM_BASE
+#define PICO_AUDIO_I2S_PIO_PROGRAM_BASE 14
+#endif
+// Region lengths per clocking mode, for layout checks by code sharing the block.
+#define PICO_AUDIO_I2S_PIO_MASTER_LENGTH 16u   // clkout + dataout
+#define PICO_AUDIO_I2S_PIO_EXTCLK_LENGTH 17u
+
 
 // ---------------------------------------------------------------------------
 // Instance structure
@@ -63,6 +73,7 @@ typedef struct audio_i2s_instance {
     // Runtime state
     uint32_t freq;
     bool enabled;
+    bool slip_stopped;          // disabled by audio_i2s_extclk_stop(), not a teardown
     uint8_t instance_index;     // Stable slot identity (== dma_channel)
 
     // Ring state; same model as the S/PDIF library (see audio_spdif.c
@@ -290,20 +301,24 @@ int8_t audio_i2s_get_clock_master_index(void);
 // ---------------------------------------------------------------------------
 
 // PIO irq flag raised by audio_i2s_dataout_extclk.pio when its per-frame
-// LRCLK verification fails (external BCK glitch or LRCLK phase jump).  The
-// program re-frames itself; software must treat the flag like a clock loss
-// (the slipped slot is no longer sample-aligned with internally clocked
-// slots until the next synchronized output start).
+// LRCLK check fails. The SM then parks; only the next synchronized output
+// start runs it again, so software must treat the flag like a clock loss.
 #define AUDIO_I2S_EXTCLK_SLIP_IRQ 7u
 
 /** \brief Read and clear the external-clock framing-slip flag
  * \ingroup pico_audio_i2s_multi
  *
  * True if any external-clock I2S output SM flagged a framing slip since the
- * last call.  Also cleared by audio_i2s_enable_sync_prepare() for extclk
- * instances (a restart IS the slip handling).
+ * last call. Stops every extclk SM on the flagged block before clearing, so
+ * a parked SM reads as one slip. Also cleared by audio_i2s_enable_sync_prepare().
  */
 bool audio_i2s_extclk_framing_slipped(void);
+
+/** \brief Disable every external-clock slot, then clear the slip flag
+ * \ingroup pico_audio_i2s_multi
+ * Only audio_i2s_enable_sync_prepare() restarts them; see current_architecture.md
+ * "Framing-slip watchdog". */
+void audio_i2s_extclk_stop(void);
 
 // ---------------------------------------------------------------------------
 // MCK (Master Clock) generator API

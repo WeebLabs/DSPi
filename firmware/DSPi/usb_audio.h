@@ -115,6 +115,10 @@ extern volatile EqParamPacket pending_packet;
 extern volatile uint16_t pending_eq_qp_x512;
 extern volatile bool rate_change_pending;
 extern volatile uint32_t pending_rate;
+#ifdef DSPI_WIRECAP
+// Bench rig only: the host's rate request path, without a USB audio stream.
+void wirecap_usb_set_selected_rate(uint32_t rate);
+#endif
 extern volatile bool bulk_params_pending;
 extern volatile bool output_type_switch_in_progress;
 extern uint8_t bulk_param_buf[];
