@@ -210,7 +210,7 @@ static inline void lg_decode_volume(const uint8_t cs[24], const LgLayout *L,
 /* Apply LG-decoded state to the audio path.  Called only while
  * s_present is true.  Drives BOTH the user-facing volume
  * (audio_state.volume + user_volume notify) AND the audio path
- * (vol_mul + loudness coeffs) through update_user_volume() — a single
+ * (vol_mul now, loudness coeffs a few passes later) through update_user_volume(), a single
  * funnel for every owner of the user-perceived volume.  Mute drives
  * user_mute (the vendor mute, gates audio without touching volume).
  *

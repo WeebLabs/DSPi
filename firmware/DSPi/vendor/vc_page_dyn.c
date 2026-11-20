@@ -159,16 +159,10 @@ static VcResult dyn_loud_enable_get(VcCtx *c) {
     return VC_OK;
 }
 
-// Coefficients follow effective_vol_index, whichever owner drives vol_mul (USB, LG Sound Sync).
+// The main loop computes for effective_vol_index on enable and publishes NULL on disable.
 static VcResult dyn_loud_enable_set(VcCtx *c) {
     loudness_enabled = (vc_in_u8(c, 0) != 0);
-    if (loudness_enabled && loudness_active_table) {
-        uint8_t idx = effective_vol_index;
-        if (idx > CENTER_VOLUME_INDEX) idx = CENTER_VOLUME_INDEX;
-        current_loudness_coeffs = loudness_active_table[idx];
-    } else {
-        current_loudness_coeffs = NULL;
-    }
+    loudness_recompute_pending = true;
     uint8_t v = loudness_enabled ? 1 : 0;
     notify_param_write(offsetof(WireBulkParams, global.loudness_enabled), 1, &v);
     return VC_OK;

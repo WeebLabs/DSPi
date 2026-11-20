@@ -242,13 +242,7 @@ volatile float loudness_intensity_pct = 100.0f;
 volatile bool loudness_recompute_pending = false;
 volatile uint16_t loudness_output_mask = LOUDNESS_DEFAULT_OUTPUT_MASK;
 
-const LoudnessCoeffs *volatile current_loudness_coeffs = NULL;
-
-// See header for the rationale.  Default 0 (silent) matches vol_mul's
-// BSS-zero state at boot before audio_set_volume() runs; first
-// audio_set_volume() / apply_vol_index_to_audio() updates this in
-// lock-step with vol_mul, and from then on it is the single source of
-// truth for "what user-perceived volume is currently active".
+// See header.
 volatile uint8_t effective_vol_index = 0;
 
 // Crossfeed state
@@ -495,37 +489,19 @@ static uint16_t db_to_vol[CENTER_VOLUME_INDEX + 1] = {
 #define MAX_VOLUME           ENCODE_DB(0)
 #define VOLUME_RESOLUTION    ENCODE_DB(1)
 
-// Apply a vol_index to the live audio path (vol_mul + loudness coeffs).
-// See usb_audio.h for the contract.  Extracted from audio_set_volume() so
-// alternative volume owners (LG Sound Sync, future controllers) can drive
-// the same internal state — keeping loudness compensation aligned with
-// whatever ultimately sets vol_mul.
+// Apply a vol_index to the live audio path (vol_mul + loudness recompute).
+// See usb_audio.h for the contract.
 void apply_vol_index_to_audio(uint8_t vol_index) {
-    // Defensive clamp: db_to_vol[] and loudness_active_table[] are sized
-    // exactly CENTER_VOLUME_INDEX+1.  A bad vol_index from a corrupt mapping
-    // would otherwise read out-of-bounds; the cost of one branch here is
-    // negligible vs. the consequences.
+    // db_to_vol[] has exactly CENTER_VOLUME_INDEX+1 entries.
     if (vol_index > CENTER_VOLUME_INDEX) vol_index = CENTER_VOLUME_INDEX;
 
     audio_state.vol_mul = db_to_vol[vol_index];
 
-    // Track the active vol_index so the loudness re-enable / table-recompute
-    // paths can re-key against the *current* value rather than recomputing
-    // it from audio_state.volume — which is wrong when an alternative
-    // volume owner (e.g. LG Sound Sync on SPDIF input) is driving vol_mul.
-    // Written before the coeff swap so a future Core 1 reader of
-    // effective_vol_index never sees an index that's "ahead" of the
-    // coefficients it is paired with.
     effective_vol_index = vol_index;
 
-    // Loudness compensation is keyed off the *raw* user-perceived volume.
-    // Anything that changes vol_mul must also re-point the coefficient
-    // table or the equal-loudness contour will compensate against a stale
-    // reference level.  Pointer swap is atomic on both Cortex-M0+ and M33;
-    // a worst-case stale read by the audio pipeline is one packet (~1 ms).
-    if (loudness_enabled && loudness_active_table) {
-        current_loudness_coeffs = loudness_active_table[vol_index];
-    }
+    // Anything that changes vol_mul must recompute loudness, or the contour
+    // compensates against a stale level; the main loop does it next pass.
+    if (loudness_enabled) loudness_recompute_pending = true;
 }
 
 bool audio_set_volume(int16_t volume) {

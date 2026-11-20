@@ -77,7 +77,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `pdm_generator.h` | PDM API, ring buffer communication |
 | `crossfeed.c` | BS2B crossfeed filter (lowpass + allpass for ILD/ITD), per-output-pair dispatch + shared double-buffered coeffs |
 | `crossfeed.h` | Crossfeed API, presets, `CrossfeedConfig`/`CrossfeedCoeffs`/`CrossfeedPairState` structs |
-| `loudness.c` | ISO 226:2003 loudness curve computation, double-buffered tables |
+| `loudness.c` | ISO 226:2003 loudness curve computation, current volume step only, live pair + spare (2026-11-20) |
 | `loudness.h` | Loudness API, coefficient structs |
 | `leveller.c` | Volume leveller (feedforward RMS compressor) |
 | `leveller.h` | Volume leveller API, state/config structs |
@@ -197,7 +197,7 @@ The bulk parameter header carries `fw_version_major` / `fw_version_minor` separa
 ---
 
 ## Initialization Flow
-*Last updated: 2026-07-22*
+*Last updated: 2026-11-20 (step 6 and main loop: loudness computed on demand). Previously 2026-07-22*
 
 Defined in `main.c`, function `core0_init()`:
 
@@ -210,7 +210,7 @@ Defined in `main.c`, function `core0_init()`:
 4. **USB + SPDIF init** — Must happen BEFORE PDM (SPDIF requires DMA channel 0)
 5. **Preset boot load** — `preset_boot_load()` always selects a preset. Reads preset directory, loads appropriate slot based on startup policy (specified default or last active). If the target slot is empty, applies factory defaults while keeping the slot selected. On first boot after upgrade, migrates legacy single-sector data into preset slot 0. A preset is always active — there is no "no preset" state.
    *Last updated: 2026-03-07*
-6. **Loudness table computation** — Pre-compute ISO 226 curves for all 61 volume steps
+6. **Loudness coefficients** (2026-11-20). `loudness_update_now()` computes and publishes the current volume step's two shelves if loudness is enabled (NULL otherwise), before audio starts
 7. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
 8. **Core 1 launch** — `multicore_launch_core1(pdm_core1_entry)`
 9. **Soft VCXO init**: `soft_vcxo_init()` claims its DMA channels / DMA timer / PWM pacer and (RP2350) grants the DMA master PLL_SYS access; inert unless `clock_get_hz(clk_sys) == 307.2 MHz`. See "Soft VCXO".
@@ -220,7 +220,7 @@ Defined in `main.c`, function `core0_init()`:
 - Watchdog refresh (8s timeout)
 - EQ parameter updates (coefficient recomputation)
 - Sample rate change handling (PLL reclocking + filter recalculation)
-- Loudness table recomputation (background, double-buffered)
+- Loudness coefficients for the current volume step (background job, live pair + spare; 2026-11-20)
 - Crossfeed coefficient updates
 - LED heartbeat toggle
 
@@ -373,14 +373,14 @@ See `Documentation/Features/notification_protocol_v2_spec.md` for the full proto
 **v1 back-compat:** `update_master_volume` still pushes an 8-byte `MASTER_VOLUME` (0x01) event into the ring. Existing v1 host apps that only recognise byte 0 = 0x01 continue to work; v2 hosts receive the parallel PARAM_CHANGED event and dispatch by offset.
 
 ### Volume & Mute
-*Last updated: 2026-11-16 (vendor-channel commands named by paged command). Previously 2026-10-04 (audio_set_volume() returns true when applied, restoring the UAC1 volume notify)*
+*Last updated: 2026-11-20 (loudness coefficients follow volume within a few main-loop passes). Previously 2026-11-16 (vendor-channel commands named by paged command). Previously 2026-10-04 (audio_set_volume() returns true when applied, restoring the UAC1 volume notify)*
 
 **Volume range:** -60 dB to 0 dB (1 dB resolution, 61 steps). Bottom step is fully silent. USB Audio Class 8.8 fixed-point dB encoding. Q15 lookup table (`db_to_vol[61]`) maps dB index to linear multiplier; index 0 = 0x0000 (silent), index 60 = 0x7FFF (unity).
 
-**User volume — multiple owners, one source of truth:** `audio_state.volume` (and `audio_state.mute`) hold the user-perceived volume/mute. Three controllers can drive these fields, all funneling through the same `apply_vol_index_to_audio()` helper so `vol_mul` and the loudness coefficient pointer always move in lock-step:
+**User volume: multiple owners, one source of truth.** `audio_state.volume` (and `audio_state.mute`) hold the user-perceived volume/mute. Three controllers can drive these fields, all funneling through the same `apply_vol_index_to_audio()` helper. It sets `vol_mul` and `effective_vol_index` together and marks loudness for recompute, so the loudness coefficients follow within a few main-loop passes (before 2026-11-20 they moved in lock-step with `vol_mul` by re-pointing into a precomputed table).
 
 1. **UAC1 host slider/mute** (`audio_set_volume()` / UAC1 Feature Unit MUTE). This is the primary controller while USB is the active input source. When `active_input_source != INPUT_SOURCE_USB`, `audio_set_volume()` does not touch `audio_state.volume` at all. It parks the value in a private `uac1_host_volume` with a pending flag and returns false. UAC1 GET_CUR returns the parked value while it is pending, so the host's round-trip still matches what it wrote. An applied UAC1 SET_CUR VOLUME emits a `PARAM_CHANGED` on `user_volume.user_volume_db` with source `PARAM_SRC_UAC1` (distinct from `PARAM_SRC_HOST_SET`, which tags a `ROUTE.USER_VOLUME` SET). A parked write emits nothing. The data-stage handler gates the notify on `audio_set_volume()` returning true, so the applied path must end in an explicit `return true`. Without it the return value is undefined in C, and GCC at -O2 deleted the notify call entirely (the build has no `-Wreturn-type` to catch it). UAC1 Feature Unit MUTE does NOT emit (no parallel WireBulkParams field; see "Mute" below).
-2. **LG Sound Sync** (`lg_sound_sync.c`) — owns `vol_mul` and re-keys the loudness pointer while SPDIF input is active and an LG TV is producing optical TC values.
+2. **LG Sound Sync** (`lg_sound_sync.c`) owns `vol_mul` (and so the loudness volume step) while SPDIF input is active and an LG TV is producing optical TC values.
 3. **Vendor channel** (`ROUTE.USER_VOLUME` / `ROUTE.USER_MUTE`). `update_user_volume()` always applies, regardless of input source, so an external control surface or app can drive user volume during non-USB playback. Caller-side conventions (e.g. "Console only writes during non-USB input") are not enforced by the firmware. While LG Sound Sync is locked, its next ~20 ms poll will overwrite the vendor write. That is intentional ownership during LG-driven playback.
 
 **Mute (two flags, different gating):**
@@ -397,7 +397,7 @@ The pipeline ORs them: `muted = (audio_state.mute && host_active) || user_mute`.
 
 **Per-sample output volume ramping (click-free transitions):** The composite output gain — host volume × `preset_mute_gain` × master volume — is linearly interpolated within each input packet from the previous packet's ending value (`vol_mul_master_prev`, file-scope state in `audio_pipeline.c`) to the new target. Both Core 0 and Core 1 receive the same `vol_mul_start` / `vol_mul_step` pair via `Core1EqWork` and apply identical per-sample ramps to their respective outputs, preserving inter-slot phase alignment (CLAUDE.md hard rule). When `vol_mul_step == 0` (steady state, no host adjustment in flight) the gain loops fall through to the original constant-gain branches (memset for zero, scalar multiply for non-unity, no-op for unity) — no per-sample overhead. RP2350 carries the ramp in float; RP2040 keeps it as Q15 int32 to avoid float→int conversion in the inner loop. The mechanism also smooths preset-mute transitions and master-volume changes, since they all funnel through the same composite gain. Zero-length packets do not advance `vol_mul_master_prev`, so a stray empty packet between two real packets cannot eat a pending volume delta.
 
-**Scope of click-free guarantee:** This ramp covers the output gain stage only. With loudness compensation enabled, `audio_set_volume()` swaps `current_loudness_coeffs` to a new table entry on every host volume step, and the SVF/biquad filter state continues from the previous coefficients — producing a small frequency-response transient at each step. With loudness disabled (or when the user does not change volume), the path is fully click-free; with loudness enabled, the broadband gain click is gone but a faint per-step zipper artifact can remain on signal-rich content.
+**Scope of click-free guarantee:** This ramp covers the output gain stage only. With loudness compensation enabled, every host volume step publishes a newly computed `current_loudness_coeffs` pair a few main-loop passes later, and the SVF/biquad filter state continues from the previous coefficients, producing a small frequency-response transient at each step. With loudness disabled (or when the user does not change volume), the path is fully click-free; with loudness enabled, the broadband gain click is gone but a faint per-step zipper artifact can remain on signal-rich content.
 
 ### Asynchronous Feedback Endpoint
 *Last updated: 2026-10-16 (clean-window gate limits; missed-SOF paragraph scoped to the IIR bridge). Previously 2026-10-15 (long-window rate as the primary Loop A term; dual-slope fill servo; diagnostics; earlier the same day frame-number decimation and merged-SOF normalization)*
@@ -1161,7 +1161,7 @@ The worst input gap is the longest single segment rather than a sum of them. The
 
 With two points, and before the revert became a background job, a Control Surfaces revert (then the longest single deferred task) measured about 290 µs of gap (it was 300 to 400 µs of pass). Roughly half of a revert is first-run flash cache misses (a cold revert takes 170 to 190 µs, an immediate second one about 95 µs), since that code is XIP-resident and rarely run. The revert and the stored-config load also no longer rebuild the button gesture groups once per slot (`cs_apply_binding_slot()` plus one `cs_bindings_changed()`; see Control Surfaces "Deferred SET, Apply/Save/Revert").
 
-**Step budget and background jobs (2026-10-24).** `Documentation/Features/main_loop_bg_jobs_plan.md`, Phases 1 and 2. Long main-loop work runs as a job (`bg_job.h`): a step function that works until a deadline (always at least one unit, so it advances) and reports when the job is finished. `bg_run_one()` runs one step of the next active job, round-robin, after the housekeeping delivery point (the second of the four in each pass, see "Delivery points"), with the deadline `now + bg_step_budget_us()`. The budget is half of what one delivery gap can absorb after a quiet pass (`BG_PASS_FLOOR_US`, 120 us, measured on RP2350) and an interrupt landing (`BG_IRQ_FLOOR_US`, 60 us), clamped to 50 to 300 us:
+**Step budget and background jobs (2026-10-24; loudness job reworked 2026-11-20).** `Documentation/Features/main_loop_bg_jobs_plan.md`, Phases 1 and 2. Long main-loop work runs as a job (`bg_job.h`): a step function that works until a deadline (always at least one unit, so it advances) and reports when the job is finished. `bg_run_one()` runs one step of the next active job, round-robin, after the housekeeping delivery point (the second of the four in each pass, see "Delivery points"), with the deadline `now + bg_step_budget_us()`. The budget is half of what one delivery gap can absorb after a quiet pass (`BG_PASS_FLOOR_US`, 120 us, measured on RP2350) and an interrupt landing (`BG_IRQ_FLOOR_US`, 60 us), clamped to 50 to 300 us:
 
 | Option (48 kHz) | Target minus batch | Step budget |
 |---|---|---|
@@ -1169,12 +1169,12 @@ With two points, and before the revert became a background job, a Control Surfac
 | 1 ms | 32 frames, 667 us | 243 us |
 | 2 ms and above | 48 frames or more, 1000 us or more | 300 us (cap) |
 
-Because steps spend to a deadline rather than doing a fixed amount, the same code adapts to RP2040, RP2350 and the system clock. A step checks before each unit whether it still fits (`bg_out_of_time(deadline, estimate)`), so it ends on time rather than one unit late; an interrupt landing in a unit is what the 60 us margin covers. The estimate is the last time the same kind of unit took: the analyser keeps one per FFT stage and one for the finish, because chunk costs differ by stage (8 to 34 us on RP2350 at order 10), and the loudness rebuild uses its last volume step, since those cost the same. A kind of unit not yet measured carries the estimate `BG_UNIT_UNMEASURED` and so always starts a step of its own: its first run is often cold XIP code, and before this rule the first Control Surfaces revert after boot overran its budget by a few microseconds in every soak. Units have to stay small; a single large indivisible unit defeats the deadline. The first Phase 2 run showed this: the FFT permutation was one 140 to 150 us unit, and steps that reached it late ran to 440 us (15,000 to 30,000 overruns per soak) until it became resumable.
+Because steps spend to a deadline rather than doing a fixed amount, the same code adapts to RP2040, RP2350 and the system clock. A step checks before each unit whether it still fits (`bg_out_of_time(deadline, estimate)`), so it ends on time rather than one unit late; an interrupt landing in a unit is what the 60 us margin covers. The estimate is the last time the same kind of unit took: the analyser keeps one per FFT stage and one for the finish, because chunk costs differ by stage (8 to 34 us on RP2350 at order 10), and the loudness update is a single unit of unmeasured cost, so it always takes a step of its own (2026-11-20). A kind of unit not yet measured carries the estimate `BG_UNIT_UNMEASURED` and so always starts a step of its own: its first run is often cold XIP code, and before this rule the first Control Surfaces revert after boot overran its budget by a few microseconds in every soak. Units have to stay small; a single large indivisible unit defeats the deadline. The first Phase 2 run showed this: the FFT permutation was one 140 to 150 us unit, and steps that reached it late ran to 440 us (15,000 to 30,000 overruns per soak) until it became resumable.
 
 Jobs today:
 - **Analyser transform** (`transform_job`, `rta.c`). `rta_packet_end()` starts it when a frame fills; it runs the FFT in 16-unit chunks (`RtaFftCursor`: prescale samples, butterflies within a stage, permutation cycle starts with the placed-slot bitmap kept in the cursor, split bin pairs), the finish in 16-bin chunks, and finishes when the frame is published. On RP2350 at order 10 a chunk costs 8 to 34 us. The publish (about 60 us, indivisible) only ever starts a step. `stop_engine()` cancels it.
 - **Control Surfaces revert** (`control_surfaces.c`). `control_surfaces_revert_begin()` starts it; it runs the reload one slot or table at a time, and the module refuses or defers every write and answers reads with the reverted state while it runs (Control Surfaces "Deferred SET, Apply/Save/Revert").
-- **Loudness rebuild** (`loudness.c`). `loudness_recompute_begin()` starts or restarts it; it builds volume steps into the inactive table until the deadline, swaps when complete, and `loudness_recompute_take_done()` tells the main loop to re-key. Boot keeps the blocking `loudness_recompute_table()`, which runs before any job.
+- **Loudness update** (`loudness.c`, `BG_JOB_LOUDNESS`, profiled as `loudness_step`; 2026-11-20). `loudness_update_begin()` records the state to compute for and starts the job; a later call before it runs just replaces the state, so a slider drag computes only the last index. The step computes one volume step's two shelves into the spare pair and publishes it, so it is one indivisible unit (`BG_UNIT_UNMEASURED` treatment: its own step). Cost is unmeasured on hardware; RP2040 soft-float is estimated near 100 us, inside every budget. Boot uses the blocking `loudness_update_now()`, which runs before any job.
 
 `bg_step_account(job, us)` records every step. It increments `bg_over_budget_count` (offset 16 of `SYS.PIPELINE_STATS`, all builds) when a step ran longer than its budget plus `BG_OVERRUN_MARGIN_US` (110 us, two interrupt landings), and on `DSPI_LOOP_PROF` builds keeps the job's worst step (`DIAG.LOOP_PROF_JOB`, addressed by `BgJobId`). The margin is wider than the one landing (`BG_IRQ_FLOOR_US`, 60 us) the budget sets aside, because under real use a step absorbs two landings about once in 10 s: with a 60 us margin the 0.67 ms soak counted 97 overruns of up to 79 us, all in seconds whose delivery gap stayed under 222 us against a 333 us limit. The worst input delivery gap (`SYS.PIPELINE_STATS` offset 12) stays the ground truth for audio; the counter says which step to blame. `soak.py` fails a run that moves it.
 
@@ -1908,7 +1908,7 @@ Each command is one GET and SET pair, and the GET reply is a valid SET payload. 
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-11-16 (output mask set with `DYN.LOUDNESS_MASK`). Previously 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
+*Last updated: 2026-11-20 (table replaced by on-demand compute of the current volume step into a live pair + spare; see "Coefficient Computation"). Previously 2026-11-16 (output mask set with `DYN.LOUDNESS_MASK`). Previously 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
 
 ### Purpose
 
@@ -1930,7 +1930,7 @@ Loudness now runs **per output channel**, inside the per-output chain (PASS 5-7)
 
 **Output mask.** A global `volatile uint16_t loudness_output_mask` (default `0xFFFF` = all outputs; `LOUDNESS_DEFAULT_OUTPUT_MASK`) selects which output channels are compensated; bit k = output k. Only masked outputs cost CPU, and behavior is identical in stereo and multichannel input modes. Intended uses: compensate headphone outputs 0-1 but not speaker outputs 2-3, or all outputs for a 7.1 night mode. Outputs derived through crossovers or bass management should share the same mask setting to keep summed responses coherent; this is a user configuration choice.
 
-**Per-output state.** `LoudnessOutputState loudness_output_state[NUM_OUTPUT_CHANNELS]` lives in `loudness.c` (RP2350: 2 SVF states = 16 B/output, 144 B total; RP2040: 2 DF2 states = 16 B/output, 80 B total). The coefficient table generation (ISO 226 math, double-buffered tables, recompute triggers) is UNCHANGED; only the filter state moved out of the shelves and into this per-output array.
+**Per-output state.** `LoudnessOutputState loudness_output_state[NUM_OUTPUT_CHANNELS]` lives in `loudness.c` (RP2350: 2 SVF states = 16 B/output, 144 B total; RP2040: 2 DF2 states = 16 B/output, 80 B total). The coefficient generation (ISO 226 math, recompute triggers) was UNCHANGED by that work; only the filter state moved out of the shelves and into this per-output array.
 
 **Block helper.** `loudness_process_output_block()` is a `static inline` in `loudness.h`, shared by Core 0 (`audio_pipeline.c`) and the Core 1 EQ worker (`pdm_generator.c`). It is filter-major (each shelf processes the whole block before the next, equivalent to the per-sample cascade for these LTI filters and cheaper); a bypassed shelf (0 dB at this volume step) clears its state and is skipped.
 
@@ -1947,15 +1947,28 @@ Loudness now runs **per output channel**, inside the per-output chain (PASS 5-7)
 - **Reference SPL:** 40-100 dB (default 87 dB)
 - **Intensity:** 0-200% (default 100%)
 
-### Table Architecture
+### Coefficient Computation
+*Last updated: 2026-11-20*
 
-Double-buffered for glitch-free updates:
+Only the current volume step is computed. Until 2026-11-20 a 61-step table was precomputed (double-buffered, 5,856 B RP2040 / 6,832 B RP2350) and volume changes re-pointed into it. Storage is now one live pair plus one spare:
 ```c
-LoudnessCoeffs loudness_tables[2][61][2];  // [buffer][volume_step][biquad]
+static LoudnessCoeffs loudness_coeff_bufs[2][LOUDNESS_BIQUAD_COUNT];  // 96 B / 112 B
+const LoudnessCoeffs *volatile current_loudness_coeffs;  // live pair, or NULL when off
 ```
 
-- 61 volume steps: -60 dB to 0 dB (1 dB increments), index 0 = silent
-- Background computation writes inactive buffer, atomic pointer swap activates
+- Volume index: -60 dB to 0 dB (1 dB increments), index 0 = silent, the same `effective_vol_index` that keys `vol_mul`.
+- `compute_vol_step()` and the ISO 226 / shelf math are unchanged, so a pair is bit-identical to the table entry it replaces (checked by `tools/loudness_test/run.sh` against the old table code for all 61 indices, ref SPL 40/60/87/100, intensity 0/50/100/200, rates 44.1/48/96 kHz, both platforms).
+- **Triggers.** Anything that changes an input sets `loudness_recompute_pending`: a volume change through `apply_vol_index_to_audio()` (only while enabled), enable/disable, ref SPL, intensity, sample rate, preset load, bulk SET, factory reset. The main loop clears it and calls `loudness_update_begin(enabled, effective_vol_index, ref, intensity, rate)`. Disabled publishes NULL at once and cancels the job; enabled records the state and starts `BG_JOB_LOUDNESS`, whose single step computes into the pair not currently published and publishes it with one pointer write. Bursts collapse because the step reads only the latest recorded state.
+- **Contract change.** `vol_mul` changes immediately; the coefficients follow within a few main-loop passes. The pending flag is handled late in pass N and the job steps in pass N+1 unless other background jobs are active, since `bg_run_one()` is round-robin (at most one turn per active job). While a compute is pending the pipeline keeps the previous pair, the same one-pass lag the old table rebuild had for ref SPL and intensity changes.
+
+**Why two buffers are enough.** A second compute writes the pair published two generations ago, which is safe because no reader can hold it then:
+1. Every caller of `process_input_block()` (USB ring drain, S/PDIF / I2S / ADAT polls, I2S prefill, siggen pump) runs in the Core 0 main loop. None runs from an IRQ or USB callback.
+2. `process_input_block()` reads `current_loudness_coeffs` once per packet and hands that snapshot to Core 1 in `Core1EqWork.loud_coeffs`. Core 0 then spins until Core 1 sets `work_done`, which Core 1 does only after its loudness pass, so no reader of the snapshot outlives the call.
+3. The compute runs in `bg_run_one()`, also in the Core 0 main loop, so it can never overlap a packet. When it runs, nothing holds a coefficient pointer, and the only pair any later packet can read is the one it publishes.
+
+Even if a packet did hold the live pair, the compute writes the other one. That is the same "compute into the inactive buffer and publish" pattern crossfeed (`crossfeed_apply_config()`) and psybass use, and they rely on the same main-loop argument. Any future change that calls `process_input_block()` from another context, or lets Core 0 return before Core 1 finishes a packet, breaks this argument and needs a third buffer.
+
+**Alignment.** Only coefficient values change, never their timing relative to samples. The shelves are IIR with no delay, so slot alignment is unaffected.
 
 ### ISO 226 Constants Correction (2026-05-05)
 
@@ -2525,7 +2538,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-11-20 (Hardware table: slot rings 4 KB each). Previously 2026-11-19 (Hardware table: `.data` rows after the EQ kernel rewrite). Previously 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-11-20 (Hardware table: free-heap row after the loudness table removal; slot rings 4 KB each). Previously 2026-11-19 (Hardware table: `.data` rows after the EQ kernel rewrite). Previously 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2543,7 +2556,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
 | RAM code+rodata+data (.data) | 70,376 B of the 72,704 B budget (2026-11-19) | 96,880 B of the 100,352 B budget (2026-11-19) |
-| Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 58,384 B (2026-11-16) | 118,204 B (2026-11-16) |
+| Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 70,948 B (2026-11-20) | 144,604 B (2026-11-20) |
 | Vendor commands (release build) | 181 in 12 pages. The 23 RP2350-only commands (ADAT RX and TX, upmixer) are not built and answer `VC_ERR_UNKNOWN` | 204 in 12 pages. Both platforms: the 15 `DIAG` commands exist only in bench builds that set their flag (6 of them `DSPI_WIRECAP`, whose capture buffer is 96 KB on RP2350 and 16 KB on RP2040) |
 | Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
 | Output slot rings | 2 × 4 KB `.slot_rings` at the top of RAM (512 frames, 2026-11-20) | 4 × 4 KB `.slot_rings` at the top of RAM (512 frames, 2026-11-20) |
@@ -3033,6 +3046,11 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 > layout is again unchanged. Current sizes after the change are 263,356 text
 > and 150,016 bss on RP2040, 310,572 text and 355,188 bss on RP2350.
 
+> **Loudness on demand (2026-11-20).** The 61-step loudness table is gone;
+> only the current volume step is computed. `arm-none-eabi-size` bss falls from
+> 125,472 to 119,708 B on RP2040 and from 290,424 to 283,700 B on RP2350.
+> `check_ram_placement.py` then reports heap free 70,948 B / 144,604 B.
+
 > **S/PDIF one word per subframe (2026-11-20).** The S/PDIF ring format is one
 > PIO word per subframe, so each slot ring is 4 KB and `SLOT_RINGS_BYTES` halves
 > again (8 KB RP2040, 16 KB RP2350). The 1 KB NRZI lookup table is gone.
@@ -3056,7 +3074,7 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Output slot staging (`slot_stage`, 2 × 192 × 2 × 4) | 3 KB |
 | Filters + recipes (7 channels) | ~8 KB |
 | Crossover filters + recipes (5 outputs × 4 bands cascades + 7 × 4 recipes) | ~3.1 KB |
-| Loudness tables (2 × 61 × 2 × ~13B) | ~3 KB |
+| Loudness coefficients (live pair + spare, 2 × 2 × 24 B; 2026-11-20) | 96 B |
 | Loudness per-output state (5 × 16 B) | 80 B |
 | Preset system (dir_cache 3,147 B + `flash_stage` 4 KB, 256-B aligned) | ~7 KB |
 | Bulk param buffer (`sizeof(WireBulkParams)`, 6,136 B at V32) | ~6 KB |
@@ -3068,10 +3086,10 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Output slot rings (`.slot_rings`, 2 × 4 KB at the top of RAM, shared SPDIF/I2S, no padding; 2026-11-20) | 8 KB |
 | Input capture arena (SPDIF RX FIFO / I2S RX ring union, 4 KB aligned) | 12 KB |
 | Other BSS | ~20 KB |
-| **Total BSS** | **~110 KB** `.bss` (measured 112,936 B on 2026-10-23) plus the 8 KB `.slot_rings` section (2026-11-20; `arm-none-eabi-size` bss 125,480 B including it) |
+| **Total BSS** | **~110 KB** `.bss` (measured 112,936 B on 2026-10-23) plus the 8 KB `.slot_rings` section (2026-11-20; `arm-none-eabi-size` bss 119,708 B including it, after the loudness table removal) |
 | RAM code+rodata+data (.data section, hot set only) | 70,376 B as of 2026-11-19, within the 72,704 B `check_ram_placement.py` budget |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 58,384 B (2026-11-16) |
+| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 70,948 B (2026-11-20) |
 | Stack | drawn from the free-RAM pool above |
 
 ### RP2350 (520 KB SRAM)
@@ -3092,16 +3110,16 @@ and warns on flash reached through linker long-call veneers (cold paths); Check
 | Leveller state + lookahead (8 rings × 240 × 4, plus limiter caps) | ~7.6 KB (7,788 B) |
 | Per-channel preamp (8 ch) + master volume | ~120 B |
 | Matrix mixer (8 × 9 crosspoints + outputs) | ~1.3 KB |
-| Loudness tables + per-output state (2 × 61 × 2 coeffs + 9 × 16 B) | ~3 KB |
+| Loudness coefficients + per-output state (2 × 2 × 28 B + 9 × 16 B; 2026-11-20) | 256 B |
 | Output slot rings (`.slot_rings`, 4 × 4 KB at the top of RAM, shared SPDIF/I2S, no padding; 2026-11-20) | 16 KB |
 | Input capture arena (SPDIF RX FIFO / I2S RX rings / ADAT RX ring union, 8 KB aligned) | 32 KB |
 | ADAT TX ring (`adat_ring`, 576 × 32 B; 2026-10-23) | 18 KB |
 | Stereo upmixer state (Haas 2 × 1024 + allpass 2 × 512 floats + estimators + double-buffered coeffs) | ~12.3 KB |
 | Other BSS | ~35 KB |
-| **Total BSS** | **~265 KB** `.bss` (measured 271,076 B on 2026-10-23) plus the 16 KB `.slot_rings` section (2026-11-20; `arm-none-eabi-size` bss 290,432 B including it) |
+| **Total BSS** | **~265 KB** `.bss` (measured 271,076 B on 2026-10-23) plus the 16 KB `.slot_rings` section (2026-11-20; `arm-none-eabi-size` bss 283,700 B including it, after the loudness table removal) |
 | RAM code+rodata+data (.data section, hot set only) | 96,880 B as of 2026-11-19, within the 100,352 B `check_ram_placement.py` budget (EQ kernel rewrite: `dsp_cascade_block` 13,500 to 12,410 B, per-sample `dsp_process_channel` removed) |
 | Flash-resident code (.text + .rodata + boot2, XIP) | ~98 KB |
-| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 118,204 B (2026-11-16) |
+| Free heap (`__HeapLimit - end`, nothing allocates at runtime) | 144,604 B (2026-11-20) |
 | Stack | drawn from the free-RAM pool above |
 
 ### Flash Layout
@@ -3469,8 +3487,9 @@ stays V17). `CS_NOUN_LOUDNESS_SPL` is the reference listening level in dB SPL
 curve, not just switch it. The wire commands accept intensity up to 200 %, but
 8.8 percent tops out at 127.99, so the front-panel span stops at 127 %.
 Neither noun is `CS_NDF_DEFERRED`: the SET handler stores the value
-immediately and only the 61-step coefficient rebuild is deferred, coalesced by
-`loudness_recompute_pending` to at most one rebuild per main-loop pass however
+immediately and only the coefficient compute is deferred (one volume step since
+2026-11-20), coalesced by
+`loudness_recompute_pending` to at most one compute per main-loop pass however
 fast a knob is swept. The accepted spans now live in `loudness.h`
 (`LOUDNESS_REF_SPL_MIN`/`MAX`, `LOUDNESS_INTENSITY_MIN`/`MAX`) so the vendor
 clamps and the noun table cannot drift apart.
@@ -5518,7 +5537,7 @@ Once present, **every** signature-positive poll re-decodes and re-applies (not j
 
 ### Apply path — option 2 (LG drives user volume directly)
 
-LG drives the user-facing volume directly: `audio_state.volume`, `vol_mul`, `current_loudness_coeffs`, and the `WireUserVolume.user_volume_db` notify all move together. The host UI's main volume widget tracks TV remote presses with no special-case binding — it just listens to the existing user-volume notification.
+LG drives the user-facing volume directly: `audio_state.volume`, `vol_mul`, and the `WireUserVolume.user_volume_db` notify move together, and `current_loudness_coeffs` follows within a few main-loop passes (2026-11-20). The host UI's main volume widget tracks TV remote presses with no special-case binding. It just listens to the existing user-volume notification.
 
 Implementation funnels through `update_user_volume(db)` in `usb_audio.c`, the same single funnel used by `ROUTE.USER_VOLUME` and the bulk-params apply path. That funnel writes `audio_state.volume`, calls `apply_vol_index_to_audio()` (vol_mul + loudness coeffs), invalidates the LG apply-cache, and pushes the user-volume notify.
 

@@ -33,7 +33,7 @@
 // Background steps accounted against the step budget (bg_job.h).
 #define BG_JOB_LIST(X)                       \
     X(BG_JOB_RTA_STEP,  "rta_step")          \
-    X(BG_JOB_LOUDNESS,  "loudness_rebuild")  \
+    X(BG_JOB_LOUDNESS,  "loudness_step")     \
     X(BG_JOB_CS_REVERT, "cs_revert")
 
 #define LOOP_PROF_ENUM_ENTRY(id, name) id,

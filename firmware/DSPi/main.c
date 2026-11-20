@@ -1785,11 +1785,9 @@ void core0_init() {
     adat_output_resync();
 #endif
 
-    // Initial loudness table computation (uses loaded or default params)
-    loudness_recompute_table(loudness_ref_spl, loudness_intensity_pct, 48000.0f);
-    if (loudness_enabled && loudness_active_table) {
-        current_loudness_coeffs = loudness_active_table[effective_vol_index];
-    }
+    // Published before audio starts (uses loaded or default params)
+    loudness_update_now(loudness_enabled, effective_vol_index,
+                        loudness_ref_spl, loudness_intensity_pct, 48000.0f);
 
     // Initial volume leveller setup (uses loaded or default params)
     leveller_compute_coefficients(&leveller_coeffs, (const LevellerConfig *)&leveller_config, 48000.0f);
@@ -2243,7 +2241,7 @@ int main(void) {
         input_service_servos();
 
         // One budgeted step of long background work (analyser transform,
-        // loudness rebuild, Control Surfaces revert); see bg_job.h.
+        // loudness coefficients, Control Surfaces revert); see bg_job.h.
         LOOP_PROF(LP_BG_JOBS);
         bg_run_one();
         LOOP_PROF(LP_DELIVERY_BG);
@@ -2738,27 +2736,11 @@ int main(void) {
                                    active_input_source == INPUT_SOURCE_ADAT);
         }
 
-        // Handle loudness table recomputation
+        // Loudness coefficients for the current volume step; computed by a bg job.
         if (loudness_recompute_pending) {
             loudness_recompute_pending = false;
-            loudness_recompute_begin(loudness_ref_spl, loudness_intensity_pct, (float)audio_state.freq);
-        }
-        if (loudness_recompute_take_done()) {
-            // Re-key the active coefficient pointer at the current
-            // vol_index.  effective_vol_index is set in lock-step with
-            // vol_mul by apply_vol_index_to_audio(), so this picks up
-            // whatever volume owner is currently active (USB host slider,
-            // LG Sound Sync, …) without disturbing vol_mul itself.  The
-            // previous formulation (audio_set_volume(audio_state.volume))
-            // early-returned during SPDIF playback and left the coefficient
-            // pointer dangling at the pre-recompute table, an audible
-            // defect when the user adjusted ref SPL or intensity while
-            // playing through SPDIF.
-            if (loudness_enabled && loudness_active_table) {
-                uint8_t idx = effective_vol_index;
-                if (idx > CENTER_VOLUME_INDEX) idx = CENTER_VOLUME_INDEX;
-                current_loudness_coeffs = loudness_active_table[idx];
-            }
+            loudness_update_begin(loudness_enabled, effective_vol_index, loudness_ref_spl,
+                                  loudness_intensity_pct, (float)audio_state.freq);
         }
 
         // Handle crossfeed coefficient updates: compute into the inactive

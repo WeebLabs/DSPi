@@ -10,8 +10,8 @@
 // Bits above NUM_OUTPUT_CHANNELS are ignored.
 #define LOUDNESS_DEFAULT_OUTPUT_MASK 0xFFFFu
 
-// Accepted spans for the two table parameters, shared by the vendor SET
-// clamps, loudness_recompute_table, and the Control Surfaces noun table.
+// Accepted spans for the two curve parameters, shared by the vendor SET
+// clamps, loudness_update_begin, and the Control Surfaces noun table.
 #define LOUDNESS_REF_SPL_MIN     40.0f
 #define LOUDNESS_REF_SPL_MAX    100.0f
 #define LOUDNESS_INTENSITY_MIN    0.0f
@@ -34,7 +34,7 @@ typedef struct { LoudnessSvfState f[LOUDNESS_BIQUAD_COUNT]; } LoudnessOutputStat
 #else
 typedef struct { int32_t b0, b1, b2, a1, a2; bool bypass; } LoudnessCoeffs;
 
-// Minimal DF2 state (s1/s2 only; coefficients come from the shared table)
+// Minimal DF2 state (s1/s2 only; coefficients come from current_loudness_coeffs)
 typedef struct {
     int32_t s1, s2;
 } LoudnessBqState;
@@ -111,16 +111,14 @@ static inline void loudness_process_output_block(const LoudnessCoeffs * __restri
 }
 #endif
 
-// Double-buffered RAM tables: compute into inactive, then swap pointer
-extern LoudnessCoeffs loudness_tables[2][LOUDNESS_VOL_STEPS][LOUDNESS_BIQUAD_COUNT];
-extern LoudnessCoeffs (*loudness_active_table)[LOUDNESS_BIQUAD_COUNT];
+// Coefficients for the current volume step, or NULL while loudness is off.
+// Written only by the functions below (Core 0 main loop); the audio path reads it.
+extern const LoudnessCoeffs *volatile current_loudness_coeffs;
 
-// Recompute the entire loudness table for current parameters
-// Called from main loop on: boot, ref SPL change, intensity change, sample rate change
-void loudness_recompute_table(float ref_spl, float intensity_pct, float sample_rate);
-// The same build as a background job (bg_job.h): begin starts or restarts it,
-// and take_done returns true once after the new table becomes active (re-key there).
-void loudness_recompute_begin(float ref_spl, float intensity_pct, float sample_rate);
-bool loudness_recompute_take_done(void);
+// Recompute for this state as a background job (bg_job.h) and publish when done.
+// A later call before the job runs replaces the state; enabled=false publishes NULL now.
+void loudness_update_begin(bool enabled, uint8_t vol_index, float ref_spl, float intensity_pct, float sample_rate);
+// Boot only: the same, computed and published before returning.
+void loudness_update_now(bool enabled, uint8_t vol_index, float ref_spl, float intensity_pct, float sample_rate);
 
 #endif // LOUDNESS_H

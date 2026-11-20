@@ -64,23 +64,14 @@ extern volatile bool user_mute;
 extern volatile bool loudness_enabled;
 extern volatile float loudness_ref_spl;
 extern volatile float loudness_intensity_pct;
+// Set by anything that changes the coefficients' inputs (volume, enable, ref
+// SPL, intensity, rate); the main loop clears it and calls loudness_update_begin().
 extern volatile bool loudness_recompute_pending;
 // Output-channel mask: bit k = compensate output k (see loudness.h)
 extern volatile uint16_t loudness_output_mask;
-// Pointer-typed `volatile` (qualifier on the pointer itself, not the
-// pointee) — the audio pipeline reads this every packet, and any write
-// from apply_vol_index_to_audio() must not be hoisted/cached across
-// the read by the optimiser even when both sides live in the same TU.
-extern const LoudnessCoeffs *volatile current_loudness_coeffs;
-
-// The vol_index most recently applied to vol_mul + loudness coefficients.
-// Single source of truth for "what user-perceived volume is active right
-// now", used by the loudness re-enable and loudness-table-recompute paths
-// so they re-key the coefficient pointer at the *actual* current vol_index
-// — not the USB-cached audio_state.volume, which would be wrong when an
-// alternative volume owner (LG Sound Sync) is driving vol_mul on SPDIF
-// input.  Initialised to 0 (silent) at boot — matches the BSS-zero state
-// of vol_mul before audio_set_volume() runs on first USB enumeration.
+// The vol_index paired with vol_mul, whichever owner drives it (USB, LG Sound
+// Sync); loudness coefficients are computed for it, never for audio_state.volume.
+// 0 at boot, matching vol_mul's BSS-zero state before the first volume set.
 extern volatile uint8_t effective_vol_index;
 
 // Crossfeed
@@ -241,10 +232,9 @@ void update_user_volume(float db);
 
 // Apply a vol_index in [0..CENTER_VOLUME_INDEX] to the live audio path.
 // Updates audio_state.vol_mul (consumed click-free by the audio pipeline's
-// per-packet ramp) and refreshes current_loudness_coeffs when loudness is
-// enabled.  Does NOT touch audio_state.volume — the caller owns the question
-// of whether the host's reported volume value is changing or merely being
-// re-applied.
+// per-packet ramp) and marks the loudness coefficients for recompute; they
+// follow within a few main-loop passes.  Does NOT touch audio_state.volume: the
+// caller owns whether the host's reported volume is changing or re-applied.
 //
 // Single funnel for every owner of the user-perceived volume (USB host
 // slider via audio_set_volume(), LG Sound Sync via lg_sound_sync.c, etc.) so
