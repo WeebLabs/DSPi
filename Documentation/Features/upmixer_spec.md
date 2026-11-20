@@ -1,6 +1,6 @@
 # DSPi Stereo Upmixer Specification
 
-*Version 1.5, 2026-11-16 (host interface on the paged protocol of firmware 1.1.7, section 6). Previously 1.4, 2026-10-10 (change notifications, section 6.5). Firmware: upmixer wire layout final at V27 (current wire format V32), upmixer slot layout final at V34 (current preset slot V39), vendor commands `FX.UPMIX_CONFIG`, `FX.UPMIX_STATUS` and `FX.UPMIX_*` (page 0x08, commands 0x80, 0x81 and 0x90-0x9D). RP2350 only. Hardware-untested at time of writing (implemented and audited on the bench build only).*
+*Version 1.6, 2026-11-20 (ADAPTIVE surround reworked: residual feed, side-specific balance gate, transient duck and lookahead; design and measurements in section 12; no host interface change). Previously 1.5, 2026-11-16 (host interface on the paged protocol of firmware 1.1.7, section 6). Previously 1.4, 2026-10-10 (change notifications, section 6.5). Firmware: upmixer wire layout final at V27 (current wire format V32), upmixer slot layout final at V34 (current preset slot V39), vendor commands `FX.UPMIX_CONFIG`, `FX.UPMIX_STATUS` and `FX.UPMIX_*` (page 0x08, commands 0x80, 0x81 and 0x90-0x9D). RP2350 only. Hardware-untested at time of writing (implemented and audited on the bench build only).*
 
 This document contains everything an application developer needs to integrate the DSPi stereo upmixer: the concept, the routing model, every command byte layout, parameter semantics with ranges and defaults, status telemetry, persistence behavior, and recommended UX patterns.
 
@@ -25,7 +25,7 @@ Two independent engines, each with a quality/CPU mode:
 | Engine | Modes | Algorithm |
 |---|---|---|
 | Centre | `PASSIVE` (0), `ADAPTIVE` (1), `OFF` (2) | Passive: fixed C = 0.7071(L+R). Adaptive: running normalized cross-correlation plus L/R balance steer the centre gain through a threshold gate with attack/release ballistics. Off: extraction gain forced to zero, so row 2 is silent and L/R pass through untouched. |
-| Surround | `OFF` (0), `PASSIVE` (1), `ADAPTIVE` (2) | Passive: difference feed (L-R). Adaptive: Dolby low-complexity matrix decoder steering (WO2007067320A2) with Pro Logic II decode coefficients; front dominance ducks the surrounds, left/right dominance steers between Ls and Rs. |
+| Surround | `OFF` (0), `PASSIVE` (1), `ADAPTIVE` (2) | Passive: difference feed (L-R). Adaptive: prediction-residual feed (each surround keeps what its own side cannot predict from the other), a balance gate that closes the surround on the dominant side, front/back dominance and a transient duck, all steered from the band-limited signal ahead of the surround delay (section 12). |
 
 Both surround modes feed a built-in conditioning chain per rear channel: Butterworth high-pass and low-pass band-limit, Haas delay, and mirrored Schroeder allpass decorrelators.
 
@@ -75,7 +75,7 @@ Everything downstream applies unchanged per output slot: crosspoint gain/phase, 
 ### 3.1 Level conventions
 
 - C is produced at the constant-power convention: full extraction of a 0 dBFS mono signal yields C = +3 dBFS on row 2 and silence on rows 0/1. **The centre row can exceed 0 dBFS by up to 3 dB.** Watch its meter (section 5) and set the C crosspoint gain to -3 dB if the downstream chain has no headroom.
-- Ls/Rs adaptive steering gains reach at most 1.0; passive surround peaks at 0.7071 x (L-R). Rear level trim is simply the crosspoint gain.
+- Passive surround peaks at 0.7071 x (L-R). Adaptive surround gains reach at most 0.75 and the residual feed `L' - w*R'` has `w` in [0.5623, 4], so full-scale anti-phase content reaches about +1.4 dBFS (0.75 x 1.56). A transient where the weight still sits high from correlated material while the inputs swing apart can momentarily exceed that, in theory up to 0.75 x 5. Watch rows 3-4 on the meters. Rear level trim is simply the crosspoint gain.
 
 ### 3.2 Example setups
 
@@ -112,7 +112,7 @@ All persisted in presets (slot V34+) and carried in bulk params (wire V27+). Flo
 
 **Per-mode applicability (UI guidance):** when the centre mode is `OFF`, grey out the whole centre group (3, 4, 5, 6, 7, 8, 13); none of it has any effect. When the centre mode is `PASSIVE`, keep **Strength** (3) and **Width** (4) accessible; they are the passive mode's working controls. Keep **Presence** (13) accessible in both centre modes as well. Grey out only **Threshold** (5), **Attack** (6), **Release** (7), and **Detector HPF** (8); those drive the adaptive steering and are inert in passive mode. Do not disable the whole centre group on mode. The surround conditioning params (9-12) apply in both `PASSIVE` and `ADAPTIVE` surround modes and should be greyed only when the surround mode is `OFF`.
 
-Fixed internals (not configurable): correlation estimator time constant 100 ms, dominance smoothers 40 ms, decorrelator delay 10 ms, activation fade 10 ms, presence bell corner 3 kHz / Q 0.6 (TPT SVF bell, boost/cut symmetric).
+Fixed internals (not configurable): correlation estimator time constant 100 ms, front/back dominance smoother 40 ms, residual-weight estimators 40 ms, duck envelopes 2 ms / 60 ms with 60 ms release, decorrelator delay 10 ms, activation fade 10 ms, presence bell corner 3 kHz / Q 0.6 (TPT SVF bell, boost/cut symmetric). The adaptive surround detector band follows `surround_hpf_hz` / `surround_lpf_hz`, and its lookahead equals `surround_delay_ms`.
 
 Parameter changes take effect within a few ms (main-loop coefficient recompute, double-buffered publish, no audio interruption). Mode and parameter changes while running are click-safe: gains ramp per sample, and a live surround OFF to ON transition clears the rear conditioning state and fades the rears in. Switching the centre engine to OFF ramps the extraction and removal gains linearly to zero across one packet (about 1 ms at 48 kHz) and then holds exact zero; it deliberately bypasses the release ballistic, which would only ever decay asymptotically toward zero and never let L/R become bit-exact again.
 
@@ -196,8 +196,8 @@ Each of the 14 parameters has its own command, `FX.UPMIX_ENABLE` (0x90) to `FX.U
 | 2 | i16 | corr_q14 | Smoothed L/R correlation, Q14: value/16384 in [-1, +1]. Zero in passive centre mode |
 | 4 | i16 | balance_q14 | Smoothed level balance, Q14: 0 = centred, 16384 = fully one-sided |
 | 6 | u16 | center_gain_q15 | Live centre extraction gain, value/32767 in [0, 1] (includes strength, gate, ballistics, fade) |
-| 8 | u16 | ls_gain_q15 | Live Ls steering gain, Q15 |
-| 10 | u16 | rs_gain_q15 | Live Rs steering gain, Q15 |
+| 8 | u16 | ls_gain_q15 | Live Ls steering gain, Q15. Adaptive: side gate x front/back term x duck x fade, excluding the residual weight. Passive: the fade only |
+| 10 | u16 | rs_gain_q15 | Live Rs steering gain, Q15, same meaning |
 | 12 | u8[4] | reserved | |
 
 Poll at 5-20 Hz for a responsive "what is the upmixer doing" display (correlation meter, extraction gain bar, surround activity). Values are telemetry snapshots; no locking needed.
@@ -263,8 +263,9 @@ A bulk SET applies the upmix section exactly like a `FX.UPMIX_CONFIG` SET (defer
 - **Sample rates:** 44.1 and 48 kHz only. Above 48 kHz the upmixer parks (`parked_reason` 3) and the derived rows go silent; it resumes with the activation fade when the rate drops back. All time-based parameters (delays, ballistics, corners) are recomputed on every rate change; expect a brief (tens of ms) surround transient at a 44.1 <-> 48 kHz change (stale ring content), on par with the existing per-output delay behavior.
 - **Input switching:** switching between stereo sources (USB 2ch, S/PDIF, I2S 2ch) keeps the upmixer running (state continues through the pipeline reset). Switching to a multichannel source parks it; switching back re-activates with the fade-in.
 - **Signal generator:** siggen injection happens post-matrix and is unaffected. Siggen RAW outputs bypass output processing as usual regardless of source rows.
-- **CPU:** roughly 90 float ops/sample when fully active (adaptive centre + adaptive surround); well under 1 percent of the RP2350 budget. Zero measurable cost when disabled (one pointer compare per packet).
-- **RAM:** ~12.3 KB BSS on RP2350 (delay/decorrelator rings sized for 48 kHz). None on RP2040.
+- **CPU:** about 160 float ops per sample fully active (adaptive centre + adaptive surround; was about 135 before the 2026-11-20 rework, counting add, sub, mul and abs as 1 and a clamp as 2), plus about 70 ops, 7 divides, 7 square roots and 2 `powf` per 1 ms block. Unmeasured on the CPU meter. Zero measurable cost when disabled (one pointer compare per packet).
+- **Surround mode switch:** changing between PASSIVE and ADAPTIVE while running clears the rear state and restarts the rears from silence after the Haas delay, because the delay rings hold different signals in the two modes.
+- **RAM:** ~12.4 KB BSS on RP2350 (delay/decorrelator rings sized for 48 kHz). None on RP2040.
 - **Mono compatibility:** with width 0 and full extraction, each main channel reconstructs exactly for the extracted component as L' + 0.7071 x C = L (and likewise for R), so folding the centre back into the mains at the standard -3 dB convention is lossless. Equivalently, L' + R' + 1.4142 x C = L + R.
 - **What the upmixer never does:** add latency to C/L/R, shift inter-slot alignment, run on multichannel inputs, run above 48 kHz, or process when disabled.
 
@@ -313,3 +314,44 @@ SET STORE.PRESET_SAVE as usual; upmix config rides along (slot V34)
 | Matrix rows | 2 = C, 3 = Ls, 4 = Rs (shared with multichannel inputs 3-5) |
 | Status telemetry | `FX.UPMIX_STATUS`, 16 B, poll 5-20 Hz |
 | Derived-row meters | `peaks[2..4]` + clip flags bits 2-4 while active |
+
+---
+
+## 12. Adaptive surround design (2026-11-20)
+
+**Why it changed.** The earlier ADAPTIVE mode followed the Dolby low-complexity decoder (WO2007067320A2). Its dominance detector, a gain of 1024 plus a hard clip, is close to a smoothed sign bit. A hard-left source reads as neutral on the front/back axis, so it reached Ls at 0.75 x 0.871, about -3.7 dB re its front level. Uncorrelated hard-L and hard-R sources reached the rears at about -6 dB. The fixed 0.871 / -0.4898 feed leaked centre at -8.4 dB whenever the rears were open. The detector ran full-band, so bass steered a 300 Hz to 7 kHz surround band. An offline model (`tools/upmix_proto`) reproduced all four figures before anything changed.
+
+**Signal flow per sample.** The surround HP/LP band-limits the raw L/R, before centre removal. Band-limited L'/R' follow by linearity (`bL' = bL - rem * (bL + bR)`) and go into the Haas rings. Every detector reads the undelayed band signals: the gate and dominance use the raw pair, because removal subtracts the same mid from both channels and would make L'/R' look balanced and anti-correlated. The steered feed is applied to the delayed band signals, then the Schroeder allpass runs as before. The delay moved rather than grew: Ls and Rs keep exactly the Haas plus allpass latency of the passive path at every delay setting.
+
+**Terms.**
+- *Residual feed.* `Ls = L' - wl * R'`, `wl = lr' / (rr' + 1e-3 (ll' + rr'))`, and mirrored for Rs. The primed moments come once per block from the raw 40 ms band moments through the removal matrix (`L' = a*L + b*R`, `a = 1 - rem`, `b = -rem`). A single panned source is predicted from the other side and cancels. The weight is clamped to [0.5623, 4]. The floor is the PLII ratio, so while the estimator lags a centre onset the feed is never worse than the old fixed decode. Anti-phase content (w would be negative) passes. The ceiling bounds the noise gain of `-w*R'`.
+- *Floor relaxation, disabled.* `UPMIX_FLOOR_Q` lets the floor fall with balance on the weight that feeds the dominant channel into the opposite surround. In the model this cleaned the quiet side of a hard-panned source, but measured per side it let centre content (a kick, a voice) into that surround: the kick reached Rs 7.4 dB above the old engine. It ships at 0, a fixed floor.
+- *Side-weighted gate.* With `d = (ll - rr)/(ll + rr)` on the raw moments, the dominant side's gain scales by `1 - |d|` and the quiet side's by `(1 - |d|)^0.75` (`UPMIX_GATE_K`). A fully one-sided gate kept the most ambience, but it swung the ambience between the rears by 13 to 16 dB (std) when sources alternated sides. Softer quiet-side exponents leaked centre into the quiet surround: K 0.5 put a centre kick 1.5 to 2 dB above the old engine there. K 0.75 is the softest value that keeps every centre stem within 1 dB of the old engine in each surround, worst case 0.73 dB, and it keeps about 3 dB more quiet-side ambience than the symmetric gate (K 1) on a hard-panned mix.
+- *Front/back dominance, F/B axis only.* The patent's front/back term still closes the rears on front-dominant material, covering residual-estimator lag on centre onsets, and opens them for back (anti-phase) content. It reads the raw band pair, so centre removal does not move it. The left/right axis was removed: it duplicated the gate and cost selectivity.
+- *Rear fade.* The rears fade in over 10 ms from exactly zero, starting at the first block at or after the point where delayed audio first emerges from the Haas ring, on unpark and on every surround (re)start.
+- *Transient duck.* A 2 ms / 60 ms power-envelope ratio on each side's residual. Above 4 the gain becomes `sqrt(4/ratio)`, releasing over 60 ms. Because control leads audio by the Haas delay, the duck lands before the onset reaches the rears.
+
+**Measured** (compiled firmware source on the host, stem-through; dB re the stem's front level through the same band limit; default settings unless stated). "Net" is the leak change minus the ambience change versus the old engine, so a plain gain cut scores 0. Negative is better. `tools/upmix_proto/harness` also checks every direct and centre stem per side across centre ADAPTIVE / PASSIVE / OFF at width 0, 25 and 100. None is more than 1 dB worse than the old engine in either surround, and total ambience is never more than 2 dB above it.
+
+| Case | Old engine | New engine |
+|---|---|---|
+| Hard-left source, Ls / Rs | -3.7 / -64.8 | below -200 / below -200 |
+| Uncorrelated hard L + hard R, Ls / Rs of the left one | -5.8 / -11.7 | -9.0 / -13.4 |
+| Single source at pan 0 / 0.25 / 0.5 (total rears) | -72.8 / -58.2 / -51.4 | -116.5 / -89.4 / -73.1 |
+| Centre voice with hard-panned guitar, Ls / Rs | -15.5 / -16.4 | -17.6 / -16.6 |
+| Centre kick with hard-panned keys, Ls / Rs | -18.8 / -21.2 | -24.4 / -22.0 |
+| Centre voice with hard-panned hats, Ls / Rs | -21.0 / -23.3 | -29.9 / -25.6 |
+| Hard-panned guitar, Ls / Rs (net total) | -7.0 / -13.4 | -9.1 / -13.3 (-1.0) |
+| Hard-panned keys, Ls / Rs (net total) | -10.0 / -18.1 | -21.8 / -22.8 (-4.0) |
+| Hard-panned hats, Ls / Rs (net total) | -9.8 / -15.9 | -15.3 / -16.9 (-2.1) |
+| Centre PASSIVE width 0: hard-panned keys, Ls / Rs | -12.1 / -15.3 | -23.9 / -20.1 |
+| Panned snare onset (first 50 ms) | -7.8 | -29.4 |
+| Anti-phase retention | 0 | +1.2 |
+| Diffuse ambience retention | 0 | +0.6 |
+| Ambience level motion when a hard-panned part alternates sides (std, Ls / Rs) | 5.6 / 5.2 | 4.8 / 5.6 |
+
+The last row is the one trade. With any balance gate strong enough to give the hard-pan improvements above, the Rs ambience level moves about 0.4 dB (std) more than under the old engine when a hard-panned part alternates sides, while Ls moves 0.8 dB less. The harness accepts up to 1 dB more per side, the same tolerance as the stem rule.
+
+The limit is fundamental to broadband gain steering. A hard-panned source and decorrelated ambience look the same statistically at this resolution. The rears are cleaner of direct sound, but they cannot be made clean of a hard-panned instrument without also losing the ambience that shares its time and band. Multiband steering (2 or 3 bands) bought 1 to 3 dB more net selectivity in the model for roughly twice the ops, and was not ported.
+
+**Tunables** (`upmix.h`): `UPMIX_W_TAU_MS` 40, `UPMIX_W_FLOOR` 0.5623, `UPMIX_W_CEIL` 4, `UPMIX_W_EPS` 1e-3, `UPMIX_GATE_K` 0.75 (quiet-side exponent), `UPMIX_FLOOR_Q` 0, `UPMIX_DUCK_THR` 4, `UPMIX_DUCK_DEPTH` 0.5, `UPMIX_DUCK_FAST_MS` 2, `UPMIX_DUCK_SLOW_MS` 60, `UPMIX_DUCK_REL_MS` 60, `UPMIX_FB_NEUTRAL` 0.75. `UPMIX_GATE_K = 1` with `UPMIX_FLOOR_Q = 0` gives the symmetric gate and fixed floor. The sensitive values are the quiet-side K and the floor Q, which trade centre leak into the quiet surround against kept ambience. The 1 dB centre limit holds for K 0.75 and 1 with Q 0, and for K 1 with Q 0.5 right at the limit. It fails for every K at Q 1 and for K 0.5 at any Q. Hardware-untested.

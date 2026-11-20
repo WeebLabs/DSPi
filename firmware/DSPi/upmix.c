@@ -11,11 +11,10 @@
  *   - Correlation is estimated on a bass-cut detector path (one-pole HP);
  *     long-wavelength content correlates by coincidence and would pump the
  *     steering (industry-standard "bass steering" mitigation).
- *   - Adaptive surround steering follows Dolby WO2007067320A2: rectified
- *     level difference per axis, gain 1024 + hard clip, 40 ms one-pole
- *     smoother, polynomial pan law (1 - x^2), PLII surround decode feed
- *     coefficients.  The patent's front/back bias maps FB into [-1, 0] so
- *     neutral material keeps ~0.75 surround pan-law gain.
+ *   - Adaptive surround: prediction-residual feed, side-specific balance
+ *     gate, front/back dominance and a transient duck, all steered from the
+ *     band-limited L'/R' ahead of the Haas delay so control leads the audio.
+ *     Design and measurements: Documentation/Features/upmixer_spec.md.
  *   - Surround band-limit filters are TPT SVF Butterworth (psybass form).
  *   - Centre presence bell is a Cytomic TPT SVF bell at fixed 3 kHz / Q 0.6,
  *     boost/cut symmetric (k = 1/(Q*A)); the knob is the gain only.
@@ -62,23 +61,32 @@ typedef struct {
     float det_lp_l, det_lp_r;      // one-pole HP states
     float acc_lr, acc_ll, acc_rr;  // smoothed products
     float g_c;                     // smoothed centre gain, 0..strength
-    // Dominance smoothers (adaptive surround)
-    float dom_lr, dom_fb;
-    // Previous effective per-sample gains (ramp start points)
-    float p_gc, p_rem, p_gls, p_grs;
+    // Previous effective per-sample centre gains (ramp start points)
+    float p_gc, p_rem;
     // Activation fade
     float env;
     // Telemetry snapshots
     float t_corr, t_bal;
     // Centre presence bell
     float pres_ic1, pres_ic2;      // TPT SVF integrators
-    // Surround conditioning
-    float shp_ic1[2], shp_ic2[2];  // HP SVF integrators
-    float slp_ic1[2], slp_ic2[2];  // LP SVF integrators
-    float haas[2][UPMIX_HAAS_RING];
-    float ap[2][UPMIX_AP_RING];
+    // Surround state, cleared as one unit whenever the surround engine
+    // (re)starts so nothing stale can replay.
+    struct {
+        float dom_fb;                  // front/back dominance smoother
+        float w_lr, w_ll, w_rr;        // raw band moments (weights, gate)
+        float ef[2], es[2];            // duck fast/slow power envelopes
+        float duck_att[2];             // duck attenuation, 0 = open (zero-init safe)
+        float p_gls, p_grs, p_wl, p_wr;// ramp start points
+        float senv;                    // adaptive rear fade, starts at emergence
+        uint32_t fill;                 // samples written since restart, to the delay
+        float shp_ic1[2], shp_ic2[2];  // HP SVF integrators
+        float slp_ic1[2], slp_ic2[2];  // LP SVF integrators
+        float haas[2][UPMIX_HAAS_RING];// adaptive: band-limited L'/R'; passive: Ls/Rs
+        float ap[2][UPMIX_AP_RING];
+    } s;
     uint32_t widx;                 // shared ring write index
     bool sur_active;               // surround engine ran last packet
+    uint8_t sur_mode;              // mode it ran in (ring contents differ per mode)
     volatile bool running;
 } UpmixState;
 
@@ -140,13 +148,13 @@ void upmix_compute_coefficients(UpmixCoeffs *c, const UpmixConfig *cfg, float sa
         c->pres_m1 = k * (A * A - 1.0f);
     }
 
-    if (c->surround_mode == UPMIX_SURROUND_ADAPTIVE) {
-        c->ls_cl = 0.8710f;   // PLII surround decode (WO2007067320A2)
-        c->ls_cr = -0.4898f;
-    } else {
-        c->ls_cl = 0.7071f;   // passive difference feed (Rs mirrors to -S)
-        c->ls_cr = -0.7071f;
-    }
+    c->ls_cl = 0.7071f;   // passive difference feed (Rs mirrors to -S); adaptive
+    c->ls_cr = -0.7071f;  // uses the residual feed instead
+
+    c->alpha_w = expf(-1.0f / (fs * UPMIX_W_TAU_MS * 0.001f));
+    c->duck_af = 1.0f - expf(-1.0f / (fs * UPMIX_DUCK_FAST_MS * 0.001f));
+    c->duck_as = 1.0f - expf(-1.0f / (fs * UPMIX_DUCK_SLOW_MS * 0.001f));
+    c->alpha_drel = expf(-1.0f / (fs * UPMIX_DUCK_REL_MS * 0.001f));
 
     c->ap_g = 0.5f * clampf(cfg->decorr_pct, UPMIX_DECORR_MIN, UPMIX_DECORR_MAX) * 0.01f;
 
@@ -210,8 +218,8 @@ void upmix_get_status(UpmixStatus *st) {
     st->corr_q14 = (int16_t)(clampf(um.t_corr, -1.0f, 1.0f) * 16384.0f);
     st->balance_q14 = (int16_t)(clampf(um.t_bal, 0.0f, 1.0f) * 16384.0f);
     st->center_gain_q15 = (uint16_t)(clampf(um.p_gc * 1.4142135624f, 0.0f, 1.0f) * 32767.0f);
-    st->ls_gain_q15 = (uint16_t)(clampf(um.p_gls, 0.0f, 1.0f) * 32767.0f);
-    st->rs_gain_q15 = (uint16_t)(clampf(um.p_grs, 0.0f, 1.0f) * 32767.0f);
+    st->ls_gain_q15 = (uint16_t)(clampf(um.s.p_gls, 0.0f, 1.0f) * 32767.0f);
+    st->rs_gain_q15 = (uint16_t)(clampf(um.s.p_grs, 0.0f, 1.0f) * 32767.0f);
 }
 
 void upmix_config_to_packet(UpmixConfigPacket *out) {
@@ -253,6 +261,32 @@ void upmix_notify_config(void) {
     UM_NOTIFY(surround_lpf_hz);
     UM_NOTIFY(decorr_pct);
     #undef UM_NOTIFY
+}
+
+// x^e for a compile-time constant e; folds to a multiply-free form for the
+// tuned values so the control update stays off powf.
+static inline float upmix_powc(float x, float e) {
+    if (e == 1.0f) return x;
+    if (e == 0.5f) return sqrtf(x);
+    if (e == 0.75f) { float s = sqrtf(x); return s * sqrtf(s); }
+    if (e == 0.0f) return 1.0f;
+    return powf(x, e);
+}
+
+// One TPT SVF Butterworth stage pair: HP then LP (surround band-limit).
+static inline float upmix_band(const UpmixCoeffs *c, float x, int ch) {
+    float v3 = x - um.s.shp_ic2[ch];
+    float v1 = c->shp_a1 * um.s.shp_ic1[ch] + c->shp_a2 * v3;
+    float v2 = um.s.shp_ic2[ch] + c->shp_a2 * um.s.shp_ic1[ch] + c->shp_a3 * v3;
+    um.s.shp_ic1[ch] = 2.0f * v1 - um.s.shp_ic1[ch];
+    um.s.shp_ic2[ch] = 2.0f * v2 - um.s.shp_ic2[ch];
+    x = x - c->shp_k * v1 - v2;
+    v3 = x - um.s.slp_ic2[ch];
+    v1 = c->slp_a1 * um.s.slp_ic1[ch] + c->slp_a2 * v3;
+    v2 = um.s.slp_ic2[ch] + c->slp_a2 * um.s.slp_ic1[ch] + c->slp_a3 * v3;
+    um.s.slp_ic1[ch] = 2.0f * v1 - um.s.slp_ic1[ch];
+    um.s.slp_ic2[ch] = 2.0f * v2 - um.s.slp_ic2[ch];
+    return v2;
 }
 
 DSP_TIME_CRITICAL
@@ -299,51 +333,97 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
     // per-sample ramp below still glides out over this one block.
     if (c->center_mode == UPMIX_CENTER_OFF) um.g_c = 0.0f;
 
-    // Surround steering gains from the smoothed dominance (patent pan law)
-    float gls_t = 1.0f, grs_t = 1.0f;
-    if (sur_adaptive) {
-        float fbb = 0.5f * um.dom_fb - 0.5f;            // front/back bias: [-1, 0]
-        float sfb = 1.0f - (fbb + 1.0f) * (fbb + 1.0f); // 1 = back dominant, 0 = front
-        float ul = 0.5f * (um.dom_lr + 1.0f);           // 1 = right dominant
-        float ur = 0.5f * (1.0f - um.dom_lr);
-        gls_t = (1.0f - ul * ul) * sfb;
-        grs_t = (1.0f - ur * ur) * sfb;
-    }
-
-    // Surround OFF -> ON while running (no park in between): clear the
-    // conditioning state so stale ring/filter content cannot replay, and
-    // ramp the steering gains up from zero.
-    if (sur && !um.sur_active) {
-        memset(um.shp_ic1, 0, sizeof(um.shp_ic1));
-        memset(um.shp_ic2, 0, sizeof(um.shp_ic2));
-        memset(um.slp_ic1, 0, sizeof(um.slp_ic1));
-        memset(um.slp_ic2, 0, sizeof(um.slp_ic2));
-        memset(um.haas, 0, sizeof(um.haas));
-        memset(um.ap, 0, sizeof(um.ap));
-        um.p_gls = 0.0f;
-        um.p_grs = 0.0f;
+    // Surround (re)start, including a PASSIVE <-> ADAPTIVE switch (the ring
+    // holds different signals per mode): clear all surround state so nothing
+    // stale replays, and ramp the gains up from zero.
+    if (sur && (!um.sur_active || um.sur_mode != c->surround_mode)) {
+        memset(&um.s, 0, sizeof(um.s));
     }
     um.sur_active = sur;
+    um.sur_mode = c->surround_mode;
+
+    // Adaptive surround targets (see upmixer_spec.md for the derivation)
+    float gls_t = 1.0f, grs_t = 1.0f, wl_t = 0.0f, wr_t = 0.0f;
+    if (sur_adaptive) {
+        float fbb = 0.5f * um.s.dom_fb - 0.5f;          // front/back bias: [-1, 0]
+        float sfb = 1.0f - (fbb + 1.0f) * (fbb + 1.0f); // 1 = back dominant, 0 = front
+        float g = UPMIX_FB_NEUTRAL * sfb;
+        // Gate and dominance read the raw (pre-removal) band moments: centre
+        // removal makes L'/R' symmetric and would hide the imbalance.
+        float ll = um.s.w_ll, rr = um.s.w_rr, lr = um.s.w_lr;
+        float d = (ll - rr) / (ll + rr + 1e-12f);       // signed balance, + = left
+        float dl = d > 0.0f ? d : 0.0f, dr = d < 0.0f ? -d : 0.0f;
+        // Side gate closes the dominant side fully, the quiet side by (1-bal)^K.
+        // K = 1 with FLOOR_Q = 0 reproduces the symmetric gate and fixed floor.
+        gls_t = g * ((1.0f - dl) * upmix_powc(1.0f - dr, UPMIX_GATE_K));
+        grs_t = g * ((1.0f - dr) * upmix_powc(1.0f - dl, UPMIX_GATE_K));
+        // Floor relaxes only on the weight feeding the dominant side across
+        float fl = UPMIX_W_FLOOR * upmix_powc(1.0f - dr, UPMIX_FLOOR_Q);
+        float fr = UPMIX_W_FLOOR * upmix_powc(1.0f - dl, UPMIX_FLOOR_Q);
+        // Weights predict L'/R' (L' = a*L + b*R, R' = b*L + a*R), so map the
+        // raw moments through the removal as it stood at the end of last block.
+        float a = 1.0f - um.p_rem, b = -um.p_rem;
+        float aa = a * a, bb = b * b, ab2 = 2.0f * a * b;
+        float ll1 = aa * ll + ab2 * lr + bb * rr;
+        float rr1 = bb * ll + ab2 * lr + aa * rr;
+        // Rounding can leave these variances just below zero. A zero divisor
+        // under a zero lr1 would put a NaN into the weight ramp for good.
+        if (ll1 < 0.0f) ll1 = 0.0f;
+        if (rr1 < 0.0f) rr1 = 0.0f;
+        float lr1 = a * b * (ll + rr) + (aa + bb) * lr;
+        float reg = UPMIX_W_EPS * (ll1 + rr1) + 1e-12f;
+        wl_t = clampf(lr1 / (rr1 + reg), fl, UPMIX_W_CEIL);
+        wr_t = clampf(lr1 / (ll1 + reg), fr, UPMIX_W_CEIL);
+        // Transient duck: attenuation jumps to the onset excess, then releases
+        float rel = powf(c->alpha_drel, (float)n);
+        for (int ch = 0; ch < 2; ch++) {
+            float ratio = um.s.ef[ch] / (um.s.es[ch] + 1e-12f);
+            float tgt = ratio <= UPMIX_DUCK_THR ? 1.0f
+                      : upmix_powc(UPMIX_DUCK_THR / ratio, UPMIX_DUCK_DEPTH);
+            float relv = um.s.duck_att[ch] * rel;
+            float att = 1.0f - tgt;
+            um.s.duck_att[ch] = att > relv ? att : relv;
+        }
+        gls_t *= 1.0f - um.s.duck_att[0];
+        grs_t *= 1.0f - um.s.duck_att[1];
+    }
 
     // Effective per-sample coefficients, ramped linearly across the block
     float gc_new  = 0.7071f * um.g_c * env_new;                  // C = gc * (L+R)
     float rem_new = 0.5f * (1.0f - c->width) * um.g_c * env_new; // L' = L - rem*(L+R)
-    float gls_new = gls_t * env_new;
-    float grs_new = grs_t * env_new;
+    // Adaptive rears fade in from their own envelope, started only once the
+    // block begins at or past the point where delayed audio first emerges.
+    float senv = env_new;
+    if (sur_adaptive) {
+        senv = um.s.senv;
+        if (um.s.fill >= c->haas_delay) {
+            senv += (float)n * c->env_step;
+            if (senv > 1.0f) senv = 1.0f;
+        } else {
+            um.s.fill += n;
+        }
+        um.s.senv = senv;
+    }
+    float gls_new = gls_t * senv;
+    float grs_new = grs_t * senv;
     float gc_i  = um.p_gc,  gc_step  = (gc_new  - um.p_gc)  * inv_n;
     float rem_i = um.p_rem, rem_step = (rem_new - um.p_rem) * inv_n;
-    float gls_i = um.p_gls, gls_step = (gls_new - um.p_gls) * inv_n;
-    float grs_i = um.p_grs, grs_step = (grs_new - um.p_grs) * inv_n;
-    um.p_gc = gc_new; um.p_rem = rem_new; um.p_gls = gls_new; um.p_grs = grs_new;
+    float gls_i = um.s.p_gls, gls_step = (gls_new - um.s.p_gls) * inv_n;
+    float grs_i = um.s.p_grs, grs_step = (grs_new - um.s.p_grs) * inv_n;
+    float wl_i = um.s.p_wl, wl_step = (wl_t - um.s.p_wl) * inv_n;
+    float wr_i = um.s.p_wr, wr_step = (wr_t - um.s.p_wr) * inv_n;
+    um.p_gc = gc_new; um.p_rem = rem_new; um.s.p_gls = gls_new; um.s.p_grs = grs_new;
+    um.s.p_wl = wl_t; um.s.p_wr = wr_t;
     um.env = env_new;
 
     // ---- Audio pass ----
     float det_lp_l = um.det_lp_l, det_lp_r = um.det_lp_r;
     float acc_lr = um.acc_lr, acc_ll = um.acc_ll, acc_rr = um.acc_rr;
-    float dom_lr = um.dom_lr, dom_fb = um.dom_fb;
     const float hp_a = c->det_hp_a;
     const float a_corr = c->alpha_corr, omc = 1.0f - c->alpha_corr;
     const float a_dom = c->alpha_dom, omd = 1.0f - c->alpha_dom;
+    const float a_w = c->alpha_w, omw = 1.0f - c->alpha_w;
+    const float daf = c->duck_af, das = c->duck_as;
     const float ls_cl = c->ls_cl, ls_cr = c->ls_cr;
     const float ap_g = c->ap_g;
     const uint32_t hdly = c->haas_delay, adly = c->ap_delay;
@@ -360,18 +440,6 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
         acc_ll = a_corr * acc_ll + omc * (el * el);
         acc_rr = a_corr * acc_rr + omc * (er * er);
 
-        if (sur_adaptive) {
-            // Axis dominance: rectified level difference, heavy gain + clip,
-            // one-pole smoother (patent stage 2)
-            float dlr = UPMIX_DOM_CLIP_GAIN * (fabsf(r0) - fabsf(l0));
-            dlr = clampf(dlr, -1.0f, 1.0f);
-            float f = 0.5f * (l0 + r0), b = 0.5f * (l0 - r0);
-            float dfb = UPMIX_DOM_CLIP_GAIN * (fabsf(f) - fabsf(b));
-            dfb = clampf(dfb, -1.0f, 1.0f);
-            dom_lr = a_dom * dom_lr + omd * dlr;
-            dom_fb = a_dom * dom_fb + omd * dfb;
-        }
-
         // Centre extraction + constant-power removal from the mains
         float mid = l0 + r0;
         float c0 = gc_i * mid;
@@ -387,6 +455,7 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
             c0 += c->pres_m1 * pv1;
         }
         cbuf[i] = c0;
+        const float rem_c = rem_i;
         float rem = rem_i * mid;
         float l1 = l0 - rem, r1 = r0 - rem;
         l[i] = l1;
@@ -394,69 +463,66 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
         gc_i += gc_step;
         rem_i += rem_step;
 
-        if (sur) {
-            // Steered feeds, then per-channel conditioning:
-            // band-limit -> Haas delay -> Schroeder allpass decorrelator
-            float x0 = gls_i * (ls_cl * l1 + ls_cr * r1);
-            float x1 = grs_i * (ls_cl * r1 + ls_cr * l1);
+        if (!sur) continue;
+        float x0, x1;
+        if (sur_adaptive) {
+            // Band-limit the raw input before the Haas delay so steering leads
+            // the audio by the delay; L'/R' follow by linearity of the filter.
+            float b0 = upmix_band(c, l0, 0), b1 = upmix_band(c, r0, 1);
+            float f = 0.5f * (b0 + b1), b = 0.5f * (b0 - b1);
+            float dfb = clampf(UPMIX_DOM_CLIP_GAIN * (fabsf(f) - fabsf(b)), -1.0f, 1.0f);
+            um.s.dom_fb = a_dom * um.s.dom_fb + omd * dfb;
+            um.s.w_lr = a_w * um.s.w_lr + omw * (b0 * b1);
+            um.s.w_ll = a_w * um.s.w_ll + omw * (b0 * b0);
+            um.s.w_rr = a_w * um.s.w_rr + omw * (b1 * b1);
+            // Duck envelopes follow the residual, so cancelled centre onsets
+            // (kicks, vocals) do not trigger it.
+            float rb = rem_c * (b0 + b1);
+            float p0 = b0 - rb, p1 = b1 - rb;
+            float q0 = p0 - wl_i * p1, q1 = p1 - wr_i * p0;
+            q0 = q0 * q0; q1 = q1 * q1;
+            um.s.ef[0] += daf * (q0 - um.s.ef[0]); um.s.es[0] += das * (q0 - um.s.es[0]);
+            um.s.ef[1] += daf * (q1 - um.s.ef[1]); um.s.es[1] += das * (q1 - um.s.es[1]);
+
+            um.s.haas[0][widx & (UPMIX_HAAS_RING - 1)] = p0;
+            um.s.haas[1][widx & (UPMIX_HAAS_RING - 1)] = p1;
+            float d0 = um.s.haas[0][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
+            float d1 = um.s.haas[1][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
+            x0 = gls_i * (d0 - wl_i * d1);
+            x1 = grs_i * (d1 - wr_i * d0);
+            gls_i += gls_step; grs_i += grs_step;
+            wl_i += wl_step; wr_i += wr_step;
+        } else {
+            // Passive: feed, then band-limit, then Haas delay
+            x0 = gls_i * (ls_cl * l1 + ls_cr * r1);
+            x1 = grs_i * (ls_cl * r1 + ls_cr * l1);
             gls_i += gls_step;
             grs_i += grs_step;
-
-            float v3, v1, v2;
-            // Ls: HP (output = x - k*v1 - v2)
-            v3 = x0 - um.shp_ic2[0];
-            v1 = c->shp_a1 * um.shp_ic1[0] + c->shp_a2 * v3;
-            v2 = um.shp_ic2[0] + c->shp_a2 * um.shp_ic1[0] + c->shp_a3 * v3;
-            um.shp_ic1[0] = 2.0f * v1 - um.shp_ic1[0];
-            um.shp_ic2[0] = 2.0f * v2 - um.shp_ic2[0];
-            x0 = x0 - c->shp_k * v1 - v2;
-            // Ls: LP (output = v2)
-            v3 = x0 - um.slp_ic2[0];
-            v1 = c->slp_a1 * um.slp_ic1[0] + c->slp_a2 * v3;
-            v2 = um.slp_ic2[0] + c->slp_a2 * um.slp_ic1[0] + c->slp_a3 * v3;
-            um.slp_ic1[0] = 2.0f * v1 - um.slp_ic1[0];
-            um.slp_ic2[0] = 2.0f * v2 - um.slp_ic2[0];
-            x0 = v2;
-            // Rs: HP
-            v3 = x1 - um.shp_ic2[1];
-            v1 = c->shp_a1 * um.shp_ic1[1] + c->shp_a2 * v3;
-            v2 = um.shp_ic2[1] + c->shp_a2 * um.shp_ic1[1] + c->shp_a3 * v3;
-            um.shp_ic1[1] = 2.0f * v1 - um.shp_ic1[1];
-            um.shp_ic2[1] = 2.0f * v2 - um.shp_ic2[1];
-            x1 = x1 - c->shp_k * v1 - v2;
-            // Rs: LP
-            v3 = x1 - um.slp_ic2[1];
-            v1 = c->slp_a1 * um.slp_ic1[1] + c->slp_a2 * v3;
-            v2 = um.slp_ic2[1] + c->slp_a2 * um.slp_ic1[1] + c->slp_a3 * v3;
-            um.slp_ic1[1] = 2.0f * v1 - um.slp_ic1[1];
-            um.slp_ic2[1] = 2.0f * v2 - um.slp_ic2[1];
-            x1 = v2;
-
-            // Haas delay (shared write index, per-channel rings)
-            um.haas[0][widx & (UPMIX_HAAS_RING - 1)] = x0;
-            um.haas[1][widx & (UPMIX_HAAS_RING - 1)] = x1;
-            x0 = um.haas[0][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
-            x1 = um.haas[1][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
-
-            // Schroeder allpass, mirrored gains (+g / -g) for max inter-channel
-            // phase spread: w[n] = x + g*w[n-D], y = w[n-D] - g*w[n]
-            float wd0 = um.ap[0][(widx - adly) & (UPMIX_AP_RING - 1)];
-            float w0 = x0 + ap_g * wd0;
-            um.ap[0][widx & (UPMIX_AP_RING - 1)] = w0;
-            lsbuf[i] = wd0 - ap_g * w0;
-
-            float wd1 = um.ap[1][(widx - adly) & (UPMIX_AP_RING - 1)];
-            float w1 = x1 - ap_g * wd1;
-            um.ap[1][widx & (UPMIX_AP_RING - 1)] = w1;
-            rsbuf[i] = wd1 + ap_g * w1;
-
-            widx++;
+            x0 = upmix_band(c, x0, 0);
+            x1 = upmix_band(c, x1, 1);
+            um.s.haas[0][widx & (UPMIX_HAAS_RING - 1)] = x0;
+            um.s.haas[1][widx & (UPMIX_HAAS_RING - 1)] = x1;
+            x0 = um.s.haas[0][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
+            x1 = um.s.haas[1][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
         }
+
+        // Schroeder allpass, mirrored gains (+g / -g) for max inter-channel
+        // phase spread: w[n] = x + g*w[n-D], y = w[n-D] - g*w[n]
+        float wd0 = um.s.ap[0][(widx - adly) & (UPMIX_AP_RING - 1)];
+        float w0 = x0 + ap_g * wd0;
+        um.s.ap[0][widx & (UPMIX_AP_RING - 1)] = w0;
+        lsbuf[i] = wd0 - ap_g * w0;
+
+        float wd1 = um.s.ap[1][(widx - adly) & (UPMIX_AP_RING - 1)];
+        float w1 = x1 - ap_g * wd1;
+        um.s.ap[1][widx & (UPMIX_AP_RING - 1)] = w1;
+        rsbuf[i] = wd1 + ap_g * w1;
+
+        widx++;
     }
 
     um.det_lp_l = det_lp_l; um.det_lp_r = det_lp_r;
     um.acc_lr = acc_lr; um.acc_ll = acc_ll; um.acc_rr = acc_rr;
-    um.dom_lr = dom_lr; um.dom_fb = dom_fb;
     um.widx = widx;
 }
 
