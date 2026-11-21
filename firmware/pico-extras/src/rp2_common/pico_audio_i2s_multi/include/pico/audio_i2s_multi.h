@@ -81,6 +81,7 @@ typedef struct audio_i2s_instance {
     int32_t *ring;                      // slot ring base (caller-owned)
     volatile uint32_t wr_frames;        // frames of real audio written
     uint32_t erased_frames;             // silence stamped through this total
+    uint32_t pad_tail_frames;           // pad frames contiguous below erased_frames (capped)
     volatile uint32_t underrun_frames;  // silence frames exposed to the wire
     volatile uint32_t drop_frames;      // producer frames dropped on ring-full
 
@@ -139,6 +140,10 @@ typedef struct audio_i2s_config {
 // coherent produced/consumed snapshot pair.
 void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
                               const int32_t *interleaved_lr, uint32_t frames);
+
+// Same as writing `frames` all-zero frames with audio_i2s_ring_write_s32(), byte for
+// byte. Once the whole ring is known to hold pad it only advances the counters.
+void audio_i2s_ring_write_silence(audio_i2s_instance_t *inst, uint32_t frames);
 
 // Monotonic DMA words consumed since ring reset. Elapsed time selects any
 // complete ring laps between calls; the DMA address supplies the remainder.

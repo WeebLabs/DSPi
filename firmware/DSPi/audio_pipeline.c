@@ -42,7 +42,7 @@
 
 // Defined with the buffer statistics helpers below.
 static bool output_rings_pre_give(uint32_t frames);
-static void output_rings_write_block(uint32_t frames);
+static void output_rings_write_block(uint32_t frames, uint8_t silent_slots);
 
 // spdif0_consumer_fill is defined in usb_audio.c and read by main.c
 extern volatile uint8_t spdif0_consumer_fill;
@@ -288,10 +288,11 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
 #if PICO_RP2350
 // RTA taps run before finalization because the ADAT-mode conversion
 // overwrites the float rows. Not inlined: one RAM copy serves all three callers.
-void __noinline DSP_TIME_CRITICAL output_pairs_meter_finalize(int first_pair, int n_pairs,
-                                                   int32_t *const *stage,
-                                                   bool finalize_s24, uint32_t n) {
+uint8_t __noinline DSP_TIME_CRITICAL output_pairs_meter_finalize(int first_pair, int n_pairs,
+                                                      int32_t *const *stage,
+                                                      bool finalize_s24, uint32_t n) {
     float pk[NUM_SPDIF_INSTANCES * 2];
+    uint8_t silent = 0;
     int first = first_pair * 2;
     int end = first + n_pairs * 2;
     for (int out = first; out < end; out++) {
@@ -304,6 +305,7 @@ void __noinline DSP_TIME_CRITICAL output_pairs_meter_finalize(int first_pair, in
         int r = l + 1;
         if (!matrix_mixer.outputs[l].enabled && !matrix_mixer.outputs[r].enabled) {
             memset(stage[p], 0, n * 8);
+            silent |= (uint8_t)(1u << (first_pair + p));
             // Nothing from a disabled pair reaches a slot, so its meters read silence.
             if (!finalize_s24) pk[l] = pk[r] = 0.0f;
         } else if (finalize_s24) {
@@ -316,6 +318,7 @@ void __noinline DSP_TIME_CRITICAL output_pairs_meter_finalize(int first_pair, in
         global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, pk[out]) * 32767.0f);
         if (pk[out] > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
     }
+    return silent;
 }
 #endif
 
@@ -335,6 +338,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // outputs acquire a permanent content offset. Space only grows between
     // here and the writes, so early admission stays valid.
     bool rings_admit = output_rings_pre_give(sample_count);
+    // Slots whose staging finalize zeroed this packet. Unset bits are always safe.
+    uint8_t slot_silent = 0;
     if (!rings_admit && sample_count) output_ring_drops++;
 
     // Watermark tracking is diagnostic-only; run at lower cadence to keep
@@ -720,13 +725,14 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
         // Core 0: meter + finalize S/PDIF pair 0 (outputs 0-1).
         int32_t *const stage0[1] = { slot_stage[0] };
-        output_pairs_meter_finalize(0, 1, stage0, finalize_s24, sample_count);
+        slot_silent = output_pairs_meter_finalize(0, 1, stage0, finalize_s24, sample_count);
 
         // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-7)
         while (!core1_eq_work.work_done) {
             __wfe();
         }
         __dmb();
+        slot_silent |= core1_eq_work.silent_pairs;
 
         // Update shared delay write index (both cores used same base)
         if (any_delay_active) {
@@ -828,7 +834,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Meter + finalize all S/PDIF pairs (outputs 0-7).
         int32_t *const stage_all[NUM_SPDIF_INSTANCES] = {
             slot_stage[0], slot_stage[1], slot_stage[2], slot_stage[3] };
-        output_pairs_meter_finalize(0, NUM_SPDIF_INSTANCES, stage_all,
+        slot_silent = output_pairs_meter_finalize(0, NUM_SPDIF_INSTANCES, stage_all,
                                     finalize_s24, sample_count);
 
 #if ENABLE_SUB
@@ -1307,7 +1313,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
     // rings_admit was decided at the top of this function, before the PDM
     // pushes; monotone space keeps it valid here.
-    if (rings_admit) output_rings_write_block(sample_count);
+    if (rings_admit) output_rings_write_block(sample_count, slot_silent);
 
 #if PICO_RP2350
     // ADAT bulk output tap: in finalize_s24 mode buf_out[0..7] hold in-place
@@ -1465,15 +1471,17 @@ static bool output_rings_pre_give(uint32_t frames) {
 }
 
 // Copy one admitted block from staging into every set-up slot ring, enabled
-// or not (a ring may be prefilling before its synchronized start).
+// or not (a ring may be prefilling before its synchronized start). A silent_slots
+// bit means that slot's staging is all zero this packet (finalize zeroed it).
 DSP_TIME_CRITICAL
-static void output_rings_write_block(uint32_t frames) {
+static void output_rings_write_block(uint32_t frames, uint8_t silent_slots) {
     uint32_t low = output_ring_min_prewrite;
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (!inst || !inst->ring) continue;
-            audio_i2s_ring_write_s32(inst, slot_stage[i], frames);
+            if ((silent_slots >> i) & 1u) audio_i2s_ring_write_silence(inst, frames);
+            else audio_i2s_ring_write_s32(inst, slot_stage[i], frames);
             if (inst->enabled && inst->recovery_prewrite_fill_frames < low)
                 low = inst->recovery_prewrite_fill_frames;
         } else {

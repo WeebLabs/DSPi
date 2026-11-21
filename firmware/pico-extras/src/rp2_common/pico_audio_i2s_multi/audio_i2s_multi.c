@@ -174,6 +174,14 @@ static uint32_t mck_div_24_8    = 0u;      // Last computed 24.8 fixed-point
                                            // divider.  Zero ≡ "never set" — an
                                            // enable in this state is refused.
 
+// Account a pad stamp of absolute frames [s, t), t the new erase frontier. Call before
+// erased_frames moves. The run only extends the tail if it starts at the old frontier.
+static inline __attribute__((always_inline))
+void i2s_pad_tail_stamped(audio_i2s_instance_t *inst, uint32_t s, uint32_t t) {
+    uint32_t tail = (s == inst->erased_frames) ? inst->pad_tail_frames + (t - s) : t - s;
+    inst->pad_tail_frames = (tail > I2S_RING_FRAMES) ? I2S_RING_FRAMES : tail;
+}
+
 // ---------------------------------------------------------------------------
 // Ring accounting (same model as the S/PDIF library)
 // ---------------------------------------------------------------------------
@@ -251,6 +259,7 @@ void audio_i2s_ring_reset(audio_i2s_instance_t *inst) {
     uint32_t save = save_and_disable_interrupts();
     inst->wr_frames = 0;
     inst->erased_frames = 0;
+    inst->pad_tail_frames = 0;
     inst->slip_stopped = false;
     inst->consumed_words = 0;
     inst->consumed_frames = 0;
@@ -285,6 +294,7 @@ void audio_i2s_ring_skip(audio_i2s_instance_t *inst, uint32_t frames) {
     if ((int32_t)(target - e) > (int32_t)I2S_RING_FRAMES) e = target - I2S_RING_FRAMES;
     if ((int32_t)(target - e) > 0) {
         i2s_stamp_pad_run(inst->ring, e, target - e);
+        i2s_pad_tail_stamped(inst, e, target);
         e = target;
     }
     inst->erased_frames = e;
@@ -301,12 +311,15 @@ void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames
     if (need <= 0) return;
     uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
     i2s_stamp_pad_run(inst->ring, e, n);
+    i2s_pad_tail_stamped(inst, e, e + n);
     inst->erased_frames = e + n;
 }
 
-I2S_TIME_CRITICAL
-void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
-                              const int32_t *lr, uint32_t frames) {
+// A silent block encodes to I2S_PAD_PATTERN in every word, so with the whole ring
+// already pad its stores are skipped. Counters and snapshots advance identically.
+static inline __attribute__((always_inline))
+void i2s_ring_write(audio_i2s_instance_t *inst, const int32_t *lr, uint32_t frames,
+                    bool silent) {
     uint32_t consumed = audio_i2s_ring_consumed_frames(inst);
     // Reader ahead of the writer is a deficit, not a full ring (see the
     // S/PDIF twin): rejecting it would split this slot's wr from its peers'.
@@ -327,19 +340,32 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
 
     int32_t *ring = inst->ring;
     uint32_t w = inst->wr_frames;
-    i2s_stamp_audio_run(ring, w, lr, frames);
+    const uint32_t w0 = w, e0 = inst->erased_frames, tail0 = inst->pad_tail_frames;
+    const bool stores = !silent || tail0 < I2S_RING_FRAMES;
+    if (stores) {
+        if (silent) i2s_stamp_pad_run(ring, w, frames);
+        else        i2s_stamp_audio_run(ring, w, lr, frames);
+    }
     w += frames;
     inst->wr_frames = w;
 
     // Signed ordering: raw compares break at the uint32 counter wrap.
-    uint32_t e = inst->erased_frames;
+    uint32_t e = e0;
     if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_I2S_ERASE_AHEAD;
     if ((int32_t)(target - e) > 0) {
-        i2s_stamp_pad_run(ring, e, target - e);
+        if (stores) i2s_stamp_pad_run(ring, e, target - e);
         e = target;
     }
     inst->erased_frames = e;
+    // Silent: pad runs unbroken up to e, from below e0 (or from w0 if e0 lagged). Audio
+    // restarts the count: with the frontier over a lap ahead the block lands in the tail.
+    if (silent) {
+        uint32_t tail = ((int32_t)(e0 - w0) >= 0) ? tail0 + (e - e0) : e - w0;
+        inst->pad_tail_frames = (tail > I2S_RING_FRAMES) ? I2S_RING_FRAMES : tail;
+    } else {
+        inst->pad_tail_frames = 0;
+    }
 
     // Recovery needs the fill before THIS block, not the post-write servo
     // snapshot below. The just-written frames remain real audio ahead of
@@ -349,6 +375,17 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
 
     inst->snap_produced_frames = w;
     inst->snap_consumed_frames = consumed;
+}
+
+I2S_TIME_CRITICAL
+void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
+                              const int32_t *lr, uint32_t frames) {
+    i2s_ring_write(inst, lr, frames, false);
+}
+
+I2S_TIME_CRITICAL
+void audio_i2s_ring_write_silence(audio_i2s_instance_t *inst, uint32_t frames) {
+    i2s_ring_write(inst, NULL, frames, true);
 }
 
 // ---------------------------------------------------------------------------

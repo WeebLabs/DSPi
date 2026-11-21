@@ -699,7 +699,7 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         // Meter + finalize pairs 1-3 (outputs 2-7), using Core 0's
         // per-packet finalize mode snapshot so both cores agree.
-        output_pairs_meter_finalize(CORE1_EQ_FIRST_OUTPUT / 2, 3,
+        core1_eq_work.silent_pairs = output_pairs_meter_finalize(CORE1_EQ_FIRST_OUTPUT / 2, 3,
                                     core1_eq_work.spdif_out,
                                     core1_eq_work.finalize_s24 != 0, sample_count);
 

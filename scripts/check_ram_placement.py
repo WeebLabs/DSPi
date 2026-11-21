@@ -74,6 +74,7 @@ COMMON = [
     ("audio_spdif_ring_silence_pump", False),
     ("audio_spdif_ring_skip", False),
     ("audio_i2s_ring_write_s32", False),
+    ("audio_i2s_ring_write_silence", False),
     ("audio_i2s_ring_consumed_words", False),
     ("audio_i2s_ring_silence_pump", False),
     ("audio_i2s_ring_skip", False),

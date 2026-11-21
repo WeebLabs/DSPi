@@ -485,6 +485,7 @@ typedef struct {
     // slot finalization mode (in-place S24 staging vs fused convert+
     // interleave) so ADAT never reads unconverted rows.  See output_s24.h.
     uint8_t           finalize_s24;
+    uint8_t           silent_pairs;     // Core 1 -> Core 0: pairs whose staging it zeroed
 #else
     int32_t         (*buf_out)[192];   // Pointer to buf_out array (Q28), set once at init
     uint32_t          sample_count;

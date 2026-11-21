@@ -82,8 +82,9 @@ extern float buf_in_ext[NUM_INPUT_CHANNELS - NUM_STEREO_INPUTS][192];
 // Last float pass over output pairs [first_pair, first_pair + n_pairs): RTA tap,
 // peak/clip metering and finalization into stage[0..n_pairs-1]. Both cores call
 // it for their own pairs; see "Output metering and finalization" in current_architecture.md.
-void output_pairs_meter_finalize(int first_pair, int n_pairs, int32_t *const *stage,
-                                 bool finalize_s24, uint32_t n);
+// Returns a mask of absolute pair indices whose staging was zeroed (both outputs disabled).
+uint8_t output_pairs_meter_finalize(int first_pair, int n_pairs, int32_t *const *stage,
+                                    bool finalize_s24, uint32_t n);
 #else
 extern int32_t buf_l[192], buf_r[192];
 extern int32_t buf_out[NUM_OUTPUT_CHANNELS][192];

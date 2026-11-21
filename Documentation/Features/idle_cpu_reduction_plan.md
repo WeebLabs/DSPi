@@ -1,12 +1,12 @@
 # Idle CPU reduction plan (RP2350, stereo I2S)
 
-*Drafted 2026-11-21. Agreed between two independent reviews (Opus and Fable). Updated the same day with a measured per-stage profile. Steps 1 and 2 committed (12f733e), step 3 committed (aef4548). Step 4 done (uncommitted). Step 5 not started.*
+*Drafted 2026-11-21. Agreed between two independent reviews (Opus and Fable). Updated the same day with a measured per-stage profile. Steps 1 and 2 committed (12f733e), step 3 (aef4548), step 4 (752f979). Step 5 done (uncommitted). All five steps are done.*
 
 ## Goal
 
 Lower the core 0 load for the stereo-only configuration (outputs 1-2 enabled, no PEQ, I2S on all four slots, 48 kHz USB stereo) without raising the USB batch size. One pipeline call per 1 ms, 48-frame packet stays.
 
-Baseline: 18,561 cycles per packet, 6.0%. After step 1: about 17,500, 5.7%. After step 2: about 16,400, 5.3%. After step 3: about 15,700, 5.1%. After step 4: about 13,200, 4.3%. Target: about 11,300 cycles, about 3.7% (step 1 delivered a third of its estimate).
+Baseline: 18,561 cycles per packet, 6.0%. After step 1: about 17,500, 5.7%. After step 2: about 16,400, 5.3%. After step 3: about 15,700, 5.1%. After step 4: about 13,200, 4.3%. After step 5: about 10,500, 3.4%. Target: about 11,300 cycles, about 3.7% (step 1 delivered a third of its estimate).
 
 ## Where the time goes (measured)
 
@@ -61,7 +61,7 @@ Result: `delay_run_output()` in `dsp_pipeline.h` replaces all six delay loops (t
 
 Result: pre_give went from 960 to 574 cycles and finalize from 4,558 to 2,498. The ring writes also dropped about 12 cycles per slot from the single critical section. Single-core stereo I2S total went from 16,348 to 13,837, and the S/PDIF stereo total is 15,410. The S/PDIF library got the same single critical section as I2S. On hardware, 15 s of streaming showed no underruns, drops or starvation, and with a tone on outputs 1-2 the disabled outputs read 0. The meter change is not visible in practice, because step 3 already keeps disabled rows at zero.
 
-### 5. Silent I2S slot skip (about 1,800 cycles after step 1)
+### 5. Silent I2S slot skip (done: 2,655 cycles measured, estimate was 1,800)
 
 When a slot's pair is disabled and its ring already holds only the pad pattern, the write advances `wr_frames`, `erased_frames` and the snapshots, but skips the data and erase stores. A zero sample encodes to exactly `I2S_PAD_PATTERN`, so the wire is bit-identical, and the counters advance identically on all slots, so alignment holds.
 
@@ -83,7 +83,20 @@ Steps 1 to 4 must produce identical slot bytes before and after, except for the 
 - a flash operation (preset save or rename, via `output_rings_stamp_silence_ahead`)
 - cold boot into the stereo-only config
 - signal generator routed to an output in a disabled pair
-- a dual-core config (outputs 1-8), where Core 1 pairs take the not-silent default and must stay bit-identical
+- a dual-core config, where Core 1 hands its silent pairs back through `core1_eq_work.silent_pairs`, so those slots take the fast path too
+
+### Step 5 result
+
+The library keeps `pad_tail_frames`, the frames just below the erase frontier known to hold pad, and `audio_i2s_ring_write_silence()` skips its stores once that covers the whole ring. An audio block resets the count to 0. The first version counted the frames above an audio block as pad, which the host test showed is wrong when the silence pump has pushed the frontier more than a lap ahead. The silent mask comes back from `output_pairs_meter_finalize()`, with Core 1's half in `core1_eq_work.silent_pairs`.
+
+Measured, stereo I2S: ring writes 4,520 to 1,893 cycles, total 13,837 to 11,182 (stage sum about 10,500, 3.4%). The 8-output config has no silent pair and moves by about +100 cycles in ring writes, within layout noise. S/PDIF is unchanged.
+
+Verification:
+- Host equivalence against an always-stamping reference (`bench_results/idle_profile_2026-11-21/equiv5`), 20 million random operations, counter wrap, and a realistic mode. Also run with address and undefined-behaviour sanitizers, and against the writer, skip and pump from before step 5.
+- Wirecap matrix, 27 cases, on the base and step 5 builds: all pass, and `compare` passes 27 of 27.
+- `wirecap/silent_park.py`, 42 cases on each build: master and slave, all I2S and mixed. Each case parks pairs 1-3 (single core) or 2-3 (Core 1 hand-back), applies an event, checks that the parked slots carry exact zero with the pad byte, re-enables, and requires the alignment signature to match. Events: none, siggen pause and resume (underrun and idle pump), slot type flips, rate change, master/slave toggle, bulk re-apply, a preset rename (flash write), a USB stream start and stop, and pair 1 toggled mid-stream. All pass on both builds, and all 84 signatures match across builds.
+- Cold boot into all-I2S with pairs 1-3 disabled: the parked slots come up silent, and the signature after re-enabling matches the one before the reboot.
+- Independent review (Fable): no defects. The pad count was then hardened to use only values read on entry. A pump interleaved with a write, which the stall bracket rules already forbid, could otherwise overstate it. The silent writer was also added to `check_ram_placement.py`.
 
 ## Follow-up (not part of stereo idle)
 
