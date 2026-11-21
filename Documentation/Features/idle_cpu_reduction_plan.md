@@ -1,12 +1,12 @@
 # Idle CPU reduction plan (RP2350, stereo I2S)
 
-*Drafted 2026-11-21. Agreed between two independent reviews (Opus and Fable). Updated the same day with a measured per-stage profile. Steps 1 and 2 done (uncommitted), steps 3-5 not started.*
+*Drafted 2026-11-21. Agreed between two independent reviews (Opus and Fable). Updated the same day with a measured per-stage profile. Steps 1 and 2 committed (12f733e). Step 3 done (uncommitted). Steps 4-5 not started.*
 
 ## Goal
 
 Lower the core 0 load for the stereo-only configuration (outputs 1-2 enabled, no PEQ, I2S on all four slots, 48 kHz USB stereo) without raising the USB batch size. One pipeline call per 1 ms, 48-frame packet stays.
 
-Baseline: 18,561 cycles per packet, 6.0%. After step 1: about 17,500, 5.7%. After step 2: about 16,400, 5.3%. Target: about 11,300 cycles, about 3.7% (step 1 delivered a third of its estimate).
+Baseline: 18,561 cycles per packet, 6.0%. After step 1: about 17,500, 5.7%. After step 2: about 16,400, 5.3%. After step 3: about 15,700, 5.1%. Target: about 11,300 cycles, about 3.7% (step 1 delivered a third of its estimate).
 
 ## Where the time goes (measured)
 
@@ -47,9 +47,11 @@ Subharm (9 x 160 B per packet) and crossfeed reset their state on every packet w
 
 Result: subharm already had the flag. Its `active` field is set by process entry, the linked-partner mirror and the seed copy, and cleared only by reset, and process entry resets an inactive state. `subharm_park_output_state()` therefore resets only an active state, used for ineligible outputs and the dual-core PDM sub. Crossfeed was left alone, because its state is 16 bytes per pair and a flag would add hidden state for a few cycles. Measured: the crossfeed + subharm stage went from 1,478 to 381 cycles, and dual-core Core 1 work from 7,701 to 7,000. Functional check on hardware: with a 50 Hz host tone, subharm on gave meter ~196 on outputs 1-2, off read 0 on every output (the reset still fires), and on again restarted normally. Psybass, tube and loudness are not done.
 
-### 3. Delay pass on disabled outputs (about 850 cycles)
+### 3. Delay pass on disabled outputs (done: 649 cycles measured, estimate was 850)
 
 The PDM sub always carries a positive alignment delay (`dsp_pipeline.c`, sub alignment), so `any_delay_active` is permanently true and the disabled sub is delayed every packet. When an output goes disabled, zero its whole delay line once (one flag per output), then skip it. "Flushed by recent zeros" is not safe. The shared `delay_write_idx` keeps advancing, so a later read at `widx - dly` could land on slots written before the disable. A `dly` change while disabled is safe under the zero-once rule. An enabled output always runs the delay. The delay pass exists in six pipeline branches (`audio_pipeline.c` single-core, dual-core and RP2040 paths) plus the two Core 1 workers in `pdm_generator.c`. The rule therefore goes in one shared helper, and the enable state is the same per-packet snapshot on both cores.
+
+Result: `delay_run_output()` in `dsp_pipeline.h` replaces all six delay loops (the four in `audio_pipeline.c` and the two Core 1 workers). The enable state is read live, like every other stage. A packet where the enable flips mid-pass costs at most one packet of undelayed audio on the output being disabled. Measured: the limiter + delay stage went from 866 to 217 cycles, single-core total 17,060 to 16,348. The dual config (outputs 1-8) does not run the PDM sub's delay, so it is unchanged within noise. Re-enable test on hardware, both configs: output 1 disabled with tone in its line, then re-enabled at 40 ms with the host streaming zeros. Its meter read 0 across 400+ polls. A line that was not zeroed would have played the old tone. Visible change: a disabled output no longer plays out its delay tail.
 
 ### 4. Fewer position reads, and no peak scans on disabled pairs (about 2,500 cycles)
 

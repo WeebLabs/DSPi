@@ -60,6 +60,7 @@ int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 uint32_t delay_write_idx = 0;
 int32_t channel_delay_samples[NUM_DELAY_CHANNELS] = {0};
 bool any_delay_active = false;
+bool delay_parked[NUM_DELAY_CHANNELS];  // per-output byte: each core owns its outputs
 
 // Every channel (inputs + outputs) has 10 active PEQ bands.  Range-designator
 // init keeps this correct as NUM_CHANNELS changes (17 on RP2350, 7 on RP2040).

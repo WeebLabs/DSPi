@@ -872,7 +872,7 @@ Spec: [`Documentation/Features/band_bypass_spec.md`](Features/band_bypass_spec.m
 | RP2040 | 10 bands | 10 bands × 5 outputs | 70 |
 
 ### Delay Lines
-*Last updated: 2026-10-10*
+*Last updated: 2026-11-21 (disabled outputs park their line). Previously 2026-10-10*
 
 NUM_DELAY_CHANNELS = NUM_OUTPUT_CHANNELS (platform-dependent).
 
@@ -886,6 +886,8 @@ Circular buffer: `delay_lines[ch][(write_idx - delay_samples) & MAX_DELAY_MASK]`
 `dsp_update_delay_samples()` caps every channel at `MAX_DELAY_SAMPLES - 1`. A delay of exactly `MAX_DELAY_SAMPLES` would read back the sample written in the same step, which is zero delay. Before 2026-10-10 the cap was `MAX_DELAY_SAMPLES`, so any over-range request (which the vendor handlers accept unbounded) silently played undelayed. The cap is applied in samples at recompute time, so a stored millisecond value that fits at 48 kHz is capped, not rejected, after a switch to 96 kHz. GET returns the stored, uncapped value.
 
 PDM sub gets automatic alignment compensation: the ring fill target minus `PDM_BUFFER_SAMPLES` (256), added before the cap. It follows the selectable output latency (see "Output Latency"): +128 samples at 8 ms and 48 kHz, but negative below 256 frames (for example -64 at the 4 ms default at 48 kHz), which shortens the sub's delay. *Updated 2026-10-23*
+
+**Disabled outputs park their line.** All six delay call sites (single-core and dual-core Core 0 on both platforms, and both Core 1 EQ workers in `pdm_generator.c`) go through `delay_run_output()` in `dsp_pipeline.h`. A matrix-disabled output with a positive delay zeroes its whole line once, sets `delay_parked[out]`, and is then skipped, leaving its zeroed `buf_out` undelayed. Writing zeros every packet is not equivalent. The shared `delay_write_idx` keeps advancing, so a later, longer delay would read slots written before the disable. Re-enabling clears the flag and the line reads back silence. Each output's flag is a separate byte owned by the core that runs that output. Because the PDM sub alignment keeps `any_delay_active` permanently true, the disabled sub used to be delayed every packet. On RP2350 stereo the limiter + delay stage went from 866 to 217 cycles per packet. One visible difference: an output that is disabled no longer plays out the delay tail it held at that moment. *Last updated: 2026-11-21*
 
 **Known limitation (temporary, until PDM becomes an assignable slot type without hardcoded alignment):** because a positive sub offset is added before the cap, the sub reaches the cap that many samples of user delay earlier than the other outputs (128 at an 8 ms target at 48 kHz). With a user delay within that band of the ring size, the sub plays up to the offset (2.7 ms at 48 kHz) earlier than other outputs set to the same delay. Below that band all outputs align exactly. A sub-aware cap (`MAX_DELAY_SAMPLES - 1 - SUB_ALIGN_SAMPLES` applied to the user delay, offset added after) was considered and deferred to the PDM overhaul, which removes the offset entirely. The Console delay sliders (42 ms RP2040, 85 ms RP2350) also exceed the ring and should be bounded by a firmware-reported maximum.
 

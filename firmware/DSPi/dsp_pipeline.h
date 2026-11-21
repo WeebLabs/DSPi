@@ -1,6 +1,7 @@
 #ifndef DSP_PIPELINE_H
 #define DSP_PIPELINE_H
 
+#include <string.h>
 #include "config.h"
 
 // Filter storage
@@ -24,6 +25,35 @@ extern int32_t delay_lines[NUM_DELAY_CHANNELS][MAX_DELAY_SAMPLES];
 extern uint32_t delay_write_idx;
 extern int32_t channel_delay_samples[NUM_DELAY_CHANNELS];
 extern bool any_delay_active;  // True if any channel has non-zero delay
+extern bool delay_parked[NUM_DELAY_CHANNELS];
+
+#if PICO_RP2350
+typedef float delay_sample_t;
+#else
+typedef int32_t delay_sample_t;
+#endif
+
+// One packet of output delay. A disabled output zeroes its line once, then skips:
+// zeros written per packet would not do, a later longer delay reads older slots.
+static inline __attribute__((always_inline))
+void delay_run_output(int out, delay_sample_t *dst, uint32_t widx, uint32_t n, bool enabled) {
+    int32_t dly = channel_delay_samples[out];
+    if (dly <= 0) return;
+    delay_sample_t *dline = delay_lines[out];
+    if (!enabled) {
+        if (!delay_parked[out]) {
+            memset(dline, 0, sizeof(delay_lines[0]));
+            delay_parked[out] = true;
+        }
+        return;
+    }
+    delay_parked[out] = false;
+    for (uint32_t i = 0; i < n; i++) {
+        dline[widx] = dst[i];
+        dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
+        widx = (widx + 1) & MAX_DELAY_MASK;
+    }
+}
 
 // API
 void dsp_init_default_filters(void);

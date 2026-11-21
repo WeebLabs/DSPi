@@ -712,16 +712,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Core 0: Delay for outputs 0-1
         if (any_delay_active) {
             for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
-                int32_t dly = channel_delay_samples[out];
-                if (dly <= 0) continue;
-                float *dst = buf_out[out];
-                float *dline = delay_lines[out];
-                uint32_t widx = delay_write_idx;
-                for (uint32_t i = 0; i < sample_count; i++) {
-                    dline[widx] = dst[i];
-                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
-                    widx = (widx + 1) & MAX_DELAY_MASK;
-                }
+                delay_run_output(out, buf_out[out], delay_write_idx, sample_count,
+                                 matrix_mixer.outputs[out].enabled);
             }
         }
 
@@ -829,16 +821,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Delay
         if (any_delay_active) {
             for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-                int32_t dly = channel_delay_samples[out];
-                if (dly <= 0) continue;
-                float *dst = buf_out[out];
-                float *dline = delay_lines[out];
-                uint32_t widx = delay_write_idx;
-                for (uint32_t i = 0; i < sample_count; i++) {
-                    dline[widx] = dst[i];
-                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
-                    widx = (widx + 1) & MAX_DELAY_MASK;
-                }
+                delay_run_output(out, buf_out[out], delay_write_idx, sample_count,
+                                 matrix_mixer.outputs[out].enabled);
             }
             delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
@@ -1125,16 +1109,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Core 0: Delay for outputs 0-1
         if (any_delay_active) {
             for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
-                int32_t dly = channel_delay_samples[out];
-                if (dly <= 0) continue;
-                int32_t *dst = buf_out[out];
-                int32_t *dline = delay_lines[out];
-                uint32_t widx = delay_write_idx;
-                for (uint32_t i = 0; i < sample_count; i++) {
-                    dline[widx] = dst[i];
-                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
-                    widx = (widx + 1) & MAX_DELAY_MASK;
-                }
+                delay_run_output(out, buf_out[out], delay_write_idx, sample_count,
+                                 matrix_mixer.outputs[out].enabled);
             }
         }
 
@@ -1262,16 +1238,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // Delay (all outputs use same base write index)
         if (any_delay_active) {
             for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
-                int32_t dly = channel_delay_samples[out];
-                if (dly <= 0) continue;
-                int32_t *dst = buf_out[out];
-                int32_t *dline = delay_lines[out];
-                uint32_t widx = saved_delay_write_idx;
-                for (uint32_t i = 0; i < sample_count; i++) {
-                    dline[widx] = dst[i];
-                    dst[i] = dline[(widx - dly) & MAX_DELAY_MASK];
-                    widx = (widx + 1) & MAX_DELAY_MASK;
-                }
+                delay_run_output(out, buf_out[out], saved_delay_write_idx, sample_count,
+                                 matrix_mixer.outputs[out].enabled);
             }
             delay_write_idx = (saved_delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
