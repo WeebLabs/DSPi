@@ -1,12 +1,12 @@
 # Idle CPU reduction plan (RP2350, stereo I2S)
 
-*Drafted 2026-11-21. Agreed between two independent reviews (Opus and Fable). Updated the same day with a measured per-stage profile. Steps 1 and 2 committed (12f733e). Step 3 done (uncommitted). Steps 4-5 not started.*
+*Drafted 2026-11-21. Agreed between two independent reviews (Opus and Fable). Updated the same day with a measured per-stage profile. Steps 1 and 2 committed (12f733e), step 3 committed (aef4548). Step 4 done (uncommitted). Step 5 not started.*
 
 ## Goal
 
 Lower the core 0 load for the stereo-only configuration (outputs 1-2 enabled, no PEQ, I2S on all four slots, 48 kHz USB stereo) without raising the USB batch size. One pipeline call per 1 ms, 48-frame packet stays.
 
-Baseline: 18,561 cycles per packet, 6.0%. After step 1: about 17,500, 5.7%. After step 2: about 16,400, 5.3%. After step 3: about 15,700, 5.1%. Target: about 11,300 cycles, about 3.7% (step 1 delivered a third of its estimate).
+Baseline: 18,561 cycles per packet, 6.0%. After step 1: about 17,500, 5.7%. After step 2: about 16,400, 5.3%. After step 3: about 15,700, 5.1%. After step 4: about 13,200, 4.3%. Target: about 11,300 cycles, about 3.7% (step 1 delivered a third of its estimate).
 
 ## Where the time goes (measured)
 
@@ -53,11 +53,13 @@ The PDM sub always carries a positive alignment delay (`dsp_pipeline.c`, sub ali
 
 Result: `delay_run_output()` in `dsp_pipeline.h` replaces all six delay loops (the four in `audio_pipeline.c` and the two Core 1 workers). The enable state is read live, like every other stage. A packet where the enable flips mid-pass costs at most one packet of undelayed audio on the output being disabled. Measured: the limiter + delay stage went from 866 to 217 cycles, single-core total 17,060 to 16,348. The dual config (outputs 1-8) does not run the PDM sub's delay, so it is unchanged within noise. Re-enable test on hardware, both configs: output 1 disabled with tone in its line, then re-enabled at 40 ms with the host streaming zeros. Its meter read 0 across 400+ polls. A line that was not zeroed would have played the old tone. Visible change: a disabled output no longer plays out its delay tail.
 
-### 4. Fewer position reads, and no peak scans on disabled pairs (about 2,500 cycles)
+### 4. Fewer position reads, and no peak scans on disabled pairs (done: 2,511 cycles measured, estimate was 2,500)
 
 - `output_rings_pre_give` reads each slot's consumed count once and reuses it for both the deficit and the admission check. A stale snapshot only overestimates fill, which is conservative. After a recovery skip, use the updated `wr_frames` with the same consumed value. The ring write keeps its own read, because `snap_produced/snap_consumed` are the clock servo's observable.
 - `audio_i2s_ring_consumed_frames` takes one IRQ-off section instead of two.
 - `output_pairs_meter_finalize`: a pair with both outputs disabled reports peak 0 instead of scanning `buf_out`. This applies only in the non-s24 branch. In ADAT (`finalize_s24`) mode the peak comes free from the in-place convert and matches what ADAT sends, so that branch is untouched. Visible change: a disabled output no longer shows a delay or limiter tail on its meter. Nothing from it reaches a slot.
+
+Result: pre_give went from 960 to 574 cycles and finalize from 4,558 to 2,498. The ring writes also dropped about 12 cycles per slot from the single critical section. Single-core stereo I2S total went from 16,348 to 13,837, and the S/PDIF stereo total is 15,410. The S/PDIF library got the same single critical section as I2S. On hardware, 15 s of streaming showed no underruns, drops or starvation, and with a tone on outputs 1-2 the disabled outputs read 0. The meter change is not visible in practice, because step 3 already keeps disabled rows at zero.
 
 ### 5. Silent I2S slot skip (about 1,800 cycles after step 1)
 

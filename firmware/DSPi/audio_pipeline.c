@@ -304,10 +304,8 @@ void __noinline DSP_TIME_CRITICAL output_pairs_meter_finalize(int first_pair, in
         int r = l + 1;
         if (!matrix_mixer.outputs[l].enabled && !matrix_mixer.outputs[r].enabled) {
             memset(stage[p], 0, n * 8);
-            if (!finalize_s24) {
-                pk[l] = block_peak_abs(buf_out[l], n);
-                pk[r] = block_peak_abs(buf_out[r], n);
-            }
+            // Nothing from a disabled pair reaches a slot, so its meters read silence.
+            if (!finalize_s24) pk[l] = pk[r] = 0.0f;
         } else if (finalize_s24) {
             output_pair_interleave_s24(stage[p], buf_out[l], buf_out[r], n);
         } else {
@@ -1361,20 +1359,23 @@ DSP_TIME_CRITICAL
 static bool output_rings_pre_give(uint32_t frames) {
     uint32_t max_deficit = 0;
     uint32_t ref_fill = UINT32_MAX;
+    // One position read per slot serves recovery and admission. The reader only
+    // advances meanwhile, so the reused value can only overstate fill (conservative).
+    uint32_t consumed[NUM_SPDIF_INSTANCES];
     for (uint i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         int32_t deficit = 0;
         uint32_t prewrite_fill = UINT32_MAX;
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
-            deficit = (int32_t)(audio_i2s_ring_consumed_frames(inst)
-                                - inst->wr_frames);
+            consumed[i] = audio_i2s_ring_consumed_frames(inst);
+            deficit = (int32_t)(consumed[i] - inst->wr_frames);
             prewrite_fill = inst->recovery_prewrite_fill_frames;
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
-            deficit = (int32_t)(audio_spdif_ring_consumed_frames(inst)
-                                - inst->wr_frames);
+            consumed[i] = audio_spdif_ring_consumed_frames(inst);
+            deficit = (int32_t)(consumed[i] - inst->wr_frames);
             prewrite_fill = inst->recovery_prewrite_fill_frames;
         }
         if (deficit > 0 && (uint32_t)deficit > max_deficit) {
@@ -1445,7 +1446,7 @@ static bool output_rings_pre_give(uint32_t frames) {
         if (output_types[i] == OUTPUT_TYPE_I2S) {
             audio_i2s_instance_t *inst = i2s_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
-            fill = (int32_t)(inst->wr_frames - audio_i2s_ring_consumed_frames(inst));
+            fill = (int32_t)(inst->wr_frames - consumed[i]);
             if (fill < 0) fill = 0;
             if ((uint32_t)fill + frames >
                 PICO_AUDIO_I2S_RING_FRAMES - PICO_AUDIO_I2S_ERASE_AHEAD)
@@ -1453,7 +1454,7 @@ static bool output_rings_pre_give(uint32_t frames) {
         } else {
             audio_spdif_instance_t *inst = spdif_instance_ptrs[i];
             if (!inst || !inst->ring || !inst->enabled) continue;
-            fill = (int32_t)(inst->wr_frames - audio_spdif_ring_consumed_frames(inst));
+            fill = (int32_t)(inst->wr_frames - consumed[i]);
             if (fill < 0) fill = 0;
             if ((uint32_t)fill + frames >
                 PICO_AUDIO_SPDIF_RING_FRAMES - PICO_AUDIO_SPDIF_ERASE_AHEAD)

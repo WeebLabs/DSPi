@@ -85,8 +85,8 @@ typedef struct audio_spdif_instance {
     volatile uint32_t underrun_frames;  // silence frames exposed to the wire
     volatile uint32_t drop_frames;      // producer frames dropped on ring-full
 
-    // Consumed-side unwrap state; mutated only inside
-    // audio_spdif_ring_consumed_words() under a brief IRQ-off section.
+    // Consumed-side unwrap state; mutated only by the
+    // consumed readers (words and frames) under a brief IRQ-off section.
     uint32_t last_read_addr;
     uint32_t last_read_time_us;          // selects whole laps across long polls
     volatile uint32_t consumed_words;   // words; USB feedback only

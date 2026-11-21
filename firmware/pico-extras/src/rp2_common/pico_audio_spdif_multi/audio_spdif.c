@@ -126,13 +126,14 @@ static inline uint spdif_entry_offset(const audio_spdif_instance_t *inst) {
 // Consumed-side accounting
 // ---------------------------------------------------------------------------
 
-SPDIF_TIME_CRITICAL
-uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
+// Advance consumed_words/consumed_frames from the DMA read pointer. Caller holds
+// interrupts off; inlined so both public readers take a single critical section.
+static inline __attribute__((always_inline))
+void spdif_consumed_advance(audio_spdif_instance_t *inst) {
     // Forward-unwrap the DMA read pointer. The address gives the exact
     // remainder modulo one ring. Elapsed time is used only to select how many
     // complete laps occurred, so a flash blackout can span multiple rings
     // without losing whole laps from the PDM/slot recovery interval.
-    uint32_t save = save_and_disable_interrupts();
     uint32_t now = time_us_32();
     uint32_t addr = dma_channel_hw_addr(inst->dma_channel)->read_addr;
     uint32_t delta = (addr - inst->last_read_addr) & (RING_BYTES - 1u);
@@ -167,6 +168,12 @@ uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
     uint32_t t = inst->consumed_word_rem + words;
     inst->consumed_frames += t / 2u;
     inst->consumed_word_rem = (uint8_t)(t % 2u);
+}
+
+SPDIF_TIME_CRITICAL
+uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
+    uint32_t save = save_and_disable_interrupts();
+    spdif_consumed_advance(inst);
     uint32_t out = inst->consumed_words;
     restore_interrupts(save);
     return out;
@@ -176,8 +183,8 @@ uint32_t audio_spdif_ring_consumed_words(audio_spdif_instance_t *inst) {
 // deficit arithmetic (wrap-coherent with wr_frames).
 SPDIF_TIME_CRITICAL
 uint32_t audio_spdif_ring_consumed_frames(audio_spdif_instance_t *inst) {
-    (void)audio_spdif_ring_consumed_words(inst);
     uint32_t save = save_and_disable_interrupts();
+    spdif_consumed_advance(inst);
     uint32_t out = inst->consumed_frames;
     restore_interrupts(save);
     return out;
