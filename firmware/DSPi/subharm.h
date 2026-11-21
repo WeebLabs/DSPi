@@ -283,6 +283,12 @@ static inline void subharm_reset_output_state(SubharmOutputState *st) {
     st->ceil_gain = SH_ONE;
 }
 
+// Per-packet reset for an idle output. Every writer that dirties the state also sets
+// `active`, and process entry resets an inactive state, so a clean one is left alone.
+static inline void subharm_park_output_state(SubharmOutputState *st) {
+    if (st->active) subharm_reset_output_state(st);
+}
+
 // Per-packet flag snapshot from the live config (link + solo).
 static inline uint8_t subharm_flags_snapshot(void) {
     return (subharm_config.link_pairs ? SUBHARM_FLAG_LINK : 0u)

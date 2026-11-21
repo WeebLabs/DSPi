@@ -703,7 +703,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         loudness_reset_output_state(&loudness_output_state[NUM_OUTPUT_CHANNELS - 1]);
         psybass_reset_output_state(&psybass_output_state[NUM_OUTPUT_CHANNELS - 1]);
         tube_reset_output_state(&tube_output_state[NUM_OUTPUT_CHANNELS - 1]);
-        subharm_reset_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
+        subharm_park_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
 
         // Output limiter for Core 0's outputs; meets Core 1 inside when a
         // link group spans both cores (limiter.h).
@@ -1116,7 +1116,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         loudness_reset_output_state(&loudness_output_state[NUM_OUTPUT_CHANNELS - 1]);
         psybass_reset_output_state(&psybass_output_state[NUM_OUTPUT_CHANNELS - 1]);
         tube_reset_output_state(&tube_output_state[NUM_OUTPUT_CHANNELS - 1]);
-        subharm_reset_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
+        subharm_park_output_state(&subharm_output_state[NUM_OUTPUT_CHANNELS - 1]);
 
         // Output limiter for Core 0's outputs; meets Core 1 inside when a
         // link group spans both cores (limiter.h).

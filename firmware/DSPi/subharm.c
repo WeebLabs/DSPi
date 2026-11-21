@@ -430,7 +430,7 @@ void subharm_process_outputs(const SubharmCoeffs *c, uint16_t mask, uint8_t flag
             subharm_process_block(c, &subharm_output_state[out], NULL,
                                   buf_out[out], NULL, n, phase0, solo);
         } else {
-            subharm_reset_output_state(&subharm_output_state[out]);
+            subharm_park_output_state(&subharm_output_state[out]);
         }
     }
 }

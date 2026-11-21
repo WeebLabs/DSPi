@@ -104,6 +104,50 @@ static uint i2s_instance_count = 0;
 _Static_assert((I2S_RING_FRAMES & (I2S_RING_FRAMES - 1)) == 0,
                "I2S ring frame count must be a power of two");
 
+// Stamp n pad-silence frames at absolute frames [e, e+n), split at the ring
+// wrap into contiguous runs. Always inline: callers run while flash may be unavailable.
+static inline __attribute__((always_inline))
+void i2s_stamp_pad_run(int32_t *ring, uint32_t e, uint32_t n) {
+    while (n) {
+        uint32_t pos = e & I2S_RING_MASK;
+        uint32_t seg = I2S_RING_FRAMES - pos;
+        if (seg > n) seg = n;
+        int32_t *dst = ring + pos * 2u;
+        e += seg;
+        n -= seg;
+        for (; seg; seg--, dst += 2) {
+            dst[0] = (int32_t)I2S_PAD_PATTERN;
+            dst[1] = (int32_t)I2S_PAD_PATTERN;
+        }
+    }
+}
+
+// Stamp n audio frames from interleaved L/R at absolute frames [w, w+n): 24-bit
+// audio at [31:8], pad pattern below so a 32-bit DAC's zero-detect never latches.
+static inline __attribute__((always_inline))
+void i2s_stamp_audio_run(int32_t *__restrict ring, uint32_t w,
+                         const int32_t *__restrict lr, uint32_t n) {
+    while (n) {
+        uint32_t pos = w & I2S_RING_MASK;
+        uint32_t seg = I2S_RING_FRAMES - pos;
+        if (seg > n) seg = n;
+        int32_t *dst = ring + pos * 2u;
+        w += seg;
+        n -= seg;
+        // Pad held in a register so the shift folds into ORR (shifted operand).
+        uint32_t pad = I2S_PAD_PATTERN;
+        __asm__("" : "+r"(pad));
+        int32_t *end = dst + seg * 2u;
+        do {
+            uint32_t l = (uint32_t)lr[0], r = (uint32_t)lr[1];
+            lr += 2;
+            dst[0] = (int32_t)((l << 8) | pad);
+            dst[1] = (int32_t)((r << 8) | pad);
+            dst += 2;
+        } while (dst != end);
+    }
+}
+
 #if !PICO_RP2350
 // Reload source word for the RP2040 free-running pair. Deliberately
 // non-const: the DMA reads it from RAM during flash blackout windows
@@ -232,11 +276,9 @@ void audio_i2s_ring_skip(audio_i2s_instance_t *inst, uint32_t frames) {
     uint32_t target = inst->wr_frames + PICO_AUDIO_I2S_ERASE_AHEAD;
     uint32_t e = inst->erased_frames;
     if ((int32_t)(target - e) > (int32_t)I2S_RING_FRAMES) e = target - I2S_RING_FRAMES;
-    while ((int32_t)(target - e) > 0) {
-        int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
-        dst[0] = (int32_t)I2S_PAD_PATTERN;
-        dst[1] = (int32_t)I2S_PAD_PATTERN;
-        e++;
+    if ((int32_t)(target - e) > 0) {
+        i2s_stamp_pad_run(inst->ring, e, target - e);
+        e = target;
     }
     inst->erased_frames = e;
 }
@@ -251,13 +293,8 @@ void audio_i2s_ring_silence_pump(audio_i2s_instance_t *inst, uint32_t max_frames
     int32_t need = (int32_t)(target - e);
     if (need <= 0) return;
     uint32_t n = ((uint32_t)need > max_frames) ? max_frames : (uint32_t)need;
-    while (n--) {
-        int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
-        dst[0] = (int32_t)I2S_PAD_PATTERN;
-        dst[1] = (int32_t)I2S_PAD_PATTERN;
-        e++;
-    }
-    inst->erased_frames = e;
+    i2s_stamp_pad_run(inst->ring, e, n);
+    inst->erased_frames = e + n;
 }
 
 I2S_TIME_CRITICAL
@@ -281,26 +318,19 @@ void audio_i2s_ring_write_s32(audio_i2s_instance_t *inst,
         return;
     }
 
+    int32_t *ring = inst->ring;
     uint32_t w = inst->wr_frames;
-    for (uint32_t i = 0; i < frames; i++) {
-        int32_t *dst = &inst->ring[(w & I2S_RING_MASK) * 2u];
-        // 24-bit audio at MSB for I2S MSB-first output; pad pattern keeps
-        // 32-bit DAC zero-detect from latching on silence.
-        dst[0] = (lr[i * 2u]      << 8) | I2S_PAD_PATTERN;
-        dst[1] = (lr[i * 2u + 1u] << 8) | I2S_PAD_PATTERN;
-        w++;
-    }
+    i2s_stamp_audio_run(ring, w, lr, frames);
+    w += frames;
     inst->wr_frames = w;
 
     // Signed ordering: raw compares break at the uint32 counter wrap.
     uint32_t e = inst->erased_frames;
     if ((int32_t)(e - w) < 0) e = w;
     uint32_t target = w + PICO_AUDIO_I2S_ERASE_AHEAD;
-    while ((int32_t)(target - e) > 0) {
-        int32_t *dst = &inst->ring[(e & I2S_RING_MASK) * 2u];
-        dst[0] = (int32_t)I2S_PAD_PATTERN;
-        dst[1] = (int32_t)I2S_PAD_PATTERN;
-        e++;
+    if ((int32_t)(target - e) > 0) {
+        i2s_stamp_pad_run(ring, e, target - e);
+        e = target;
     }
     inst->erased_frames = e;
 
