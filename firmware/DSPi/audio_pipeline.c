@@ -285,6 +285,42 @@ uint8_t __not_in_flash_func(active_input_channel_count)(void) {
     return (uint8_t)n;
 }
 
+#if PICO_RP2350
+// RTA taps run before finalization because the ADAT-mode conversion
+// overwrites the float rows. Not inlined: one RAM copy serves all three callers.
+void __noinline DSP_TIME_CRITICAL output_pairs_meter_finalize(int first_pair, int n_pairs,
+                                                   int32_t *const *stage,
+                                                   bool finalize_s24, uint32_t n) {
+    float pk[NUM_SPDIF_INSTANCES * 2];
+    int first = first_pair * 2;
+    int end = first + n_pairs * 2;
+    for (int out = first; out < end; out++) {
+        rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], n);
+        if (finalize_s24)
+            pk[out] = output_block_to_s24_inplace(buf_out[out], n);
+    }
+    for (int p = 0; p < n_pairs; p++) {
+        int l = first + p * 2;
+        int r = l + 1;
+        if (!matrix_mixer.outputs[l].enabled && !matrix_mixer.outputs[r].enabled) {
+            memset(stage[p], 0, n * 8);
+            if (!finalize_s24) {
+                pk[l] = block_peak_abs(buf_out[l], n);
+                pk[r] = block_peak_abs(buf_out[r], n);
+            }
+        } else if (finalize_s24) {
+            output_pair_interleave_s24(stage[p], buf_out[l], buf_out[r], n);
+        } else {
+            output_pair_convert_interleave(stage[p], buf_out[l], buf_out[r], n, &pk[l]);
+        }
+    }
+    for (int out = first; out < end; out++) {
+        global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, pk[out]) * 32767.0f);
+        if (pk[out] > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
+    }
+}
+#endif
+
 // Never inline: a copy inlined into a flash caller (siggen_pump) would run the
 // whole pipeline from XIP, invisible to check_ram_placement.py.
 void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
@@ -418,10 +454,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         if (!is_bypassed && !channel_bypassed[k]) {
             dsp_process_channel_block(filters[k], ibuf, sample_count, k);
         }
-        float pk = 0.0f;
-        for (uint32_t i = 0; i < sample_count; i++) {
-            float a = fabsf(ibuf[i]); if (a > pk) pk = a;
-        }
+        float pk = block_peak_abs(ibuf, sample_count);
         global_status.peaks[k] = (uint16_t)(fminf(1.0f, pk) * 32767.0f);
         if (pk > CLIP_THRESH_F) global_status.clip_flags |= (1u << k);
         rta_tap(RTA_TAP_INPUT, (uint8_t)k, ibuf, sample_count);
@@ -467,10 +500,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         for (int k = 0; k < um_coeffs->n_derived; k++) {
             int row = NUM_STEREO_INPUTS + k;
             const float *dbuf = input_bufs[row];
-            float pk = 0.0f;
-            for (uint32_t i = 0; i < sample_count; i++) {
-                float a = fabsf(dbuf[i]); if (a > pk) pk = a;
-            }
+            float pk = block_peak_abs(dbuf, sample_count);
             global_status.peaks[row] = (uint16_t)(fminf(1.0f, pk) * 32767.0f);
             if (pk > CLIP_THRESH_F) global_status.clip_flags |= (1u << row);
             rta_tap(RTA_TAP_INPUT, (uint8_t)row, dbuf, sample_count);
@@ -695,35 +725,12 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
             }
         }
 
-        // Core 0: Peaks for outputs 0..CORE1_EQ_FIRST_OUTPUT-1
-        for (int out = 0; out < CORE1_EQ_FIRST_OUTPUT; out++) {
-            float peak = 0;
-            for (uint32_t i = 0; i < sample_count; i++) {
-                float a = fabsf(buf_out[out][i]);
-                if (a > peak) peak = a;
-            }
-            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
-            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
-            rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
-        }
         // PDM is inactive in EQ_WORKER mode
         global_status.peaks[CH_OUT_SUB] = 0;
 
-        // Core 0: finalize outputs 0-1 (see output_s24.h).  ADAT active:
-        // convert to S24 in place first, so ADAT always sees converted
-        // samples; otherwise fuse convert+interleave and skip the in-place
-        // pass.  Then S/PDIF pair 0.
-        if (finalize_s24) {
-            output_block_to_s24_inplace(buf_out[0], sample_count);
-            output_block_to_s24_inplace(buf_out[1], sample_count);
-        }
-        if (!matrix_mixer.outputs[0].enabled && !matrix_mixer.outputs[1].enabled) {
-            memset(slot_stage[0], 0, sample_count * 8);
-        } else if (finalize_s24) {
-            output_pair_interleave_s24(slot_stage[0], buf_out[0], buf_out[1], sample_count);
-        } else {
-            output_pair_convert_interleave(slot_stage[0], buf_out[0], buf_out[1], sample_count);
-        }
+        // Core 0: meter + finalize S/PDIF pair 0 (outputs 0-1).
+        int32_t *const stage0[1] = { slot_stage[0] };
+        output_pairs_meter_finalize(0, 1, stage0, finalize_s24, sample_count);
 
         // Wait for Core 1 (EQ + delay + S/PDIF for outputs 2-7)
         while (!core1_eq_work.work_done) {
@@ -836,46 +843,15 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
             delay_write_idx = (delay_write_idx + sample_count) & MAX_DELAY_MASK;
         }
 
-        // Peaks for all SPDIF outputs
-        for (int out = 0; out < NUM_SPDIF_INSTANCES * 2; out++) {
-            float peak = 0;
-            for (uint32_t i = 0; i < sample_count; i++) {
-                float a = fabsf(buf_out[out][i]);
-                if (a > peak) peak = a;
-            }
-            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
-            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
-            rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
-        }
-
-        // Finalize outputs 0-7 (see output_s24.h).  ADAT active: convert to
-        // S24 in place first, so ADAT always sees converted samples; otherwise
-        // fuse convert+interleave per pair and skip the in-place pass.
-        if (finalize_s24) {
-            for (int out = 0; out < NUM_SPDIF_INSTANCES * 2; out++)
-                output_block_to_s24_inplace(buf_out[out], sample_count);
-        }
-        for (int pair = 0; pair < 4; pair++) {
-            int left_ch = pair * 2;
-            int right_ch = pair * 2 + 1;
-            if (!matrix_mixer.outputs[left_ch].enabled && !matrix_mixer.outputs[right_ch].enabled) {
-                memset(slot_stage[pair], 0, sample_count * 8);
-                continue;
-            }
-            int32_t *out_ptr = slot_stage[pair];
-            if (finalize_s24)
-                output_pair_interleave_s24(out_ptr, buf_out[left_ch], buf_out[right_ch], sample_count);
-            else
-                output_pair_convert_interleave(out_ptr, buf_out[left_ch], buf_out[right_ch], sample_count);
-        }
+        // Meter + finalize all S/PDIF pairs (outputs 0-7).
+        int32_t *const stage_all[NUM_SPDIF_INSTANCES] = {
+            slot_stage[0], slot_stage[1], slot_stage[2], slot_stage[3] };
+        output_pairs_meter_finalize(0, NUM_SPDIF_INSTANCES, stage_all,
+                                    finalize_s24, sample_count);
 
 #if ENABLE_SUB
         if (matrix_mixer.outputs[NUM_OUTPUT_CHANNELS-1].enabled) {
-            float peak_sub = 0;
-            for (uint32_t i = 0; i < sample_count; i++) {
-                float abs_sub = fabsf(buf_out[NUM_OUTPUT_CHANNELS-1][i]);
-                if (abs_sub > peak_sub) peak_sub = abs_sub;
-            }
+            float peak_sub = block_peak_abs(buf_out[NUM_OUTPUT_CHANNELS-1], sample_count);
             global_status.peaks[CH_OUT_SUB] = (uint16_t)(fminf(1.0f, peak_sub) * 32767.0f);
             if (peak_sub > CLIP_THRESH_F) global_status.clip_flags |= (1u << CH_OUT_SUB);
             rta_tap(RTA_TAP_OUTPUT, NUM_OUTPUT_CHANNELS - 1, buf_out[NUM_OUTPUT_CHANNELS-1], sample_count);

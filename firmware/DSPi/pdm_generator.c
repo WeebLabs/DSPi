@@ -9,7 +9,7 @@
 #include "siggen.h"     // siggen_raw_mask: per-output EQ bypass in RAW mode
 #include "tube.h"
 #include "limiter.h"
-#include "output_s24.h" // RP2350 EQ worker: in-place S24 finalization
+#include "audio_pipeline.h" // output_pairs_meter_finalize
 #include "audio_clock_div.h"
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
@@ -705,44 +705,11 @@ static void __not_in_flash_func(eq_worker_loop)() {
             }
         }
 
-        // Peak metering for Core 1 outputs
-        for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++) {
-            float peak = 0;
-            for (uint32_t i = 0; i < sample_count; i++) {
-                float a = fabsf(buf_out[out][i]);
-                if (a > peak) peak = a;
-            }
-            global_status.peaks[CH_OUT_1 + out] = (uint16_t)(fminf(1.0f, peak) * 32767.0f);
-            if (peak > CLIP_THRESH_F) global_status.clip_flags |= (1u << (CH_OUT_1 + out));
-            rta_tap(RTA_TAP_OUTPUT, (uint8_t)out, buf_out[out], sample_count);
-        }
-
-        // Finalize Core 1's outputs (see output_s24.h), using Core 0's
-        // per-packet mode snapshot so both cores agree.  ADAT active:
-        // convert rows 2-7 to S24 in place first, so ADAT always sees
-        // converted samples; otherwise fuse
-        // convert+interleave per pair.  Then interleave pairs 1-3.
-        bool finalize_s24 = core1_eq_work.finalize_s24 != 0;
-        if (finalize_s24) {
-            for (int out = CORE1_EQ_FIRST_OUTPUT; out <= CORE1_EQ_LAST_OUTPUT; out++)
-                output_block_to_s24_inplace(buf_out[out], sample_count);
-        }
-        for (int p = 0; p < 3; p++) {
-            int32_t *out_ptr = core1_eq_work.spdif_out[p];
-            int left_out = CORE1_EQ_FIRST_OUTPUT + p * 2;
-            int right_out = left_out + 1;
-            if (!matrix_mixer.outputs[left_out].enabled &&
-                !matrix_mixer.outputs[right_out].enabled) {
-                memset(out_ptr, 0, sample_count * 8);
-                continue;
-            }
-            if (finalize_s24)
-                output_pair_interleave_s24(out_ptr, buf_out[left_out],
-                                           buf_out[right_out], sample_count);
-            else
-                output_pair_convert_interleave(out_ptr, buf_out[left_out],
-                                               buf_out[right_out], sample_count);
-        }
+        // Meter + finalize pairs 1-3 (outputs 2-7), using Core 0's
+        // per-packet finalize mode snapshot so both cores agree.
+        output_pairs_meter_finalize(CORE1_EQ_FIRST_OUTPUT / 2, 3,
+                                    core1_eq_work.spdif_out,
+                                    core1_eq_work.finalize_s24 != 0, sample_count);
 
         uint32_t work_end = time_us_32();
 
