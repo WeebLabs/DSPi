@@ -1,6 +1,6 @@
 # Upmixer v2 Implementation Plan
 
-*2026-11-22 (revised the same day for the one-engine design). Implements `upmixer_v2_spec.md`. Phases 0 to 5 done. RP2350 only, except phase 7.*
+*2026-11-22 (revised the same day for the one-engine design). Implements `upmixer_v2_spec.md`. Phases 0 to 5 done; phase 6 done on the loopback rig except the wirecap items. RP2350 only, except phase 7.*
 
 Each phase builds on both platforms, keeps the tree releasable, and ends with the `tools/upmix_proto` harness passing where the engine is touched. Architecture doc updates follow `CLAUDE.md`.
 
@@ -66,7 +66,19 @@ Result: as planned, with one change. `VC_SET_MAX` is 64 bytes (reported in `SYS.
 - Docs: `commands.md` (rule 3 clause, FX preamble, command rows), `upmixer_spec.md` rewritten from the v2 spec, and `current_architecture.md` (pipeline order, memory layout, vendor command table).
 - Test: save on v1 firmware, load on v2, and compare the migrated routes with the expected table for representative presets (LCR, 5.1, surrounds only, sub on L+R, phantom fold).
 
-## Phase 6: Hardware bench pass
+## Phase 6: Hardware bench pass (loopback part done 2026-11-22)
+
+Result: run as a loopback bench instead of a listening session, `tools/dspi_test/tests/audio_upmix.py` (group `audio`, 48 kHz, RP2350 `DSPI_LOOPBACK` build). The tap carries one output pair, so each scenario routes the channels it checks onto that pair; expected values are the engine equations. All six pass, and the whole `audio` group passes 197 of 199 (the two failures are the long-standing `subharm_octave` at both rates).
+- Passive engines: A'/B' at 0.625 and 0.375 and C, SA, SB, BA at 0.7071 of two uncorrelated tones, every one within 0.3 dB (levels by least-squares tone fit).
+- Adaptive engines: centred tone C +3.01 dB and A' -12.04 dB; left-only and antiphase tones keep C below -40 dB and A' at 0 dB; uncorrelated noise gives C nothing, SA -9.4, SB -9.3 and BA -9.3 dB re input.
+- Timing: A', C and the plain matrix at 0 samples apart; SA 1056 samples after A' at a 12 ms delay and 720 at 5 ms (Haas plus the 10 ms allpass main tap); each back channel 97 samples (2.02 ms) after its side.
+- Fades: enable, route add and remove, trim, polarity, a live profile change, a source edit, the back pair start and centre mode changes, each three times during a two-tone stream. Every path stays within 3 dB of an ideal 10 ms linear fade's own splatter above 5 kHz (-72.8 dBFS) or at the -98 dBFS floor, and at least 40 dB under a hard matrix toggle (-20 to -33 dBFS, the control that proves the metric bites).
+- Use cases: vocal reduction removes a centred tone completely while a panned tone passes at 0 dB; dialogue lift raises a centred tone +4.65 dB and leaves panned content alone; centre fill puts C (+3.01 dB) on its output and leaves the other untouched.
+- Two profiles: a 6-channel USB stream (selected through the new CoreAudio physical-format helper in `coreaudio.py`) runs profile 1 on inputs 5/6 (A' and B' at -4.08 dB, input 1's matrix row kept on the claimed output, profile 0's centre absent); a stereo stream runs profile 0.
+- Preset migration on a real v1 preset and the CPU figures were done in phases 4 and 5.
+
+Not covered by the loopback, still open: inter-slot alignment across separate S/PDIF and I2S instances (wirecap rig), and a listen at stream start.
+
 
 - Stereo to 5.1, stereo to 7.1 (back pair), 5.1 to 7.1 (6-channel USB), LCR, centre fill, dialogue lift, and a two-profile preset switching between stereo and 6-channel sources.
 - Inter-slot alignment check with the wirecap rig across enable, disable, mask edits, profile changes, source switches and preset loads.

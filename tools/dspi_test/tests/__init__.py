@@ -30,3 +30,4 @@ from . import paged_diag      # noqa: F401
 from . import paged_page0     # noqa: F401
 from . import paged_pins      # noqa: F401
 from . import audio_loopback  # noqa: F401  (group "audio"; opt-in via --audio)
+from . import audio_upmix     # noqa: F401  (group "audio": upmixer loopback bench)
