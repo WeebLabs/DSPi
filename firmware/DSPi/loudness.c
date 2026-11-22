@@ -2,6 +2,7 @@
 #include <string.h>
 #include "loudness.h"
 #include "bg_job.h"
+#include "dsp_svf.h"
 
 // Live pair plus spare: a compute writes the pair not published.  Why two are
 // enough: current_architecture.md "Loudness Compensation".
@@ -92,8 +93,9 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
     if (fabsf(gain_db) < 0.01f) {
         out->bypass = true;
 #if PICO_RP2350
-        out->sva1 = 0.0f; out->sva2 = 0.0f; out->sva3 = 0.0f;
-        out->svm0 = 0.0f; out->svm1 = 0.0f; out->svm2 = 0.0f;
+        // Identity (y = x, state stays zero) so the RP2350 kernel can run it fused with its partner.
+        out->sva1 = 0.0f; out->sva2 = 0.0f; out->g = 0.0f;
+        out->svm0 = 1.0f; out->svm1 = 0.0f; out->svm2 = 0.0f;
 #else
         out->b0 = 1 << FILTER_SHIFT; out->b1 = 0; out->b2 = 0;
         out->a1 = 0; out->a2 = 0;
@@ -120,7 +122,7 @@ static void compute_shelf_coeffs(float freq, float Q, float gain_db,
 
     out->sva1 = 1.0f / (1.0f + g * (g + k));
     out->sva2 = g * out->sva1;
-    out->sva3 = g * out->sva2;
+    out->g = g;
 
     if (is_high_shelf) {
         out->svm0 = A * A;
@@ -249,3 +251,34 @@ void loudness_update_now(bool enabled, uint8_t vol_index, float ref_spl, float i
     bg_job_cancel(&update_job);
     compute_and_publish();
 }
+
+#if PICO_RP2350
+// Half-state SVF shelf arms from dsp_svf.h, both shelves fused per sample; state keeps its standard meaning.
+#define LOUD_SECTION(lc, st, n) \
+    const float A1_##n = (lc)->sva1 + (lc)->sva1, a2_##n = (lc)->sva2, g_##n = (lc)->g; \
+    const float m0_##n = (lc)->svm0, m1_##n = (lc)->svm1, m2_##n = (lc)->svm2; \
+    float h1_##n = 0.5f * (st)->ic1eq, ic2_##n = (st)->ic2eq; \
+    float v1_##n, v2_##n, v3_##n, gv_##n
+#define LOUD_STORE(st, n) (st)->ic1eq = h1_##n + h1_##n; (st)->ic2eq = ic2_##n
+
+DSP_TIME_CRITICAL
+void loudness_process_output_block(const LoudnessCoeffs * __restrict lc_arr,
+                                   LoudnessOutputState * __restrict st_out,
+                                   float * __restrict buf, uint32_t n) {
+    _Static_assert(LOUDNESS_BIQUAD_COUNT == 2, "kernel fuses exactly two shelves");
+    const LoudnessCoeffs *l0 = &lc_arr[0], *l1 = &lc_arr[1];
+    LoudnessSvfState *s0 = &st_out->f[0], *s1 = &st_out->f[1];
+    float x, y, z;
+    if (l0->bypass) { s0->ic1eq = 0.0f; s0->ic2eq = 0.0f; }
+    if (l1->bypass) { s1->ic1eq = 0.0f; s1->ic2eq = 0.0f; }
+    if (l0->bypass && l1->bypass) return;
+    // A bypassed shelf carries identity coefficients and zero state, so it passes x through exactly.
+    LOUD_SECTION(l0, s0, 0); LOUD_SECTION(l1, s1, 1);
+    // 2x unroll: 4x measured about 14 % faster but costs 456 B of .data the budget does not have.
+    for (uint32_t i = 0; i + 2 <= n; i += 2) {
+        SVF_S2(buf[i], SVF_SHELF, SVF_SHELF) SVF_S2(buf[i + 1], SVF_SHELF, SVF_SHELF)
+    }
+    if (n & 1) SVF_S2(buf[n - 1], SVF_SHELF, SVF_SHELF)
+    LOUD_STORE(s0, 0); LOUD_STORE(s1, 1);
+}
+#endif

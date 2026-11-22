@@ -13,11 +13,16 @@ void bg_job_register(BgJob *j) { job = j; }
 static int fails, checks;
 #define CHECK(c, ...) do { checks++; if (!(c)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
 
+// a is the live build, b the reference. The reference's g field holds its old sva3 = g*sva2 (ref_tu.c).
 static bool same(const LoudnessCoeffs *a, const LoudnessCoeffs *b) {
     for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
 #if PICO_RP2350
-        float x[6] = { a[j].sva1, a[j].sva2, a[j].sva3, a[j].svm0, a[j].svm1, a[j].svm2 };
-        float y[6] = { b[j].sva1, b[j].sva2, b[j].sva3, b[j].svm0, b[j].svm1, b[j].svm2 };
+        if (a[j].bypass || b[j].bypass) {     // the live build stores identity coefficients for a bypassed shelf
+            if (a[j].bypass != b[j].bypass) return false;
+            continue;
+        }
+        float x[6] = { a[j].sva1, a[j].sva2, a[j].g * a[j].sva2, a[j].svm0, a[j].svm1, a[j].svm2 };
+        float y[6] = { b[j].sva1, b[j].sva2, b[j].g, b[j].svm0, b[j].svm1, b[j].svm2 };
 #else
         int32_t x[5] = { a[j].b0, a[j].b1, a[j].b2, a[j].a1, a[j].a2 };
         int32_t y[5] = { b[j].b0, b[j].b1, b[j].b2, b[j].a1, b[j].a2 };

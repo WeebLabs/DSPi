@@ -31,6 +31,8 @@ add_executable(DSPi
     audio_clock_div.h
     audio_pipeline.c
     audio_pipeline.h
+    matrix_mix.c
+    matrix_mix.h
     bg_job.c
     bg_job.h
     bulk_params.c
@@ -202,6 +204,10 @@ else()
     set_source_files_properties(rta_bass.c PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off")
     # Float FFT kernel: same rule (butterflies and window are short multiply-add chains).
     set_source_files_properties(rta_fft.c PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off")
+    # Matrix kernel: own TU so editing it cannot reschedule process_input_block().
+    set_source_files_properties(matrix_mix.c PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off")
+    # Loudness and psybass hold the out-of-line SVF kernels both cores call; same FP-contraction rule.
+    set_source_files_properties(loudness.c psybass.c PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off")
 endif()
 # PICO_FLASH_SPI_CLKDIV=6 is set at the top-level CMakeLists so it reaches
 # the boot2 build (target-level defines don't propagate to it).

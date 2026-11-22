@@ -740,7 +740,9 @@ extern volatile SystemStatusPacket global_status;
 // placement is the load-bearing RAM-residency mechanism on both platforms;
 // without it these functions would run from flash and stall the audio path.
 // ----------------------------------------------------------------------------
+#ifndef DSP_TIME_CRITICAL   // host test builds define it empty
 #define DSP_TIME_CRITICAL __attribute__((section(".time_critical")))
+#endif
 
 // ----------------------------------------------------------------------------
 // UTILS

@@ -20,7 +20,7 @@
 // Coefficients-only struct (state lives separately per output channel)
 #if PICO_RP2350
 typedef struct {
-    float sva1, sva2, sva3;    // SVF integrator coefficients
+    float sva1, sva2, g;       // SVF integrator coefficients and g, for the half-state kernel
     float svm0, svm1, svm2;    // SVF output mix coefficients (shelf: general formula)
     bool bypass;
 } LoudnessCoeffs;
@@ -62,33 +62,14 @@ static inline void loudness_reset_output_state(LoudnessOutputState *st) {
     }
 }
 
-// Run the loudness shelf cascade over one output's block, in place.
-// Filter-major order: each shelf processes the whole block before the next,
-// which is equivalent to the per-sample cascade for LTI filters and cheaper.
-// A bypassed shelf (0 dB at this volume step) clears its state and costs
-// nothing.  Callers are RAM-resident; this inlines into them.
+// Run the loudness shelf cascade over one output's block, in place; a bypassed
+// shelf (0 dB at this volume step) clears its state.  RP2350: one out-of-line
+// copy in loudness.c serves both cores, shelves fused per sample.  RP2040:
+// inline, filter-major (each shelf sweeps the block before the next).
 #if PICO_RP2350
-static inline void loudness_process_output_block(const LoudnessCoeffs * __restrict lc_arr,
-                                                 LoudnessOutputState * __restrict st_out,
-                                                 float * __restrict buf, uint32_t n) {
-    for (int j = 0; j < LOUDNESS_BIQUAD_COUNT; j++) {
-        const LoudnessCoeffs *lc = &lc_arr[j];
-        LoudnessSvfState *st = &st_out->f[j];
-        if (lc->bypass) { st->ic1eq = 0.0f; st->ic2eq = 0.0f; continue; }
-        float ic1 = st->ic1eq, ic2 = st->ic2eq;
-        for (uint32_t i = 0; i < n; i++) {
-            float x = buf[i];
-            float v3 = x - ic2;
-            float v1 = lc->sva1 * ic1 + lc->sva2 * v3;
-            float v2 = ic2 + lc->sva2 * ic1 + lc->sva3 * v3;
-            ic1 = 2.0f * v1 - ic1;
-            ic2 = 2.0f * v2 - ic2;
-            buf[i] = lc->svm0 * x + lc->svm1 * v1 + lc->svm2 * v2;
-        }
-        st->ic1eq = ic1;
-        st->ic2eq = ic2;
-    }
-}
+void loudness_process_output_block(const LoudnessCoeffs * __restrict lc_arr,
+                                   LoudnessOutputState * __restrict st_out,
+                                   float * __restrict buf, uint32_t n);
 #else
 static inline void loudness_process_output_block(const LoudnessCoeffs * __restrict lc_arr,
                                                  LoudnessOutputState * __restrict st_out,

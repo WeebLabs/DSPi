@@ -71,8 +71,8 @@ typedef struct {
 // Coefficients-only struct (state lives separately per output channel)
 #if PICO_RP2350
 typedef struct {
-    float lp_a1, lp_a2, lp_a3;          // split lowpass, TPT SVF at cutoff
-    float hp_a1, hp_a2, hp_a3, hp_k;    // harmonic highpass, TPT SVF at cutoff
+    float lp_a1, lp_a2, lp_g;           // split lowpass, TPT SVF at cutoff (g for the half-state kernel)
+    float hp_a1, hp_a2, hp_g, hp_k;     // harmonic highpass, TPT SVF at cutoff
     float hl_a0, hl_b1;                 // harmonic one-pole lowpass at 4x cutoff
     float drive;                        // linear odd-path pre-clip drive
     float even_w, odd_w;                // NLD blend weights
@@ -134,52 +134,12 @@ void psybass_compute_coefficients(PsybassCoeffs *coeffs, const PsybassConfig *co
 void psybass_apply_config(const PsybassConfig *config, float sample_rate);
 
 // Run the effect over one output's block, in place.  Sample-major single
-// pass: no scratch buffer, so it is safe on either core's stack.  Callers
-// are RAM-resident; this inlines into them.
+// pass: no scratch buffer, so it is safe on either core's stack.  RP2350: one
+// out-of-line RAM copy in psybass.c serves both cores.
 #if PICO_RP2350
-static inline void psybass_process_output_block(const PsybassCoeffs * __restrict c,
-                                                PsybassOutputState * __restrict st,
-                                                float * __restrict buf, uint32_t n) {
-    float lp_ic1 = st->lp_ic1, lp_ic2 = st->lp_ic2;
-    float hp_ic1 = st->hp_ic1, hp_ic2 = st->hp_ic2;
-    float hl = st->hl_state;
-
-    for (uint32_t i = 0; i < n; i++) {
-        float x = buf[i];
-
-        // Low-band split: TPT SVF, lowpass output = v2
-        float v3 = x - lp_ic2;
-        float v1 = c->lp_a1 * lp_ic1 + c->lp_a2 * v3;
-        float v2 = lp_ic2 + c->lp_a2 * lp_ic1 + c->lp_a3 * v3;
-        lp_ic1 = 2.0f * v1 - lp_ic1;
-        lp_ic2 = 2.0f * v2 - lp_ic2;
-        float low = v2;
-
-        // NLD: even harmonics from rectification, odd from the cubic clipper
-        float even = fabsf(low);
-        float d = c->drive * low;
-        if (d > 1.0f) d = 1.0f; else if (d < -1.0f) d = -1.0f;
-        float odd = d * (1.5f - 0.5f * d * d);
-        float h = c->even_w * even + c->odd_w * odd;
-
-        // Harmonic shaping: SVF highpass at cutoff (hp = x - k*v1 - v2)
-        v3 = h - hp_ic2;
-        v1 = c->hp_a1 * hp_ic1 + c->hp_a2 * v3;
-        v2 = hp_ic2 + c->hp_a2 * hp_ic1 + c->hp_a3 * v3;
-        hp_ic1 = 2.0f * v1 - hp_ic1;
-        hp_ic2 = 2.0f * v2 - hp_ic2;
-        float hpo = h - c->hp_k * v1 - v2;
-
-        // One-pole lowpass caps harmonic brightness
-        hl = c->hl_a0 * hpo + c->hl_b1 * hl;
-
-        buf[i] = x + c->orig_delta * low + c->harm_gain * hl;
-    }
-
-    st->lp_ic1 = lp_ic1; st->lp_ic2 = lp_ic2;
-    st->hp_ic1 = hp_ic1; st->hp_ic2 = hp_ic2;
-    st->hl_state = hl;
-}
+void psybass_process_output_block(const PsybassCoeffs * __restrict c,
+                                  PsybassOutputState * __restrict st,
+                                  float * __restrict buf, uint32_t n);
 #else
 static inline void psybass_process_output_block(const PsybassCoeffs * __restrict c,
                                                 PsybassOutputState * __restrict st,

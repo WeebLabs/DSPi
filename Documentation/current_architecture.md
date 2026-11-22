@@ -57,7 +57,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 ---
 
 ## Source File Map
-*Last updated: 2026-11-16 (phase 5: bg_job counter read through `SYS.PIPELINE_STATS`). Previously 2026-11-16 (vendor protocol flip: `vendor_commands.c/.h` deleted, `vendor/` is the whole vendor protocol); 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c); 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
+*Last updated: 2026-11-22 (`matrix_mix.c/h` added; loudness and psybass kernels out of line in their `.c` files). Previously 2026-11-16 (phase 5: bg_job counter read through `SYS.PIPELINE_STATS`). Previously 2026-11-16 (vendor protocol flip: `vendor_commands.c/.h` deleted, `vendor/` is the whole vendor protocol); 2026-11-16 (loop profiler read through the DIAG page; vendor/ paged dispatcher directory; pin helpers moved out of vendor_commands.c); 2026-11-01 (input_source_names.c also stages the board name); 2026-10-31 (input source names module added); 2026-09-20 (tube preamp output stage is a damping-factor bell plus shelf; 2026-09-18: tube preamp module added)*
 
 ### Core Firmware (`firmware/DSPi/`)
 
@@ -69,6 +69,8 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `tusb_config.h` | TinyUSB configuration (disables built-in classes; UAC1 handled by custom driver) |
 | `audio_pipeline.c` | Input-agnostic DSP pipeline (`process_input_block`): loudness, EQ, leveller, matrix mixer, per-output-pair crossfeed, per-output EQ/gain/delay, output encoding, buffer stats |
 | `audio_pipeline.h` | Pipeline entry point, shared buffer declarations (`buf_l`/`buf_r`/`buf_out`), buffer stats API |
+| `matrix_mix.c` | RP2350 only: the out-of-line, RAM-resident matrix kernel `matrix_mix_output()`, built `-O3 -ffp-contract=off` (2026-11-22). See "Matrix Mixer" |
+| `matrix_mix.h` | Matrix kernel declaration and its `always_inline` body (`matrix_mix_kernel()`), kept in the header so `tools/matrix_mix_test` compiles the same code |
 | `vendor/` | The vendor protocol, on every transport. `vc_usb.c` is the EP0 front end: it overrides TinyUSB's `tud_vendor_control_xfer_cb`, serves the MS OS 2.0 descriptor set, and refuses page 0. `vc_core.*` holds the table types, lookup, validation and dispatch, and the UART/I2C entry points (`vc_ctrl.h`). `vc_bulk.c` owns the bulk-buffer lock, bulk routing and the USB chunk sessions. `vc_pins.*` holds the pin validation helpers and `vc_ids.h` the command ID constants. Each page is `pages/<mnem>.def` plus `vc_page_<mnem>.c`. See "Vendor Protocol". |
 | `dsp_pipeline.c` | Biquad coefficient computation, filter management |
 | `dsp_pipeline.h` | Filter storage declarations, delay line API |
@@ -77,7 +79,7 @@ DSPi is a USB Audio Class 1 (UAC1) digital signal processor built on the Raspber
 | `pdm_generator.h` | PDM API, ring buffer communication |
 | `crossfeed.c` | BS2B crossfeed filter (lowpass + allpass for ILD/ITD), per-output-pair dispatch + shared double-buffered coeffs |
 | `crossfeed.h` | Crossfeed API, presets, `CrossfeedConfig`/`CrossfeedCoeffs`/`CrossfeedPairState` structs |
-| `loudness.c` | ISO 226:2003 loudness curve computation, current volume step only, live pair + spare (2026-11-20) |
+| `loudness.c` | ISO 226:2003 loudness curve computation, current volume step only, live pair + spare (2026-11-20); RP2350 shelf kernel `loudness_process_output_block()` (2026-11-22) |
 | `loudness.h` | Loudness API, coefficient structs |
 | `leveller.c` | Volume leveller (feedforward RMS compressor) |
 | `leveller.h` | Volume leveller API, state/config structs |
@@ -146,6 +148,7 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 **Optimization levels:**
 - General code: `-O2`
 - DSP-critical files (`dsp_pipeline.c`, `usb_audio.c`, `crossfeed.c`, `loudness.c`, `audio_pipeline.c`, `leveller.c`): `-O3`
+- `-O3 -ffp-contract=off` (no fused multiply-add): `dsp_pipeline.c`, `subharm.c`, `tube.c` on both platforms; `rta_bass.c`, `rta_fft.c`, `matrix_mix.c`, `loudness.c`, `psybass.c` on RP2350 only. See "FP contraction" under Hybrid SVF/Biquad Filtering
 
 **Platform-specific sources:**
 - RP2040: Includes `dsp_process_rp2040.S` (hand-coded biquad assembly)
@@ -473,7 +476,7 @@ The DSP pipeline is decoupled from USB audio transfer completion via a lock-free
 The `process_input_block()` function reads from `buf_l[]`/`buf_r[]` arrays (extern, defined in `audio_pipeline.c`, filled by the input decode stage). This separation enables future alternative input sources (S/PDIF, I2S) to fill the same buffers and call `process_input_block()` directly. Buffer statistics helpers (`get_slot_consumer_fill()`, `get_slot_consumer_stats()`, `reset_buffer_watermarks()`) also live in `audio_pipeline.c`.
 
 ### RP2350 Float Pipeline
-*Last updated: 2026-11-21 (output metering row: peaks taken inside the finalize pass; peak loops use VMAXNM). Previously 2026-10-10 (delay row: ring size and cap; 2026-09-22: output limiter row; 2026-08-01: upmixer centre engine gains an OFF mode)*
+*Last updated: 2026-11-22 (matrix mixing row: fused per-output kernel). Previously 2026-11-21 (output metering row: peaks taken inside the finalize pass; peak loops use VMAXNM). Previously 2026-10-10 (delay row: ring size and cap; 2026-09-22: output limiter row; 2026-08-01: upmixer centre engine gains an OFF mode)*
 
 All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filtering (SVF for bands below Fs/7.5, TDF2 biquad above).
 
@@ -483,7 +486,7 @@ All processing in IEEE 754 single-precision float. Hybrid SVF/biquad EQ filterin
 | Per-Input EQ + metering | Per active input: block-based `dsp_process_channel_block()`, 10 bands, hybrid SVF/biquad; then peak/clip into `peaks[k]`/`clip_flags` via `block_peak_abs()` |
 | Volume Leveller | Upward RMS compressor over active inputs (2 to 8), mask-driven detector/apply link, smoothed peak limiter on the boost, 5 ms per-channel lookahead (float throughout) |
 | Stereo Upmixer | Stereo input only: derives Centre/Ls/Rs into matrix source rows 2..4 and removes centre from L/R (nothing removed with the centre engine OFF, leaving L/R bit-exact); raises the matrix source count to 3 or 5. Parks in multichannel modes. Zero-latency steering; deliberate identical-per-row surround Haas delay (see "Stereo Upmixer") |
-| Matrix mixing | Block-based: 2 inputs × 9 outputs (8 inputs in 8-channel USB mode, or 3/5 sources with the upmixer active) with gain/phase (loudness now per-output post-gain; leveller still runs) |
+| Matrix mixing | Block-based: 2 inputs × 9 outputs (8 inputs in 8-channel USB mode, or 3/5 sources with the upmixer active) with gain/phase, one fused pass per output in `matrix_mix_output()` (2026-11-22, see "Matrix Mixer") (loudness now per-output post-gain; leveller still runs) |
 | Crossfeed | BS2B lowpass + allpass (ILD + ITD) per output pair, post-matrix (PASS 4.5), pre-output-EQ; `output_pair_mask`-selected (up to 4 pairs); works in every input mode |
 | Output EQ | Block-based, 10 bands per output (Core 0: outputs 0-1, Core 1: outputs 2-7) |
 | Output gain | Per-output gain × host volume × master volume |
@@ -831,9 +834,9 @@ RP2040 is unaffected: its band-major assembly kernels (`dsp_process_rp2040.S`) a
 
 **FPU configuration (RP2350):** Both cores set FPSCR flush-to-zero (FZ) and default-NaN (DN) bits at startup. This prevents denormalized floats from causing performance penalties as SVF integrator and biquad states decay toward zero after silence.
 
-**FP contraction (added 2026-08-05, RP2350 only):** `dsp_pipeline.c` is compiled with `-ffp-contract=off`, so the EQ kernels use separate VMUL/VADD instead of fused VFMA. Hardware measurement on the CPU meter established that the M33 FMA pipeline is throughput-bound with an effective VFMA occupancy of roughly 2 to 2.5 cycles versus 1 for VMUL/VADD: de-contraction emits ~58 % more FP instructions (and eliminates the VMOV accumulator copies VFMA's destructive form forces) yet measures 14 to 24 % less EQ cost on every kernel path, SVF and biquad alike, with no register spills. Loads/stores already overlap FPU issue, so FP-op *occupancy* is the only currency that matters in these loops. That is why the fused kernel only became worthwhile once its arms were specialized to match the single kernels' op counts (above): while it used the generic 9-op form it was giving back most of what the saved memory traffic won. Precision cost of double rounding is negligible and was verified on hardware: loopback THD, noise floor, and flat-path residual byte-identical to the contracted build, filter responses within 0.01 dB, and host analysis puts the noise penalty at ~1.5 dB on a −137 dB re-signal error floor. The flag is per-file: other DSP translation units (loudness, psybass, leveller, crossfeed, upmix) still contract and are candidates for the same measure-then-decide treatment. `subharm.c` (added 2026-09-02) also compiles with `-ffp-contract=off`: a static count of its kernel loop shows FMAs 70 to 0, VMOV accumulator copies 25 to 4, FP instructions 109 to 175, and an occupancy-weighted estimate about 9 % fewer cycles per sample; the hardware CPU-meter confirmation is still pending. `tube.c` (added 2026-09-18) compiles with `-O3 -ffp-contract=off` on the same static-estimate basis as `subharm.c`, and is likewise unmeasured on the CPU meter. `rta_bass.c` (added 2026-09-12) and `rta_fft.c` (added 2026-11-20, static count only, CPU meter unmeasured) compile with `-O3 -ffp-contract=off` on RP2350 only. Its float bass kernel goes from 8 fused multiply-adds to none, at a cost of 256 B of RAM code, and the speed gain is unmeasured (`RtaStatus.bass_busy_us_per_s`). RP2040 keeps `-O2`: its fixed-point kernel has no FP ops, and `-O3` only unrolled the loops for 1.6 KB more RAM code.
+**FP contraction (added 2026-08-05, RP2350 only):** `dsp_pipeline.c` is compiled with `-ffp-contract=off`, so the EQ kernels use separate VMUL/VADD instead of fused VFMA. Hardware measurement on the CPU meter established that the M33 FMA pipeline is throughput-bound with an effective VFMA occupancy of roughly 2 to 2.5 cycles versus 1 for VMUL/VADD: de-contraction emits ~58 % more FP instructions (and eliminates the VMOV accumulator copies VFMA's destructive form forces) yet measures 14 to 24 % less EQ cost on every kernel path, SVF and biquad alike, with no register spills. Loads/stores already overlap FPU issue, so FP-op *occupancy* is the only currency that matters in these loops. That is why the fused kernel only became worthwhile once its arms were specialized to match the single kernels' op counts (above): while it used the generic 9-op form it was giving back most of what the saved memory traffic won. Precision cost of double rounding is negligible and was verified on hardware: loopback THD, noise floor, and flat-path residual byte-identical to the contracted build, filter responses within 0.01 dB, and host analysis puts the noise penalty at ~1.5 dB on a −137 dB re-signal error floor. The flag is per-file: leveller, crossfeed and upmix still contract and are candidates for the same measure-then-decide treatment. *(2026-11-22)* `matrix_mix.c`, `loudness.c` and `psybass.c` compile with `-O3 -ffp-contract=off` on RP2350, measured with a bench-only DWT profiler around each stage (48 kHz, 307.2 MHz, both cores, `bench_results/matrix_fp_2026-11-22/`). Loudness and psybass were `static inline` and expanded three times (twice in `process_input_block()`, once in the Core 1 worker in `pdm_generator.c`); each is now one out-of-line copy in its own `.c`. Moving them out of line alone changed their cost by under 3 %. De-contracting cut loudness 16 to 19 % and psybass 17 to 20 % on both cores. The half-state SVF rewrite then took loudness a further 36 % (with both shelves fused per sample) and psybass a further 6 %. Net per output-sample, old to new: loudness 62 to 39 cycles, psybass 84 to 63, Core 1 work in the 8-output config -22 %, Core 0 packet -12 % in the stereo default and -27 % with a dense 8x8 matrix. `tools/fx_kernel_test/run.sh` checks both kernels against frozen models of the old ones and a double-precision reference: pooled error is -135.2 dB (old -134.6) for loudness and -138.4 dB (old -137.0) for psybass, and output is bit-identical however a stream is split into blocks. `subharm.c` (added 2026-09-02) also compiles with `-ffp-contract=off`: a static count of its kernel loop shows FMAs 70 to 0, VMOV accumulator copies 25 to 4, FP instructions 109 to 175, and an occupancy-weighted estimate about 9 % fewer cycles per sample; the hardware CPU-meter confirmation is still pending. `tube.c` (added 2026-09-18) compiles with `-O3 -ffp-contract=off` on the same static-estimate basis as `subharm.c`, and is likewise unmeasured on the CPU meter. `rta_bass.c` (added 2026-09-12) and `rta_fft.c` (added 2026-11-20, static count only, CPU meter unmeasured) compile with `-O3 -ffp-contract=off` on RP2350 only. Its float bass kernel goes from 8 fused multiply-adds to none, at a cost of 256 B of RAM code, and the speed gain is unmeasured (`RtaStatus.bass_busy_us_per_s`). RP2040 keeps `-O2`: its fixed-point kernel has no FP ops, and `-O3` only unrolled the loops for 1.6 KB more RAM code.
 
-*Last updated: 2026-11-20 (rta_fft.c FP contraction, RP2350 only). Previously 2026-09-18 (tube.c FP contraction, static estimate only; 2026-09-12: rta_bass.c FP contraction, RP2350 only; previously 2026-08-06)*
+*Last updated: 2026-11-22 (matrix_mix.c, loudness.c and psybass.c FP contraction off, RP2350, hardware-measured). Previously 2026-11-20 (rta_fft.c FP contraction, RP2350 only). Previously 2026-09-18 (tube.c FP contraction, static estimate only; 2026-09-12: rta_bass.c FP contraction, RP2350 only; previously 2026-08-06)*
 
 **Memory impact:** Biquad struct grows from ~48 to ~68 bytes on RP2350. With 110 EQ biquads at the larger size: ~3 KB additional BSS. *(2026-11-19: the RP2350 `Filter` is 68 bytes after the unused `sva3` was removed; it was 72.)* (Loudness no longer uses the full `Biquad` struct; since 2026-07-09 its per-output shelf state is a separate minimal array, `loudness_output_state`, 144 B on RP2350 / 80 B on RP2040.)
 
@@ -982,7 +985,7 @@ Spec: `Documentation/Features/crossover_filters_spec.md`.
 ---
 
 ## Matrix Mixer
-*Last updated: 2026-11-16 (vendor commands table on the ROUTE page). Previously 2026-07-18 (loop bound generalized to n_matrix_sources; rows 2..4 shared by multichannel inputs 3..5 and the stereo upmixer's C/Ls/Rs)*
+*Last updated: 2026-11-22 (RP2350 kernel moved to `matrix_mix.c`: one fused pass per output). Previously 2026-11-16 (vendor commands table on the ROUTE page). Previously 2026-07-18 (loop bound generalized to n_matrix_sources; rows 2..4 shared by multichannel inputs 3..5 and the stereo upmixer's C/Ls/Rs)*
 
 ### Architecture
 
@@ -1015,6 +1018,21 @@ USB R ──┘    (gain/phase)    ├── Output 3 (SPDIF 2L)
 ```
 
 Each output: `sample = L * gain_L + R * gain_R` (with phase invert option)
+
+### Kernel (RP2350)
+*Last updated: 2026-11-22*
+
+`process_input_block()` still snapshots each output's active `(source, signed gain)` pairs and keeps the disabled-output and no-source `memset` paths. The sum itself is `matrix_mix_output()` in `matrix_mix.c`, an out-of-line RAM function built `-O3 -ffp-contract=off` in its own translation unit, so editing it cannot reschedule `process_input_block()` (whose loudness and psybass copies once moved 2.5 to 3.5 % from an unrelated edit). Its body, `matrix_mix_kernel()` in `matrix_mix.h`, switches on the crosspoint count n and holds each output's gains and running sum in registers, so every output sample is stored once instead of once per crosspoint:
+
+- n = 1 and 2: one pass, unrolled 4x.
+- n = 3: one pass.
+- n = 4 to 8: a four-source write pass, then one accumulate pass for the rest (one extra reload and store of `dst` per sample).
+
+Sources are summed in snapshot order, so the result is bit-identical to a sequential sum without fused multiply-add. Against 1.1.7 beta 1 that is identical for n = 1 and differs in the last bit for n >= 2, where the old loop used VFMA. `tools/matrix_mix_test/run.sh` checks the kernel against a frozen copy of the old loop bit for bit, n = 1..8, lengths 0..192, and that nothing past `count` is written. Every output still uses the same `sample_count` and sample index, so output slot alignment is unchanged.
+
+The old loop ran one pass per crosspoint at about 10.8 cycles per crosspoint-sample (two loads, VFMA, store, compare, branch), so it was bound by memory traffic and loop overhead, not by the FPU. Hardware, 48 kHz, 307.2 MHz, cycles per packet before and after: dense 8x8 33,733 to 17,075 (-49 %, 10.8 % to 5.4 % of core 0), 3 or 4 crosspoints per output 14,352 to 7,679 (-47 %), stereo into 8 outputs with one summed pair 3,760 to 2,943 (-22 %), stereo default 1,931 to 1,798 (-7 %).
+
+The unroll factors are sized against the `.data` budget. 2x on n = 3 and on the n = 4 to 6 passes measured 1 to 3 % faster on dense and downmix routing for about 640 B more RAM text.
 
 ### Vendor Commands
 *Last updated: 2026-11-16 (paged commands)*
@@ -1402,7 +1420,7 @@ Double-buffered coeffs plus 4 (RP2350) / 2 (RP2040) pair states; net a few dozen
 ---
 
 ## Psychoacoustic Bass
-*Last updated: 2026-11-16 (vendor commands on the FX page). Previously 2026-07-13*
+*Last updated: 2026-11-22 (RP2350 kernel out of line in `psybass.c`, half-state SVF arms, `lp_g`/`hp_g` replace `lp_a3`/`hp_a3`). Previously 2026-11-16 (vendor commands on the FX page). Previously 2026-07-13*
 
 ### Purpose
 
@@ -1442,7 +1460,7 @@ The divider is a peak follower (40 ms decay) plus a hysteresis comparator: it ar
 
 ### Platform Implementation
 
-- **RP2350:** TPT SVF (topology-preserving transform) in single-precision float. The split lowpass and harmonic highpass share one Butterworth corner at the cutoff; the cutoff is always far below Fs/7.5, deep in SVF territory. The harmonic one-pole lowpass is a plain float one-pole. `PsybassCoeffs` holds SVF integrator coefficients (`lp_a1-3`, `hp_a1-3`, `hp_k`), one-pole coeffs, `drive`, NLD blend weights (`even_w`/`odd_w`), `harm_gain`, and `orig_delta`; per-output state is the SVF integrators plus the one-pole state (`PsybassOutputState`).
+- **RP2350:** TPT SVF (topology-preserving transform) in single-precision float. The split lowpass and harmonic highpass share one Butterworth corner at the cutoff; the cutoff is always far below Fs/7.5, deep in SVF territory. The harmonic one-pole lowpass is a plain float one-pole. `PsybassCoeffs` holds SVF integrator coefficients (`lp_a1`, `lp_a2`, `hp_a1`, `hp_a2`), the warped corners `lp_g`/`hp_g`, `hp_k`, one-pole coeffs, `drive`, NLD blend weights (`even_w`/`odd_w`), `harm_gain`, and `orig_delta`; per-output state is the SVF integrators plus the one-pole state (`PsybassOutputState`). The kernel `psybass_process_output_block()` is one out-of-line `DSP_TIME_CRITICAL` function in `psybass.c` (built `-O3 -ffp-contract=off`), shared by both cores, using the half-state arms `SVF_LP` and `SVF_HP` (`m1 = -k`) from `dsp_svf.h`; stored state keeps the standard `ic1`/`ic2` meaning. On RP2040 the Q28 kernel stays a `static inline` in `psybass.h`. *(2026-11-22)*
 - **RP2040:** RBJ biquads (TDF2) scaled to Q28, processed with `fast_mul_q28()`. Range clamps keep every Q28 coefficient inside the representable +/-8.0 range (harmonics capped at +12 dB, drive at +18 dB = 7.94). The kernel **pre-clamps the low band to +/-1.0 before the drive multiply**: drive can be up to 7.94 and `fast_mul_q28` wraps sign past +/-8.0, so `drive * low` on an over-full-scale low band would wrap; since drive >= 1.0 the result is identical to clamping only the product. A second clamp bounds `d` so `1.5d - 0.5d^3` (which peaks at exactly 1.0) stays in range.
 
 ### Parameters
@@ -1932,7 +1950,7 @@ Each command is one GET and SET pair, and the GET reply is a valid SET payload. 
 ---
 
 ## Loudness Compensation
-*Last updated: 2026-11-20 (table replaced by on-demand compute of the current volume step into a live pair + spare; see "Coefficient Computation"). Previously 2026-11-16 (output mask set with `DYN.LOUDNESS_MASK`). Previously 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
+*Last updated: 2026-11-22 (RP2350 kernel out of line in `loudness.c`, fused half-state shelves, `g` replaces `sva3`, bypassed shelves stored as identity). Previously 2026-11-20 (table replaced by on-demand compute of the current volume step into a live pair + spare; see "Coefficient Computation"). Previously 2026-11-16 (output mask set with `DYN.LOUDNESS_MASK`). Previously 2026-10-24 (table rebuild is a background job: `loudness_recompute_begin()` starts it, it builds volume steps into the inactive table until each step's deadline and swaps when complete, and `loudness_recompute_take_done()` triggers the re-key; boot keeps the one-call `loudness_recompute_table()`). Previously 2026-10-23 (rebuild sliced at 8 steps per pass), 2026-07-09 (per-output processing + output mask)*
 
 ### Purpose
 
@@ -1944,7 +1962,7 @@ ISO 226:2003 equal-loudness contour compensation to maintain perceived frequency
 1. Low shelf (200 Hz, Q=0.707); bass boost at low volume
 2. High shelf (6000 Hz, Q=0.707); treble boost at low volume
 
-**RP2350:** SVF shelf filters (Cytomic "SvfLinearTrapAllOutputs" with `k = 1/Q` for exact RBJ matching). Both loudness filters are always below the SVF crossover frequency at all supported sample rates, so SVF is used unconditionally. Coefficients (`LoudnessCoeffs`) are SVF integrator + mix coefficients (`sva1-3`, `svm0-2`) plus a `bypass` flag; per-output state is the minimal `LoudnessSvfState` (`ic1eq`, `ic2eq`).
+**RP2350:** SVF shelf filters (Cytomic "SvfLinearTrapAllOutputs" with `k = 1/Q` for exact RBJ matching). Both loudness filters are always below the SVF crossover frequency at all supported sample rates, so SVF is used unconditionally. Coefficients (`LoudnessCoeffs`) are SVF integrator coefficients (`sva1`, `sva2`), the warped corner `g`, mix coefficients (`svm0-2`) and a `bypass` flag; per-output state is the minimal `LoudnessSvfState` (`ic1eq`, `ic2eq`). A bypassed shelf stores identity coefficients (`svm0 = 1`, everything else 0), so the fused kernel can run it as an exact pass-through. *(2026-11-22: `g` replaced `sva3 = g*sva2`.)*
 
 **RP2040:** Q28 fixed-point RBJ biquad coefficients with `fast_mul_q28()` processing; per-output state is a minimal DF2 pair (`s1`, `s2`) in `LoudnessBqState`.
 
@@ -1956,7 +1974,7 @@ Loudness now runs **per output channel**, inside the per-output chain (PASS 5-7)
 
 **Per-output state.** `LoudnessOutputState loudness_output_state[NUM_OUTPUT_CHANNELS]` lives in `loudness.c` (RP2350: 2 SVF states = 16 B/output, 144 B total; RP2040: 2 DF2 states = 16 B/output, 80 B total). The coefficient generation (ISO 226 math, recompute triggers) was UNCHANGED by that work; only the filter state moved out of the shelves and into this per-output array.
 
-**Block helper.** `loudness_process_output_block()` is a `static inline` in `loudness.h`, shared by Core 0 (`audio_pipeline.c`) and the Core 1 EQ worker (`pdm_generator.c`). It is filter-major (each shelf processes the whole block before the next, equivalent to the per-sample cascade for these LTI filters and cheaper); a bypassed shelf (0 dB at this volume step) clears its state and is skipped.
+**Block helper.** *(Last updated: 2026-11-22.)* On RP2350 `loudness_process_output_block()` is one out-of-line `DSP_TIME_CRITICAL` function in `loudness.c`, called by Core 0 (`audio_pipeline.c`) and the Core 1 EQ worker (`pdm_generator.c`); `loudness.c` builds `-O3 -ffp-contract=off` on RP2350. It runs both shelves fused per sample with the half-state SVF arm `SVF_SHELF` from `dsp_svf.h` (13 FP ops per shelf-sample instead of 17), so a cascade of the two is bit-identical to two sequential sweeps. A bypassed shelf (0 dB at this volume step) has its state cleared; with both bypassed the call returns at once, and with one bypassed its identity coefficients pass the signal through exactly. On RP2040 it stays a `static inline` in `loudness.h`, filter-major over the two Q28 biquads. Hardware figures are under "FP contraction".
 
 **Two-core coherence.** Core 0 snapshots the coefficient pointer (`current_loudness_coeffs`, or NULL when loudness is disabled) and the mask once per packet and passes them to Core 1 through new `Core1EqWork` fields (`loud_coeffs`, `loud_mask`), so both cores apply one consistent view for the whole packet.
 
@@ -2563,7 +2581,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-11-21 (Hardware table: silent I2S slot fast path row; RP2350 `.data` after output metering moved into `output_pairs_meter_finalize()`). Previously 2026-11-20 (Hardware table: RP2350 `.data` and free heap after the upmixer surround rework; spectrum analyser row: float kernel unscaled; Hardware table: free-heap row after the loudness table removal; slot rings 4 KB each). Previously 2026-11-19 (Hardware table: `.data` rows after the EQ kernel rewrite). Previously 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-11-22 (Hardware table: RP2350 `.data` after the matrix and FX kernel work; DSP Processing table: RP2350 loudness and psybass kernels). Previously 2026-11-21 (Hardware table: silent I2S slot fast path row; RP2350 `.data` after output metering moved into `output_pairs_meter_finalize()`). Previously 2026-11-20 (Hardware table: RP2350 `.data` and free heap after the upmixer surround rework; spectrum analyser row: float kernel unscaled; Hardware table: free-heap row after the loudness table removal; slot rings 4 KB each). Previously 2026-11-19 (Hardware table: `.data` rows after the EQ kernel rewrite). Previously 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2580,7 +2598,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Control Surfaces IR sub-slots | 16 (`CS_MAX_IR_COMMANDS`) | 16 (identical) |
 | Binary type | `default` (XIP) | `default` (XIP) |
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
-| RAM code+rodata+data (.data) | 70,376 B of the 72,704 B budget (2026-11-19) | 98,856 B of the 100,352 B budget (2026-11-21, output metering fused into finalization) |
+| RAM code+rodata+data (.data) | 70,376 B of the 72,704 B budget (2026-11-19) | 100,072 B of the 100,352 B budget (2026-11-22, matrix kernel and out-of-line loudness and psybass; 99,680 B before) |
 | Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 70,948 B (2026-11-20) | 136,332 B (2026-11-20, after the upmixer surround rework; most of the 8 KB drop is `.bss` alignment padding after `.data` crossed a boundary) |
 | Vendor commands (release build) | 181 in 12 pages. The 23 RP2350-only commands (ADAT RX and TX, upmixer) are not built and answer `VC_ERR_UNKNOWN` | 204 in 12 pages. Both platforms: the 15 `DIAG` commands exist only in bench builds that set their flag (6 of them `DSPI_WIRECAP`, whose capture buffer is 96 KB on RP2350 and 16 KB on RP2040) |
 | Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
@@ -2622,9 +2640,9 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | S/PDIF input conversion | 24-bit sign-extended full-scale → Q28 via `>> 2` (equivalent to `sample << 6`) | 24-bit sign-extended full-scale → float via `÷ 2147483648.0f` |
 | S/PDIF output conversion | Q28 >> 6 → int24 | float × 8388607 → int24 |
 | Volume leveller | Q28 envelope + float gain; 2 channels, 2 lookahead rings; max boost clamped to 18 dB (Q28 gain range); safety limiter in Q28 gains, floored steps, float divide only in `lim_cap_of` | Float throughout; 2 to 8 active channels, mask-driven, 8 lookahead rings; full 35 dB max boost; safety limiter in float. Both platforms: same block caps, hold and release (see "Safety Limiter") |
-| Loudness | Per output, post-gain: 2 Q28 shelf biquads; `loudness_output_mask` (5 outputs) | Per output, post-gain: 2 SVF shelves; `loudness_output_mask` (9 outputs). Both platforms: volume-keyed, works in stereo and multichannel input modes |
+| Loudness | Per output, post-gain: 2 Q28 shelf biquads; `loudness_output_mask` (5 outputs) | Per output, post-gain: 2 SVF shelves fused per sample in half-state form, one out-of-line kernel for both cores; `loudness_output_mask` (9 outputs). Both platforms: volume-keyed, works in stereo and multichannel input modes |
 | Crossfeed | Per output pair, post-matrix (PASS 4.5); 2 pairs; `output_pair_mask` (default pair 1) | Per output pair, post-matrix (PASS 4.5); 4 pairs; `output_pair_mask` (default pair 1). Both platforms: shared coeffs, per-pair state, works in every input mode |
-| Psychoacoustic bass | Per output, pre-crossover; RBJ Q28 biquads (with pre-drive low-band clamp) | Per output, pre-crossover; TPT SVF float. Both platforms: missing-fundamental NLD, `output_mask`, zero added latency |
+| Psychoacoustic bass | Per output, pre-crossover; RBJ Q28 biquads (with pre-drive low-band clamp) | Per output, pre-crossover; TPT SVF float, half-state form, one out-of-line kernel for both cores. Both platforms: missing-fundamental NLD, `output_mask`, zero added latency |
 | Subharmonic synthesizer | Per output, pre-crossover, ahead of psybass; same kernel in Q28 through `fast_mul_q28` (band clamp before the divider); 10-byte sub meter (5 outputs) | Per output, pre-crossover, ahead of psybass; same kernel in float; 18-byte sub meter (9 outputs). Both platforms: TPT SVF band split, hysteresis octave dividers, phase-aligned sum, LF bell, `output_mask`, selectivity, sub ceiling, pair link, runtime solo, headroom reading, zero added latency |
 | Tube preamp | Per output, pre-crossover, after psybass; same kernel in Q28 through `fast_mul_q28`, whose operand magnitudes must sum below 8.0 (drive and shaper-output terms in shifted domains chosen per coefficient set, clamps on the shaper input, driven value, shaper output, DC-blocker output, bell input and bell output, and the wet signal); 11 multiplies per sample base, 12 to 19 typical; 1,196 B of shared RAM text | Per output, pre-crossover, after psybass; same kernel in float, with no headroom clamps at all; 660 B of shared RAM text. Both platforms: biased asymmetric waveshaper with a blended knee hardness, supply sag, DC blocker, optional damping-factor output stage (bell at the speaker resonance plus a 2.5 kHz top shelf), 16 tube-type rows, drive -30..+24 dB with automatic makeup gain, `output_mask`, zero added latency |
 | Output limiter | Per output, post-loudness, pre-delay; Q30 gains on raw Q28 levels (full scale 2^29), one hardware divide per 16-sample block, two-multiply Q15 apply; 5 outputs; 2,444 B RAM text, 1,238 B BSS | Per output, post-loudness, pre-delay; float; 9 outputs; 2,200 B RAM text, 2,126 B BSS. Both platforms: 32-sample lookahead engaged on every output only while any limiter is on (switched in silence), no overshoot, link groups with a per-packet cross-core meeting when a group spans both cores |
@@ -2711,6 +2729,14 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 ---
 
 ## Memory Layout
+
+> **Matrix and FX kernels (2026-11-22).** RP2350 only. `matrix_mix_output()` is
+> 784 B of new RAM text. Loudness (612 B) and psybass (338 B) moved out of line,
+> one copy each instead of three inlined copies, and `process_input_block()`
+> shrank from 6,780 to 6,056 B. `check_ram_placement.py` `.data` 99,680 to
+> 100,072 B (budget 100,352 B, 280 B left), free RAM 140,800 to 140,408 B. The
+> faster 4x loudness unroll would have used the last 280 B and 176 B more, so it
+> was left out (see "Loudness Compensation"). RP2040 is unchanged.
 
 > **Pin availability (2026-11-18).** vendor/vc_pins.c adds three static claim
 > lists, so no pin check puts one on the stack: the live state

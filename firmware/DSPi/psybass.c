@@ -19,6 +19,7 @@
 #include <math.h>
 #include <string.h>
 #include "psybass.h"
+#include "dsp_svf.h"
 
 // Live configuration; vendor handlers write it and raise the pending flag,
 // the main loop recomputes + publishes.  Defaults match apply_factory_defaults.
@@ -82,10 +83,9 @@ void psybass_compute_coefficients(PsybassCoeffs *coeffs, const PsybassConfig *co
     float g = tanf(pi * fc / sample_rate);
     float a1 = 1.0f / (1.0f + g * (g + k));
     float a2 = g * a1;
-    float a3 = g * a2;
 
-    coeffs->lp_a1 = a1; coeffs->lp_a2 = a2; coeffs->lp_a3 = a3;
-    coeffs->hp_a1 = a1; coeffs->hp_a2 = a2; coeffs->hp_a3 = a3;
+    coeffs->lp_a1 = a1; coeffs->lp_a2 = a2; coeffs->lp_g = g;
+    coeffs->hp_a1 = a1; coeffs->hp_a2 = a2; coeffs->hp_g = g;
     coeffs->hp_k = k;
     coeffs->hl_a0 = hl_a0_f;
     coeffs->hl_b1 = hl_b1_f;
@@ -141,3 +141,44 @@ void psybass_apply_config(const PsybassConfig *config, float sample_rate) {
         current_psybass_coeffs = NULL;
     }
 }
+
+#if PICO_RP2350
+// Both SVFs use the half-state arms from dsp_svf.h: section 0 is the split lowpass,
+// section 1 the harmonic highpass (m1 = -k). Stored state keeps its standard meaning.
+DSP_TIME_CRITICAL
+void psybass_process_output_block(const PsybassCoeffs * __restrict c,
+                                  PsybassOutputState * __restrict st,
+                                  float * __restrict buf, uint32_t n) {
+    const float A1_0 = c->lp_a1 + c->lp_a1, a2_0 = c->lp_a2, g_0 = c->lp_g;
+    const float A1_1 = c->hp_a1 + c->hp_a1, a2_1 = c->hp_a2, g_1 = c->hp_g, m1_1 = -c->hp_k;
+    const float drive = c->drive, even_w = c->even_w, odd_w = c->odd_w;
+    const float hl_a0 = c->hl_a0, hl_b1 = c->hl_b1, orig_delta = c->orig_delta, harm_gain = c->harm_gain;
+    float h1_0 = 0.5f * st->lp_ic1, ic2_0 = st->lp_ic2;
+    float h1_1 = 0.5f * st->hp_ic1, ic2_1 = st->hp_ic2;
+    float v1_0, v2_0, v3_0, gv_0, v1_1, v2_1, v3_1, gv_1;
+    float hl = st->hl_state;
+
+    for (uint32_t i = 0; i < n; i++) {
+        float x = buf[i], low, hpo;
+        SVF_LP(x, low, 0)
+
+        // NLD: even harmonics from rectification, odd from the cubic clipper
+        float even = fabsf(low);
+        float d = drive * low;
+        if (d > 1.0f) d = 1.0f; else if (d < -1.0f) d = -1.0f;
+        float odd = d * (1.5f - 0.5f * d * d);
+        float h = even_w * even + odd_w * odd;
+
+        SVF_HP(h, hpo, 1)
+
+        // One-pole lowpass caps harmonic brightness
+        hl = hl_a0 * hpo + hl_b1 * hl;
+
+        buf[i] = x + orig_delta * low + harm_gain * hl;
+    }
+
+    st->lp_ic1 = h1_0 + h1_0; st->lp_ic2 = ic2_0;
+    st->hp_ic1 = h1_1 + h1_1; st->hp_ic2 = ic2_1;
+    st->hl_state = hl;
+}
+#endif

@@ -28,6 +28,7 @@
 #include "limiter.h"
 #include "adat_output.h"
 #include "output_s24.h"
+#include "matrix_mix.h"
 #include "loopback.h"   // DSPI_LOOPBACK slot-0 capture tap (self-guarded; empty otherwise)
 #include "output_latency.h"
 #include "pico/audio_spdif.h"
@@ -547,17 +548,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
             continue;
         }
 
-        // First active input writes; remaining inputs accumulate.
-        const float *s0 = src[0];
-        float g0 = gain[0];
-        for (uint32_t i = 0; i < sample_count; i++)
-            dst[i] = s0[i] * g0;
-        for (int k = 1; k < n; k++) {
-            const float *sk = src[k];
-            float gk = gain[k];
-            for (uint32_t i = 0; i < sample_count; i++)
-                dst[i] += sk[i] * gk;
-        }
+        matrix_mix_output(dst, src, gain, n, sample_count);
     }
 
     // Test-signal injection: replaces the matrix mix on generator channels

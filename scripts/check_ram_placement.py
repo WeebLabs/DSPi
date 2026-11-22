@@ -179,6 +179,11 @@ RP2350_EXTRA = [
     ("adat_output_keepalive", False),
     ("adat_output_on_slot_skip", False),
     ("output_ring_fill_signed", False),
+    # Matrix kernel (PASS 4), its own TU.
+    ("matrix_mix_output", False),
+    # Loudness and psybass kernels, one out-of-line copy for both cores.
+    ("loudness_process_output_block", False),
+    ("psybass_process_output_block", False),
 ]
 
 # RP2040 float / integer-divider shims. Their linker names vary by build; the
