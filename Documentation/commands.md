@@ -443,7 +443,7 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 | 0x05 | `ROUTE` | 1 | 15 | Matrix, per-output controls, delays, channel names, preamp, master and user volume |
 | 0x06 | `FILTER` | 1 | 3 | EQ and crossover bands, bypasses |
 | 0x07 | `DYN` | 1 | 17 | Limiter, leveller, loudness |
-| 0x08 | `FX` | 1 | 57 | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer |
+| 0x08 | `FX` | 2 | 58 | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer |
 | 0x09 | `MEAS` | 1 | 20 | Level meters, clip flags, spectrum analyser, signal generator |
 | 0x0A | `CS` | 1 | 26 | Control Surfaces |
 | 0x0B | `XPORT` | 1 | 5 | UART and I2C control transports |
@@ -958,7 +958,7 @@ The matrix mixer, the per-output controls, delays, channel names, input preamps 
 | 2 | u16 | Reserved, 0 |
 | 4 | f32 | Gain, dB. A non-finite value is `VC_ERR_VALUE` |
 
-On RP2350, while the stereo upmixer runs, matrix rows 2, 3 and 4 carry its derived centre, left surround and right surround signals instead of inputs 3 to 5 (section 13.5). Spec: `Features/matrixmixer_spec.md`.
+On RP2350, an output the upmixer routes a generated channel to no longer receives the upmixer's source rows from the matrix; every other row still reaches it (section 13.5). Spec: `Features/matrixmixer_spec.md`.
 
 ### 10.2 Per-output controls
 
@@ -1108,7 +1108,7 @@ The compensation follows `ROUTE.USER_VOLUME` (or LG Sound Sync, when it drives t
 
 ## 13. FX (0x08)
 
-Effects. This page holds headphone crossfeed, the subharmonic synthesizer, psychoacoustic bass, the tube preamp and, on RP2350, the stereo upmixer. No command on this page takes an address, so `wValue` is always 0.
+Effects. This page holds headphone crossfeed, the subharmonic synthesizer, psychoacoustic bass, the tube preamp and, on RP2350, the stereo upmixer. Only `FX.UPMIX_ROUTE` takes an address; for every other command on this page `wValue` is 0.
 
 These rules apply to the whole page.
 
@@ -1165,7 +1165,8 @@ Output masks are u16, bit k = output k (5 outputs on RP2040, 9 on RP2350).
 | 0x6C | `TUBE_MIX` | G, S | none | 4 | 4 | DEFERRED | Wet mix in percent (f32, clamped) |
 | 0x6D | `TUBE_TRIM` | G, S | none | 4 | 4 | DEFERRED | Output trim in dB (f32, clamped) |
 | 0x80 | `UPMIX_CONFIG` | G, S | none | 44 | 44 | DEFERRED | Whole upmixer config (UpmixConfigPacket) (build: `PICO_RP2350` only) |
-| 0x81 | `UPMIX_STATUS` | G | none | 16 | - |  | Live upmixer telemetry (UpmixStatus) (build: `PICO_RP2350` only) |
+| 0x81 | `UPMIX_STATUS` | G | none | 32 | - |  | Live upmixer telemetry (UpmixStatus) (build: `PICO_RP2350` only) |
+| 0x82 | `UPMIX_ROUTE` | G, S | index | 4 | 4 | DEFERRED | Routing of one generated channel, wValue = (profile << 8) \| channel (UpmixRoute; trim clamped, reserved flag bits refused) (build: `PICO_RP2350` only) |
 | 0x90 | `UPMIX_ENABLE` | G, S | none | 4 | 4 | DEFERRED | Upmixer on or off (f32) (build: `PICO_RP2350` only) |
 | 0x91 | `UPMIX_CENTER_MODE` | G, S | none | 4 | 4 | DEFERRED | Centre mode (f32, rounded and clamped) (build: `PICO_RP2350` only) |
 | 0x92 | `UPMIX_SURROUND_MODE` | G, S | none | 4 | 4 | DEFERRED | Surround mode (f32, rounded and clamped to 0-2) (build: `PICO_RP2350` only) |
@@ -1264,7 +1265,7 @@ Setting `FX.TUBE_TYPE` to a stock tube (1 to 16) also rewrites bias, asymmetry, 
 
 ### 13.5 Stereo upmixer (RP2350)
 
-Derives centre, left surround and right surround signals from a stereo input. While it runs, they replace inputs 3, 4 and 5 as matrix rows 2, 3 and 4, and the matrix routes them like any other input. It runs only for a stereo input at up to 48 kHz. These commands exist only on RP2350.
+Splits a pair of inputs (inputs 0 and 1 until the source commands arrive) into seven generated channels: A' and B' (the sources after centre removal), C (the centre), SA and SB (side ambience), and BA and BB (back ambience, silent in this firmware). Each generated channel reaches the outputs set in its route. On a routed output it replaces the source pair's matrix rows, and every other row still reaches that output. Turning the upmixer off or removing a route fades over about 10 ms. It runs at up to 48 kHz on the stereo input. These commands exist only on RP2350.
 
 `FX.UPMIX_CONFIG` (44 bytes) carries the whole configuration. `FX.UPMIX_ENABLE` to `FX.UPMIX_PRESENCE` carry one field each as a float32.
 
@@ -1287,20 +1288,31 @@ Derives centre, left surround and right surround signals from a stereo input. Wh
 
 The mode fields are sanitized when written. The float fields are stored as sent and clamped only when the coefficients are computed, so they read back unclamped. Presence is the exception in `FX.UPMIX_CONFIG`, which carries it in 0.5 dB steps. A non-finite float in either form is `VC_ERR_VALUE`.
 
-`FX.UPMIX_STATUS` (16 bytes).
+`FX.UPMIX_ROUTE` (4 bytes both ways), `wValue` = profile × 256 + generated channel (0 A', 1 B', 2 C, 3 SA, 4 SB, 5 BA, 6 BB). Profile 1 cannot be enabled until the profile commands arrive. A profile above 1 or a channel above 6 is `VC_ERR_ADDRESS`. Routes are not yet saved in presets, and a preset load or factory reset clears them.
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u8 | 1 while processing |
-| 1 | u8 | Why it is parked: 0 active, 1 disabled, 2 input not stereo, 3 rate above 48 kHz |
+| 0 | u16 | Output mask, bit k = output k. A bit above the last output is `VC_ERR_VALUE` |
+| 2 | i8 | Trim, dB x 2, clamped to -80 (-40 dB) to +12 (+6 dB) |
+| 3 | u8 | Flags: bit 0 inverts polarity. Any other bit is `VC_ERR_VALUE` |
+
+`FX.UPMIX_STATUS` (32 bytes; a host asking for the first 16 gets the original fields).
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | 1 while running, or when it will run as soon as audio flows |
+| 1 | u8 | Why it is not running: 0 running, 1 disabled, 2 no profile serves this input count, 3 rate above 48 kHz, 4 a source channel is absent, 5 fading out, 6 nothing routed |
 | 2 | i16 | L/R correlation, value / 16384 (-1 to +1) |
 | 4 | i16 | Balance, 0 centred, 16384 fully one-sided |
 | 6 | u16 | Centre extraction gain, value / 32767 |
 | 8 | u16 | Left surround steering gain, value / 32767 |
 | 10 | u16 | Right surround steering gain, value / 32767 |
 | 12 | u8[4] | Reserved |
+| 16 | u8 | Profile running or about to run, 0xFF for none |
+| 17 | u8 | Bit g: generated channel g passed 0 dBFS before its trim within the last second |
+| 18 | u16[7] | Peak of each generated channel over the last packet, value / 32767 |
 
-Spec: `Features/upmixer_spec.md`.
+Spec: `Features/upmixer_spec.md` and, for routing, `Features/upmixer_v2_spec.md`.
 
 ---
 
@@ -2427,6 +2439,7 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | UPMIX_ENABLE | [`FX.UPMIX_ENABLE`](#13-fx-0x08) | `0x0890` | RP2350 only |
 | UPMIX_PRESENCE | [`FX.UPMIX_PRESENCE`](#13-fx-0x08) | `0x089D` | RP2350 only |
 | UPMIX_RELEASE | [`FX.UPMIX_RELEASE`](#13-fx-0x08) | `0x0897` | RP2350 only |
+| UPMIX_ROUTE | [`FX.UPMIX_ROUTE`](#13-fx-0x08) | `0x0882` | RP2350 only |
 | UPMIX_STATUS | [`FX.UPMIX_STATUS`](#13-fx-0x08) | `0x0881` | RP2350 only |
 | UPMIX_STRENGTH | [`FX.UPMIX_STRENGTH`](#13-fx-0x08) | `0x0893` | RP2350 only |
 | UPMIX_SURROUND_MODE | [`FX.UPMIX_SURROUND_MODE`](#13-fx-0x08) | `0x0892` | RP2350 only |

@@ -50,6 +50,9 @@ def build(src_c, src_h, new):
     if hasattr(lib, 'h_select_check'):
         lib.h_select_check.argtypes = []
         lib.h_profile_switch_check.argtypes = [FP, FP, _I, FP, FP, _I, _I]
+    if hasattr(lib, 'h_route_check'):
+        lib.h_route_check.argtypes = [_I, _I, FP, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(_I), ctypes.POINTER(_I)]
+        lib.h_route_scenes.argtypes = []
     if new:
         lib.h_run_stems.argtypes = [FP, _I, _I, _I, FP, FP, _I, _I, FP, FP, FP, FP, FP, FP, FP]
     return lib

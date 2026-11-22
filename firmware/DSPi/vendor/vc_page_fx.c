@@ -329,8 +329,41 @@ static VcResult fx_upmix_config_set(VcCtx *c) {
 
 static VcResult fx_upmix_status_get(VcCtx *c) {
     UpmixStatus st;
-    upmix_get_status(&st, active_input_channel_count());
+    uint16_t out_en = 0;
+    for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
+        if (matrix_mixer.outputs[o].enabled) out_en |= (uint16_t)(1u << o);
+    upmix_get_status(&st, active_input_channel_count(), out_en);
     memcpy(c->out, &st, sizeof(st));
+    return VC_OK;
+}
+
+// wValue = (profile << 8) | generated channel.  No change notification until
+// the routes have a wire offset (upmixer_v2_plan.md phase 5).
+static volatile UpmixRoute *fx_upmix_route_at(const VcCtx *c) {
+    uint8_t p = (uint8_t)(c->addr >> 8), g = (uint8_t)c->addr;
+    return (p < UPMIX_NUM_PROFILES && g < UPMIX_NUM_GEN) ? &upmix_profiles[p].routes[g] : NULL;
+}
+
+static VcResult fx_upmix_route_get(VcCtx *c) {
+    volatile UpmixRoute *r = fx_upmix_route_at(c);
+    if (!r) return VC_ERR_ADDRESS;
+    UpmixRoute v = { r->out_mask, r->trim_q1, r->flags };
+    memcpy(c->out, &v, sizeof(v));
+    return VC_OK;
+}
+
+static VcResult fx_upmix_route_set(VcCtx *c) {
+    volatile UpmixRoute *r = fx_upmix_route_at(c);
+    if (!r) return VC_ERR_ADDRESS;
+    UpmixRoute v;
+    memcpy(&v, c->in, sizeof(v));
+    if ((v.out_mask & (uint16_t)~UPMIX_OUT_MASK) || (v.flags & (uint8_t)~UPMIX_ROUTE_INVERT))
+        return VC_ERR_VALUE;
+    r->out_mask = v.out_mask;
+    r->trim_q1 = v.trim_q1 < UPMIX_TRIM_MIN_Q1 ? UPMIX_TRIM_MIN_Q1
+               : (v.trim_q1 > UPMIX_TRIM_MAX_Q1 ? UPMIX_TRIM_MAX_Q1 : v.trim_q1);
+    r->flags = v.flags;
+    upmix_update_pending = true;
     return VC_OK;
 }
 

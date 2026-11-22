@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import struct
+import threading
 import time
 
 from ..device import Stall, Timeout
@@ -478,8 +479,8 @@ def _route_only(dev, profile, out_l, out_r):
     """Route USB L/R 1:1 to the (out_l, out_r) pair at 0 dB and disable every
     other crosspoint. Matrix writes apply immediately (no deferred reset).
 
-    EVERY input row is cleared: with the upmixer running, rows 2..4 carry
-    derived C/Ls/Rs and would otherwise still feed the target output.
+    EVERY input row is cleared, so a multichannel input left on rows 2..7
+    cannot still feed the target output.
     """
     for inp in range(profile.num_input_channels):
         for out in range(profile.num_output_channels):
@@ -1381,8 +1382,11 @@ def output_clip_limit(dev, profile, chk):
 
 LT_TYPE = 11                  # FILTER_LINKWITZ_TRANSFORM
 UPMIX_CENTER_OFF = 2          # upmix.h
+UPMIX_CENTER_ADAPTIVE = 1
+UPMIX_SURROUND_OFF = 0
 UPMIX_SURROUND_PASSIVE = 1
-UPMIX_ROW_LS = 3
+UPMIX_GEN_A, UPMIX_GEN_B, UPMIX_GEN_C, UPMIX_GEN_SA = 0, 1, 2, 3
+UPMIX_NUM_GEN, UPMIX_NUM_PROFILES = 7, 2
 PSYBASS_CUTOFF, PSYBASS_HARMONICS, PSYBASS_DRIVE = 120.0, 12.0, 18.0
 SUBHARM_TONE = 60.0           # inside the 48-72 Hz band: sub lands at 30 Hz
 SUBHARM_MIN_RISE_DB = 20.0    # sub bin must rise at least this much when enabled
@@ -1530,13 +1534,49 @@ def loudness_output_mask(dev, profile, chk):
         dev.pset_f32("ROUTE.USER_VOLUME", 0.0); dev.wait_ready()
 
 
+def _upmix_route(dev, g, mask, trim_q1=0, flags=0, profile=0):
+    dev.pset("FX.UPMIX_ROUTE", struct.pack("<HbB", mask, trim_q1, flags), addr=(profile << 8) | g)
+
+
+def _upmix_reset(dev):
+    """Upmixer off with no routes on either profile, so no output stays claimed."""
+    _optional(lambda: dev.pset_f32("FX.UPMIX_ENABLE", 0.0))
+    for p in range(UPMIX_NUM_PROFILES):
+        for g in range(UPMIX_NUM_GEN):
+            _optional(lambda g=g, p=p: _upmix_route(dev, g, 0, 0, 0, p))
+
+
+def _upmix_peak_during(dev, g, fn):
+    """Run fn while polling FX.UPMIX_STATUS; returns (fn's result, highest peak of
+    generated channel g). Peaks are per packet, so they must be read while audio flows."""
+    best, done = [0], threading.Event()
+
+    def poll():
+        while not done.is_set():
+            st = dev.pget("FX.UPMIX_STATUS", length=32)
+            best[0] = max(best[0], struct.unpack_from("<7H", st, 18)[g])
+            time.sleep(0.05)
+
+    t = threading.Thread(target=poll, daemon=True)
+    t.start()
+    try:
+        return fn(), best[0]
+    finally:
+        done.set()
+        t.join()
+
+
+def _upmix_running(dev):
+    st = dev.pget("FX.UPMIX_STATUS", length=32)
+    if not st[0]:
+        raise Skip(f"upmixer parked (reason {st[1]}: 1=disabled 2=no profile for this "
+                   f"input count 3=rate>48k 4=source absent)")
+    return st
+
+
 @test("audio", mutating=True)
 def upmix_centre_off_passthrough(dev, profile, chk):
-    """Centre engine OFF leaves L/R bit-exact while surrounds are still derived.
-
-    upmix.h states this explicitly: the surround engine never writes L/R, so
-    with the centre engine off the mains pass through untouched.
-    """
+    """Centre engine OFF: A'/B' routed over L/R are bit-exact, and the side channels still carry audio."""
     rig = _get_rig(dev, profile)
     if profile.platform_id != 1:
         raise Skip("upmixer is RP2350-only")
@@ -1545,33 +1585,71 @@ def upmix_centre_off_passthrough(dev, profile, chk):
         if _optional(lambda: dev.pset_f32("FX.UPMIX_CENTER_MODE", float(UPMIX_CENTER_OFF))) is None:
             raise Skip("upmixer not available on this build")
         dev.pset_f32("FX.UPMIX_SURROUND_MODE", float(UPMIX_SURROUND_PASSIVE))
+        _upmix_route(dev, UPMIX_GEN_A, 1 << out_l)
+        _upmix_route(dev, UPMIX_GEN_B, 1 << out_r)
         dev.pset_f32("FX.UPMIX_ENABLE", 1.0)
         dev.wait_ready()
-        st = dev.pget("FX.UPMIX_STATUS", length=16)
-        if not st[0]:
-            raise Skip(f"upmixer parked (reason {st[1]}: "
-                       f"1=disabled 2=input not stereo 3=rate>48k)")
         resid, scale = _capture(
             dev, lambda: audio.bit_exact_residual(rig["out"], rig["in"], rig["chan"], rig["fs"]))
+        # Status follows audio packets, so read it once audio has flowed.
+        st = _upmix_running(dev)
+        chk.eq(st[16], 0, "status: profile 0 is the running profile")
         chk.ok(resid < RESIDUAL_MAX_DBFS,
-               f"centre OFF: L/R bit-exact through the upmixer "
-               f"({resid:.1f} dBFS < {RESIDUAL_MAX_DBFS})")
+               f"centre OFF: A'/B' bit-exact in place of L/R ({resid:.1f} dBFS < {RESIDUAL_MAX_DBFS})")
         chk.approx(20.0 * np.log10(abs(scale) + 1e-20), 0.0, GAIN_TOL_DB,
                    f"centre OFF: unity gain (|scale| {abs(scale):.4f})")
-        # Surrounds are still produced: route the derived Ls row to the target.
-        _route(dev, 0, out_l, 0)
-        _route(dev, UPMIX_ROW_LS, out_l, 1, 0.0)
+        # SA replaces A' on the left output; the claim keeps row 0 off it.
+        _upmix_route(dev, UPMIX_GEN_A, 0)
+        _upmix_route(dev, UPMIX_GEN_SA, 1 << out_l)
         dev.wait_ready()
-        # Ls = 0.7071*(L-R) under PASSIVE, so a mono-duplicated tone would
+        # SA = 0.7071*(L-R) under PASSIVE, so a mono-duplicated tone would
         # cancel to silence; drive the left channel only.
-        lvl, _r, _t = _capture(dev, lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"],
-                                             1000.0, amp=0.4, left_only=True))
-        chk.ok(lvl > -40.0, f"derived Ls row carries audio ({lvl:.1f} dBFS)")
-        chk.note(f"upmix: resid={resid:.1f}dBFS Ls={lvl:.1f}dBFS")
+        (lvl, _r, _t), sa_pk = _upmix_peak_during(dev, UPMIX_GEN_SA, lambda: _capture(
+            dev, lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"], 1000.0, amp=0.4,
+                                                left_only=True)))
+        chk.ok(lvl > -40.0, f"SA routed to the left output carries audio ({lvl:.1f} dBFS)")
+        chk.ok(sa_pk > 0, f"status reports an SA peak while audio flows ({sa_pk})")
+        chk.note(f"upmix: resid={resid:.1f}dBFS SA={lvl:.1f}dBFS")
     finally:
-        _optional(lambda: dev.pset_f32("FX.UPMIX_ENABLE", 0.0))
-        _route(dev, UPMIX_ROW_LS, out_l, 0)
-        _route(dev, 0, out_l, 1, 0.0)
+        _upmix_reset(dev)
+        dev.wait_ready()
+
+
+@test("audio", mutating=True)
+def upmix_claim_and_release(dev, profile, chk):
+    """A mono tone through the adaptive centre: A' drops 12 dB, C rises 3 dB, and disabling returns the plain matrix bit for bit."""
+    rig = _get_rig(dev, profile)
+    if profile.platform_id != 1:
+        raise Skip("upmixer is RP2350-only")
+    out_l, out_r, _cl, _cr = _slot_indices(profile, rig["slot"])
+    run = lambda: audio.measure_tone_2ch(rig["out"], rig["in"], rig["fs"], 1000.0, amp=0.25)
+    try:
+        if _optional(lambda: dev.pset_f32("FX.UPMIX_CENTER_MODE", float(UPMIX_CENTER_ADAPTIVE))) is None:
+            raise Skip("upmixer not available on this build")
+        base_l, base_r, _t = _capture(dev, run)
+        dev.pset_f32("FX.UPMIX_SURROUND_MODE", float(UPMIX_SURROUND_OFF))
+        dev.pset_f32("FX.UPMIX_STRENGTH", 100.0)
+        dev.pset_f32("FX.UPMIX_CENTER_WIDTH", 25.0)
+        _upmix_route(dev, UPMIX_GEN_A, 1 << out_l)
+        _upmix_route(dev, UPMIX_GEN_C, 1 << out_r)
+        dev.pset_f32("FX.UPMIX_ENABLE", 1.0)
+        dev.wait_ready()
+        # Fully correlated input: C = 0.7071*(L+R) = +3.01 dB, A' = L - 0.375*(L+R) = -12.04 dB.
+        lvl_l, lvl_r, _t = _capture(dev, run)
+        _upmix_running(dev)
+        chk.approx(lvl_l - base_l, -12.04, 0.5, f"A' on the left output: {lvl_l - base_l:+.2f} dB")
+        chk.approx(lvl_r - base_r, 3.01, 0.5, f"C replaces R on the right output: {lvl_r - base_r:+.2f} dB")
+        dev.pset_f32("FX.UPMIX_ENABLE", 0.0)
+        dev.wait_ready()
+        # The fade-out advances with audio packets, so status settles once audio has flowed.
+        resid, _scale = _capture(
+            dev, lambda: audio.bit_exact_residual(rig["out"], rig["in"], rig["chan"], rig["fs"]))
+        chk.ok(resid < RESIDUAL_MAX_DBFS, f"after the fade-out the matrix is bit-exact ({resid:.1f} dBFS)")
+        st = dev.pget("FX.UPMIX_STATUS", length=32)
+        chk.eq((st[0], st[1], st[16]), (0, 1, 0xFF), "disabled: parked, reason 1, no profile held")
+        chk.note(f"upmix claim: A' {lvl_l - base_l:+.2f} dB, C {lvl_r - base_r:+.2f} dB, release {resid:.1f} dBFS")
+    finally:
+        _upmix_reset(dev)
         dev.wait_ready()
 
 

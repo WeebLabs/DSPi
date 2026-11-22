@@ -10,8 +10,8 @@ semantics:
     Test 3 deliberately reproduces the pre-barrier bug, so a regression that
     reintroduces fire-and-assume sequencing shows up here rather than as an
     intermittent hardware failure.
-  * Matrix isolation.  _route_only() must clear EVERY input row, since the
-    upmixer feeds rows 2..4 and multichannel USB feeds up to row 7.
+  * Matrix isolation.  _route_only() must clear EVERY input row, since
+    multichannel USB feeds up to row 7.
   * Per-channel band ceilings, which are probed rather than taken from the
     profile's channel-0 value.
 
@@ -209,9 +209,9 @@ check(on == {(0, 0), (1, 1)}, f"exactly the target pair is enabled (got {sorted(
 covered = {(i, o) for i in range(8) for o in range(11)}
 check(set(d.xp) == covered,
       f"all {len(covered)} crosspoints written (got {len(d.xp)})")
-upmix_rows = [k for k in d.xp if k[0] in (2, 3, 4)]
-check(len(upmix_rows) == 3 * 11 and not any(d.xp[k] for k in upmix_rows),
-      "upmixer rows 2..4 explicitly disabled")
+upper_rows = [k for k in d.xp if k[0] >= 2]
+check(len(upper_rows) == 6 * 11 and not any(d.xp[k] for k in upper_rows),
+      "multichannel rows 2..7 explicitly disabled")
 
 print("9. _route_only on RP2040 geometry (2 inputs)")
 d = MatrixDev(n_in=2, n_out=7)

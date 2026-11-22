@@ -131,7 +131,7 @@
        {"cmd": 51, "name": "LOUDNESS_MASK", "id": 1843, "get": true, "set": true, "addr": "NONE", "get_len": 2, "set_min": 2, "set_max": 2, "flags": [], "arg": "0", "build": null, "doc": "Loudness output mask, u16"}
      ],
      "reserved": []},
-    {"page": 8, "mnemonic": "FX", "revision": 1, "doc": "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer",
+    {"page": 8, "mnemonic": "FX", "revision": 2, "doc": "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer",
      "commands": [
        {"cmd": 16, "name": "CROSSFEED_ENABLE", "id": 2064, "get": true, "set": true, "addr": "NONE", "get_len": 1, "set_min": 1, "set_max": 1, "flags": ["DEFERRED"], "arg": "0", "build": null, "doc": "Crossfeed on or off (u8 bool)"},
        {"cmd": 17, "name": "CROSSFEED_PRESET", "id": 2065, "get": true, "set": true, "addr": "NONE", "get_len": 1, "set_min": 1, "set_max": 1, "flags": ["DEFERRED"], "arg": "0", "build": null, "doc": "Crossfeed preset (u8, 0 to CROSSFEED_PRESET_CUSTOM)"},
@@ -175,7 +175,8 @@
        {"cmd": 108, "name": "TUBE_MIX", "id": 2156, "get": true, "set": true, "addr": "NONE", "get_len": 4, "set_min": 4, "set_max": 4, "flags": ["DEFERRED"], "arg": "TUBE_PARAM_MIX_PCT", "build": null, "doc": "Wet mix in percent (f32, clamped)"},
        {"cmd": 109, "name": "TUBE_TRIM", "id": 2157, "get": true, "set": true, "addr": "NONE", "get_len": 4, "set_min": 4, "set_max": 4, "flags": ["DEFERRED"], "arg": "TUBE_PARAM_TRIM_DB", "build": null, "doc": "Output trim in dB (f32, clamped)"},
        {"cmd": 128, "name": "UPMIX_CONFIG", "id": 2176, "get": true, "set": true, "addr": "NONE", "get_len": 44, "set_min": 44, "set_max": 44, "flags": ["DEFERRED"], "arg": "0", "build": "PICO_RP2350", "doc": "Whole upmixer config (UpmixConfigPacket)"},
-       {"cmd": 129, "name": "UPMIX_STATUS", "id": 2177, "get": true, "set": false, "addr": "NONE", "get_len": 16, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "PICO_RP2350", "doc": "Live upmixer telemetry (UpmixStatus)"},
+       {"cmd": 129, "name": "UPMIX_STATUS", "id": 2177, "get": true, "set": false, "addr": "NONE", "get_len": 32, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "PICO_RP2350", "doc": "Live upmixer telemetry (UpmixStatus)"},
+       {"cmd": 130, "name": "UPMIX_ROUTE", "id": 2178, "get": true, "set": true, "addr": "INDEX", "get_len": 4, "set_min": 4, "set_max": 4, "flags": ["DEFERRED"], "arg": "0", "build": "PICO_RP2350", "doc": "Routing of one generated channel, wValue = (profile << 8) | channel (UpmixRoute; trim clamped, reserved flag bits refused)"},
        {"cmd": 144, "name": "UPMIX_ENABLE", "id": 2192, "get": true, "set": true, "addr": "NONE", "get_len": 4, "set_min": 4, "set_max": 4, "flags": ["DEFERRED"], "arg": "UPMIX_PARAM_ENABLED", "build": "PICO_RP2350", "doc": "Upmixer on or off (f32)"},
        {"cmd": 145, "name": "UPMIX_CENTER_MODE", "id": 2193, "get": true, "set": true, "addr": "NONE", "get_len": 4, "set_min": 4, "set_max": 4, "flags": ["DEFERRED"], "arg": "UPMIX_PARAM_CENTER_MODE", "build": "PICO_RP2350", "doc": "Centre mode (f32, rounded and clamped)"},
        {"cmd": 146, "name": "UPMIX_SURROUND_MODE", "id": 2194, "get": true, "set": true, "addr": "NONE", "get_len": 4, "set_min": 4, "set_max": 4, "flags": ["DEFERRED"], "arg": "UPMIX_PARAM_SURROUND_MODE", "build": "PICO_RP2350", "doc": "Surround mode (f32, rounded and clamped to 0-2)"},

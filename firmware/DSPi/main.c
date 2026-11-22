@@ -1358,6 +1358,10 @@ static void complete_pipeline_reset(void) {
     uint spdif_count = 0;
     uint i2s_count = 0;
 
+#if PICO_RP2350
+    upmix_hard_park();   // spec 6.4: pipeline-forced parks are hard
+#endif
+
     // Phase 1: per-slot teardown — interrupts enabled.
     for (int i = 0; i < NUM_SPDIF_INSTANCES; i++) {
         teardown_output_slot(i);
@@ -2785,12 +2789,13 @@ int main(void) {
 
 #if PICO_RP2350
         // Handle upmixer coefficient updates: same double-buffer publish
-        // model (NULL = disabled); processing state resets via upmix_park()
-        // whenever the pipeline pass is not running.
+        // model (NULL = disabled); the audio path latches what it runs.
         if (upmix_update_pending) {
             upmix_update_pending = false;
             upmix_apply_profiles((float)audio_state.freq);
         }
+        // Upmixer fades advance only with packets; park while none flow.
+        if (!pipeline_producer_is_streaming()) upmix_hard_park();
 #endif
 
         // Handle volume leveller coefficient updates

@@ -7,68 +7,12 @@
 #include <stdbool.h>
 #include "config.h"
 
-// Stereo upmixer (RP2350 only): derives Centre / Left-Surround / Right-Surround
-// virtual source channels from the stereo input pair.
-//
-// Runs as a pipeline pass between the leveller and the matrix, ONLY when the
-// active input is stereo (active_input_channel_count() == 2) and the sample
-// rate is 48 kHz or below (ADAT-style park above; rings are sized for 48 kHz).  It reads the
-// post-EQ/leveller stereo bus (buf_l/buf_r), writes the derived channels into
-// the otherwise-idle multichannel input rows (buf_in_ext[0..2] = matrix source
-// rows 2..4), and applies centre removal to L/R in place.  Centre removal is
-// the ONLY thing the pass does to the mains; the surround engine never writes
-// L/R, so with the centre engine OFF (or width at 100%) the stereo pair passes
-// through bit-exact and the surrounds are derived from it.  The matrix then
-// treats the derived channels as ordinary sources: routing, crosspoint gains,
-// and the whole per-output chain (PEQ, crossover, delay, gain, loudness) are
-// reused unchanged.  In multichannel input modes those rows carry real inputs
-// and the upmixer parks (state reset, rows not exposed).
-//
-// Two independent engines:
-//
-//   Centre engine (owns row 2 whenever the pass runs):
-//     OFF     : no extraction and no removal.  Row 2 goes silent but stays
-//               reserved so Ls/Rs keep matrix rows 3/4, and L/R are untouched,
-//               which is the "surround effects only, mains as recorded" setup.
-//     PASSIVE : C = 0.7071*(L+R), fixed gain (power-preserving for
-//               uncorrelated content; correlated content sums to +3 dB).
-//     ADAPTIVE: running normalized cross-correlation and L/R balance (one-pole
-//               estimators on a bass-cut detector path) drive the centre gain
-//               through a threshold gate and attack/release ballistics, so only
-//               genuinely centre-panned correlated content is extracted and the
-//               image does not pump.
-//     Extracted centre energy is subtracted from L/R (scaled by width) so a
-//     physical centre speaker and the L/R phantom don't comb-filter.
-//     Both modes: a broad presence bell (TPT SVF, 3 kHz, Q 0.6, +-12 dB) on
-//     the extracted C moves voices forward/back (Syn-style presence control).
-//
-//   Surround engine (rows 3..4 when mode != OFF):
-//     PASSIVE : difference feed, Ls = 0.7071*(L-R) and Rs mirrored (-S).
-//     ADAPTIVE: prediction-residual feed (Ls = L' - w*R', Rs mirrored), side-
-//               specific balance gate, front/back dominance and a transient
-//               duck.  L'/R' are band-limited and delayed before the feed, so
-//               steering sees the Haas delay ahead (see upmixer_spec.md).
-//     Both modes share the conditioning: 2nd-order Butterworth HP/LP band
-//     limit, Haas delay, mirrored-gain Schroeder allpass decorrelators, with the
-//     same total delay, so routing "Upmix Ls/Rs" to output slots is the setup.
-//
-// Steering is pure gain (zero latency) on C/L/R; the surround Haas delay is a
-// deliberate, identical-per-source feature, so inter-output-slot alignment is
-// preserved by construction (CLAUDE.md hard rule).
-//
-// Module pattern follows psybass: volatile config + update_pending flag,
-// main-loop recompute, double-buffered published coefficient pointer (NULL =
-// disabled).  All state is Core 0 only (the pass runs before the matrix).
+// Upmixer pair engine (RP2350 only).  It splits a selectable input pair into
+// generated channels (A', B', C, side and back ambience) and routes each to
+// outputs, replacing the pair's matrix rows there.  Design and signal flow:
+// Documentation/Features/upmixer_v2_spec.md and current_architecture.md.
 
 #if PICO_RP2350
-
-// Derived-channel matrix rows (contiguous above the stereo pair)
-#define UPMIX_ROW_C          2
-#define UPMIX_ROW_LS         3
-#define UPMIX_ROW_RS         4
-#define UPMIX_NUM_DERIVED    3
-_Static_assert(NUM_STEREO_INPUTS + UPMIX_NUM_DERIVED <= NUM_INPUT_CHANNELS,
-               "upmix derived rows must fit in the matrix source space");
 
 // Engine modes
 #define UPMIX_CENTER_PASSIVE    0
@@ -173,8 +117,22 @@ enum {
     UPMIX_GEN_C,       // extracted centre
     UPMIX_GEN_SA,      // side ambience, A side (v1 Ls)
     UPMIX_GEN_SB,      // side ambience, B side (v1 Rs)
+    UPMIX_GEN_BA,      // back ambience, A side (not rendered until v2 phase 4)
+    UPMIX_GEN_BB,      // back ambience, B side
     UPMIX_NUM_GEN
 };
+
+// Per generated channel routing (spec 6.1); also its 4-byte wire image.
+#define UPMIX_TRIM_MIN_Q1   (-80)   // trim in 0.5 dB steps: -40 dB
+#define UPMIX_TRIM_MAX_Q1     12    // +6 dB
+#define UPMIX_ROUTE_INVERT  0x01    // flags bit 0: polarity invert
+#define UPMIX_OUT_MASK      ((uint16_t)((1u << NUM_OUTPUT_CHANNELS) - 1u))
+typedef struct __attribute__((packed)) {
+    uint16_t out_mask;         // bit k routes to output k
+    int8_t trim_q1;
+    uint8_t flags;             // UPMIX_ROUTE_*; other bits reserved, kept 0
+} UpmixRoute;
+_Static_assert(sizeof(UpmixRoute) == 4, "UpmixRoute wire size");
 
 // Configuration (persisted to flash / wire)
 typedef struct {
@@ -194,6 +152,7 @@ typedef struct {
     float presence_db;         // centre presence bell (Syn-style), both centre modes
     uint8_t src_a, src_b;      // source pair, input channels (A plays L, B plays R)
     uint8_t active_counts;     // input counts this profile serves (upmix_count_bit)
+    UpmixRoute routes[UPMIX_NUM_GEN];
 } UpmixConfig;
 
 // Wire image of UpmixConfig for FX.UPMIX_CONFIG (44 bytes).
@@ -248,29 +207,37 @@ static inline float upmix_presence_decode(int8_t q1) {
     return 0.5f * (float)q1;
 }
 
-// Live telemetry for FX.UPMIX_STATUS (16 bytes)
+// Live telemetry for FX.UPMIX_STATUS (32 bytes)
 typedef struct __attribute__((packed)) {
-    uint8_t active;            // 1 = processing this packet stream
+    uint8_t active;            // 1 = running, or will run once audio flows
     uint8_t parked_reason;     // 0 = active, 1 = disabled, 2 = no profile serves
-                               // this input count, 3 = sample rate above 48 kHz,
-                               // 4 = a source channel is not present
+                               // this input count, 3 = rate above 48 kHz, 4 = a source
+                               // is absent, 5 = fading out, 6 = nothing routed
     int16_t corr_q14;          // smoothed L/R correlation, Q14 (-16384..16384)
     int16_t balance_q14;       // smoothed |L/R| balance, Q14 (0..16384)
     uint16_t center_gain_q15;  // smoothed centre extraction gain, Q15
     uint16_t ls_gain_q15;      // surround steering gains, Q15
     uint16_t rs_gain_q15;
     uint8_t reserved[4];
+    uint8_t active_profile;    // profile the engine holds, 0xFF for none
+    uint8_t gen_clip;          // bit g: channel g passed 0 dBFS before trim in the last second
+    uint16_t gen_peak[7];      // last packet's peak per generated channel, 32767 = 0 dBFS
 } UpmixStatus;
-_Static_assert(sizeof(UpmixStatus) == 16, "UpmixStatus wire size");
+_Static_assert(sizeof(UpmixStatus) == 32, "UpmixStatus wire size");
+_Static_assert(UPMIX_NUM_GEN == 7, "UpmixStatus carries seven generated channels");
 
 // Published coefficient set; snapshot once per packet.  NULL = disabled.
 typedef struct {
+    uint32_t seq;              // publish stamp; a new value means a new set
     uint8_t profile;           // index of the profile it was computed from
     uint8_t src_a, src_b;      // source pair (< NUM_INPUT_CHANNELS)
     uint8_t active_counts;     // masked to UPMIX_COUNTS_MASK
     uint8_t center_mode;
     uint8_t surround_mode;
-    uint8_t n_derived;         // 1 (C only) or 3 (C + Ls/Rs)
+    // Routing: outputs per generated channel, their union, signed linear trim
+    uint16_t route_mask[UPMIX_NUM_GEN];
+    uint16_t claim_mask;
+    float route_gain[UPMIX_NUM_GEN];
     // Centre engine
     float strength;            // 0..1
     float width;               // 0..1 (residual retention)
@@ -294,6 +261,7 @@ typedef struct {
     float shp_a1, shp_a2, shp_a3, shp_k;  // surround HP, TPT SVF Butterworth
     float slp_a1, slp_a2, slp_a3;         // surround LP, TPT SVF Butterworth
     float env_step;            // activation fade increment per sample
+    float slew_step;           // routing slew per sample: full scale per UPMIX_FADE_MS
 } UpmixCoeffs;
 
 // Live configuration + main-loop recompute flag (defined in upmix.c).
@@ -325,14 +293,6 @@ static inline const UpmixCoeffs *upmix_select(uint8_t n_inputs) {
     return NULL;
 }
 
-// Coefficients the v1 row bridge runs this packet, or NULL.  The bridge writes
-// matrix rows 2..4, which carry real inputs above stereo; removed in phase 3.
-static inline const UpmixCoeffs *upmix_bridge_coeffs(uint8_t n_inputs) {
-    const UpmixCoeffs *c = upmix_select(n_inputs);
-    if (!c || n_inputs != NUM_STEREO_INPUTS) return NULL;
-    return (c->src_a < n_inputs && c->src_b < n_inputs) ? c : NULL;
-}
-
 // Packet control update: call once per packet with the packet length, then
 // upmix_render() over consecutive chunks that sum to exactly that length, all
 // with the same coeffs.  Output is identical for any chunking.  A set from a
@@ -344,29 +304,48 @@ void upmix_begin(const UpmixCoeffs *coeffs, uint32_t sample_count);
 void upmix_render(const UpmixCoeffs *coeffs, const float *a, const float *b,
                   uint32_t n, float *const out[UPMIX_NUM_GEN]);
 
-// v1 delivery bridge over begin/render: A'/B' back into the source rows a/b
-// (which may be one row), C/SA/SB into the given rows.  Temporary; see
-// Documentation/Features/upmixer_v2_plan.md.
-void upmix_process_block(const UpmixCoeffs *coeffs,
-                         float *a, float *b,
-                         float *cbuf, float *lsbuf, float *rsbuf,
-                         uint32_t sample_count);
+// Per-packet claim snapshot (spec 6.3).  upmix_claim() sets claimed and the
+// source rows; PASS 4 fills each claimed output's side list with the source
+// rows it omitted, so injection never re-reads the live matrix.
+typedef struct {
+    uint16_t claimed;          // outputs whose source rows the matrix omits
+    uint8_t src_a, src_b;
+    uint8_t side_n[NUM_OUTPUT_CHANNELS];
+    const float *side_src[NUM_OUTPUT_CHANNELS][2];
+    float side_gain[NUM_OUTPUT_CHANNELS][2];
+} UpmixClaim;
 
-// Reset all processing state (rings, estimators, envelope).  Cold; called on
-// the running -> parked transition and when the running profile changes.
+// Packet setup, before the matrix: picks or holds the running profile, runs
+// the fades' park logic, and fills the claim.  Returns the coefficients to
+// pass to upmix_run(), or NULL with nothing claimed when the engine is parked.
+const UpmixCoeffs *upmix_claim(uint8_t n_inputs, uint32_t rate_hz, uint16_t out_enabled,
+                               UpmixClaim *cl);
+
+// After the matrix: render the packet chunk by chunk and inject it into the
+// claimed outputs.  in[] are the matrix sources, out[] the matrix outputs.
+void upmix_run(const UpmixCoeffs *coeffs, const UpmixClaim *cl,
+               float *const in[], float (*out)[AUDIO_BUFFER_SAMPLES], uint32_t sample_count);
+
+// Park at once with every fade at zero.  Main loop only: called by the
+// pipeline reset and while no producer feeds the pipeline.
+void upmix_hard_park(void);
+
+// Reset the engine's processing state (rings, estimators, envelope), not the
+// routing fades.  Called on park and when the running profile changes.
 void upmix_reset_state(void);
 
-// True while processing state holds audio (set by upmix_process_block).
+// True while processing state holds audio (set by upmix_begin).
 extern bool upmix_state_dirty;
 
-// Called by the pipeline every packet the pass is not running.  Inline so the
-// steady-state disabled path is a load + branch in RAM, no flash call.
+// Resets the engine if it holds audio.  Inline so the steady-state parked
+// path is a load and a branch.
 static inline void upmix_park(void) {
     if (upmix_state_dirty) upmix_reset_state();
 }
 
-// Fill a status packet from the live processing state at this input count.
-void upmix_get_status(UpmixStatus *st, uint8_t n_inputs);
+// Fill a status packet from the live processing state at this input count
+// and output enable mask (bit k = matrix output k enabled).
+void upmix_get_status(UpmixStatus *st, uint8_t n_inputs, uint16_t out_enabled);
 
 // Encode profile 0 as its wire image (the only profile on the wire until v2
 // phase 5).  Shared by GET_CONFIG, bulk collect and notify, so the notify

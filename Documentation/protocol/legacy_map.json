@@ -162,7 +162,7 @@
   "FX.TUBE_MIX": {"page": "FX", "cmd": 108, "dir": "GS", "addr": "NONE", "get_len": 4, "set": [4, 4]},
   "FX.TUBE_TRIM": {"page": "FX", "cmd": 109, "dir": "GS", "addr": "NONE", "get_len": 4, "set": [4, 4]},
   "FX.UPMIX_CONFIG": {"page": "FX", "cmd": 128, "dir": "GS", "addr": "NONE", "get_len": 44, "set": [44, 44], "build": "PICO_RP2350"},
-  "FX.UPMIX_STATUS": {"page": "FX", "cmd": 129, "dir": "G", "addr": "NONE", "get_len": 16, "build": "PICO_RP2350"},
+  "FX.UPMIX_STATUS": {"page": "FX", "cmd": 129, "dir": "G", "addr": "NONE", "get_len": 32, "build": "PICO_RP2350"},
   "FX.UPMIX_ENABLE": {"page": "FX", "cmd": 144, "dir": "GS", "addr": "NONE", "get_len": 4, "set": [4, 4], "build": "PICO_RP2350"},
   "FX.UPMIX_CENTER_MODE": {"page": "FX", "cmd": 145, "dir": "GS", "addr": "NONE", "get_len": 4, "set": [4, 4], "build": "PICO_RP2350"},
   "FX.UPMIX_SURROUND_MODE": {"page": "FX", "cmd": 146, "dir": "GS", "addr": "NONE", "get_len": 4, "set": [4, 4], "build": "PICO_RP2350"},

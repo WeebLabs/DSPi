@@ -14,9 +14,6 @@
 #include "audio_pipeline.h"
 #include "usb_audio.h"
 #include "bg_job.h"
-#if PICO_RP2350
-#include "upmix.h"
-#endif
 #include "pico/time.h"
 #include "hardware/sync.h"
 #include <string.h>
@@ -110,20 +107,14 @@ static inline uint16_t tap_valid_mask(uint8_t tap) {
     return (uint16_t)((1u << tap_width(tap)) - 1u);
 }
 
-// Selected AND live right now.  Input side follows the active USB alt and
-// the upmixer's derived rows; output side follows the matrix enables.
+// Selected AND live right now.  Input side follows the active input count;
+// output side follows the matrix enables.
 static uint16_t DSP_TIME_CRITICAL compute_live_mask(void) {
     uint16_t live = 0;
     if (rta.cfg.tap == RTA_TAP_INPUT) {
         uint8_t n = active_input_channel_count();
         if (n > NUM_INPUT_CHANNELS) n = NUM_INPUT_CHANNELS;
         live = (uint16_t)((1u << n) - 1u);
-#if PICO_RP2350
-        const UpmixCoeffs *um = upmix_bridge_coeffs(n);
-        if (um) {
-            live |= (uint16_t)(((1u << um->n_derived) - 1u) << NUM_STEREO_INPUTS);
-        }
-#endif
     } else {
         for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
             if (matrix_mixer.outputs[o].enabled) live |= (uint16_t)(1u << o);
@@ -355,8 +346,8 @@ static void tick_stats(uint32_t now) {
     rta.frames_acc = 0;
 }
 
-// A channel that stops being tapped mid-fill (output disabled, USB alt
-// change, upmixer parked) would never fill; move on instead of stalling.
+// A channel that stops being tapped mid-fill (output disabled or USB alt
+// change) would never fill; move on instead of stalling.
 static void check_fill_liveness(void) {
     if (rta.phase != PH_FILL) return;
     uint16_t live = compute_live_mask();

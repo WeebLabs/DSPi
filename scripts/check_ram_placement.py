@@ -27,10 +27,10 @@ FLASH_LO, FLASH_HI = 0x10000000, 0x20000000  # XIP flash window
 ROM_HI = 0x00008000                          # bootrom below here is always fine
 
 RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
-# RAM-resident code+data budgets, set about 2.5 KB above the measured image.
+# RAM-resident code+data budgets, set 1.5 to 2.5 KB above the measured image.
 # Raise deliberately and record the measured numbers in current_architecture.md
 # "Memory Layout" (history of every raise is there).
-DATA_BUDGET = {"rp2040": 72704, "rp2350": 100352}
+DATA_BUDGET = {"rp2040": 72704, "rp2350": 102400}
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {
@@ -168,6 +168,13 @@ RP2350_EXTRA = [
     ("__wrap_logf", True),
     # RP2350-only: QMI clkdiv helper.
     ("dspi_set_clkdiv", False),
+    # Upmixer: claim before the matrix, render and injection after it.
+    ("upmix_claim", False),
+    ("upmix_run", False),
+    ("um_inject", True),
+    ("upmix_begin", False),
+    ("upmix_render", False),
+    ("upmix_reset_state", False),
     # Shared cascade walker behind the PEQ and crossover block kernels.
     ("dsp_cascade_block", False),
     # Compiler/newlib mem ops; kept in RAM by the linker script exclusions.

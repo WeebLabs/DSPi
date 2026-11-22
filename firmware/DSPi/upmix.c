@@ -1,8 +1,6 @@
 /*
- * Stereo upmixer (RP2350 only)
- *
- * Derives Centre / Ls / Rs virtual matrix sources from the stereo bus.
- * See upmix.h for the signal flow, engine modes, and module pattern.
+ * Upmixer pair engine and its output routing (RP2350 only).
+ * Design: Documentation/Features/upmixer_v2_spec.md.
  *
  * Coefficient design notes:
  *   - All smoothers are one-pole with retention alpha = exp(-1/(fs*tau)).
@@ -111,6 +109,27 @@ typedef struct {
 
 static UpmixState um;
 
+// Routing and lifecycle state (spec 6.2 to 6.4).  Engine resets leave it alone.
+static struct {
+    UpmixCoeffs latch;                            // set the engine runs; copied on publish
+    float e[UPMIX_NUM_GEN][NUM_OUTPUT_CHANNELS];  // contribution gains, current value
+    float w[NUM_OUTPUT_CHANNELS];                 // claim weights
+    uint16_t gen_peak[UPMIX_NUM_GEN];
+    uint32_t rate;
+    uint8_t n_inputs;
+    uint32_t clip_hold[UPMIX_NUM_GEN];            // samples left showing a clip bit
+    bool held;                                    // latch valid: running or fading out
+    bool active;                                  // targets on; false while fading out
+} ur;
+
+// One render chunk of every generated channel.  BA/BB stay zero until phase 4.
+static float um_chunk[UPMIX_NUM_GEN][UPMIX_CHUNK];
+
+// Host harness tap on each rendered chunk (tools/upmix_proto/harness).
+#ifndef UPMIX_HOST_TAP
+#define UPMIX_HOST_TAP(gen, off, k)
+#endif
+
 // Park fast-path flag (see upmix_park() in upmix.h)
 bool upmix_state_dirty = false;
 
@@ -133,10 +152,14 @@ void upmix_compute_coefficients(UpmixCoeffs *c, const UpmixConfig *cfg, float sa
     c->center_mode = upmix_clamp_center_mode(cfg->center_mode);
     c->surround_mode = cfg->surround_mode > UPMIX_SURROUND_ADAPTIVE
                        ? UPMIX_SURROUND_ADAPTIVE : cfg->surround_mode;
-    // n_derived tracks the surround mode alone: row 2 stays reserved with the
-    // centre engine OFF so switching it does not renumber the Ls/Rs source rows
-    // under existing matrix routing.
-    c->n_derived = (c->surround_mode == UPMIX_SURROUND_OFF) ? 1 : UPMIX_NUM_DERIVED;
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+        int t = cfg->routes[g].trim_q1;
+        t = t < UPMIX_TRIM_MIN_Q1 ? UPMIX_TRIM_MIN_Q1 : (t > UPMIX_TRIM_MAX_Q1 ? UPMIX_TRIM_MAX_Q1 : t);
+        float gain = powf(10.0f, (float)t * (0.5f / 20.0f));   // exactly 1 at 0 dB
+        c->route_mask[g] = cfg->routes[g].out_mask & UPMIX_OUT_MASK;
+        c->route_gain[g] = (cfg->routes[g].flags & UPMIX_ROUTE_INVERT) ? -gain : gain;
+        c->claim_mask |= c->route_mask[g];
+    }
 
     c->strength = clampf(cfg->strength_pct, UPMIX_STRENGTH_MIN, UPMIX_STRENGTH_MAX) * 0.01f;
     // Both the C output and the removal from L/R scale by strength, so zeroing
@@ -201,10 +224,12 @@ void upmix_compute_coefficients(UpmixCoeffs *c, const UpmixConfig *cfg, float sa
     c->slp_a3 = g * c->slp_a2;
 
     c->env_step = 1.0f / (fs * UPMIX_FADE_MS * 0.001f);
+    c->slew_step = 1000.0f / (fs * UPMIX_FADE_MS);   // exact 1/480 at 48 kHz
 }
 
 // Rate gate snapshot for status reporting (written by upmix_apply_profiles).
 static bool um_rate_ok = true;
+static uint32_t um_seq;
 
 void upmix_apply_profiles(float sample_rate) {
     // Compute into each profile's inactive buffer, then publish the pointer
@@ -215,6 +240,7 @@ void upmix_apply_profiles(float sample_rate) {
         UpmixCoeffs *next = &um_coeff_bufs[p][um_coeff_idx[p] ^ 1];
         upmix_compute_coefficients(next, &cfg, sample_rate);
         next->profile = (uint8_t)p;
+        next->seq = ++um_seq;
         if (cfg.enabled && um_rate_ok) {
             um_coeff_idx[p] ^= 1;
             current_upmix_coeffs[p] = next;
@@ -232,21 +258,30 @@ void upmix_reset_state(void) {
     upmix_state_dirty = false;
 }
 
-void upmix_get_status(UpmixStatus *st, uint8_t n_inputs) {
+void upmix_get_status(UpmixStatus *st, uint8_t n_inputs, uint16_t out_enabled) {
     memset(st, 0, sizeof(*st));
     bool enabled = false;
     for (int p = 0; p < UPMIX_NUM_PROFILES; p++) enabled |= upmix_profiles[p].enabled;
     const UpmixCoeffs *sel = upmix_select(n_inputs);
-    st->active = um.running ? 1 : 0;
-    st->parked_reason = um.running ? 0
+    bool absent = sel && (sel->src_a >= n_inputs || sel->src_b >= n_inputs);
+    // Parked only for want of audio: report what will run once packets flow.
+    bool would_run = !ur.held && sel && !absent && (sel->claim_mask & out_enabled);
+    st->active = ((ur.held && ur.active) || would_run) ? 1 : 0;
+    st->parked_reason = st->active ? 0
+                      : ur.held ? 5
                       : !enabled ? 1
                       : !um_rate_ok ? 3
-                      : (sel && (sel->src_a >= n_inputs || sel->src_b >= n_inputs)) ? 4 : 2;
+                      : absent ? 4
+                      : sel ? 6 : 2;
     st->corr_q14 = (int16_t)(clampf(um.t_corr, -1.0f, 1.0f) * 16384.0f);
     st->balance_q14 = (int16_t)(clampf(um.t_bal, 0.0f, 1.0f) * 16384.0f);
     st->center_gain_q15 = (uint16_t)(clampf(um.p_gc * 1.4142135624f, 0.0f, 1.0f) * 32767.0f);
     st->ls_gain_q15 = (uint16_t)(clampf(um.s.p_gls, 0.0f, 1.0f) * 32767.0f);
     st->rs_gain_q15 = (uint16_t)(clampf(um.s.p_grs, 0.0f, 1.0f) * 32767.0f);
+    st->active_profile = ur.held ? ur.latch.profile : would_run ? sel->profile : 0xFF;
+    for (int g = 0; g < UPMIX_NUM_GEN; g++)
+        if (ur.clip_hold[g]) st->gen_clip |= (uint8_t)(1u << g);
+    memcpy(st->gen_peak, ur.gen_peak, sizeof(st->gen_peak));
 }
 
 void upmix_config_to_packet(UpmixConfigPacket *out) {
@@ -329,7 +364,7 @@ void upmix_begin(const UpmixCoeffs * __restrict c, uint32_t n) {
     upmix_state_dirty = true;
     um.running = true;
 
-    const bool sur = c->n_derived == UPMIX_NUM_DERIVED;
+    const bool sur = c->surround_mode != UPMIX_SURROUND_OFF;
     const bool sur_adaptive = sur && c->surround_mode == UPMIX_SURROUND_ADAPTIVE;
     const float inv_n = 1.0f / (float)n;
 
@@ -451,7 +486,7 @@ DSP_TIME_CRITICAL
 void upmix_render(const UpmixCoeffs * __restrict c,
                   const float * __restrict l, const float * __restrict r,
                   uint32_t n, float *const out[UPMIX_NUM_GEN]) {
-    const bool sur = c->n_derived == UPMIX_NUM_DERIVED;
+    const bool sur = c->surround_mode != UPMIX_SURROUND_OFF;
     const bool sur_adaptive = sur && c->surround_mode == UPMIX_SURROUND_ADAPTIVE;
     float * __restrict abuf = out[UPMIX_GEN_A];
     float * __restrict bbuf = out[UPMIX_GEN_B];
@@ -576,29 +611,153 @@ void upmix_render(const UpmixCoeffs * __restrict c,
     um.rp.gls = gls_i; um.rp.grs = grs_i; um.rp.wl = wl_i; um.rp.wr = wr_i;
 }
 
-// A'/B' staging for the bridge: render outputs must not alias its sources.
-static float um_ab[2][UPMIX_CHUNK];
-
-static inline void um_copy(float * __restrict dst, const float * __restrict src, uint32_t n) {
-    for (uint32_t i = 0; i < n; i++) dst[i] = src[i];
+__attribute__((always_inline)) static inline void um_release(void) {
+    if (upmix_state_dirty) upmix_reset_state();
+    ur.held = false;
+    ur.active = false;
+    memset(ur.gen_peak, 0, sizeof(ur.gen_peak));
+    memset(ur.clip_hold, 0, sizeof(ur.clip_hold));
 }
 
-// Temporary bridge to v1 delivery (matrix rows 0..4); removed when module
-// routing lands (Documentation/Features/upmixer_v2_plan.md, phase 3).
 DSP_TIME_CRITICAL
-void upmix_process_block(const UpmixCoeffs * __restrict c,
-                         float *a, float *b,
-                         float * __restrict cbuf,
-                         float * __restrict lsbuf, float * __restrict rsbuf,
-                         uint32_t n) {
+__attribute__((optimize("Os")))
+const UpmixCoeffs *upmix_claim(uint8_t n_in, uint32_t rate, uint16_t out_en, UpmixClaim *cl) {
+    cl->claimed = 0;
+    const UpmixCoeffs *sel = rate <= (uint32_t)UPMIX_RATE_MAX ? upmix_select(n_in) : NULL;
+    if (sel && (sel->src_a >= n_in || sel->src_b >= n_in)) sel = NULL;
+    // Count and rate changes park hard (spec 6.4).  Source switches at the same
+    // count and rate arrive through upmix_hard_park() from the pipeline reset.
+    if (ur.held && (n_in != ur.n_inputs || rate != ur.rate)) {
+        memset(ur.e, 0, sizeof(ur.e));
+        memset(ur.w, 0, sizeof(ur.w));
+        um_release();
+    }
+    ur.n_inputs = n_in;
+    ur.rate = rate;
+    if (ur.held) {
+        // A source edit fades out and restarts like a profile change (spec 3.2).
+        ur.active = sel && sel->profile == ur.latch.profile
+                    && sel->src_a == ur.latch.src_a && sel->src_b == ur.latch.src_b;
+        if (ur.active && sel->seq != ur.latch.seq) ur.latch = *sel;
+    }
+    // Second pass: a finished fade-out lets the waiting profile start this packet.
+    for (int pass = 0; pass < 2; pass++) {
+        if (!ur.held) {
+            if (!sel || !(sel->claim_mask & out_en)) break;   // nothing routed: no engine
+            ur.latch = *sel;
+            ur.held = ur.active = true;
+        }
+        uint16_t claimed = 0;
+        for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
+            uint16_t bit = (uint16_t)(1u << o);
+            bool live = ur.w[o] != 0.0f || (ur.active && (ur.latch.claim_mask & bit));
+            for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+                if (!(out_en & bit)) ur.e[g][o] = 0.0f;   // disabled: fade in again on return
+                live |= ur.e[g][o] != 0.0f;
+            }
+            if (!(out_en & bit)) { ur.w[o] = 0.0f; continue; }
+            if (live) claimed |= bit;
+        }
+        if (claimed || (ur.active && (ur.latch.claim_mask & out_en))) {
+            cl->claimed = claimed;
+            cl->src_a = ur.latch.src_a;
+            cl->src_b = ur.latch.src_b;
+            memset(cl->side_n, 0, sizeof(cl->side_n));
+            return &ur.latch;
+        }
+        um_release();
+    }
+    if (ur.held) um_release();
+    else upmix_park();
+    return NULL;
+}
+
+// Fixed-rate slew that lands exactly on the target (spec 6.4).
+static inline float um_slew(float v, float t, float step) {
+    if (v < t) { v += step; return v > t ? t : v; }
+    v -= step;
+    return v < t ? t : v;
+}
+
+// Adds output o's generated contributions and restores its omitted rows by 1 - w.
+// Separate VMUL/VADD: VFMA is slower on the M33 (current_architecture.md, FP contraction).
+DSP_TIME_CRITICAL __attribute__((noinline, optimize("O2", "fp-contract=off")))
+static void um_inject(const UpmixCoeffs * __restrict c, const UpmixClaim * __restrict cl,
+                      int o, float * __restrict dst, uint32_t off, uint32_t k, uint8_t live) {
+    const uint16_t bit = (uint16_t)(1u << o);
+    const float step = c->slew_step;
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+        float e = ur.e[g][o];
+        const float t = (ur.active && (c->route_mask[g] & bit)) ? c->route_gain[g] : 0.0f;
+        const float * __restrict s = um_chunk[g];
+        if (e == t) {
+            if (e == 0.0f || !(live & (1u << g))) continue;
+            for (uint32_t i = 0; i < k; i++) dst[i] += e * s[i];
+            continue;
+        }
+        if (live & (1u << g)) {
+            for (uint32_t i = 0; i < k; i++) { e = um_slew(e, t, step); dst[i] += e * s[i]; }
+        } else {
+            for (uint32_t i = 0; i < k; i++) e = um_slew(e, t, step);
+        }
+        ur.e[g][o] = e;
+    }
+
+    float w = ur.w[o];
+    const float tw = (ur.active && (c->claim_mask & bit)) ? 1.0f : 0.0f;
+    const uint32_t ns = cl->side_n[o];
+    if (w == tw && w == 1.0f) return;   // fully claimed: rows stay out, gen is bit-exact
+    // One loop form for settled and slewing weights, so the sum cannot depend
+    // on where a chunk ends.
+    const float *s0 = ns ? cl->side_src[o][0] + off : NULL;
+    const float *s1 = ns > 1 ? cl->side_src[o][1] + off : NULL;
+    const float g0 = ns ? cl->side_gain[o][0] : 0.0f, g1 = ns > 1 ? cl->side_gain[o][1] : 0.0f;
+    for (uint32_t i = 0; i < k; i++) {
+        w = um_slew(w, tw, step);
+        float r = ns > 1 ? g0 * s0[i] + g1 * s1[i] : (ns ? g0 * s0[i] : 0.0f);
+        dst[i] += (1.0f - w) * r;
+    }
+    ur.w[o] = w;
+}
+
+DSP_TIME_CRITICAL
+__attribute__((optimize("O2")))
+void upmix_run(const UpmixCoeffs * __restrict c, const UpmixClaim * __restrict cl,
+               float *const in[], float (*out)[AUDIO_BUFFER_SAMPLES], uint32_t n) {
+    if (n == 0) return;
     upmix_begin(c, n);
+    const float *a = in[c->src_a], *b = in[c->src_b];
+    uint8_t live = (1u << UPMIX_GEN_A) | (1u << UPMIX_GEN_B) | (1u << UPMIX_GEN_C);
+    if (c->surround_mode != UPMIX_SURROUND_OFF) live |= (1u << UPMIX_GEN_SA) | (1u << UPMIX_GEN_SB);
+    float *const gen[UPMIX_NUM_GEN] = { um_chunk[0], um_chunk[1], um_chunk[2], um_chunk[3],
+                                        um_chunk[4], um_chunk[5], um_chunk[6] };
+    float pk[UPMIX_NUM_GEN] = { 0 };
     for (uint32_t off = 0; off < n; off += UPMIX_CHUNK) {
         uint32_t k = n - off < UPMIX_CHUNK ? n - off : UPMIX_CHUNK;
-        float *const out[UPMIX_NUM_GEN] = { um_ab[0], um_ab[1], cbuf + off, lsbuf + off, rsbuf + off };
-        upmix_render(c, a + off, b + off, k, out);
-        um_copy(a + off, um_ab[0], k);
-        um_copy(b + off, um_ab[1], k);
+        upmix_render(c, a + off, b + off, k, gen);
+        UPMIX_HOST_TAP(gen, off, k);
+        for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+            if (!(live & (1u << g))) continue;
+            float m = pk[g];
+            for (uint32_t i = 0; i < k; i++) { float v = fabsf(um_chunk[g][i]); m = v > m ? v : m; }
+            pk[g] = m;
+        }
+        for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
+            if (cl->claimed & (1u << o)) um_inject(c, cl, o, out[o] + off, off, k, live);
     }
+    // A clip shows for one second, so every poller sees it and no read clears it.
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+        ur.gen_peak[g] = (uint16_t)(fminf(1.0f, pk[g]) * 32767.0f);
+        uint32_t h = ur.clip_hold[g];
+        ur.clip_hold[g] = pk[g] > CLIP_THRESH_F ? ur.rate : (h > n ? h - n : 0);
+    }
+}
+
+void upmix_hard_park(void) {
+    if (!ur.held) return;   // parked already: every fade is at zero
+    memset(ur.e, 0, sizeof(ur.e));
+    memset(ur.w, 0, sizeof(ur.w));
+    um_release();
 }
 
 #endif // PICO_RP2350

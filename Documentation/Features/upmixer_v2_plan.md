@@ -1,6 +1,6 @@
 # Upmixer v2 Implementation Plan
 
-*2026-11-22 (revised the same day for the one-engine design). Implements `upmixer_v2_spec.md`. Not started. RP2350 only, except phase 7.*
+*2026-11-22 (revised the same day for the one-engine design). Implements `upmixer_v2_spec.md`. Phases 0 to 3 done. RP2350 only, except phase 7.*
 
 Each phase builds on both platforms, keeps the tree releasable, and ends with the `tools/upmix_proto` harness passing where the engine is touched. Architecture doc updates follow `CLAUDE.md`.
 
@@ -20,7 +20,7 @@ Result: `split_check.py` passes 1,500 runs bit for bit against HEAD, chunk sizes
 - Keep v1 delivery as a temporary bridge inside this phase only. Still call the engine at the v1 hook and copy each chunk to rows 0 to 4, so behaviour and wire are identical. Phase 3 deletes the bridge in the same release.
 - Harness: extend `tools/upmix_proto/harness` to the new calls. Every v1 acceptance case must stay bit-identical at chunk sizes 1, 7, 32 and the whole packet.
 
-## Phase 2: Profiles, sources and activation (done 2026-11-22)
+## Phase 2: Profiles, sources and activation (done 2026-11-22, 9293bc8)
 
 - `upmix_config` became `upmix_profiles[2]`, each with `src_a`, `src_b` and `active_counts` (defaults 0, 1, 0x01; both disabled), and each with its own published coefficient set (`current_upmix_coeffs[]`, double-buffered). `upmix_profile_defaults()` replaces the copied default blocks in preset load and factory reset.
 - `upmix_select(n)` returns the lowest published profile whose `active_counts` holds the input count. Coefficient sets carry their profile index, and `upmix_begin()` resets the engine when a set from a different profile arrives, so the new profile fades in from reset.
@@ -29,7 +29,12 @@ Result: `split_check.py` passes 1,500 runs bit for bit against HEAD, chunk sizes
 - Not reachable from a host until phase 5: profile 1 and the new fields have no commands and are not persisted. Every vendor, bulk, preset and Control Surfaces path uses profile 0, and a preset load resets the rest to defaults. Behaviour with the defaults is v1's.
 - Result: `split_check.py` adds profile selection (12 cases: disjoint and overlapping counts, lowest-wins, absent sources, source clamp, rate gate, park reasons) and a profile-switch test (the output after a switch equals the new profile run alone from reset; a mutant without the reset fails it). 1,500 engine runs stay bit-identical to HEAD and the full `harness.py` passes. RP2350 `.data` 99,600 to 99,840 B, `.bss` +268 B (second coefficient double buffer). Hardware: core 0 load unchanged from phase 1.
 
-## Phase 3: Module routing and claim semantics
+## Phase 3: Module routing and claim semantics (done 2026-11-22)
+
+Result: the bridge is gone. `upmix_claim()` runs before the matrix and holds the running profile on a copied coefficient set, so disable, a lost win and a removed last route fade out before the engine parks; count and rate changes park hard. PASS 4 omits the source rows on claimed outputs into a side list, and `upmix_run()` renders and injects after the matrix, before the generator. Pulled forward from phase 5 so hardware could exercise the routing: `FX.UPMIX_ROUTE` (0x82, no notification or persistence yet) and the 32-byte status, FX revision 2. BA/BB have route and status slots but render silence until phase 4. Host: `split_check.py` adds a mini pipeline against an independent float64 model of the claim and fade rules (three scenes, packet sizes 7 to 192): claims agree on every packet, worst error under 1e-7, settled unity claims bit-exact, and six seeded faults each fail it. The engine stays bit-identical to 9293bc8 over 1,500 runs and the full `harness.py` passes. Builds: RP2350 `.data` 99,840 to 101,000 B, so the RP2350 budget rose 2 KB to 102,400 B (covers phase 4); `.bss` +1,324 B; RP2040 unchanged. Hardware (RP2350 loopback build, 48 and 44.1 kHz): A'/B' routed over L/R are bit-exact with the centre off, a mono tone gives A' -12.04 dB and C +3.01 dB as computed, the matrix is bit-exact again after a disable, and route GET/SET, clamps and refusals behave. Core 0 with a 5.1 routing: adaptive 12.2 %, passive 11.0 %, off 5.0 % (phase 2 without routes: 12, 10, 5). A v1 preset that used rows 2..4 gives no upmix output until the phase 5 migration. Fable audit the same day (no blockers): the engine now parks hard while no producer feeds the pipeline and on every pipeline reset, a source edit fades like a profile change, a profile with nothing routed does not run, clip bits hold for a second instead of clearing on read (protocol rule 2), reserved route flags are refused, and the host check gained a two-row side list, rate and source-edit cases, time-placed edits, an independent fade and trim model, status checks and `harness/mutants.py` (11 seeded faults, all caught).
+
+**Release gate.** No beta is cut between phase 3 and phase 5. Until phase 5, routes have no change notification, no persistence, and a preset load or factory reset clears them, and FX revision 2 changes shape again in phase 5. Check the ESP32 front panel's `FX.UPMIX_STATUS` request length before the release.
+
 
 - Add the per-generated-channel route fields (mask, trim, flags) to each profile.
 - PASS 4: build the per-packet claim snapshot from the running profile, omit its source rows from claimed outputs, and capture the omitted (source, gain) pairs in a per-output side list.
@@ -47,8 +52,8 @@ Result: `split_check.py` passes 1,500 runs bit for bit against HEAD, chunk sizes
 
 ## Phase 5: Host interface and persistence
 
-- Commands, in `vendor/pages/fx.def` then regenerated: change the address kind of 0x80 and 0x90 to 0x9D to `INDEX` (profile) with handler range checks. 0x81 stays `NONE`. Add 0x82 `UPMIX_ROUTE` and 0x9E to 0xA1. Grow `UpmixConfigPacket` to 80 bytes (a 44-byte SET keeps the tail) and `UpmixStatus` to 32. Bump the FX page revision.
-- Notifications for every new field of both profiles via the shared encoder.
+- Commands, in `vendor/pages/fx.def` then regenerated: change the address kind of 0x80 and 0x90 to 0x9D to `INDEX` (profile) with handler range checks. 0x81 stays `NONE`. Add 0x9E to 0xA1. Grow `UpmixConfigPacket` to 80 bytes (a 44-byte SET keeps the tail). 0x82 `UPMIX_ROUTE`, the 32-byte `UpmixStatus` and the FX revision bump to 2 landed in phase 3; the revision stays 2 for the rest of this release.
+- Notifications for every new field of both profiles via the shared encoder, routes included (0x82 has none until then).
 - Wire bulk: append the 116-byte section and bump `WIRE_FORMAT_VERSION`.
 - Slot: tail-append 116 bytes, bump `SLOT_DATA_VERSION`, extend the CRC size table, and add the legacy route migration of spec 8.1 as one function used by slot load.
 - Factory reset defaults for both profiles.
@@ -59,7 +64,7 @@ Result: `split_check.py` passes 1,500 runs bit for bit against HEAD, chunk sizes
 
 - Stereo to 5.1, stereo to 7.1 (back pair), 5.1 to 7.1 (6-channel USB), LCR, centre fill, dialogue lift, and a two-profile preset switching between stereo and 6-channel sources.
 - Inter-slot alignment check with the wirecap rig across enable, disable, mask edits, profile changes, source switches and preset loads.
-- Click check on every fade path, including the back-pair start. Confirm pipeline-forced parks only click where a pipeline reset already does.
+- Click check on every fade path, including the back-pair start. Listen at stream start too: the main loop parks the engine while `pipeline_producer_is_streaming()` is false, so blocks must not flow audibly in that window (USB before `sync_started`, I2S before RUNNING). Confirm pipeline-forced parks only click where a pipeline reset already does.
 - Preset migration on real v1 presets.
 - CPU meter measurement of the engine with and without the back pair, recorded in the spec. Measure RAM growth from the ELF against the spec's 6 KB estimate.
 

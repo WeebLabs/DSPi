@@ -207,11 +207,14 @@ def fx_reads_shape(dev, profile, chk):
         params = _save(dev, [n for n, _v in UPMIX])
         chk.eq(_upmix_cfg_disagreements(cfg, params), [], "UPMIX_CONFIG fields == UPMIX_* parameters")
         st = _get(dev, "UPMIX_STATUS")
-        chk.eq(len(st), 16, "UPMIX_STATUS length")
+        chk.eq(len(st), 32, "UPMIX_STATUS length")
         chk.member(st[0], (0, 1), "UPMIX_STATUS active")
-        chk.in_range(st[1], 0, 3, "UPMIX_STATUS parked reason")
+        chk.in_range(st[1], 0, 6, "UPMIX_STATUS parked reason")
         chk.eq(st[0] == 1, st[1] == 0, f"active exactly when not parked: {st[:2].hex()}")
-        chk.eq(st[12:], bytes(4), "UPMIX_STATUS reserved")
+        chk.eq(st[12:16], bytes(4), "UPMIX_STATUS reserved")
+        chk.member(st[16], (0, 1, 0xFF), "UPMIX_STATUS active_profile")
+        chk.eq(st[16] == 0xFF, st[1] in (1, 2, 3, 4, 6), f"a profile is named unless parked: {st[:2].hex()} {st[16]:#x}")
+        chk.eq(st[17] & 0x80, 0, "UPMIX_STATUS clip bits within the seven generated channels")
 
 
 @test("paged_fx", mutating=True)
@@ -323,6 +326,42 @@ def fx_value_and_length_errors(dev, profile, chk):
     if _rp2350(profile):
         expect_stall(chk, lambda: _set(dev, "UPMIX_STATUS", bytes(16)), "VC_ERR_DIRECTION", "SET UPMIX_STATUS")
         expect_stall(chk, lambda: _set(dev, "UPMIX_CONFIG", bytes(43)), "VC_ERR_LENGTH", "43-byte UPMIX_CONFIG")
+
+
+@test("paged_fx", mutating=True)
+def fx_upmix_route_roundtrip(dev, profile, chk):
+    """UPMIX_ROUTE per (profile, channel): exact readback, trim clamp, and reserved-flag, address and mask refusals."""
+    require_page(dev, FX)
+    if not _rp2350(profile):
+        expect_stall(chk, lambda: _get(dev, "UPMIX_ROUTE", 4), "VC_ERR_UNKNOWN", "UPMIX_ROUTE on RP2040")
+        return
+    addrs = [(p << 8) | g for p in range(2) for g in range(7)]
+    saved = {a: dev.pget("FX.UPMIX_ROUTE", addr=a, length=4) for a in addrs}
+    nout = profile.num_output_channels
+    pk = lambda m, t, f: struct.pack("<HbB", m, t, f)
+    try:
+        for a in addrs:
+            v = pk((a * 37) & ((1 << nout) - 1), -((a & 0x3F) % 80), a & 1)
+            dev.pset("FX.UPMIX_ROUTE", v, addr=a)
+            chk.eq(dev.pget("FX.UPMIX_ROUTE", addr=a, length=4), v, f"UPMIX_ROUTE {a:#06x} readback")
+        a = 0x0102
+        dev.pset("FX.UPMIX_ROUTE", pk(1, -100, 1), addr=a)
+        chk.eq(dev.pget("FX.UPMIX_ROUTE", addr=a, length=4), pk(1, -80, 1), "trim clamps to -40 dB")
+        expect_stall(chk, lambda: dev.pset("FX.UPMIX_ROUTE", pk(1, 0, 0x02), addr=a), "VC_ERR_VALUE",
+                     "reserved flag bit")
+        dev.pset("FX.UPMIX_ROUTE", pk(1, 100, 0), addr=a)
+        chk.eq(dev.pget("FX.UPMIX_ROUTE", addr=a, length=4), pk(1, 12, 0), "trim clamps to +6 dB")
+        expect_stall(chk, lambda: dev.pset("FX.UPMIX_ROUTE", pk(1 << nout, 0, 0), addr=0), "VC_ERR_VALUE",
+                     "mask bit above the last output")
+        for bad in (0x0007, 0x0200, 0xFF00):
+            expect_stall(chk, lambda b=bad: dev.pget("FX.UPMIX_ROUTE", addr=b, length=4), "VC_ERR_ADDRESS",
+                         f"GET UPMIX_ROUTE at {bad:#06x}")
+            expect_stall(chk, lambda b=bad: dev.pset("FX.UPMIX_ROUTE", pk(0, 0, 0), addr=b), "VC_ERR_ADDRESS",
+                         f"SET UPMIX_ROUTE at {bad:#06x}")
+    finally:
+        for a, v in saved.items():
+            dev.pset("FX.UPMIX_ROUTE", v, addr=a)
+    chk.eq({a: dev.pget("FX.UPMIX_ROUTE", addr=a, length=4) for a in addrs}, saved, "routes restored")
 
 
 @test("paged_fx", mutating=True)

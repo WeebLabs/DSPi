@@ -1,5 +1,5 @@
 // Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.8.
-VC_PAGE(FX, 0x08, 1, "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer")
+VC_PAGE(FX, 0x08, 2, "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer")
 
 VC_CMD(0x10, CROSSFEED_ENABLE, fx_crossfeed_enable_get, fx_crossfeed_enable_set,
        NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Crossfeed on or off (u8 bool)")
@@ -91,7 +91,9 @@ VC_CMD(0x6D, TUBE_TRIM, fx_tube_get, fx_tube_set,
 VC_CMD(0x80, UPMIX_CONFIG, fx_upmix_config_get, fx_upmix_config_set,
        NONE, 44, 44, 44, VC_F_DEFERRED, 0, "Whole upmixer config (UpmixConfigPacket)")
 VC_CMD(0x81, UPMIX_STATUS, fx_upmix_status_get, VC_NONE,
-       NONE, 16, 0, 0, 0, 0, "Live upmixer telemetry (UpmixStatus)")
+       NONE, 32, 0, 0, 0, 0, "Live upmixer telemetry (UpmixStatus)")
+VC_CMD(0x82, UPMIX_ROUTE, fx_upmix_route_get, fx_upmix_route_set,
+       INDEX, 4, 4, 4, VC_F_DEFERRED, 0, "Routing of one generated channel, wValue = (profile << 8) | channel (UpmixRoute; trim clamped, reserved flag bits refused)")
 VC_CMD(0x90, UPMIX_ENABLE, fx_upmix_param_get, fx_upmix_param_set,
        NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ENABLED, "Upmixer on or off (f32)")
 VC_CMD(0x91, UPMIX_CENTER_MODE, fx_upmix_param_get, fx_upmix_param_set,

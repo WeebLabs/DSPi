@@ -48,6 +48,29 @@ def outs():
     return [np.zeros(N, np.float32) for _ in range(5)]
 
 
+def route_check(lib, quiet=False):
+    """Claims, injection, fades and status against the model, per scene and packet size."""
+    import ctypes
+    names = ('stereo 5.1 with edits', 'one source row', 'two profiles on 6 ch', 'nothing routed')
+    n = FS * 3                                  # HDUR in harness.c
+    rng = np.random.default_rng(5)
+    t = np.arange(n) / FS
+    src = np.stack([0.4 * np.sin(2 * np.pi * (110 + 70 * k) * t + k) + 0.1 * rng.standard_normal(n)
+                    for k in range(8)]).astype(np.float32)
+    src[1] = 0.6 * src[0] + 0.4 * src[1]        # partly correlated pair, so C and the sides carry audio
+    fails = 0
+    for blk in (48, 44, 192, 37, 7):
+        for sc in range(lib.h_route_scenes()):
+            err, exact, sbad = ctypes.c_double(0), ctypes.c_int(0), ctypes.c_int(0)
+            bad = lib.h_route_check(sc, blk, ptr(src), ctypes.byref(err), ctypes.byref(exact), ctypes.byref(sbad))
+            ok = bad == 0 and err.value < 2e-6 and exact.value == 0 and sbad.value == 0
+            fails += 0 if ok else 1
+            if not quiet:
+                print('route %-24s blk %3d: %s (lifecycle %d, worst error %.2e, unity not exact %d, status %d)' %
+                      (names[sc], blk, 'ok' if ok else 'FAIL', bad, err.value, exact.value, sbad.value))
+    return fails
+
+
 def main():
     rev = sys.argv[1] if len(sys.argv) > 1 else 'HEAD'
     head = build(*head_sources(rev), False)
@@ -91,6 +114,8 @@ def main():
             bad = new.h_profile_switch_check(ptr(p0), ptr(p1), blk, ptr(L), ptr(R), N, blk * (N // blk // 2))
             print('profile switch restarts from reset (blk %d): %d channel mismatches' % (blk, bad))
             fails += bad
+    if hasattr(new, 'h_route_check'):
+        fails += route_check(new)
     sys.exit(1 if fails else 0)
 
 

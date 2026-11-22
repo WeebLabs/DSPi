@@ -662,7 +662,7 @@ A row whose New command is `none` and whose Payload says "1.1.6 STALLed it" or "
 | 0x4D | [`UPMIX_GET_PARAM`](#upmix_set_param-and-upmix_get_param-0x4c-0x4d) | R | 12 | split | `FX.UPMIX_DECORR` (RP2350 only) | `0x089C` | G | `0` | - | 4 |
 | 0x4D | [`UPMIX_GET_PARAM`](#upmix_set_param-and-upmix_get_param-0x4c-0x4d) | R | 13 | split | `FX.UPMIX_PRESENCE` (RP2350 only) | `0x089D` | G | `0` | - | 4 |
 | 0x4D | [`UPMIX_GET_PARAM`](#upmix_set_param-and-upmix_get_param-0x4c-0x4d) | R | any other | split | none | - | - | - | 1.1.6 STALLed it | - |
-| 0x4E | `UPMIX_GET_STATUS` | R | any | same | `FX.UPMIX_STATUS` (RP2350 only) | `0x0881` | G | `0` | - | 16 |
+| 0x4E | `UPMIX_GET_STATUS` | R | any | same | `FX.UPMIX_STATUS` (RP2350 only) | `0x0881` | G | `0` | - | 32 |
 | 0x50 | [`GET_STATUS`](#63-get_status-0x50) | R | any | custom | `MEAS.LEVELS` G, `SYS.SYSTEM_STATUS` G, `SYS.PDM_STATS` G, `SYS.SPDIF_TX_STATS` G, `SYS.USB_AUDIO_STATUS` G, `SYS.PIPELINE_STATS` G, `INPUT.STATUS` G, `DIAG.LOOPBACK_STATS` (DSPI_LOOPBACK) G | `0x0910`, `0x0140`, `0x0144`, `0x0145`, `0x0141`, `0x0143`, `0x0311`, `0xF020` | - | see recipe | [see recipe](#63-get_status-0x50) | see recipe |
 | 0x51 | `SAVE_PARAMS` | W-as-R | any | retired | none | - | - | - | [replacement](#67-retired-opcodes) | - |
 | 0x52 | `SAVE_OUTPUT_CONFIG` | W-as-R | any | action | `STORE.OUTPUT_CONFIG_SAVE` | `0x0221` | S0 | `0` | none | 0 |
@@ -1483,7 +1483,8 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `FX.TUBE_MIX` | 0x08 | 0x6C | none | 4 |  |  |
 | `FX.TUBE_TRIM` | 0x08 | 0x6D | none | 4 |  |  |
 | `FX.UPMIX_CONFIG` | 0x08 | 0x80 | none | 44 | RP2350 only |  |
-| `FX.UPMIX_STATUS` | 0x08 | 0x81 | none | 16 | RP2350 only |  |
+| `FX.UPMIX_STATUS` | 0x08 | 0x81 | none | 32 | RP2350 only |  |
+| `FX.UPMIX_ROUTE` | 0x08 | 0x82 | index | 4 | RP2350 only |  |
 | `FX.UPMIX_ENABLE` | 0x08 | 0x90 | none | 4 | RP2350 only |  |
 | `FX.UPMIX_CENTER_MODE` | 0x08 | 0x91 | none | 4 | RP2350 only |  |
 | `FX.UPMIX_SURROUND_MODE` | 0x08 | 0x92 | none | 4 | RP2350 only |  |

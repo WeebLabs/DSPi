@@ -478,66 +478,43 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
                                sample_count);
     }
 
-    // ========== PASS 3: Stereo Upmixer ==========
-    // The running profile's engine derives Centre/Ls/Rs from its source pair
-    // into the otherwise-idle multichannel input rows (buf_in_ext[0..2] =
-    // source rows 2..4) and raises the matrix source count so they become
-    // ordinary routable sources.  That row bridge runs only on the plain stereo
-    // pair (upmix_bridge_coeffs); in multichannel modes those rows carry real
-    // inputs and the upmixer parks.  Steering is pure gain on C/L/R (zero
-    // latency); the surround Haas delay is identical for every slot fed from
-    // the same source row, so inter-output-slot alignment is preserved.
-    int n_matrix_sources = n_active_inputs;
-    const UpmixCoeffs *um_coeffs = upmix_bridge_coeffs((uint8_t)n_active_inputs);
-    if (um_coeffs) {
-        upmix_process_block(um_coeffs, input_bufs[um_coeffs->src_a], input_bufs[um_coeffs->src_b],
-                            buf_in_ext[UPMIX_ROW_C - NUM_STEREO_INPUTS],
-                            buf_in_ext[UPMIX_ROW_LS - NUM_STEREO_INPUTS],
-                            buf_in_ext[UPMIX_ROW_RS - NUM_STEREO_INPUTS],
-                            sample_count);
-        n_matrix_sources = NUM_STEREO_INPUTS + um_coeffs->n_derived;
-
-        // Derived-row metering: rows 2..4 carry C/Ls/Rs while upmixing (the
-        // PASS 2 zeroing loop above cleared them).  The extracted centre can
-        // legitimately reach +3 dBFS on hot correlated content, so the host
-        // must be able to see it; clip flags share the channel bit space.
-        for (int k = 0; k < um_coeffs->n_derived; k++) {
-            int row = NUM_STEREO_INPUTS + k;
-            const float *dbuf = input_bufs[row];
-            float pk = block_peak_abs(dbuf, sample_count);
-            global_status.peaks[row] = (uint16_t)(fminf(1.0f, pk) * 32767.0f);
-            if (pk > CLIP_THRESH_F) global_status.clip_flags |= (1u << row);
-            rta_tap(RTA_TAP_INPUT, (uint8_t)row, dbuf, sample_count);
-        }
-    } else {
-        upmix_park();
-    }
+    // ========== PASS 3: Upmixer claim snapshot ==========
+    // Outputs the upmixer claims omit its source rows below; it injects its
+    // generated channels after the matrix (upmixer_v2_spec.md section 6).
+    uint16_t out_enabled = 0;
+    for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++)
+        if (matrix_mixer.outputs[out].enabled) out_enabled |= (uint16_t)(1u << out);
+    UpmixClaim um_claim;
+    const UpmixCoeffs *um_coeffs = upmix_claim((uint8_t)n_active_inputs, sample_rate_hz,
+                                               out_enabled, &um_claim);
 
     // ========== PASS 4: Matrix Mixing (block-based, output-major) ==========
-    // Generalized over n_matrix_sources (2 for stereo / S/PDIF / I2S, 4/6/8
-    // for multichannel USB, 3 or 5 with the upmixer active).  For each output,
-    // snapshot the active (source buffer, signed gain) pairs ONCE, then run
-    // the sample loop.  Sources are gated by n_matrix_sources, not by
-    // crosspoint enables, so buf_in_ext rows are read only when they carry
-    // real input or upmix-derived audio.  Every output uses the same
-    // sample_count and per-sample index, so inter-output sample alignment is
-    // preserved exactly (CLAUDE.md hard rule).
+    // Sources are gated by n_active_inputs, so buf_in_ext rows are read only
+    // when they carry real input.  Every output uses the same sample_count and
+    // index, so inter-output alignment holds exactly (CLAUDE.md hard rule).
     for (int out = 0; out < NUM_OUTPUT_CHANNELS; out++) {
         float *dst = buf_out[out];
-        if (!matrix_mixer.outputs[out].enabled) {
+        if (!(out_enabled & (1u << out))) {
             memset(dst, 0, sample_count * sizeof(float));
             continue;
         }
+        bool claimed = um_claim.claimed & (1u << out);
 
         // Snapshot active crosspoints for this output (once, not per sample)
         const float *src[NUM_INPUT_CHANNELS];
         float        gain[NUM_INPUT_CHANNELS];
         int n = 0;
-        for (int in = 0; in < n_matrix_sources; in++) {
+        for (int in = 0; in < n_active_inputs; in++) {
             MatrixCrosspoint *xp = &matrix_mixer.crosspoints[in][out];
             if (!xp->enabled) continue;
             float g = xp->phase_invert ? -xp->gain_linear : xp->gain_linear;
             if (g == 0.0f) continue;
+            if (claimed && (in == um_claim.src_a || in == um_claim.src_b)) {
+                uint8_t k = um_claim.side_n[out]++;
+                um_claim.side_src[out][k] = input_bufs[in];
+                um_claim.side_gain[out][k] = g;
+                continue;
+            }
             src[n]  = input_bufs[in];
             gain[n] = g;
             n++;
@@ -550,6 +527,11 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
         matrix_mix_output(dst, src, gain, n, sample_count);
     }
+
+    // Upmixer render and injection: same sample index on every output, no
+    // added latency, before the generator so siggen still replaces whole outputs.
+    if (um_coeffs)
+        upmix_run(um_coeffs, &um_claim, input_bufs, buf_out, sample_count);
 
     // Test-signal injection: replaces the matrix mix on generator channels
     // before per-output processing and the Core 1 dispatch, so every output

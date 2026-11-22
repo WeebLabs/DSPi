@@ -257,7 +257,7 @@ Each row covers one 1.1.6 opcode and direction, or one selector value of an opco
 | 0x4D | [`UPMIX_GET_PARAM`](vendor_protocol_migration_guide.md#upmix_set_param-and-upmix_get_param-0x4c-0x4d) | R | 12 | split | `FX.UPMIX_DECORR` (RP2350 only) | `0x089C` | G | `0` | - | 4 |
 | 0x4D | [`UPMIX_GET_PARAM`](vendor_protocol_migration_guide.md#upmix_set_param-and-upmix_get_param-0x4c-0x4d) | R | 13 | split | `FX.UPMIX_PRESENCE` (RP2350 only) | `0x089D` | G | `0` | - | 4 |
 | 0x4D | [`UPMIX_GET_PARAM`](vendor_protocol_migration_guide.md#upmix_set_param-and-upmix_get_param-0x4c-0x4d) | R | any other | split | none | - | - | - | 1.1.6 STALLed it | - |
-| 0x4E | `UPMIX_GET_STATUS` | R | any | same | `FX.UPMIX_STATUS` (RP2350 only) | `0x0881` | G | `0` | - | 16 |
+| 0x4E | `UPMIX_GET_STATUS` | R | any | same | `FX.UPMIX_STATUS` (RP2350 only) | `0x0881` | G | `0` | - | 32 |
 | 0x50 | [`GET_STATUS`](#get_status-0x50) | R | any | custom | `MEAS.LEVELS` G, `SYS.SYSTEM_STATUS` G, `SYS.PDM_STATS` G, `SYS.SPDIF_TX_STATS` G, `SYS.USB_AUDIO_STATUS` G, `SYS.PIPELINE_STATS` G, `INPUT.STATUS` G, `DIAG.LOOPBACK_STATS` (DSPI_LOOPBACK) G | `0x0910`, `0x0140`, `0x0144`, `0x0145`, `0x0141`, `0x0143`, `0x0311`, `0xF020` | - | see recipe | [see recipe](#get_status-0x50) | see recipe |
 | 0x51 | `SAVE_PARAMS` | W-as-R | any | retired | none | - | - | - | [replacement](#retired-opcodes) | - |
 | 0x52 | `SAVE_OUTPUT_CONFIG` | W-as-R | any | action | `STORE.OUTPUT_CONFIG_SAVE` | `0x0221` | S0 | `0` | none | 0 |

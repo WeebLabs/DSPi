@@ -1,6 +1,6 @@
 # DSPi Upmixer v2: Pair Engine with Module Routing
 
-*Design spec, 2026-11-22 (revised the same day: one engine with a built-in back pair and two config profiles replaces the two-instance design). Status: agreed design, not implemented. Supersedes sections 2, 3, 5 and parts of 6 to 9 of `upmixer_spec.md` once it lands; the centre and surround algorithms (including section 12) are unchanged. RP2350 only. Implementation plan: `upmixer_v2_plan.md`.*
+*Design spec, 2026-11-22 (revised the same day: one engine with a built-in back pair and two config profiles replaces the two-instance design). Status: agreed design, phases 0 to 3 implemented (2026-11-22). Supersedes sections 2, 3, 5 and parts of 6 to 9 of `upmixer_spec.md` once it lands; the centre and surround algorithms (including section 12) are unchanged. RP2350 only. Implementation plan: `upmixer_v2_plan.md`.*
 
 ---
 
@@ -51,7 +51,7 @@ Stereo widening is **not** part of the upmixer. See section 10.
 
 - Profiles 0 and 1 are complete configs: every v1 parameter, sources, `active_counts`, `back_offset_ms` and routes.
 - **Running profile:** the lowest-numbered profile that is enabled and whose `active_counts` contains the current active input count. Overlapping `active_counts` are legal and never refused. Refusing them would make SET order matter (swapping counts between profiles would pass through an illegal state) and would break bulk and preset loads. With an overlap, profile 0 wins and profile 1 is inert for that count. The Console warns.
-- **Profile changes while audio runs.** An input-count change already goes through `complete_pipeline_reset()`, so the old profile stops hard and the new one fades in. A live edit (enable or `active_counts`) can also change the winner. That change is sequential, never a crossfade. The old profile fades out on its held coefficients and routes, the state resets, and the new profile fades in. The audio thread latches the running profile separately from the selected one.
+- **Profile changes while audio runs.** An input-count change already goes through `complete_pipeline_reset()`, so the old profile stops hard and the new one fades in. A live edit (enable or `active_counts`) can also change the winner, and an edit of the running profile's `src_a` or `src_b` is treated the same way. That change is sequential, never a crossfade. The old profile fades out on its held coefficients and routes, the state resets, and the new profile fades in. The audio thread latches the running profile separately from the selected one.
 - Control Surfaces nouns always edit profile 0. This keeps one binding deterministic whatever the input is, and it matches migrated presets.
 
 ## 4. Sources and activation
@@ -103,7 +103,7 @@ The back pair derives a second ambience pair from the same steering, so stereo t
 |---|---|---|---|---|
 | `out_mask` | u16 | bits 0 to 8 | 0 | Bit k routes this channel to output k. Bits above `NUM_OUTPUT_CHANNELS - 1` are refused with `VC_ERR_VALUE` |
 | `trim_q1` | i8 | -80..+12 (-40.0 to +6.0 dB) | 0 | Gain in 0.5 dB steps, clamped |
-| `flags` | u8 | bit 0 | 0 | Bit 0 = polarity invert. Other bits reserved, written 0 |
+| `flags` | u8 | bit 0 | 0 | Bit 0 = polarity invert. Other bits are reserved and refused with `VC_ERR_VALUE`, so a later host can detect firmware that lacks them |
 
 A generated channel may go to several outputs. Several generated channels may land on one output and are summed there.
 
@@ -111,7 +111,7 @@ Per-destination gain was considered and rejected. A 7 x 9 gain table with phase 
 
 ### 6.2 Claim semantics: replace the source pair, keep everything else
 
-An output is **claimed** when any generated channel of the running profile has that output's bit set, while the engine is active or fading. A claimed output no longer receives the profile's source rows from the matrix. All other matrix contributions to that output stay. Examples:
+An output is **claimed** when any generated channel of the running profile has that output's bit set, while the engine is active or fading. A claimed output no longer receives the profile's source rows from the matrix. All other matrix contributions to that output stay. A profile with nothing routed does not run the engine; it starts with its first route. Examples:
 - Stereo input, Front L output fed by row 0. Assign A' to it. The output now carries A' instead of L.
 - 6-channel input, profile on Ls/Rs (inputs 4 and 5). The side outputs fed by rows 4 and 5 now carry A'/B'. Any other rows routed to those outputs remain.
 - A sub output fed by rows 0 and 1 that is not assigned keeps raw L+R. That is the original bass and does not depend on centre steering, which makes it the correct sub feed. Assign nothing to the sub.
@@ -143,7 +143,8 @@ The control update still happens once per packet, and the per-sample state does 
 - Each contribution gain `e[g][out]` stores only its current value. Every sample it slews toward its target at a fixed rate of full scale per 10 ms (`UPMIX_FADE_MS`) and lands exactly on the target. The target is the trim and polarity if the channel is routed and the engine is active, otherwise 0. This covers trim edits, mask edits, invert changes and activation with no stored step and no edit queue, so a second edit during a fade simply retargets. A large trim step takes proportionally longer (a +6 dB step about 20 ms).
 - The claim weight `w[out]` slews the same way, 0 to 1 when the output becomes claimed and 1 to 0 when it stops. Weights clamp to exactly 0.0 and 1.0 at the ends.
 - **Disable fades out.** When the running profile is disabled, loses the win, or loses its last routed bit on an output, the engine keeps running on the last published coefficient set until the fade completes, then parks. This replaces v1's documented hard stop on disable.
-- **Parks forced by the pipeline are hard.** Input source switches, active-count changes and rate changes already pass through `complete_pipeline_reset()`. The engine parks immediately and starts from a fade-in.
+- **Parks forced by the pipeline are hard.** Input source switches, active-count changes and rate changes already pass through `complete_pipeline_reset()`, which parks the engine (`upmix_hard_park()`); it starts again from a fade-in. Count and rate changes are also caught per packet.
+- **No audio, no fades.** Fades advance per packet, so while no producer feeds the pipeline the main loop parks the engine hard. Nothing is playing, so nothing is heard, and the next start fades in cleanly instead of finishing a stale fade or replaying the Haas ring.
 
 ## 7. Host interface
 
@@ -186,14 +187,14 @@ A 44-byte SET is still accepted (rule 8) and leaves bytes 44 to 79 unchanged. It
 
 ### 7.4 UpmixStatus grows from 16 to 32 bytes
 
-`parked_reason` gains codes. 2 now means "no profile matches the active input count" (for a v1-style config this is exactly v1's "input not stereo"). 4 means "a source channel of the running profile is not present". 5 means "fading out". The live gain fields report the running profile.
+`parked_reason` gains codes. 2 now means "no profile matches the active input count" (for a v1-style config this is exactly v1's "input not stereo"). 4 means "a source channel of the running profile is not present". 5 means "fading out". 6 means "the winning profile has nothing routed". `active` reads 1 while running and also while parked only for want of audio, when the profile would start with the next packet. The live gain fields report the running profile.
 
 Appended:
 
 | Offset | Type | Field |
 |---|---|---|
-| 16 | u8 | active_profile (0, 1, or 0xFF for none) |
-| 17 | u8 | Clip bits per generated channel (bits 0 to 6) |
+| 16 | u8 | active_profile: running, fading or about to run (0, 1, or 0xFF for none) |
+| 17 | u8 | Bit g set while generated channel g passed 0 dBFS before its trim within the last second. No read clears it, so several pollers see the same bits |
 | 18 | u16 x 7 | Peak per generated channel, 32767 = 0 dBFS, saturating |
 
 ### 7.5 Notifications
