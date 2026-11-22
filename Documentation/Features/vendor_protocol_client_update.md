@@ -1,6 +1,6 @@
 # DSPi Client Update Guide: Firmware 1.1.7
 
-*Last updated: 2026-11-17*
+*Last updated: 2026-11-22*
 
 This is the short version of the host migration guide. It covers only what a client must change to work with firmware 1.1.7. The full guide, [`vendor_protocol_migration_guide.md`](vendor_protocol_migration_guide.md), adds worked examples, every reply layout, transport detail and appendices for the ESP32 front panel, DSPi Console for macOS, DSPi Link and DSPi Terminal. Links in the tables below lead to it when this file has no matching section.
 
@@ -28,7 +28,9 @@ Set the gain of output 1 to -6.0 dB, then read it back.
 
 Every 1.1.6 request has page 0, and page 0 has no commands. A 1.1.6 client therefore fails on every request against 1.1.7, but it changes nothing.
 
-These are unchanged: the VID and PID, the interface numbers, the USB audio class, the Microsoft OS 2.0 descriptor, the bulk parameter blob (`WireBulkParams` version 32, 6136 bytes), the notification endpoint and packets, and the UART and I2C frame format and CRC. Most GET replies are also byte-for-byte the same. Section 7 lists the ones that changed.
+These are unchanged: the VID and PID, the interface numbers, the USB audio class, the Microsoft OS 2.0 descriptor, the notification endpoint and packets, and the UART and I2C frame format and CRC. Most GET replies are also byte-for-byte the same. Section 7 lists the ones that changed.
+
+The bulk parameter blob grew. `WireBulkParams` was version 32 and 6136 bytes in 1.1.6. In 1.1.7 it is version 35 and 6252 bytes on both platforms, with a 116-byte upmixer section appended at offset 6136. The earlier sections keep their offsets. A bulk SET must match the device's version and length exactly, so regenerate your struct.
 
 ---
 
@@ -351,7 +353,7 @@ Each row covers one 1.1.6 opcode and direction, or one selector value of an opco
 | 0x9C | `GET_CHANNEL_NAME` | R | any | folded | `ROUTE.CHANNEL_NAME` | `0x0531` | G | `old` | - | 32 |
 | 0x9D | `CS_SAVE` | W-as-R | any | action | `CS.SAVE` | `0x0A18` | S0 | `0` | none | 0 |
 | 0x9E | `CS_REVERT` | W-as-R | any | action | `CS.REVERT` | `0x0A19` | S0 | `0` | none | 0 |
-| 0xA0 | `GET_ALL_PARAMS` | R | any | same | `STORE.ALL_PARAMS` | `0x0240` | G | `0` | - | 6136 |
+| 0xA0 | `GET_ALL_PARAMS` | R | any | same | `STORE.ALL_PARAMS` | `0x0240` | G | `0` | - | 6252 |
 | 0xA1 | [`SET_ALL_PARAMS`](#set_all_params-0xa1) | W | any | custom | `STORE.ALL_PARAMS` S | `0x0240` | - | see recipe | [see recipe](#set_all_params-0xa1) | see recipe |
 | 0xA2 | `GET_ALL_PARAMS_CHUNK` | R | any | folded | `STORE.ALL_PARAMS_CHUNK` | `0x0241` | G | `old` | - | var |
 | 0xA3 | `SET_ALL_PARAMS_CHUNK` | W | any | folded | `STORE.ALL_PARAMS_CHUNK` | `0x0241` | S | `old` | unchanged | chunk |
@@ -550,7 +552,7 @@ The old 16-byte reply is split. Bytes 0 to 3 are `CS.DISPLAY_CAPS` (`0x0A71`, 4 
 
 ### `SET_ALL_PARAMS` (0xA1)
 
-The blob is unchanged. Send exactly 6136 bytes to `STORE.ALL_PARAMS` (`0x0240`) with `wValue` 0. Any other length is refused. On Windows, move the blob with `STORE.ALL_PARAMS_CHUNK` (`0x0241`, `wValue` = byte offset) in pieces of at most 4096 bytes.
+The blob grew to version 35, 6252 bytes (section 1). Send exactly 6252 bytes to `STORE.ALL_PARAMS` (`0x0240`) with `wValue` 0. Any other length, or a header with any other version, is refused. On Windows, move the blob with `STORE.ALL_PARAMS_CHUNK` (`0x0241`, `wValue` = byte offset) in pieces of at most 4096 bytes.
 
 ### Retired opcodes
 

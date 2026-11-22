@@ -89,37 +89,47 @@ VC_CMD(0x6D, TUBE_TRIM, fx_tube_get, fx_tube_set,
 
 #if PICO_RP2350
 VC_CMD(0x80, UPMIX_CONFIG, fx_upmix_config_get, fx_upmix_config_set,
-       NONE, 44, 44, 44, VC_F_DEFERRED, 0, "Whole upmixer config (UpmixConfigPacket)")
+       INDEX, 44, 44, 44, VC_F_DEFERRED, 0, "Config of profile wValue, UpmixConfigPacket bytes 0 to 43")
 VC_CMD(0x81, UPMIX_STATUS, fx_upmix_status_get, VC_NONE,
        NONE, 32, 0, 0, 0, 0, "Live upmixer telemetry (UpmixStatus)")
 VC_CMD(0x82, UPMIX_ROUTE, fx_upmix_route_get, fx_upmix_route_set,
        INDEX, 4, 4, 4, VC_F_DEFERRED, 0, "Routing of one generated channel, wValue = (profile << 8) | channel (UpmixRoute; trim clamped, reserved flag bits refused)")
+VC_CMD(0x83, UPMIX_CONFIG_EXT, fx_upmix_ext_get, fx_upmix_ext_set,
+       INDEX, 36, 36, 36, VC_F_DEFERRED, 0, "Sources, active counts, back offset and routes of profile wValue, UpmixConfigPacket bytes 44 to 79")
 VC_CMD(0x90, UPMIX_ENABLE, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ENABLED, "Upmixer on or off (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ENABLED, "Upmixer on or off (f32)")
 VC_CMD(0x91, UPMIX_CENTER_MODE, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_CENTER_MODE, "Centre mode (f32, rounded and clamped)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_CENTER_MODE, "Centre mode (f32, rounded and clamped)")
 VC_CMD(0x92, UPMIX_SURROUND_MODE, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SURROUND_MODE, "Surround mode (f32, rounded and clamped to 0-2)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SURROUND_MODE, "Surround mode (f32, rounded and clamped to 0-2)")
 VC_CMD(0x93, UPMIX_STRENGTH, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_STRENGTH, "Strength in percent (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_STRENGTH, "Strength in percent (f32)")
 VC_CMD(0x94, UPMIX_CENTER_WIDTH, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_CENTER_WIDTH, "Centre width in percent (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_CENTER_WIDTH, "Centre width in percent (f32)")
 VC_CMD(0x95, UPMIX_THRESHOLD, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_THRESHOLD, "Correlation threshold in percent (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_THRESHOLD, "Correlation threshold in percent (f32)")
 VC_CMD(0x96, UPMIX_ATTACK, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ATTACK, "Steering attack in ms (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ATTACK, "Steering attack in ms (f32)")
 VC_CMD(0x97, UPMIX_RELEASE, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_RELEASE, "Steering release in ms (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_RELEASE, "Steering release in ms (f32)")
 VC_CMD(0x98, UPMIX_DET_HPF, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_DET_HPF, "Detector high-pass in Hz (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_DET_HPF, "Detector high-pass in Hz (f32)")
 VC_CMD(0x99, UPMIX_SUR_DELAY, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_DELAY, "Surround delay in ms (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_DELAY, "Surround delay in ms (f32)")
 VC_CMD(0x9A, UPMIX_SUR_HPF, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_HPF, "Surround high-pass in Hz (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_HPF, "Surround high-pass in Hz (f32)")
 VC_CMD(0x9B, UPMIX_SUR_LPF, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_LPF, "Surround low-pass in Hz (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SUR_LPF, "Surround low-pass in Hz (f32)")
 VC_CMD(0x9C, UPMIX_DECORR, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_DECORR, "Surround decorrelation in percent (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_DECORR, "Surround decorrelation in percent (f32)")
 VC_CMD(0x9D, UPMIX_PRESENCE, fx_upmix_param_get, fx_upmix_param_set,
-       NONE, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_PRESENCE, "Centre presence in dB (f32)")
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_PRESENCE, "Centre presence in dB (f32)")
+VC_CMD(0x9E, UPMIX_SOURCE_A, fx_upmix_param_get, fx_upmix_param_set,
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SRC_A, "Source A input channel (f32, rounded; above 7 refused)")
+VC_CMD(0x9F, UPMIX_SOURCE_B, fx_upmix_param_get, fx_upmix_param_set,
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_SRC_B, "Source B input channel (f32, rounded; above 7 refused)")
+VC_CMD(0xA0, UPMIX_ACTIVE_COUNTS, fx_upmix_param_get, fx_upmix_param_set,
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_ACTIVE_COUNTS, "Input counts served, bit k = 2(k+1) channels (f32, rounded; bits above 3 refused)")
+VC_CMD(0xA1, UPMIX_BACK_OFFSET, fx_upmix_param_get, fx_upmix_param_set,
+       INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_BACK_OFFSET, "Back pair arrival after the sides in ms (f32, stored as sent, used clamped to 0-10)")
 #endif

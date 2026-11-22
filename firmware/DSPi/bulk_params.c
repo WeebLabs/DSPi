@@ -58,12 +58,19 @@ _Static_assert(offsetof(WireBulkParams, tube) == 5980,
 _Static_assert(sizeof(WireLimiterParams) == 108, "V32 limiter section must be 108 bytes");
 _Static_assert(offsetof(WireBulkParams, limiter) == 6028,
                "V32 limiter section must sit at wire offset 6028");
-_Static_assert(sizeof(WireBulkParams) == 6136,
-               "V32 wire total must be 6136 bytes");
+_Static_assert(sizeof(WireUpmixV2Params) == 116, "V35 upmixer v2 section must be 116 bytes");
+_Static_assert(offsetof(WireBulkParams, upmix2) == 6136,
+               "V35 upmixer v2 section must sit at wire offset 6136");
+_Static_assert(sizeof(WireBulkParams) == 6252,
+               "V35 wire total must be 6252 bytes");
 _Static_assert(NUM_OUTPUT_CHANNELS <= WIRE_MAX_OUTPUT_CHANNELS, "limiter wire records");
 #if PICO_RP2350
-_Static_assert(sizeof(WireUpmixParams) == sizeof(UpmixConfigPacket),
-               "WireUpmixParams and UpmixConfigPacket must have identical layout");
+// upmix_notify_config() and collect/apply map packet offsets onto these sections.
+_Static_assert(sizeof(WireUpmixParams) == UPMIX_PACKET_V1_SIZE &&
+               sizeof(WireUpmixParams) + sizeof(WireUpmixExt) == sizeof(UpmixConfigPacket) &&
+               offsetof(UpmixConfigPacket, back_offset_ms) - UPMIX_PACKET_V1_SIZE == offsetof(WireUpmixExt, back_offset_ms) &&
+               offsetof(UpmixConfigPacket, routes) - UPMIX_PACKET_V1_SIZE == offsetof(WireUpmixExt, routes),
+               "UpmixConfigPacket must be WireUpmixParams then WireUpmixExt");
 #endif
 
 // External variables (defined in usb_audio.c)
@@ -355,8 +362,12 @@ void bulk_params_collect(WireBulkParams *out) {
     // stays zeroed on RP2040 from the memset above.
 #if PICO_RP2350
     UpmixConfigPacket pkt;
-    upmix_config_to_packet(&pkt);
-    memcpy(&out->upmix, &pkt, sizeof(pkt));   // layout identity asserted above
+    upmix_config_to_packet(0, &pkt);   // layout identity asserted above
+    memcpy(&out->upmix, &pkt, sizeof(out->upmix));
+    memcpy(&out->upmix2.p0_ext, (const uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, sizeof(out->upmix2.p0_ext));
+    upmix_config_to_packet(1, &pkt);
+    memcpy(&out->upmix2.p1, &pkt, sizeof(out->upmix2.p1));
+    memcpy(&out->upmix2.p1_ext, (const uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, sizeof(out->upmix2.p1_ext));
 #endif
 }
 
@@ -716,27 +727,17 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
         limiter_update_pending = true;
     }
 
-    // Stereo upmixer (V25+).  RP2350 only; RP2040 ignores the section.  Config
-    // copied straight in (mode fields clamped; floats are clamped downstream in
-    // upmix_compute_coefficients); the main loop recomputes coefficients from
-    // the raised pending flag, mirroring psybass above.
+    // Upmixer profiles (V25+, both profiles V35+).  RP2350 only; RP2040 ignores
+    // the sections.  upmix_packet_to_config() sanitizes; floats clamp at recompute.
 #if PICO_RP2350
     {
-        uint8_t sm = in->upmix.surround_mode;
-        upmix_profiles[0].enabled            = (in->upmix.enabled != 0);
-        upmix_profiles[0].center_mode        = upmix_clamp_center_mode(in->upmix.center_mode);
-        upmix_profiles[0].surround_mode      = (sm > 2) ? 2 : sm;
-        upmix_profiles[0].strength_pct       = in->upmix.strength_pct;
-        upmix_profiles[0].center_width_pct   = in->upmix.center_width_pct;
-        upmix_profiles[0].corr_threshold_pct = in->upmix.corr_threshold_pct;
-        upmix_profiles[0].attack_ms          = in->upmix.attack_ms;
-        upmix_profiles[0].release_ms         = in->upmix.release_ms;
-        upmix_profiles[0].detector_hpf_hz    = in->upmix.detector_hpf_hz;
-        upmix_profiles[0].surround_delay_ms  = in->upmix.surround_delay_ms;
-        upmix_profiles[0].surround_hpf_hz    = in->upmix.surround_hpf_hz;
-        upmix_profiles[0].surround_lpf_hz    = in->upmix.surround_lpf_hz;
-        upmix_profiles[0].decorr_pct         = in->upmix.decorr_pct;
-        upmix_profiles[0].presence_db        = upmix_presence_decode(in->upmix.presence_q1);
+        UpmixConfigPacket pkt;
+        memcpy(&pkt, &in->upmix, sizeof(in->upmix));
+        memcpy((uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, &in->upmix2.p0_ext, sizeof(in->upmix2.p0_ext));
+        upmix_packet_to_config(0, &pkt, UPMIX_PKT_ALL);
+        memcpy(&pkt, &in->upmix2.p1, sizeof(in->upmix2.p1));
+        memcpy((uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, &in->upmix2.p1_ext, sizeof(in->upmix2.p1_ext));
+        upmix_packet_to_config(1, &pkt, UPMIX_PKT_ALL);
         upmix_update_pending = true;
     }
 #endif

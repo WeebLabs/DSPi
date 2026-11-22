@@ -283,7 +283,7 @@ def run_case(m: Matrix, case: dict) -> dict:
             steps.append(f"to slave, settled={m.configure('slave', types, case['rate'])}")
             m.configure("master", types, case["rate"]); steps.append("back to master")
         elif ev == "bulk_reapply":
-            blob = m.d.pget("STORE.ALL_PARAMS", length=6136)
+            blob = m.d.pget("STORE.ALL_PARAMS", length=6252)
             m.d.pset("STORE.ALL_PARAMS", blob); steps.append(f"STORE.ALL_PARAMS re-applied ({len(blob)} B)")
         settled = m.r.wait_settled(case["rate"], slave=(case["mode"] == "slave"))
         steps.append(f"settled={settled}")

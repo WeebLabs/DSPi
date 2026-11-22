@@ -11,7 +11,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from hbuild import DEFP, build, ptr, head_sources, tree_sources   # noqa: E402
+from hbuild import DEFP, build, ptr, head_sources, tree_sources, head_bulk, tree_bulk   # noqa: E402
 
 FS = 48000
 N = FS * 3 // 2
@@ -73,8 +73,8 @@ def route_check(lib, quiet=False):
 
 def main():
     rev = sys.argv[1] if len(sys.argv) > 1 else 'HEAD'
-    head = build(*head_sources(rev), False)
-    new = build(*tree_sources(), True)
+    head = build(*head_sources(rev), False, head_bulk(rev))
+    new = build(*tree_sources(), True, tree_bulk())
     if not hasattr(new, 'h_run_split'):
         sys.exit('working-tree upmix.h has no UPMIX_CHUNK: nothing to check')
     L, R = signal()
@@ -116,6 +116,14 @@ def main():
             fails += bad
     if hasattr(new, 'h_route_check'):
         fails += route_check(new)
+    if hasattr(new, 'h_migrate_check'):
+        bad = new.h_migrate_check()
+        print('v1 route migration and profile codec: %d failures' % bad)
+        fails += bad
+    if hasattr(new, 'h_notify_check'):
+        bad = new.h_notify_check()
+        print('notify offsets against WireBulkParams: %d failures' % bad)
+        fails += bad
     sys.exit(1 if fails else 0)
 
 

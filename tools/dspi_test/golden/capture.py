@@ -26,7 +26,7 @@ PLATFORM_BY_ID = {v["id"]: k for k, v in PLATFORMS.items()}
 FORMAT = 2
 CS_PENDING = 0x16
 CS_STATUS_LEN = 41
-BULK_LEN = 6136
+BULK_LEN = 6252
 BULK_BUSY_RETRIES = 10
 LIMITER_OFF = 6028       # WireBulkParams.limiter (V32)
 # Physical IO sections of WireBulkParams V32 (pins, i2s_config, input_config, dac_hw_mute,

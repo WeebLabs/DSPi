@@ -1,6 +1,6 @@
 # DSPi Upmixer v2: Pair Engine with Module Routing
 
-*Design spec, 2026-11-22 (revised the same day: one engine with a built-in back pair and two config profiles replaces the two-instance design). Status: agreed design, phases 0 to 3 implemented (2026-11-22). Supersedes sections 2, 3, 5 and parts of 6 to 9 of `upmixer_spec.md` once it lands; the centre and surround algorithms (including section 12) are unchanged. RP2350 only. Implementation plan: `upmixer_v2_plan.md`.*
+*Design spec, 2026-11-22 (revised the same day: one engine with a built-in back pair and two config profiles replaces the two-instance design). Status: agreed design, phases 0 to 5 implemented (2026-11-22). Supersedes sections 2, 3, 5 and parts of 6 to 9 of `upmixer_spec.md` once it lands; the centre and surround algorithms (including section 12) are unchanged. RP2350 only. Implementation plan: `upmixer_v2_plan.md`.*
 
 ---
 
@@ -162,6 +162,7 @@ The existing config and per-parameter commands (0x80 and 0x90 to 0x9D) change ad
 
 | Command | Cmd | Dir | Address | Size | Notes |
 |---|---|---|---|---|---|
+| `FX.UPMIX_CONFIG_EXT` | 0x83 | G, S | profile | 36 / 36 | Bytes 44 to 79 of the packet (section 7.3); out-of-range fields are `VC_ERR_VALUE` |
 | `FX.UPMIX_ROUTE` | 0x82 | G, S | `(profile << 8) \| g`, g 0 to 6 | 4 / 4 | {u16 out_mask, i8 trim_q1, u8 flags} |
 | `FX.UPMIX_SOURCE_A` | 0x9E | G, S | profile | 4 / 4 | Parameter 14, f32, rounded. Out of range is `VC_ERR_VALUE` |
 | `FX.UPMIX_SOURCE_B` | 0x9F | G, S | profile | 4 / 4 | Parameter 15 |
@@ -183,7 +184,7 @@ Bytes 0 to 43 are unchanged. Appended:
 | 48 | f32 | back_offset_ms |
 | 52 | 7 x {u16 out_mask, i8 trim_q1, u8 flags} | routes for g = 0 to 6 |
 
-A 44-byte SET is still accepted (rule 8) and leaves bytes 44 to 79 unchanged. It does not reset them to defaults.
+On the vendor interface the packet travels in two commands (decided in phase 5, 2026-11-22). A non-bulk SET tops out at `VC_SET_MAX` (64 bytes, reported in `SYS.PROTOCOL_INFO` and sizing every transport's receive buffer), and rule 7 needs every GET to be a valid SET. So `FX.UPMIX_CONFIG` stays 44 bytes both ways, and the new `FX.UPMIX_CONFIG_EXT` (0x83, profile-addressed) carries bytes 44 to 79 both ways. Each leaves the other's bytes unchanged. Bulk and preset storage carry the 80-byte image.
 
 ### 7.4 UpmixStatus grows from 16 to 32 bytes
 
@@ -213,10 +214,10 @@ The six existing nouns edit profile 0. No new nouns in v2.
 
 ### 8.1 Migrating older presets
 
-A slot older than the v2 version with the upmixer enabled loads into profile 0 with sources 0 and 1, `active_counts` = 0x01, default `back_offset_ms`, and routes derived from the matrix. Profile 1 loads disabled at defaults.
+A slot older than the v2 version loads into profile 0 with sources 0 and 1, `active_counts` = 0x01, default `back_offset_ms`, and routes derived from the matrix, whether the upmixer was on or off, so turning it on later sounds as it did in v1. A disabled profile claims nothing, so the routes are inert until then. Profile 1 loads disabled at defaults. (Decided in the phase 5 audit; only V33 and later slots have upmixer fields, but every V21 and later slot has the matrix rows.)
 
 Route derivation, for each enabled output:
-- Collect the enabled, non-zero crosspoints among rows 0 to 4.
+- Collect the enabled crosspoints among rows 0 to 4 whose gain is above the matrix mute (-120 dB).
 - If exactly one row r is found, set the output bit on the generated channel r maps to (0 to A', 1 to B', 2 to C, 3 to SA, 4 to SB). Rows 3 and 4 are mapped even when the surround mode is OFF, so turning surrounds on later behaves as it did in v1.
 - If two or more rows are found, the output stays unassigned on the matrix.
 - Trim comes from the crosspoint gain, clamped to the trim range and rounded to 0.5 dB, and invert comes from its phase. If one row feeds several single-row outputs at different gains, the largest gain (and its phase) wins.
@@ -227,17 +228,20 @@ The lossy cases, to be stated in the release notes:
 - A multi-row output such as a sub fed by rows 0 and 1 now receives raw L+R instead of v1's L'+R'. This is the more correct sub feed.
 - A phantom fold such as row 0 plus row 2 on one output now receives raw L, which already contains the centre.
 - Outputs fed by one row at different gains get one trim.
+- A crosspoint gain above +6 dB or below -40 dB is clamped to the trim range, which changes that output's level.
 
 ## 9. Use-case templates (Console)
 
-Templates live in the Console. The firmware has no notion of them. Each template fills one profile. A "Stereo + 5.1" preset typically uses profile 0 for 2-channel input and profile 1 for 6/8-channel input.
+Templates live in the Console. The firmware has no notion of them. Each template fills one profile. A "stereo plus 5.1 source" preset typically uses profile 0 for 2-channel input and profile 1 for 6/8-channel input.
+
+The upmixer makes full-range channels only. It has no LFE output and no crossover, so templates are named 3.0, 5.0 and 7.0. A ".1" setup is "x.0 plus a matrix sub feed": the sub output gets no upmixer route, keeps the raw L+R matrix feed (the best sub feed) and a low-pass on that output, and the front and centre outputs get matching high-passes as ordinary bass management. The surround HP/LP is the "ambience band" (default 300 Hz to 7 kHz, 12 dB/oct), not an LFE crossover. It can be set down to 20 Hz, and then output high-passes on the side and back outputs matter again. Routing to a disabled output is accepted and stays silent until the output is enabled, which the Console should warn about.
 
 | Template | Profile setup | Routing |
 |---|---|---|
 | Stereo to 3.0 (LCR) | src 0/1, counts 2ch, surround OFF | A' to FL, B' to FR, C to centre |
-| Stereo to 5.1 | as above, surround ADAPTIVE | plus SA to SL, SB to SR. Sub left on the matrix (L+R) |
-| Stereo to 7.1 | as 5.1 | plus BA to BL, BB to BR. Extra back distance via per-output delay |
-| 5.1 to 7.1 (backs from surrounds) | src = input Ls/Rs, counts 6ch and 8ch | A'/B' to side L/R; C to both backs (back centre, EX style), or SA/SB to the backs |
+| Stereo to 5.0 (plus matrix sub) | as above, surround ADAPTIVE | plus SA to SL, SB to SR. Sub left on the matrix (L+R) |
+| Stereo to 7.0 (plus matrix sub) | as 5.0 | plus BA to BL, BB to BR. Extra back distance via per-output delay |
+| 5.1 source to 7.1 (backs from surrounds) | src = input Ls/Rs, counts 6ch and 8ch | A'/B' to side L/R; C to both backs (back centre, EX style), or SA/SB to the backs |
 | Centre / mono fill | src 0/1, surround OFF, width 100 | C alone to the fill output |
 | Dialogue lift | src 0/1, width 100, presence up | A' to FL, B' to FR, C to both FL and FR at a negative trim |
 | Vocal reduction | src 0/1, width 0, strength 100 | A' to FL, B' to FR, C unrouted |

@@ -603,7 +603,7 @@ def render_index_table(pages, anchors):
 # Reply-length rules for VC_LEN_VAR GETs, which the registry cannot express.
 VAR_RULES = {
     "SYS.PAGE_LIST": "2 x pages (`SYS.PROTOCOL_INFO` byte 6). 24 on a release build",
-    "STORE.ALL_PARAMS_CHUNK": "min(wLength, 6136 - offset). wLength 0 is `VC_ERR_LENGTH`",
+    "STORE.ALL_PARAMS_CHUNK": "min(wLength, 6252 - offset). wLength 0 is `VC_ERR_LENGTH`",
     "OUTPUT.LATENCY_OPTIONS": "8 x options (`OUTPUT.LATENCY_STATUS` byte 9). 56 today",
     "DYN.LIMITER_METERS": "2 x outputs. 10 on RP2040, 18 on RP2350",
     "FX.SUBHARM_METER": "2 x outputs. 10 on RP2040, 18 on RP2350",

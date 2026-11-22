@@ -170,7 +170,7 @@ reason is readable from `SYS.LAST_RESULT` (see `../commands.md`).
 |---|---|---|---|---|---|---|
 | `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | One whole band, section 4.1 |
 | `FILTER.BAND_BYPASS` | 0x06 | 0x11 | GET, SET | `(channel << 8) \| band` | GET 1, SET 1 | Section 4.2 |
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | Bulk snapshot, section 4.3 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | Bulk snapshot, section 4.3 |
 
 ### 4.1 `FILTER.BAND`: read or write one band
 

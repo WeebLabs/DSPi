@@ -27,13 +27,24 @@ def tree_sources():
     return (open(os.path.join(FW, 'upmix.c')).read(), open(os.path.join(FW, 'upmix.h')).read())
 
 
-def build(src_c, src_h, new):
+def head_bulk(rev='HEAD'):
+    """bulk_params.h as committed at rev (self-contained, so it builds on the host)."""
+    return subprocess.check_output(['git', '-C', REPO, 'show', '%s:firmware/DSPi/bulk_params.h' % rev]).decode()
+
+
+def tree_bulk():
+    return open(os.path.join(FW, 'bulk_params.h')).read()
+
+
+def build(src_c, src_h, new, bulk_h=None):
     """Copy upmix.c/h beside the stubs so their "config.h" resolves to the stub."""
     d = tempfile.mkdtemp(prefix='upmix_h_')
     for f in os.listdir(os.path.join(HERE, 'stubs')):
         shutil.copy(os.path.join(HERE, 'stubs', f), d)
     open(os.path.join(d, 'upmix.c'), 'w').write(src_c)
     open(os.path.join(d, 'upmix.h'), 'w').write(src_h)
+    if bulk_h is not None:   # the real wire layout instead of the offset stub
+        open(os.path.join(d, 'bulk_params.h'), 'w').write(bulk_h)
     shutil.copy(os.path.join(HERE, 'harness.c'), d)
     so = os.path.join(d, 'libupmix.so')
     # No FMA contraction, so the host result is comparable operation for operation.
@@ -53,6 +64,10 @@ def build(src_c, src_h, new):
     if hasattr(lib, 'h_route_check'):
         lib.h_route_check.argtypes = [_I, _I, FP, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(_I), ctypes.POINTER(_I)]
         lib.h_route_scenes.argtypes = []
+    if hasattr(lib, 'h_migrate_check'):
+        lib.h_migrate_check.argtypes = []
+    if hasattr(lib, 'h_notify_check'):
+        lib.h_notify_check.argtypes = []
     if hasattr(lib, 'h_run_back'):
         lib.h_run_back.argtypes = [FP, _I, _I, ctypes.c_float, _I, _I, FP, FP, _I, FP]
     if new:

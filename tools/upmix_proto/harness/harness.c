@@ -675,3 +675,121 @@ int h_run_back(const float *p, int cmode, int smode, float back_ms, int blk, int
     return (int)c.back_delay;
 }
 #endif
+
+#ifdef UPMIX_PACKET_V1_SIZE
+/* Spec 8.1 migration and the profile wire codec. Returns the failure count. */
+static int mg_fail;
+static void mg_expect(int ok, const char *what) {
+    if (!ok) { mg_fail++; printf("  MIGRATE FAIL: %s\n", what); }
+}
+static void mg_xp(UpmixV1Crosspoint xp[5][NUM_OUTPUT_CHANNELS], int r, int o, float db, int inv) {
+    xp[r][o].enabled = 1; xp[r][o].gain_db = db; xp[r][o].invert = (uint8_t)inv;
+}
+int h_migrate_check(void) {
+    UpmixV1Crosspoint xp[5][NUM_OUTPUT_CHANNELS];
+    UpmixRoute rt[UPMIX_NUM_GEN];
+    mg_fail = 0;
+
+    /* 5.1: L, R, C, Ls, Rs on outputs 0..4, sub on rows 0 and 1, output 7 disabled. */
+    memset(xp, 0, sizeof(xp));
+    for (int r = 0; r < 5; r++) mg_xp(xp, r, r, 0.0f, 0);
+    mg_xp(xp, 0, 5, -6.0f, 0); mg_xp(xp, 1, 5, -6.0f, 0);
+    mg_xp(xp, 3, 7, 0.0f, 0);
+    upmix_routes_from_v1(rt, xp, 0x3F);
+    mg_expect(rt[0].out_mask == 1 && rt[1].out_mask == 2 && rt[2].out_mask == 4 &&
+              rt[3].out_mask == 8 && rt[4].out_mask == 16, "5.1: one row per output maps to its channel");
+    mg_expect(!((rt[0].out_mask | rt[1].out_mask) & (1u << 5)), "5.1: the two-row sub stays on the matrix");
+    mg_expect(!(rt[3].out_mask & (1u << 7)), "5.1: a disabled output is not routed");
+    mg_expect(!rt[5].out_mask && !rt[6].out_mask, "5.1: the back pair is never migrated");
+
+    /* LCR at a -3 dB centre with an inverted copy; phantom fold row 0 + row 2. */
+    memset(xp, 0, sizeof(xp));
+    mg_xp(xp, 0, 0, 0.0f, 0); mg_xp(xp, 1, 1, 0.0f, 0);
+    mg_xp(xp, 2, 2, -3.0f, 0); mg_xp(xp, 2, 3, -1.0f, 1);
+    mg_xp(xp, 0, 4, 0.0f, 0); mg_xp(xp, 2, 4, -3.0f, 0);
+    upmix_routes_from_v1(rt, xp, 0x1F);
+    mg_expect(rt[2].out_mask == 0x0C, "LCR: C reaches both single-row outputs");
+    mg_expect(rt[2].trim_q1 == -2 && rt[2].flags == UPMIX_ROUTE_INVERT, "LCR: largest gain wins with its phase");
+    mg_expect(!(rt[0].out_mask & (1u << 4)) && !(rt[2].out_mask & (1u << 4)), "phantom fold stays on the matrix");
+
+    /* Surrounds only; muted, disabled and out-of-range crosspoints. */
+    memset(xp, 0, sizeof(xp));
+    mg_xp(xp, 3, 0, 20.0f, 0); mg_xp(xp, 4, 1, -60.0f, 0);
+    mg_xp(xp, 0, 2, -120.0f, 0); xp[1][2].gain_db = 0.0f;   /* muted, then disabled */
+    upmix_routes_from_v1(rt, xp, 0x07);
+    mg_expect(rt[3].out_mask == 1 && rt[3].trim_q1 == UPMIX_TRIM_MAX_Q1, "surrounds: +20 dB clamps to +6 dB");
+    mg_expect(rt[4].out_mask == 2 && rt[4].trim_q1 == UPMIX_TRIM_MIN_Q1, "surrounds: -60 dB clamps to -40 dB");
+    mg_expect(!rt[0].out_mask && !rt[1].out_mask, "muted (-120 dB) and disabled crosspoints count as absent");
+
+    /* Codec: profile 1 round-trips; decoding sanitizes; a v1-only decode keeps the tail. */
+    UpmixConfigPacket a, b;
+    upmix_profile_defaults(&upmix_profiles[1]);
+    upmix_profiles[1].src_a = 4; upmix_profiles[1].src_b = 5; upmix_profiles[1].active_counts = 0x0C;
+    upmix_profiles[1].back_offset_ms = 7.5f;
+    upmix_profiles[1].routes[6].out_mask = 0x80; upmix_profiles[1].routes[6].trim_q1 = -7;
+    upmix_config_to_packet(1, &a);
+    upmix_profile_defaults(&upmix_profiles[1]);
+    upmix_packet_to_config(1, &a, UPMIX_PKT_ALL);
+    upmix_config_to_packet(1, &b);
+    mg_expect(!memcmp(&a, &b, sizeof(a)), "codec: profile 1 round-trips all 80 bytes");
+    a.src_a = 9; a.active_counts = 0xFF; a.routes[0].out_mask = 0xFFFF; a.routes[0].trim_q1 = 100; a.routes[0].flags = 0xFF;
+    upmix_packet_to_config(1, &a, UPMIX_PKT_ALL);
+    mg_expect(upmix_profiles[1].src_a == UPMIX_DEFAULT_SRC_A && upmix_profiles[1].active_counts == 0x0F &&
+              upmix_profiles[1].routes[0].out_mask == UPMIX_OUT_MASK && upmix_profiles[1].routes[0].trim_q1 == 12 &&
+              upmix_profiles[1].routes[0].flags == UPMIX_ROUTE_INVERT, "codec: decode sanitizes bulk and flash input");
+    a.src_a = 3;
+    upmix_packet_to_config(1, &a, UPMIX_PKT_HEAD);
+    mg_expect(upmix_profiles[1].src_a == UPMIX_DEFAULT_SRC_A, "codec: a head-only decode leaves the tail alone");
+    upmix_profiles[1].presence_db = 3.3f;
+    upmix_config_to_packet(1, &a);
+    upmix_packet_to_config(1, &a, UPMIX_PKT_TAIL);
+    mg_expect(upmix_profiles[1].presence_db == 3.3f, "codec: a tail-only decode keeps presence unquantized");
+    a.strength_pct = NAN; a.surround_lpf_hz = INFINITY; a.back_offset_ms = -INFINITY;
+    upmix_packet_to_config(1, &a, UPMIX_PKT_ALL);
+    mg_expect(upmix_profiles[1].strength_pct == UPMIX_DEFAULT_STRENGTH && upmix_profiles[1].surround_lpf_hz == UPMIX_DEFAULT_SUR_LPF &&
+              upmix_profiles[1].back_offset_ms == UPMIX_DEFAULT_BACK_OFFSET, "codec: non-finite floats decode to the defaults");
+    upmix_profile_defaults(&upmix_profiles[1]);
+
+    /* Order independence, the PDM output (index 8), NaN gains, 0.5 dB rounding. */
+    memset(xp, 0, sizeof(xp));
+    mg_xp(xp, 2, 1, -9.0f, 0); mg_xp(xp, 2, 0, -2.0f, 1); mg_xp(xp, 2, 8, -5.0f, 0);
+    mg_xp(xp, 3, 2, NAN, 0); mg_xp(xp, 4, 3, 0.75f, 0); mg_xp(xp, 0, 4, 0.25f, 0);
+    upmix_routes_from_v1(rt, xp, 0x1FF);
+    mg_expect(rt[2].out_mask == 0x103 && rt[2].trim_q1 == -4 && rt[2].flags == UPMIX_ROUTE_INVERT,
+              "largest gain wins wherever it sits; the PDM output is routed");
+    mg_expect(!rt[3].out_mask, "a NaN gain counts as absent");
+    mg_expect(rt[4].trim_q1 == 2 && rt[0].trim_q1 == 0, "0.75 dB rounds to 1 dB, 0.25 dB to 0 dB");
+    return mg_fail;
+}
+#endif
+
+#if defined(UPMIX_PACKET_V1_SIZE) && defined(WIRE_FORMAT_VERSION)
+/* Every notify lands on the WireBulkParams field of the same name, in order. */
+int h_notify_check(void) {
+    int bad = 0;
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) {
+        uint16_t want[UPMIX_PARAM_COUNT + UPMIX_NUM_GEN], wl[UPMIX_PARAM_COUNT + UPMIX_NUM_GEN];
+        int n = 0;
+        #define WB(f)  do { want[n] = (uint16_t)(p ? offsetof(WireBulkParams, upmix2.p1.f) : offsetof(WireBulkParams, upmix.f)); \
+                            wl[n++] = (uint16_t)sizeof(((WireUpmixParams *)0)->f); } while (0)
+        #define WE(f)  do { want[n] = (uint16_t)(p ? offsetof(WireBulkParams, upmix2.p1_ext.f) : offsetof(WireBulkParams, upmix2.p0_ext.f)); \
+                            wl[n++] = (uint16_t)sizeof(((WireUpmixExt *)0)->f); } while (0)
+        WB(enabled); WB(center_mode); WB(surround_mode); WB(presence_q1); WB(strength_pct);
+        WB(center_width_pct); WB(corr_threshold_pct); WB(attack_ms); WB(release_ms); WB(detector_hpf_hz);
+        WB(surround_delay_ms); WB(surround_hpf_hz); WB(surround_lpf_hz); WB(decorr_pct);
+        WE(src_a); WE(src_b); WE(active_counts); WE(back_offset_ms);
+        for (int g = 0; g < UPMIX_NUM_GEN; g++) WE(routes[g]);
+        #undef WB
+        #undef WE
+        h_ntf_n = 0;
+        upmix_notify_config((uint8_t)p);
+        if (h_ntf_n != n) { printf("  NOTIFY FAIL: profile %d sent %d fields, want %d\n", p, h_ntf_n, n); bad++; continue; }
+        for (int i = 0; i < n; i++)
+            if (h_ntf_off[i] != want[i] || h_ntf_len[i] != wl[i]) {
+                printf("  NOTIFY FAIL: profile %d field %d at %u+%u, want %u+%u\n", p, i, h_ntf_off[i], h_ntf_len[i], want[i], wl[i]);
+                bad++;
+            }
+    }
+    return bad;
+}
+#endif

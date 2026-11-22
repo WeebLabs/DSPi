@@ -1,6 +1,6 @@
 # Chunked Bulk Params: Host-Side Migration Guide
 
-*Last updated: 2026-11-16 (commands on the paged protocol of firmware 1.1.7, size at wire V32, result codes)*
+*Last updated: 2026-11-22 (commands on the paged protocol of firmware 1.1.7, size at wire V35, result codes)*
 
 ## Why this exists
 
@@ -18,10 +18,10 @@ commands are on the `STORE` page of the paged protocol (see `../commands.md`):
 
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | Single shot. A SET must be the whole struct |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | Single shot. A SET must be the whole struct |
 | `STORE.ALL_PARAMS_CHUNK` | 0x02 | 0x41 | GET, SET | byte offset | GET var, SET var | `wLength` is the chunk size. USB only |
 
-At wire V32 the struct is 6136 bytes. The single-shot `STORE.ALL_PARAMS`
+At wire V35 the struct is 6252 bytes. The single-shot `STORE.ALL_PARAMS`
 remains the right choice on macOS, Linux, and on the UART/I2C control
 transports (no size cap there). `STORE.ALL_PARAMS_CHUNK` is refused on UART
 and I2C with `VC_ERR_BLOCKED`. The wire payload is byte-identical to the
@@ -35,7 +35,7 @@ Only the transport layer of the bulk read/write helpers. Everything that
 parses or builds `WireBulkParams` is untouched.
 
 Pick a chunk size of at most 4096; **2048 is recommended** (comfortable
-margin, three transfers per direction).
+margin, four transfers per direction at wire V35).
 
 Every request below uses `wIndex = 0x0202` (page 0x02 in the high byte,
 vendor interface 2 in the low byte).
@@ -45,21 +45,22 @@ vendor interface 2 in the low byte).
 1. Issue control-IN `bRequest=0x41, wValue=0, wLength=2048`. Receiving
    offset 0 makes the device snapshot the complete struct into an internal
    buffer under its bulk lock, so all chunks come from one coherent image.
-2. Repeat with `wValue = 2048`, then `4096`, until you have accumulated
-   the full struct. The final chunk returns short (6136 - 4096 = 2040
-   bytes at wire V32); the device clamps `wLength` past the end for you.
+2. Repeat with `wValue = 2048`, then `4096`, then `6144`, until you have
+   accumulated the full struct. The final chunk returns short (6252 - 6144
+   = 108 bytes at wire V35); the device clamps `wLength` past the end for you.
    An offset at or past the end STALLs with `VC_ERR_ADDRESS`.
 3. Concatenate in offset order. Sanity-check `header.payload_length`
    against what you received, as with `STORE.ALL_PARAMS`.
 
 You may read `header` fields from the first chunk to learn the exact total
-instead of hardcoding 6136.
+instead of hardcoding 6252.
 
 ### Write (replaces one `STORE.ALL_PARAMS` SET)
 
 1. Build the full payload exactly as for `STORE.ALL_PARAMS`.
 2. Issue control-OUT `bRequest=0x41, wValue=0` with the first 2048 bytes,
-   then `wValue=2048`, then `wValue=4096` with the remainder.
+   then `wValue=2048`, then `wValue=4096`, then `wValue=6144` with the
+   remainder.
 3. Chunks **must be sequential and non-overlapping starting at offset 0**.
    An out-of-order offset STALLs at SETUP with `VC_ERR_STATE` and leaves the
    session open, so the host may resend the expected offset or restart
@@ -91,7 +92,7 @@ instead of hardcoding 6136.
 ### pyusb sketch (tools/dspi_test)
 
 ```python
-TOTAL = 6136          # wire V32, or read header.payload_length from the first chunk
+TOTAL = 6252          # wire V35, or read header.payload_length from the first chunk
 CHUNK = 2048
 STORE_WINDEX = (0x02 << 8) | 2    # page STORE, vendor interface 2
 ALL_PARAMS_CHUNK = 0x41

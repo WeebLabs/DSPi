@@ -220,7 +220,7 @@ When the firmware answers a `STORE.ALL_PARAMS` GET, `WirePreampConfig` is always
 
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Description |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | GET returns the full `WireBulkParams` (2896 bytes at V6, 6136 at V32). SET applies it to live state |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | GET returns the full `WireBulkParams` (2896 bytes at V6, 6252 at V35). SET applies it to live state |
 
 ---
 

@@ -12,7 +12,7 @@
 #include "bulk_params.h"
 #include "hardware/sync.h"
 
-_Static_assert(sizeof(WireBulkParams) == 6136, "STORE.ALL_PARAMS GET_LEN in pages/store.def");
+_Static_assert(sizeof(WireBulkParams) == 6252, "STORE.ALL_PARAMS GET_LEN in pages/store.def");
 
 static VcResult store_preset_save_set(VcCtx *c) {
     pending_preset_save_slot = (uint8_t)c->addr;

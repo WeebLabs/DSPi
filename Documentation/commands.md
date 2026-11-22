@@ -106,7 +106,7 @@ A STALL is an answer, not a fault. Retrying the same request gives the same answ
 - **GET replies** are at most 256 bytes (`SYS.PROTOCOL_INFO` bytes 10 and 11), except for the bulk commands. A fixed-length reply always has the length in the "GET bytes" column. A `var` reply has the length the command describes.
 - **Truncation.** The device sends at most `wLength` bytes. A shorter `wLength` gets a prefix of the same reply (for example 6 bytes of `SYS.PROTOCOL_INFO` return `44 53 50 69 01 00`). A longer `wLength` gets the whole reply and a short packet, which is how a host learns the length of a `var` reply. Ask for the length you know.
 - **Long data** is read in pieces addressed by a byte offset in `wValue`. `MEAS.RTA_BINS` returns at most 256 bytes per request, and `STORE.ALL_PARAMS_CHUNK` moves the bulk structure in pieces.
-- **Bulk commands** (`BULK` flag) use the 6136-byte bulk buffer instead of the 64-byte receive buffer and the 256-byte reply buffer. They are `STORE.ALL_PARAMS`, `STORE.ALL_PARAMS_CHUNK` and `MEAS.RTA_BANDS_ALL`. Only one transport can hold the bulk buffer at a time. A request that finds it held answers `VC_ERR_BUSY`.
+- **Bulk commands** (`BULK` flag) use the 6252-byte bulk buffer instead of the 64-byte receive buffer and the 256-byte reply buffer. They are `STORE.ALL_PARAMS`, `STORE.ALL_PARAMS_CHUNK` and `MEAS.RTA_BANDS_ALL`. Only one transport can hold the bulk buffer at a time. A request that finds it held answers `VC_ERR_BUSY`.
 
 ### 1.5 Result codes and `SYS.LAST_RESULT`
 
@@ -246,7 +246,7 @@ These rules hold for every command in every page. A host can rely on them.
 1. **One number per setting.** A setting that can be read and written is one command with a GET and a SET. There are no separate read and write commands for the same thing.
 2. **A GET changes nothing.** No read changes configuration, runtime state or flash. Two narrow exceptions exist. A spectrum analyser read refreshes the analyser's idle timer and can start it (`KEEPALIVE`). A chunked bulk read takes the bulk buffer for the length of the session.
 3. **Anything that changes the device is a SET.** That includes actions with no value, which are zero-length SETs.
-4. **`wValue` is an address.** It names which instance, such as a channel, an output, a slot, a band or a byte offset. It never selects an operation or a parameter. A two-level address packs as `(major << 8) | minor`. A command with no address requires `wValue` 0.
+4. **`wValue` is an address.** It names which instance, such as a channel, an output, a slot, a band or a byte offset. It never selects an operation or a parameter. A two-level address packs as `(major << 8) | minor`. A command with no address requires `wValue` 0. A command may gain an address in a later page revision, provided address 0 keeps its old meaning (the FX upmixer commands did this at FX revision 2).
 5. **Values go in the payload.** A GPIO number, a mode and an enable flag are all values.
 6. **One command, one shape.** Each command has exactly one GET reply layout and one SET payload layout.
 7. **GET and SET are symmetric.** For a read-write command, the GET reply is a valid SET payload with the same meaning. Status and capability data are separate read-only commands.
@@ -443,7 +443,7 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 | 0x05 | `ROUTE` | 1 | 15 | Matrix, per-output controls, delays, channel names, preamp, master and user volume |
 | 0x06 | `FILTER` | 1 | 3 | EQ and crossover bands, bypasses |
 | 0x07 | `DYN` | 1 | 17 | Limiter, leveller, loudness |
-| 0x08 | `FX` | 2 | 58 | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer |
+| 0x08 | `FX` | 2 | 63 | Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer |
 | 0x09 | `MEAS` | 1 | 20 | Level meters, clip flags, spectrum analyser, signal generator |
 | 0x0A | `CS` | 1 | 26 | Control Surfaces |
 | 0x0B | `XPORT` | 1 | 5 | UART and I2C control transports |
@@ -618,7 +618,7 @@ The preset store, the startup policy, IO configuration persistence, factory rese
 | 0x20 | `OUTPUT_CONFIG_MODE` | G, S | none | 1 | 1 | DEFERRED, FLASH, RESTART | IO config persistence: 0 independent, 1 with preset; other values store 0 |
 | 0x21 | `OUTPUT_CONFIG_SAVE` | S0 | none | - | 0 | DEFERRED, FLASH, RESTART | Persist the live IO config to the device-wide block |
 | 0x30 | `FACTORY_RESET` | S0 | none | - | 0 | DEFERRED, RESTART | Reset the live state to factory defaults; stored presets are kept and no flash is written |
-| 0x40 | `ALL_PARAMS` | G, S | none | 6136 | bulk | BULK, DEFERRED, RESTART | WireBulkParams V32; a SET must be the whole struct |
+| 0x40 | `ALL_PARAMS` | G, S | none | 6252 | bulk | BULK, DEFERRED, RESTART | WireBulkParams V35; a SET must be the whole struct |
 | 0x41 | `ALL_PARAMS_CHUNK` | G, S | byte offset | var | bulk | USB_ONLY, BULK, DEFERRED, RESTART | WireBulkParams in pieces at a byte offset; offset 0 opens the session and SET chunks must follow in order |
 
 <!-- VC:END STORE -->
@@ -1108,7 +1108,7 @@ The compensation follows `ROUTE.USER_VOLUME` (or LG Sound Sync, when it drives t
 
 ## 13. FX (0x08)
 
-Effects. This page holds headphone crossfeed, the subharmonic synthesizer, psychoacoustic bass, the tube preamp and, on RP2350, the stereo upmixer. Only `FX.UPMIX_ROUTE` takes an address; for every other command on this page `wValue` is 0.
+Effects. This page holds headphone crossfeed, the subharmonic synthesizer, psychoacoustic bass, the tube preamp and, on RP2350, the stereo upmixer. The upmixer commands take an address (`wValue` = profile, or profile and channel for `FX.UPMIX_ROUTE`), and address 0 is the profile hosts before FX revision 2 used. `FX.UPMIX_STATUS` and every other command on this page take `wValue` 0.
 
 These rules apply to the whole page.
 
@@ -1164,23 +1164,28 @@ Output masks are u16, bit k = output k (5 outputs on RP2040, 9 on RP2350).
 | 0x6B | `TUBE_XFMR_RES` | G, S | none | 4 | 4 | DEFERRED | Transformer resonance in Hz (f32, clamped) |
 | 0x6C | `TUBE_MIX` | G, S | none | 4 | 4 | DEFERRED | Wet mix in percent (f32, clamped) |
 | 0x6D | `TUBE_TRIM` | G, S | none | 4 | 4 | DEFERRED | Output trim in dB (f32, clamped) |
-| 0x80 | `UPMIX_CONFIG` | G, S | none | 44 | 44 | DEFERRED | Whole upmixer config (UpmixConfigPacket) (build: `PICO_RP2350` only) |
+| 0x80 | `UPMIX_CONFIG` | G, S | index | 44 | 44 | DEFERRED | Config of profile wValue, UpmixConfigPacket bytes 0 to 43 (build: `PICO_RP2350` only) |
 | 0x81 | `UPMIX_STATUS` | G | none | 32 | - |  | Live upmixer telemetry (UpmixStatus) (build: `PICO_RP2350` only) |
 | 0x82 | `UPMIX_ROUTE` | G, S | index | 4 | 4 | DEFERRED | Routing of one generated channel, wValue = (profile << 8) \| channel (UpmixRoute; trim clamped, reserved flag bits refused) (build: `PICO_RP2350` only) |
-| 0x90 | `UPMIX_ENABLE` | G, S | none | 4 | 4 | DEFERRED | Upmixer on or off (f32) (build: `PICO_RP2350` only) |
-| 0x91 | `UPMIX_CENTER_MODE` | G, S | none | 4 | 4 | DEFERRED | Centre mode (f32, rounded and clamped) (build: `PICO_RP2350` only) |
-| 0x92 | `UPMIX_SURROUND_MODE` | G, S | none | 4 | 4 | DEFERRED | Surround mode (f32, rounded and clamped to 0-2) (build: `PICO_RP2350` only) |
-| 0x93 | `UPMIX_STRENGTH` | G, S | none | 4 | 4 | DEFERRED | Strength in percent (f32) (build: `PICO_RP2350` only) |
-| 0x94 | `UPMIX_CENTER_WIDTH` | G, S | none | 4 | 4 | DEFERRED | Centre width in percent (f32) (build: `PICO_RP2350` only) |
-| 0x95 | `UPMIX_THRESHOLD` | G, S | none | 4 | 4 | DEFERRED | Correlation threshold in percent (f32) (build: `PICO_RP2350` only) |
-| 0x96 | `UPMIX_ATTACK` | G, S | none | 4 | 4 | DEFERRED | Steering attack in ms (f32) (build: `PICO_RP2350` only) |
-| 0x97 | `UPMIX_RELEASE` | G, S | none | 4 | 4 | DEFERRED | Steering release in ms (f32) (build: `PICO_RP2350` only) |
-| 0x98 | `UPMIX_DET_HPF` | G, S | none | 4 | 4 | DEFERRED | Detector high-pass in Hz (f32) (build: `PICO_RP2350` only) |
-| 0x99 | `UPMIX_SUR_DELAY` | G, S | none | 4 | 4 | DEFERRED | Surround delay in ms (f32) (build: `PICO_RP2350` only) |
-| 0x9A | `UPMIX_SUR_HPF` | G, S | none | 4 | 4 | DEFERRED | Surround high-pass in Hz (f32) (build: `PICO_RP2350` only) |
-| 0x9B | `UPMIX_SUR_LPF` | G, S | none | 4 | 4 | DEFERRED | Surround low-pass in Hz (f32) (build: `PICO_RP2350` only) |
-| 0x9C | `UPMIX_DECORR` | G, S | none | 4 | 4 | DEFERRED | Surround decorrelation in percent (f32) (build: `PICO_RP2350` only) |
-| 0x9D | `UPMIX_PRESENCE` | G, S | none | 4 | 4 | DEFERRED | Centre presence in dB (f32) (build: `PICO_RP2350` only) |
+| 0x83 | `UPMIX_CONFIG_EXT` | G, S | index | 36 | 36 | DEFERRED | Sources, active counts, back offset and routes of profile wValue, UpmixConfigPacket bytes 44 to 79 (build: `PICO_RP2350` only) |
+| 0x90 | `UPMIX_ENABLE` | G, S | index | 4 | 4 | DEFERRED | Upmixer on or off (f32) (build: `PICO_RP2350` only) |
+| 0x91 | `UPMIX_CENTER_MODE` | G, S | index | 4 | 4 | DEFERRED | Centre mode (f32, rounded and clamped) (build: `PICO_RP2350` only) |
+| 0x92 | `UPMIX_SURROUND_MODE` | G, S | index | 4 | 4 | DEFERRED | Surround mode (f32, rounded and clamped to 0-2) (build: `PICO_RP2350` only) |
+| 0x93 | `UPMIX_STRENGTH` | G, S | index | 4 | 4 | DEFERRED | Strength in percent (f32) (build: `PICO_RP2350` only) |
+| 0x94 | `UPMIX_CENTER_WIDTH` | G, S | index | 4 | 4 | DEFERRED | Centre width in percent (f32) (build: `PICO_RP2350` only) |
+| 0x95 | `UPMIX_THRESHOLD` | G, S | index | 4 | 4 | DEFERRED | Correlation threshold in percent (f32) (build: `PICO_RP2350` only) |
+| 0x96 | `UPMIX_ATTACK` | G, S | index | 4 | 4 | DEFERRED | Steering attack in ms (f32) (build: `PICO_RP2350` only) |
+| 0x97 | `UPMIX_RELEASE` | G, S | index | 4 | 4 | DEFERRED | Steering release in ms (f32) (build: `PICO_RP2350` only) |
+| 0x98 | `UPMIX_DET_HPF` | G, S | index | 4 | 4 | DEFERRED | Detector high-pass in Hz (f32) (build: `PICO_RP2350` only) |
+| 0x99 | `UPMIX_SUR_DELAY` | G, S | index | 4 | 4 | DEFERRED | Surround delay in ms (f32) (build: `PICO_RP2350` only) |
+| 0x9A | `UPMIX_SUR_HPF` | G, S | index | 4 | 4 | DEFERRED | Surround high-pass in Hz (f32) (build: `PICO_RP2350` only) |
+| 0x9B | `UPMIX_SUR_LPF` | G, S | index | 4 | 4 | DEFERRED | Surround low-pass in Hz (f32) (build: `PICO_RP2350` only) |
+| 0x9C | `UPMIX_DECORR` | G, S | index | 4 | 4 | DEFERRED | Surround decorrelation in percent (f32) (build: `PICO_RP2350` only) |
+| 0x9D | `UPMIX_PRESENCE` | G, S | index | 4 | 4 | DEFERRED | Centre presence in dB (f32) (build: `PICO_RP2350` only) |
+| 0x9E | `UPMIX_SOURCE_A` | G, S | index | 4 | 4 | DEFERRED | Source A input channel (f32, rounded; above 7 refused) (build: `PICO_RP2350` only) |
+| 0x9F | `UPMIX_SOURCE_B` | G, S | index | 4 | 4 | DEFERRED | Source B input channel (f32, rounded; above 7 refused) (build: `PICO_RP2350` only) |
+| 0xA0 | `UPMIX_ACTIVE_COUNTS` | G, S | index | 4 | 4 | DEFERRED | Input counts served, bit k = 2(k+1) channels (f32, rounded; bits above 3 refused) (build: `PICO_RP2350` only) |
+| 0xA1 | `UPMIX_BACK_OFFSET` | G, S | index | 4 | 4 | DEFERRED | Back pair arrival after the sides in ms (f32, stored as sent, used clamped to 0-10) (build: `PICO_RP2350` only) |
 
 <!-- VC:END FX -->
 
@@ -1265,9 +1270,11 @@ Setting `FX.TUBE_TYPE` to a stock tube (1 to 16) also rewrites bias, asymmetry, 
 
 ### 13.5 Stereo upmixer (RP2350)
 
-Splits a pair of inputs (inputs 0 and 1 until the source commands arrive) into seven generated channels: A' and B' (the sources after centre removal), C (the centre), SA and SB (side ambience), and BA and BB (back ambience, silent in this firmware). Each generated channel reaches the outputs set in its route. On a routed output it replaces the source pair's matrix rows, and every other row still reaches that output. Turning the upmixer off or removing a route fades over about 10 ms. It runs at up to 48 kHz on the stereo input. These commands exist only on RP2350.
+Splits a pair of input channels into seven generated channels: A' and B' (the sources after centre removal), C (the centre), SA and SB (side ambience), and BA and BB (back ambience, arriving after the sides). Each generated channel reaches the outputs set in its route. On a routed output it replaces the source pair's matrix rows, and every other row still reaches that output. Turning the upmixer off, removing a route or changing the running profile or its sources fades over about 10 ms. It runs at up to 48 kHz. These commands exist only on RP2350.
 
-`FX.UPMIX_CONFIG` (44 bytes) carries the whole configuration. `FX.UPMIX_ENABLE` to `FX.UPMIX_PRESENCE` carry one field each as a float32.
+There are two profiles, each a complete configuration addressed by `wValue` (0 or 1; 2 and above is `VC_ERR_ADDRESS`). The running profile is the lowest enabled one whose active counts hold the live input channel count. If one of its sources is absent at that count, the upmixer parks (status reason 4); it does not fall through to the other profile.
+
+A profile is 80 bytes. `FX.UPMIX_CONFIG` carries bytes 0 to 43 both ways and `FX.UPMIX_CONFIG_EXT` bytes 44 to 79 (offsets below minus 44), because a SET tops out at 64 bytes; each leaves the other's bytes unchanged. `FX.UPMIX_ENABLE` to `FX.UPMIX_BACK_OFFSET` (0x90 to 0xA1) carry one field each as a float32. A `FX.UPMIX_CONFIG_EXT` SET refuses an out-of-range source, count, mask or flag with `VC_ERR_VALUE` and changes nothing.
 
 | Offset | Type | Field | Single command | Range applied at compute time |
 |---|---|---|---|---|
@@ -1285,10 +1292,16 @@ Splits a pair of inputs (inputs 0 and 1 until the source commands arrive) into s
 | 32 | f32 | Surround high-pass, Hz | `FX.UPMIX_SUR_HPF` | 20 to 2000 |
 | 36 | f32 | Surround low-pass, Hz | `FX.UPMIX_SUR_LPF` | 1000 to 20000 |
 | 40 | f32 | Surround decorrelation, percent | `FX.UPMIX_DECORR` | 0 to 100 |
+| 44 | u8 | Source A input channel | `FX.UPMIX_SOURCE_A` | Above 7 refused on SET |
+| 45 | u8 | Source B input channel | `FX.UPMIX_SOURCE_B` | Above 7 refused on SET |
+| 46 | u8 | Active counts: bit 0 = 2 input channels, bit 1 = 4, bit 2 = 6, bit 3 = 8 | `FX.UPMIX_ACTIVE_COUNTS` | Bits above 3 refused on SET |
+| 47 | u8 | Reserved, 0 | | |
+| 48 | f32 | Back pair arrival after the sides, ms | `FX.UPMIX_BACK_OFFSET` | 0 to 10; the back tap is also held inside a 21 ms ring |
+| 52 | 7 x 4 bytes | Routes for A', B', C, SA, SB, BA, BB (the `FX.UPMIX_ROUTE` layout below) | `FX.UPMIX_ROUTE` | |
 
-The mode fields are sanitized when written. The float fields are stored as sent and clamped only when the coefficients are computed, so they read back unclamped. Presence is the exception in `FX.UPMIX_CONFIG`, which carries it in 0.5 dB steps. A non-finite float in either form is `VC_ERR_VALUE`.
+Defaults for both profiles: disabled, sources 0 and 1, active counts 0x01 (stereo), back offset 2 ms, no routes. The mode fields are sanitized when written. The float fields are stored as sent and clamped only when the coefficients are computed, so they read back unclamped. Presence is the exception in `FX.UPMIX_CONFIG`, which carries it in 0.5 dB steps. A non-finite float in either form is `VC_ERR_VALUE`.
 
-`FX.UPMIX_ROUTE` (4 bytes both ways), `wValue` = profile × 256 + generated channel (0 A', 1 B', 2 C, 3 SA, 4 SB, 5 BA, 6 BB). Profile 1 cannot be enabled until the profile commands arrive. A profile above 1 or a channel above 6 is `VC_ERR_ADDRESS`. Routes are not yet saved in presets, and a preset load or factory reset clears them.
+`FX.UPMIX_ROUTE` (4 bytes both ways), `wValue` = profile × 256 + generated channel (0 A', 1 B', 2 C, 3 SA, 4 SB, 5 BA, 6 BB). A profile above 1 or a channel above 6 is `VC_ERR_ADDRESS`. Every field of both profiles is saved in presets and sent in bulk parameters, and every SET notifies a field change. A preset saved before this layout (slot version 41 or older), with the upmixer on or off, gets routes derived from its matrix rows 0 to 4: an output fed by exactly one of those rows gets that row's channel, trim and polarity.
 
 | Offset | Type | Field |
 |---|---|---|
@@ -1922,19 +1935,19 @@ Bench and diagnostic commands with no stability promise. Release firmware builds
 
 ## 19. Bulk parameter transfer
 
-`STORE.ALL_PARAMS` moves the whole live DSP and IO state in one `WireBulkParams` structure. It is 6136 bytes at wire format version 32, the same size on both platforms. A host reads it at connect to build its picture of the device, and writes it to restore a saved state in one step. `STORE.ALL_PARAMS_CHUNK` moves the same structure in pieces.
+`STORE.ALL_PARAMS` moves the whole live DSP and IO state in one `WireBulkParams` structure. It is 6252 bytes at wire format version 35, the same size on both platforms. A host reads it at connect to build its picture of the device, and writes it to restore a saved state in one step. `STORE.ALL_PARAMS_CHUNK` moves the same structure in pieces.
 
 ### 19.1 `STORE.ALL_PARAMS`
 
-**GET.** `wValue` 0. The device collects the live state when the request arrives and returns `min(wLength, 6136)` bytes. Over USB the reply goes out in 64-byte packets from the bulk buffer, so the host's USB layer must accept a multi-packet control read. A host that already has the header can use `payload_length` (offset 6) as the length.
+**GET.** `wValue` 0. The device collects the live state when the request arrives and returns `min(wLength, 6252)` bytes. Over USB the reply goes out in 64-byte packets from the bulk buffer, so the host's USB layer must accept a multi-packet control read. A host that already has the header can use `payload_length` (offset 6) as the length.
 
-**SET.** `wValue` 0, exactly 6136 bytes. The device checks the request in two steps.
+**SET.** `wValue` 0, exactly 6252 bytes. The device checks the request in two steps.
 
 | When | Check | Result |
 |---|---|---|
-| SETUP | Length is not 6136 | `VC_ERR_LENGTH`. On UART and I2C a length the transport cannot buffer is status `0x06` |
+| SETUP | Length is not 6252 | `VC_ERR_LENGTH`. On UART and I2C a length the transport cannot buffer is status `0x06` |
 | SETUP | Another transport holds the bulk buffer, or an earlier bulk apply is still pending | `VC_ERR_BUSY` (UART and I2C: status `0x04`) |
-| After the data | `format_version` is not 32, `payload_length` is not 6136, `platform_id` or any channel count differs from the device | `VC_ERR_VALUE`, nothing applied |
+| After the data | `format_version` is not 35, `payload_length` is not 6252, `platform_id` or any channel count differs from the device | `VC_ERR_VALUE`, nothing applied |
 
 Then the main loop applies the structure under a muted, synchronized restart of every output, and sends one `BULK_INVALIDATED` notification with source 2. The bulk SET does not check float values and stores them as sent.
 
@@ -1951,11 +1964,11 @@ WinUSB limits a control transfer to 4096 bytes, so USB hosts on Windows move the
 
 **Reading in chunks.** A GET at offset 0 takes the bulk buffer and snapshots the whole state. Later GETs read that snapshot at any offset. The session ends when a chunk that reaches the end of the structure completes, or when any other USB vendor request arrives.
 
-**Writing in chunks.** Chunks must arrive in order. Offset 0 opens the session and takes the bulk buffer. Each later chunk must start where the previous one ended. When the received count reaches 6136, the header is checked as for `STORE.ALL_PARAMS` and the apply is queued. Any other USB vendor request closes the session and discards what was received.
+**Writing in chunks.** Chunks must arrive in order. Offset 0 opens the session and takes the bulk buffer. Each later chunk must start where the previous one ended. When the received count reaches 6252, the header is checked as for `STORE.ALL_PARAMS` and the apply is queued. Any other USB vendor request closes the session and discards what was received.
 
 | Refusal | Result |
 |---|---|
-| Offset at or past 6136 | `VC_ERR_ADDRESS` |
+| Offset at or past 6252 | `VC_ERR_ADDRESS` |
 | A SET chunk that runs past the end, or a zero-length chunk | `VC_ERR_LENGTH` |
 | A chunk with no open session, or a SET chunk at the wrong offset | `VC_ERR_STATE`. Restart at offset 0 (a SET refused for its offset keeps the session, so the right offset can be resent) |
 | The bulk buffer is held elsewhere when offset 0 arrives | `VC_ERR_BUSY` |
@@ -1990,10 +2003,11 @@ Offsets are bytes from the start of the structure. Arrays are sized for RP2350 o
 | 4780 | 1088 | `crossovers` | `WireBandParams[17][4]`, channel-major. Columns are bands 20 to 23. Input rows are zero on GET and skipped on SET |
 | 5868 | 8 | `adat_config` | u8 enabled; u8 pin (0 selects the default on SET); u8[6] reserved. Zero on RP2040 |
 | 5876 | 24 | `psybass` | u8 enabled; u8 reserved; u16 output_mask; f32 cutoff_hz; f32 harmonics_db; f32 drive_db; f32 character_pct; f32 original_db |
-| 5900 | 44 | `upmix` | The `FX.UPMIX_CONFIG` layout. Zero on RP2040 |
+| 5900 | 44 | `upmix` | Profile 0, the `FX.UPMIX_CONFIG` layout. Zero on RP2040 |
 | 5944 | 36 | `subharm` | u8 enabled; u8 reserved; u16 output_mask; f32 low_db; f32 high_db; f32 boost_db; f32 top_db; f32 select_depth; f32 select_hold_ms; f32 ceiling_db; u8 select_mode; u8 link_pairs; u8[2] reserved |
 | 5980 | 48 | `tube` | u8 enabled; u8 tube_type; u8 rectifier; u8 xfmr_enabled; u16 output_mask; u8[2] reserved; f32 drive_db; f32 bias_pct; f32 asym_db; f32 hardness_pct; f32 sag_pct; f32 xfmr_damping; f32 xfmr_res_hz; f32 mix_pct; f32 trim_db; f32 reserved |
 | 6028 | 108 | `limiter` | `[9]`, 12 bytes each: u8 enabled; u8 link_group (0 unlinked, 1 to 4); u8[2] reserved; f32 threshold_db; f32 release_ms |
+| 6136 | 116 | `upmix2` | Profile 0 in the `FX.UPMIX_CONFIG_EXT` layout (36 bytes), then profile 1 in the `FX.UPMIX_CONFIG` (44) and `FX.UPMIX_CONFIG_EXT` (36) layouts. Zero on RP2040 |
 
 Fields named `*_p1` hold the value plus one, so 0 means "absent, keep the live value" on a SET.
 
@@ -2001,13 +2015,13 @@ Fields named `*_p1` hold the value plus one, so 0 means "absent, keep the live v
 
 | Offset | Type | Field |
 |---|---|---|
-| 0 | u8 | `format_version` (32). A SET must match |
+| 0 | u8 | `format_version` (35). A SET must match |
 | 1 | u8 | `platform_id`: 0 RP2040, 1 RP2350. A SET must match the device |
 | 2 | u8 | `num_channels` (7 or 17). A SET must match |
 | 3 | u8 | `num_output_channels` (5 or 9). A SET must match |
 | 4 | u8 | `num_input_channels` (2 or 8). A SET must match |
 | 5 | u8 | `max_bands` (12) |
-| 6 | u16 | `payload_length` (6136). A SET must match |
+| 6 | u16 | `payload_length` (6252). A SET must match |
 | 8 | u16 | Firmware major (GET only) |
 | 10 | u16 | Firmware minor (GET only) |
 | 12 | u32 | Reserved, 0 |
@@ -2430,16 +2444,21 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | TYPE | [`OUTPUT.TYPE`](#9-output-0x04) | `0x0410` |  |
 | UART_CONFIG | [`XPORT.UART_CONFIG`](#16-xport-0x0b) | `0x0B10` |  |
 | UART_PIN_AVAIL | [`XPORT.UART_PIN_AVAIL`](#16-xport-0x0b) | `0x0B13` |  |
+| UPMIX_ACTIVE_COUNTS | [`FX.UPMIX_ACTIVE_COUNTS`](#13-fx-0x08) | `0x08A0` | RP2350 only |
 | UPMIX_ATTACK | [`FX.UPMIX_ATTACK`](#13-fx-0x08) | `0x0896` | RP2350 only |
+| UPMIX_BACK_OFFSET | [`FX.UPMIX_BACK_OFFSET`](#13-fx-0x08) | `0x08A1` | RP2350 only |
 | UPMIX_CENTER_MODE | [`FX.UPMIX_CENTER_MODE`](#13-fx-0x08) | `0x0891` | RP2350 only |
 | UPMIX_CENTER_WIDTH | [`FX.UPMIX_CENTER_WIDTH`](#13-fx-0x08) | `0x0894` | RP2350 only |
 | UPMIX_CONFIG | [`FX.UPMIX_CONFIG`](#13-fx-0x08) | `0x0880` | RP2350 only |
+| UPMIX_CONFIG_EXT | [`FX.UPMIX_CONFIG_EXT`](#13-fx-0x08) | `0x0883` | RP2350 only |
 | UPMIX_DECORR | [`FX.UPMIX_DECORR`](#13-fx-0x08) | `0x089C` | RP2350 only |
 | UPMIX_DET_HPF | [`FX.UPMIX_DET_HPF`](#13-fx-0x08) | `0x0898` | RP2350 only |
 | UPMIX_ENABLE | [`FX.UPMIX_ENABLE`](#13-fx-0x08) | `0x0890` | RP2350 only |
 | UPMIX_PRESENCE | [`FX.UPMIX_PRESENCE`](#13-fx-0x08) | `0x089D` | RP2350 only |
 | UPMIX_RELEASE | [`FX.UPMIX_RELEASE`](#13-fx-0x08) | `0x0897` | RP2350 only |
 | UPMIX_ROUTE | [`FX.UPMIX_ROUTE`](#13-fx-0x08) | `0x0882` | RP2350 only |
+| UPMIX_SOURCE_A | [`FX.UPMIX_SOURCE_A`](#13-fx-0x08) | `0x089E` | RP2350 only |
+| UPMIX_SOURCE_B | [`FX.UPMIX_SOURCE_B`](#13-fx-0x08) | `0x089F` | RP2350 only |
 | UPMIX_STATUS | [`FX.UPMIX_STATUS`](#13-fx-0x08) | `0x0881` | RP2350 only |
 | UPMIX_STRENGTH | [`FX.UPMIX_STRENGTH`](#13-fx-0x08) | `0x0893` | RP2350 only |
 | UPMIX_SURROUND_MODE | [`FX.UPMIX_SURROUND_MODE`](#13-fx-0x08) | `0x0892` | RP2350 only |

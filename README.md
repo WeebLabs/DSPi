@@ -120,9 +120,8 @@ PASS 2    Input PEQ (10 bands per input) -> input meters / RTA input tap
     |
 PASS 2.5  Volume Leveller (optional)
     |
-PASS 3    Stereo Upmixer (RP2350 only, stereo input only, optional)
-    |
 PASS 4    Matrix Mixer (2x5 on RP2040, 8x9 on RP2350)
+          Upmixer injection (RP2350 only, optional)
           Signal generator injection (when active)
     |
 PASS 4.5  Headphone Crossfeed (per output pair, optional)
@@ -288,7 +287,7 @@ The output buffering is selectable, trading latency against tolerance of host ti
 
 ### Matrix Mixer
 
-The matrix mixer routes the inputs to the outputs. The RP2350 matrix is 8x9 (up to 8 inputs, 9 outputs). The RP2040 matrix is 2x5. On RP2350, the stereo upmixer can add derived centre and surround rows. Each crosspoint has:
+The matrix mixer routes the inputs to the outputs. The RP2350 matrix is 8x9 (up to 8 inputs, 9 outputs). The RP2040 matrix is 2x5. On RP2350, an output the upmixer is routed to drops the upmixer's source rows and takes the upmixer's channels instead. Each crosspoint has:
 
 *   **Enable/Disable:** Route active or inactive.
 *   **Gain:** Per-crosspoint gain.
@@ -383,12 +382,11 @@ The leveller is independent of Loudness Compensation; both can be enabled togeth
 
 ### Stereo Upmixer (RP2350)
 
-Derives a centre channel and, optionally, left and right surround channels from a stereo source. The derived channels appear as extra rows in the matrix mixer, so they can be routed to any output.
+Splits any two input channels into seven full-range channels: the two sources with the centre removed, a centre, a side ambience pair and a back ambience pair. Each channel is routed to one or more outputs with its own trim and polarity, replacing the source pair on those outputs. That covers stereo to 3.0, 5.0 and 7.0, centre fill, dialogue lift, vocal reduction, and backs derived from a 5.1 source's surrounds. It has no LFE output: a subwoofer keeps its plain matrix feed with a low-pass.
 
 *   **Centre:** Passive or adaptive extraction, with strength, width, correlation gate, attack/release, and a presence control.
-*   **Surround:** Passive or adaptive (Dolby-style), with delay, band limiting, and decorrelation.
-
-The upmixer only runs with a stereo input and parks itself in multichannel input modes.
+*   **Ambience:** Passive or adaptive (prediction-residual steering), with delay, an ambience band filter and decorrelation. The back pair arrives a set time after the sides.
+*   **Profiles:** Two configurations, each tied to the input channel counts it serves, so one preset can upmix stereo one way and extend 6-channel input another. Changes fade in and out.
 
 ### Headphone Crossfeed
 
@@ -509,7 +507,7 @@ DSPi includes a 10-slot preset system that stores complete configurations in fla
 *   **Master Volume Mode:** Choose whether master volume is part of each preset or stored independently (default). See [Volume Controls](#volume-controls).
 *   **Device-wide names:** The device name and the input source names are stored on the device, outside the presets.
 *   **Silent switching:** A preset load fades the outputs to silence, restarts them together so they stay sample-aligned, and fades back up. If a DAC hardware mute pin is configured, it is held during the restart.
-*   **Bulk Parameter Transfer:** The complete DSP state (6136 bytes) can be read or written in one transfer, or in chunks for Windows' 4 KB control-transfer limit.
+*   **Bulk Parameter Transfer:** The complete DSP state (6252 bytes) can be read or written in one transfer, or in chunks for Windows' 4 KB control-transfer limit.
 *   **Auto-Migration:** Presets saved by older firmware are upgraded transparently on first boot of new firmware.
 
 ---

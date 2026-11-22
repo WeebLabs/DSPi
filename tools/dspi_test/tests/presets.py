@@ -184,3 +184,42 @@ def limiter_follows_output_config_mode(dev, profile, chk):
     _mode_isolation(dev, profile, chk, "limiter threshold",
                     lambda: round(dev.pget_f32("DYN.LIMITER_THRESHOLD", out), 3),
                     lambda v: dev.pset_f32("DYN.LIMITER_THRESHOLD", v, out), -17.0, -5.0)
+
+
+@test("presets", mutating=True, flash=4)
+def upmix_profiles_persist(dev, profile, chk):
+    """Both upmixer profiles, routes included, survive a preset save and load (slot V42)."""
+    if profile.platform_id != 1:
+        chk.note("upmixer is RP2350-only")
+        return
+    scratch = _scratch_slot(dev)
+    if scratch is None:
+        chk.note("all preset slots occupied, skipping the upmixer persistence test")
+        return
+    live = read_bulk(dev, profile)
+    orig_active = dev.pget_u8("STORE.PRESET_ACTIVE")
+    image = lambda: {p: bytes(dev.pget("FX.UPMIX_CONFIG", addr=p)) + bytes(dev.pget("FX.UPMIX_CONFIG_EXT", addr=p))
+                     for p in (0, 1)}
+    saved = False
+    try:
+        dev.pset("FX.UPMIX_STRENGTH", struct.pack("<f", 61.0), addr=1)
+        dev.pset("FX.UPMIX_PRESENCE", struct.pack("<f", -2.5), addr=1)
+        ext = bytearray(dev.pget("FX.UPMIX_CONFIG_EXT", addr=1))
+        struct.pack_into("<BBBBf", ext, 0, 4, 5, 0x0C, 0, 3.5)
+        struct.pack_into("<HbB", ext, 8 + 4 * 5, 0x40, -9, 1)       # BA to output 6
+        dev.pset("FX.UPMIX_CONFIG_EXT", bytes(ext), addr=1)
+        dev.pset("FX.UPMIX_ROUTE", struct.pack("<HbB", 0x04, -6, 0), addr=0x002)   # profile 0: C to output 2
+        want = image()
+        dev.pset("STORE.PRESET_SAVE", b"", scratch)
+        saved = True
+        chk.eq(wait_for(lambda: _slot_used(dev, scratch), 1), 1, "scratch preset saved")
+        dev.pset("FX.UPMIX_ROUTE", struct.pack("<HbB", 0, 0, 0), addr=0x002)
+        dev.pset("FX.UPMIX_SOURCE_A", struct.pack("<f", 0.0), addr=1)
+        chk.ok(image() != want, "live profiles changed before the load")
+        _load(dev, scratch)
+        chk.eq(image(), want, "both profiles, routes included, come back from the preset")
+    finally:
+        _run_all(lambda: _load(dev, orig_active),
+                 lambda: _drop_scratch(dev, scratch) if saved else None,
+                 lambda: push_bulk(dev, live))
+

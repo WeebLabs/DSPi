@@ -261,7 +261,7 @@ and `SYS.LAST_RESULT` gives the reason.
 ### Capability & whole-state
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6136, SET 6136 | `WireBulkParams`, read or write everything (Section 8). 6136 bytes is the current V32 layout. This guide describes V16 (5864 bytes) |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | `WireBulkParams`, read or write everything (Section 8). 6252 bytes is the current V35 layout. This guide describes V16 (5864 bytes) |
 | `SYS.PLATFORM` | 0x01 | 0x20 | GET | none (0) | GET 7 | Optional; header is canonical |
 
 ### Matrix routing (inputs 0-7 on RP2350)
@@ -569,7 +569,7 @@ Compatibility is **intentionally broken at V16/V21** — there is no forward/bac
 ### Commands for multichannel work
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | 0 | GET 6136, SET 6136 | WireBulkParams (V32 today. This guide describes V16) |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | 0 | GET 6252, SET 6252 | WireBulkParams (V35 today. This guide describes V16) |
 | `MEAS.LEVELS` | 0x09 | 0x10 | GET | 0 | GET var | combined meter packet |
 | `INPUT.STATUS` | 0x03 | 0x11 | GET | 0 | GET 12 | active input count at offset 1 |
 | `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | GET | 0 | GET 4 | u32 clip flags, not cleared |

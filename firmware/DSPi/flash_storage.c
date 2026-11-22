@@ -205,7 +205,11 @@
 //        (input_blocks_encode()); no size change.  V40 is held by the unmerged
 //        ac3-dts-decode branch.  Older slots map their mask through
 //        input_blocks_from_legacy().
-#define SLOT_DATA_VERSION       41
+//   V42: Upmixer v2 appended (WireUpmixV2Params, 116 bytes: profile 0's sources,
+//        active counts, back offset and routes, then profile 1 whole).  Older
+//        slots with the upmixer on get routes from their matrix rows 0..4
+//        (upmix_routes_from_v1(), spec 8.1); RP2350 only, zeros on RP2040.
+#define SLOT_DATA_VERSION       42
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1538,6 +1542,9 @@ typedef struct __attribute__((packed)) {
     uint8_t  limiter_link_group[NUM_OUTPUT_CHANNELS];
     float    limiter_threshold_db[NUM_OUTPUT_CHANNELS];
     float    limiter_release_ms[NUM_OUTPUT_CHANNELS];
+
+    // V42: upmixer v2, same layout as the wire section.  Gated on version >= 42.
+    WireUpmixV2Params upmix_v2;
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -1614,7 +1621,7 @@ static void cs_ir_from_v1(CsIrConfig *dst, const CsIrConfig_v1 *src);           
 // VALIDATION section.  collect_live_state() and migrate_legacy() use it
 // to compute the CRC byte range that matches whatever version they're
 // writing, so the same range is used at save and read time.
-static size_t slot_data_size_for_version(uint8_t version);
+static size_t slot_data_size_for_version(uint16_t version);
 
 // RAM-cached copy of the directory — updated on every directory write and
 // loaded once at boot.  Avoids repeated flash reads for queries.
@@ -3680,7 +3687,16 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     slot->upmix_surround_hpf_hz    = upmix_profiles[0].surround_hpf_hz;
     slot->upmix_surround_lpf_hz    = upmix_profiles[0].surround_lpf_hz;
     slot->upmix_decorr_pct         = upmix_profiles[0].decorr_pct;
+    {
+        UpmixConfigPacket pkt;
+        upmix_config_to_packet(0, &pkt);
+        memcpy(&slot->upmix_v2.p0_ext, (const uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, sizeof(slot->upmix_v2.p0_ext));
+        upmix_config_to_packet(1, &pkt);
+        memcpy(&slot->upmix_v2.p1, &pkt, sizeof(slot->upmix_v2.p1));
+        memcpy(&slot->upmix_v2.p1_ext, (const uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, sizeof(slot->upmix_v2.p1_ext));
+    }
 #else
+    memset(&slot->upmix_v2, 0, sizeof(slot->upmix_v2));
     slot->upmix_enabled            = 0;
     slot->upmix_center_mode        = 0;
     slot->upmix_surround_mode      = 0;
@@ -3990,35 +4006,59 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     // Output limiter: sourced by apply_output_config_from_mode(), which follows
     // output_config_mode like the physical IO config.
 
-    // Stereo upmixer (V33): RP2350-only.  V33+ slots restore the stored config
-    // (modes clamped; enabled = nonzero); older slots load the disabled
-    // defaults.  Range clamping of the floats happens downstream in
-    // upmix_compute_coefficients (matching the psybass/leveller precedent of a
-    // raw copy plus downstream clamp), so no NaN/range sanitization here.  The
-    // pending flag is raised in both branches so a load that turns the upmixer
-    // off unpublishes its coefficients.
+    // Upmixer (RP2350): every profile from defaults, then profile 0's v1 fields
+    // (V33+), the v2 tail (V42) or routes migrated from the matrix, all through
+    // the sanitizing decoder.  The pending flag always rises, so a load that turns
+    // the upmixer off unpublishes its coefficients.
 #if PICO_RP2350
-    // Profile 1 and the v2 fields are not persisted yet (v2 phase 5), so a load
-    // starts every profile from defaults and overlays profile 0 from the slot.
     for (int p = 0; p < UPMIX_NUM_PROFILES; p++) upmix_profile_defaults(&upmix_profiles[p]);
     if (slot->version >= 33) {
-        upmix_profiles[0].enabled            = (slot->upmix_enabled != 0);
-        upmix_profiles[0].center_mode        = upmix_clamp_center_mode(slot->upmix_center_mode);
-        upmix_profiles[0].surround_mode      = (slot->upmix_surround_mode <= 2)
-                                          ? slot->upmix_surround_mode : UPMIX_DEFAULT_SURROUND_MODE;
-        upmix_profiles[0].strength_pct       = slot->upmix_strength_pct;
-        upmix_profiles[0].center_width_pct   = slot->upmix_center_width_pct;
-        upmix_profiles[0].corr_threshold_pct = slot->upmix_corr_threshold_pct;
-        upmix_profiles[0].attack_ms          = slot->upmix_attack_ms;
-        upmix_profiles[0].release_ms         = slot->upmix_release_ms;
-        upmix_profiles[0].detector_hpf_hz    = slot->upmix_detector_hpf_hz;
-        upmix_profiles[0].surround_delay_ms  = slot->upmix_surround_delay_ms;
-        upmix_profiles[0].surround_hpf_hz    = slot->upmix_surround_hpf_hz;
-        upmix_profiles[0].surround_lpf_hz    = slot->upmix_surround_lpf_hz;
-        upmix_profiles[0].decorr_pct         = slot->upmix_decorr_pct;
-        // V34 presence byte; V33 slots wrote 0 here, which decodes to the
-        // 0 dB default, so no version gate is needed.
-        upmix_profiles[0].presence_db        = upmix_presence_decode(slot->upmix_presence_q1);
+        UpmixConfigPacket pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.enabled            = slot->upmix_enabled;
+        pkt.center_mode        = slot->upmix_center_mode;
+        pkt.surround_mode      = slot->upmix_surround_mode;
+        pkt.presence_q1        = slot->upmix_presence_q1;   // V33 wrote 0 here: the 0 dB default
+        pkt.strength_pct       = slot->upmix_strength_pct;
+        pkt.center_width_pct   = slot->upmix_center_width_pct;
+        pkt.corr_threshold_pct = slot->upmix_corr_threshold_pct;
+        pkt.attack_ms          = slot->upmix_attack_ms;
+        pkt.release_ms         = slot->upmix_release_ms;
+        pkt.detector_hpf_hz    = slot->upmix_detector_hpf_hz;
+        pkt.surround_delay_ms  = slot->upmix_surround_delay_ms;
+        pkt.surround_hpf_hz    = slot->upmix_surround_hpf_hz;
+        pkt.surround_lpf_hz    = slot->upmix_surround_lpf_hz;
+        pkt.decorr_pct         = slot->upmix_decorr_pct;
+        upmix_packet_to_config(0, &pkt, UPMIX_PKT_HEAD);
+    }
+    if (slot->version >= 42) {
+        UpmixConfigPacket pkt;
+        upmix_config_to_packet(0, &pkt);
+        memcpy((uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, &slot->upmix_v2.p0_ext, sizeof(slot->upmix_v2.p0_ext));
+        upmix_packet_to_config(0, &pkt, UPMIX_PKT_TAIL);
+        memcpy(&pkt, &slot->upmix_v2.p1, sizeof(slot->upmix_v2.p1));
+        memcpy((uint8_t *)&pkt + UPMIX_PACKET_V1_SIZE, &slot->upmix_v2.p1_ext, sizeof(slot->upmix_v2.p1_ext));
+        upmix_packet_to_config(1, &pkt, UPMIX_PKT_ALL);
+    } else {
+        // Older presets delivered through matrix rows 2..4, enabled or not, so
+        // turning the upmixer on later sounds as it did on v1.  Defaults match v1 activation.
+        UpmixV1Crosspoint xp[5][NUM_OUTPUT_CHANNELS];
+        uint16_t out_en = 0;
+        for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
+            if (slot->matrix_outputs[o].enabled) out_en |= (uint16_t)(1u << o);
+            for (int r = 0; r < 5; r++) {
+                xp[r][o].enabled = slot->matrix_crosspoints[r][o].enabled;
+                xp[r][o].invert  = slot->matrix_crosspoints[r][o].phase_invert;
+                xp[r][o].gain_db = slot->matrix_crosspoints[r][o].gain_db;
+            }
+        }
+        UpmixRoute routes[UPMIX_NUM_GEN];
+        upmix_routes_from_v1(routes, xp, out_en);
+        for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+            upmix_profiles[0].routes[g].out_mask = routes[g].out_mask;
+            upmix_profiles[0].routes[g].trim_q1  = routes[g].trim_q1;
+            upmix_profiles[0].routes[g].flags    = routes[g].flags;
+        }
     }
     upmix_update_pending = true;
 #endif
@@ -4227,25 +4267,19 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 #define SLOT_DATA_SIZE_V38 \
     (offsetof(PresetSlot, limiter_enabled) - offsetof(PresetSlot, filter_recipes))
 #define SLOT_DATA_SIZE_V39 \
-    (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
+    (offsetof(PresetSlot, upmix_v2) - offsetof(PresetSlot, filter_recipes))
 // V41 only changes what the input_blocks byte means.
 #define SLOT_DATA_SIZE_V41 SLOT_DATA_SIZE_V39
+#define SLOT_DATA_SIZE_V42 \
+    (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
-// V21 broke compatibility (unified channel model); V22 (I2S multichannel input),
-// V23 (ADAT bulk output), V24 (optional SPDIF inputs 2/3), V25 (leveller channel
-// masks), V26 (loudness output mask), V27 (crossfeed output pair mask), V28
-// (I2S clock master/slave mode), V29 (I2S clock-pin mode), V30 (Linkwitz
-// Transform per-band target Q), V31 (psychoacoustic bass), V32 (ADAT input) and
-// V33 (stereo upmixer), V35 (SPDIF input 4 pin), V36 (subharmonic synthesizer)
-// V37 (subharm third band / selectivity / ceiling / link), V38 (tube preamp)
-// and V39 (output limiter) are backward-compatible tail-appends; V34 (upmix
-// presence) and V41 (input blocks) change a byte's meaning with no size change.
-// V40 belongs to another branch and is rejected.  V21..V39 and V41 slots are all
-// accepted (an older slot loads with the newer fields defaulted to unset) while
-// older/unknown versions are invalidated and the slot loads factory defaults.
-static size_t slot_data_size_for_version(uint8_t version) {
+// Stored byte range per accepted slot version; 0 rejects (older than V21, V40 of
+// another branch, unknown).  History: the SLOT_DATA_VERSION comment above.
+static size_t slot_data_size_for_version(uint16_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 41
+        case SLOT_DATA_VERSION:   // 42
+            return SLOT_DATA_SIZE_V42;
+        case 41:
             return SLOT_DATA_SIZE_V41;
         case 39:
             return SLOT_DATA_SIZE_V39;

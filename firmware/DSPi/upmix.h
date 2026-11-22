@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "config.h"
 
 // Upmixer pair engine (RP2350 only).  It splits a selectable input pair into
@@ -164,7 +165,7 @@ typedef struct {
     UpmixRoute routes[UPMIX_NUM_GEN];
 } UpmixConfig;
 
-// Wire image of UpmixConfig for FX.UPMIX_CONFIG (44 bytes).
+// Wire image of one profile for FX.UPMIX_CONFIG (80 bytes; bytes 0..43 are v1's).
 // presence_q1 (V26+, was reserved) carries presence_db in 0.5 dB steps
 // (int8, dB * 2, -24..+24); older V25 hosts wrote 0 = 0 dB, so the byte is
 // backward-compatible in both directions and no struct size changes.
@@ -183,11 +184,18 @@ typedef struct __attribute__((packed)) {
     float surround_hpf_hz;
     float surround_lpf_hz;
     float decorr_pct;
+    uint8_t src_a, src_b;      // v2 tail: a 44-byte SET leaves it unchanged
+    uint8_t active_counts;
+    uint8_t reserved;
+    float back_offset_ms;
+    UpmixRoute routes[UPMIX_NUM_GEN];
 } UpmixConfigPacket;
-_Static_assert(sizeof(UpmixConfigPacket) == 44, "UpmixConfigPacket wire size");
+#define UPMIX_PACKET_V1_SIZE 44
+_Static_assert(sizeof(UpmixConfigPacket) == 80, "UpmixConfigPacket wire size");
+_Static_assert(offsetof(UpmixConfigPacket, src_a) == UPMIX_PACKET_V1_SIZE, "v2 fields follow v1's 44 bytes");
 
-// Parameter ids, in the order of FX.UPMIX_ENABLE..FX.UPMIX_PRESENCE.  All values
-// travel as a 4-byte float; mode/enable params are rounded to integer on SET.
+// Parameter ids; command = 0x90 + id.  All values travel as a 4-byte float;
+// mode, enable, source and count params are rounded to integer on SET.
 enum {
     UPMIX_PARAM_ENABLED       = 0,
     UPMIX_PARAM_CENTER_MODE   = 1,
@@ -203,6 +211,10 @@ enum {
     UPMIX_PARAM_SUR_LPF       = 11,
     UPMIX_PARAM_DECORR        = 12,
     UPMIX_PARAM_PRESENCE      = 13,
+    UPMIX_PARAM_SRC_A         = 14,
+    UPMIX_PARAM_SRC_B         = 15,
+    UPMIX_PARAM_ACTIVE_COUNTS = 16,
+    UPMIX_PARAM_BACK_OFFSET   = 17,
     UPMIX_PARAM_COUNT
 };
 
@@ -360,14 +372,26 @@ static inline void upmix_park(void) {
 // and output enable mask (bit k = matrix output k enabled).
 void upmix_get_status(UpmixStatus *st, uint8_t n_inputs, uint16_t out_enabled);
 
-// Encode profile 0 as its wire image (the only profile on the wire until v2
-// phase 5).  Shared by GET_CONFIG, bulk collect and notify, so the notify
-// shadow matches collect.
-void upmix_config_to_packet(UpmixConfigPacket *out);
+// Encode profile p as its wire image.  Shared by GET_CONFIG, bulk collect,
+// preset save and notify, so the notify shadow matches collect.
+void upmix_config_to_packet(uint8_t p, UpmixConfigPacket *out);
 
-// Push every upmix field through notify_param_write; only changed fields emit
-// PARAM_CHANGED.  Every SET path must call this after writing a profile.
-void upmix_notify_config(void);
+// Write the parts (UPMIX_PKT_*) of profile p from a wire image, touching nothing
+// else.  Sanitizes every field (bulk and flash rely on it); vendor SETs validate first.
+#define UPMIX_PKT_HEAD 0x01   // bytes 0..43, UPMIX_CONFIG
+#define UPMIX_PKT_TAIL 0x02   // bytes 44..79, UPMIX_CONFIG_EXT
+#define UPMIX_PKT_ALL  0x03
+void upmix_packet_to_config(uint8_t p, const UpmixConfigPacket *in, uint8_t parts);
+
+// Push every field of profile p through notify_param_write; only changed
+// fields emit PARAM_CHANGED.  Every SET path must call this after a write.
+void upmix_notify_config(uint8_t p);
+
+// Spec 8.1: routes for a v1 preset, from its matrix rows 0..4.  Each output fed
+// by exactly one of those rows gets that row's generated channel, trim and phase.
+typedef struct { uint8_t enabled, invert; float gain_db; } UpmixV1Crosspoint;
+void upmix_routes_from_v1(UpmixRoute routes[UPMIX_NUM_GEN],
+                          const UpmixV1Crosspoint xp[5][NUM_OUTPUT_CHANNELS], uint16_t out_enabled);
 
 #endif // PICO_RP2350
 

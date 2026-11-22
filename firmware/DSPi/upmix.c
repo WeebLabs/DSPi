@@ -127,7 +127,7 @@ static struct {
     bool active;                                  // targets on; false while fading out
 } ur;
 
-// One render chunk of every generated channel.  BA/BB stay zero until phase 4.
+// One render chunk of every generated channel.
 static float um_chunk[UPMIX_NUM_GEN][UPMIX_CHUNK];
 
 // Host harness tap on each rendered chunk (tools/upmix_proto/harness).
@@ -296,8 +296,9 @@ void upmix_get_status(UpmixStatus *st, uint8_t n_inputs, uint16_t out_enabled) {
     memcpy(st->gen_peak, ur.gen_peak, sizeof(st->gen_peak));
 }
 
-void upmix_config_to_packet(UpmixConfigPacket *out) {
-    volatile const UpmixConfig *cfg = &upmix_profiles[0];
+void upmix_config_to_packet(uint8_t p, UpmixConfigPacket *out) {
+    volatile const UpmixConfig *cfg = &upmix_profiles[p < UPMIX_NUM_PROFILES ? p : 0];
+    memset(out, 0, sizeof(*out));
     out->enabled            = cfg->enabled ? 1 : 0;
     out->center_mode        = cfg->center_mode;
     out->surround_mode      = cfg->surround_mode;
@@ -312,30 +313,110 @@ void upmix_config_to_packet(UpmixConfigPacket *out) {
     out->surround_hpf_hz    = cfg->surround_hpf_hz;
     out->surround_lpf_hz    = cfg->surround_lpf_hz;
     out->decorr_pct         = cfg->decorr_pct;
+    out->src_a              = cfg->src_a;
+    out->src_b              = cfg->src_b;
+    out->active_counts      = cfg->active_counts;
+    out->back_offset_ms     = cfg->back_offset_ms;
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+        out->routes[g].out_mask = cfg->routes[g].out_mask;
+        out->routes[g].trim_q1  = cfg->routes[g].trim_q1;
+        out->routes[g].flags    = cfg->routes[g].flags;
+    }
 }
 
-void upmix_notify_config(void) {
-    UpmixConfigPacket p;
-    upmix_config_to_packet(&p);
-    // Offsets come from WireBulkParams by name so each event lands on its own
-    // field; one PARAM_CHANGED per field the SET actually moved.
-    #define UM_NOTIFY(f) notify_param_write(offsetof(WireBulkParams, upmix.f), \
-                                            sizeof(p.f), (const void *)&p.f)
-    UM_NOTIFY(enabled);
-    UM_NOTIFY(center_mode);
-    UM_NOTIFY(surround_mode);
-    UM_NOTIFY(presence_q1);
-    UM_NOTIFY(strength_pct);
-    UM_NOTIFY(center_width_pct);
-    UM_NOTIFY(corr_threshold_pct);
-    UM_NOTIFY(attack_ms);
-    UM_NOTIFY(release_ms);
-    UM_NOTIFY(detector_hpf_hz);
-    UM_NOTIFY(surround_delay_ms);
-    UM_NOTIFY(surround_hpf_hz);
-    UM_NOTIFY(surround_lpf_hz);
-    UM_NOTIFY(decorr_pct);
+static int8_t um_clamp_trim(int t) {
+    return (int8_t)(t < UPMIX_TRIM_MIN_Q1 ? UPMIX_TRIM_MIN_Q1 : (t > UPMIX_TRIM_MAX_Q1 ? UPMIX_TRIM_MAX_Q1 : t));
+}
+
+// A non-finite float from bulk or flash would reach the coefficient maths.
+static inline float um_fin(float v, float def) { return isfinite(v) ? v : def; }
+
+void upmix_packet_to_config(uint8_t p, const UpmixConfigPacket *in, uint8_t parts) {
+    if (p >= UPMIX_NUM_PROFILES) return;
+    volatile UpmixConfig *cfg = &upmix_profiles[p];
+    if (parts & UPMIX_PKT_HEAD) {
+        cfg->enabled            = in->enabled != 0;
+        cfg->center_mode        = upmix_clamp_center_mode(in->center_mode);
+        cfg->surround_mode      = in->surround_mode > UPMIX_SURROUND_ADAPTIVE ? UPMIX_SURROUND_ADAPTIVE
+                                                                              : in->surround_mode;
+        cfg->presence_db        = upmix_presence_decode(in->presence_q1);
+        cfg->strength_pct       = um_fin(in->strength_pct, UPMIX_DEFAULT_STRENGTH);
+        cfg->center_width_pct   = um_fin(in->center_width_pct, UPMIX_DEFAULT_WIDTH);
+        cfg->corr_threshold_pct = um_fin(in->corr_threshold_pct, UPMIX_DEFAULT_THRESH);
+        cfg->attack_ms          = um_fin(in->attack_ms, UPMIX_DEFAULT_ATTACK);
+        cfg->release_ms         = um_fin(in->release_ms, UPMIX_DEFAULT_RELEASE);
+        cfg->detector_hpf_hz    = um_fin(in->detector_hpf_hz, UPMIX_DEFAULT_DET_HPF);
+        cfg->surround_delay_ms  = um_fin(in->surround_delay_ms, UPMIX_DEFAULT_SUR_DELAY);
+        cfg->surround_hpf_hz    = um_fin(in->surround_hpf_hz, UPMIX_DEFAULT_SUR_HPF);
+        cfg->surround_lpf_hz    = um_fin(in->surround_lpf_hz, UPMIX_DEFAULT_SUR_LPF);
+        cfg->decorr_pct         = um_fin(in->decorr_pct, UPMIX_DEFAULT_DECORR);
+    }
+    if (parts & UPMIX_PKT_TAIL) {
+        cfg->src_a          = in->src_a < NUM_INPUT_CHANNELS ? in->src_a : UPMIX_DEFAULT_SRC_A;
+        cfg->src_b          = in->src_b < NUM_INPUT_CHANNELS ? in->src_b : UPMIX_DEFAULT_SRC_B;
+        cfg->active_counts  = in->active_counts & UPMIX_COUNTS_MASK;
+        cfg->back_offset_ms = um_fin(in->back_offset_ms, UPMIX_DEFAULT_BACK_OFFSET);
+        for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+            cfg->routes[g].out_mask = in->routes[g].out_mask & UPMIX_OUT_MASK;
+            cfg->routes[g].trim_q1  = um_clamp_trim(in->routes[g].trim_q1);
+            cfg->routes[g].flags    = in->routes[g].flags & UPMIX_ROUTE_INVERT;
+        }
+    }
+}
+
+void upmix_notify_config(uint8_t p) {
+    if (p >= UPMIX_NUM_PROFILES) return;
+    UpmixConfigPacket k;
+    upmix_config_to_packet(p, &k);
+    // Profile 0's first 44 bytes sit at the V25 upmix section, the rest of both
+    // profiles in upmix2 (bulk_params.h); packet offsets map onto both.
+    const size_t base = p ? offsetof(WireBulkParams, upmix2.p1) : offsetof(WireBulkParams, upmix);
+    const size_t ext = (p ? offsetof(WireBulkParams, upmix2.p1_ext) : offsetof(WireBulkParams, upmix2.p0_ext))
+                       - UPMIX_PACKET_V1_SIZE;
+    #define UM_NOTIFY(at, f) notify_param_write((uint16_t)((at) + offsetof(UpmixConfigPacket, f)), \
+                                                sizeof(k.f), (const void *)&k.f)
+    UM_NOTIFY(base, enabled);
+    UM_NOTIFY(base, center_mode);
+    UM_NOTIFY(base, surround_mode);
+    UM_NOTIFY(base, presence_q1);
+    UM_NOTIFY(base, strength_pct);
+    UM_NOTIFY(base, center_width_pct);
+    UM_NOTIFY(base, corr_threshold_pct);
+    UM_NOTIFY(base, attack_ms);
+    UM_NOTIFY(base, release_ms);
+    UM_NOTIFY(base, detector_hpf_hz);
+    UM_NOTIFY(base, surround_delay_ms);
+    UM_NOTIFY(base, surround_hpf_hz);
+    UM_NOTIFY(base, surround_lpf_hz);
+    UM_NOTIFY(base, decorr_pct);
+    UM_NOTIFY(ext, src_a);
+    UM_NOTIFY(ext, src_b);
+    UM_NOTIFY(ext, active_counts);
+    UM_NOTIFY(ext, back_offset_ms);
+    for (int g = 0; g < UPMIX_NUM_GEN; g++)
+        UM_NOTIFY(ext, routes[g]);
     #undef UM_NOTIFY
+}
+
+void upmix_routes_from_v1(UpmixRoute routes[UPMIX_NUM_GEN],
+                          const UpmixV1Crosspoint xp[5][NUM_OUTPUT_CHANNELS], uint16_t out_enabled) {
+    float best[UPMIX_NUM_GEN];
+    memset(routes, 0, sizeof(UpmixRoute) * UPMIX_NUM_GEN);
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) best[g] = -INFINITY;
+    for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++) {
+        if (!(out_enabled & (1u << o))) continue;
+        int row = -1, rows = 0;
+        for (int r = 0; r < 5; r++)
+            if (xp[r][o].enabled && xp[r][o].gain_db > -120.0f) { row = r; rows++; }   // -120 dB is the matrix mute
+        if (rows != 1) continue;   // several rows: the output keeps its matrix feed
+        // Rows 0..4 were L', R', C, Ls, Rs: generated channels A', B', C, SA, SB.
+        routes[row].out_mask |= (uint16_t)(1u << o);
+        if (xp[row][o].gain_db > best[row]) {   // one trim per channel: the largest gain wins
+            best[row] = xp[row][o].gain_db;
+            routes[row].trim_q1 = um_clamp_trim((int)lrintf(xp[row][o].gain_db * 2.0f));
+            routes[row].flags = xp[row][o].invert ? UPMIX_ROUTE_INVERT : 0;
+        }
+    }
 }
 
 // x^e for a compile-time constant e; folds to a multiply-free form for the

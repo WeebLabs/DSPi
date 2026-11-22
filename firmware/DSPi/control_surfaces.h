@@ -191,7 +191,7 @@ typedef enum {
     CS_NOUN_LG_MUTED       = 34, // bool, read-only (LG source present and muted)
     // --- caps v4 additions ---
     CS_NOUN_UPMIX          = 35, // bool (stereo upmixer enable; RP2350)
-    CS_NOUN_UPMIX_CENTER_MODE   = 36, // enum 0..1 (Passive / Logic; RP2350)
+    CS_NOUN_UPMIX_CENTER_MODE   = 36, // enum 0..2 (Passive / Adaptive / Off; RP2350)
     CS_NOUN_UPMIX_SURROUND_MODE = 37, // enum 0..2 (Off / Passive / Logic; RP2350)
     CS_NOUN_UPMIX_STRENGTH = 38, // continuous percent 0..100 (RP2350)
     CS_NOUN_UPMIX_WIDTH    = 39, // continuous percent 0..100 (centre width; RP2350)

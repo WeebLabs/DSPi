@@ -204,6 +204,7 @@ def fx_reads_shape(dev, profile, chk):
     if _rp2350(profile):
         cfg = _get(dev, "UPMIX_CONFIG")
         chk.eq(len(cfg), 44, "UPMIX_CONFIG length")
+        chk.eq(len(_get(dev, "UPMIX_CONFIG_EXT")), 36, "UPMIX_CONFIG_EXT length")
         params = _save(dev, [n for n, _v in UPMIX])
         chk.eq(_upmix_cfg_disagreements(cfg, params), [], "UPMIX_CONFIG fields == UPMIX_* parameters")
         st = _get(dev, "UPMIX_STATUS")
@@ -296,6 +297,8 @@ def fx_nonfinite_refused(dev, profile, chk):
     for n, v in UPMIX:
         if v is not None:
             nonfinite_refused(chk, lambda: _get(dev, n), lambda pl: _set(dev, n, pl), both, f"FX.{n}")
+    nonfinite_refused(chk, lambda: _get(dev, "UPMIX_BACK_OFFSET"), lambda pl: _set(dev, "UPMIX_BACK_OFFSET", pl),
+                      both, "FX.UPMIX_BACK_OFFSET")
     cfg = _get(dev, "UPMIX_CONFIG")
     cases = []
     for off, field in ((4, "strength"), (40, "decorr")):
@@ -326,6 +329,7 @@ def fx_value_and_length_errors(dev, profile, chk):
     if _rp2350(profile):
         expect_stall(chk, lambda: _set(dev, "UPMIX_STATUS", bytes(16)), "VC_ERR_DIRECTION", "SET UPMIX_STATUS")
         expect_stall(chk, lambda: _set(dev, "UPMIX_CONFIG", bytes(43)), "VC_ERR_LENGTH", "43-byte UPMIX_CONFIG")
+        expect_stall(chk, lambda: _set(dev, "UPMIX_CONFIG", bytes(45)), "VC_ERR_LENGTH", "45-byte UPMIX_CONFIG")
 
 
 @test("paged_fx", mutating=True)
@@ -364,6 +368,65 @@ def fx_upmix_route_roundtrip(dev, profile, chk):
     chk.eq({a: dev.pget("FX.UPMIX_ROUTE", addr=a, length=4) for a in addrs}, saved, "routes restored")
 
 
+# Profile-addressed v2 parameters: name, byte offset in UPMIX_CONFIG_EXT, test value.
+UPMIX_V2 = [("UPMIX_SOURCE_A", 0, 4.0), ("UPMIX_SOURCE_B", 1, 5.0),
+            ("UPMIX_ACTIVE_COUNTS", 2, 12.0), ("UPMIX_BACK_OFFSET", 4, 6.5)]
+
+
+@test("paged_fx", mutating=True)
+def fx_upmix_profiles(dev, profile, chk):
+    """Profile addressing: profile 1 is independent of 0, wValue 2 is refused, the v2 fields round-trip and refuse bad values."""
+    require_page(dev, FX)
+    if not _rp2350(profile):
+        return
+    cfgs = {p: dev.pget("FX.UPMIX_CONFIG", addr=p) + dev.pget("FX.UPMIX_CONFIG_EXT", addr=p) for p in (0, 1)}
+    names = [n for n, _o, _v in UPMIX_V2] + ["UPMIX_STRENGTH", "UPMIX_PRESENCE"]
+    saved = {(n, p): dev.pget(f"FX.{n}", addr=p) for n in names for p in (0, 1)}
+    try:
+        for n, off, v in UPMIX_V2:
+            dev.pset(f"FX.{n}", _f32(v), addr=1)
+            chk.eq(dev.pget(f"FX.{n}", addr=1), _f32(v), f"profile 1 FX.{n} after SET {v}")
+            got = dev.pget("FX.UPMIX_CONFIG_EXT", addr=1)
+            raw = struct.unpack_from("<f", got, off)[0] if off == 4 else got[off]
+            chk.eq(raw, v if off == 4 else int(v), f"UPMIX_CONFIG_EXT byte {off} follows FX.{n}")
+            chk.eq(dev.pget(f"FX.{n}", addr=0), saved[(n, 0)], f"profile 0 FX.{n} untouched")
+        dev.pset("FX.UPMIX_SOURCE_A", _f32(3.4), addr=1)
+        chk.eq(dev.pget("FX.UPMIX_SOURCE_A", addr=1), _f32(3.0), "a source is rounded")
+        for n, bad in (("UPMIX_SOURCE_A", 8.0), ("UPMIX_SOURCE_B", -1.0), ("UPMIX_ACTIVE_COUNTS", 16.0)):
+            expect_stall(chk, lambda n=n, bad=bad: dev.pset(f"FX.{n}", _f32(bad), addr=1), "VC_ERR_VALUE",
+                         f"FX.{n} {bad}")
+        dev.pset("FX.UPMIX_STRENGTH", _f32(55.0), addr=1)
+        chk.eq(dev.pget("FX.UPMIX_STRENGTH", addr=0), saved[("UPMIX_STRENGTH", 0)], "profile 0 strength untouched")
+        for n in ("UPMIX_CONFIG", "UPMIX_STRENGTH", "UPMIX_SOURCE_A"):
+            expect_stall(chk, lambda n=n: dev.pget(f"FX.{n}", addr=2), "VC_ERR_ADDRESS", f"GET FX.{n} at profile 2")
+        expect_stall(chk, lambda: dev.pset("FX.UPMIX_STRENGTH", _f32(1.0), addr=2), "VC_ERR_ADDRESS",
+                     "SET FX.UPMIX_STRENGTH at profile 2")
+        expect_stall(chk, lambda: dev.pset("FX.UPMIX_CONFIG", cfgs[1][:44], addr=2), "VC_ERR_ADDRESS",
+                     "SET FX.UPMIX_CONFIG at profile 2")
+        # UPMIX_CONFIG_EXT: a GET is a valid SET; bad fields are refused whole.
+        ext = bytearray(dev.pget("FX.UPMIX_CONFIG_EXT", addr=1))
+        struct.pack_into("<HbB", ext, 8 + 4 * 6, 0x80, -6, 1)          # BB to output 7, -3 dB, inverted
+        dev.pset("FX.UPMIX_CONFIG_EXT", bytes(ext), addr=1)
+        chk.eq(dev.pget("FX.UPMIX_CONFIG_EXT", addr=1), bytes(ext), "UPMIX_CONFIG_EXT round-trips")
+        chk.eq(dev.pget("FX.UPMIX_ROUTE", addr=0x106, length=4), struct.pack("<HbB", 0x80, -6, 1),
+               "UPMIX_ROUTE sees the routes written through UPMIX_CONFIG_EXT")
+        for off, raw, what in ((0, b"\x08", "source 8"), (2, b"\x10", "count bit 4"), (11, b"\x02", "route flag bit 1")):
+            bad = bytes(ext[:off]) + raw + bytes(ext[off + 1:])
+            expect_stall(chk, lambda b=bad: dev.pset("FX.UPMIX_CONFIG_EXT", b, addr=1), "VC_ERR_VALUE",
+                         f"UPMIX_CONFIG_EXT with {what}")
+        chk.eq(dev.pget("FX.UPMIX_CONFIG_EXT", addr=1), bytes(ext), "refused SETs changed nothing")
+        dev.pset("FX.UPMIX_PRESENCE", _f32(3.3), addr=1)
+        dev.pset("FX.UPMIX_CONFIG_EXT", bytes(ext), addr=1)
+        chk.eq(dev.pget("FX.UPMIX_PRESENCE", addr=1), _f32(3.3), "an EXT SET leaves presence unquantized")
+    finally:
+        for p in (0, 1):
+            dev.pset("FX.UPMIX_CONFIG_EXT", cfgs[p][44:], addr=p)
+        for (n, p), v in saved.items():
+            dev.pset(f"FX.{n}", v, addr=p)
+    chk.eq({p: dev.pget("FX.UPMIX_CONFIG", addr=p) + dev.pget("FX.UPMIX_CONFIG_EXT", addr=p) for p in (0, 1)},
+           cfgs, "both profiles restored")
+
+
 @test("paged_fx", mutating=True)
 def fx_upmix_roundtrip(dev, profile, chk):
     """UPMIX_CONFIG and each UPMIX_* parameter round-trip and stay in step with each other; enable is never changed."""
@@ -373,9 +436,11 @@ def fx_upmix_roundtrip(dev, profile, chk):
         return
     names = [n for n, _v in UPMIX]
     cfg = _get(dev, "UPMIX_CONFIG")
+    ext = _get(dev, "UPMIX_CONFIG_EXT")
     saved = _save(dev, names)
     try:
         chk.no_stall(lambda: _set(dev, "UPMIX_CONFIG", cfg), "write back the current config")
+        chk.eq(_get(dev, "UPMIX_CONFIG_EXT"), ext, "UPMIX_CONFIG SET keeps UPMIX_CONFIG_EXT")
         chk.eq(_get(dev, "UPMIX_CONFIG"), cfg, "UPMIX_CONFIG GET is a valid SET payload")
         mod = bytearray(cfg)
         struct.pack_into("<f", mod, 4, 37.0)            # strength_pct

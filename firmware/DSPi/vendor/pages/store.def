@@ -24,6 +24,6 @@ VC_CMD(0x30, FACTORY_RESET, VC_NONE, store_factory_reset_set,
        NONE, 0, 0, 0, VC_F_DEFERRED | VC_F_RESTART, 0, "Reset the live state to factory defaults; stored presets are kept and no flash is written")
 
 VC_CMD(0x40, ALL_PARAMS, store_all_params_get, store_all_params_set,
-       NONE, 6136, 0, 0, VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams V32; a SET must be the whole struct")
+       NONE, 6252, 0, 0, VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams V35; a SET must be the whole struct")
 VC_CMD(0x41, ALL_PARAMS_CHUNK, store_all_params_chunk_get, store_all_params_chunk_set,
        OFFSET, VC_LEN_VAR, 0, 0, VC_F_USB_ONLY | VC_F_BULK | VC_F_DEFERRED | VC_F_RESTART, 0, "WireBulkParams in pieces at a byte offset; offset 0 opens the session and SET chunks must follow in order")
