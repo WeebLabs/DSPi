@@ -63,6 +63,46 @@ void h_run_switch(const float *p, int cmode, int sm_a, int sm_b, int cut, int bl
     }
 }
 
+/* Reference run with both modes switchable at sample `cut`, through upmix_process_block. */
+void h_run_ref(const float *p, int cm_a, int sm_a, int cm_b, int sm_b, int cut, int blk,
+               const float *L, const float *R, int N,
+               float *oc, float *ol, float *orr, float *ols, float *ors) {
+    UpmixCoeffs ca, cb;
+    set_cfg(&ca, p, cm_a, sm_a, 48000.0f);
+    set_cfg(&cb, p, cm_b, sm_b, 48000.0f);
+    upmix_reset_state();
+    for (int s = 0; s < N; s += blk) {
+        int n = N - s < blk ? N - s : blk;
+        memcpy(ol + s, L + s, n * sizeof(float));
+        memcpy(orr + s, R + s, n * sizeof(float));
+        upmix_process_block(s < cut ? &ca : &cb, ol + s, orr + s, oc + s, ols + s, ors + s, (uint32_t)n);
+    }
+}
+
+#ifdef UPMIX_CHUNK
+/* Same run through upmix_begin()/upmix_render() at an arbitrary chunk size. */
+void h_run_split(const float *p, int cm_a, int sm_a, int cm_b, int sm_b, int cut, int blk, int chunk,
+                 const float *L, const float *R, int N,
+                 float *oc, float *ol, float *orr, float *ols, float *ors) {
+    float *dst[UPMIX_NUM_GEN] = { ol, orr, oc, ols, ors };
+    UpmixCoeffs ca, cb;
+    set_cfg(&ca, p, cm_a, sm_a, 48000.0f);
+    set_cfg(&cb, p, cm_b, sm_b, 48000.0f);
+    upmix_reset_state();
+    for (int s = 0; s < N; s += blk) {
+        int n = N - s < blk ? N - s : blk;
+        const UpmixCoeffs *c = s < cut ? &ca : &cb;
+        upmix_begin(c, (uint32_t)n);
+        for (int o = 0; o < n; o += chunk) {
+            int k = n - o < chunk ? n - o : chunk;
+            float *const out[UPMIX_NUM_GEN] = { dst[0] + s + o, dst[1] + s + o, dst[2] + s + o,
+                                                dst[3] + s + o, dst[4] + s + o };
+            upmix_render(c, L + s + o, R + s + o, (uint32_t)k, out);
+        }
+    }
+}
+#endif
+
 #ifdef UPMIX_NEW
 /* Stem-through: control runs on the mix, each stem reuses the mix's control state
  * per block and keeps only its own audio-path state (filters, rings, bell). */

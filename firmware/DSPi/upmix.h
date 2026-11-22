@@ -150,6 +150,17 @@ static inline uint8_t upmix_clamp_center_mode(long m) {
 #define UPMIX_RATE_MAX        48000.0f   // parks above this (rings sized for 48 kHz)
 #define UPMIX_HAAS_RING        1024      // samples; holds the 20 ms delay ceiling at 48 kHz
 #define UPMIX_AP_RING           512      // samples; holds the 10 ms decorrelator at 48 kHz
+#define UPMIX_CHUNK              32      // samples per render chunk where output is staged
+
+// Generated channels, the out[] rows of upmix_render().
+enum {
+    UPMIX_GEN_A = 0,   // source A after centre removal (v1 L')
+    UPMIX_GEN_B,       // source B after centre removal (v1 R')
+    UPMIX_GEN_C,       // extracted centre
+    UPMIX_GEN_SA,      // side ambience, A side (v1 Ls)
+    UPMIX_GEN_SB,      // side ambience, B side (v1 Rs)
+    UPMIX_NUM_GEN
+};
 
 // Configuration (persisted to flash / wire)
 typedef struct {
@@ -280,8 +291,18 @@ void upmix_compute_coefficients(UpmixCoeffs *coeffs, const UpmixConfig *config, 
 // Called from the main loop while audio runs; never touches processing state.
 void upmix_apply_config(const UpmixConfig *config, float sample_rate);
 
-// Run one block: reads/modifies l/r in place, writes cbuf and (if surround
-// active) lsbuf/rsbuf.  Core 0 only, called from process_input_block.
+// Packet control update: call once per packet with the packet length, then
+// upmix_render() over consecutive chunks that sum to exactly that length, all
+// with the same coeffs.  Output is identical for any chunking.  Core 0 only.
+void upmix_begin(const UpmixCoeffs *coeffs, uint32_t sample_count);
+
+// Render the next n samples from the read-only sources a/b into out[UPMIX_GEN_*].
+// No out row may alias a, b or another row.  SA/SB are written only while surround is on.
+void upmix_render(const UpmixCoeffs *coeffs, const float *a, const float *b,
+                  uint32_t n, float *const out[UPMIX_NUM_GEN]);
+
+// v1 delivery bridge over begin/render: L'/R' back into l/r, C/Ls/Rs into the
+// given rows.  Temporary; see Documentation/Features/upmixer_v2_plan.md.
 void upmix_process_block(const UpmixCoeffs *coeffs,
                          float *l, float *r,
                          float *cbuf, float *lsbuf, float *rsbuf,

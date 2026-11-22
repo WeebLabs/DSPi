@@ -36,3 +36,9 @@ measures the `run_side.py` metrics from the compiled C, stem-through. It writes
 `out/harness_report.txt` and `out/harness_metrics.csv`.
 
     /tmp/upmix_venv/bin/python harness/harness.py
+
+`harness/split_check.py` needs only numpy. It checks that `upmix_begin()` /
+`upmix_render()` reproduce the committed engine bit for bit at chunk sizes 1, 7
+and 32, across every mode, mode switches and packet sizes.
+
+    python3 harness/split_check.py [rev]

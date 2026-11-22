@@ -84,6 +84,13 @@ typedef struct {
         float haas[2][UPMIX_HAAS_RING];// adaptive: band-limited L'/R'; passive: Ls/Rs
         float ap[2][UPMIX_AP_RING];
     } s;
+    // Per-sample ramp cursors (value, step) set by upmix_begin() for the whole
+    // packet and advanced by each upmix_render() chunk.
+    struct {
+        float gc, gc_d, rem, rem_d;
+        float gls, gls_d, grs, grs_d;
+        float wl, wl_d, wr, wr_d;
+    } rp;
     uint32_t widx;                 // shared ring write index
     bool sur_active;               // surround engine ran last packet
     uint8_t sur_mode;              // mode it ran in (ring contents differ per mode)
@@ -289,12 +296,11 @@ static inline float upmix_band(const UpmixCoeffs *c, float x, int ch) {
     return v2;
 }
 
+// Once per packet, so size beats speed: -O3 made this 2 KB of RAM code
+// against a .data budget with 280 B left (see check_ram_placement.py).
 DSP_TIME_CRITICAL
-void upmix_process_block(const UpmixCoeffs * __restrict c,
-                         float * __restrict l, float * __restrict r,
-                         float * __restrict cbuf,
-                         float * __restrict lsbuf, float * __restrict rsbuf,
-                         uint32_t n) {
+__attribute__((optimize("Os")))
+void upmix_begin(const UpmixCoeffs * __restrict c, uint32_t n) {
     if (n == 0) return;
     upmix_state_dirty = true;
     um.running = true;
@@ -406,17 +412,35 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
     }
     float gls_new = gls_t * senv;
     float grs_new = grs_t * senv;
-    float gc_i  = um.p_gc,  gc_step  = (gc_new  - um.p_gc)  * inv_n;
-    float rem_i = um.p_rem, rem_step = (rem_new - um.p_rem) * inv_n;
-    float gls_i = um.s.p_gls, gls_step = (gls_new - um.s.p_gls) * inv_n;
-    float grs_i = um.s.p_grs, grs_step = (grs_new - um.s.p_grs) * inv_n;
-    float wl_i = um.s.p_wl, wl_step = (wl_t - um.s.p_wl) * inv_n;
-    float wr_i = um.s.p_wr, wr_step = (wr_t - um.s.p_wr) * inv_n;
+    um.rp.gc  = um.p_gc;    um.rp.gc_d  = (gc_new  - um.p_gc)    * inv_n;
+    um.rp.rem = um.p_rem;   um.rp.rem_d = (rem_new - um.p_rem)   * inv_n;
+    um.rp.gls = um.s.p_gls; um.rp.gls_d = (gls_new - um.s.p_gls) * inv_n;
+    um.rp.grs = um.s.p_grs; um.rp.grs_d = (grs_new - um.s.p_grs) * inv_n;
+    um.rp.wl  = um.s.p_wl;  um.rp.wl_d  = (wl_t    - um.s.p_wl)  * inv_n;
+    um.rp.wr  = um.s.p_wr;  um.rp.wr_d  = (wr_t    - um.s.p_wr)  * inv_n;
     um.p_gc = gc_new; um.p_rem = rem_new; um.s.p_gls = gls_new; um.s.p_grs = grs_new;
     um.s.p_wl = wl_t; um.s.p_wr = wr_t;
     um.env = env_new;
+}
 
-    // ---- Audio pass ----
+DSP_TIME_CRITICAL
+void upmix_render(const UpmixCoeffs * __restrict c,
+                  const float * __restrict l, const float * __restrict r,
+                  uint32_t n, float *const out[UPMIX_NUM_GEN]) {
+    const bool sur = c->n_derived == UPMIX_NUM_DERIVED;
+    const bool sur_adaptive = sur && c->surround_mode == UPMIX_SURROUND_ADAPTIVE;
+    float * __restrict abuf = out[UPMIX_GEN_A];
+    float * __restrict bbuf = out[UPMIX_GEN_B];
+    float * __restrict cbuf = out[UPMIX_GEN_C];
+    float * __restrict lsbuf = out[UPMIX_GEN_SA];
+    float * __restrict rsbuf = out[UPMIX_GEN_SB];
+
+    float gc_i = um.rp.gc, rem_i = um.rp.rem;
+    float gls_i = um.rp.gls, grs_i = um.rp.grs, wl_i = um.rp.wl, wr_i = um.rp.wr;
+    const float gc_step = um.rp.gc_d, rem_step = um.rp.rem_d;
+    const float gls_step = um.rp.gls_d, grs_step = um.rp.grs_d;
+    const float wl_step = um.rp.wl_d, wr_step = um.rp.wr_d;
+
     float det_lp_l = um.det_lp_l, det_lp_r = um.det_lp_r;
     float acc_lr = um.acc_lr, acc_ll = um.acc_ll, acc_rr = um.acc_rr;
     const float hp_a = c->det_hp_a;
@@ -458,8 +482,8 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
         const float rem_c = rem_i;
         float rem = rem_i * mid;
         float l1 = l0 - rem, r1 = r0 - rem;
-        l[i] = l1;
-        r[i] = r1;
+        abuf[i] = l1;
+        bbuf[i] = r1;
         gc_i += gc_step;
         rem_i += rem_step;
 
@@ -524,6 +548,33 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
     um.det_lp_l = det_lp_l; um.det_lp_r = det_lp_r;
     um.acc_lr = acc_lr; um.acc_ll = acc_ll; um.acc_rr = acc_rr;
     um.widx = widx;
+    um.rp.gc = gc_i; um.rp.rem = rem_i;
+    um.rp.gls = gls_i; um.rp.grs = grs_i; um.rp.wl = wl_i; um.rp.wr = wr_i;
+}
+
+// A'/B' staging for the bridge: render outputs must not alias its sources.
+static float um_ab[2][UPMIX_CHUNK];
+
+static inline void um_copy(float * __restrict dst, const float * __restrict src, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) dst[i] = src[i];
+}
+
+// Temporary bridge to v1 delivery (matrix rows 0..4); removed when module
+// routing lands (Documentation/Features/upmixer_v2_plan.md, phase 3).
+DSP_TIME_CRITICAL
+void upmix_process_block(const UpmixCoeffs * __restrict c,
+                         float * __restrict l, float * __restrict r,
+                         float * __restrict cbuf,
+                         float * __restrict lsbuf, float * __restrict rsbuf,
+                         uint32_t n) {
+    upmix_begin(c, n);
+    for (uint32_t off = 0; off < n; off += UPMIX_CHUNK) {
+        uint32_t k = n - off < UPMIX_CHUNK ? n - off : UPMIX_CHUNK;
+        float *const out[UPMIX_NUM_GEN] = { um_ab[0], um_ab[1], cbuf + off, lsbuf + off, rsbuf + off };
+        upmix_render(c, l + off, r + off, k, out);
+        um_copy(l + off, um_ab[0], k);
+        um_copy(r + off, um_ab[1], k);
+    }
 }
 
 #endif // PICO_RP2350

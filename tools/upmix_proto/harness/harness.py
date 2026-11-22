@@ -3,13 +3,9 @@
 Usage (from tools/upmix_proto): <python with numpy+scipy+numba> harness/harness.py
 Writes out/harness_report.txt and out/harness_metrics.csv.
 """
-import ctypes
 import csv
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -20,37 +16,7 @@ import run_side as RS     # noqa: E402
 import accept as A        # noqa: E402
 from run_eval import band, p, db, win_energy, WARM, D, OUT   # noqa: E402
 
-REPO = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
-FW = os.path.join(REPO, 'firmware', 'DSPi')
-DEFP = [100.0, 25.0, 30.0, 10.0, 100.0, 200.0, 12.0, 300.0, 7000.0, 90.0, 0.0]
-FP = ctypes.POINTER(ctypes.c_float)
-
-
-def build(src_c, src_h, new):
-    """Copy upmix.c/h beside the stubs so their "config.h" resolves to the stub."""
-    d = tempfile.mkdtemp(prefix='upmix_h_')
-    for f in os.listdir(os.path.join(HERE, 'stubs')):
-        shutil.copy(os.path.join(HERE, 'stubs', f), d)
-    open(os.path.join(d, 'upmix.c'), 'w').write(src_c)
-    open(os.path.join(d, 'upmix.h'), 'w').write(src_h)
-    shutil.copy(os.path.join(HERE, 'harness.c'), d)
-    so = os.path.join(d, 'libupmix.so')
-    # No FMA contraction, so the host result is comparable operation for operation.
-    cmd = ['cc', '-O2', '-ffp-contract=off', '-fno-fast-math', '-shared', '-fPIC', '-I', d,
-           os.path.join(d, 'harness.c'), '-o', so, '-lm'] + (['-DUPMIX_NEW'] if new else [])
-    subprocess.check_call(cmd)
-    lib = ctypes.CDLL(so)
-    lib.h_run.argtypes = [FP, ctypes.c_int, ctypes.c_int, ctypes.c_int, FP, FP, ctypes.c_int] + [FP] * 5
-    lib.h_coeffs.argtypes = [FP, ctypes.c_int, ctypes.c_int, ctypes.c_int, FP]
-    lib.h_run_switch.argtypes = ([FP] + [ctypes.c_int] * 5 + [FP, FP, ctypes.c_int] + [FP] * 5)
-    if new:
-        lib.h_run_stems.argtypes = ([FP, ctypes.c_int, ctypes.c_int, ctypes.c_int, FP, FP, ctypes.c_int,
-                                     ctypes.c_int, FP, FP, FP, FP, FP, FP, FP])
-    return lib
-
-
-def ptr(a):
-    return a.ctypes.data_as(FP)
+from hbuild import REPO, FW, DEFP, FP, build, ptr, head_sources, tree_sources   # noqa: E402,F401
 
 
 def c_run(lib, L, R, cm=1, sm=2, params=None, blk=48):
@@ -255,10 +221,8 @@ def main():
 
     def log(s):
         print(s, flush=True); lines.append(s)
-    head_c = subprocess.check_output(['git', '-C', REPO, 'show', 'HEAD:firmware/DSPi/upmix.c']).decode()
-    head_h = subprocess.check_output(['git', '-C', REPO, 'show', 'HEAD:firmware/DSPi/upmix.h']).decode()
-    new = build(open(os.path.join(FW, 'upmix.c')).read(), open(os.path.join(FW, 'upmix.h')).read(), True)
-    head = build(head_c, head_h, False)
+    new = build(*tree_sources(), True)
+    head = build(*head_sources(), False)
     tests = S.build_tests()
     tests['alternating'] = RS.alternating_test()
     head_model_check(head, tests, log)
