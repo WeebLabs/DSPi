@@ -1385,7 +1385,8 @@ UPMIX_CENTER_OFF = 2          # upmix.h
 UPMIX_CENTER_ADAPTIVE = 1
 UPMIX_SURROUND_OFF = 0
 UPMIX_SURROUND_PASSIVE = 1
-UPMIX_GEN_A, UPMIX_GEN_B, UPMIX_GEN_C, UPMIX_GEN_SA = 0, 1, 2, 3
+UPMIX_GEN_A, UPMIX_GEN_B, UPMIX_GEN_C, UPMIX_GEN_SA, UPMIX_GEN_BA = 0, 1, 2, 3, 5
+UPMIX_BACK_OFFSET_MS = 2.0    # default back_offset_ms: the backs land this long after the sides
 UPMIX_NUM_GEN, UPMIX_NUM_PROFILES = 7, 2
 PSYBASS_CUTOFF, PSYBASS_HARMONICS, PSYBASS_DRIVE = 120.0, 12.0, 18.0
 SUBHARM_TONE = 60.0           # inside the 48-72 Hz band: sub lands at 30 Hz
@@ -1648,6 +1649,47 @@ def upmix_claim_and_release(dev, profile, chk):
         st = dev.pget("FX.UPMIX_STATUS", length=32)
         chk.eq((st[0], st[1], st[16]), (0, 1, 0xFF), "disabled: parked, reason 1, no profile held")
         chk.note(f"upmix claim: A' {lvl_l - base_l:+.2f} dB, C {lvl_r - base_r:+.2f} dB, release {resid:.1f} dBFS")
+    finally:
+        _upmix_reset(dev)
+        dev.wait_ready()
+
+
+@test("audio", mutating=True)
+def upmix_back_pair_timing(dev, profile, chk):
+    """Back pair: BA arrives back_offset (2 ms) after SA and carries the same ambience, decorrelated."""
+    rig = _get_rig(dev, profile)
+    if profile.platform_id != 1:
+        raise Skip("upmixer is RP2350-only")
+    out_l, out_r, _cl, _cr = _slot_indices(profile, rig["slot"])
+    fs = rig["fs"]
+    try:
+        if _optional(lambda: dev.pset_f32("FX.UPMIX_CENTER_MODE", float(UPMIX_CENTER_OFF))) is None:
+            raise Skip("upmixer not available on this build")
+        dev.pset_f32("FX.UPMIX_SURROUND_MODE", float(UPMIX_SURROUND_PASSIVE))
+        _upmix_route(dev, UPMIX_GEN_BA, 1 << out_l)
+        _upmix_route(dev, UPMIX_GEN_SA, 1 << out_r)
+        dev.pset_f32("FX.UPMIX_ENABLE", 1.0)
+        dev.wait_ready()
+
+        def lag_once():
+            # Left only: the passive feed is L - R, so a centred signal would cancel.
+            sweep = audio.make_sweep(fs, 0.5, 30.0, fs * 0.45, 0.4)
+            pad = np.zeros(int(audio.PAD_S * fs), np.float32)
+            sig = np.concatenate([pad, sweep, pad])
+            cap = audio.play_record(np.column_stack([sig, np.zeros_like(sig)]), fs, rig["out"], rig["in"])
+            a, b = cap[:, 0].astype(np.float64), cap[:, 1].astype(np.float64)
+            n = 1 << (2 * len(a)).bit_length()
+            c = np.fft.irfft(np.fft.rfft(a, n) * np.conj(np.fft.rfft(b, n)), n)   # c[k]: a delayed by k
+            w = int(0.03 * fs)
+            corr, lags = np.concatenate([c[-w:], c[:w + 1]]), np.arange(-w, w + 1)
+            k = int(np.argmax(np.abs(corr)))
+            return int(lags[k]), float(np.abs(corr[k]) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-20))
+        lag, strength = _capture(dev, lag_once)
+        _upmix_running(dev)
+        got_ms = 1000.0 * lag / fs
+        chk.approx(got_ms, UPMIX_BACK_OFFSET_MS, 0.15, f"BA lands {got_ms:.2f} ms after SA")
+        chk.ok(0.3 < strength < 0.9, f"BA and SA share the ambience but are decorrelated (peak r {strength:.2f})")
+        chk.note(f"upmix back pair: +{got_ms:.2f} ms, r {strength:.2f}")
     finally:
         _upmix_reset(dev)
         dev.wait_ready()

@@ -41,6 +41,7 @@
     .surround_lpf_hz = UPMIX_DEFAULT_SUR_LPF, \
     .decorr_pct = UPMIX_DEFAULT_DECORR, \
     .presence_db = UPMIX_DEFAULT_PRESENCE, \
+    .back_offset_ms = UPMIX_DEFAULT_BACK_OFFSET, \
     .src_a = UPMIX_DEFAULT_SRC_A, \
     .src_b = UPMIX_DEFAULT_SRC_B, \
     .active_counts = UPMIX_DEFAULT_ACTIVE_COUNTS, \
@@ -87,11 +88,14 @@ typedef struct {
         float duck_att[2];             // duck attenuation, 0 = open (zero-init safe)
         float p_gls, p_grs, p_wl, p_wr;// ramp start points
         float senv;                    // adaptive rear fade, starts at emergence
-        uint32_t fill;                 // samples written since restart, to the delay
+        float benv, p_benv;            // adaptive back fade and its ramp start
+        uint32_t fill;                 // samples written since restart, to the deepest tap
+        bool back_on;                  // back pair rendered last packet
         float shp_ic1[2], shp_ic2[2];  // HP SVF integrators
         float slp_ic1[2], slp_ic2[2];  // LP SVF integrators
         float haas[2][UPMIX_HAAS_RING];// adaptive: band-limited L'/R'; passive: Ls/Rs
         float ap[2][UPMIX_AP_RING];
+        float bap[2][UPMIX_BACK_AP_RING];
     } s;
     // Per-sample ramp cursors (value, step) set by upmix_begin() for the whole
     // packet and advanced by each upmix_render() chunk.
@@ -99,6 +103,7 @@ typedef struct {
         float gc, gc_d, rem, rem_d;
         float gls, gls_d, grs, grs_d;
         float wl, wl_d, wr, wr_d;
+        float benv, benv_d;
     } rp;
     uint32_t widx;                 // shared ring write index
     bool sur_active;               // surround engine ran last packet
@@ -207,6 +212,13 @@ void upmix_compute_coefficients(UpmixCoeffs *c, const UpmixConfig *cfg, float sa
     c->haas_delay = hd > UPMIX_HAAS_RING - 1 ? UPMIX_HAAS_RING - 1 : hd;
     uint32_t ad = (uint32_t)(UPMIX_DECORR_DELAY_MS * 0.001f * fs + 0.5f);
     c->ap_delay = ad > UPMIX_AP_RING - 1 ? UPMIX_AP_RING - 1 : ad;
+    float boff = clampf(cfg->back_offset_ms, UPMIX_BACK_OFFSET_MIN, UPMIX_BACK_OFFSET_MAX);
+    uint32_t bd = c->haas_delay + (uint32_t)((UPMIX_BACK_GAP_MS + boff) * 0.001f * fs + 0.5f);
+    c->back_delay = bd > UPMIX_HAAS_RING - 1 ? UPMIX_HAAS_RING - 1 : bd;   // clamped, never refused
+    uint32_t bad = (uint32_t)(UPMIX_BACK_AP_MS * 0.001f * fs + 0.5f);
+    c->bap_delay = bad > UPMIX_BACK_AP_RING - 1 ? UPMIX_BACK_AP_RING - 1 : bad;
+    c->back = c->surround_mode != UPMIX_SURROUND_OFF
+              && (c->route_mask[UPMIX_GEN_BA] | c->route_mask[UPMIX_GEN_BB]);
 
     // Surround band-limit: 2nd-order Butterworth TPT SVF (HP + LP)
     const float k = 1.4142135624f;
@@ -404,6 +416,13 @@ void upmix_begin(const UpmixCoeffs * __restrict c, uint32_t n) {
     if (sur && (!um.sur_active || um.sur_mode != c->surround_mode)) {
         memset(&um.s, 0, sizeof(um.s));
     }
+    // Back pair start: its allpass and fade restart; the shared Haas ring is already valid.
+    const bool back = sur && c->back;
+    if (back && !um.s.back_on) {
+        memset(um.s.bap, 0, sizeof(um.s.bap));
+        um.s.benv = um.s.p_benv = 0.0f;
+    }
+    um.s.back_on = back;
     um.sur_active = sur;
     um.sur_mode = c->surround_mode;
 
@@ -458,17 +477,25 @@ void upmix_begin(const UpmixCoeffs * __restrict c, uint32_t n) {
     float rem_new = 0.5f * (1.0f - c->width) * um.g_c * env_new; // L' = L - rem*(L+R)
     // Adaptive rears fade in from their own envelope, started only once the
     // block begins at or past the point where delayed audio first emerges.
-    float senv = env_new;
+    float senv = env_new, benv = 1.0f;
     if (sur_adaptive) {
         senv = um.s.senv;
         if (um.s.fill >= c->haas_delay) {
             senv += (float)n * c->env_step;
             if (senv > 1.0f) senv = 1.0f;
-        } else {
-            um.s.fill += n;
         }
+        // The backs emerge later, from the deeper tap, so they ramp on their own.
+        benv = um.s.benv;
+        if (back && um.s.fill >= c->back_delay) {
+            benv += (float)n * c->env_step;
+            if (benv > 1.0f) benv = 1.0f;
+        }
+        if (um.s.fill < (back ? c->back_delay : c->haas_delay)) um.s.fill += n;
         um.s.senv = senv;
+        um.s.benv = benv;
     }
+    um.rp.benv = um.s.p_benv; um.rp.benv_d = (benv - um.s.p_benv) * inv_n;
+    um.s.p_benv = benv;
     float gls_new = gls_t * senv;
     float grs_new = grs_t * senv;
     um.rp.gc  = um.p_gc;    um.rp.gc_d  = (gc_new  - um.p_gc)    * inv_n;
@@ -493,6 +520,12 @@ void upmix_render(const UpmixCoeffs * __restrict c,
     float * __restrict cbuf = out[UPMIX_GEN_C];
     float * __restrict lsbuf = out[UPMIX_GEN_SA];
     float * __restrict rsbuf = out[UPMIX_GEN_SB];
+    float * __restrict babuf = out[UPMIX_GEN_BA];
+    float * __restrict bbbuf = out[UPMIX_GEN_BB];
+    const bool back = sur && c->back;
+    float benv_i = um.rp.benv;
+    const float benv_step = um.rp.benv_d;
+    const uint32_t bdly = c->back_delay, bapd = c->bap_delay;
 
     float gc_i = um.rp.gc, rem_i = um.rp.rem;
     float gls_i = um.rp.gls, grs_i = um.rp.grs, wl_i = um.rp.wl, wr_i = um.rp.wr;
@@ -547,7 +580,7 @@ void upmix_render(const UpmixCoeffs * __restrict c,
         rem_i += rem_step;
 
         if (!sur) continue;
-        float x0, x1;
+        float x0, x1, xb0 = 0.0f, xb1 = 0.0f;
         if (sur_adaptive) {
             // Band-limit the raw input before the Haas delay so steering leads
             // the audio by the delay; L'/R' follow by linearity of the filter.
@@ -573,6 +606,13 @@ void upmix_render(const UpmixCoeffs * __restrict c,
             float d1 = um.s.haas[1][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
             x0 = gls_i * (d0 - wl_i * d1);
             x1 = grs_i * (d1 - wr_i * d0);
+            if (back) {   // same weights and steering gains at the deeper tap, on its own fade
+                float e0 = um.s.haas[0][(widx - bdly) & (UPMIX_HAAS_RING - 1)];
+                float e1 = um.s.haas[1][(widx - bdly) & (UPMIX_HAAS_RING - 1)];
+                xb0 = benv_i * (gls_i * (e0 - wl_i * e1));
+                xb1 = benv_i * (grs_i * (e1 - wr_i * e0));
+                benv_i += benv_step;
+            }
             gls_i += gls_step; grs_i += grs_step;
             wl_i += wl_step; wr_i += wr_step;
         } else {
@@ -587,6 +627,10 @@ void upmix_render(const UpmixCoeffs * __restrict c,
             um.s.haas[1][widx & (UPMIX_HAAS_RING - 1)] = x1;
             x0 = um.s.haas[0][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
             x1 = um.s.haas[1][(widx - hdly) & (UPMIX_HAAS_RING - 1)];
+            if (back) {   // the ring holds gained feed, so the activation ramp is already in it
+                xb0 = um.s.haas[0][(widx - bdly) & (UPMIX_HAAS_RING - 1)];
+                xb1 = um.s.haas[1][(widx - bdly) & (UPMIX_HAAS_RING - 1)];
+            }
         }
 
         // Schroeder allpass, mirrored gains (+g / -g) for max inter-channel
@@ -601,6 +645,17 @@ void upmix_render(const UpmixCoeffs * __restrict c,
         um.s.ap[1][widx & (UPMIX_AP_RING - 1)] = w1;
         rsbuf[i] = wd1 + ap_g * w1;
 
+        if (back) {   // signs mirrored against the sides, so SA and BA differ in their first tap
+            float bd0 = um.s.bap[0][(widx - bapd) & (UPMIX_BACK_AP_RING - 1)];
+            float bw0 = xb0 - ap_g * bd0;
+            um.s.bap[0][widx & (UPMIX_BACK_AP_RING - 1)] = bw0;
+            babuf[i] = bd0 + ap_g * bw0;
+            float bd1 = um.s.bap[1][(widx - bapd) & (UPMIX_BACK_AP_RING - 1)];
+            float bw1 = xb1 + ap_g * bd1;
+            um.s.bap[1][widx & (UPMIX_BACK_AP_RING - 1)] = bw1;
+            bbbuf[i] = bd1 - ap_g * bw1;
+        }
+
         widx++;
     }
 
@@ -609,6 +664,7 @@ void upmix_render(const UpmixCoeffs * __restrict c,
     um.widx = widx;
     um.rp.gc = gc_i; um.rp.rem = rem_i;
     um.rp.gls = gls_i; um.rp.grs = grs_i; um.rp.wl = wl_i; um.rp.wr = wr_i;
+    um.rp.benv = benv_i;
 }
 
 __attribute__((always_inline)) static inline void um_release(void) {
@@ -659,6 +715,12 @@ const UpmixCoeffs *upmix_claim(uint8_t n_in, uint32_t rate, uint16_t out_en, Upm
             if (live) claimed |= bit;
         }
         if (claimed || (ur.active && (ur.latch.claim_mask & out_en))) {
+            // The back pair renders while routed or while BA/BB still fade out.
+            uint16_t bm = ur.latch.route_mask[UPMIX_GEN_BA] | ur.latch.route_mask[UPMIX_GEN_BB];
+            bool back = ur.active && (bm & out_en);
+            for (int o = 0; o < NUM_OUTPUT_CHANNELS; o++)
+                back |= ur.e[UPMIX_GEN_BA][o] != 0.0f || ur.e[UPMIX_GEN_BB][o] != 0.0f;
+            ur.latch.back = back && ur.latch.surround_mode != UPMIX_SURROUND_OFF;
             cl->claimed = claimed;
             cl->src_a = ur.latch.src_a;
             cl->src_b = ur.latch.src_b;
@@ -729,6 +791,7 @@ void upmix_run(const UpmixCoeffs * __restrict c, const UpmixClaim * __restrict c
     const float *a = in[c->src_a], *b = in[c->src_b];
     uint8_t live = (1u << UPMIX_GEN_A) | (1u << UPMIX_GEN_B) | (1u << UPMIX_GEN_C);
     if (c->surround_mode != UPMIX_SURROUND_OFF) live |= (1u << UPMIX_GEN_SA) | (1u << UPMIX_GEN_SB);
+    if (c->back) live |= (1u << UPMIX_GEN_BA) | (1u << UPMIX_GEN_BB);
     float *const gen[UPMIX_NUM_GEN] = { um_chunk[0], um_chunk[1], um_chunk[2], um_chunk[3],
                                         um_chunk[4], um_chunk[5], um_chunk[6] };
     float pk[UPMIX_NUM_GEN] = { 0 };

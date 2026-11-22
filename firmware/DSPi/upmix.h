@@ -48,6 +48,8 @@
 #define UPMIX_DECORR_MAX        100.0f
 #define UPMIX_PRESENCE_MIN      -12.0f   // centre presence bell gain (dB); Syn-style
 #define UPMIX_PRESENCE_MAX       12.0f   // "presence" knob, both centre modes
+#define UPMIX_BACK_OFFSET_MIN     0.0f   // back pair arrival after the sides (ms)
+#define UPMIX_BACK_OFFSET_MAX    10.0f
 
 #define UPMIX_DEFAULT_CENTER_MODE    UPMIX_CENTER_ADAPTIVE
 #define UPMIX_DEFAULT_SURROUND_MODE  UPMIX_SURROUND_ADAPTIVE
@@ -62,6 +64,7 @@
 #define UPMIX_DEFAULT_SUR_LPF     7000.0f
 #define UPMIX_DEFAULT_DECORR        90.0f
 #define UPMIX_DEFAULT_PRESENCE       0.0f
+#define UPMIX_DEFAULT_BACK_OFFSET    2.0f
 #define UPMIX_DEFAULT_SRC_A          0      // source pair: input channels
 #define UPMIX_DEFAULT_SRC_B          1
 #define UPMIX_DEFAULT_ACTIVE_COUNTS  0x01   // stereo input only (v1 activation)
@@ -108,6 +111,11 @@ static inline uint8_t upmix_clamp_center_mode(long m) {
 #define UPMIX_RATE_MAX        48000.0f   // parks above this (rings sized for 48 kHz)
 #define UPMIX_HAAS_RING        1024      // samples; holds the 20 ms delay ceiling at 48 kHz
 #define UPMIX_AP_RING           512      // samples; holds the 10 ms decorrelator at 48 kHz
+// Back pair (spec 5.1): Haas tap at d_side + 4.8 ms + offset, so it lands offset
+// after the sides once the 10 ms and 5.23 ms allpass main taps are counted.
+#define UPMIX_BACK_GAP_MS        4.8f
+#define UPMIX_BACK_AP_MS         5.23f   // about 251 samples at 48 kHz; not 5 ms (half the side's)
+#define UPMIX_BACK_AP_RING      256
 #define UPMIX_CHUNK              32      // samples per render chunk where output is staged
 
 // Generated channels, the out[] rows of upmix_render().
@@ -117,7 +125,7 @@ enum {
     UPMIX_GEN_C,       // extracted centre
     UPMIX_GEN_SA,      // side ambience, A side (v1 Ls)
     UPMIX_GEN_SB,      // side ambience, B side (v1 Rs)
-    UPMIX_GEN_BA,      // back ambience, A side (not rendered until v2 phase 4)
+    UPMIX_GEN_BA,      // back ambience, A side (rendered only while c->back)
     UPMIX_GEN_BB,      // back ambience, B side
     UPMIX_NUM_GEN
 };
@@ -152,6 +160,7 @@ typedef struct {
     float presence_db;         // centre presence bell (Syn-style), both centre modes
     uint8_t src_a, src_b;      // source pair, input channels (A plays L, B plays R)
     uint8_t active_counts;     // input counts this profile serves (upmix_count_bit)
+    float back_offset_ms;      // back pair arrival after the sides
     UpmixRoute routes[UPMIX_NUM_GEN];
 } UpmixConfig;
 
@@ -238,6 +247,9 @@ typedef struct {
     uint16_t route_mask[UPMIX_NUM_GEN];
     uint16_t claim_mask;
     float route_gain[UPMIX_NUM_GEN];
+    uint8_t back;              // render BA/BB; upmix_claim() also holds it on while they fade
+    uint32_t back_delay;       // samples, < UPMIX_HAAS_RING
+    uint32_t bap_delay;        // samples, < UPMIX_BACK_AP_RING
     // Centre engine
     float strength;            // 0..1
     float width;               // 0..1 (residual retention)
@@ -300,7 +312,8 @@ static inline const UpmixCoeffs *upmix_select(uint8_t n_inputs) {
 void upmix_begin(const UpmixCoeffs *coeffs, uint32_t sample_count);
 
 // Render the next n samples from the read-only sources a/b into out[UPMIX_GEN_*].
-// No out row may alias a, b or another row.  SA/SB are written only while surround is on.
+// No out row may alias a, b or another row.  SA/SB are written only while surround
+// is on, BA/BB only while c->back.
 void upmix_render(const UpmixCoeffs *coeffs, const float *a, const float *b,
                   uint32_t n, float *const out[UPMIX_NUM_GEN]);
 

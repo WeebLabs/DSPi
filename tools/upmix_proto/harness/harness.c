@@ -388,6 +388,10 @@ static uint16_t ref_packet(HRef *r, const HMix *m, int n, const float *const *in
     int sa = ref_src(r->latch.src_a, 0), sb = ref_src(r->latch.src_b, 1);
     int sur = r->latch.surround_mode != UPMIX_SURROUND_OFF;
     uint16_t cm = ref_claim_mask(&r->latch);
+    /* BA/BB carry audio while routed to an enabled output or while either still fades. */
+    int back = r->active && ((r->latch.routes[5].out_mask | r->latch.routes[6].out_mask) & m->out_en);
+    for (int o = 0; o < HO; o++) back |= r->e[5][o] != 0 || r->e[6][o] != 0;
+    back = back && sur;
     for (int o = 0; o < HO; o++) {
         uint16_t bit = (uint16_t)(1u << o);
         int cl = claimed & bit;
@@ -402,7 +406,7 @@ static uint16_t ref_packet(HRef *r, const HMix *m, int n, const float *const *in
                 for (int g = 0; g < HG; g++) {
                     float t = (r->active && (r->latch.routes[g].out_mask & bit)) ? ref_gain(&r->latch.routes[g]) : 0.0f;
                     r->e[g][o] = ref_slew(r->e[g][o], t);
-                    int live = g <= 2 || (sur && g <= 4);   /* A', B', C; SA, SB with surround on */
+                    int live = g <= 2 || (sur && g <= 4) || back;   /* A', B', C; sides; backs */
                     if (live) acc += (double)r->e[g][o] * gen[g][i];
                 }
                 r->w[o] = ref_slew(r->w[o], (r->active && (cm & bit)) ? 1.0f : 0.0f);
@@ -527,7 +531,32 @@ static void scene_noroute(int t0, int t1, HMix *m) {
     if (AT(1500)) h_route(0, UPMIX_GEN_C, 1u << 1, -6, 0);
 }
 
-static const HScene scenes[] = { scene_51, scene_mono, scene_profiles, scene_noroute };
+/* Stereo to 7.1: the back pair starts, fades out after its routes go (still
+ * rendering), restarts, and follows a surround mode switch. */
+static void scene_71(int t0, int t1, HMix *m) {
+    if (AT(0)) {
+        m->n_in = 2; m->out_en = 0xFF;
+        m->mx[0][0] = 1.0f; m->mx[1][1] = 1.0f;
+        upmix_profiles[0].enabled = true;
+        h_route(0, UPMIX_GEN_A, 1u << 0, 0, 0);
+        h_route(0, UPMIX_GEN_B, 1u << 1, 0, 0);
+        h_route(0, UPMIX_GEN_C, 1u << 2, -6, 0);
+        h_route(0, UPMIX_GEN_SA, 1u << 4, 0, 0);
+        h_route(0, UPMIX_GEN_SB, 1u << 5, 0, 0);
+        h_route(0, UPMIX_GEN_BA, 1u << 6, 0, 0);
+        h_route(0, UPMIX_GEN_BB, 1u << 7, 0, 0);
+    }
+    if (AT(1000)) h_route(0, UPMIX_GEN_BA, 0, 0, 0);
+    if (AT(1004)) h_route(0, UPMIX_GEN_BB, 1u << 7, 12, 0);
+    if (AT(1300)) h_route(0, UPMIX_GEN_BB, 0, 0, 0);       /* +6 dB fade-out with no back route left */
+    if (AT(1800)) { h_route(0, UPMIX_GEN_BA, 1u << 6, 0, 0); h_route(0, UPMIX_GEN_BB, 1u << 7, 0, 0); }
+    if (AT(2300)) upmix_profiles[0].surround_mode = UPMIX_SURROUND_PASSIVE;
+#ifdef UPMIX_BACK_AP_RING   /* builds of the engine before the back pair lack the field */
+    if (AT(2600)) upmix_profiles[0].back_offset_ms = 9.0f;
+#endif
+}
+
+static const HScene scenes[] = { scene_51, scene_mono, scene_profiles, scene_noroute, scene_71 };
 
 /* Runs scene sc at packet size blk over src (8 x HDUR). Returns claim and lifecycle
  * disagreements; *err is the worst |device - model|, *exact counts settled unity
@@ -612,4 +641,37 @@ int h_route_check(int sc, int blk, const float *src, double *err, int *exact, in
 }
 
 int h_route_scenes(void) { return (int)(sizeof(scenes) / sizeof(scenes[0])); }
+#endif
+
+#ifdef UPMIX_BACK_AP_RING
+/* Engine run with the back pair rendered: out is 7 x N planar (UPMIX_GEN_* order).
+ * Returns the back Haas tap in samples. */
+int h_run_back(const float *p, int cmode, int smode, float back_ms, int blk, int chunk,
+               const float *L, const float *R, int N, float *out) {
+    UpmixConfig cfg = {
+        .enabled = true, .center_mode = (uint8_t)cmode, .surround_mode = (uint8_t)smode,
+        .strength_pct = p[0], .center_width_pct = p[1], .corr_threshold_pct = p[2],
+        .attack_ms = p[3], .release_ms = p[4], .detector_hpf_hz = p[5],
+        .surround_delay_ms = p[6], .surround_hpf_hz = p[7], .surround_lpf_hz = p[8],
+        .decorr_pct = p[9], .presence_db = p[10], .back_offset_ms = back_ms,
+    };
+    cfg.routes[UPMIX_GEN_BA].out_mask = 1;
+    cfg.routes[UPMIX_GEN_BB].out_mask = 2;
+    UpmixCoeffs c;
+    upmix_compute_coefficients(&c, &cfg, 48000.0f);
+    upmix_reset_state();
+    for (int s = 0; s < N; s += blk) {
+        int n = N - s < blk ? N - s : blk;
+        upmix_begin(&c, (uint32_t)n);
+        for (int o = 0; o < n; o += chunk) {
+            int k = n - o < chunk ? n - o : chunk;
+            float *const dst[UPMIX_NUM_GEN] = {
+                out + s + o, out + (size_t)N + s + o, out + 2 * (size_t)N + s + o,
+                out + 3 * (size_t)N + s + o, out + 4 * (size_t)N + s + o,
+                out + 5 * (size_t)N + s + o, out + 6 * (size_t)N + s + o };
+            upmix_render(&c, L + s + o, R + s + o, (uint32_t)k, dst);
+        }
+    }
+    return (int)c.back_delay;
+}
 #endif

@@ -26,6 +26,8 @@ MUTANTS = {
     'engine keeps running unrouted': ('if (claimed || (ur.active && (ur.latch.claim_mask & out_en))) {',
                                       'if (claimed || ur.active) {'),
     'fade rate': ('1000.0f / (fs * UPMIX_FADE_MS)', '1000.0f / (fs * 9.0f)'),
+    'back stops before its fade': ('                back |= ur.e[UPMIX_GEN_BA][o] != 0.0f || ur.e[UPMIX_GEN_BB][o] != 0.0f;',
+                                   '                (void)0;'),
     'trim law': ('powf(10.0f, (float)t * (0.5f / 20.0f))', 'powf(10.0f, (float)t * (0.5f / 10.0f))'),
 }
 

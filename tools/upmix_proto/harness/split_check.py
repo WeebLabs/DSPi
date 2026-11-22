@@ -51,7 +51,7 @@ def outs():
 def route_check(lib, quiet=False):
     """Claims, injection, fades and status against the model, per scene and packet size."""
     import ctypes
-    names = ('stereo 5.1 with edits', 'one source row', 'two profiles on 6 ch', 'nothing routed')
+    names = ('stereo 5.1 with edits', 'one source row', 'two profiles on 6 ch', 'nothing routed', 'stereo 7.1 back pair')
     n = FS * 3                                  # HDUR in harness.c
     rng = np.random.default_rng(5)
     t = np.arange(n) / FS

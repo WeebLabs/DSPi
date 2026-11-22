@@ -53,6 +53,8 @@ def build(src_c, src_h, new):
     if hasattr(lib, 'h_route_check'):
         lib.h_route_check.argtypes = [_I, _I, FP, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(_I), ctypes.POINTER(_I)]
         lib.h_route_scenes.argtypes = []
+    if hasattr(lib, 'h_run_back'):
+        lib.h_run_back.argtypes = [FP, _I, _I, ctypes.c_float, _I, _I, FP, FP, _I, FP]
     if new:
         lib.h_run_stems.argtypes = [FP, _I, _I, _I, FP, FP, _I, _I, FP, FP, FP, FP, FP, FP, FP]
     return lib
