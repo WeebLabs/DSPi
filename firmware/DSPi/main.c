@@ -1808,7 +1808,7 @@ void core0_init() {
 
 #if PICO_RP2350
     // Initial upmixer setup (uses loaded or default params)
-    upmix_apply_config((const UpmixConfig *)&upmix_config, 48000.0f);
+    upmix_apply_profiles(48000.0f);
 #endif
 
 #if ENABLE_SUB
@@ -2789,7 +2789,7 @@ int main(void) {
         // whenever the pipeline pass is not running.
         if (upmix_update_pending) {
             upmix_update_pending = false;
-            upmix_apply_config((const UpmixConfig *)&upmix_config, (float)audio_state.freq);
+            upmix_apply_profiles((float)audio_state.freq);
         }
 #endif
 

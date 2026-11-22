@@ -28,32 +28,43 @@
 
 #if PICO_RP2350
 
-// Live configuration; vendor handlers write it and raise the pending flag,
-// the main loop recomputes + publishes.  Defaults match apply_factory_defaults.
-volatile UpmixConfig upmix_config = {
-    .enabled = false,
-    .center_mode = UPMIX_DEFAULT_CENTER_MODE,
-    .surround_mode = UPMIX_DEFAULT_SURROUND_MODE,
-    .strength_pct = UPMIX_DEFAULT_STRENGTH,
-    .center_width_pct = UPMIX_DEFAULT_WIDTH,
-    .corr_threshold_pct = UPMIX_DEFAULT_THRESH,
-    .attack_ms = UPMIX_DEFAULT_ATTACK,
-    .release_ms = UPMIX_DEFAULT_RELEASE,
-    .detector_hpf_hz = UPMIX_DEFAULT_DET_HPF,
-    .surround_delay_ms = UPMIX_DEFAULT_SUR_DELAY,
-    .surround_hpf_hz = UPMIX_DEFAULT_SUR_HPF,
-    .surround_lpf_hz = UPMIX_DEFAULT_SUR_LPF,
-    .decorr_pct = UPMIX_DEFAULT_DECORR,
-    .presence_db = UPMIX_DEFAULT_PRESENCE,
-};
+#define UM_PROFILE_DEFAULTS { \
+    .enabled = false, \
+    .center_mode = UPMIX_DEFAULT_CENTER_MODE, \
+    .surround_mode = UPMIX_DEFAULT_SURROUND_MODE, \
+    .strength_pct = UPMIX_DEFAULT_STRENGTH, \
+    .center_width_pct = UPMIX_DEFAULT_WIDTH, \
+    .corr_threshold_pct = UPMIX_DEFAULT_THRESH, \
+    .attack_ms = UPMIX_DEFAULT_ATTACK, \
+    .release_ms = UPMIX_DEFAULT_RELEASE, \
+    .detector_hpf_hz = UPMIX_DEFAULT_DET_HPF, \
+    .surround_delay_ms = UPMIX_DEFAULT_SUR_DELAY, \
+    .surround_hpf_hz = UPMIX_DEFAULT_SUR_HPF, \
+    .surround_lpf_hz = UPMIX_DEFAULT_SUR_LPF, \
+    .decorr_pct = UPMIX_DEFAULT_DECORR, \
+    .presence_db = UPMIX_DEFAULT_PRESENCE, \
+    .src_a = UPMIX_DEFAULT_SRC_A, \
+    .src_b = UPMIX_DEFAULT_SRC_B, \
+    .active_counts = UPMIX_DEFAULT_ACTIVE_COUNTS, \
+}
+
+// Live profiles; vendor handlers write them and raise the pending flag, the
+// main loop recomputes + publishes.
+_Static_assert(UPMIX_NUM_PROFILES == 2, "profile initializer lists two entries");
+volatile UpmixConfig upmix_profiles[UPMIX_NUM_PROFILES] = { UM_PROFILE_DEFAULTS, UM_PROFILE_DEFAULTS };
 volatile bool upmix_update_pending = false;
 
-// Published coefficient set the pipeline snapshots each packet; NULL = disabled.
-volatile const UpmixCoeffs *current_upmix_coeffs = NULL;
+// Published coefficient sets the pipeline snapshots each packet; NULL = disabled.
+volatile const UpmixCoeffs *current_upmix_coeffs[UPMIX_NUM_PROFILES];
 
-// Double buffer so upmix_apply_config() never writes through the published pointer.
-static UpmixCoeffs um_coeff_bufs[2];
-static uint8_t um_coeff_idx = 0;
+// Double buffer per profile so a recompute never writes through a published pointer.
+static UpmixCoeffs um_coeff_bufs[UPMIX_NUM_PROFILES][2];
+static uint8_t um_coeff_idx[UPMIX_NUM_PROFILES];
+
+void upmix_profile_defaults(volatile UpmixConfig *cfg) {
+    const UpmixConfig d = UM_PROFILE_DEFAULTS;
+    *cfg = d;
+}
 
 // Processing state (Core 0 only; the pass runs before the matrix).
 typedef struct {
@@ -93,6 +104,7 @@ typedef struct {
     } rp;
     uint32_t widx;                 // shared ring write index
     bool sur_active;               // surround engine ran last packet
+    uint8_t profile;               // profile whose coefficients it runs on
     uint8_t sur_mode;              // mode it ran in (ring contents differ per mode)
     volatile bool running;
 } UpmixState;
@@ -107,11 +119,13 @@ static inline float clampf(float v, float lo, float hi) {
 }
 
 void upmix_compute_coefficients(UpmixCoeffs *c, const UpmixConfig *cfg, float sample_rate) {
+    memset(c, 0, sizeof(UpmixCoeffs));
     // Rates above 48 kHz are unsupported (rings sized for 48 kHz); park.
-    if (!cfg->enabled || sample_rate < 1.0f || sample_rate > UPMIX_RATE_MAX) {
-        memset(c, 0, sizeof(UpmixCoeffs));
-        return;
-    }
+    if (!cfg->enabled || sample_rate < 1.0f || sample_rate > UPMIX_RATE_MAX) return;
+
+    c->src_a = cfg->src_a < NUM_INPUT_CHANNELS ? cfg->src_a : UPMIX_DEFAULT_SRC_A;
+    c->src_b = cfg->src_b < NUM_INPUT_CHANNELS ? cfg->src_b : UPMIX_DEFAULT_SRC_B;
+    c->active_counts = cfg->active_counts & UPMIX_COUNTS_MASK;
 
     const float pi = 3.1415926535f;
     float fs = sample_rate;
@@ -189,22 +203,24 @@ void upmix_compute_coefficients(UpmixCoeffs *c, const UpmixConfig *cfg, float sa
     c->env_step = 1.0f / (fs * UPMIX_FADE_MS * 0.001f);
 }
 
-// Rate gate snapshot for status reporting (written by upmix_apply_config).
+// Rate gate snapshot for status reporting (written by upmix_apply_profiles).
 static bool um_rate_ok = true;
 
-void upmix_apply_config(const UpmixConfig *config, float sample_rate) {
-    // Compute into the inactive buffer, then publish the pointer (psybass
-    // pattern).  The pipeline snapshots current_upmix_coeffs once per packet.
-    // NULL is published when disabled OR the rate is above 48 kHz (ADAT-style
-    // park; the pipeline then resets state via upmix_park).
+void upmix_apply_profiles(float sample_rate) {
+    // Compute into each profile's inactive buffer, then publish the pointer
+    // (psybass pattern).  NULL when disabled or above 48 kHz.
     um_rate_ok = sample_rate <= UPMIX_RATE_MAX;
-    UpmixCoeffs *next = &um_coeff_bufs[um_coeff_idx ^ 1];
-    upmix_compute_coefficients(next, config, sample_rate);
-    if (config->enabled && um_rate_ok) {
-        um_coeff_idx ^= 1;
-        current_upmix_coeffs = next;
-    } else {
-        current_upmix_coeffs = NULL;
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) {
+        UpmixConfig cfg = upmix_profiles[p];
+        UpmixCoeffs *next = &um_coeff_bufs[p][um_coeff_idx[p] ^ 1];
+        upmix_compute_coefficients(next, &cfg, sample_rate);
+        next->profile = (uint8_t)p;
+        if (cfg.enabled && um_rate_ok) {
+            um_coeff_idx[p] ^= 1;
+            current_upmix_coeffs[p] = next;
+        } else {
+            current_upmix_coeffs[p] = NULL;
+        }
     }
 }
 
@@ -216,12 +232,16 @@ void upmix_reset_state(void) {
     upmix_state_dirty = false;
 }
 
-void upmix_get_status(UpmixStatus *st) {
+void upmix_get_status(UpmixStatus *st, uint8_t n_inputs) {
     memset(st, 0, sizeof(*st));
-    bool enabled = upmix_config.enabled;
+    bool enabled = false;
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) enabled |= upmix_profiles[p].enabled;
+    const UpmixCoeffs *sel = upmix_select(n_inputs);
     st->active = um.running ? 1 : 0;
     st->parked_reason = um.running ? 0
-                        : (!enabled ? 1 : (!um_rate_ok ? 3 : 2));
+                      : !enabled ? 1
+                      : !um_rate_ok ? 3
+                      : (sel && (sel->src_a >= n_inputs || sel->src_b >= n_inputs)) ? 4 : 2;
     st->corr_q14 = (int16_t)(clampf(um.t_corr, -1.0f, 1.0f) * 16384.0f);
     st->balance_q14 = (int16_t)(clampf(um.t_bal, 0.0f, 1.0f) * 16384.0f);
     st->center_gain_q15 = (uint16_t)(clampf(um.p_gc * 1.4142135624f, 0.0f, 1.0f) * 32767.0f);
@@ -230,20 +250,21 @@ void upmix_get_status(UpmixStatus *st) {
 }
 
 void upmix_config_to_packet(UpmixConfigPacket *out) {
-    out->enabled            = upmix_config.enabled ? 1 : 0;
-    out->center_mode        = upmix_config.center_mode;
-    out->surround_mode      = upmix_config.surround_mode;
-    out->presence_q1        = upmix_presence_encode(upmix_config.presence_db);
-    out->strength_pct       = upmix_config.strength_pct;
-    out->center_width_pct   = upmix_config.center_width_pct;
-    out->corr_threshold_pct = upmix_config.corr_threshold_pct;
-    out->attack_ms          = upmix_config.attack_ms;
-    out->release_ms         = upmix_config.release_ms;
-    out->detector_hpf_hz    = upmix_config.detector_hpf_hz;
-    out->surround_delay_ms  = upmix_config.surround_delay_ms;
-    out->surround_hpf_hz    = upmix_config.surround_hpf_hz;
-    out->surround_lpf_hz    = upmix_config.surround_lpf_hz;
-    out->decorr_pct         = upmix_config.decorr_pct;
+    volatile const UpmixConfig *cfg = &upmix_profiles[0];
+    out->enabled            = cfg->enabled ? 1 : 0;
+    out->center_mode        = cfg->center_mode;
+    out->surround_mode      = cfg->surround_mode;
+    out->presence_q1        = upmix_presence_encode(cfg->presence_db);
+    out->strength_pct       = cfg->strength_pct;
+    out->center_width_pct   = cfg->center_width_pct;
+    out->corr_threshold_pct = cfg->corr_threshold_pct;
+    out->attack_ms          = cfg->attack_ms;
+    out->release_ms         = cfg->release_ms;
+    out->detector_hpf_hz    = cfg->detector_hpf_hz;
+    out->surround_delay_ms  = cfg->surround_delay_ms;
+    out->surround_hpf_hz    = cfg->surround_hpf_hz;
+    out->surround_lpf_hz    = cfg->surround_lpf_hz;
+    out->decorr_pct         = cfg->decorr_pct;
 }
 
 void upmix_notify_config(void) {
@@ -302,6 +323,9 @@ DSP_TIME_CRITICAL
 __attribute__((optimize("Os")))
 void upmix_begin(const UpmixCoeffs * __restrict c, uint32_t n) {
     if (n == 0) return;
+    // A profile change restarts from reset, so its fades run from zero.
+    if (um.running && um.profile != c->profile) upmix_reset_state();
+    um.profile = c->profile;
     upmix_state_dirty = true;
     um.running = true;
 
@@ -563,7 +587,7 @@ static inline void um_copy(float * __restrict dst, const float * __restrict src,
 // routing lands (Documentation/Features/upmixer_v2_plan.md, phase 3).
 DSP_TIME_CRITICAL
 void upmix_process_block(const UpmixCoeffs * __restrict c,
-                         float * __restrict l, float * __restrict r,
+                         float *a, float *b,
                          float * __restrict cbuf,
                          float * __restrict lsbuf, float * __restrict rsbuf,
                          uint32_t n) {
@@ -571,9 +595,9 @@ void upmix_process_block(const UpmixCoeffs * __restrict c,
     for (uint32_t off = 0; off < n; off += UPMIX_CHUNK) {
         uint32_t k = n - off < UPMIX_CHUNK ? n - off : UPMIX_CHUNK;
         float *const out[UPMIX_NUM_GEN] = { um_ab[0], um_ab[1], cbuf + off, lsbuf + off, rsbuf + off };
-        upmix_render(c, l + off, r + off, k, out);
-        um_copy(l + off, um_ab[0], k);
-        um_copy(r + off, um_ab[1], k);
+        upmix_render(c, a + off, b + off, k, out);
+        um_copy(a + off, um_ab[0], k);
+        um_copy(b + off, um_ab[1], k);
     }
 }
 

@@ -479,18 +479,18 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     }
 
     // ========== PASS 3: Stereo Upmixer ==========
-    // Derives Centre/Ls/Rs from the stereo bus into the otherwise-idle
-    // multichannel input rows (buf_in_ext[0..2] = source rows 2..4) and raises
-    // the matrix source count so they become ordinary routable sources.  Runs
-    // only when the active input is the plain stereo pair; in multichannel
-    // modes those rows carry real inputs and the upmixer parks (state reset,
-    // source count unchanged).  Steering is pure gain on C/L/R (zero latency);
-    // the surround Haas delay is identical for every slot fed from the same
-    // source row, so inter-output-slot alignment is preserved.
+    // The running profile's engine derives Centre/Ls/Rs from its source pair
+    // into the otherwise-idle multichannel input rows (buf_in_ext[0..2] =
+    // source rows 2..4) and raises the matrix source count so they become
+    // ordinary routable sources.  That row bridge runs only on the plain stereo
+    // pair (upmix_bridge_coeffs); in multichannel modes those rows carry real
+    // inputs and the upmixer parks.  Steering is pure gain on C/L/R (zero
+    // latency); the surround Haas delay is identical for every slot fed from
+    // the same source row, so inter-output-slot alignment is preserved.
     int n_matrix_sources = n_active_inputs;
-    const UpmixCoeffs *um_coeffs = (const UpmixCoeffs *)current_upmix_coeffs;
-    if (um_coeffs && n_active_inputs == NUM_STEREO_INPUTS) {
-        upmix_process_block(um_coeffs, buf_l, buf_r,
+    const UpmixCoeffs *um_coeffs = upmix_bridge_coeffs((uint8_t)n_active_inputs);
+    if (um_coeffs) {
+        upmix_process_block(um_coeffs, input_bufs[um_coeffs->src_a], input_bufs[um_coeffs->src_b],
                             buf_in_ext[UPMIX_ROW_C - NUM_STEREO_INPUTS],
                             buf_in_ext[UPMIX_ROW_LS - NUM_STEREO_INPUTS],
                             buf_in_ext[UPMIX_ROW_RS - NUM_STEREO_INPUTS],

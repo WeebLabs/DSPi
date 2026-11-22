@@ -47,6 +47,9 @@ def build(src_c, src_h, new):
     lib.h_run_ref.argtypes = [FP] + [_I] * 6 + [FP, FP, _I] + [FP] * 5
     if hasattr(lib, 'h_run_split'):
         lib.h_run_split.argtypes = [FP] + [_I] * 7 + [FP, FP, _I] + [FP] * 5
+    if hasattr(lib, 'h_select_check'):
+        lib.h_select_check.argtypes = []
+        lib.h_profile_switch_check.argtypes = [FP, FP, _I, FP, FP, _I, _I]
     if new:
         lib.h_run_stems.argtypes = [FP, _I, _I, _I, FP, FP, _I, _I, FP, FP, FP, FP, FP, FP, FP]
     return lib

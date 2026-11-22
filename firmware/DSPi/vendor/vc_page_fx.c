@@ -13,6 +13,7 @@
 #include "psybass.h"
 #include "tube.h"
 #include "upmix.h"
+#include "audio_pipeline.h"   // active_input_channel_count() for the upmix status
 #include "bulk_params.h"
 #include "notify.h"
 
@@ -307,20 +308,20 @@ static VcResult fx_upmix_config_set(VcCtx *c) {
                         pkt.decorr_pct };
     for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++)
         if (!isfinite(f[i])) return VC_ERR_VALUE;
-    upmix_config.enabled       = (pkt.enabled != 0);
-    upmix_config.center_mode   = upmix_clamp_center_mode(pkt.center_mode);
-    upmix_config.surround_mode = (pkt.surround_mode <= 2) ? pkt.surround_mode : 2;
-    upmix_config.strength_pct       = pkt.strength_pct;
-    upmix_config.center_width_pct   = pkt.center_width_pct;
-    upmix_config.corr_threshold_pct = pkt.corr_threshold_pct;
-    upmix_config.attack_ms          = pkt.attack_ms;
-    upmix_config.release_ms         = pkt.release_ms;
-    upmix_config.detector_hpf_hz    = pkt.detector_hpf_hz;
-    upmix_config.surround_delay_ms  = pkt.surround_delay_ms;
-    upmix_config.surround_hpf_hz    = pkt.surround_hpf_hz;
-    upmix_config.surround_lpf_hz    = pkt.surround_lpf_hz;
-    upmix_config.decorr_pct         = pkt.decorr_pct;
-    upmix_config.presence_db        = upmix_presence_decode(pkt.presence_q1);
+    upmix_profiles[0].enabled       = (pkt.enabled != 0);
+    upmix_profiles[0].center_mode   = upmix_clamp_center_mode(pkt.center_mode);
+    upmix_profiles[0].surround_mode = (pkt.surround_mode <= 2) ? pkt.surround_mode : 2;
+    upmix_profiles[0].strength_pct       = pkt.strength_pct;
+    upmix_profiles[0].center_width_pct   = pkt.center_width_pct;
+    upmix_profiles[0].corr_threshold_pct = pkt.corr_threshold_pct;
+    upmix_profiles[0].attack_ms          = pkt.attack_ms;
+    upmix_profiles[0].release_ms         = pkt.release_ms;
+    upmix_profiles[0].detector_hpf_hz    = pkt.detector_hpf_hz;
+    upmix_profiles[0].surround_delay_ms  = pkt.surround_delay_ms;
+    upmix_profiles[0].surround_hpf_hz    = pkt.surround_hpf_hz;
+    upmix_profiles[0].surround_lpf_hz    = pkt.surround_lpf_hz;
+    upmix_profiles[0].decorr_pct         = pkt.decorr_pct;
+    upmix_profiles[0].presence_db        = upmix_presence_decode(pkt.presence_q1);
     upmix_update_pending = true;
     upmix_notify_config();
     return VC_OK;
@@ -328,7 +329,7 @@ static VcResult fx_upmix_config_set(VcCtx *c) {
 
 static VcResult fx_upmix_status_get(VcCtx *c) {
     UpmixStatus st;
-    upmix_get_status(&st);
+    upmix_get_status(&st, active_input_channel_count());
     memcpy(c->out, &st, sizeof(st));
     return VC_OK;
 }
@@ -336,20 +337,20 @@ static VcResult fx_upmix_status_get(VcCtx *c) {
 static VcResult fx_upmix_param_get(VcCtx *c) {
     float v = 0.0f;
     switch (c->arg) {
-        case UPMIX_PARAM_ENABLED:       v = upmix_config.enabled ? 1.0f : 0.0f; break;
-        case UPMIX_PARAM_CENTER_MODE:   v = (float)upmix_config.center_mode; break;
-        case UPMIX_PARAM_SURROUND_MODE: v = (float)upmix_config.surround_mode; break;
-        case UPMIX_PARAM_STRENGTH:      v = upmix_config.strength_pct; break;
-        case UPMIX_PARAM_CENTER_WIDTH:  v = upmix_config.center_width_pct; break;
-        case UPMIX_PARAM_THRESHOLD:     v = upmix_config.corr_threshold_pct; break;
-        case UPMIX_PARAM_ATTACK:        v = upmix_config.attack_ms; break;
-        case UPMIX_PARAM_RELEASE:       v = upmix_config.release_ms; break;
-        case UPMIX_PARAM_DET_HPF:       v = upmix_config.detector_hpf_hz; break;
-        case UPMIX_PARAM_SUR_DELAY:     v = upmix_config.surround_delay_ms; break;
-        case UPMIX_PARAM_SUR_HPF:       v = upmix_config.surround_hpf_hz; break;
-        case UPMIX_PARAM_SUR_LPF:       v = upmix_config.surround_lpf_hz; break;
-        case UPMIX_PARAM_DECORR:        v = upmix_config.decorr_pct; break;
-        case UPMIX_PARAM_PRESENCE:      v = upmix_config.presence_db; break;
+        case UPMIX_PARAM_ENABLED:       v = upmix_profiles[0].enabled ? 1.0f : 0.0f; break;
+        case UPMIX_PARAM_CENTER_MODE:   v = (float)upmix_profiles[0].center_mode; break;
+        case UPMIX_PARAM_SURROUND_MODE: v = (float)upmix_profiles[0].surround_mode; break;
+        case UPMIX_PARAM_STRENGTH:      v = upmix_profiles[0].strength_pct; break;
+        case UPMIX_PARAM_CENTER_WIDTH:  v = upmix_profiles[0].center_width_pct; break;
+        case UPMIX_PARAM_THRESHOLD:     v = upmix_profiles[0].corr_threshold_pct; break;
+        case UPMIX_PARAM_ATTACK:        v = upmix_profiles[0].attack_ms; break;
+        case UPMIX_PARAM_RELEASE:       v = upmix_profiles[0].release_ms; break;
+        case UPMIX_PARAM_DET_HPF:       v = upmix_profiles[0].detector_hpf_hz; break;
+        case UPMIX_PARAM_SUR_DELAY:     v = upmix_profiles[0].surround_delay_ms; break;
+        case UPMIX_PARAM_SUR_HPF:       v = upmix_profiles[0].surround_hpf_hz; break;
+        case UPMIX_PARAM_SUR_LPF:       v = upmix_profiles[0].surround_lpf_hz; break;
+        case UPMIX_PARAM_DECORR:        v = upmix_profiles[0].decorr_pct; break;
+        case UPMIX_PARAM_PRESENCE:      v = upmix_profiles[0].presence_db; break;
         default:                        return VC_ERR_UNKNOWN;
     }
     vc_out_f32(c, 0, v);
@@ -362,27 +363,27 @@ static VcResult fx_upmix_param_set(VcCtx *c) {
     if (!isfinite(v)) return VC_ERR_VALUE;
     switch (c->arg) {
         case UPMIX_PARAM_ENABLED:
-            upmix_config.enabled = (v != 0.0f);
+            upmix_profiles[0].enabled = (v != 0.0f);
             break;
         case UPMIX_PARAM_CENTER_MODE:
-            upmix_config.center_mode = upmix_clamp_center_mode(lrintf(v));
+            upmix_profiles[0].center_mode = upmix_clamp_center_mode(lrintf(v));
             break;
         case UPMIX_PARAM_SURROUND_MODE: {
             long m = lrintf(v);
-            upmix_config.surround_mode = (m < 0) ? 0 : (m > 2) ? 2 : (uint8_t)m;
+            upmix_profiles[0].surround_mode = (m < 0) ? 0 : (m > 2) ? 2 : (uint8_t)m;
             break;
         }
-        case UPMIX_PARAM_STRENGTH:      upmix_config.strength_pct = v; break;
-        case UPMIX_PARAM_CENTER_WIDTH:  upmix_config.center_width_pct = v; break;
-        case UPMIX_PARAM_THRESHOLD:     upmix_config.corr_threshold_pct = v; break;
-        case UPMIX_PARAM_ATTACK:        upmix_config.attack_ms = v; break;
-        case UPMIX_PARAM_RELEASE:       upmix_config.release_ms = v; break;
-        case UPMIX_PARAM_DET_HPF:       upmix_config.detector_hpf_hz = v; break;
-        case UPMIX_PARAM_SUR_DELAY:     upmix_config.surround_delay_ms = v; break;
-        case UPMIX_PARAM_SUR_HPF:       upmix_config.surround_hpf_hz = v; break;
-        case UPMIX_PARAM_SUR_LPF:       upmix_config.surround_lpf_hz = v; break;
-        case UPMIX_PARAM_DECORR:        upmix_config.decorr_pct = v; break;
-        case UPMIX_PARAM_PRESENCE:      upmix_config.presence_db = v; break;
+        case UPMIX_PARAM_STRENGTH:      upmix_profiles[0].strength_pct = v; break;
+        case UPMIX_PARAM_CENTER_WIDTH:  upmix_profiles[0].center_width_pct = v; break;
+        case UPMIX_PARAM_THRESHOLD:     upmix_profiles[0].corr_threshold_pct = v; break;
+        case UPMIX_PARAM_ATTACK:        upmix_profiles[0].attack_ms = v; break;
+        case UPMIX_PARAM_RELEASE:       upmix_profiles[0].release_ms = v; break;
+        case UPMIX_PARAM_DET_HPF:       upmix_profiles[0].detector_hpf_hz = v; break;
+        case UPMIX_PARAM_SUR_DELAY:     upmix_profiles[0].surround_delay_ms = v; break;
+        case UPMIX_PARAM_SUR_HPF:       upmix_profiles[0].surround_hpf_hz = v; break;
+        case UPMIX_PARAM_SUR_LPF:       upmix_profiles[0].surround_lpf_hz = v; break;
+        case UPMIX_PARAM_DECORR:        upmix_profiles[0].decorr_pct = v; break;
+        case UPMIX_PARAM_PRESENCE:      upmix_profiles[0].presence_db = v; break;
         default:                        return VC_ERR_UNKNOWN;
     }
     upmix_update_pending = true;

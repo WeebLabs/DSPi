@@ -723,20 +723,20 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
 #if PICO_RP2350
     {
         uint8_t sm = in->upmix.surround_mode;
-        upmix_config.enabled            = (in->upmix.enabled != 0);
-        upmix_config.center_mode        = upmix_clamp_center_mode(in->upmix.center_mode);
-        upmix_config.surround_mode      = (sm > 2) ? 2 : sm;
-        upmix_config.strength_pct       = in->upmix.strength_pct;
-        upmix_config.center_width_pct   = in->upmix.center_width_pct;
-        upmix_config.corr_threshold_pct = in->upmix.corr_threshold_pct;
-        upmix_config.attack_ms          = in->upmix.attack_ms;
-        upmix_config.release_ms         = in->upmix.release_ms;
-        upmix_config.detector_hpf_hz    = in->upmix.detector_hpf_hz;
-        upmix_config.surround_delay_ms  = in->upmix.surround_delay_ms;
-        upmix_config.surround_hpf_hz    = in->upmix.surround_hpf_hz;
-        upmix_config.surround_lpf_hz    = in->upmix.surround_lpf_hz;
-        upmix_config.decorr_pct         = in->upmix.decorr_pct;
-        upmix_config.presence_db        = upmix_presence_decode(in->upmix.presence_q1);
+        upmix_profiles[0].enabled            = (in->upmix.enabled != 0);
+        upmix_profiles[0].center_mode        = upmix_clamp_center_mode(in->upmix.center_mode);
+        upmix_profiles[0].surround_mode      = (sm > 2) ? 2 : sm;
+        upmix_profiles[0].strength_pct       = in->upmix.strength_pct;
+        upmix_profiles[0].center_width_pct   = in->upmix.center_width_pct;
+        upmix_profiles[0].corr_threshold_pct = in->upmix.corr_threshold_pct;
+        upmix_profiles[0].attack_ms          = in->upmix.attack_ms;
+        upmix_profiles[0].release_ms         = in->upmix.release_ms;
+        upmix_profiles[0].detector_hpf_hz    = in->upmix.detector_hpf_hz;
+        upmix_profiles[0].surround_delay_ms  = in->upmix.surround_delay_ms;
+        upmix_profiles[0].surround_hpf_hz    = in->upmix.surround_hpf_hz;
+        upmix_profiles[0].surround_lpf_hz    = in->upmix.surround_lpf_hz;
+        upmix_profiles[0].decorr_pct         = in->upmix.decorr_pct;
+        upmix_profiles[0].presence_db        = upmix_presence_decode(in->upmix.presence_q1);
         upmix_update_pending = true;
     }
 #endif

@@ -1,4 +1,4 @@
-"""Bit-exact check of upmix_begin()/upmix_render() against the committed engine.
+"""Bit-exact check of upmix_begin()/upmix_render() against the committed engine, plus profile selection.
 
 Runs the committed upmix.c (HEAD, or the rev given as argv[1]) through
 upmix_process_block and the working tree through begin/render at several chunk
@@ -81,6 +81,16 @@ def main():
                         print('MISMATCH %s modes=%s blk=%d %s channels=%s' %
                               (vname, (cm_a, sm_a, cm_b, sm_b), blk, tname, bad))
     print('%d runs against %s, %d mismatches' % (runs, rev, fails))
+    if hasattr(new, 'h_select_check'):
+        bad = new.h_select_check()
+        print('profile selection: %d failures' % bad)
+        fails += bad
+        p0 = np.array(VARIANTS['default'], np.float32)
+        p1 = np.array(VARIANTS['dly0_hpf80_lpf12k'], np.float32)
+        for blk in (48, 192):
+            bad = new.h_profile_switch_check(ptr(p0), ptr(p1), blk, ptr(L), ptr(R), N, blk * (N // blk // 2))
+            print('profile switch restarts from reset (blk %d): %d channel mismatches' % (blk, bad))
+            fails += bad
     sys.exit(1 if fails else 0)
 
 

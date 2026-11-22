@@ -119,8 +119,8 @@ static uint16_t DSP_TIME_CRITICAL compute_live_mask(void) {
         if (n > NUM_INPUT_CHANNELS) n = NUM_INPUT_CHANNELS;
         live = (uint16_t)((1u << n) - 1u);
 #if PICO_RP2350
-        const UpmixCoeffs *um = (const UpmixCoeffs *)current_upmix_coeffs;
-        if (um && n == NUM_STEREO_INPUTS) {
+        const UpmixCoeffs *um = upmix_bridge_coeffs(n);
+        if (um) {
             live |= (uint16_t)(((1u << um->n_derived) - 1u) << NUM_STEREO_INPUTS);
         }
 #endif

@@ -118,6 +118,20 @@ _Static_assert(NUM_STEREO_INPUTS + UPMIX_NUM_DERIVED <= NUM_INPUT_CHANNELS,
 #define UPMIX_DEFAULT_SUR_LPF     7000.0f
 #define UPMIX_DEFAULT_DECORR        90.0f
 #define UPMIX_DEFAULT_PRESENCE       0.0f
+#define UPMIX_DEFAULT_SRC_A          0      // source pair: input channels
+#define UPMIX_DEFAULT_SRC_B          1
+#define UPMIX_DEFAULT_ACTIVE_COUNTS  0x01   // stereo input only (v1 activation)
+
+// Config profiles: the lowest enabled one whose active_counts holds the live
+// input count runs (Documentation/Features/upmixer_v2_spec.md section 3.2).
+#define UPMIX_NUM_PROFILES     2
+#define UPMIX_COUNTS_MASK      0x0F   // bit k = 2*(k+1) active input channels
+
+// active_counts bit for a live input count; 0 for a count no profile can name.
+static inline uint8_t upmix_count_bit(uint8_t n_inputs) {
+    return (n_inputs >= 2 && n_inputs <= 8 && !(n_inputs & 1))
+           ? (uint8_t)(1u << (n_inputs / 2 - 1)) : 0;
+}
 
 // Clamp a centre-mode value arriving from wire, bulk, or flash.  Out-of-range
 // falls back to the default instead of the top of the range (the surround
@@ -178,6 +192,8 @@ typedef struct {
     float surround_lpf_hz;
     float decorr_pct;
     float presence_db;         // centre presence bell (Syn-style), both centre modes
+    uint8_t src_a, src_b;      // source pair, input channels (A plays L, B plays R)
+    uint8_t active_counts;     // input counts this profile serves (upmix_count_bit)
 } UpmixConfig;
 
 // Wire image of UpmixConfig for FX.UPMIX_CONFIG (44 bytes).
@@ -235,8 +251,9 @@ static inline float upmix_presence_decode(int8_t q1) {
 // Live telemetry for FX.UPMIX_STATUS (16 bytes)
 typedef struct __attribute__((packed)) {
     uint8_t active;            // 1 = processing this packet stream
-    uint8_t parked_reason;     // 0 = active, 1 = disabled, 2 = input not stereo,
-                               // 3 = sample rate above 48 kHz
+    uint8_t parked_reason;     // 0 = active, 1 = disabled, 2 = no profile serves
+                               // this input count, 3 = sample rate above 48 kHz,
+                               // 4 = a source channel is not present
     int16_t corr_q14;          // smoothed L/R correlation, Q14 (-16384..16384)
     int16_t balance_q14;       // smoothed |L/R| balance, Q14 (0..16384)
     uint16_t center_gain_q15;  // smoothed centre extraction gain, Q15
@@ -248,6 +265,9 @@ _Static_assert(sizeof(UpmixStatus) == 16, "UpmixStatus wire size");
 
 // Published coefficient set; snapshot once per packet.  NULL = disabled.
 typedef struct {
+    uint8_t profile;           // index of the profile it was computed from
+    uint8_t src_a, src_b;      // source pair (< NUM_INPUT_CHANNELS)
+    uint8_t active_counts;     // masked to UPMIX_COUNTS_MASK
     uint8_t center_mode;
     uint8_t surround_mode;
     uint8_t n_derived;         // 1 (C only) or 3 (C + Ls/Rs)
@@ -280,20 +300,43 @@ typedef struct {
 // Vendor SET handlers write the config and raise the flag; the main loop
 // recomputes coefficients and publishes.  The audio path only ever reads
 // the published snapshot pointer.
-extern volatile UpmixConfig upmix_config;
+extern volatile UpmixConfig upmix_profiles[UPMIX_NUM_PROFILES];
 extern volatile bool upmix_update_pending;
-extern volatile const UpmixCoeffs *current_upmix_coeffs;
+extern volatile const UpmixCoeffs *current_upmix_coeffs[UPMIX_NUM_PROFILES];
+
+// Factory defaults for one profile (disabled, v1 sources and activation).
+void upmix_profile_defaults(volatile UpmixConfig *cfg);
 
 // Compute a coefficient set from config (clamped) at the given sample rate.
 void upmix_compute_coefficients(UpmixCoeffs *coeffs, const UpmixConfig *config, float sample_rate);
 
-// Recompute shared coefficients from config and publish current_upmix_coeffs.
+// Recompute every profile's coefficients and publish current_upmix_coeffs[].
 // Called from the main loop while audio runs; never touches processing state.
-void upmix_apply_config(const UpmixConfig *config, float sample_rate);
+void upmix_apply_profiles(float sample_rate);
+
+// The profile that runs at this input count: the lowest published one whose
+// active_counts holds it, or NULL.  Its sources may still be absent.
+static inline const UpmixCoeffs *upmix_select(uint8_t n_inputs) {
+    uint8_t bit = upmix_count_bit(n_inputs);
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) {
+        const UpmixCoeffs *c = (const UpmixCoeffs *)current_upmix_coeffs[p];
+        if (c && (c->active_counts & bit)) return c;
+    }
+    return NULL;
+}
+
+// Coefficients the v1 row bridge runs this packet, or NULL.  The bridge writes
+// matrix rows 2..4, which carry real inputs above stereo; removed in phase 3.
+static inline const UpmixCoeffs *upmix_bridge_coeffs(uint8_t n_inputs) {
+    const UpmixCoeffs *c = upmix_select(n_inputs);
+    if (!c || n_inputs != NUM_STEREO_INPUTS) return NULL;
+    return (c->src_a < n_inputs && c->src_b < n_inputs) ? c : NULL;
+}
 
 // Packet control update: call once per packet with the packet length, then
 // upmix_render() over consecutive chunks that sum to exactly that length, all
-// with the same coeffs.  Output is identical for any chunking.  Core 0 only.
+// with the same coeffs.  Output is identical for any chunking.  A set from a
+// different profile than the running one restarts from reset.  Core 0 only.
 void upmix_begin(const UpmixCoeffs *coeffs, uint32_t sample_count);
 
 // Render the next n samples from the read-only sources a/b into out[UPMIX_GEN_*].
@@ -301,15 +344,16 @@ void upmix_begin(const UpmixCoeffs *coeffs, uint32_t sample_count);
 void upmix_render(const UpmixCoeffs *coeffs, const float *a, const float *b,
                   uint32_t n, float *const out[UPMIX_NUM_GEN]);
 
-// v1 delivery bridge over begin/render: L'/R' back into l/r, C/Ls/Rs into the
-// given rows.  Temporary; see Documentation/Features/upmixer_v2_plan.md.
+// v1 delivery bridge over begin/render: A'/B' back into the source rows a/b
+// (which may be one row), C/SA/SB into the given rows.  Temporary; see
+// Documentation/Features/upmixer_v2_plan.md.
 void upmix_process_block(const UpmixCoeffs *coeffs,
-                         float *l, float *r,
+                         float *a, float *b,
                          float *cbuf, float *lsbuf, float *rsbuf,
                          uint32_t sample_count);
 
-// Reset all processing state (rings, estimators, envelope).  Cold; called
-// only on the running -> parked transition.
+// Reset all processing state (rings, estimators, envelope).  Cold; called on
+// the running -> parked transition and when the running profile changes.
 void upmix_reset_state(void);
 
 // True while processing state holds audio (set by upmix_process_block).
@@ -321,15 +365,16 @@ static inline void upmix_park(void) {
     if (upmix_state_dirty) upmix_reset_state();
 }
 
-// Fill a status packet from the live processing state.
-void upmix_get_status(UpmixStatus *st);
+// Fill a status packet from the live processing state at this input count.
+void upmix_get_status(UpmixStatus *st, uint8_t n_inputs);
 
-// Encode the live config as its wire image.  Single encoder shared by
-// GET_CONFIG, bulk collect and notify, so the notify shadow matches collect.
+// Encode profile 0 as its wire image (the only profile on the wire until v2
+// phase 5).  Shared by GET_CONFIG, bulk collect and notify, so the notify
+// shadow matches collect.
 void upmix_config_to_packet(UpmixConfigPacket *out);
 
 // Push every upmix field through notify_param_write; only changed fields emit
-// PARAM_CHANGED.  Every SET path must call this after writing upmix_config.
+// PARAM_CHANGED.  Every SET path must call this after writing a profile.
 void upmix_notify_config(void);
 
 #endif // PICO_RP2350

@@ -3666,20 +3666,20 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
     // RP2040 has no upmix config, so it zero-fills (fields are round-tripped
     // but never applied).
 #if PICO_RP2350
-    slot->upmix_enabled            = upmix_config.enabled ? 1 : 0;
-    slot->upmix_center_mode        = upmix_config.center_mode;
-    slot->upmix_surround_mode      = upmix_config.surround_mode;
-    slot->upmix_presence_q1        = upmix_presence_encode(upmix_config.presence_db);
-    slot->upmix_strength_pct       = upmix_config.strength_pct;
-    slot->upmix_center_width_pct   = upmix_config.center_width_pct;
-    slot->upmix_corr_threshold_pct = upmix_config.corr_threshold_pct;
-    slot->upmix_attack_ms          = upmix_config.attack_ms;
-    slot->upmix_release_ms         = upmix_config.release_ms;
-    slot->upmix_detector_hpf_hz    = upmix_config.detector_hpf_hz;
-    slot->upmix_surround_delay_ms  = upmix_config.surround_delay_ms;
-    slot->upmix_surround_hpf_hz    = upmix_config.surround_hpf_hz;
-    slot->upmix_surround_lpf_hz    = upmix_config.surround_lpf_hz;
-    slot->upmix_decorr_pct         = upmix_config.decorr_pct;
+    slot->upmix_enabled            = upmix_profiles[0].enabled ? 1 : 0;
+    slot->upmix_center_mode        = upmix_profiles[0].center_mode;
+    slot->upmix_surround_mode      = upmix_profiles[0].surround_mode;
+    slot->upmix_presence_q1        = upmix_presence_encode(upmix_profiles[0].presence_db);
+    slot->upmix_strength_pct       = upmix_profiles[0].strength_pct;
+    slot->upmix_center_width_pct   = upmix_profiles[0].center_width_pct;
+    slot->upmix_corr_threshold_pct = upmix_profiles[0].corr_threshold_pct;
+    slot->upmix_attack_ms          = upmix_profiles[0].attack_ms;
+    slot->upmix_release_ms         = upmix_profiles[0].release_ms;
+    slot->upmix_detector_hpf_hz    = upmix_profiles[0].detector_hpf_hz;
+    slot->upmix_surround_delay_ms  = upmix_profiles[0].surround_delay_ms;
+    slot->upmix_surround_hpf_hz    = upmix_profiles[0].surround_hpf_hz;
+    slot->upmix_surround_lpf_hz    = upmix_profiles[0].surround_lpf_hz;
+    slot->upmix_decorr_pct         = upmix_profiles[0].decorr_pct;
 #else
     slot->upmix_enabled            = 0;
     slot->upmix_center_mode        = 0;
@@ -3998,39 +3998,27 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     // pending flag is raised in both branches so a load that turns the upmixer
     // off unpublishes its coefficients.
 #if PICO_RP2350
+    // Profile 1 and the v2 fields are not persisted yet (v2 phase 5), so a load
+    // starts every profile from defaults and overlays profile 0 from the slot.
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) upmix_profile_defaults(&upmix_profiles[p]);
     if (slot->version >= 33) {
-        upmix_config.enabled            = (slot->upmix_enabled != 0);
-        upmix_config.center_mode        = upmix_clamp_center_mode(slot->upmix_center_mode);
-        upmix_config.surround_mode      = (slot->upmix_surround_mode <= 2)
+        upmix_profiles[0].enabled            = (slot->upmix_enabled != 0);
+        upmix_profiles[0].center_mode        = upmix_clamp_center_mode(slot->upmix_center_mode);
+        upmix_profiles[0].surround_mode      = (slot->upmix_surround_mode <= 2)
                                           ? slot->upmix_surround_mode : UPMIX_DEFAULT_SURROUND_MODE;
-        upmix_config.strength_pct       = slot->upmix_strength_pct;
-        upmix_config.center_width_pct   = slot->upmix_center_width_pct;
-        upmix_config.corr_threshold_pct = slot->upmix_corr_threshold_pct;
-        upmix_config.attack_ms          = slot->upmix_attack_ms;
-        upmix_config.release_ms         = slot->upmix_release_ms;
-        upmix_config.detector_hpf_hz    = slot->upmix_detector_hpf_hz;
-        upmix_config.surround_delay_ms  = slot->upmix_surround_delay_ms;
-        upmix_config.surround_hpf_hz    = slot->upmix_surround_hpf_hz;
-        upmix_config.surround_lpf_hz    = slot->upmix_surround_lpf_hz;
-        upmix_config.decorr_pct         = slot->upmix_decorr_pct;
+        upmix_profiles[0].strength_pct       = slot->upmix_strength_pct;
+        upmix_profiles[0].center_width_pct   = slot->upmix_center_width_pct;
+        upmix_profiles[0].corr_threshold_pct = slot->upmix_corr_threshold_pct;
+        upmix_profiles[0].attack_ms          = slot->upmix_attack_ms;
+        upmix_profiles[0].release_ms         = slot->upmix_release_ms;
+        upmix_profiles[0].detector_hpf_hz    = slot->upmix_detector_hpf_hz;
+        upmix_profiles[0].surround_delay_ms  = slot->upmix_surround_delay_ms;
+        upmix_profiles[0].surround_hpf_hz    = slot->upmix_surround_hpf_hz;
+        upmix_profiles[0].surround_lpf_hz    = slot->upmix_surround_lpf_hz;
+        upmix_profiles[0].decorr_pct         = slot->upmix_decorr_pct;
         // V34 presence byte; V33 slots wrote 0 here, which decodes to the
         // 0 dB default, so no version gate is needed.
-        upmix_config.presence_db        = upmix_presence_decode(slot->upmix_presence_q1);
-    } else {
-        upmix_config.enabled            = false;
-        upmix_config.center_mode        = UPMIX_DEFAULT_CENTER_MODE;
-        upmix_config.surround_mode      = UPMIX_DEFAULT_SURROUND_MODE;
-        upmix_config.strength_pct       = UPMIX_DEFAULT_STRENGTH;
-        upmix_config.center_width_pct   = UPMIX_DEFAULT_WIDTH;
-        upmix_config.corr_threshold_pct = UPMIX_DEFAULT_THRESH;
-        upmix_config.attack_ms          = UPMIX_DEFAULT_ATTACK;
-        upmix_config.release_ms         = UPMIX_DEFAULT_RELEASE;
-        upmix_config.detector_hpf_hz    = UPMIX_DEFAULT_DET_HPF;
-        upmix_config.surround_delay_ms  = UPMIX_DEFAULT_SUR_DELAY;
-        upmix_config.surround_hpf_hz    = UPMIX_DEFAULT_SUR_HPF;
-        upmix_config.surround_lpf_hz    = UPMIX_DEFAULT_SUR_LPF;
-        upmix_config.decorr_pct         = UPMIX_DEFAULT_DECORR;
-        upmix_config.presence_db        = UPMIX_DEFAULT_PRESENCE;
+        upmix_profiles[0].presence_db        = upmix_presence_decode(slot->upmix_presence_q1);
     }
     upmix_update_pending = true;
 #endif
@@ -4933,22 +4921,9 @@ static void apply_factory_defaults(void) {
 
     // Output limiter: left to apply_output_config_from_mode() (see IO note above).
 
-    // Stereo upmixer (RP2350-only): disabled, default engine params.
+    // Stereo upmixer (RP2350-only): every profile disabled, default engine params.
 #if PICO_RP2350
-    upmix_config.enabled            = false;
-    upmix_config.center_mode        = UPMIX_DEFAULT_CENTER_MODE;
-    upmix_config.surround_mode      = UPMIX_DEFAULT_SURROUND_MODE;
-    upmix_config.strength_pct       = UPMIX_DEFAULT_STRENGTH;
-    upmix_config.center_width_pct   = UPMIX_DEFAULT_WIDTH;
-    upmix_config.corr_threshold_pct = UPMIX_DEFAULT_THRESH;
-    upmix_config.attack_ms          = UPMIX_DEFAULT_ATTACK;
-    upmix_config.release_ms         = UPMIX_DEFAULT_RELEASE;
-    upmix_config.detector_hpf_hz    = UPMIX_DEFAULT_DET_HPF;
-    upmix_config.surround_delay_ms  = UPMIX_DEFAULT_SUR_DELAY;
-    upmix_config.surround_hpf_hz    = UPMIX_DEFAULT_SUR_HPF;
-    upmix_config.surround_lpf_hz    = UPMIX_DEFAULT_SUR_LPF;
-    upmix_config.decorr_pct         = UPMIX_DEFAULT_DECORR;
-    upmix_config.presence_db        = UPMIX_DEFAULT_PRESENCE;
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) upmix_profile_defaults(&upmix_profiles[p]);
     upmix_update_pending = true;
 #endif
 

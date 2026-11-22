@@ -484,12 +484,12 @@ float cs_noun_get(uint8_t noun, uint8_t target, uint8_t index) {
             return (st.present && st.muted) ? 1.0f : 0.0f;
         }
 #if PICO_RP2350
-        case CS_NOUN_UPMIX:               return upmix_config.enabled ? 1.0f : 0.0f;
-        case CS_NOUN_UPMIX_CENTER_MODE:   return (float)upmix_config.center_mode;
-        case CS_NOUN_UPMIX_SURROUND_MODE: return (float)upmix_config.surround_mode;
-        case CS_NOUN_UPMIX_STRENGTH:      return upmix_config.strength_pct;
-        case CS_NOUN_UPMIX_WIDTH:         return upmix_config.center_width_pct;
-        case CS_NOUN_UPMIX_PRESENCE:      return upmix_config.presence_db;
+        case CS_NOUN_UPMIX:               return upmix_profiles[0].enabled ? 1.0f : 0.0f;
+        case CS_NOUN_UPMIX_CENTER_MODE:   return (float)upmix_profiles[0].center_mode;
+        case CS_NOUN_UPMIX_SURROUND_MODE: return (float)upmix_profiles[0].surround_mode;
+        case CS_NOUN_UPMIX_STRENGTH:      return upmix_profiles[0].strength_pct;
+        case CS_NOUN_UPMIX_WIDTH:         return upmix_profiles[0].center_width_pct;
+        case CS_NOUN_UPMIX_PRESENCE:      return upmix_profiles[0].presence_db;
 #else
         case CS_NOUN_UPMIX:
         case CS_NOUN_UPMIX_CENTER_MODE:

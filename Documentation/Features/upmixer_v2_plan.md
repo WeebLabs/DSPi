@@ -11,7 +11,7 @@ Each phase builds on both platforms, keeps the tree releasable, and ends with th
 - Collision to watch: the locked worktree `agent-ae9cd744540d7c58e` (wirecap rig, uncommitted) edits `commands.md`, `dspi_commands.json` and `scripts/gen_vendor_protocol.py`. Phase 5 touches the same generated files, so land or rebase that work before phase 5.
 - Command definitions live in `firmware/DSPi/vendor/pages/fx.def`. The `commands.md` tables and `dspi_commands.json` are generated from it by `scripts/gen_vendor_protocol.py`, so phase 5 edits `fx.def` and regenerates rather than hand-editing the tables.
 
-## Phase 1: Engine split (no behaviour change; done 2026-11-22, uncommitted)
+## Phase 1: Engine split (no behaviour change; done 2026-11-22, a6144b1)
 
 Result: `split_check.py` passes 1,500 runs bit for bit against HEAD, chunk sizes 1, 7, 32 and the whole packet (and reports mismatches against the pre-rework engine at `3bc9b93~1`, so the check does bite). The full `harness.py` passes too: zero difference from HEAD, zero from the Python model, no failing acceptance cell. Both platforms build. RP2350 `.bss` +304 B and `.data` -472 B, because `upmix_begin()` is compiled `-Os` (it was 2 KB of RAM text at `-O3` and pushed `.data` 360 B over its budget). `upmix_render()` writes to caller pointers, so the bridge stages only A'/B'. The bridge sits inside `upmix_process_block()`, so `audio_pipeline.c` did not change. Hardware (RP2350, 307.2 MHz, 48-sample packets, cycle counter around the upmix call): 19,374 to 20,409 cycles per packet adaptive, 13,333 to 14,482 passive, 4,176 to 5,076 centre only, about 0.3 % of core 0 while the upmixer runs. Phase 3 should recover the bridge share.
 
@@ -20,12 +20,14 @@ Result: `split_check.py` passes 1,500 runs bit for bit against HEAD, chunk sizes
 - Keep v1 delivery as a temporary bridge inside this phase only. Still call the engine at the v1 hook and copy each chunk to rows 0 to 4, so behaviour and wire are identical. Phase 3 deletes the bridge in the same release.
 - Harness: extend `tools/upmix_proto/harness` to the new calls. Every v1 acceptance case must stay bit-identical at chunk sizes 1, 7, 32 and the whole packet.
 
-## Phase 2: Profiles, sources and activation
+## Phase 2: Profiles, sources and activation (done 2026-11-22)
 
-- Turn `upmix_config` into two profiles, each with `src_a`, `src_b` and `active_counts` (defaults 0, 1, 0x01; profile 1 disabled).
-- Running-profile selection (lowest enabled match), latched on the audio thread. A live winner change is a sequential fade out, reset and fade in.
-- Replace the `n_active_inputs == NUM_STEREO_INPUTS` test with the spec section 4 rule. Add `parked_reason` 4 and 5 and redefine 2.
-- Harness: sources on inputs 4/5 of a 6-channel buffer must match the same signals on 0/1.
+- `upmix_config` became `upmix_profiles[2]`, each with `src_a`, `src_b` and `active_counts` (defaults 0, 1, 0x01; both disabled), and each with its own published coefficient set (`current_upmix_coeffs[]`, double-buffered). `upmix_profile_defaults()` replaces the copied default blocks in preset load and factory reset.
+- `upmix_select(n)` returns the lowest published profile whose `active_counts` holds the input count. Coefficient sets carry their profile index, and `upmix_begin()` resets the engine when a set from a different profile arrives, so the new profile fades in from reset.
+- `parked_reason` 2 now means no profile serves the input count, and 4 means a source channel is absent. Reason 5 (fading out) arrives with phase 3.
+- Scope moved to phase 3, because the row bridge cannot carry it: running above stereo (the bridge writes rows 2..4, which hold real inputs there, so `upmix_bridge_coeffs()` keeps the stereo gate) and the fade-out on a live profile change (that fade is the claim weights). Until then a profile change is a hard reset plus fade-in, as an input-count change already is.
+- Not reachable from a host until phase 5: profile 1 and the new fields have no commands and are not persisted. Every vendor, bulk, preset and Control Surfaces path uses profile 0, and a preset load resets the rest to defaults. Behaviour with the defaults is v1's.
+- Result: `split_check.py` adds profile selection (12 cases: disjoint and overlapping counts, lowest-wins, absent sources, source clamp, rate gate, park reasons) and a profile-switch test (the output after a switch equals the new profile run alone from reset; a mutant without the reset fails it). 1,500 engine runs stay bit-identical to HEAD and the full `harness.py` passes. RP2350 `.data` 99,600 to 99,840 B, `.bss` +268 B (second coefficient double buffer). Hardware: core 0 load unchanged from phase 1.
 
 ## Phase 3: Module routing and claim semantics
 

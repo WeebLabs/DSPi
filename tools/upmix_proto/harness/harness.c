@@ -103,6 +103,97 @@ void h_run_split(const float *p, int cm_a, int sm_a, int cm_b, int sm_b, int cut
 }
 #endif
 
+#ifdef UPMIX_NUM_PROFILES
+#include <stdio.h>
+static int sel_fail;
+static void expect(int ok, const char *what) {
+    if (!ok) { sel_fail++; printf("  SELECT FAIL: %s\n", what); }
+}
+static int sel_of(uint8_t n) {
+    const UpmixCoeffs *c = upmix_select(n);
+    return c ? c->profile : -1;
+}
+static int reason_of(uint8_t n) {
+    UpmixStatus st;
+    upmix_get_status(&st, n);
+    return st.parked_reason;
+}
+
+/* Profile selection, bridge gating and park reasons; returns the failure count. */
+int h_select_check(void) {
+    sel_fail = 0;
+    upmix_reset_state();
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) upmix_profile_defaults(&upmix_profiles[p]);
+    upmix_apply_profiles(48000.0f);
+    expect(sel_of(2) == -1 && reason_of(2) == 1, "all disabled: no profile, reason 1");
+
+    upmix_profiles[0].enabled = true;
+    upmix_apply_profiles(48000.0f);
+    expect(sel_of(2) == 0 && upmix_bridge_coeffs(2) != NULL, "defaults: profile 0 on stereo");
+    expect(sel_of(6) == -1 && reason_of(6) == 2, "defaults: nothing on 6 ch, reason 2");
+    expect(sel_of(3) == -1 && sel_of(0) == -1, "odd or zero counts select nothing");
+
+    upmix_profiles[1].enabled = true;
+    upmix_profiles[1].src_a = 4; upmix_profiles[1].src_b = 5;
+    upmix_profiles[1].active_counts = 0x0C;
+    upmix_apply_profiles(48000.0f);
+    expect(sel_of(2) == 0 && sel_of(6) == 1 && sel_of(8) == 1 && sel_of(4) == -1, "disjoint counts");
+    expect(upmix_bridge_coeffs(6) == NULL, "bridge never runs above stereo");
+
+    upmix_profiles[1].active_counts = 0x0D;
+    upmix_apply_profiles(48000.0f);
+    expect(sel_of(2) == 0, "overlap: lowest profile wins");
+    upmix_profiles[0].enabled = false;
+    upmix_apply_profiles(48000.0f);
+    expect(sel_of(2) == 1, "overlap with profile 0 off: profile 1");
+    expect(upmix_bridge_coeffs(2) == NULL && reason_of(2) == 4, "profile 1 sources absent on stereo: reason 4");
+
+    upmix_profiles[0].enabled = true;
+    upmix_profiles[0].src_a = 7; upmix_profiles[0].src_b = 9;
+    upmix_apply_profiles(48000.0f);
+    const UpmixCoeffs *c0 = upmix_select(2);
+    expect(c0 && c0->profile == 0 && c0->src_a == 7 && c0->src_b == UPMIX_DEFAULT_SRC_B,
+           "source above the channel count clamps to default");
+    expect(upmix_bridge_coeffs(2) == NULL && reason_of(2) == 4, "profile 0 source 7 absent on stereo: reason 4");
+
+    upmix_apply_profiles(96000.0f);
+    expect(sel_of(2) == -1 && reason_of(2) == 3, "above 48 kHz: nothing, reason 3");
+    for (int p = 0; p < UPMIX_NUM_PROFILES; p++) upmix_profile_defaults(&upmix_profiles[p]);
+    upmix_apply_profiles(48000.0f);
+    return sel_fail;
+}
+
+/* Run profile 0 for `cut` samples then profile 1 to the end; outputs from cut on
+ * must equal profile 1 run alone from reset over the same input. */
+int h_profile_switch_check(const float *p0, const float *p1, int blk, const float *L, const float *R, int N, int cut) {
+    float *o1[UPMIX_NUM_GEN], *o2[UPMIX_NUM_GEN];
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+        o1[g] = calloc((size_t)N, sizeof(float)); o2[g] = calloc((size_t)N, sizeof(float));
+    }
+    UpmixCoeffs ca, cb;
+    set_cfg(&ca, p0, 1, 2, 48000.0f);
+    set_cfg(&cb, p1, 0, 1, 48000.0f);
+    ca.profile = 0; cb.profile = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        upmix_reset_state();
+        float **o = pass ? o2 : o1;
+        for (int s = pass ? cut : 0; s < N; s += blk) {
+            int n = N - s < blk ? N - s : blk;
+            const UpmixCoeffs *c = s < cut ? &ca : &cb;
+            float *const out[UPMIX_NUM_GEN] = { o[0] + s, o[1] + s, o[2] + s, o[3] + s, o[4] + s };
+            upmix_begin(c, (uint32_t)n);
+            upmix_render(c, L + s, R + s, (uint32_t)n, out);
+        }
+    }
+    int bad = 0;
+    for (int g = 0; g < UPMIX_NUM_GEN; g++) {
+        if (memcmp(o1[g] + cut, o2[g] + cut, (size_t)(N - cut) * sizeof(float))) bad++;
+        free(o1[g]); free(o2[g]);
+    }
+    return bad;
+}
+#endif
+
 #ifdef UPMIX_NEW
 /* Stem-through: control runs on the mix, each stem reuses the mix's control state
  * per block and keeps only its own audio-path state (filters, rings, bell). */
