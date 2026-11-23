@@ -289,3 +289,22 @@ target_link_libraries(DSPi
 pico_enable_stdio_uart(DSPi 0)
 
 pico_add_extra_outputs(DSPi)
+
+# DSPI_DEBUG_PRINTF: no stdio driver is linked, so printf/puts are compiled out
+# (dspi_no_printf.h) and panic() halts on a breakpoint without formatting.
+# snprintf() users take no float conversions, so pico_printf drops that code.
+option(DSPI_DEBUG_PRINTF "Keep printf/puts diagnostics (only useful with a stdio driver)" OFF)
+if (NOT DSPI_DEBUG_PRINTF)
+    get_target_property(_dspi_c_sources DSPi SOURCES)
+    list(FILTER _dspi_c_sources INCLUDE REGEX "\\.c$")
+    file(GLOB _dspi_extras_c_sources
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pico-extras/src/rp2_common/pico_audio_i2s_multi/*.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pico-extras/src/rp2_common/pico_audio_spdif_multi/*.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/../pico-extras/src/rp2_common/pico_spdif_rx/*.c)
+    set_property(SOURCE ${_dspi_c_sources} ${_dspi_extras_c_sources} APPEND PROPERTY
+        COMPILE_OPTIONS -include ${CMAKE_CURRENT_SOURCE_DIR}/dspi_no_printf.h)
+    target_compile_definitions(DSPi PRIVATE
+        PICO_PANIC_FUNCTION=
+        PICO_PRINTF_SUPPORT_FLOAT=0
+        PICO_PRINTF_SUPPORT_EXPONENTIAL=0)
+endif()
