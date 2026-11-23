@@ -31,3 +31,12 @@ from . import paged_page0     # noqa: F401
 from . import paged_pins      # noqa: F401
 from . import audio_loopback  # noqa: F401  (group "audio"; opt-in via --audio)
 from . import audio_upmix     # noqa: F401  (group "audio": upmixer loopback bench)
+from . import audio_spatial   # noqa: F401  (group "audio": spatializer loopback bench)
+
+# The rate round trip leaves the device at the primary rate, so it must stay the audio group's
+# last test whatever audio modules register after audio_loopback.
+from ..framework import REGISTRY as _REG
+_rt = [tc for tc in _REG if tc.name == "rate_switch_round_trip"]
+for _tc in _rt:
+    _REG.remove(_tc)
+    _REG.append(_tc)

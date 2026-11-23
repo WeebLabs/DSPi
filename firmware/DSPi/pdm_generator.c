@@ -8,6 +8,7 @@
 #include "usb_audio.h"
 #include "siggen.h"     // siggen_raw_mask: per-output EQ bypass in RAW mode
 #include "tube.h"
+#include "spatial.h"
 #include "limiter.h"
 #include "audio_pipeline.h" // output_pairs_meter_finalize
 #include "audio_clock_div.h"
@@ -593,6 +594,10 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         // Crossfeed for Core 1's pairs, pre-EQ (Core 0 owns pair 0; snapshot
         // comes from core1_eq_work so both cores apply the same view).
+        spatial_process_pairs((const SpatialCoeffs *)core1_eq_work.spatial_coeffs,
+                              core1_eq_work.spatial_mask,
+                              CORE1_EQ_FIRST_OUTPUT / 2, CORE1_EQ_LAST_OUTPUT / 2,
+                              buf_out, sample_count);
         crossfeed_process_pairs((const CrossfeedCoeffs *)core1_eq_work.xfeed_coeffs,
                                 core1_eq_work.xfeed_mask,
                                 CORE1_EQ_FIRST_OUTPUT / 2, CORE1_EQ_LAST_OUTPUT / 2,
@@ -766,6 +771,10 @@ static void __not_in_flash_func(eq_worker_loop)() {
 
         // Crossfeed for Core 1's pair, pre-EQ (Core 0 owns pair 0; snapshot
         // comes from core1_eq_work so both cores apply the same view).
+        spatial_process_pairs((const SpatialCoeffs *)core1_eq_work.spatial_coeffs,
+                              core1_eq_work.spatial_mask,
+                              CORE1_EQ_FIRST_OUTPUT / 2, CORE1_EQ_LAST_OUTPUT / 2,
+                              buf_out, sample_count);
         crossfeed_process_pairs((const CrossfeedCoeffs *)core1_eq_work.xfeed_coeffs,
                                 core1_eq_work.xfeed_mask,
                                 CORE1_EQ_FIRST_OUTPUT / 2, CORE1_EQ_LAST_OUTPUT / 2,

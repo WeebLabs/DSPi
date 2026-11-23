@@ -164,7 +164,7 @@ DSPi Link (`/Users/weeblabs/DSPi-Link`).
 - Add rows to `policy/commands.json` for `INPUT.SPDIF_RX_COUNT` (0x0326), `INPUT.SPDIF_RX_ENABLE` (0x0327) and `INPUT.I2S_RX_ENABLE` (0x0334), and remove the 0x0323 row, with `get` as `read` and `set` as `config`, like the existing `SPDIF_RX_ENABLE` row. A command with no row is treated as config class on both GET and SET, so bridges would refuse even the GET to non-admin clients.
 - Regenerate `link_policy_table.c` with `bridge/esp32/tools/gen_policy.py`.
 - Update the fake device in the host tests, and any decoder that reads the two reused bytes.
-- Link's payload limit is 8192 bytes (`LINK_MAX_PAYLOAD_BYTES`). The number 6136 is the bulk blob size and appears in Link tests, docs and `BULK_PARAMS_BYTES`. This plan keeps the blob at 6136. Wire V35 then grew it to 6252 bytes for the upmixer section, so those values must change to 6252, which still fits the payload limit.
+- Link's payload limit is 8192 bytes (`LINK_MAX_PAYLOAD_BYTES`). The number 6136 is the bulk blob size and appears in Link tests, docs and `BULK_PARAMS_BYTES`. This plan keeps the blob at 6136. Wire V36 then grew it to 6284 bytes for the upmixer section, so those values must change to 6284, which still fits the payload limit.
 
 Other clients. The ESP32 front panel client checks values strictly and will need the new commands. Add the change to `Documentation/Features/vendor_protocol_client_update.md`.
 

@@ -356,7 +356,7 @@ Six front-panel nouns dispatch to the matching per-parameter command, so physica
 | 6172 | 44 | `upmix2.p1` | Profile 1, packet bytes 0 to 43 |
 | 6216 | 36 | `upmix2.p1_ext` | Profile 1, packet bytes 44 to 79 |
 
-The total at `WIRE_FORMAT_VERSION` 35 is **6252 bytes**. Profile 0's first 44 bytes have not moved since V25.
+The total at `WIRE_FORMAT_VERSION` 36 is **6284 bytes**. Profile 0's first 44 bytes have not moved since V25.
 
 - On RP2040 both sections are present but zero on GET and ignored on SET (platform-independent wire format).
 - Version discipline is strict. The header's format_version must match exactly, so a client built for an older version is refused. Clients must send 35.
@@ -463,7 +463,7 @@ SET STORE.PRESET_SAVE as usual. Both profiles ride along (slot V42).
 |---|---|
 | Vendor commands | `FX.UPMIX_CONFIG` (0x80), `FX.UPMIX_STATUS` (0x81), `FX.UPMIX_ROUTE` (0x82), `FX.UPMIX_CONFIG_EXT` (0x83), `FX.UPMIX_ENABLE` to `FX.UPMIX_PRESENCE` (0x90 to 0x9D), `FX.UPMIX_SOURCE_A`, `FX.UPMIX_SOURCE_B`, `FX.UPMIX_ACTIVE_COUNTS`, `FX.UPMIX_BACK_OFFSET` (0x9E to 0xA1), all in page 0x08 |
 | FX page revision | 2. 0x80 and 0x90 to 0x9D gained the profile address, 0x82, 0x83 and 0x9E to 0xA1 were added, and the status grew from 16 to 32 bytes |
-| Wire format | V35. Profile 0 bytes 0 to 43 at offset 5900 (section 22, since V25), section 26 `upmix2` at offset 6136 (116 bytes). Total 6252 B |
+| Wire format | V36. Profile 0 bytes 0 to 43 at offset 5900 (section 22, since V25), section 26 `upmix2` at offset 6136 (116 bytes). Total 6284 B |
 | Preset slot | V42 (116-byte tail-append). V33 to V41 slots load into profile 0 with routes migrated from matrix rows 0 to 4 (section 8.1) |
 | Change notifications | One `PARAM_CHANGED` per changed field of either profile on every SET (section 6.7) |
 | Platforms | RP2350 only (RP2040: the commands do not exist, `VC_ERR_UNKNOWN`) |

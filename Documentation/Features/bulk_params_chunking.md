@@ -18,10 +18,10 @@ commands are on the `STORE` page of the paged protocol (see `../commands.md`):
 
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | Single shot. A SET must be the whole struct |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 | Single shot. A SET must be the whole struct |
 | `STORE.ALL_PARAMS_CHUNK` | 0x02 | 0x41 | GET, SET | byte offset | GET var, SET var | `wLength` is the chunk size. USB only |
 
-At wire V35 the struct is 6252 bytes. The single-shot `STORE.ALL_PARAMS`
+At wire V36 the struct is 6284 bytes. The single-shot `STORE.ALL_PARAMS`
 remains the right choice on macOS, Linux, and on the UART/I2C control
 transports (no size cap there). `STORE.ALL_PARAMS_CHUNK` is refused on UART
 and I2C with `VC_ERR_BLOCKED`. The wire payload is byte-identical to the
@@ -46,14 +46,14 @@ vendor interface 2 in the low byte).
    offset 0 makes the device snapshot the complete struct into an internal
    buffer under its bulk lock, so all chunks come from one coherent image.
 2. Repeat with `wValue = 2048`, then `4096`, then `6144`, until you have
-   accumulated the full struct. The final chunk returns short (6252 - 6144
+   accumulated the full struct. The final chunk returns short (6284 - 6144
    = 108 bytes at wire V35); the device clamps `wLength` past the end for you.
    An offset at or past the end STALLs with `VC_ERR_ADDRESS`.
 3. Concatenate in offset order. Sanity-check `header.payload_length`
    against what you received, as with `STORE.ALL_PARAMS`.
 
 You may read `header` fields from the first chunk to learn the exact total
-instead of hardcoding 6252.
+instead of hardcoding 6284.
 
 ### Write (replaces one `STORE.ALL_PARAMS` SET)
 
@@ -92,7 +92,7 @@ instead of hardcoding 6252.
 ### pyusb sketch (tools/dspi_test)
 
 ```python
-TOTAL = 6252          # wire V35, or read header.payload_length from the first chunk
+TOTAL = 6284          # wire V36, or read header.payload_length from the first chunk
 CHUNK = 2048
 STORE_WINDEX = (0x02 << 8) | 2    # page STORE, vendor interface 2
 ALL_PARAMS_CHUNK = 0x41

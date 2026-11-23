@@ -502,6 +502,9 @@ typedef struct {
     // Crossfeed snapshot for THIS packet; same single-view rationale.
     const void       *xfeed_coeffs;    // CrossfeedCoeffs or NULL = off
     uint8_t           xfeed_mask;      // Bit p = crossfeed output pair p
+    // Spatializer snapshot for THIS packet; same single-view rationale.
+    const void       *spatial_coeffs;  // SpatialCoeffs (never NULL once published)
+    uint8_t           spatial_mask;    // Bit p = spatializer output pair p
     // Psychoacoustic bass snapshot for THIS packet; same single-view rationale.
     const void       *psybass_coeffs;  // PsybassCoeffs or NULL = off
     uint16_t          psybass_mask;    // Bit k = process output k

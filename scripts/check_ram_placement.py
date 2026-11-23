@@ -30,7 +30,7 @@ RAM_LEN = {"rp2040": 262144, "rp2350": 524288}
 # RAM-resident code+data budgets, set 1.5 to 2.5 KB above the measured image.
 # Raise deliberately and record the measured numbers in current_architecture.md
 # "Memory Layout" (history of every raise is there).
-DATA_BUDGET = {"rp2040": 72704, "rp2350": 102400}
+DATA_BUDGET = {"rp2040": 77312, "rp2350": 105472}
 
 # Flash callees that are cold-path-only and safe for a hot caller to reference.
 WHITELIST = {
@@ -46,6 +46,12 @@ WHITELIST = {
 # ---------------------------------------------------------------------------
 COMMON = [
     ("process_input_block", False),
+    # Stereo spatializer: dispatcher and both kernels, on both cores.
+    ("spatial_process_pairs", False),
+    ("sp_width", True),
+    ("sp_xtc", True),
+    ("sp_xtc_tap", True),
+    ("sp_begin", True),
     ("uac1_driver_xfer_cb", True),
     ("uac1_driver_sof", True),
     ("process_audio_packet", True),
@@ -245,8 +251,8 @@ B2_LITERAL_WHITELIST = {
 # Check B2: numeric constants that only happen to fall in the flash window, keyed
 # by (function, value).  A ring geometry change moves the value and fails safe.
 B2_CONSTANT_WHITELIST = {
-    ("audio_i2s_ring_consumed_words", 0x1E847FFF): "I2S half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
-    ("audio_spdif_ring_consumed_words", 0x1E847FFF): "S/PDIF half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
+    ("audio_i2s_ring_consumed_frames", 0x1E847FFF): "I2S half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
+    ("audio_spdif_ring_consumed_frames", 0x1E847FFF): "S/PDIF half-ring lap threshold, RING_WORDS/2 * 1e6 - 1",
 }
 
 # ---------------------------------------------------------------------------

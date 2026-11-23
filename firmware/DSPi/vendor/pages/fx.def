@@ -1,5 +1,5 @@
 // Grammar: Documentation/Features/vendor_command_overhaul_plan.md section 8.8.
-VC_PAGE(FX, 0x08, 2, "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer")
+VC_PAGE(FX, 0x08, 3, "Crossfeed, subharmonic synth, psychoacoustic bass, tube, upmixer, spatializer")
 
 VC_CMD(0x10, CROSSFEED_ENABLE, fx_crossfeed_enable_get, fx_crossfeed_enable_set,
        NONE, 1, 1, 1, VC_F_DEFERRED, 0, "Crossfeed on or off (u8 bool)")
@@ -133,3 +133,26 @@ VC_CMD(0xA0, UPMIX_ACTIVE_COUNTS, fx_upmix_param_get, fx_upmix_param_set,
 VC_CMD(0xA1, UPMIX_BACK_OFFSET, fx_upmix_param_get, fx_upmix_param_set,
        INDEX, 4, 4, 4, VC_F_DEFERRED, UPMIX_PARAM_BACK_OFFSET, "Back pair arrival after the sides in ms (f32, stored as sent, used clamped to 0-10)")
 #endif
+
+VC_CMD(0xB0, SPATIAL_CONFIG, fx_spatial_config_get, fx_spatial_config_set,
+       NONE, 32, 32, 32, VC_F_DEFERRED, 0, "Whole spatializer config (SpatialConfigPacket); floats clamped, a mode above 1 or a non-finite float refused")
+VC_CMD(0xB1, SPATIAL_ENABLE, fx_spatial_u8_get, fx_spatial_u8_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, SPATIAL_PARAM_ENABLED, "Spatializer on or off (u8 bool)")
+VC_CMD(0xB2, SPATIAL_MODE, fx_spatial_u8_get, fx_spatial_u8_set,
+       NONE, 1, 1, 1, VC_F_DEFERRED, SPATIAL_PARAM_MODE, "Mode: 0 width, 1 crosstalk cancellation (u8; above 1 refused)")
+VC_CMD(0xB3, SPATIAL_PAIRS, fx_spatial_u8_get, fx_spatial_u8_set,
+       NONE, 1, 1, 1, 0, SPATIAL_PARAM_PAIRS, "Output pairs it runs on (u8 mask, masked to the pair count)")
+VC_CMD(0xB4, SPATIAL_WIDTH, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_WIDTH, "Side width above the shelf corner in percent (f32, clamped 0-200)")
+VC_CMD(0xB5, SPATIAL_BASS_WIDTH, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_BASS_WIDTH, "Side width below the shelf corner in percent (f32, clamped 0-200)")
+VC_CMD(0xB6, SPATIAL_SHELF, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_SHELF, "Width shelf corner in Hz (f32, clamped 100-1500)")
+VC_CMD(0xB7, SPATIAL_SPAN, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_SPAN, "Speaker half-angle for crosstalk cancellation in degrees (f32, clamped 5-30)")
+VC_CMD(0xB8, SPATIAL_ATTEN, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_ATTEN, "Crosstalk cancellation attenuation per pass in dB (f32, clamped 2.5-20)")
+VC_CMD(0xB9, SPATIAL_MID, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_MID, "Crosstalk cancellation mid-path amount in percent (f32, clamped 0-100)")
+VC_CMD(0xBA, SPATIAL_TRIM, fx_spatial_f32_get, fx_spatial_f32_set,
+       NONE, 4, 4, 4, VC_F_DEFERRED, SPATIAL_PARAM_TRIM, "Spatializer output trim in dB (f32, clamped -12-0)")

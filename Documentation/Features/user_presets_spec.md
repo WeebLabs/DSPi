@@ -142,7 +142,7 @@ All preset commands are on the `STORE` page (0x02) of the paged protocol (see `.
 | `STORE.OUTPUT_CONFIG_SAVE` | 0x02 | 0x21 | SET (zero-length) | none (0) | SET 0 | Persist the live IO config (see `output_config_independent_load.md`) |
 | `STORE.FACTORY_RESET` | 0x02 | 0x30 | SET (zero-length) | none (0) | SET 0 | Reset live state to factory defaults |
 | `ROUTE.CHANNEL_NAME` | 0x05 | 0x31 | GET, SET | channel 0 to NUM_CHANNELS-1 | GET 32, SET 1-32 | Channel name |
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | Complete DSP state (multi-packet). 6252 bytes at wire V35 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 | Complete DSP state (multi-packet). 6284 bytes at wire V36 |
 | `STORE.ALL_PARAMS_CHUNK` | 0x02 | 0x41 | GET, SET | byte offset | GET var, SET var | The same state in pieces, USB only (see `bulk_params_chunking.md`) |
 
 ### Result Codes
@@ -560,7 +560,7 @@ Read the complete live DSP state in a single transfer. This is a multi-packet US
 **bRequest:** `0x40`
 **wValue:** 0
 **wIndex:** `0x0202`
-**wLength:** `sizeof(WireBulkParams)` (6252 at wire V35)
+**wLength:** `sizeof(WireBulkParams)` (6284 at wire V36)
 
 **Response:** `WireBulkParams` structure (defined in `bulk_params.h`). The table below is the V2 layout this section was first written against. Later versions append sections, and `bulk_params.h` holds the current layout.
 
@@ -612,7 +612,7 @@ Apply a complete DSP state in a single transfer. This is a multi-packet USB cont
 **bRequest:** `0x40`
 **wValue:** 0
 **wIndex:** `0x0202`
-**wLength:** `sizeof(WireBulkParams)` (6252 at wire V35, must match exactly)
+**wLength:** `sizeof(WireBulkParams)` (6284 at wire V36, must match exactly)
 
 **Payload:** `WireBulkParams` structure (same layout as the GET response above).
 
@@ -704,7 +704,7 @@ When a host application connects to the device:
    STORE.PRESET_NAME           -> Get the slot's name
 3. STORE.PRESET_ACTIVE         -> Determine which slot is currently loaded
 4. STORE.ALL_PARAMS (GET)      -> Read all DSP parameters + channel names
-                                  in one transfer (6252 bytes at wire V35)
+                                  in one transfer (6284 bytes at wire V36)
 5. Parse params->channel_names.names[] to populate channel label UI
 6. Display the preset list with the active slot highlighted
 ```

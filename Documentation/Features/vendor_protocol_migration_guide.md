@@ -24,7 +24,7 @@ Porting a host comes down to seven changes.
 4. **Turn write-as-reads into writes.** 34 old commands changed state through an IN transfer and answered a status byte. They are now ordinary SETs, and an action with no value is a SET with no payload.
 5. **Treat a STALL as a refusal.** A rejected request now fails explicitly. On USB it STALLs, and `SYS.LAST_RESULT` says why. On UART and I2C the status byte carries the reason.
 6. **Re-check every reply length.** Most replies kept their 1.1.6 bytes exactly. A few changed or split. Section 7 lists every reply length and says which ones changed.
-7. **Regenerate the bulk struct.** `WireBulkParams` grew from version 32 and 6136 bytes to version 35 and 6252 bytes. A bulk SET must match the version and length exactly (section 9).
+7. **Regenerate the bulk struct.** `WireBulkParams` grew from version 32 and 6136 bytes to version 36 and 6284 bytes. A bulk SET must match the version and length exactly (section 9).
 
 What did not change is just as important. The notification packets and endpoint, the USB audio class, the descriptors, the VID and PID, the interface numbers and the UART and I2C frame formats are all the same as in 1.1.6.
 
@@ -58,7 +58,7 @@ The host appendices in section 13 cover the ESP32 front panel, DSPi Console for 
 - **Actions are zero-length SETs.** A request that does something, such as loading a preset or clearing clip flags, is a SET with `wLength` 0. Reads never change anything.
 - **Failure is explicit.** A refused request STALLs on USB and returns a result code on UART and I2C. 1.1.6 accepted most bad writes silently and changed nothing. 1.1.7 tells you.
 - **Discovery.** The device reports its pages, page revisions and the commands each page implements. A host decides whether a feature exists by asking the device, not by comparing firmware versions.
-- **The bulk blob grew.** `WireBulkParams` is format version 35, 6252 bytes, the same on both platforms. The 1.1.6 sections keep their offsets and a 116-byte upmixer section is appended. A bulk SET must match the version and length exactly, so regenerate the struct (section 9).
+- **The bulk blob grew.** `WireBulkParams` is format version 36, 6284 bytes, the same on both platforms. The 1.1.6 sections keep their offsets; a 116-byte upmixer section and a 32-byte spatializer section are appended. A bulk SET must match the version and length exactly, so regenerate the struct (section 9).
 
 ### 2.2 What did not change
 
@@ -757,7 +757,7 @@ A row whose New command is `none` and whose Payload says "1.1.6 STALLed it" or "
 | 0x9C | `GET_CHANNEL_NAME` | R | any | folded | `ROUTE.CHANNEL_NAME` | `0x0531` | G | `old` | - | 32 |
 | 0x9D | `CS_SAVE` | W-as-R | any | action | `CS.SAVE` | `0x0A18` | S0 | `0` | none | 0 |
 | 0x9E | `CS_REVERT` | W-as-R | any | action | `CS.REVERT` | `0x0A19` | S0 | `0` | none | 0 |
-| 0xA0 | `GET_ALL_PARAMS` | R | any | same | `STORE.ALL_PARAMS` | `0x0240` | G | `0` | - | 6252 |
+| 0xA0 | `GET_ALL_PARAMS` | R | any | same | `STORE.ALL_PARAMS` | `0x0240` | G | `0` | - | 6284 |
 | 0xA1 | [`SET_ALL_PARAMS`](#set_all_params-0xa1) | W | any | custom | `STORE.ALL_PARAMS` S | `0x0240` | - | see recipe | [see recipe](#set_all_params-0xa1) | see recipe |
 | 0xA2 | `GET_ALL_PARAMS_CHUNK` | R | any | folded | `STORE.ALL_PARAMS_CHUNK` | `0x0241` | G | `old` | - | var |
 | 0xA3 | `SET_ALL_PARAMS_CHUNK` | W | any | folded | `STORE.ALL_PARAMS_CHUNK` | `0x0241` | S | `old` | unchanged | chunk |
@@ -1215,7 +1215,7 @@ A clip that lands between the two requests is cleared without being seen. The fl
 
 #### `SET_ALL_PARAMS` (0xA1)
 
-The blob grew to format version 35 and 6252 bytes (section 9.1), and the length rule is now strict. Send exactly 6252 bytes to `STORE.ALL_PARAMS` (`0x0240`) with `wValue` 0. 1.1.6 ACKed and ignored a payload of 64 bytes or fewer and STALLed other wrong lengths at SETUP. 1.1.7 STALLs every length other than 6252 at SETUP with `VC_ERR_LENGTH`, and a header the apply would refuse STALLs the status stage with `VC_ERR_VALUE` instead of being dropped after the ACK. Section 9 has the details.
+The blob grew to format version 36 and 6284 bytes (section 9.1), and the length rule is now strict. Send exactly 6284 bytes to `STORE.ALL_PARAMS` (`0x0240`) with `wValue` 0. 1.1.6 ACKed and ignored a payload of 64 bytes or fewer and STALLed other wrong lengths at SETUP. 1.1.7 STALLs every length other than 6284 at SETUP with `VC_ERR_LENGTH`, and a header the apply would refuse STALLs the status stage with `VC_ERR_VALUE` instead of being dropped after the ACK. Section 9 has the details.
 
 ### 6.6 Former write-as-reads
 
@@ -1372,8 +1372,8 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `STORE.DIRECTORY` | 0x02 | 0x15 | none | 7 |  |  |
 | `STORE.STARTUP` | 0x02 | 0x16 | none | 2 |  |  |
 | `STORE.OUTPUT_CONFIG_MODE` | 0x02 | 0x20 | none | 1 |  |  |
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | none | 6252 |  | Bulk buffer, `min(wLength, 6252)` |
-| `STORE.ALL_PARAMS_CHUNK` | 0x02 | 0x41 | byte offset | var | USB only | min(wLength, 6252 - offset). wLength 0 is `VC_ERR_LENGTH` |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | none | 6284 |  | Bulk buffer, `min(wLength, 6284)` |
+| `STORE.ALL_PARAMS_CHUNK` | 0x02 | 0x41 | byte offset | var | USB only | min(wLength, 6284 - offset). wLength 0 is `VC_ERR_LENGTH` |
 | `INPUT.SOURCE` | 0x03 | 0x10 | none | 1 |  |  |
 | `INPUT.STATUS` | 0x03 | 0x11 | none | 12 |  |  |
 | `INPUT.SOURCE_NAME` | 0x03 | 0x12 | source ID | 32 |  |  |
@@ -1505,6 +1505,17 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `FX.UPMIX_SOURCE_B` | 0x08 | 0x9F | index | 4 | RP2350 only |  |
 | `FX.UPMIX_ACTIVE_COUNTS` | 0x08 | 0xA0 | index | 4 | RP2350 only |  |
 | `FX.UPMIX_BACK_OFFSET` | 0x08 | 0xA1 | index | 4 | RP2350 only |  |
+| `FX.SPATIAL_CONFIG` | 0x08 | 0xB0 | none | 32 |  |  |
+| `FX.SPATIAL_ENABLE` | 0x08 | 0xB1 | none | 1 |  |  |
+| `FX.SPATIAL_MODE` | 0x08 | 0xB2 | none | 1 |  |  |
+| `FX.SPATIAL_PAIRS` | 0x08 | 0xB3 | none | 1 |  |  |
+| `FX.SPATIAL_WIDTH` | 0x08 | 0xB4 | none | 4 |  |  |
+| `FX.SPATIAL_BASS_WIDTH` | 0x08 | 0xB5 | none | 4 |  |  |
+| `FX.SPATIAL_SHELF` | 0x08 | 0xB6 | none | 4 |  |  |
+| `FX.SPATIAL_SPAN` | 0x08 | 0xB7 | none | 4 |  |  |
+| `FX.SPATIAL_ATTEN` | 0x08 | 0xB8 | none | 4 |  |  |
+| `FX.SPATIAL_MID` | 0x08 | 0xB9 | none | 4 |  |  |
+| `FX.SPATIAL_TRIM` | 0x08 | 0xBA | none | 4 |  |  |
 | `MEAS.LEVELS` | 0x09 | 0x10 | none | var |  | 2 x channels + 7. 21 on RP2040, 41 on RP2350 |
 | `MEAS.CLIP_FLAGS` | 0x09 | 0x11 | none | 4 |  |  |
 | `MEAS.RTA_CONFIG` | 0x09 | 0x20 | none | 12 |  |  |
@@ -1574,7 +1585,7 @@ For each page, "identical" means the 1.1.7 reply has the same length, layout and
 | Page | Identical to 1.1.6 | Changed | New |
 |---|---|---|---|
 | `SYS` | `PLATFORM` (7), `SERIAL` (16), `BUILD_INFO` (64), `CORE1_MODE` (1), `DEVICE_NAME` (32), `BUFFER_STATS` (44) | None | `PROTOCOL_INFO` (4.2), `PAGE_LIST`, `PAGE_COMMANDS`, `COMMAND_INFO` (4.7), `LAST_RESULT` (5.2), `SYSTEM_STATUS`, `USB_AUDIO_STATUS`, `PIPELINE_STATS`, `PDM_STATS`, `SPDIF_TX_STATS` (6.3, replacing `GET_STATUS`) |
-| `STORE` | `PRESET_NAME` (32), `PRESET_ACTIVE` (1), `DIRECTORY` (7), `OUTPUT_CONFIG_MODE` (1) | `STARTUP`, 2 bytes where `PRESET_GET_STARTUP` was 3 (6.5). `ALL_PARAMS` and `ALL_PARAMS_CHUNK`, 6252 bytes where 1.1.6 had 6136 (9.1) | None |
+| `STORE` | `PRESET_NAME` (32), `PRESET_ACTIVE` (1), `DIRECTORY` (7), `OUTPUT_CONFIG_MODE` (1) | `STARTUP`, 2 bytes where `PRESET_GET_STARTUP` was 3 (6.5). `ALL_PARAMS` and `ALL_PARAMS_CHUNK`, 6284 bytes where 1.1.6 had 6136 (9.1) | None |
 | `INPUT` | `SOURCE` (1), `SOURCE_NAME` (32), `SPDIF_RX_STATUS` (16), `SPDIF_RX_CH_STATUS` (24), `SPDIF_RX_PIN` (1), `SPDIF_RX_CONFIG` (6), `I2S_RX_PIN` (1), `I2S_RX_CHANNELS` (1), `ADAT_RX_ENABLE` (1), `ADAT_RX_PIN` (1), `ADAT_RX_CLOCK_MODE` (1), `ADAT_RX_STATUS` (20), `LG_SOUND_SYNC_ENABLE` (1), `LG_SOUND_SYNC_STATUS` (16) | `I2S_RX_RATE`, 4 bytes where `GET_INPUT_RATE` was 8 (6.5) | `STATUS` (6.3), `SPDIF_RX_ENABLE` GET (7.3) |
 | `OUTPUT` | `TYPE` (1), `PIN` (1), `LATENCY_STATUS` (12), `LATENCY_OPTIONS` (8 per option, 56 today), `ADAT_TX_ENABLE` (1), `ADAT_TX_PIN` (1), `ADAT_TX_STATUS` (8), `DAC_MUTE_CONFIG` (16) | None | `LATENCY` GET (7.3) |
 | `ROUTE` | `OUTPUT_ENABLE` (1), `OUTPUT_GAIN` (4), `OUTPUT_MUTE` (1), `OUTPUT_DELAY` (4), `OUTPUT_ENABLE_CONFLICT` (1), `CHANNEL_DELAY` (4), `CHANNEL_NAME` (32), `PREAMP` (4), `MASTER_VOLUME` (4), `MASTER_VOLUME_MODE` (1), `MASTER_VOLUME_SAVED` (4), `USER_VOLUME` (4), `USER_MUTE` (1) | `MATRIX_ROUTE`, same length, new layout (6.5) | None |
@@ -1688,7 +1699,7 @@ These values have not changed since 1.1.6. They are what a client that checks ra
 | `CS.CAPS` capability version, type count, noun count | 22, 11, 81 | same |
 | Spectrum analyser version, bands, bass bands | 3, 37, 14 | same |
 | Signal generator version, signal types | 1, 15 | same |
-| `WireBulkParams` format version, length | 32, 6136 | 35, 6252 |
+| `WireBulkParams` format version, length | 32, 6136 | 35, 6284 |
 | `XPORT.STATUS` byte 4, transport framing version | 1 | 1 |
 
 New constants. The protocol major is 1 and the minor 0. A release build implements 12 pages, every page at revision 1. The largest SET payload is 64 bytes and the largest non-bulk reply 256 bytes.
@@ -1734,7 +1745,7 @@ Every request with a zero `wIndex` high byte is refused. USB STALLs at SETUP, UA
 | `0x98` | `STORE.OUTPUT_CONFIG_MODE` SET | Exactly 1 byte. A value above 1 stores 0 |
 | `0x52`, `0x53` | `STORE.OUTPUT_CONFIG_SAVE`, `STORE.FACTORY_RESET` | Zero-length SETs, no status byte |
 | `0x51` | None | Retired. Read `STORE.PRESET_ACTIVE`, then `STORE.PRESET_SAVE` to that slot |
-| `0xA1` | `STORE.ALL_PARAMS` SET | Any length other than 6252 STALLs at SETUP with `VC_ERR_LENGTH` (1.1.6 ACKed and ignored 64 bytes or fewer). A header the apply would refuse STALLs the status stage with `VC_ERR_VALUE` (1.1.6 ACKed and dropped it) |
+| `0xA1` | `STORE.ALL_PARAMS` SET | Any length other than 6284 STALLs at SETUP with `VC_ERR_LENGTH` (1.1.6 ACKed and ignored 64 bytes or fewer). A header the apply would refuse STALLs the status stage with `VC_ERR_VALUE` (1.1.6 ACKed and dropped it) |
 | `0xA2`, `0xA3` | `STORE.ALL_PARAMS_CHUNK` | Same semantics, USB only, chunk size 1 to the rest of the blob. Refusals now carry a reason (section 9.3) |
 
 `STORE.FACTORY_RESET` behaves exactly as `FACTORY_RESET` did, and its flags now state it (`DEFERRED`, `RESTART`, no `FLASH`). It resets the live state to factory defaults under a muted, synchronized output restart and switches the input to USB. It writes no flash. It keeps every stored preset, slot name and device-wide setting, keeps the active slot selected and keeps the master volume. In IO config mode 1 the IO configuration returns to firmware defaults, and in mode 0 the stored device-wide IO configuration is applied again. The host receives one `BULK_INVALIDATED` notification with source 4. To make the reset state permanent, save it to a preset afterwards.
@@ -1877,7 +1888,7 @@ The preview, Save and Revert model of Control Surfaces is unchanged. Preview SET
 
 ### 9.1 The blob grew
 
-`WireBulkParams` is format version 35 and 6252 bytes on both platforms. 1.1.6 shipped format version 32 at 6136 bytes. Version 35 appends a 116-byte `upmix2` section at offset 6136 for the upmixer profiles, zero on RP2040. Version 34 reused two input-config bytes as `spdif_rx_count` and `input_enable_p1` without changing any size. Every 1.1.6 section keeps its offset, the 16-byte header keeps its layout, and the `PARAM_CHANGED` offsets that refer to them are unchanged. The layout is in `Documentation/commands.md` sections 19.3 to 19.5.
+`WireBulkParams` is format version 36 and 6284 bytes on both platforms. 1.1.6 shipped format version 32 at 6136 bytes. Version 35 appends a 116-byte `upmix2` section at offset 6136 for the upmixer profiles, zero on RP2040. Version 36 appends a 32-byte `spatial` section at offset 6252 for the stereo spatializer, on both platforms. Version 34 reused two input-config bytes as `spdif_rx_count` and `input_enable_p1` without changing any size. Every 1.1.6 section keeps its offset, the 16-byte header keeps its layout, and the `PARAM_CHANGED` offsets that refer to them are unchanged. The layout is in `Documentation/commands.md` sections 19.3 to 19.5.
 
 A bulk SET must match the device's version and length exactly, so a host must regenerate its `WireBulkParams` struct, its length constant and its version check. A blob saved from 1.1.6 cannot be sent to 1.1.7 as it is.
 
@@ -1885,18 +1896,18 @@ A bulk SET must match the device's version and length exactly, so a host must re
 
 `STORE.ALL_PARAMS` (page `0x02`, command `0x40`, ID `0x0240`) replaces both `GET_ALL_PARAMS` (`0xA0`) and `SET_ALL_PARAMS` (`0xA1`).
 
-- **GET.** `wValue` 0. The device collects the live state when the request arrives and returns `min(wLength, 6252)` bytes. Over USB the reply goes out in 64-byte packets, so the host USB layer must accept a multi-packet control read, as before.
-- **SET.** `wValue` 0 and exactly 6252 bytes. The device checks the request in two steps.
+- **GET.** `wValue` 0. The device collects the live state when the request arrives and returns `min(wLength, 6284)` bytes. Over USB the reply goes out in 64-byte packets, so the host USB layer must accept a multi-packet control read, as before.
+- **SET.** `wValue` 0 and exactly 6284 bytes. The device checks the request in two steps.
 
 | When | Check | Result |
 |---|---|---|
-| SETUP | Length is not 6252 | `VC_ERR_LENGTH`. On UART and I2C a payload the transport cannot buffer is status `0x06` |
+| SETUP | Length is not 6284 | `VC_ERR_LENGTH`. On UART and I2C a payload the transport cannot buffer is status `0x06` |
 | SETUP | Another transport holds the bulk buffer, or an earlier bulk apply is pending | `VC_ERR_BUSY`. UART and I2C answer status `0x04` |
-| After the data | `format_version` is not 35, `payload_length` is not 6252, or `platform_id` or a channel count differs from the device | `VC_ERR_VALUE`, nothing applied |
+| After the data | `format_version` is not 36, `payload_length` is not 6284, or `platform_id` or a channel count differs from the device | `VC_ERR_VALUE`, nothing applied |
 
 The main loop then applies the blob under a muted, synchronized restart of every output and sends one `BULK_INVALIDATED` notification with source 2. As in 1.1.6, the bulk SET writes no flash, does not validate floats, and applies the physical IO configuration and the limiter only when `STORE.OUTPUT_CONFIG_MODE` is 1. There is no version tolerance. Send the version the device reports in the header of its own GET. Confirm the apply by reading `STORE.ALL_PARAMS` again after the busy window.
 
-A bridge or transport that recognised the bulk SET by `bRequest` `0xA1` must now recognise page `0x02`, command `0x40` instead, and its buffer must hold all 6252 bytes. Keyed on `0xA1`, it never recognises the 1.1.7 bulk SET and handles a 6252-byte payload as an ordinary request.
+A bridge or transport that recognised the bulk SET by `bRequest` `0xA1` must now recognise page `0x02`, command `0x40` instead, and its buffer must hold all 6284 bytes. Keyed on `0xA1`, it never recognises the 1.1.7 bulk SET and handles a 6284-byte payload as an ordinary request.
 
 What is new is the strictness. 1.1.6 ACKed and ignored a SET of 64 bytes or fewer, and ACKed a blob with a bad header and then dropped it silently. 1.1.7 refuses both and says why. A non-zero `wValue` is `VC_ERR_ADDRESS`.
 
@@ -1905,11 +1916,11 @@ What is new is the strictness. 1.1.6 ACKed and ignored a SET of 64 bytes or fewe
 WinUSB limits a control transfer to 4096 bytes, so USB hosts on Windows move the blob in pieces with `STORE.ALL_PARAMS_CHUNK` (page `0x02`, command `0x41`, ID `0x0241`). It replaces `GET_ALL_PARAMS_CHUNK` and `SET_ALL_PARAMS_CHUNK` (`0xA2`, `0xA3`) with the same semantics. `wValue` is the byte offset and `wLength` the chunk size, from 1 to the rest of the blob. It is USB only.
 
 - **Reading.** A GET at offset 0 takes the bulk buffer and snapshots the whole state. Later GETs read that snapshot at any offset. A GET with `wLength` 0 is `VC_ERR_LENGTH`. The session ends when a chunk that reaches the end of the blob completes, or when any other USB vendor request arrives.
-- **Writing.** Chunks must arrive in order. Offset 0 opens the session and takes the bulk buffer. Each later chunk must start where the previous one ended. When 6252 bytes have arrived, the header is checked as for `STORE.ALL_PARAMS` and the apply is queued. Any other USB vendor request closes the session and discards what was received.
+- **Writing.** Chunks must arrive in order. Offset 0 opens the session and takes the bulk buffer. Each later chunk must start where the previous one ended. When 6284 bytes have arrived, the header is checked as for `STORE.ALL_PARAMS` and the apply is queued. Any other USB vendor request closes the session and discards what was received.
 
 | Refusal | Result |
 |---|---|
-| Offset at or past 6252 | `VC_ERR_ADDRESS` |
+| Offset at or past 6284 | `VC_ERR_ADDRESS` |
 | A SET chunk that runs past the end, or a zero-length chunk | `VC_ERR_LENGTH` |
 | A chunk with no open session, or a SET chunk at the wrong offset | `VC_ERR_STATE`. Restart at offset 0. A SET refused for its offset keeps the session, so the right offset can be resent |
 | The bulk buffer is held elsewhere when offset 0 arrives | `VC_ERR_BUSY` |
@@ -1919,7 +1930,7 @@ In 1.1.6 these failures were STALLs with no reason. Now each carries a result co
 
 ### 9.4 UART and I2C
 
-Over UART and I2C, `STORE.ALL_PARAMS` streams through the same bulk buffer under the same lock, in one GET response or one SET request, exactly as in 1.1.6. `STORE.ALL_PARAMS_CHUNK` is refused there with `VC_ERR_BLOCKED`. Over I2C a 6252-byte reply is read out in pieces, and a parked reply that is not read for 1 s is dropped. See `Documentation/Features/control_interfaces_spec.md` sections 3.7 and 4.7 for wire times.
+Over UART and I2C, `STORE.ALL_PARAMS` streams through the same bulk buffer under the same lock, in one GET response or one SET request, exactly as in 1.1.6. `STORE.ALL_PARAMS_CHUNK` is refused there with `VC_ERR_BLOCKED`. Over I2C a 6284-byte reply is read out in pieces, and a parked reply that is not read for 1 s is dropped. See `Documentation/Features/control_interfaces_spec.md` sections 3.7 and 4.7 for wire times.
 
 ---
 
@@ -1950,7 +1961,7 @@ The `wIndex` page check (`tools/windex_page_test.py`) passes on macOS with firmw
 
 - **Binding.** The Microsoft OS 2.0 descriptor still binds WinUSB to interface 2 with no driver install. Its request (IN, `bRequest` `0x01`, `wIndex` 7) is not part of the protocol and is answered as before.
 - **The page byte.** For an interface-recipient request, WinUSB overwrites the **low** byte of `wIndex` with the interface number of the handle you send on, and leaves the high byte alone. The page rides in the high byte, so it should reach the device unchanged. Send `wIndex = (page << 8) | 2` on the interface 2 handle.
-- **Transfer size.** WinUSB limits a control transfer to 4096 bytes. Use `STORE.ALL_PARAMS_CHUNK` (9.3) for the 6252-byte blob, with chunks of at most 4096 bytes. Every other reply is at most 256 bytes, except `MEAS.RTA_BANDS_ALL` at 82 bytes per live channel, which stays well under 4096.
+- **Transfer size.** WinUSB limits a control transfer to 4096 bytes. Use `STORE.ALL_PARAMS_CHUNK` (9.3) for the 6284-byte blob, with chunks of at most 4096 bytes. Every other reply is at most 256 bytes, except `MEAS.RTA_BANDS_ALL` at 82 bytes per live channel, which stays well under 4096.
 - **Confirming the page byte on your setup.** The repository does not yet record a Windows run of the page check. `tools/windex_page_test.py` sends harmless refused requests to several pages and reads `SYS.LAST_RESULT` after each one to confirm the device saw the page byte intact, for interface and device recipients. It needs Python and a DSPi on 1.1.7. Run it once on your Windows setup before relying on the page byte, following `Documentation/Features/windex_page_test.md`. If it fails for interface recipients and passes for device recipients, send device-recipient requests (`0xC0` and `0x40`), which the firmware also accepts.
 
 ### 11.3 USB on Linux (libusb, usbfs)
@@ -2052,7 +2063,7 @@ Device -> host   A5 82 13 00 00 A3 AE
 
 A 1.1.6-era client that leaves the `wIndex` high byte at 0 gets status `0x10` for everything. For the probe with page 0 the answer is `A5 82 10 00 00 F3 F7`. A USB-only SET such as `XPORT.UART_CONFIG` sent over the UART is answered `A5 81 16 00 00 8F DE`.
 
-**Sizes.** SET payloads are at most 64 bytes. GET replies are at most 256 bytes and arrive whole, except `STORE.ALL_PARAMS`, which streams 6252 bytes. 1.1.6 limited UART and I2C replies to 132 bytes, so a receive buffer sized for 132 must grow to 256. The largest fixed-length reply is still `CS.MACRO` at 132 bytes. `MEAS.RTA_BINS` returns up to 256 bytes per read. `wLength` caps the reply as on USB, and `wLength` 0 means "the whole reply".
+**Sizes.** SET payloads are at most 64 bytes. GET replies are at most 256 bytes and arrive whole, except `STORE.ALL_PARAMS`, which streams 6284 bytes. 1.1.6 limited UART and I2C replies to 132 bytes, so a receive buffer sized for 132 must grow to 256. The largest fixed-length reply is still `CS.MACRO` at 132 bytes. `MEAS.RTA_BINS` returns up to 256 bytes per read. `wLength` caps the reply as on USB, and `wLength` 0 means "the whole reply".
 
 **USB-only commands** answer `VC_ERR_BLOCKED` (`0x16`) over UART. They are the `XPORT.UART_CONFIG` and `XPORT.I2C_CONFIG` SETs, both directions of `STORE.ALL_PARAMS_CHUNK` and `MEAS.RTA_BANDS_ALL`. `SYS.COMMAND_INFO` flag bits 0 and 1 mark them.
 
@@ -2965,7 +2976,7 @@ With today's sync order, an unprobed sync against 1.1.6 stops at its first reque
 - Port from `release/v1.1.6`. The branches `room-correction`, `room_correction_poles`, `room_correction_scheduled_fit` and `zero2w` add protocol reads of their own and need the same port when they are rebased. The `overclock` branch sends 0x40 and 0x41 for the system clock, which have no command in 1.1.7 beta 1, so it cannot be ported yet.
 - Vendor a copy of `Documentation/protocol/dspi_commands.json` from the firmware tag you pair with, and generate the command constants from it (13.2.5). Never hand-copy numbers again.
 - Coordinate the Link changes (13.2.8) with the DSPi Link appendix (13.3). The Console embeds the same `commands.json` policy table and frame format as the other hubs and clients.
-- The bulk blob parser (`fetchAllParams`, `WireBulkParams`) must move from version 32 and 6136 bytes to version 35 and 6252 bytes (section 9.1).
+- The bulk blob parser (`fetchAllParams`, `WireBulkParams`) must move from version 32 and 6136 bytes to version 36 and 6284 bytes (section 9.1).
 - These stay exactly as they are. The hub's `SnapshotCache`, the notification path (`USBNotificationReader`, `applyNotifiedParamChange`, `InterruptMonitor`), `FirmwareVersion.fromPlatformReply` (`SYS.PLATFORM` has the same 7 bytes), CoreAudio streaming, and the Link frame wire format, which already carries a 16-bit `wIndex` (`Link/LinkFrames.swift`).
 - The "USB Protocol" section of the Console's own `CLAUDE.md` still describes 1.1.6 opcodes. Rewrite it from this guide once the port lands.
 
@@ -3130,7 +3141,7 @@ OUT    type bypass qp(u16) freq(f32) Q(f32) gain(f32)
 | `fetchPresetStartup` (dead) | `count >= 3`, last active slot at byte 2 | `STORE.STARTUP`, 2 bytes | Delete. The last active slot is byte 4 of `STORE.DIRECTORY` (7 bytes) |
 | `SpectrumAnalyser.fetchCaps` centre loop | stops on a short chunk or a STALL | `MEAS.RTA_BAND_CENTRES`, 0-based index | A chunk past the table is `VC_ERR_ADDRESS`, which the loop already treats as the end |
 
-These checks still hold and need no change. They are the exact 32 of `SYS.DEVICE_NAME` (`USBHubDevice.readInfo`, `fetchDeviceName`) and `INPUT.SOURCE_NAME`, `MEAS.LEVELS` at `2N + 7` (21 on RP2040, 41 on RP2350), byte 0 equal to 3 in the analyser's config, status and bin frames, `CS.STATUS` at 41, `CS.CAPS` at 52 (the Console asks for 64 and parses by type count), `SYS.BUFFER_STATS` at 44, `OUTPUT.LATENCY_STATUS` at 12 and `INPUT.SPDIF_RX_CONFIG` at 6. `MEAS.RTA_BINS` answers at most 256 bytes per request, which `readBinFrame` already handles by reading on from the returned offset. The `STORE.ALL_PARAMS` check of `count >= 6136` with byte 0 equal to 32 must change. The blob is now 6252 bytes with byte 0 equal to 35 (section 9.1).
+These checks still hold and need no change. They are the exact 32 of `SYS.DEVICE_NAME` (`USBHubDevice.readInfo`, `fetchDeviceName`) and `INPUT.SOURCE_NAME`, `MEAS.LEVELS` at `2N + 7` (21 on RP2040, 41 on RP2350), byte 0 equal to 3 in the analyser's config, status and bin frames, `CS.STATUS` at 41, `CS.CAPS` at 52 (the Console asks for 64 and parses by type count), `SYS.BUFFER_STATS` at 44, `OUTPUT.LATENCY_STATUS` at 12 and `INPUT.SPDIF_RX_CONFIG` at 6. `MEAS.RTA_BINS` answers at most 256 bytes per request, which `readBinFrame` already handles by reading on from the returned offset. The `STORE.ALL_PARAMS` check of `count >= 6136` with byte 0 equal to 32 must change. The blob is now 6284 bytes with byte 0 equal to 35 (section 9.1).
 
 **Status polling moves to the struct commands.** The view model reads selector 9 every 60 ms while connected, and selector 15 every 16th tick (about 1 s). Once the System Statistics window has been opened, `StatsViewModel` keeps polling for the rest of the session, with the rows below every 2 s and `SYS.BUFFER_STATS` every 60 ms.
 
@@ -3245,7 +3256,7 @@ Inputs for the regenerated policy are `Documentation/protocol/dspi_commands.json
 
 These stay exactly as they are. The binary frame header and every frame layout, including the unused reserved byte at CMD offset 7. The JSON control plane apart from the fields above. The UART framing, CRC, resync, quarantine and timeout code in `bridge/esp32/components/dspi_frame` and `dspi_uart/dspi_link.c`. Notification relay and origin attribution, because v2 packets did not change (section 10). The platform decoders, because `SYS.PLATFORM` kept the 1.1.6 layout (4.6).
 
-The bulk header parsing in `hub_device.c` and the TypeScript bulk decoders must change. The blob is now format 35 and 6252 bytes, where 1.1.6 had format 32 and 6136 bytes (9.1).
+The bulk header parsing in `hub_device.c` and the TypeScript bulk decoders must change. The blob is now format 36 and 6284 bytes, where 1.1.6 had format 32 and 6136 bytes (9.1).
 
 #### 13.3.3 Transport and choke points
 
@@ -3297,7 +3308,7 @@ A Console hub runs the same probe in its own attach path (13.2). The spec must a
 |---|---|---|
 | Bridge identity and heartbeat (`dspi_link.c`) | 0xF9 `GET_CTRL_IFACE_STATUS`, 0x7E `GET_SERIAL`, 0x7F `GET_PLATFORM`, 0xF6 `GET_UART_CONFIG`, 0x57 `GET_DEVICE_NAME` | `XPORT.STATUS`, `SYS.SERIAL`, `SYS.PLATFORM`, `XPORT.UART_CONFIG` GET, `SYS.DEVICE_NAME` GET |
 | Bridge rename and adoption (`hub_device.c`) | 0x56 `SET_DEVICE_NAME` | `SYS.DEVICE_NAME` SET, 1 to 32 bytes. The 32-byte zero-padded payload is still valid |
-| Bridge snapshot (`hub_device.c`), web bulk read (`page.ts`), `link_conformance.mjs` | 0xA0 `GET_ALL_PARAMS` | `STORE.ALL_PARAMS` GET, 6252 bytes |
+| Bridge snapshot (`hub_device.c`), web bulk read (`page.ts`), `link_conformance.mjs` | 0xA0 `GET_ALL_PARAMS` | `STORE.ALL_PARAMS` GET, 6284 bytes |
 | Web volume (`volume.ts`), `link_smoke.mjs` | 0xD2 `SET_MASTER_VOLUME`, 0xD3 `GET_MASTER_VOLUME` | `ROUTE.MASTER_VOLUME`, 4 bytes both ways, one command number for both directions |
 | Analyser reads the bridge recognises (`hub_commands.c`) | 0x0B `RTA_GET_BANDS`, 0x0C `RTA_GET_BINS`, 0x0F `RTA_GET_BANDS_ALL` | `MEAS.RTA_BANDS`, `MEAS.RTA_BINS`, `MEAS.RTA_BANDS_ALL` (USB only) |
 
@@ -3305,7 +3316,7 @@ A Console hub runs the same probe in its own attach path (13.2). The spec must a
 
 1. **Meter frame.** 0x50 `GET_STATUS` with `wValue` 9 becomes `MEAS.LEVELS` (`0x0910`) with `wValue` **0**. A non-zero `wValue` on a command that addresses nothing is `VC_ERR_ADDRESS` (5.5). The reply is the same `2N + 7` bytes. Change the bridge's `submit_status_read` (`STATUS_COMBINED_FRAME`), the web poll in `page.ts` (`STATUS_WVALUE_COMBINED`), `link_smoke.mjs` and `link_conformance.mjs`. A poll becomes `{"req": 16, "val": 0, "idx": 2306, "len": 41}`.
 2. **Analyser control.** 0x0E `RTA_CONTROL` was a GET with the action in `wValue`. It is now three zero-length SETs, `MEAS.RTA_STOP` (`0x0929`), `MEAS.RTA_START` (`0x0928`) and `MEAS.RTA_RESET` (`0x092A`), with `wValue` 0 (6.4). `rta_stop_swallowed` and `is_rta_read` in `hub_commands.c` must key on these IDs and on the `KEEPALIVE` reads, `MEAS.RTA_BANDS`, `MEAS.RTA_BINS` and `MEAS.RTA_BANDS_ALL`. The swallowed STOP must be answered `OK` with **no payload**, because a SET response carries none. Today `answer_swallowed_stop` and `release_deferred_acks` send the byte `01`.
-3. **Bulk SET.** 0xA1 `SET_ALL_PARAMS` becomes the `STORE.ALL_PARAMS` SET (`0x0240`), exactly 6252 bytes, else `VC_ERR_LENGTH` (9.2). `admission_status` and `enqueue_command` exempt 0xA1 from the 64-byte cap and route it to `bulk_set_buffer` (8192 bytes, so the blob fits). Key both on ID `0x0240` and change them together (13.3.8). Do not key them on the registry `BULK` flag. That would also admit `STORE.ALL_PARAMS_CHUNK` SETs of up to 8192 bytes, which the device refuses on UART with `0x16` only after the bridge has spent about 80 ms of the link sending them.
+3. **Bulk SET.** 0xA1 `SET_ALL_PARAMS` becomes the `STORE.ALL_PARAMS` SET (`0x0240`), exactly 6284 bytes, else `VC_ERR_LENGTH` (9.2). `admission_status` and `enqueue_command` exempt 0xA1 from the 64-byte cap and route it to `bulk_set_buffer` (8192 bytes, so the blob fits). Key both on ID `0x0240` and change them together (13.3.8). Do not key them on the registry `BULK` flag. That would also admit `STORE.ALL_PARAMS_CHUNK` SETs of up to 8192 bytes, which the device refuses on UART with `0x16` only after the bridge has spent about 80 ms of the link sending them.
 4. **Write tracking and retries.** `enqueue_command` sets `writes = !is_get || class_ != LINK_CLASS_READ` and `may_retry = is_get && class_ == LINK_CLASS_READ`. With no write-as-reads left these become `writes = !is_get` and `may_retry = is_get`. Under the old table, 111 paged GETs class as non-read, so they would claim other sessions' notification origins, mark the snapshot stale and lose their retry.
 5. **The policy table.** All 246 rows of `policy/commands.json` are keyed by 1.1.6 opcode. Regenerate it with the rule below, rewrite `bridge/esp32/tools/gen_policy.py` to emit it, and change `link_policy_class` to take the page.
 6. **The enabling command** the user runs in Console (spec 9.2, bridge spec 5) is now the `XPORT.UART_CONFIG` SET. It is still refused on UART, now with `0x16 VC_ERR_BLOCKED`.
@@ -3358,7 +3369,7 @@ Three SETs cannot be derived and need a human decision.
 | UART config | `dspi_link_read_identity` | Exactly 8 bytes | `XPORT.UART_CONFIG`, 8 bytes, same layout |
 | Board name | `dspi_link_read_identity` | Exactly 32 bytes, else old firmware | `SYS.DEVICE_NAME`, 32 bytes on every build |
 | Meter frame | `hub.h` snapshot buffer, `decodeStatusFrame` | `2N + 7`, at most 132 | `MEAS.LEVELS`, 21 bytes on RP2040, 41 on RP2350 |
-| Bulk blob | snapshot, web `isSupportedBulkVersion` | 6136 bytes, format 30 to 32 | 6252 bytes, format 35 (9.1) |
+| Bulk blob | snapshot, web `isSupportedBulkVersion` | 6136 bytes, format 30 to 32 | 6284 bytes, format 36 (9.1) |
 | Volume read | `readDeviceVolume` in `volume.ts` | At least 4 bytes | `ROUTE.MASTER_VOLUME`, 4 bytes |
 | Largest non-bulk reply | `DSPI_UART_MAX_GET_REPLY_BYTES` 132, event pool small buffers | 132 bytes | 256 bytes. `MEAS.RTA_BINS` returns up to 256 per request (7.3) |
 | Swallowed analyser STOP | `answer_swallowed_stop`, `release_deferred_acks` | `OK` + `01` | `OK`, length 0 |
@@ -3407,7 +3418,7 @@ The same carry-over is wrong in the other direction for 187 pairs, and those bre
 
 **A full ID table does not fit the ESP32.** A table indexed by every 16-bit ID is 128 KB. Emit a sorted array of `{id, SET class, GET class}` (211 rows) and search it, with a missing ID answering `config`.
 
-**The bulk cap and the bulk buffer must move together.** `hub_pending_t.payload` in `hub/include/hub.h` is 64 bytes. If `admission_status` lets a 6252-byte SET past the 64-byte cap but `enqueue_command` does not route it to `bulk_set_buffer`, the `memcpy` overflows the pending entry.
+**The bulk cap and the bulk buffer must move together.** `hub_pending_t.payload` in `hub/include/hub.h` is 64 bytes. If `admission_status` lets a 6284-byte SET past the 64-byte cap but `enqueue_command` does not route it to `bulk_set_buffer`, the `memcpy` overflows the pending entry.
 
 **A paged request must never reach a 1.1.6 device.** A hub that keeps a 1.1.6 device attached, as a Console hub does to offer a firmware update, must refuse every CMD whose `wIndex` high byte is not 0 for that handle. Otherwise a paged read such as `ROUTE.MASTER_VOLUME_SAVED` runs 0x53 `FACTORY_RESET` there (4.1).
 
@@ -3434,7 +3445,7 @@ Tests to change.
 - `test_dspi_frame.c` checks the 1.1.6 worked frame with CRC `CF 6D`. Use the 1.1.7 example `A5 01 50 00 00 00 05 04 00 00 00 A0 C1 71 3D` from `Documentation/Features/control_interfaces_spec.md`.
 - `test_link_policy.c` and `js/packages/dspi-link/test/policy.test.ts` assert codes 0 to 255, spec version `"1.1"` and the 0x81 row. Assert unique IDs instead, and add one test per escalation row that it is `config`.
 - Fixtures `cmd_request_set_master_volume.bin`, `cmd_request_get_platform.bin`, `poll_subscribe.json`, `auth_ok.json` and the `spec_version` in `frames.json` take the bytes of 13.3.5. `bulk_v32.bin`, `status_wvalue9.bin` and `platform.bin` stay valid as payloads.
-- On hardware, check that the bridge attaches a 1.1.7 RP2040 and RP2350, that it refuses a 1.1.6 board with the update message, and that a `control` session gets `0x81 DENIED` for `SYS.ENTER_BOOTLOADER` and `STORE.FACTORY_RESET`. Check too that two sessions share the analyser and that a 6252-byte `STORE.ALL_PARAMS` SET round-trips through the bridge.
+- On hardware, check that the bridge attaches a 1.1.7 RP2040 and RP2350, that it refuses a 1.1.6 board with the update message, and that a `control` session gets `0x81 DENIED` for `SYS.ENTER_BOOTLOADER` and `STORE.FACTORY_RESET`. Check too that two sessions share the analyser and that a 6284-byte `STORE.ALL_PARAMS` SET round-trips through the bridge.
 
 ### 13.4 DSPi Terminal
 
@@ -3458,7 +3469,7 @@ Tests to change.
 - Add `serde_json` to `[build-dependencies]` of `crates/dspi-proto`. It is already a workspace dependency. The current note in that `Cargo.toml`, saying the build script is dependency free, has to go.
 - Keep two devices to hand, one on 1.1.6 and one on 1.1.7, and both platforms if you can.
 
-The bulk blob codec (`crates/dspi-proto/src/wire.rs`, generated section offsets) must be regenerated from version 32 and 6136 bytes to version 35 and 6252 bytes (section 9.1). These stay exactly as they are. The notification parser (`crates/dspi-session/src/notify.rs`), the USB identity constants, `bmRequestType`, the 1024-byte chunking of the blob, the `.dspipreset` and filter-file formats, and the command grammar. Users keep typing `vol.user` and `eq.freq`. The undo journal, the write gate and the dry-run log are keyed by parameter path, so they survive unchanged.
+The bulk blob codec (`crates/dspi-proto/src/wire.rs`, generated section offsets) must be regenerated from version 32 and 6136 bytes to version 36 and 6284 bytes (section 9.1). These stay exactly as they are. The notification parser (`crates/dspi-session/src/notify.rs`), the USB identity constants, `bmRequestType`, the 1024-byte chunking of the blob, the `.dspipreset` and filter-file formats, and the command grammar. Users keep typing `vol.user` and `eq.freq`. The undo journal, the write gate and the dry-run log are keyed by parameter path, so they survive unchanged.
 
 #### 13.4.3 Transport and choke points
 
@@ -3589,7 +3600,7 @@ These are the non-mechanical items, exhaustively.
 
 These stay strict and correct. `SYS.PLATFORM` is 7 bytes in the same layout, and `MEAS.LEVELS` is `2 x channels + 7` bytes (41 on RP2350, 21 on RP2040) with identical bytes. `CS.STATUS` is 41, `CS.CAPS` 52, `CS.AUX_ALL` 48, `SYS.SERIAL` 16, `SYS.BUILD_INFO` 64 and `SYS.BUFFER_STATS` 44. `FX.SUBHARM_METER` and `DYN.LIMITER_METERS` are one u16 per output (18 or 10 bytes).
 
-The blob checks in `read_bulk_from` and `crates/dspi-proto/src/wire.rs` (byte 0 equal to 32, 6136 bytes) must change to byte 0 equal to 35 and 6252 bytes (9.1).
+The blob checks in `read_bulk_from` and `crates/dspi-proto/src/wire.rs` (byte 0 equal to 32, 6136 bytes) must change to byte 0 equal to 35 and 6284 bytes (9.1).
 
 #### 13.4.7 Errors, status and busy handling
 

@@ -13,7 +13,7 @@ from ..helpers import expect_stall, reached, require_page, settle
 
 STORE = 0x02
 PRESET_SLOTS = 10
-BULK_LEN = 6252
+BULK_LEN = 6284
 CHUNK = 2048
 
 
@@ -194,10 +194,10 @@ def all_params_set_guards(dev, profile, chk):
 def chunk_errors(dev, profile, chk):
     """Chunk offsets past the struct, overruns, out-of-order SETs and reads without a snapshot are refused."""
     require_page(dev, STORE)
-    expect_stall(chk, lambda: dev.pget("STORE.ALL_PARAMS_CHUNK", BULK_LEN, 64), "VC_ERR_ADDRESS", "GET at 6252")
+    expect_stall(chk, lambda: dev.pget("STORE.ALL_PARAMS_CHUNK", BULK_LEN, 64), "VC_ERR_ADDRESS", "GET at 6284")
     expect_stall(chk, lambda: dev.pget("STORE.ALL_PARAMS_CHUNK", 64, 64), "VC_ERR_STATE", "GET at 64, no session")
     expect_stall(chk, lambda: dev.pset("STORE.ALL_PARAMS_CHUNK", b"\x00", BULK_LEN), "VC_ERR_ADDRESS",
-                 "SET at 6252")
+                 "SET at 6284")
     expect_stall(chk, lambda: dev.pset("STORE.ALL_PARAMS_CHUNK", bytes(64), BULK_LEN - 32), "VC_ERR_LENGTH",
                  "SET past the end")
     expect_stall(chk, lambda: dev.pset("STORE.ALL_PARAMS_CHUNK", bytes(64), 64), "VC_ERR_STATE",

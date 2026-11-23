@@ -1,6 +1,6 @@
 """
 Native paged tests for the FX page (plan section 5.8): crossfeed, subharmonic synth, psychoacoustic
-bass, tube and the RP2350 upmixer. Every effect is switched off, with its output mask cleared, while
+bass, tube, the spatializer and the RP2350 upmixer. Every effect is switched off, with its output mask cleared, while
 its enable bit is exercised, and every test puts back what it changed. The upmixer enable is never toggled.
 """
 
@@ -66,6 +66,16 @@ SCALARS = [
     ("PSYBASS_ORIGINAL", "f32", (-12.0, -3.0),
      [(-70.0, -60.0), (1.0, 0.0)]),
     ("PSYBASS_MASK", "u16", (0x0003, 0x0040), []),
+    ("SPATIAL_ENABLE", "bool", (1, 0), [(4, 1)]),
+    ("SPATIAL_MODE", "u8", (1, 0), []),
+    ("SPATIAL_PAIRS", "u8", (1, 2), []),
+    ("SPATIAL_WIDTH", "f32", (150.0, 80.0), [(-5.0, 0.0), (250.0, 200.0)]),
+    ("SPATIAL_BASS_WIDTH", "f32", (175.0, 40.0), [(-1.0, 0.0), (300.0, 200.0)]),
+    ("SPATIAL_SHELF", "f32", (300.0, 1200.0), [(20.0, 100.0), (5000.0, 1500.0)]),
+    ("SPATIAL_SPAN", "f32", (15.0, 25.0), [(1.0, 5.0), (90.0, 30.0)]),
+    ("SPATIAL_ATTEN", "f32", (6.0, 12.0), [(0.0, 2.5), (40.0, 20.0)]),
+    ("SPATIAL_MID", "f32", (50.0, 0.0), [(-10.0, 0.0), (150.0, 100.0)]),
+    ("SPATIAL_TRIM", "f32", (-3.0, -6.5), [(5.0, 0.0), (-30.0, -12.0)]),
 ]
 SCALAR = {s[0]: s for s in SCALARS}
 
@@ -107,6 +117,7 @@ GUARDS = {
     "subharm": ("SUBHARM_ENABLE", "SUBHARM_MASK", _u16(0)),
     "psybass": ("PSYBASS_ENABLE", "PSYBASS_MASK", _u16(0)),
     "tube": ("TUBE_ENABLE", "TUBE_OUTPUT_MASK", _f32(0.0)),
+    "spatial": ("SPATIAL_ENABLE", "SPATIAL_PAIRS", _u8(0)),
 }
 
 
@@ -469,3 +480,52 @@ def fx_upmix_roundtrip(dev, profile, chk):
             pass
     chk.eq(_get(dev, "UPMIX_CONFIG"), cfg, "upmix config restored")
     chk.eq(_save(dev, names), saved, "every upmix parameter restored")
+
+
+SPATIAL_FIELDS = "<BBBBfffffff"     # SpatialConfigPacket, spec 8.2
+
+
+@test("paged_fx", mutating=True)
+def fx_spatial_config(dev, profile, chk):
+    """SPATIAL_CONFIG agrees with the SPATIAL_* parameters, round-trips, masks the pair mask and refuses bad modes and NaN."""
+    require_page(dev, FX)
+    names = [s[0] for s in SCALARS if s[0].startswith("SPATIAL_")]
+    cfg = _get(dev, "SPATIAL_CONFIG")
+    saved = _save(dev, names)
+    if not chk.eq(len(cfg), 32, "SPATIAL_CONFIG length"):
+        return
+    f = struct.unpack(SPATIAL_FIELDS, cfg)
+    chk.eq(f[3], 0, "SPATIAL_CONFIG reserved byte reads 0")
+    want = [saved[n][0] for n in names[:3]] + [struct.unpack("<f", saved[n])[0] for n in names[3:]]
+    chk.eq(list(f[:3]) + list(f[4:]), want, "SPATIAL_CONFIG fields == SPATIAL_* parameters")
+    pmask = (1 << profile.num_spdif) - 1
+    try:
+        mod = struct.pack(SPATIAL_FIELDS, 0, 1, 0xFF, 0x5A, 110.0, 90.0, 400.0, 22.0, 5.0, 60.0, -2.0)
+        chk.no_stall(lambda: _set(dev, "SPATIAL_CONFIG", mod), "SPATIAL_CONFIG SET")
+        back = _get(dev, "SPATIAL_CONFIG")
+        chk.eq(back, struct.pack(SPATIAL_FIELDS, 0, 1, pmask, 0, 110.0, 90.0, 400.0, 22.0, 5.0, 60.0, -2.0),
+               f"config reads back with the mask cut to {pmask:#x} and reserved zero")
+        chk.eq(_get(dev, "SPATIAL_SPAN"), _f32(22.0), "SPATIAL_SPAN follows the config")
+        clamp = struct.pack(SPATIAL_FIELDS, 0, 0, 1, 0, 999.0, -9.0, 9.0, 99.0, 1.0, 500.0, 6.0)
+        _set(dev, "SPATIAL_CONFIG", clamp)
+        chk.eq(_get(dev, "SPATIAL_CONFIG"),
+               struct.pack(SPATIAL_FIELDS, 0, 0, 1, 0, 200.0, 0.0, 100.0, 30.0, 2.5, 100.0, 0.0),
+               "out-of-range config fields clamp")
+        _set(dev, "SPATIAL_PAIRS", _u8(0xFF))
+        chk.eq(_get(dev, "SPATIAL_PAIRS"), _u8(pmask), f"SPATIAL_PAIRS 0xFF reads back {pmask:#x}")
+        before = _get(dev, "SPATIAL_CONFIG")
+        expect_stall(chk, lambda: _set(dev, "SPATIAL_MODE", _u8(2)), "VC_ERR_VALUE", "SPATIAL_MODE 2")
+        bad = bytearray(before)
+        bad[1] = 2
+        expect_stall(chk, lambda: _set(dev, "SPATIAL_CONFIG", bytes(bad)), "VC_ERR_VALUE", "SPATIAL_CONFIG mode 2")
+        for off, field in ((4, "width"), (16, "span"), (28, "trim")):
+            for raw, label in ((_f32(math.nan), "NaN"), (_f32(math.inf), "infinity")):
+                bad = before[:off] + raw + before[off + 4:]
+                expect_stall(chk, lambda: _set(dev, "SPATIAL_CONFIG", bad), "VC_ERR_VALUE", f"{label} {field}")
+        chk.eq(_get(dev, "SPATIAL_CONFIG"), before, "refused SETs changed nothing")
+        for n in (31, 33):
+            expect_stall(chk, lambda: _set(dev, "SPATIAL_CONFIG", bytes(n)), "VC_ERR_LENGTH", f"{n}-byte SPATIAL_CONFIG")
+    finally:
+        _set(dev, "SPATIAL_CONFIG", cfg)
+    chk.eq(_get(dev, "SPATIAL_CONFIG"), cfg, "spatial config restored")
+    chk.eq(_save(dev, names), saved, "every spatial parameter restored")

@@ -22,6 +22,7 @@
 #include "adat_output.h"
 #include "upmix.h"     // upmix_config / upmix_update_pending (RP2350; header body #if-guarded)
 #include "tube.h"      // tube_config / tube_update_pending
+#include "spatial.h"   // spatial codec / spatial_update_pending
 #include "limiter.h"   // limiter_config / limiter_update_pending
 #include "notify.h"
 #include "vc_pins.h"
@@ -61,8 +62,12 @@ _Static_assert(offsetof(WireBulkParams, limiter) == 6028,
 _Static_assert(sizeof(WireUpmixV2Params) == 116, "V35 upmixer v2 section must be 116 bytes");
 _Static_assert(offsetof(WireBulkParams, upmix2) == 6136,
                "V35 upmixer v2 section must sit at wire offset 6136");
-_Static_assert(sizeof(WireBulkParams) == 6252,
-               "V35 wire total must be 6252 bytes");
+_Static_assert(sizeof(WireSpatialParams) == 32 && sizeof(WireSpatialParams) == sizeof(SpatialConfigPacket),
+               "V36 spatializer section must be 32 bytes, layout-identical to SpatialConfigPacket");
+_Static_assert(offsetof(WireBulkParams, spatial) == 6252,
+               "V36 spatializer section must sit at wire offset 6252");
+_Static_assert(sizeof(WireBulkParams) == 6284,
+               "V36 wire total must be 6284 bytes");
 _Static_assert(NUM_OUTPUT_CHANNELS <= WIRE_MAX_OUTPUT_CHANNELS, "limiter wire records");
 #if PICO_RP2350
 // upmix_notify_config() and collect/apply map packet offsets onto these sections.
@@ -356,6 +361,13 @@ void bulk_params_collect(WireBulkParams *out) {
         out->limiter.outputs[k].link_group   = limiter_config[k].link_group;
         out->limiter.outputs[k].threshold_db = limiter_config[k].threshold_db;
         out->limiter.outputs[k].release_ms   = limiter_config[k].release_ms;
+    }
+
+    // Stereo spatializer (V36+), both platforms.
+    {
+        SpatialConfigPacket sp;
+        spatial_config_to_packet(&sp);
+        memcpy(&out->spatial, &sp, sizeof(sp));
     }
 
     // Stereo upmixer (V25+).  RP2350 only; the whole section (including reserved)
@@ -712,6 +724,14 @@ int bulk_params_apply(const WireBulkParams *in, bool apply_pins) {
     tube_config.mix_pct      = in->tube.mix_pct;
     tube_config.trim_db      = in->tube.trim_db;
     tube_update_pending = true;
+
+    // Stereo spatializer (V36+), both platforms; the codec sanitizes and masks the pairs.
+    {
+        SpatialConfigPacket sp;
+        memcpy(&sp, &in->spatial, sizeof(sp));
+        spatial_packet_to_config(&sp);
+        spatial_update_pending = true;
+    }
 
     // Output limiter (V32+).  Follows output_config_mode like the pins: in
     // INDEPENDENT mode a bulk push leaves the device-global settings alone.

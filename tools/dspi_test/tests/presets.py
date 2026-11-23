@@ -223,3 +223,34 @@ def upmix_profiles_persist(dev, profile, chk):
                  lambda: _drop_scratch(dev, scratch) if saved else None,
                  lambda: push_bulk(dev, live))
 
+
+
+@test("presets", mutating=True, flash=4)
+def spatial_persists(dev, profile, chk):
+    """The spatializer config survives a preset save and load (slot V43) and travels in STORE.ALL_PARAMS (wire V36)."""
+    scratch = _scratch_slot(dev)
+    if scratch is None:
+        chk.note("all preset slots occupied, skipping the spatializer persistence test")
+        return
+    live = read_bulk(dev, profile)
+    orig_active = dev.pget_u8("STORE.PRESET_ACTIVE")
+    image = lambda: bytes(dev.pget("FX.SPATIAL_CONFIG"))
+    saved = False
+    try:
+        want_cfg = struct.pack("<BBBBfffffff", 0, 1, 0x01, 0, 140.0, 90.0, 450.0, 17.5, 4.5, 70.0, -1.5)
+        dev.pset("FX.SPATIAL_CONFIG", want_cfg)
+        want = image()
+        chk.eq(want, want_cfg, "spatial config set")
+        chk.eq(read_bulk(dev, profile)[6252:6284], want, "STORE.ALL_PARAMS carries the config at offset 6252")
+        dev.pset("STORE.PRESET_SAVE", b"", scratch)
+        saved = True
+        chk.eq(wait_for(lambda: _slot_used(dev, scratch), 1), 1, "scratch preset saved")
+        dev.pset("FX.SPATIAL_SPAN", struct.pack("<f", 9.0))
+        dev.pset("FX.SPATIAL_MODE", b"\x00")
+        chk.ok(image() != want, "live config changed before the load")
+        _load(dev, scratch)
+        chk.eq(image(), want, "the spatializer config comes back from the preset")
+    finally:
+        _run_all(lambda: _load(dev, orig_active),
+                 lambda: _drop_scratch(dev, scratch) if saved else None,
+                 lambda: push_bulk(dev, live))

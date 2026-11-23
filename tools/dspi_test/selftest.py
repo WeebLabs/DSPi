@@ -253,7 +253,9 @@ for fs in (44100, 96000, 32000):
 
 print("13. every test body is registered at every rate")
 from tools.dspi_test.framework import REGISTRY
-audio_all = [tc.name for tc in REGISTRY if tc.group == "audio"]
+# The bench modules (audio_upmix, audio_spatial) run at 48 kHz only and are not replayed.
+BENCH = {tc.name for tc in REGISTRY if tc.group == "audio" and tc.fn.__module__ != L.__name__}
+audio_all = [tc.name for tc in REGISTRY if tc.group == "audio" and tc.name not in BENCH]
 base = [n for n in audio_all if not n.endswith("_44k1") and n != "rate_switch_round_trip"]
 var = [n for n in audio_all if n.endswith("_44k1")]
 check(len(var) == len(base),
@@ -344,7 +346,7 @@ def _list_audio(*extra):
         cwd=ROOT, capture_output=True, text=True, check=True).stdout
     names = [ln.strip().split()[0] for ln in out.splitlines()
              if ln.startswith("  ") and ln.strip() and not ln.startswith("  [")]
-    return names
+    return [n for n in names if n not in BENCH]
 
 
 base = _list_audio()
@@ -707,7 +709,7 @@ class FakePagedFirmware:
             self.store[(c.cid, a)] = (bytes(d[:31]) if d[0] else b"").ljust(32, b"\0")
             return 0
         self.add("SYS.DEVICE_NAME", 32, (1, 32), _NONE, None, device_name)
-        self.add("STORE.ALL_PARAMS", 6252, (1, 6252), _NONE, None,
+        self.add("STORE.ALL_PARAMS", 6284, (1, 6284), _NONE, None,
                  lambda c, a, d: self.store.__setitem__((c.cid, a), bytes(d)) or 0)
         self._act("STORE.PRESET_SAVE", range(10))
         self._ro("STORE.PRESET_ACTIVE", b"\x02")
@@ -1055,10 +1057,10 @@ check((cfg["limit"], cfg["enabled"], cfg["count"], cfg["pins"]) == (4, 1, 2, [5,
 want_blocks = dict(spdif=0, count=3, i2s=1, adat=0)
 H.restore_input_blocks(dv, want_blocks)
 check(H.input_blocks(dv) == want_blocks, "restore_input_blocks then input_blocks round-trips (no ADAT built)")
-blob = bytearray(6252)
+blob = bytearray(6284)
 blob[H.INPUT_CONFIG_OFF + 11], blob[H.INPUT_CONFIG_OFF + 14] = 3, 0b110 + 1
 check(H.blob_input_blocks(bytes(blob)) == dict(spdif=0, count=3, i2s=1, adat=1)
-      and H.blob_input_blocks(bytes(6252)) is None,
+      and H.blob_input_blocks(bytes(6284)) is None,
       "blob_input_blocks decodes spdif_rx_count and input_enable_p1; 0 is absent")
 check(H.spdif_source(0) == 1 and [H.spdif_source(i) for i in (1, 2, 3)] == [4, 5, 6],
       "spdif_source maps S/PDIF inputs 1 to 4 onto sources 1, 4, 5, 6")
@@ -1090,20 +1092,20 @@ fw.put("ROUTE.USER_VOLUME", struct.pack("<f", -12.0))
 fw.put("INPUT.SPDIF_RX_PIN", b"\x05", 0)
 fw.put("OUTPUT.TYPE", b"\x01", 2)
 fw.put("ROUTE.CHANNEL_NAME", b"Sub".ljust(32, b"\0"), 16)
-fw.put("STORE.ALL_PARAMS", bytes(range(256)) * 24 + bytes(108))
-prof = _NS(bulk_payload_len=6252, num_pin_outputs=5, num_spdif=4, num_channels=17)
+fw.put("STORE.ALL_PARAMS", bytes(range(256)) * 24 + bytes(140))
+prof = _NS(bulk_payload_len=6284, num_pin_outputs=5, num_spdif=4, num_channels=17)
 snap = LC.capture(dv, prof)
-check(len(snap.bulk) == 6252 and snap.bulk[:4] == bytes([0, 1, 2, 3]), "capture reads STORE.ALL_PARAMS")
+check(len(snap.bulk) == 6284 and snap.bulk[:4] == bytes([0, 1, 2, 3]), "capture reads STORE.ALL_PARAMS")
 check((snap.directory, snap.startup, snap.active_slot, snap.occupied_mask)
       == (bytes([5, 0, 1, 3, 2, 1, 0]), bytes([1, 3, 2]), 2, 5), "capture: directory, 3-byte startup, active slot")
 check((snap.user_vol, snap.saved_mv, snap.spdif_rx_pin, snap.output_pins, snap.output_types, snap.sample_rate)
       == (-12.0, -20.0, 5, [6, 7, 8, 9, 10], [0, 0, 1, 0], 48000), "capture: scalars, pins, types, sample rate")
 check(snap.channel_names[16][:3] == b"Sub" and len(snap.channel_names) == 17, "capture: channel names")
-fw.put("STORE.ALL_PARAMS", bytes(6252))
+fw.put("STORE.ALL_PARAMS", bytes(6284))
 left = _busy_first(fw, "STORE.ALL_PARAMS", 2)
 LC.restore_live(dv, snap, settle_s=0)
 check(left[0] == 0 and LC.diff_bulk(dv, snap, prof) == [], "restore_live retries VC_ERR_BUSY; diff_bulk is empty after")
-fw.put("STORE.ALL_PARAMS", bytes(6252))
+fw.put("STORE.ALL_PARAMS", bytes(6284))
 check(len(LC.diff_bulk(dv, snap, prof)) == sum(1 for x in snap.bulk if x), "diff_bulk lists every changed byte")
 c = fw.cmds[fw._id("STORE.ALL_PARAMS")]
 c.set = lambda cm, a, d: _VC["VC_ERR_VALUE"]

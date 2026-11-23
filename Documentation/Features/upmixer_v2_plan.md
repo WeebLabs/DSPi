@@ -1,6 +1,6 @@
 # Upmixer v2 Implementation Plan
 
-*2026-11-22 (revised the same day for the one-engine design). Implements `upmixer_v2_spec.md`. Phases 0 to 5 done; phase 6 done on the loopback rig except the wirecap items. RP2350 only, except phase 7.*
+*2026-11-22 (revised the same day for the one-engine design). Implements `upmixer_v2_spec.md`. Phases 0 to 5 done; phase 6 done on the loopback rig except the wirecap items; phase 7 done as the Stereo Spatializer (2026-11-23). RP2350 only, except phase 7.*
 
 Each phase builds on both platforms, keeps the tree releasable, and ends with the `tools/upmix_proto` harness passing where the engine is touched. Architecture doc updates follow `CLAUDE.md`.
 
@@ -91,10 +91,12 @@ Not covered by the loopback, still open: inter-slot alignment across separate S/
 - Write `stereo_width_spec.md` first: mid/side width with a shuffler low shelf on the side signal, pair mask, ranges, level cost, position before crossfeed.
 - Implement following the crossfeed idiom in float (RP2350) and Q28 (RP2040), with its own wire and slot section.
 - Not coupled to the upmixer and not mutually exclusive with crossfeed in firmware.
+- **Result (2026-11-23).** Built as the Stereo Spatializer, a separate module with two modes, width and RACE-style crosstalk cancellation. The spec is `stereo_spatializer_spec.md`, which replaces the planned `stereo_width_spec.md`. Wire V36, slot V43, FX page revision 3 (0xB0 to 0xBA). It is host-tested, and loopback-tested on RP2350; the results are in the architecture doc's "Stereo Spatializer" section. The RP2040 CPU gate is still to measure.
 
 ## Cross-repo follow-ups
 
 - **DSPi Console.** Profile tabs with their input-count selection, per-generated-channel output pickers with trim and invert, the template set of spec section 9, claimed-cell marking in the matrix, an overlap warning between profiles, generated meters from status, and removal of the row-sharing labels. The Console must ship with the matching firmware, because an old Console routing rows 2 to 4 on v2 firmware gets silence.
+- **DSPi Console (spatializer).** A spatializer panel (enable, mode, pairs, the width and XTC fields, trim) on the FX page revision 3 commands, and a hint to link the output limiter on pairs running XTC.
 - **ESP32 front panel.** Check that its upmix GETs request the length they know (44 and 16) so the longer replies truncate cleanly.
 - **Control Surfaces.** No change. Nouns edit profile 0.
 

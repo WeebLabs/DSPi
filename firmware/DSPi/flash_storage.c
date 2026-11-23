@@ -44,6 +44,7 @@
 #include "adat_output.h"     // adat_output_config_enabled/_pin/_set_config (RP2350)
 #include "upmix.h"           // upmix_config + UPMIX_DEFAULT_* (RP2350 only)
 #include "tube.h"            // tube_config + TUBE_DEFAULT_*
+#include "spatial.h"         // spatial codec and defaults
 #include "limiter.h"         // limiter_config + limiter_config_defaults
 #include "notify.h"
 #include "vc_pins.h"         // pin_restore_apply: the restore paths' one pin check
@@ -209,7 +210,9 @@
 //        active counts, back offset and routes, then profile 1 whole).  Older
 //        slots with the upmixer on get routes from their matrix rows 0..4
 //        (upmix_routes_from_v1(), spec 8.1); RP2350 only, zeros on RP2040.
-#define SLOT_DATA_VERSION       42
+//   V43: Stereo spatializer appended (WireSpatialParams, 32 bytes, both
+//        platforms).  Older slots load the defaults with the stage off.
+#define SLOT_DATA_VERSION       43
 
 // ============================================================================
 // ON-FLASH STRUCTURES
@@ -1545,6 +1548,9 @@ typedef struct __attribute__((packed)) {
 
     // V42: upmixer v2, same layout as the wire section.  Gated on version >= 42.
     WireUpmixV2Params upmix_v2;
+
+    // V43: stereo spatializer, same layout as the wire section.  Gated on version >= 43.
+    WireSpatialParams spatial;
 } PresetSlot;
 
 // The whole slot must fit its 2-sector (8 KB) flash allocation.
@@ -3663,6 +3669,13 @@ static void collect_live_state(PresetSlot *slot, uint8_t slot_index) {
         slot->limiter_release_ms[k]   = limiter_config[k].release_ms;
     }
 
+    // Stereo spatializer (V43), both platforms.
+    {
+        SpatialConfigPacket sp;
+        spatial_config_to_packet(&sp);
+        memcpy(&slot->spatial, &sp, sizeof(sp));
+    }
+
     // ADAT input (V32): raw pin (0xFF unset) + enable + clock mode (both
     // platforms; RP2040 stores its default state for round-trips).
     slot->adat_input_pin        = adat_input_pin;
@@ -4003,6 +4016,16 @@ static void apply_slot_to_live(const PresetSlot *slot) {
     }
     tube_update_pending = true;
 
+    // Stereo spatializer (V43): the codec sanitizes and masks the pairs; older slots load defaults, off.
+    if (slot->version >= 43) {
+        SpatialConfigPacket sp;
+        memcpy(&sp, &slot->spatial, sizeof(sp));
+        spatial_packet_to_config(&sp);
+    } else {
+        spatial_config_defaults(&spatial_config);
+    }
+    spatial_update_pending = true;
+
     // Output limiter: sourced by apply_output_config_from_mode(), which follows
     // output_config_mode like the physical IO config.
 
@@ -4271,13 +4294,17 @@ static void apply_slot_to_live(const PresetSlot *slot) {
 // V41 only changes what the input_blocks byte means.
 #define SLOT_DATA_SIZE_V41 SLOT_DATA_SIZE_V39
 #define SLOT_DATA_SIZE_V42 \
+    (offsetof(PresetSlot, spatial) - offsetof(PresetSlot, filter_recipes))
+#define SLOT_DATA_SIZE_V43 \
     (sizeof(PresetSlot) - offsetof(PresetSlot, filter_recipes))
 
 // Stored byte range per accepted slot version; 0 rejects (older than V21, V40 of
 // another branch, unknown).  History: the SLOT_DATA_VERSION comment above.
 static size_t slot_data_size_for_version(uint16_t version) {
     switch (version) {
-        case SLOT_DATA_VERSION:   // 42
+        case SLOT_DATA_VERSION:   // 43
+            return SLOT_DATA_SIZE_V43;
+        case 42:
             return SLOT_DATA_SIZE_V42;
         case 41:
             return SLOT_DATA_SIZE_V41;
@@ -4952,6 +4979,9 @@ static void apply_factory_defaults(void) {
     tube_config.mix_pct      = TUBE_DEFAULT_MIX;
     tube_config.trim_db      = TUBE_DEFAULT_TRIM;
     tube_update_pending = true;
+
+    spatial_config_defaults(&spatial_config);
+    spatial_update_pending = true;
 
     // Output limiter: left to apply_output_config_from_mode() (see IO note above).
 

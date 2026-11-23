@@ -106,7 +106,7 @@ All are paged control transfers on the vendor interface: the page goes in the `w
 | `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 | Whole band (2.1). The `bypass` byte rides along. A GET returns bypass as 0 or 1 |
 | `FILTER.BAND_BYPASS` | 0x06 | 0x11 | GET, SET | `(channel << 8) \| band` | GET 1, SET 1 | `1` = bypass, anything else = active. Preserves freq/Q/gain/qp. A GET returns 0 or 1 |
 | `FILTER.EQ_BYPASS` | 0x06 | 0x12 | GET, SET | none (0) | GET 1, SET 1 | Master EQ bypass, non-zero bypasses |
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | Bulk snapshot. GET bypass bytes are normalized 0/1. SET intake normalizes `!=1` to 0 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 | Bulk snapshot. GET bypass bytes are normalized 0/1. SET intake normalizes `!=1` to 0 |
 
 A channel past the end, a band in the reserved gap, or a crossover band on an input channel is refused with `VC_ERR_ADDRESS` in both directions. `FILTER.BAND` and `FILTER.BAND_BYPASS` share one pending slot. A SET of either that arrives while an earlier one is still waiting for the main loop is refused with `VC_ERR_BUSY` and changes nothing, so retry after a short delay.
 
@@ -333,7 +333,7 @@ The single line `if (bq->bypass) continue;` already existed in every DSP inner l
 ```
 Toggle: FILTER.BAND_BYPASS  page 0x06 cmd 0x11  wValue=(ch<<8)|band  SET u8 (0 or 1), GET u8 (always 0 or 1)
 Whole:  FILTER.BAND         page 0x06 cmd 0x10  wValue=(ch<<8)|band  16 B both ways, bypass at offset 1
-Bulk:   STORE.ALL_PARAMS    page 0x02 cmd 0x40  wValue=0             WireBulkParams, 6252 B both ways
+Bulk:   STORE.ALL_PARAMS    page 0x02 cmd 0x40  wValue=0             WireBulkParams, 6284 B both ways
 
 EqParamPacket.bypass     offset 3, 1 byte (firmware recipe and preset slots)
 WireBandParams.bypass    offset 1, 1 byte

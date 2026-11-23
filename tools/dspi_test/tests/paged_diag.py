@@ -12,7 +12,7 @@ DIAG = 0xF0
 CLOCK_DIAG, LOOPBACK_STATS = 0x10, 0x20
 LOOP_PROF = (0x30, 0x31, 0x32, 0x33, 0x34)
 LP_SECTION, LP_JOB, LP_COMMAND, LP_BG_PACE, LP_RESET = (0xF000 | c for c in LOOP_PROF)
-SLOW_GET = ("STORE.ALL_PARAMS", 6252)   # a handler that always takes measurable time
+SLOW_GET = ("STORE.ALL_PARAMS", 6284)   # a handler that always takes measurable time
 
 
 def _diag_cmds(dev):

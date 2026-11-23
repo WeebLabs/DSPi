@@ -1,6 +1,6 @@
 # External Control Interfaces (UART and I2C Target)
 
-*Last updated: 2026-11-22 (bulk blob 6252 bytes at wire V35). Previously 2026-11-17 (`DIAG.CLOCK_DIAG` no longer USB only), 2026-11-16 (paged vendor protocol, firmware 1.1.7)*
+*Last updated: 2026-11-23 (bulk blob 6284 bytes at wire V36). Previously 2026-11-22 (bulk blob 6252 bytes at wire V35). Previously 2026-11-17 (`DIAG.CLOCK_DIAG` no longer USB only), 2026-11-16 (paged vendor protocol, firmware 1.1.7)*
 
 *Transport framing version: 1. Command protocol: paged, major version 1.*
 
@@ -261,7 +261,7 @@ A client that leaves notifications off never sees a `0x40` frame. It should stil
 
 ### 3.7 Bulk transfer
 
-`STORE.ALL_PARAMS` (page `0x02`, command `0x40`) moves the whole parameter set as one `WireBulkParams` blob. On firmware 1.1.7 the blob is **6252 bytes** (wire format V35). It travels in one GET response or one SET request.
+`STORE.ALL_PARAMS` (page `0x02`, command `0x40`) moves the whole parameter set as one `WireBulkParams` blob. On firmware 1.1.7 the blob is **6284 bytes** (wire format V36). It travels in one GET response or one SET request.
 
 - **GET.** Send `wValue` 0 and `wLength` 0 for the whole blob, or a smaller `wLength` for a prefix. The reply streams straight out of the device's bulk buffer.
 - **SET.** The payload must be the whole blob, header included. Any shorter length fails with `VC_ERR_LENGTH`. A payload longer than the bulk buffer is discarded unread and answered with `CTRL_STATUS_OVERSIZE`. A header that does not match this device (platform, channel counts, wire format version, payload length) fails with `VC_ERR_VALUE`. Status `0x00` means the blob passed these checks and the main loop will apply it. Watch notifications or read the state back to see it applied.
@@ -269,7 +269,7 @@ A client that leaves notifications off never sees a `0x40` frame. It should stil
 
 Budget the wire time. At 8N1 a byte costs about 10 bit times.
 
-| Baud | Approximate time for one 6252-byte bulk frame |
+| Baud | Approximate time for one 6284-byte bulk frame |
 |---|---|
 | 9600 | 6.5 s |
 | 115200 | 0.54 s |
@@ -339,7 +339,7 @@ The device stretches SCL only for interrupt latency at FIFO boundaries. It never
 
 ### 4.7 Bulk transfer
 
-`STORE.ALL_PARAMS` works as in 3.7. A GET reply of 6252 bytes is read out in chunks per 4.4. A SET is one long write transaction of the 8-byte header plus 6252 payload bytes. At 400 kHz the blob takes about 140 ms of bus time plus transaction overhead. The same shared buffer and `BULK_LOCKED` rule apply. A parked bulk reply that is not read for 1 s is dropped and the buffer freed. Send the GET again.
+`STORE.ALL_PARAMS` works as in 3.7. A GET reply of 6284 bytes is read out in chunks per 4.4. A SET is one long write transaction of the 8-byte header plus 6284 payload bytes. At 400 kHz the blob takes about 140 ms of bus time plus transaction overhead. The same shared buffer and `BULK_LOCKED` rule apply. A parked bulk reply that is not read for 1 s is dropped and the buffer freed. Send the GET again.
 
 ---
 
@@ -390,7 +390,7 @@ Codes `0x02` and `0x03` belonged to the 1.1.6 protocol. Firmware 1.1.7 never sen
 |---|---|---|
 | Non-bulk SET payload | 64 bytes | `SYS.PROTOCOL_INFO` bytes 8 and 9 |
 | Non-bulk GET reply | 256 bytes | `SYS.PROTOCOL_INFO` bytes 10 and 11. Delivered whole on every transport |
-| Bulk (`STORE.ALL_PARAMS`) | 6252 bytes in 1.1.7 | Read the size from the blob header, not from this table |
+| Bulk (`STORE.ALL_PARAMS`) | 6284 bytes in 1.1.7 | Read the size from the blob header, not from this table |
 
 A GET's `wLength` caps the reply exactly as on USB. A reply longer than `wLength` is cut to `wLength`, and `wLength` 0 means the whole reply. Commands with longer data, such as the spectrum analyser bins, take a byte offset in `wValue` and are read in pieces.
 

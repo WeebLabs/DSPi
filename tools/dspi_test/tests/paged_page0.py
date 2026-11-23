@@ -58,7 +58,7 @@ def _plan():
 
 
 def _state(dev):
-    return dev.pget("STORE.ALL_PARAMS", length=6252), dev.pget("STORE.DIRECTORY", length=7)
+    return dev.pget("STORE.ALL_PARAMS", length=6284), dev.pget("STORE.DIRECTORY", length=7)
 
 
 def _label(bm, req, windex, dl):

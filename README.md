@@ -507,7 +507,7 @@ DSPi includes a 10-slot preset system that stores complete configurations in fla
 *   **Master Volume Mode:** Choose whether master volume is part of each preset or stored independently (default). See [Volume Controls](#volume-controls).
 *   **Device-wide names:** The device name and the input source names are stored on the device, outside the presets.
 *   **Silent switching:** A preset load fades the outputs to silence, restarts them together so they stay sample-aligned, and fades back up. If a DAC hardware mute pin is configured, it is held during the restart.
-*   **Bulk Parameter Transfer:** The complete DSP state (6252 bytes) can be read or written in one transfer, or in chunks for Windows' 4 KB control-transfer limit.
+*   **Bulk Parameter Transfer:** The complete DSP state (6284 bytes) can be read or written in one transfer, or in chunks for Windows' 4 KB control-transfer limit.
 *   **Auto-Migration:** Presets saved by older firmware are upgraded transparently on first boot of new firmware.
 
 ---

@@ -395,7 +395,7 @@ The `WireInputConfig` section is the last section in the packet, appended after 
 
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Notes |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | GET returns the full `WireBulkParams`, SET applies it to live state. The sizes are those of the current wire format (V35). The 2912 bytes this section describes were V7 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 | GET returns the full `WireBulkParams`, SET applies it to live state. The sizes are those of the current wire format (V36). The 2912 bytes this section describes were V7 |
 
 ---
 

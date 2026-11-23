@@ -54,7 +54,7 @@
   "STORE.OUTPUT_CONFIG_MODE": {"page": "STORE", "cmd": 32, "dir": "GS", "addr": "NONE", "get_len": 1, "set": [1, 1]},
   "STORE.OUTPUT_CONFIG_SAVE": {"page": "STORE", "cmd": 33, "dir": "S0", "addr": "NONE", "set": [0, 0]},
   "STORE.FACTORY_RESET": {"page": "STORE", "cmd": 48, "dir": "S0", "addr": "NONE", "set": [0, 0]},
-  "STORE.ALL_PARAMS": {"page": "STORE", "cmd": 64, "dir": "GS", "addr": "NONE", "get_len": 6252, "set": [6252, 6252], "bulk": true},
+  "STORE.ALL_PARAMS": {"page": "STORE", "cmd": 64, "dir": "GS", "addr": "NONE", "get_len": 6284, "set": [6284, 6284], "bulk": true},
   "STORE.ALL_PARAMS_CHUNK": {"page": "STORE", "cmd": 65, "dir": "GS", "addr": "OFFSET", "get_len": "var", "set": [1, 64]},
   "INPUT.SOURCE": {"page": "INPUT", "cmd": 16, "dir": "GS", "addr": "NONE", "get_len": 1, "set": [1, 1]},
   "INPUT.STATUS": {"page": "INPUT", "cmd": 17, "dir": "G", "addr": "NONE", "get_len": 12},

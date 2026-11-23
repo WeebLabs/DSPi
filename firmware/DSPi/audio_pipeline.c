@@ -18,6 +18,7 @@
 #include "crossover.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "spatial.h"
 #include "leveller.h"
 #include "flash_storage.h"
 #include "pdm_generator.h"
@@ -423,6 +424,9 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // core1_eq_work.  Runs per output pair post-matrix (PASS 4.5).
     const CrossfeedCoeffs *xf_coeffs = (const CrossfeedCoeffs *)current_crossfeed_coeffs;
     uint8_t xf_mask = crossfeed_config.output_pair_mask;
+    // Spatializer snapshot: published set plus the live pair mask (spec 7.1).
+    const SpatialCoeffs *sp_coeffs = (const SpatialCoeffs *)current_spatial_coeffs;
+    uint8_t sp_mask = spatial_config.pair_mask;
 
     // Psychoacoustic bass snapshot for this packet: published coefficient
     // pointer (NULL = disabled) + output mask, shared with Core 1 via
@@ -568,6 +572,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.loud_mask = loud_mask;
         core1_eq_work.xfeed_coeffs = xf_coeffs;
         core1_eq_work.xfeed_mask = xf_mask;
+        core1_eq_work.spatial_coeffs = sp_coeffs;
+        core1_eq_work.spatial_mask = sp_mask;
         core1_eq_work.psybass_coeffs = pb_coeffs;
         core1_eq_work.psybass_mask = pb_mask;
         core1_eq_work.tube_coeffs = tb_coeffs;
@@ -587,6 +593,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
         // Core 0 owns pair 0; Core 1 runs pairs 1-3 inside eq_worker_loop.
         // Pre-EQ so per-output (headphone) EQ shapes the post-crossfeed signal.
+        spatial_process_pairs(sp_coeffs, sp_mask, 0, 0, buf_out, sample_count);
         crossfeed_process_pairs(xf_coeffs, xf_mask, 0, 0, buf_out, sample_count);
 
         // Subharmonic synthesizer for Core 0's outputs, pre-crossover and
@@ -715,6 +722,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         // --- Single-core path: all outputs on Core 0 ---
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
+        spatial_process_pairs(sp_coeffs, sp_mask, 0, NUM_SPDIF_INSTANCES - 1, buf_out, sample_count);
         crossfeed_process_pairs(xf_coeffs, xf_mask, 0, NUM_SPDIF_INSTANCES - 1,
                                 buf_out, sample_count);
 
@@ -876,6 +884,9 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
     // output pair post-matrix, shared with Core 1 via core1_eq_work.
     const CrossfeedCoeffs *xf_coeffs = (const CrossfeedCoeffs *)current_crossfeed_coeffs;
     uint8_t xf_mask = crossfeed_config.output_pair_mask;
+    // Spatializer snapshot: published set plus the live pair mask (spec 7.1).
+    const SpatialCoeffs *sp_coeffs = (const SpatialCoeffs *)current_spatial_coeffs;
+    uint8_t sp_mask = spatial_config.pair_mask;
 
     // Psychoacoustic bass snapshot for this packet (see RP2350 branch above):
     // runs per output pre-crossover, shared with Core 1 via core1_eq_work.
@@ -975,6 +986,8 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         core1_eq_work.loud_mask = loud_mask;
         core1_eq_work.xfeed_coeffs = xf_coeffs;
         core1_eq_work.xfeed_mask = xf_mask;
+        core1_eq_work.spatial_coeffs = sp_coeffs;
+        core1_eq_work.spatial_mask = sp_mask;
         core1_eq_work.psybass_coeffs = pb_coeffs;
         core1_eq_work.psybass_mask = pb_mask;
         core1_eq_work.tube_coeffs = tb_coeffs;
@@ -991,6 +1004,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
         // Core 0 owns pair 0; Core 1 runs pair 1 inside eq_worker_loop.
+        spatial_process_pairs(sp_coeffs, sp_mask, 0, 0, buf_out, sample_count);
         crossfeed_process_pairs(xf_coeffs, xf_mask, 0, 0, buf_out, sample_count);
 
         // Subharmonic synthesizer for Core 0's outputs, pre-crossover and
@@ -1133,6 +1147,7 @@ void __no_inline_not_in_flash_func(process_input_block)(uint32_t sample_count) {
         uint32_t saved_delay_write_idx = delay_write_idx;
 
         // ========== PASS 4.5: Crossfeed (per output pair, pre-EQ) ==========
+        spatial_process_pairs(sp_coeffs, sp_mask, 0, NUM_SPDIF_INSTANCES - 1, buf_out, sample_count);
         crossfeed_process_pairs(xf_coeffs, xf_mask, 0, NUM_SPDIF_INSTANCES - 1,
                                 buf_out, sample_count);
 

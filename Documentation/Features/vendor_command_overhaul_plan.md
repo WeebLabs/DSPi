@@ -187,7 +187,7 @@ Sizes are bytes. "G" is GET, "S" is SET, "S0" is a zero-length action. "Addr" is
 | 0x20 | `OUTPUT_CONFIG_MODE` | G, S | none | 1 | Deferred, flash |
 | 0x21 | `OUTPUT_CONFIG_SAVE` | S0 | none | 0 | Deferred, flash |
 | 0x30 | `FACTORY_RESET` | S0 | none | 0 | Deferred, restart |
-| 0x40 | `ALL_PARAMS` | G, S | none | 6252 | `WireBulkParams` V35. The overhaul left it untouched at V32, 6136 bytes. Bulk buffer |
+| 0x40 | `ALL_PARAMS` | G, S | none | 6284 | `WireBulkParams` V36. The overhaul left it untouched at V32, 6136 bytes. Bulk buffer |
 | 0x41 | `ALL_PARAMS_CHUNK` | G, S | byte offset | 1 to the rest of the struct | USB only, bulk buffer. WinUSB hosts use 4096 or less per chunk |
 
 ### 5.3 `INPUT` (0x03)

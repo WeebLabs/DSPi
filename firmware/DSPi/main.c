@@ -52,6 +52,7 @@
 #include "control_surfaces.h"
 #include "loudness.h"
 #include "crossfeed.h"
+#include "spatial.h"
 #include "leveller.h"
 #include "bulk_params.h"
 #include "pico/audio_spdif.h"
@@ -213,6 +214,7 @@ static void perform_rate_change(uint32_t new_freq, bool defer_output_to_input_pr
     dsp_recalculate_all_filters((float)new_freq);
     loudness_recompute_pending = true;
     crossfeed_update_pending = true;  // Recalculate crossfeed coefficients for new sample rate
+    spatial_update_pending = true;    // Spatializer coefficients carry the rate; pairs reset on it
     leveller_update_pending = true;   // Recalculate leveller coefficients for new sample rate
     psybass_update_pending = true;    // Recalculate psybass coefficients for new sample rate
     subharm_update_pending = true;    // Recalculate subharm coefficients for new sample rate
@@ -1807,6 +1809,9 @@ void core0_init() {
     // Initial tube preamp setup (uses loaded or default params)
     tube_apply_config((const TubeConfig *)&tube_config, 48000.0f);
 
+    // Initial spatializer setup (uses loaded or default params)
+    spatial_apply_config(48000.0f);
+
     // Initial output limiter setup; the delay engages via the main loop.
     limiter_apply_config(48000.0f);
 
@@ -2754,6 +2759,11 @@ int main(void) {
             crossfeed_update_pending = false;
             crossfeed_apply_config((const CrossfeedConfig *)&crossfeed_config, (float)audio_state.freq);
         }
+        // Spatializer: same publish model, but the set is never NULL (fading pairs need it).
+        if (spatial_update_pending) {
+            spatial_update_pending = false;
+            spatial_apply_config((float)audio_state.freq);
+        }
 
         // Handle psychoacoustic bass coefficient updates: same double-buffer
         // publish model as crossfeed (NULL = disabled); per-output states are
@@ -3064,6 +3074,7 @@ int main(void) {
                 dsp_update_delay_samples((float)audio_state.freq);
                 loudness_recompute_pending = true;
                 crossfeed_update_pending = true;
+                spatial_update_pending = true;
 
                 // Zero delay lines to prevent stale audio bleed-through
                 extern

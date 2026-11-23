@@ -12,6 +12,7 @@
 #include "subharm.h"
 #include "psybass.h"
 #include "tube.h"
+#include "spatial.h"
 #include "upmix.h"
 #include "audio_pipeline.h"   // active_input_channel_count() for the upmix status
 #include "bulk_params.h"
@@ -468,6 +469,41 @@ static VcResult fx_upmix_param_set(VcCtx *c) {
     return VC_OK;
 }
 #endif
+
+// ---- Stereo spatializer (both platforms) ----
+
+static VcResult fx_spatial_config_get(VcCtx *c) {
+    SpatialConfigPacket p;
+    spatial_config_to_packet(&p);
+    memcpy(c->out, &p, sizeof(p));
+    return VC_OK;
+}
+
+static VcResult fx_spatial_config_set(VcCtx *c) {
+    SpatialConfigPacket p;
+    memcpy(&p, c->in, sizeof(p));
+    return spatial_set_config(&p) ? VC_OK : VC_ERR_VALUE;
+}
+
+static VcResult fx_spatial_u8_get(VcCtx *c) {
+    c->out[0] = (uint8_t)spatial_get_param(c->arg);
+    return VC_OK;
+}
+
+static VcResult fx_spatial_u8_set(VcCtx *c) {
+    uint8_t v = c->in[0];
+    if (c->arg == SPATIAL_PARAM_ENABLED) v = v != 0;
+    return spatial_set_param(c->arg, (float)v) ? VC_OK : VC_ERR_VALUE;
+}
+
+static VcResult fx_spatial_f32_get(VcCtx *c) {
+    vc_out_f32(c, 0, spatial_get_param(c->arg));
+    return VC_OK;
+}
+
+static VcResult fx_spatial_f32_set(VcCtx *c) {
+    return spatial_set_param(c->arg, vc_in_f32(c, 0)) ? VC_OK : VC_ERR_VALUE;
+}
 
 #define VC_PAGE_DEF "pages/fx.def"
 #include "vc_page_table.inc"

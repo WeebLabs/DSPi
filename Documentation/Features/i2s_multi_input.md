@@ -234,7 +234,7 @@ A SET has no status byte. It is ACKed, or it STALLs with a `VC_*` result code
 | `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(channel << 8) \| band` | GET 16, SET 16 |
 | `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(input << 8) \| output` | GET 8, SET 8 |
 | `ROUTE.CHANNEL_NAME` | 0x05 | 0x31 | GET, SET | channel | GET 32, SET 1-32 |
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 |
 
 ### 7.1 Channel count
 
@@ -606,7 +606,7 @@ clash is rejected (fix the pins first); a *lower* always succeeds.
 | `FILTER.BAND` | 0x06 | 0x10 | GET, SET | `(ch << 8) \| band` | GET 16, SET 16 | band record |
 | `ROUTE.MATRIX_ROUTE` | 0x05 | 0x10 | GET, SET | `(in << 8) \| out` | GET 8, SET 8 | crosspoint |
 | `ROUTE.CHANNEL_NAME` | 0x05 | 0x31 | GET, SET | channel | GET 32, SET 1-32 | name |
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | bulk blob |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 | bulk blob |
 
 ### Enums / constants
 

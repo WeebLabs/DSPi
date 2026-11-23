@@ -445,7 +445,7 @@ When the firmware answers a bulk GET (`STORE.ALL_PARAMS`), the `WireLevellerConf
 
 | Command | Page | Cmd | Dir | Address (`wValue`) | Size | Description |
 |---|---|---|---|---|---|---|
-| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6252, SET 6252 | GET returns the full `WireBulkParams`. SET applies it to live state |
+| `STORE.ALL_PARAMS` | 0x02 | 0x40 | GET, SET | none (0) | GET 6284, SET 6284 | GET returns the full `WireBulkParams`. SET applies it to live state |
 
 After a bulk SET, the firmware sets `leveller_update_pending = true` and `leveller_reset_pending = true`, triggering a full coefficient recompute and state reset on the next main loop iteration.
 
