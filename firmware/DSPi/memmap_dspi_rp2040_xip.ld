@@ -83,6 +83,32 @@ SECTIONS
         /* bit of a hack right now to exclude all floating point and time critical (e.g. memset, memcpy) code from
          * FLASH ... we will include any thing excluded here in .data below by default */
         *(.init)
+        /* DSPi: cold carve-out from the RAM pull list (first matching rule wins).
+           Only flash callers may reach these: calling one from RAM code (ISR,
+           audio path, flash window) needs it removed here. An unmatched name
+           after an SDK update stays in RAM. See "Memory Layout". */
+        *tinyusb/src/device/usbd.c.o(.text.tud_rhport_init .text.usbd_edpt_open
+            .text.usbd_edpt_iso_alloc .text.usbd_edpt_iso_activate
+            .text.usbd_sof_enable .text.usbd_edpt_stall .text.usbd_edpt_clear_stall
+            .text.usbd_edpt_busy .text.usbd_edpt_close)
+        *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o(.text.dcd_init
+            .text.hw_endpoint_init .text.dcd_edpt_open .text.dcd_edpt_iso_alloc
+            .text.dcd_edpt_iso_activate .text.dcd_int_enable)
+        *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o(.text.rp2040_usb_init)
+        *tinyusb/src/tusb.c.o(.text.tu_edpt_validate)
+        *pico_time/time.c.o(.text.runtime_init_default_alarm_pool)
+        *hardware_timer/timer.c.o(.text.busy_wait_ms .text.busy_wait_us
+            .text.timer_hardware_alarm_claim .text.hardware_alarm_claim_unused)
+        *hardware_clocks/clocks.c.o(.text.clock_configure_internal
+            .text.clock_configure_undivided .text.clock_configure_int_divider
+            .text.check_sys_clock_hz .text.set_sys_clock_pll
+            .text.clock_gpio_init_int_frac16)
+        *DSPi.dir/notify.c.o(.text.notify_init)
+        *pico_spdif_rx/spdif_rx.c.o(.text.spdif_rx_*_program_get_default_config
+            .text.spdif_rx_start .text.spdif_rx_end
+            .text.spdif_rx_set_callback_on_stable
+            .text.spdif_rx_set_callback_on_lost_stable
+            .text.spdif_rx_get_c_bits .text.spdif_rx_get_parity_err_count)
         /* DSPi: also exclude the hot USB/audio-support objects (RAM code pull
            list in .data below): TinyUSB device core + tusb.c helpers run per
            ISO transfer and inside the USB ISR, tusb_fifo backs the OSAL event
@@ -145,6 +171,12 @@ SECTIONS
     } > FLASH
 
     .rodata : {
+        /* DSPi: rodata of the cold carve-out above. The spdif_rx PIO programs
+           are read only by pio_add_program, which is in flash. */
+        *hardware_timer/timer.c.o(.rodata.timer_hardware_alarm_claim*
+            .rodata.hardware_alarm_claim_unused* .rodata.timer_hardware_alarm_claim_unused*)
+        *pico_spdif_rx/spdif_rx.c.o(.rodata.spdif_rx_*_program_instructions
+            .rodata.spdif_rx_*_program)
         /* DSPi: same exclusions as .text above, plus spdif_rx rodata (the
            sample-rate tables are read per block inside the RX DMA ISR). */
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:
