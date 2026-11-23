@@ -99,6 +99,17 @@ SECTIONS
             .text.spdif_rx_set_callback_on_stable
             .text.spdif_rx_set_callback_on_lost_stable
             .text.spdif_rx_get_c_bits .text.spdif_rx_get_parity_err_count)
+        /* Math helpers with no RAM caller (setup and coefficient math only).
+           RP2040 ROM-table shims are reached through tables a call scan cannot
+           see, so they are deliberately not listed. */
+        *pico_double/double_conv_m33.S.o(.time_critical.__wrap_conv_tod
+            .time_critical.__wrap_conv_dtoui64)
+        *pico_float/float_sci_m33_vfp.S.o(.time_critical.__wrap_tanf)
+        *pico_float/float_math.c.o(.text.__wrap_exp2f .text.__wrap_log2f
+            .text.__wrap_expm1f .text.__wrap_ceilf)
+        *libm.a:*sf_lrint.o(.text.lrintf)
+        *libm.a:*sf_lround.o(.text.lroundf)
+        *libgcc.a:_popcountsi2.o(.text.__popcountsi2)
         /* DSPi: also exclude the hot USB/audio-support objects (RAM code pull
            list in .data below): TinyUSB device core + tusb.c helpers run per
            ISO transfer and inside the USB ISR, tusb_fifo backs the OSAL event
@@ -188,6 +199,7 @@ SECTIONS
             .rodata.hardware_alarm_claim_unused* .rodata.timer_hardware_alarm_claim_unused*)
         *pico_spdif_rx/spdif_rx.c.o(.rodata.spdif_rx_*_program_instructions
             .rodata.spdif_rx_*_program)
+        *libm.a:*sf_lrint.o(.rodata.TWO23)
         /* DSPi: same exclusions as .text above, plus spdif_rx rodata (the
            sample-rate tables are read per block inside the RX DMA ISR). */
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:
