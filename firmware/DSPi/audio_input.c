@@ -8,12 +8,21 @@
 #include "audio_input.h"
 #include "input_capture_arena.h"
 #include "pico/stdlib.h"
+#include <string.h>
 
-// Shared capture storage for the mutually exclusive input receivers.  The
-// explicit section keeps it out of COMMON, where its alignment would cost
-// more padding than the overlay saves.
-InputCaptureArena __attribute__((section(".bss.input_capture_arena")))
+// Shared capture storage for the mutually exclusive input receivers. The
+// .bss.aligned.* section puts it in the linker's .bss_aligned block at the
+// start of RAM, where its alignment costs no padding.
+InputCaptureArena __attribute__((section(".bss.aligned.input_capture_arena")))
     input_capture_arena;
+
+// .bss_aligned is outside crt0's .bss clear. Zero it before main() so its
+// buffers (this arena, pdm_dma_buffer) keep zero-initialised .bss semantics.
+extern uint8_t __bss_aligned_start__[], __bss_aligned_end__[];
+static void __attribute__((constructor)) bss_aligned_clear(void) {
+    memset(__bss_aligned_start__, 0,
+           (size_t)(__bss_aligned_end__ - __bss_aligned_start__));
+}
 static InputArenaOwner arena_owner = INPUT_ARENA_FREE;
 
 void input_arena_claim(InputArenaOwner owner) {

@@ -557,7 +557,7 @@ def check_elf(elf, baseline):
     lines.append("[Check C] size accounting")
     sec = load_sections(elf)
     data = sec.get(".data", 0)
-    bss = sec.get(".bss", 0)
+    bss = sec.get(".bss", 0) + sec.get(".bss_aligned", 0)
     vtab = sec.get(".ram_vector_table", 0)
     heap = sec.get(".heap", 0)
     rings = sec.get(".slot_rings", 0)

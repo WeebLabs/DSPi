@@ -185,6 +185,17 @@ SECTIONS
     __binary_info_end = .;
     . = ALIGN(4);
 
+    /* DSPi: DMA rings that need size alignment (.bss.aligned.*) go first in RAM,
+       where they cost no padding; in .bss they aligned the whole section and
+       wasted 0..8 KB after .data. NOLOAD and outside crt0's .bss clear:
+       audio_input.c zeroes it from a constructor. */
+    .bss_aligned (NOLOAD) : {
+        __bss_aligned_start__ = .;
+        KEEP(*(SORT_BY_ALIGNMENT(.bss.aligned.*)))
+        . = ALIGN(4);
+        __bss_aligned_end__ = .;
+    } > RAM
+
     .ram_vector_table (NOLOAD): {
         *(.ram_vector_table)
     } > RAM
