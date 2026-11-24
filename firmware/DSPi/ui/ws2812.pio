@@ -1,0 +1,33 @@
+;
+; ws2812.pio; single-wire WS2812 transmitter (same timing program as the Pico SDK example:
+; 10 PIO cycles per bit, so the SM clock is 800 kHz * 10).
+;
+.program ws2812
+.side_set 1
+
+.wrap_target
+bitloop:
+    out x, 1       side 0 [2]
+    jmp !x do_zero side 1 [1]
+do_one:
+    jmp bitloop    side 1 [4]
+do_zero:
+    nop            side 0 [4]
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void ws2812_program_init(PIO pio, uint sm, uint offset, uint pin, float freq) {
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+    pio_sm_config c = ws2812_program_get_default_config(offset);
+    sm_config_set_sideset_pins(&c, pin);
+    sm_config_set_out_shift(&c, false, true, 24);          // MSB first, autopull at 24 bits
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    float div = clock_get_hz(clk_sys) / (freq * 10.0f);
+    sm_config_set_clkdiv(&c, div);
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}

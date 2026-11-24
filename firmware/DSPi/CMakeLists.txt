@@ -182,6 +182,26 @@ endif()
 pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/i2s_input.pio)
 pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/adat_input.pio)
 
+# Front-panel UI (SSD1331 OLED, on-board RGB LED, one button). On by default for the
+# Seeed XIAO RP2350; -DDSPI_UI=ON/OFF overrides. See ui/README.md.
+if (PICO_BOARD STREQUAL "seeed_xiao_rp2350")
+    set(DSPI_UI_DEFAULT ON)
+else()
+    set(DSPI_UI_DEFAULT OFF)
+endif()
+option(DSPI_UI "Build the OLED/RGB front-panel UI" ${DSPI_UI_DEFAULT})
+if (DSPI_UI)
+    if (NOT PICO_RP2350)
+        message(FATAL_ERROR "DSPI_UI targets the RP2350 (XIAO RP2350)")
+    endif()
+    target_sources(DSPi PRIVATE
+        ui/ui.c ui/ui_button.c ui/ui_nav.c ui/ui_eq.c ui/ui_pages.c ui/gfx.c
+        ui/ssd1331.c ui/rgb_led.c ui/ui_hw.c)
+    pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/ui/ws2812.pio)
+    target_compile_definitions(DSPi PRIVATE DSPI_UI=1)
+    target_link_libraries(DSPi hardware_spi hardware_dma hardware_pio)
+endif()
+
 target_include_directories(DSPi PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_BINARY_DIR}/generated

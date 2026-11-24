@@ -11,6 +11,7 @@
  * via extern declarations in usb_audio.h.
  */
 
+#include "ui/ui.h"
 #include "vendor_commands.h"
 #include "usb_audio.h"
 #include "audio_input.h"
@@ -376,6 +377,7 @@ bool is_valid_gpio_pin(uint8_t pin) {
     // GPIO 16/17 are general-purpose again since the debug UART was removed;
     // when the UART control interface claims them, is_pin_in_use() covers it.
     if (pin >= 23 && pin <= 25) return false;   // Power/LED
+    if (ui_owns_pin(pin)) return false;         // front-panel UI pins (DSPI_UI builds)
 #if PICO_RP2350
     return pin <= 29;
 #else

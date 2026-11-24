@@ -87,14 +87,14 @@ SECTIONS
            and mem* would silently land in flash. */
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:
             *libg.a:*lib_a-mem*.o *libc.a:*libc_a-mem*.o *libg.a:*libc_a-mem*.o
-            *tinyusb/src/device/usbd.c.o *tinyusb/src/device/usbd_control.c.o
-            *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o
-            *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o
-            *tinyusb/src/common/tusb_fifo.c.o *tinyusb/src/tusb.c.o
-            *pico_float/float_math.c.o *pico_time/time.c.o
-            *pico_util/pheap.c.o *hardware_timer/timer.c.o
-            *hardware_clocks/clocks.c.o *DSPi.dir/notify.c.o
-            *pico_spdif_rx/spdif_rx.c.o) .text*)
+            *tinyusb/src/device/usbd.c.o* *tinyusb/src/device/usbd_control.c.o*
+            *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o*
+            *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o*
+            *tinyusb/src/common/tusb_fifo.c.o* *tinyusb/src/tusb.c.o*
+            *pico_float/float_math.c.o* *pico_time/time.c.o*
+            *pico_util/pheap.c.o* *hardware_timer/timer.c.o*
+            *hardware_clocks/clocks.c.o* *DSPi.dir/notify.c.o*
+            *pico_spdif_rx/spdif_rx.c.o*) .text*)
         *(.fini)
         /* Pull all c'tors into .text */
         *crtbegin.o(.ctors)
@@ -160,14 +160,14 @@ SECTIONS
            sample-rate tables are read per block inside the RX DMA ISR). */
         *(EXCLUDE_FILE(*libgcc.a: *libc.a:*lib_a-mem*.o *libm.a:
             *libg.a:*lib_a-mem*.o *libc.a:*libc_a-mem*.o *libg.a:*libc_a-mem*.o
-            *tinyusb/src/device/usbd.c.o *tinyusb/src/device/usbd_control.c.o
-            *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o
-            *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o
-            *tinyusb/src/common/tusb_fifo.c.o *tinyusb/src/tusb.c.o
-            *pico_float/float_math.c.o *pico_time/time.c.o
-            *pico_util/pheap.c.o *hardware_timer/timer.c.o
-            *hardware_clocks/clocks.c.o *DSPi.dir/notify.c.o
-            *pico_spdif_rx/spdif_rx.c.o) .rodata*)
+            *tinyusb/src/device/usbd.c.o* *tinyusb/src/device/usbd_control.c.o*
+            *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o*
+            *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o*
+            *tinyusb/src/common/tusb_fifo.c.o* *tinyusb/src/tusb.c.o*
+            *pico_float/float_math.c.o* *pico_time/time.c.o*
+            *pico_util/pheap.c.o* *hardware_timer/timer.c.o*
+            *hardware_clocks/clocks.c.o* *DSPi.dir/notify.c.o*
+            *pico_spdif_rx/spdif_rx.c.o*) .rodata*)
         *(.srodata*)
         . = ALIGN(4);
         *(SORT_BY_ALIGNMENT(SORT_BY_NAME(.flashdata*)))
@@ -217,19 +217,19 @@ SECTIONS
            take XIP cache misses.  The bracket symbols exist so the rename
            guard ASSERT below can measure the region. */
         __ram_code_pull_start__ = .;
-        *tinyusb/src/device/usbd.c.o(.text* .rodata*)
-        *tinyusb/src/device/usbd_control.c.o(.text* .rodata*)
-        *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o(.text* .rodata*)
-        *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o(.text* .rodata*)
-        *tinyusb/src/common/tusb_fifo.c.o(.text* .rodata*)
-        *tinyusb/src/tusb.c.o(.text* .rodata*)
-        *pico_float/float_math.c.o(.text* .rodata*)
-        *pico_time/time.c.o(.text* .rodata*)
-        *pico_util/pheap.c.o(.text* .rodata*)
-        *hardware_timer/timer.c.o(.text* .rodata*)
-        *hardware_clocks/clocks.c.o(.text* .rodata*)
-        *DSPi.dir/notify.c.o(.text* .rodata*)
-        *pico_spdif_rx/spdif_rx.c.o(.text* .rodata*)
+        *tinyusb/src/device/usbd.c.o*(.text* .rodata*)
+        *tinyusb/src/device/usbd_control.c.o*(.text* .rodata*)
+        *tinyusb/src/portable/raspberrypi/rp2040/dcd_rp2040.c.o*(.text* .rodata*)
+        *tinyusb/src/portable/raspberrypi/rp2040/rp2040_usb.c.o*(.text* .rodata*)
+        *tinyusb/src/common/tusb_fifo.c.o*(.text* .rodata*)
+        *tinyusb/src/tusb.c.o*(.text* .rodata*)
+        *pico_float/float_math.c.o*(.text* .rodata*)
+        *pico_time/time.c.o*(.text* .rodata*)
+        *pico_util/pheap.c.o*(.text* .rodata*)
+        *hardware_timer/timer.c.o*(.text* .rodata*)
+        *hardware_clocks/clocks.c.o*(.text* .rodata*)
+        *DSPi.dir/notify.c.o*(.text* .rodata*)
+        *pico_spdif_rx/spdif_rx.c.o*(.text* .rodata*)
         __ram_code_pull_end__ = .;
 
         /* remaining .text and .rodata; i.e. stuff we exclude above because we want it in RAM */
