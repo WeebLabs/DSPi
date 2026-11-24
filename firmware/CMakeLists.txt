@@ -1,3 +1,17 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.12)
 
 # Default SDK path to submodule location if not set via environment
@@ -20,7 +34,14 @@ add_compile_definitions(PICO_FLASH_SPI_CLKDIV=6)
 # XIP setup (CLKDIV≈3) stays in force.  The RP2350 override is done at runtime
 # in DSPi/flash_clkdiv.c by writing QMI registers directly.
 
+# Target board: Seeed XIAO RP2350 (also enables the front-panel UI, see
+# DSPi/ui/README.md). Must be set before pico_sdk_import. Override with
+# -DPICO_BOARD=<board> on the cmake command line.
+set(PICO_BOARD seeed_xiao_rp2350 CACHE STRING "Board type")
+
+
 # Pull in PICO SDK (must be before project)
+set(PICO_BOARD seeed_xiao_rp2350 CACHE STRING "")
 include(pico_sdk_import.cmake)
 
 # We also need PICO EXTRAS

@@ -41,6 +41,7 @@
 #include "pdm_generator.h"
 #include "siggen.h"
 #include "rta.h"
+#include "ui/ui.h"
 #include "tube.h"
 #include "limiter.h"
 #include "upmix.h"
@@ -1941,6 +1942,8 @@ void core0_init() {
     // boot-sync dispatches fire from the first main-loop ticks, not here.
     control_surfaces_init();
     rta_init();
+    // Front-panel UI (OLED, RGB LED, button); no-op unless built with DSPI_UI.
+    ui_init();
 }
 
 // A main-loop delivery point (current_architecture.md "Delivery points").
@@ -2228,6 +2231,10 @@ int main(void) {
         // transform runs as a background job.  Immediate no-op while idle.
         LOOP_PROF(LP_RTA);
         rta_service();
+
+        // Front-panel UI: button, model refresh, frame scheduling and flush.
+        // Drawing runs as a background job; this call is cheap when nothing is due.
+        ui_service();
 
         LOOP_PROF(LP_INPUT);
         input_service_handshakes();

@@ -27,6 +27,10 @@
  * into slot 0.
  */
 
+#include "ui/ui.h"
+#ifdef DSPI_UI
+#include "ui/ui_board.h"
+#endif
 #include "flash_storage.h"
 #include "config.h"
 #include "audio_input.h"
@@ -3072,7 +3076,7 @@ static bool io_pin_valid(uint8_t pin) {
 #ifdef DSPI_PLATFORM_PINS
     bool valid = dspi_platform_pin_valid(DSPI_PIN_FN_ANY, pin);
 #else
-    bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25);
+    bool valid = (pin <= 29) && !(pin >= 23 && pin <= 25) && !ui_owns_pin(pin);
 #if !PICO_RP2350
     if (pin > 28) valid = false;
 #endif
@@ -3101,6 +3105,11 @@ static void io_config_defaults(FlashOutputConfig *cfg) {
     cfg->output_pins[2] = PICO_PDM_PIN;
 #endif
     // output_types[] all 0 (S/PDIF) from memset
+#ifdef DSPI_UI
+    // XIAO RP2350 + PCM5102: slot 0 (Out 1-2) is I2S on GPIO 28, BCK/LRCLK 26/27.
+    cfg->output_types[0] = OUTPUT_TYPE_I2S;
+    cfg->output_pins[0]  = UI_FACTORY_I2S_DATA_PIN;
+#endif
     cfg->i2s_bck_pin        = PICO_I2S_BCK_PIN;
     cfg->i2s_mck_pin        = PICO_I2S_MCK_PIN;
     cfg->i2s_mck_enabled    = 0;

@@ -720,7 +720,11 @@ typedef struct __attribute__((packed)) {
 
 #ifndef DSPI_PLATFORM_PINS
 // I2S default pins
+#ifdef DSPI_UI
+#define PICO_I2S_BCK_PIN            26   // XIAO RP2350 D0; LRCLK = GPIO 27 (D1); data = GPIO 28 (D2)
+#else
 #define PICO_I2S_BCK_PIN            14   // BCK; LRCLK = BCK + 1 = GPIO 15
+#endif
 
 // Default slave-mode clock pair for SPLIT clock-pin mode (dormant in UNIFIED
 // mode).  Nearest sequential pair to BCK/LRCLK that no other feature defaults

@@ -33,7 +33,8 @@
 #define BG_JOB_LIST(X)                       \
     X(BG_JOB_RTA_STEP,  "rta_step")          \
     X(BG_JOB_LOUDNESS,  "loudness_rebuild")  \
-    X(BG_JOB_CS_REVERT, "cs_revert")
+    X(BG_JOB_CS_REVERT, "cs_revert")         \
+    X(BG_JOB_UI,        "ui_frame")
 
 #define LOOP_PROF_ENUM_ENTRY(id, name) id,
 typedef enum { LOOP_PROF_SECTION_LIST(LOOP_PROF_ENUM_ENTRY) LOOP_PROF_SECTIONS } LoopProfSection;
