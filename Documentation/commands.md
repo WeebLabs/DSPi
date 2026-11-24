@@ -448,7 +448,7 @@ The page map is generated from the firmware's page table. Pages `0x0D` to `0x7F`
 | 0x0A | `CS` | 1 | 26 | Control Surfaces |
 | 0x0B | `XPORT` | 1 | 5 | UART and I2C control transports |
 | 0x0C | `CLOCK` | 1 | 9 | I2S clock pins and modes, MCK |
-| 0xF0 | `DIAG` | 1 | 15 | Bench and diagnostic commands with no stability promise |
+| 0xF0 | `DIAG` | 1 | 18 | Bench and diagnostic commands with no stability promise |
 
 <!-- VC:END PAGES -->
 
@@ -1957,6 +1957,9 @@ Bench and diagnostic commands with no stability promise. Release firmware builds
 | 0x53 | `WIRECAP_CLKGEN` | G, S | none | 24 | 5 |  | I2S clock generator on GPIO 24/25: SET u8 enable, u32 rate; GET status (build: `DSPI_WIRECAP` only) |
 | 0x54 | `WIRECAP_CLKGEN_GLITCH` | S | none | - | 2 |  | Inject one clock glitch: u8 kind (1 runt, 2 missing BCK, 3 LRCLK early, 4 late), u8 cells (build: `DSPI_WIRECAP` only) |
 | 0x55 | `WIRECAP_RATE` | S | none | - | 4 |  | Request an output rate change through the host path, u32 Hz (USB input only) (build: `DSPI_WIRECAP` only) |
+| 0x60 | `VCXO_STATUS` | G | none | 104 | - |  | SoftVcxoShapedDiag (104 B): state, counters, modulator, fc0 totals (build: `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` only) |
+| 0x61 | `VCXO_FORCE` | G, S | none | 5 | 5 |  | u8 enable, f32 ppm (+-1000): run this trim in place of the servo (build: `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` only) |
+| 0x62 | `VCXO_DELAY` | G, S | none | 1 | 1 |  | u8 pacer delay d (40..59, default 50); a running pacer parks and restarts (build: `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` only) |
 
 <!-- VC:END DIAG -->
 
@@ -2514,6 +2517,9 @@ Every command, sorted by name and then by page, with its 16-bit ID. Each command
 | USB_AUDIO_STATUS | [`SYS.USB_AUDIO_STATUS`](#6-sys-0x01) | `0x0141` |  |
 | USER_MUTE | [`ROUTE.USER_MUTE`](#10-route-0x05) | `0x0561` |  |
 | USER_VOLUME | [`ROUTE.USER_VOLUME`](#10-route-0x05) | `0x0560` |  |
+| VCXO_DELAY | [`DIAG.VCXO_DELAY`](#18-diag-0xf0) | `0xF062` | `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` |
+| VCXO_FORCE | [`DIAG.VCXO_FORCE`](#18-diag-0xf0) | `0xF061` | `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` |
+| VCXO_STATUS | [`DIAG.VCXO_STATUS`](#18-diag-0xf0) | `0xF060` | `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` |
 | WIRECAP_ARM | [`DIAG.WIRECAP_ARM`](#18-diag-0xf0) | `0xF050` | `DSPI_WIRECAP` |
 | WIRECAP_CLKGEN | [`DIAG.WIRECAP_CLKGEN`](#18-diag-0xf0) | `0xF053` | `DSPI_WIRECAP` |
 | WIRECAP_CLKGEN_GLITCH | [`DIAG.WIRECAP_CLKGEN_GLITCH`](#18-diag-0xf0) | `0xF054` | `DSPI_WIRECAP` |

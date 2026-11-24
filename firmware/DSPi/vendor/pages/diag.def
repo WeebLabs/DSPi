@@ -51,3 +51,13 @@ VC_CMD(0x54, WIRECAP_CLKGEN_GLITCH, VC_NONE, diag_wirecap_glitch_set,
 VC_CMD(0x55, WIRECAP_RATE, VC_NONE, diag_wirecap_rate_set,
        NONE, 0, 4, 4, 0, 0, "Request an output rate change through the host path, u32 Hz (USB input only)")
 #endif
+
+// Shaped soft VCXO bench hooks (soft_vcxo_spec.md section 8.7 has the layouts).
+#if DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED
+VC_CMD(0x60, VCXO_STATUS, diag_vcxo_status_get, VC_NONE,
+       NONE, 104, 0, 0, 0, 0, "SoftVcxoShapedDiag (104 B): state, counters, modulator, fc0 totals")
+VC_CMD(0x61, VCXO_FORCE, diag_vcxo_force_get, diag_vcxo_force_set,
+       NONE, 5, 5, 5, 0, 0, "u8 enable, f32 ppm (+-1000): run this trim in place of the servo")
+VC_CMD(0x62, VCXO_DELAY, diag_vcxo_delay_get, diag_vcxo_delay_set,
+       NONE, 1, 1, 1, 0, 0, "u8 pacer delay d (40..59, default 50); a running pacer parks and restarts")
+#endif

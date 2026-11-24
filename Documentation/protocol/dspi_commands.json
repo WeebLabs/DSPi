@@ -301,7 +301,10 @@
        {"cmd": 82, "name": "WIRECAP_READ", "id": 61522, "get": true, "set": false, "addr": "INDEX", "get_len": "var", "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_WIRECAP", "doc": "Captured bytes, 256-byte chunk wValue"},
        {"cmd": 83, "name": "WIRECAP_CLKGEN", "id": 61523, "get": true, "set": true, "addr": "NONE", "get_len": 24, "set_min": 5, "set_max": 5, "flags": [], "arg": "0", "build": "DSPI_WIRECAP", "doc": "I2S clock generator on GPIO 24/25: SET u8 enable, u32 rate; GET status"},
        {"cmd": 84, "name": "WIRECAP_CLKGEN_GLITCH", "id": 61524, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 2, "set_max": 2, "flags": [], "arg": "0", "build": "DSPI_WIRECAP", "doc": "Inject one clock glitch: u8 kind (1 runt, 2 missing BCK, 3 LRCLK early, 4 late), u8 cells"},
-       {"cmd": 85, "name": "WIRECAP_RATE", "id": 61525, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 4, "set_max": 4, "flags": [], "arg": "0", "build": "DSPI_WIRECAP", "doc": "Request an output rate change through the host path, u32 Hz (USB input only)"}
+       {"cmd": 85, "name": "WIRECAP_RATE", "id": 61525, "get": false, "set": true, "addr": "NONE", "get_len": null, "set_min": 4, "set_max": 4, "flags": [], "arg": "0", "build": "DSPI_WIRECAP", "doc": "Request an output rate change through the host path, u32 Hz (USB input only)"},
+       {"cmd": 96, "name": "VCXO_STATUS", "id": 61536, "get": true, "set": false, "addr": "NONE", "get_len": 104, "set_min": 0, "set_max": 0, "flags": [], "arg": "0", "build": "DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED", "doc": "SoftVcxoShapedDiag (104 B): state, counters, modulator, fc0 totals"},
+       {"cmd": 97, "name": "VCXO_FORCE", "id": 61537, "get": true, "set": true, "addr": "NONE", "get_len": 5, "set_min": 5, "set_max": 5, "flags": [], "arg": "0", "build": "DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED", "doc": "u8 enable, f32 ppm (+-1000): run this trim in place of the servo"},
+       {"cmd": 98, "name": "VCXO_DELAY", "id": 61538, "get": true, "set": true, "addr": "NONE", "get_len": 1, "set_min": 1, "set_max": 1, "flags": [], "arg": "0", "build": "DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED", "doc": "u8 pacer delay d (40..59, default 50); a running pacer parks and restarts"}
      ],
      "reserved": []}
   ]

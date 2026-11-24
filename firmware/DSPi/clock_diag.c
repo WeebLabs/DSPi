@@ -53,6 +53,9 @@ static uint32_t fc_last_hz = 0;
 static uint32_t fc_min_hz = 0;
 static uint32_t fc_max_hz = 0;
 static uint32_t fc_count = 0;
+// Cumulative raw results and gates, never reset: the host differences two reads.
+static uint64_t fc_sum_raw = 0;
+static uint32_t fc_gates = 0;
 
 // Main-loop gap.
 static uint32_t loop_prev_us = 0;
@@ -146,6 +149,8 @@ static void fc_service(void) {
     // result[24:5] = kHz, result[4:0] = 1/32 kHz fraction (31.25 Hz LSB).
     uint32_t result = clocks_hw->fc0.result;
     uint32_t hz = (uint32_t)(((uint64_t)result * 1000ull) >> 5);
+    fc_sum_raw += result;
+    fc_gates++;
     fc_last_hz = hz;
     if (fc_count == 0 || hz < fc_min_hz) fc_min_hz = hz;
     if (fc_count == 0 || hz > fc_max_hz) fc_max_hz = hz;
@@ -444,6 +449,11 @@ void clock_diag_poll(void) {
         slot_min_fill[i] = (uint8_t)(output_type_switch_in_progress
                                      ? SPDIF_CONSUMER_BUFFER_COUNT
                                      : get_slot_consumer_fill((uint)i));
+}
+
+void clock_diag_fc0_totals(uint64_t *sum_raw, uint32_t *gates) {
+    *sum_raw = fc_sum_raw;
+    *gates = fc_gates;
 }
 
 void clock_diag_get_snapshot(ClockDiagPacket *out) {

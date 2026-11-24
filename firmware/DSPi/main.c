@@ -1031,6 +1031,8 @@ static void pipeline_service_producer(bool lock_gated) {
     // Every caller pumps, the blocking spins included: a producer that stalls in
     // one would otherwise replay the previous ring lap once fill + erase-ahead drain.
     output_rings_idle_pump();
+    // Same cadence keeps the shaped soft VCXO's pulse ring ahead of its DMA.
+    soft_vcxo_service();
 }
 
 static bool pipeline_fade_to_silence_poll(void) {
@@ -1679,8 +1681,10 @@ static void complete_flash_write_operation_full(void) {
 }
 
 void core0_init() {
+#if !SOFT_VCXO_SHAPED   // GPIO 25 carries the crystal reference in that build
     // LED setup
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
+#endif
 
 #if PICO_RP2350
     // Enable flush-to-zero and default-NaN for audio processing.
@@ -2153,9 +2157,11 @@ static void input_service_servos(void) {
 }
 
 int main(void) {
+#if !SOFT_VCXO_SHAPED
     // Initial LED on to show we're alive
     gpio_init(25); gpio_set_dir(25, GPIO_OUT);
     gpio_put(25, 1);
+#endif
 
 #if !PICO_RP2350
     set_sys_clock_pll(1536000000, 4, 2);
@@ -3742,11 +3748,13 @@ int main(void) {
         wirecap_poll();
 #endif
 
+#if !SOFT_VCXO_SHAPED
         // LED heartbeat - toggle every ~1000 iterations
         static uint32_t loop_counter = 0;
         if (++loop_counter >= 1000) {
             loop_counter = 0;
             gpio_xor_mask(1u << 25);
         }
+#endif
     }
 }

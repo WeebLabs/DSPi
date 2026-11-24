@@ -163,6 +163,18 @@ if (DSPI_CLOCK_DIAG)
     target_compile_definitions(DSPi PRIVATE DSPI_CLOCK_DIAG=1)
 endif()
 
+# DSPI_VCXO_SHAPED (prototype): crystal-paced, noise-shaped soft VCXO on RP2350
+# (soft_vcxo_spec.md section 8). RP2040 keeps the PWM-paced actuator (config.h).
+option(DSPI_VCXO_SHAPED "Build the crystal-paced noise-shaped soft VCXO (RP2350 only)" OFF)
+if (DSPI_VCXO_SHAPED)
+    target_sources(DSPi PRIVATE soft_vcxo_shaped.c)
+    pico_generate_pio_header(DSPi ${CMAKE_CURRENT_SOURCE_DIR}/soft_vcxo_pacer.pio)
+    target_compile_definitions(DSPi PRIVATE DSPI_VCXO_SHAPED=1)
+    if (PICO_PLATFORM STREQUAL "rp2040")
+        message(WARNING "DSPI_VCXO_SHAPED is RP2350-only; this RP2040 build keeps the PWM-paced soft VCXO")
+    endif()
+endif()
+
 # DSPI_LOOP_PROF (bench instrumentation): worst time per main-loop section,
 # background job and paged command, read through DIAG.LOOP_PROF_* (loop_prof.h).
 # Release builds leave it OFF.

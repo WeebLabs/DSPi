@@ -122,6 +122,10 @@ typedef struct __attribute__((packed)) {
 // Copy the latest 1 Hz snapshot.  Main-loop / control-transfer context.
 void clock_diag_get_snapshot(ClockDiagPacket *out);
 
+// Cumulative fc0 results of clk_sys against the crystal (1/32 kHz units, one
+// per ~32.8 ms gate, 0.1 ppm steps) and their count, for averaging over many gates.
+void clock_diag_fc0_totals(uint64_t *sum_raw, uint32_t *gates);
+
 // One-time bring-up: enable the TX-library starvation monitors and seed the
 // timing baselines.  Call once after soft_vcxo_init().
 void clock_diag_init(void);

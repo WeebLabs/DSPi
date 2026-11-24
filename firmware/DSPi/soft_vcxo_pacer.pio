@@ -1,0 +1,14 @@
+; Crystal pacer of the shaped soft VCXO (soft_vcxo_spec.md section 8): one FBDIV
+; byte per slot of 5 XOSC periods, written d + 35 cycles after a rising edge.
+; X = d. Outside SOFT_VCXO_D_MIN..MAX a slot is 4 or 6 periods long, and a
+; 4-period FBDIV excursion can reset the chip.
+.program vcxo_pacer
+.wrap_target
+    wait 0 pin 0
+    wait 1 pin 0
+    mov y, x [31]
+dly:
+    jmp y-- dly
+    out isr, 8
+    push block [31]
+.wrap

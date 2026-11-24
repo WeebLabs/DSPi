@@ -1,0 +1,156 @@
+; TDC: 512-cycle frame (4 x 128 sys cycles, so the sys/ref pattern repeats
+; every frame). 128 ref-pin samples on a 3-cycle lattice, autopushed as 4 words,
+; only on frames that start with the RX FIFO empty, so autopush never stalls
+; and the FIFO holds whole frames. Y holds 127 (loaded at init).
+.program tdc
+.wrap_target
+    mov x, status           ; all ones when RX FIFO is empty
+    jmp !x skip
+    mov x, y
+samp:
+    in pins, 1
+    jmp x-- samp [1]
+    jmp pad
+skip:
+    mov x, y
+dly:
+    jmp x-- dly [2]
+    jmp pad
+pad:
+    irq nowait 4            ; frame marker for the pacer
+    nop [31]
+    nop [31]
+    nop [31]
+    nop [26]
+.wrap
+
+; Pacer: pushes two FBDIV values exactly W sys cycles apart at a fixed frame
+; offset plus d. TX words: (d | (W-4) << 16), excursion, nominal.
+.program pacer
+.wrap_target
+    pull block
+    out x, 16
+    out y, 16
+    pull block
+    wait 1 irq 4            ; consumes a stale marker if one is set
+    wait 1 irq 4
+dly:
+    jmp x-- dly
+    mov isr, osr
+    push noblock
+    pull block
+wid:
+    jmp y-- wid
+    mov isr, osr
+    push noblock
+.wrap
+
+; Crystal pacer: slot = N ref periods, timed from rising edges of the ref pin.
+; TX word: bits 0-7 excursion, 8-15 nominal, 16-31 N - 7. X holds the delay d.
+; Both FBDIV values are pushed d+2 cycles after a ref edge, 5 ref periods apart.
+.program xpacer
+.wrap_target
+    pull block
+    out isr, 8
+    wait 0 pin 0
+    wait 1 pin 0
+    mov y, x
+xd1:
+    jmp y-- xd1
+    push block
+    out isr, 8
+    set y, 4
+xe5:
+    wait 0 pin 0
+    wait 1 pin 0
+    jmp y-- xe5
+    mov y, x
+xd2:
+    jmp y-- xd2
+    push block
+    out y, 16
+xsk:
+    wait 0 pin 0
+    wait 1 pin 0
+    jmp y-- xsk
+.wrap
+
+; Same as xpacer but timed from falling edges (PIO2), to reach delays past one ref period.
+.program xpacerf
+.wrap_target
+    pull block
+    out isr, 8
+    wait 1 pin 0
+    wait 0 pin 0
+    mov y, x
+xd1f:
+    jmp y-- xd1f
+    push block
+    out isr, 8
+    set y, 4
+xe5f:
+    wait 1 pin 0
+    wait 0 pin 0
+    jmp y-- xe5f
+    mov y, x
+xd2f:
+    jmp y-- xd2f
+    push block
+    out y, 16
+xskf:
+    wait 1 pin 0
+    wait 0 pin 0
+    jmp y-- xskf
+.wrap
+
+; Delay stage for the chain pacers (PIO2 SM1): every word is pushed back
+; X + 3 cycles after it arrives, so the FBDIV write phase moves in sys-cycle steps.
+.program xdelay
+.wrap_target
+    pull block
+    mov y, x
+xdl:
+    jmp y-- xdl
+    mov isr, osr
+    push block
+.wrap
+
+; Arrival probe (PIO2 SM2): X counts down once per 3 idle cycles; each word written
+; to the TX FIFO is answered with the current X. Spacing in cycles is about 3 dX + 4.
+.program tstamp
+.wrap_target
+tstop:
+    mov y, status           ; all ones while the TX FIFO is empty
+    jmp !y tsgot
+    jmp x-- tstop
+tsgot:
+    pull block
+    in x, 32
+.wrap
+
+; Small crystal pacer (6 instructions): one FBDIV word per slot of 5 ref periods.
+; Autopull on. X = d (37..59). The fixed delays put the next wait between edges 4 and 5,
+; so each slot resyncs to the crystal. Writes land d + 35 cycles after the detected edge.
+.program xpacer6
+.wrap_target
+    wait 0 pin 0
+    wait 1 pin 0
+    mov y, x [31]
+x6d:
+    jmp y-- x6d
+    out isr, 32
+    push block [31]
+.wrap
+
+; Firmware data path: xpacer6 fed one byte per slot (autopull threshold 8).
+; Ring bytes are FBDIV values 127, 128 or 129. Timing identical to xpacer6.
+.program xpacer6b
+.wrap_target
+    wait 0 pin 0
+    wait 1 pin 0
+    mov y, x [31]
+x6bd:
+    jmp y-- x6bd
+    out isr, 8
+    push block [31]
+.wrap

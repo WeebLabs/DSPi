@@ -169,6 +169,8 @@ Multi-instance S/PDIF output library (PIO-based, converted from pico-extras sing
 - `PICO_DIVIDER_IN_RAM=1`; RP2040 only, divider shims in RAM
 - `PICO_INT64_OPS_IN_RAM=1` and `PICO_BITS_IN_RAM=1`; RP2040 only, 64-bit mul and clz shims in RAM
 
+**Prototype option (2026-11-24):** `DSPI_VCXO_SHAPED` (OFF) adds `soft_vcxo_shaped.c` and the `soft_vcxo_pacer.pio` header and defines `DSPI_VCXO_SHAPED`; it takes effect on RP2350 only (see "Shaped Soft VCXO").
+
 **Vendor protocol sources:** `add_executable()` lists the `vendor/` core files and one `vendor/vc_page_<mnem>.c` per page (see "Vendor Protocol"). The `.def` files are included by their page file and need no CMake entry.
 
 **Build commands:**
@@ -200,11 +202,11 @@ The bulk parameter header carries `fw_version_major` / `fw_version_minor` separa
 ---
 
 ## Initialization Flow
-*Last updated: 2026-11-20 (step 6 and main loop: loudness computed on demand). Previously 2026-07-22*
+*Last updated: 2026-11-24 (steps 1 and 9, main loop: shaped soft VCXO builds). Previously 2026-11-20 (step 6 and main loop: loudness computed on demand); 2026-07-22*
 
 Defined in `main.c`, function `core0_init()`:
 
-1. **GPIO setup** — LED (GPIO 25), status pin (GPIO 23)
+1. **GPIO setup**: LED (GPIO 25), status pin (GPIO 23). A `DSPI_VCXO_SHAPED` RP2350 build has no LED: GPIO 25 carries the crystal (see "Shaped Soft VCXO")
 2. **Clock configuration** — PLL fixed at 307.2 MHz (VCO 1536 / 5 / 1), no runtime clock switching
    - RP2350: `set_sys_clock_hz(307200000)`, VREG 1.15V
    - RP2040: `set_sys_clock_pll(1536000000, 5, 1)`, VREG 1.15V
@@ -216,7 +218,7 @@ Defined in `main.c`, function `core0_init()`:
 6. **Loudness coefficients** (2026-11-20). `loudness_update_now()` computes and publishes the current volume step's two shelves if loudness is enabled (NULL otherwise), before audio starts
 7. **PDM setup** — Configure PIO1 hardware, determine Core 1 mode
 8. **Core 1 launch** — `multicore_launch_core1(pdm_core1_entry)`
-9. **Soft VCXO init**: `soft_vcxo_init()` claims its DMA channels / DMA timer / PWM pacer and (RP2350) grants the DMA master PLL_SYS access; inert unless `clock_get_hz(clk_sys) == 307.2 MHz`. See "Soft VCXO".
+9. **Soft VCXO init**: `soft_vcxo_init()` claims its DMA channels / DMA timer / PWM pacer and (RP2350) grants the DMA master PLL_SYS access; inert unless `clock_get_hz(clk_sys) == 307.2 MHz`. See "Soft VCXO". The shaped build claims DMA 11/12, PIO1 SM3 and GPIO 25 instead (see "Shaped Soft VCXO").
 
 ### Main Loop
 
@@ -225,7 +227,7 @@ Defined in `main.c`, function `core0_init()`:
 - Sample rate change handling (PLL reclocking + filter recalculation)
 - Loudness coefficients for the current volume step (background job, live pair + spare; 2026-11-20)
 - Crossfeed coefficient updates
-- LED heartbeat toggle
+- LED heartbeat toggle (compiled out in `DSPI_VCXO_SHAPED` builds)
 
 ---
 
@@ -296,11 +298,13 @@ Any host-driven format change (SET_INTERFACE between AS alts for a bit-depth swi
 **Output dividers at rate changes (`apply_nominal_output_rate()`, main.c):** output dividers are never trimmed. Input clock tracking pulls `sys_clk` in ppm through the soft VCXO, which moves every output together (see "Soft VCXO" and "Clock Servo"). `perform_rate_change()` therefore only programs the nominal divider for the new rate on each set-up S/PDIF slot and MCK, while `audio_i2s_update_all_frequencies()` retunes the I2S slots. Leaving a tracked input (SPDIF, ADAT slave, I2S slave) needs no divider work at all: its stop path calls `input_servo_reset()`, which parks the VCXO at nominal. `input_servo_reset()` must never run on the pipeline-reset path, because it would park a locked VCXO mid-lock. *Last updated: 2026-10-10*
 
 ### Clock Diagnostics (bench instrument)
-*Last updated: 2026-11-23 (the `CLKDIAG` printf dump is compiled out unless `DSPI_DEBUG_PRINTF` is ON). Previously 2026-11-17 (`DIAG.CLOCK_DIAG` served on UART and I2C too). Previously 2026-11-16 (read through `DIAG.CLOCK_DIAG`; config.h default corrected); 2026-10-16 (packet version 2: USB feedback controller block and `usbfb:` line)*
+*Last updated: 2026-11-24 (cumulative fc0 totals; shaped soft VCXO commands). Previously 2026-11-23 (the `CLKDIAG` printf dump is compiled out unless `DSPI_DEBUG_PRINTF` is ON). Previously 2026-11-17 (`DIAG.CLOCK_DIAG` served on UART and I2C too). Previously 2026-11-16 (read through `DIAG.CLOCK_DIAG`; config.h default corrected); 2026-10-16 (packet version 2: USB feedback controller block and `usbfb:` line)*
 
 **Building it.** Diagnostics are compiled in only with `-DDSPI_CLOCK_DIAG=ON` at configure time (a CMake option, OFF by default, like `DSPI_LOOPBACK`). `DIAG.CLOCK_DIAG` exists only in such a build. A release build has no such command, so a request STALLs with `VC_ERR_UNKNOWN`. It is served on every transport. The `ClockDiagPacket` is 226 bytes on RP2040 and 248 on RP2350, static-asserted to fit the 256-byte reply buffer that UART and I2C also use. Read it over USB with `tools/clkdiag_poll.py`.
 
 `clock_diag.c` is a serial-console instrument for isolating DAC-cutout failure classes while the soft VCXO tracks an input (sys_clk excursion, servo oscillation, transient consumer starvation, TX/main-loop stall, wedged VCXO DMA loop). It exposes the same once-per-second values two ways: the `CLKDIAG` console `printf` dump, and the read-only `DIAG.CLOCK_DIAG` GET that returns the latched `ClockDiagPacket` snapshot (used when no console backend is enabled; this firmware ships with USB CDC and UART stdio both off, so the printf calls are compiled out unless the build sets `-DDSPI_DEBUG_PRINTF=ON` and links a stdio driver). Gated entirely by `DSPI_CLOCK_DIAG`. `config.h` defaults it to 0, which compiles everything to no-op inlines and leaves `DIAG.CLOCK_DIAG` out of the table; the CMake option sets it to 1. `clock_diag_sample()` runs once per main-loop pass (services a non-blocking fc0 frequency counter, tracks the max loop gap, per-slot min consumer fill, and PWM-pacer counter movement); `clock_diag_poll()` prints once per second and resets the windowed aggregates.
+
+Since 2026-11-24 the fc0 service also keeps a cumulative sum of raw results and a gate count that never reset (`clock_diag_fc0_totals()`), so a host can average clk_sys against the crystal over any window by differencing two reads (0.1 ppm per ~32.8 ms gate). A build that also sets `DSPI_VCXO_SHAPED` serves them in `DIAG.VCXO_STATUS`, next to `DIAG.VCXO_FORCE` and `DIAG.VCXO_DELAY` (see "Shaped Soft VCXO"). In that build the `vcxo:` fields carry the shaped actuator's state (`pulseHz` is the mean pulse rate, PWM fields 0), and the `vcxoloop:` PULSE and PACE columns are the writer (CH11) and feed (CH12) channels.
 
 The dump is seven-to-nine lines, each prefixed `CLKDIAG ` for grepping:
 
@@ -2655,7 +2659,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 ---
 
 ## RP2040 vs RP2350 Comparison
-*Last updated: 2026-11-23 (spatializer: DSP Processing row; Hardware table: `.data` budgets raised, vendor command counts brought to the page map's totals). Previously 2026-11-22 (Hardware table: vendor command count after upmixer v2). Previously 2026-11-22 (Hardware table: RP2350 `.data` and vendor command count after upmixer routing; DSP Processing table: upmixer row). Previously 2026-11-22 (Hardware table: RP2350 `.data` after the matrix and FX kernel work; DSP Processing table: RP2350 loudness and psybass kernels). Previously 2026-11-21 (Hardware table: silent I2S slot fast path row; RP2350 `.data` after output metering moved into `output_pairs_meter_finalize()`). Previously 2026-11-20 (Hardware table: RP2350 `.data` and free heap after the upmixer surround rework; spectrum analyser row: float kernel unscaled; Hardware table: free-heap row after the loudness table removal; slot rings 4 KB each). Previously 2026-11-19 (Hardware table: `.data` rows after the EQ kernel rewrite). Previously 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
+*Last updated: 2026-11-24 (Clock Configuration and DMA tables: shaped soft VCXO option; Hardware table: DIAG command count). Previously 2026-11-23 (spatializer: DSP Processing row; Hardware table: `.data` budgets raised, vendor command counts brought to the page map's totals). Previously 2026-11-22 (Hardware table: vendor command count after upmixer v2). Previously 2026-11-22 (Hardware table: RP2350 `.data` and vendor command count after upmixer routing; DSP Processing table: upmixer row). Previously 2026-11-22 (Hardware table: RP2350 `.data` after the matrix and FX kernel work; DSP Processing table: RP2350 loudness and psybass kernels). Previously 2026-11-21 (Hardware table: silent I2S slot fast path row; RP2350 `.data` after output metering moved into `output_pairs_meter_finalize()`). Previously 2026-11-20 (Hardware table: RP2350 `.data` and free heap after the upmixer surround rework; spectrum analyser row: float kernel unscaled; Hardware table: free-heap row after the loudness table removal; slot rings 4 KB each). Previously 2026-11-19 (Hardware table: `.data` rows after the EQ kernel rewrite). Previously 2026-11-18 (Hardware table: pin claims row). Previously 2026-11-16 (Hardware table: `.data` and free-heap rows at the 1.1.7 beta 1 figures, vendor command count row). Previously 2026-11-15 (Hardware table: VREG is 1.15 V on both, output latency row adds the 1 ms option; DSP Processing table: EQ channels 7/17, input EQ row renamed from master). Previously 2026-11-02 (Control Surfaces nouns row: caps v22, 81 nouns). Previously 2026-10-26 (Control Surfaces nouns row: caps v21, 80 nouns). Previously 2026-10-23 (DSP Processing table: sample full scale and metering row; Hardware table: slot rings halved to 8 KB, output latency row). Previously 2026-10-17 (Hardware table: USB input bit depth and AS alt rows add alt 6 = 4ch/24-bit). Previously, 2026-10-11 (Hardware table: RAM rows re-measured after the SPDIF RX overhaul merge, slot ring row). Previously, 2026-10-10 (Volume leveller row: safety limiter; Delay Lines table: RP2040 ring is 1024 samples, cap is ring size minus one; 2026-09-28: Control Surfaces nouns row: caps v20, 79 nouns; tube preamp row: drive -30..+24 dB, RP2040 shifted domains, kernel 1,196 B; 2026-09-22: output limiter row; wire/slot row V32/V39; 2026-09-20: tube preamp row: damping-factor output stage replaces the transformer stage, RP2040 bell clamps and multiply count; 2026-09-19: tube preamp row: RP2040 shaper-output clamp and kernel size 1,212 B; current .data and free-RAM figures; 2026-09-18: tube preamp row: RP2040 operand-sum headroom rule, multiply count and kernel size; wire/slot row V31/V38; 2026-09-12: 6th-order bass bands and RAM cost; continuous bass bank, V3 and RAM costs; spectrum analyser row: FFT ceiling lowered to 1024 points, RAM cost revised; 2026-09-07: LF FFT replaced by continuous bank, protocol V2 and RAM cost; 2026-09-04: subharm row: new parameters and per-output sub meter; wire/slot row V30/V37)*
 
 ### Hardware
 
@@ -2674,7 +2678,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | Cold code location (control paths, storage, coeff design, init) | Flash XIP | Flash XIP |
 | RAM code+rodata+data (.data) | 75,268 B of the 77,312 B budget (2026-11-23, spatializer; budget raised 4.5 KB from 72,704 B) | 103,976 B of the 105,472 B budget (2026-11-23, spatializer; budget raised 3 KB from 102,400 B) |
 | Free heap (`__HeapLimit - end`; nothing allocates at runtime) | 70,948 B (2026-11-20) | 136,332 B (2026-11-20, after the upmixer surround rework; most of the 8 KB drop is `.bss` alignment padding after `.data` crossed a boundary) |
-| Vendor commands (release build) | 203 in 12 pages (2026-11-23, after the spatializer; the page map's totals). The 29 RP2350-only commands (ADAT RX and TX, upmixer) are not built and answer `VC_ERR_UNKNOWN` | 234 in 12 pages (2026-11-23). Both platforms: the 15 `DIAG` commands exist only in bench builds that set their flag (6 of them `DSPI_WIRECAP`, whose capture buffer is 96 KB on RP2350 and 16 KB on RP2040) |
+| Vendor commands (release build) | 203 in 12 pages (2026-11-23, after the spatializer; the page map's totals). The 29 RP2350-only commands (ADAT RX and TX, upmixer) are not built and answer `VC_ERR_UNKNOWN` | 234 in 12 pages (2026-11-23). Both platforms: the 18 `DIAG` commands exist only in bench builds that set their flag (6 of them `DSPI_WIRECAP`, whose capture buffer is 96 KB on RP2350 and 16 KB on RP2040; 3 of them `DSPI_CLOCK_DIAG` with `DSPI_VCXO_SHAPED`, RP2350 only) |
 | Output slot staging (`slot_stage`, BSS) | 2 × 1.5 KB | 4 × 1.5 KB |
 | Output slot rings | 2 × 4 KB `.slot_rings` at the top of RAM (512 frames, 2026-11-20) | 4 × 4 KB `.slot_rings` at the top of RAM (512 frames, 2026-11-20) |
 | Silent I2S slot fast path | Library support only; the pipeline never flags a slot silent | Disabled pairs on I2S slots skip their ring stores once the ring is all pad (2026-11-21) |
@@ -2760,7 +2764,7 @@ Core 1 runs sigma-delta modulation loop, popping samples from ring buffer and wr
 | I2S RX channels | CH4, CH5 (1 pair, data+reload; shared with SPDIF RX) | CH5 + CH6 + CH7 + CH8 (up to 4 pairs; one ENDLESS-mode channel each, no reload; pair 0's CH5 shared with SPDIF RX) |
 | I2S RX IRQ | IRQ-less (chained ring) | IRQ-less (ENDLESS rings) |
 | PDM channel | Dynamic (`dma_claim_unused_channel`) | Dynamic (`dma_claim_unused_channel`) |
-| Soft VCXO channels | CH10 (PULSE) + CH11 (PACE), DMA timer 0, IRQ-less | CH11 (PULSE) + CH12 (PACE), DMA timer 0, IRQ-less |
+| Soft VCXO channels | CH10 (PULSE) + CH11 (PACE), DMA timer 0, IRQ-less | CH11 (PULSE) + CH12 (PACE), DMA timer 0, IRQ-less. `DSPI_VCXO_SHAPED` (2026-11-24): CH11 PIO1 RX3 to `fbdiv_int`, CH12 byte ring to PIO1 TX3, both ENDLESS, high priority, IRQ-less; DMA timer unused |
 | ADAT output channels | N/A | CH13 (data) + CH14 (control), IRQ-less chained ring |
 | ADAT input channel | N/A | CH15 (RX ring, ENDLESS mode, no IRQ, no reload channel) |
 
@@ -2800,10 +2804,22 @@ is unclaimed cannot race a `dma_claim_unused_channel` consumer (PDM).
 | I2S slave-pair BCK/LRCLK default (SPLIT clock-pin mode; `PICO_I2S_BCK_PIN_SLAVE`) | GPIO 12/13 | GPIO 26/27 |
 | Input clock tracking | Soft VCXO (ppm sys_clk trim; see "Soft VCXO") | Soft VCXO (ppm sys_clk trim; see "Soft VCXO") |
 | Soft VCXO PWM pacer slice (no GPIO) | Slice 7 (reserved) | Slice 8 (reserved) |
+| Shaped soft VCXO (`DSPI_VCXO_SHAPED`, 2026-11-24) | Not built: the option falls back to the PWM-paced actuator (`config.h`) | Crystal-paced pulses: PIO1 SM3 pacer on GPIO 25 (CLK_GPOUT3 = XOSC, heartbeat LED compiled out), second-order three-level sigma-delta, 8 KB byte ring; requires the 12 MHz / N = 128 / 307.2 MHz plan. See "Shaped Soft VCXO" |
 
 ---
 
 ## Memory Layout
+
+> **Shaped soft VCXO ring (2026-11-24).** `DSPI_VCXO_SHAPED` builds only
+> (RP2350); default builds are unchanged. `vcxo_ring` (8,192 B, 8 KB-aligned,
+> DMA-read through flash blackouts) is a `.bss.aligned.vcxo_ring` section, so
+> it joins the input capture arena and the PDM buffer in `.bss_aligned`
+> (40,960 to 49,152 B) with no padding. Against the same tree built without
+> the option: release `.bss_aligned` +8,192 B, `.bss` +12 B, `.data` +416 B,
+> free heap 137,520 to 128,804 B; with `DSPI_CLOCK_DIAG` as well, `.bss`
+> +76 B, `.data` +600 B, free heap 136,664 to 127,884 B. `check_ram_placement.py` requires `vcxo_ring` and
+> `vx_fill` in RAM in any ELF that defines `vcxo_ring`, and no longer asks for
+> the PWM actuator's `fbdivs` words there.
 
 > **Math helpers kept in flash (2026-11-23).** Both platforms. `PICO_FLOAT_IN_RAM`,
 > `PICO_DOUBLE_IN_RAM` and the whole-archive libgcc/libm RAM placement put
@@ -4715,12 +4731,12 @@ Hosts gate features on page revisions and command bits, never on the firmware ve
 A float SET handler refuses a NaN or infinite field with `VC_ERR_VALUE` before it touches any state. That covers ROUTE (matrix gain, output gain, output and channel delay, preamp, master and user volume), `FILTER.BAND` (freq, Q, gain), the leveller and loudness floats on DYN, and the crossfeed, subharmonic, psychoacoustic bass and upmixer floats on FX. Finite out-of-range values are still clamped. The `DYN.LIMITER_*` and `FX.TUBE_*` handlers refuse NaN and rely on the subsystem setter clamping infinity to the range end. `MEAS.SIGGEN_CONFIG` is sanitised by `siggen_stage_config()`. `STORE.ALL_PARAMS` applies floats as the bulk loader always has, with a finite check on master volume only.
 
 ### Platform and build-conditional commands
-*Last updated: 2026-11-22 (RP2350-only count: upmixer v2 commands). Previously 2026-11-22 (RP2350-only count: `FX.UPMIX_ROUTE`). Previously 2026-11-20 (`DIAG.WIRECAP_*`). Previously 2026-11-19 (`DIAG.EQ_PROF`, `DIAG.EQ_PROF_RESET_MIN`)*
+*Last updated: 2026-11-24 (`DIAG.VCXO_*`). Previously 2026-11-22 (RP2350-only count: upmixer v2 commands). Previously 2026-11-22 (RP2350-only count: `FX.UPMIX_ROUTE`). Previously 2026-11-20 (`DIAG.WIRECAP_*`). Previously 2026-11-19 (`DIAG.EQ_PROF`, `DIAG.EQ_PROF_RESET_MIN`)*
 
 A command outside its platform or build is absent from the table. A request for it is `VC_ERR_UNKNOWN`, and `SYS.PAGE_COMMANDS` does not list it.
 
 - **RP2350 only (29).** `INPUT.ADAT_RX_*` (4), `OUTPUT.ADAT_TX_*` (3) and the upmixer (`FX.UPMIX_*`, 22).
-- **Bench builds only (`DIAG`, 15).** `DIAG.CLOCK_DIAG` needs `DSPI_CLOCK_DIAG` (tested with `#if`, because `config.h` defines it as 0 when off), `DIAG.LOOPBACK_STATS` needs `DSPI_LOOPBACK`, the five `DIAG.LOOP_PROF_*` commands need `DSPI_LOOP_PROF`, and `DIAG.EQ_PROF` / `DIAG.EQ_PROF_RESET_MIN` need `DSPI_EQ_PROF` (RP2350 EQ cascade cycle profiler; see "EQ kernel arithmetic"), and the six `DIAG.WIRECAP_*` commands (0x50 to 0x55) need `DSPI_WIRECAP` (see "Wire-Capture Test Rig"). In a release build the DIAG page is empty, so it is not implemented and `SYS.PAGE_LIST` omits it.
+- **Bench builds only (`DIAG`, 18).** `DIAG.CLOCK_DIAG` needs `DSPI_CLOCK_DIAG` (tested with `#if`, because `config.h` defines it as 0 when off), `DIAG.LOOPBACK_STATS` needs `DSPI_LOOPBACK`, the five `DIAG.LOOP_PROF_*` commands need `DSPI_LOOP_PROF`, and `DIAG.EQ_PROF` / `DIAG.EQ_PROF_RESET_MIN` need `DSPI_EQ_PROF` (RP2350 EQ cascade cycle profiler; see "EQ kernel arithmetic"), and the six `DIAG.WIRECAP_*` commands (0x50 to 0x55) need `DSPI_WIRECAP` (see "Wire-Capture Test Rig"). The three `DIAG.VCXO_*` commands (0x60 to 0x62) need `DSPI_CLOCK_DIAG` and `SOFT_VCXO_SHAPED`, so only an RP2350 build with `DSPI_VCXO_SHAPED` has them (see "Shaped Soft VCXO"). In a release build the DIAG page is empty, so it is not implemented and `SYS.PAGE_LIST` omits it.
 
 The `.def` files hold 211 commands. A release build has 12 pages with 181 commands on RP2040 and 204 on RP2350.
 
@@ -4795,7 +4811,7 @@ This section is the map of the command space. The per-command reference (number,
 A command is written `PAGE.NAME` (for example `FILTER.BAND`), and its 16-bit ID is `(page << 8) | cmd`.
 
 ### Page map
-*Last updated: 2026-11-23 (FX: spatializer commands, revision 3). Previously 2026-11-22 (FX: upmixer v2 commands). Previously 2026-11-22 (FX: `UPMIX_ROUTE`, revision 2). Previously 2026-11-20 (DIAG: six `WIRECAP_*` commands, bench builds only). Previously 2026-11-19 (DIAG: `EQ_PROF`, `EQ_PROF_RESET_MIN`, bench builds only); 2026-11-18 (pin availability GETs on INPUT, OUTPUT, CS, XPORT and CLOCK; SYS.PIN_STATE and SYS.PIN_CLAIMS); 2026-11-16*
+*Last updated: 2026-11-24 (DIAG: three `VCXO_*` commands, bench builds only). Previously 2026-11-23 (FX: spatializer commands, revision 3). Previously 2026-11-22 (FX: upmixer v2 commands). Previously 2026-11-22 (FX: `UPMIX_ROUTE`, revision 2). Previously 2026-11-20 (DIAG: six `WIRECAP_*` commands, bench builds only). Previously 2026-11-19 (DIAG: `EQ_PROF`, `EQ_PROF_RESET_MIN`, bench builds only); 2026-11-18 (pin availability GETs on INPUT, OUTPUT, CS, XPORT and CLOCK; SYS.PIN_STATE and SYS.PIN_CLAIMS); 2026-11-16*
 
 | Page | Mnemonic | Holds | Commands, RP2040 / RP2350 release | Source |
 |---|---|---|---|---|
@@ -4815,10 +4831,10 @@ A command is written `PAGE.NAME` (for example `FILTER.BAND`), and its 16-bit ID 
 | 0x0D-0x7F | | Unallocated, for future subsystems | | |
 | 0x80-0xDF | | Reserved | | |
 | 0xE0-0xEF | | Private use for forks and ports, never allocated upstream | | |
-| 0xF0 | `DIAG` | Bench and diagnostic commands with no stability promise | 0 / 0 (15 in bench builds) | `pages/diag.def`, `vc_page_diag.c` |
+| 0xF0 | `DIAG` | Bench and diagnostic commands with no stability promise | 0 / 0 (18 in bench builds) | `pages/diag.def`, `vc_page_diag.c` |
 | 0xF1-0xFF | | Reserved | | |
 
-Every page is at revision 1 except FX, at 3 since 2026-11-23 (`FX.SPATIAL_CONFIG` and `FX.SPATIAL_ENABLE` to `FX.SPATIAL_TRIM`, 0xB0 to 0xBA, both platforms) and at 2 since 2026-11-22 (upmixer v2: `FX.UPMIX_ROUTE`, `FX.UPMIX_CONFIG_EXT` and `FX.UPMIX_SOURCE_A` to `FX.UPMIX_BACK_OFFSET` added, the config commands profile-addressed, `FX.UPMIX_STATUS` grown to 32 bytes). Totals: 203 commands on RP2040 and 234 on RP2350 in release builds, 251 in the `.def` files (2026-11-23: +11 spatializer; 2026-11-19: +2 bench-only `DIAG.EQ_PROF*`; 2026-11-20: +6 bench-only `DIAG.WIRECAP_*`, listed below; 2026-11-22: +6 RP2350-only upmixer commands). Paths are under `firmware/DSPi/vendor/`.
+Every page is at revision 1 except FX, at 3 since 2026-11-23 (`FX.SPATIAL_CONFIG` and `FX.SPATIAL_ENABLE` to `FX.SPATIAL_TRIM`, 0xB0 to 0xBA, both platforms) and at 2 since 2026-11-22 (upmixer v2: `FX.UPMIX_ROUTE`, `FX.UPMIX_CONFIG_EXT` and `FX.UPMIX_SOURCE_A` to `FX.UPMIX_BACK_OFFSET` added, the config commands profile-addressed, `FX.UPMIX_STATUS` grown to 32 bytes). Totals: 203 commands on RP2040 and 234 on RP2350 in release builds, 254 in the `.def` files (2026-11-24: +3 bench-only `DIAG.VCXO_*`, listed below; 2026-11-23: +11 spatializer; 2026-11-19: +2 bench-only `DIAG.EQ_PROF*`; 2026-11-20: +6 bench-only `DIAG.WIRECAP_*`, listed below; 2026-11-22: +6 RP2350-only upmixer commands). Paths are under `firmware/DSPi/vendor/`.
 
 **`DSPI_WIRECAP` DIAG commands (2026-11-20).** Payload layouts are in `Documentation/Features/wirecap_test_rig.md`.
 
@@ -4830,6 +4846,14 @@ Every page is at revision 1 except FX, at 3 since 2026-11-23 (`FX.SPATIAL_CONFIG
 | 0x53 | `WIRECAP_CLKGEN` | SET 5 B / GET 24 B | I2S clock generator on GPIO 24/25: enable and rate; status |
 | 0x54 | `WIRECAP_CLKGEN_GLITCH` | SET 2 B | Inject one clock glitch: kind, cells |
 | 0x55 | `WIRECAP_RATE` | SET 4 B | Output rate change through the host rate path (USB input only) |
+
+**Shaped soft VCXO DIAG commands (2026-11-24).** Need `DSPI_CLOCK_DIAG` and `DSPI_VCXO_SHAPED` (RP2350). Payload layouts are in `Documentation/Features/soft_vcxo_spec.md` section 8.7.
+
+| Cmd | Name | Dir | Purpose |
+|---|---|---|---|
+| 0x60 | `VCXO_STATUS` | GET 104 B | `SoftVcxoShapedDiag`: state, delay, force, counters, modulator totals, fc0 totals |
+| 0x61 | `VCXO_FORCE` | SET 5 B / GET 5 B | u8 enable, f32 ppm (±1000): run a fixed trim in place of the servo |
+| 0x62 | `VCXO_DELAY` | SET 1 B / GET 1 B | Pacer delay d, 40 to 59, default 50; a running pacer parks and restarts on it |
 
 ### Conventions
 *Last updated: 2026-11-16*
@@ -5585,7 +5609,9 @@ Every audio output clock and the input servo's feed-forward reference derive fro
 The rule a future edit must not break: never compute an output divider independently. Independent rounding gives clocks different ppm errors, and a divider ratio error is a rate offset between outputs that the soft VCXO (a common sys_clk trim) cannot correct. At 307.2 MHz the nearest-rounded base equals the earlier ceiling form at every supported rate (44.1, 48, 88.2, 96, 192 kHz), so only MCK at 44.1 kHz changed. The helper and its name match the `overclock` branch.
 
 ## Soft VCXO
-*Last updated: 2026-11-05 (authority raised to ±1000 ppm; RP2040 PLL response bench-verified). Previously 2026-10-11 (clock plan read from pll_sys at init; any sys_clk works)*
+*Last updated: 2026-11-24 (pointer to the shaped actuator prototype). Previously 2026-11-05 (authority raised to ±1000 ppm; RP2040 PLL response bench-verified); 2026-10-11 (clock plan read from pll_sys at init; any sys_clk works)*
+
+This section describes the PWM-paced actuator that every release build uses. An RP2350 prototype with crystal-paced, noise-shaped pulses replaces it behind the same API when built with `DSPI_VCXO_SHAPED`; see "Shaped Soft VCXO" below.
 
 The single actuator behind input clock tracking (SPDIF input, ADAT slave-clock mode, I2S slave). When the device follows an external audio clock its output clocks must match the source's rate to keep the consumer buffers centred. Previously each output type's PIO divider (and MCK, and ADAT TX) was trimmed independently; that had coarse steps (one 16.8 fractional LSB is 156 ppm at 48 kHz), many actuators to coordinate, and left PDM untracked. The soft VCXO replaces all of it with one knob: it pulls the system PLL by ppm amounts, exactly like warping a crystal. Every output clock (SPDIF TX, internally clocked I2S TX, MCK, ADAT TX, PDM) derives from `sys_clk`, so they all move together and inter-slot sample alignment is preserved by construction; there is no per-output write to get wrong and no divider rounding to coordinate. Files: `soft_vcxo.c/h`. Full spec: `Documentation/Features/soft_vcxo_spec.md`. Status: mechanism bench-proven standalone on both platforms (RP2040 since 2026-11-05, see "RP2040 bench profile" below); full-firmware behavior HW-untested.
 
@@ -5622,6 +5648,25 @@ Not measured: the sub-pulse phase transient, which needs a scope or a loopback p
 RP2350 slice 8 has no bondable GPIO on RP2350A; RP2040 slice 7 covers GPIO 14/15, and the control-surface PWM LED bind rejects pins on the reserved slice with `CS_STATUS_PWM_CONFLICT` (both platforms). The RP2350 I2S RX input rings were converted from data+reload pairs to single ENDLESS-mode channels (5-8) to free the VCXO's channels (11-12); see "I2S Input" and the "DMA" table.
 
 **Invariants.** Slot alignment is unaffected by design: a sys_clk trim scales every output clock identically and no start/stop sequencing changed. `clock_get_hz(clk_sys)` intentionally keeps reporting the nominal 307.2 MHz (the trim is a closed-loop correction, not a reported frequency; do not "fix" call sites for it). USB (clk_usb from pll_usb) and `time_us_*` rate measurement (clk_ref from XOSC) are independent of the trim, so the servo loop is well-posed. clk_peri (UART) and the flash clkdiv shift by the < 1000 ppm trim, orders of magnitude inside tolerance. The servo actuation lives in `input_servo.c` (see "Clock Servo"); this module is just the actuator.
+
+## Shaped Soft VCXO (`DSPI_VCXO_SHAPED`, RP2350 prototype)
+*Last updated: 2026-11-24 (first hardware run in the full firmware). Previously 2026-11-24 (default d 50 and the byte-fed window; 240-byte lead after a start or replay; overtaken counter); 2026-11-24 (added)*
+
+**Hardware status (2026-11-24, one RP2350 board, USB input, forced trims).** Realised trim within 0.015 ppm of the command from ±0.02 to ±1000 ppm at d = 50 (fc0 averaging, 0.005 ppm per 10 s window). Miscounts visible at d = 40 to 42 only, idle and under heavy DSP load with USB streaming. No audio disturbance attributable to the actuator, 0 overtaken fills and no replays outside flash writes in about an hour of running; worst refill gap 939 us (a 4 KB ring would have held). Fill cost 28.2 cycles per decision, 3.67 % of core 0 (DWT, diag build). The servo path is untested: no S/PDIF, ADAT or I2S slave source was connected. Details: `soft_vcxo_spec.md` section 8.8.
+
+An alternative soft VCXO actuator that times every FBDIV pulse from the crystal and drives the pulse train from a noise shaper. Full mechanism, hazards, constants and bench hooks: `Documentation/Features/soft_vcxo_spec.md` section 8. Files: `soft_vcxo_shaped.c`, `soft_vcxo_pacer.pio`.
+
+**Build selection.** CMake option `DSPI_VCXO_SHAPED` (default OFF) defines `DSPI_VCXO_SHAPED`; `config.h` turns that into `SOFT_VCXO_SHAPED`, which is 1 only on RP2350. An RP2040 build with the option keeps the PWM-paced actuator (one `#if` in `config.h`, plus a CMake warning), because its FBDIV pacer has never run on RP2040 hardware. With the option off, `soft_vcxo.c` is unchanged and `soft_vcxo_service()` is an empty inline, so both default builds compile to the same code as before (verified 2026-11-24: identical instruction streams, only the git stamp and the rodata addresses after it differ). `config.h` rejects the option together with `DSPI_WIRECAP` or `DSPI_PLATFORM_PINS`.
+
+**Mechanism.** XOSC is routed to GPIO 25 through CLK_GPOUT3 (12 mA, fast slew). A 6-instruction PIO1 SM3 program waits for each rising edge and, d + 35 cycles later, pushes one byte per slot of 5 XOSC periods (2.4 M slots/s). DMA 11 copies the RX FIFO into `pll_sys` `fbdiv_int`; DMA 12 feeds the TX FIFO with bytes from an 8 KB RAM ring (`vcxo_ring`); both are ENDLESS and high priority. Each byte is 127, 128 or 129. A pulse (129 or 127 for one slot) inserts or removes exactly 5 VCO cycles. A second-order three-level sigma-delta makes one decision per 6 slots (400 k/s; full scale 1302 ppm, clamp ±1000 ppm), and the CPU writes two decisions at a time as three aligned words. The pacer delay d (default 50, accepted 40 to 59) must stay inside the window that keeps every slot at 5 periods; a 4-period FBDIV = 127 excursion can reset the chip. Measured clean window: 44..57 for this byte-fed path, 45..58 for the 32-bit bench variant.
+
+**Command path and cadence.** `soft_vcxo_set_ppm()` only clamps and records the command. `soft_vcxo_service()`, called at the end of every `pipeline_service_producer()` (the four delivery points of each main-loop pass and every blocking spin), runs a small state machine: PARKED (SM off, channels idle, GPOUT3 off, FBDIV exactly 128), start, RUNNING (refill every 200 us or later, at most 1 ms of slots per call), and a two-step park (fill the ring with 128, then 50 us or more later stop the SM, abort both channels, write 128). The ring holds 3.41 ms against worst measured delivery gaps of 0.4 to 0.6 ms. A later refill detects a lapped ring (DMA replayed stale bytes, expected only across flash blackouts), counts it and restarts 240 bytes (100 us) ahead of the DMA. Each fill also re-reads the DMA position afterwards and counts a fill the DMA overtook (`overtaken`, detection only). The pacer runs only while a trim is commanded: `input_servo_reset()`'s explicit 0 parks it, and any nonzero command (parking below 0.001 ppm) runs it. `input_servo.c` is unchanged.
+
+**Cost.** RAM: the 8 KB ring in `.bss_aligned`, a few dozen bytes of statics and 692 B of RAM code in a release build (`vx_fill`, `soft_vcxo_service`, `soft_vcxo_set_ppm`; `.data` +416 B net), free heap 137,520 to 128,804 B. CPU, estimated from the generated code: about 20 cycles per decision, about 3 % of core 0 while a trim runs, a few cycles per delivery while parked.
+
+**Bench hooks** (`DSPI_VCXO_SHAPED` with `DSPI_CLOCK_DIAG`): `DIAG.VCXO_STATUS` (state, counters, modulator, the clock-diag fc0 totals), `DIAG.VCXO_FORCE` (run a fixed trim in place of the servo) and `DIAG.VCXO_DELAY` (set d at run time; a running pacer restarts). Host script: `tools/vcxo_shaped_bench.py`. Bench build directory: `build-rp2350-vcxoshaped` (configured with `-DDSPI_CLOCK_DIAG=ON -DDSPI_VCXO_SHAPED=ON`).
+
+**Invariants.** Output slot alignment is unaffected: only sys_clk moves, every output with it, and no output, ring or reset path changed. `clock_get_hz(clk_sys)` stays nominal, as for the PWM actuator. The actuator stays inert unless the live plan is XOSC 12 MHz, refdiv 1, N = 128, postdiv product 5 and 307.2 MHz.
 
 ---
 

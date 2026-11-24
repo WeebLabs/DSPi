@@ -9,6 +9,7 @@
 #include "loop_prof.h"
 #include "eq_prof.h"
 #include "wirecap.h"
+#include "soft_vcxo.h"
 
 #if DSPI_CLOCK_DIAG
 // Served on every transport. The assert below keeps it inside the UART and I2C reply buffer.
@@ -19,6 +20,44 @@ static VcResult diag_clock_diag_get(VcCtx *c) {
     return VC_OK;
 }
 _Static_assert(sizeof(ClockDiagPacket) <= VC_REPLY_MAX, "DIAG.CLOCK_DIAG exceeds the reply buffer");
+
+#if SOFT_VCXO_SHAPED
+static VcResult diag_vcxo_status_get(VcCtx *c) {
+    SoftVcxoShapedDiag d;
+    soft_vcxo_shaped_get_diag(&d);
+    uint64_t sum;
+    uint32_t gates;
+    clock_diag_fc0_totals(&sum, &gates);
+    d.fc0_sum = sum;
+    d.fc0_gates = gates;
+    vc_reply(c, &d, sizeof(d));
+    return VC_OK;
+}
+_Static_assert(sizeof(SoftVcxoShapedDiag) <= VC_REPLY_MAX, "DIAG.VCXO_STATUS exceeds the reply buffer");
+
+static VcResult diag_vcxo_force_get(VcCtx *c) {
+    float ppm;
+    vc_out_u8(c, 0, soft_vcxo_get_force(&ppm) ? 1u : 0u);
+    vc_out_f32(c, 1, ppm);
+    return VC_OK;
+}
+
+static VcResult diag_vcxo_force_set(VcCtx *c) {
+    float ppm = vc_in_f32(c, 1);
+    if (!(ppm >= -1000.0f && ppm <= 1000.0f)) return VC_ERR_VALUE;   // NaN fails too
+    soft_vcxo_force(vc_in_u8(c, 0) != 0, ppm);
+    return VC_OK;
+}
+
+static VcResult diag_vcxo_delay_get(VcCtx *c) {
+    vc_out_u8(c, 0, soft_vcxo_get_delay());
+    return VC_OK;
+}
+
+static VcResult diag_vcxo_delay_set(VcCtx *c) {
+    return soft_vcxo_set_delay(vc_in_u8(c, 0)) ? VC_OK : VC_ERR_VALUE;
+}
+#endif
 #endif
 
 #ifdef DSPI_LOOPBACK

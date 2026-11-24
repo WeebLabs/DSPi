@@ -29,6 +29,9 @@
 #include "soft_vcxo.h"
 #include "config.h"
 
+// The shaped actuator (soft_vcxo_shaped.c) replaces this whole file.
+#if !SOFT_VCXO_SHAPED
+
 #include "hardware/clocks.h"
 #include "hardware/dma.h"
 #include "hardware/pll.h"
@@ -221,3 +224,5 @@ void soft_vcxo_get_diag(SoftVcxoDiag *out) {
     diag_max_ppm = vcxo_ppm;
 }
 #endif
+
+#endif // !SOFT_VCXO_SHAPED

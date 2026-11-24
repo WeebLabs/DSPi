@@ -1573,6 +1573,9 @@ Every command that has a GET, by page and command number, with its exact reply l
 | `DIAG.WIRECAP_STATUS` | 0xF0 | 0x51 | none | 32 | `DSPI_WIRECAP` |  |
 | `DIAG.WIRECAP_READ` | 0xF0 | 0x52 | index | var | `DSPI_WIRECAP` | min(256, captured bytes - 256 x wValue) |
 | `DIAG.WIRECAP_CLKGEN` | 0xF0 | 0x53 | none | 24 | `DSPI_WIRECAP` |  |
+| `DIAG.VCXO_STATUS` | 0xF0 | 0x60 | none | 104 | `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` |  |
+| `DIAG.VCXO_FORCE` | 0xF0 | 0x61 | none | 5 | `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` |  |
+| `DIAG.VCXO_DELAY` | 0xF0 | 0x62 | none | 1 | `DSPI_CLOCK_DIAG && SOFT_VCXO_SHAPED` |  |
 
 <!-- VC:END GET_LENGTHS -->
 

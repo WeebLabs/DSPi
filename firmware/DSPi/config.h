@@ -342,6 +342,31 @@ typedef struct __attribute__((packed)) {
 #endif
 #define SOFT_VCXO_DMA_TIMER         0
 
+// Shaped soft VCXO (soft_vcxo_shaped.c, soft_vcxo_spec.md section 8), requested
+// by the DSPI_VCXO_SHAPED CMake option. RP2350 only: RP2040 builds the PWM-paced
+// actuator above whatever the option says, because its FBDIV pacer is unproven.
+#if defined(DSPI_VCXO_SHAPED) && PICO_RP2350
+#define SOFT_VCXO_SHAPED            1
+#else
+#define SOFT_VCXO_SHAPED            0
+#endif
+
+#if SOFT_VCXO_SHAPED
+#ifdef DSPI_WIRECAP
+#error "DSPI_VCXO_SHAPED and DSPI_WIRECAP both claim GPIO 25 and PIO1 SM3; build one or the other"
+#endif
+#ifdef DSPI_PLATFORM_PINS
+#error "DSPI_VCXO_SHAPED needs GPIO 25 as the crystal reference; no platform pin map reserves it"
+#endif
+// DMA 11 copies the pacer's RX FIFO into fbdiv_int, DMA 12 feeds it from the
+// byte ring. GPIO 25 carries XOSC on CLK_GPOUT3, so the heartbeat LED is off.
+#define SOFT_VCXO_DMA_WRITER        SOFT_VCXO_DMA_PULSE
+#define SOFT_VCXO_DMA_FEED          SOFT_VCXO_DMA_PACE
+#define SOFT_VCXO_PACER_PIO         pio1
+#define SOFT_VCXO_PACER_SM          3
+#define SOFT_VCXO_REF_PIN           25
+#endif
+
 // Output slot rings: RP2040 lacks ENDLESS-mode DMA, so each slot's
 // free-running ring needs a reload partner channel (slot i uses
 // OUTPUT_SLOT_RELOAD_DMA_BASE + i). RP2350 uses ENDLESS mode, no partner.

@@ -230,6 +230,14 @@ LOOPBACK_EXTRA = [
     ("lb_driver_xfer_cb", True),
 ]
 
+# Shaped soft VCXO builds (DSPI_VCXO_SHAPED, detected by vcxo_ring): its byte
+# ring is read by DMA through flash blackouts, and the PWM actuator's words are gone.
+SHAPED_VCXO_EXTRA = [
+    ("vcxo_ring", False),
+    ("vx_fill", False),
+]
+PWM_VCXO_ONLY = {"fbdivs", "fbdivs_addr"}
+
 # Core-1 roots for the literal-pool scan (Check B2).
 CORE1_ROOTS = ["pdm_core1_entry", "pdm_processing_loop", "eq_worker_loop"]
 
@@ -274,11 +282,13 @@ def detect_platform(path):
 def is_loopback(path):
     return "loopback" in path.lower()
 
-def hot_list(platform, loopback):
+def hot_list(platform, loopback, shaped_vcxo=False):
     entries = list(COMMON)
     entries += RP2350_EXTRA if platform == "rp2350" else RP2040_EXTRA
     if loopback:
         entries += LOOPBACK_EXTRA
+    if shaped_vcxo:
+        entries = [e for e in entries if e[0] not in PWM_VCXO_ONLY] + SHAPED_VCXO_EXTRA
     return entries
 
 def run(cmd):
@@ -409,7 +419,10 @@ def check_elf(elf, baseline):
 
     syms = load_symbols(elf)
     funcs, starts = parse_disasm(elf)
-    entries = hot_list(platform, loopback)
+    shaped_vcxo = bool(match_symbols(syms, "vcxo_ring"))
+    if shaped_vcxo:
+        lines.append("soft VCXO: shaped (vcxo_ring present)")
+    entries = hot_list(platform, loopback, shaped_vcxo)
 
     # --- Check A: hot symbols in RAM ---------------------------------------
     lines.append("[Check A] hot symbols must be RAM-resident")
