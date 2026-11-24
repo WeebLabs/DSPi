@@ -11,6 +11,7 @@
 #define C_RED     GFX_RGB(255, 48, 64)
 #define C_GREY    GFX_RGB(84, 84, 92)
 #define C_DIM     GFX_RGB(34, 34, 40)
+#define C_DIMRED  GFX_RGB(72, 10, 14)       // unlit meter clip zone
 #define C_DARKFILL GFX_RGB(10, 22, 52)
 
 // The four encoder colours of the OP-1, cycled over items.

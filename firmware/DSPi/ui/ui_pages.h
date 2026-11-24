@@ -9,7 +9,7 @@
 #include "ui_types.h"
 #include "gfx.h"
 
-#define UI_BANDS      4
+#define UI_BANDS      8
 #define UI_BAND_ROWS  (UI_DISP_H / UI_BANDS)
 
 void ui_render_band(const UiView *v, int band);

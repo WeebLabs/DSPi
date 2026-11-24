@@ -5,7 +5,7 @@
 #include <math.h>
 #include "../ui.h"
 #include "../ui_hw.h"
-#include "../ssd1331.h"
+#include "../st7735.h"
 #include "../rgb_led.h"
 #include "../gfx.h"
 #include "../ui_board.h"
@@ -76,7 +76,7 @@ void bg_job_register(BgJob *j) { job = j; }
 void bg_run_one(void) { if (job && job->active && job->step(job->ctx, (uint32_t)sim_us + 100)) job->active = false; }
 
 // ---- fake hardware --------------------------------------------------------
-static bool btn_down; static int disp_level_calls, last_level = -1, power_on_calls, power_off_calls;
+static bool btn_down; static int power_on_calls, power_off_calls;
 static int flushes; static const char *dump_name; static bool disp_ready_after_ms_done;
 static uint8_t led_r, led_g, led_b;
 void ui_hw_init(void) {}
@@ -84,10 +84,10 @@ bool ui_hw_button_pressed(uint32_t t) { (void)t; return btn_down; }
 void ui_hw_user_led(bool on) { (void)on; }
 void rgb_led_init(void) {}
 void rgb_led_set(uint8_t r, uint8_t g, uint8_t b) { led_r = r; led_g = g; led_b = b; }
-void ssd1331_begin(void) {}
-bool ssd1331_service(void) { return sim_us > 150000; }
-bool ssd1331_ready(void) { return sim_us > 150000; }
-bool ssd1331_busy(void) { return false; }
+void st7735_begin(void) {}
+bool st7735_service(void) { return sim_us > 150000; }
+bool st7735_ready(void) { return sim_us > 150000; }
+bool st7735_busy(void) { return false; }
 static void dump(const char *name) {
     char p[96]; snprintf(p, sizeof p, "out_ui/%s.ppm", name);
     FILE *f = fopen(p, "wb"); fprintf(f, "P6\n%d %d\n255\n", UI_DISP_W, UI_DISP_H);
@@ -98,9 +98,8 @@ static void dump(const char *name) {
     }
     fclose(f);
 }
-bool ssd1331_flush(const uint16_t *fb) { (void)fb; flushes++; if (dump_name) { dump(dump_name); dump_name = NULL; } return true; }
-void ssd1331_set_level(uint8_t l) { last_level = l; disp_level_calls++; }
-void ssd1331_power(bool on) { if (on) power_on_calls++; else power_off_calls++; }
+bool st7735_flush(const uint16_t *fb) { (void)fb; flushes++; if (dump_name) { dump(dump_name); dump_name = NULL; } return true; }
+void st7735_power(bool on) { if (on) power_on_calls++; else power_off_calls++; }
 
 // ---- driver ---------------------------------------------------------------
 static int fails;
@@ -188,9 +187,9 @@ int main(void) {
     D.preset = 3;
 
     // Idle policy: dim after 30 s, off after 120 s without streaming
-    disp_level_calls = 0; power_off_calls = 0;
+    power_off_calls = 0;
     run_ms(31000);
-    CHECK(last_level == 0, "display should dim after 30 s (last_level=%d)", last_level);
+    CHECK(gfx_get_level() == 0, "display should dim after 30 s (level=%d)", gfx_get_level());
     D.streaming = false;
     run_ms(100000);
     CHECK(power_off_calls == 1, "display should power off after 120 s idle without streaming (%d)", power_off_calls);

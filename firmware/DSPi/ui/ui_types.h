@@ -10,7 +10,7 @@
 
 #define UI_PRESETS        10
 #define UI_EQ_MAX_BANDS   10
-#define UI_EQ_COLS        92
+#define UI_EQ_COLS        152   // EQ graph width in pixels
 #define UI_FX_COUNT       6
 
 typedef enum { UI_PG_NOW, UI_PG_EQ, UI_PG_FX, UI_PG_PRESET, UI_PG_SYS, UI_PG_COUNT } UiPage;
@@ -28,6 +28,8 @@ typedef struct {
     uint8_t preset;      // active preset slot
     uint8_t cpu_pct;
     float   lvl_db[2];   // output peak, dB
+    char    src[13];     // input source: its user name, else "usb"/"spdif"/...
+    bool    src_active;  // signal present (USB streaming / S/PDIF locked)
     bool    fx_on[UI_FX_COUNT];
 } UiLive;
 

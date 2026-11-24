@@ -9,7 +9,7 @@
  * Audio (set as DSPi's defaults in config.h for this board):
  *   PCM5102 BCK  = GPIO26 (D0)    LRCK = GPIO27 (D1, always BCK+1)
  *   PCM5102 DIN  = GPIO28 (D2)
- * Display (SSD1331, SPI0):
+ * Display (ST7735 1.8" 160x128 TFT, SPI0; BL wired on, not driven):
  *   CS = GPIO1 (D7)  SCK = GPIO2 (D8)  DC = GPIO4 (D9)  MOSI = GPIO3 (D10)
  *   RES = GPIO5 (D3)
  * Left free: D4 (GPIO6) and D5 (GPIO7) are the idle S/PDIF slot pins DSPi
@@ -23,8 +23,8 @@
 
 #define UI_FACTORY_I2S_DATA_PIN 28   // PCM5102 DIN (D2); slot 0 factory default in this build
 
-#define UI_DISP_W 96
-#define UI_DISP_H 64
+#define UI_DISP_W 160      // landscape
+#define UI_DISP_H 128
 
 #define UI_DISP_SPI_INST    spi0
 #define UI_PIN_DISP_CS      1
@@ -33,10 +33,22 @@
 #define UI_PIN_DISP_DC      4
 #define UI_PIN_DISP_RST     5
 #ifndef UI_DISP_SPI_HZ
-#define UI_DISP_SPI_HZ      8000000u   // SSD1331 write cycle is specified at 150 ns (6.7 MHz); 8 MHz is what common drivers use
+#define UI_DISP_SPI_HZ      26000000u  // highest clk_peri divide at or below this; verified on this panel. 13 MHz for long wiring
 #endif
-#ifndef UI_DISP_REMAP
-#define UI_DISP_REMAP       0x72       // SSD1331 remap/colour-depth byte: 65k colour, RGB order, common module orientation
+// MADCTL: 0xA0 = MY|MV, landscape, RGB colour order: verified on this
+// module (with the BGR bit, 0x08, orange and red showed as blue). 0x60
+// (MX|MV) rotates 180 degrees; add 0x08 for BGR-order modules.
+#ifndef UI_DISP_MADCTL
+#define UI_DISP_MADCTL      0xA0
+#endif
+// Green-tab modules: 132x162 controller RAM with the glass at (1, 2) in
+// landscape; without this, noise shows along the bottom and right edges.
+// Set both to 0 for red/black-tab modules.
+#ifndef UI_DISP_X_OFS
+#define UI_DISP_X_OFS       1
+#endif
+#ifndef UI_DISP_Y_OFS
+#define UI_DISP_Y_OFS       2
 #endif
 #define UI_DISP_DMA_CH      9          // spare on RP2350 (DSPi map: outputs 0-3, PDM 4, RX 5-8, spare 9-10)
 

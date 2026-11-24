@@ -10,13 +10,14 @@
 #include "ui_pages.h"
 #include "ui_theme.h"
 #include "ui_hw.h"
-#include "ssd1331.h"
+#include "st7735.h"
 #include "rgb_led.h"
 #include "gfx.h"
 
 #include "config.h"
 #include "control_surfaces.h"
 #include "flash_storage.h"
+#include "input_source_names.h"
 #include "usb_audio.h"
 #include "bg_job.h"
 #include "pico/time.h"
@@ -111,6 +112,24 @@ static void refresh_live(void) {
     l->rate_idx  = (uint8_t)(r < 0 ? 0 : r > 2 ? 2 : r);
     int p = (int)noun(CS_NOUN_PRESET, 0, 0);
     l->preset    = (uint8_t)(p < 0 ? 0 : p >= UI_PRESETS ? UI_PRESETS - 1 : p);
+    // Input source: the user's name for it when set, else the built-in one.
+    static const char *const src_names[INPUT_SOURCE_MAX + 1] = { "usb", "spdif", "i2s", "adat",
+                                             "spdif 2", "spdif 3", "spdif 4" };
+    int src = (int)noun(CS_NOUN_INPUT_SOURCE, 0, 0);
+    if (src < 0 || src > INPUT_SOURCE_MAX) src = INPUT_SOURCE_USB;
+    char nm[INPUT_SOURCE_NAME_LEN];
+    if (input_source_name_get((uint8_t)src, nm) && nm[0]) {
+        size_t n = 0;
+        while (n < sizeof l->src - 1 && nm[n]) n++;
+        memcpy(l->src, nm, n);
+        l->src[n] = 0;
+    } else {
+        strncpy(l->src, src_names[src], sizeof l->src - 1);
+        l->src[sizeof l->src - 1] = 0;
+    }
+    l->src_active = (src == INPUT_SOURCE_USB) ? l->streaming
+                  : (src == INPUT_SOURCE_I2S) ? true
+                  : noun(CS_NOUN_SPDIF_LOCK, 0, 0) >= 0.5f;
     float cpu = noun(CS_NOUN_CPU_LOAD, 0, 0);
     l->cpu_pct   = (uint8_t)(cpu < 0 ? 0 : cpu > 100 ? 100 : cpu);
     for (int i = 0; i < UI_FX_COUNT; i++) {
@@ -237,7 +256,7 @@ static void announce(const UiAction *a) {
 
 static void set_disp_level(uint8_t lv) {
     S.view.disp_level = lv & 3;
-    ssd1331_set_level(S.view.disp_level);
+    gfx_set_level(S.view.disp_level);   // backlight not driven: dim the picture
 }
 
 static void handle_action(UiAction a) {
@@ -341,7 +360,7 @@ static void frame_begin(uint32_t t) {
 
 void ui_init(void) {
     memset(&S, 0, sizeof S);
-    S.view.disp_level = 2;
+    S.view.disp_level = 3;              // full; the TFT dims by scaling colours
     S.view.led_level  = 2;
     S.job.id = BG_JOB_UI;
     S.job.step = ui_step;
@@ -350,7 +369,7 @@ void ui_init(void) {
     ui_hw_init();
     rgb_led_init();
     ui_btn_init(&S.btn);
-    ssd1331_begin();
+    st7735_begin();
     for (int i = 0; i < UI_PRESETS; i++) refresh_names();
     refresh_live();
     refresh_eq();
@@ -361,7 +380,7 @@ void ui_init(void) {
 void ui_service(void) {
     if (!S.started) return;
     uint32_t t = now_ms();
-    bool ready = ssd1331_service();
+    bool ready = st7735_service();
 
     // --- input -------------------------------------------------------------
     UiBtnEvent ev = ui_btn_update(&S.btn, ui_hw_button_pressed(t), t);
@@ -369,7 +388,7 @@ void ui_service(void) {
     if (ev != UI_BTN_NONE) {
         bool woke = S.asleep || S.dimmed;
         S.t_active = t;
-        if (S.asleep) { ssd1331_power(true); S.asleep = false; }
+        if (S.asleep) { st7735_power(true); S.asleep = false; }
         if (S.dimmed) { set_disp_level(S.view.disp_level); S.dimmed = false; }
         if (!woke) handle_action(ui_nav_event(&S.nav, ev, S.view.eq.nb, S.view.live.preset));
     }
@@ -381,12 +400,12 @@ void ui_service(void) {
     if ((int32_t)(t - S.t_name) >= (int32_t)UI_NAME_POLL_MS) { S.t_name = t; refresh_names(); }
 
     // --- idle policy -------------------------------------------------------
-    if (S.view.live.streaming || S.view.live.clip) { if (S.asleep) { ssd1331_power(true); S.asleep = false; } }
+    if (S.view.live.streaming || S.view.live.clip) { if (S.asleep) { st7735_power(true); S.asleep = false; } }
     uint32_t idle = t - S.t_active;
     if (!S.asleep && idle > UI_SLEEP_MS && !S.view.live.streaming) {
-        ssd1331_power(false); S.asleep = true;
+        st7735_power(false); S.asleep = true;   // black frame
     } else if (!S.dimmed && !S.asleep && idle > UI_DIM_MS) {
-        ssd1331_set_level(0); S.dimmed = true;
+        gfx_set_level(0); S.dimmed = true;
     }
     update_led(t);
 
@@ -394,10 +413,14 @@ void ui_service(void) {
     if (!ready || S.asleep) return;
     switch (S.phase) {
     case PH_IDLE:
-        if ((int32_t)(t - S.t_frame) >= (int32_t)UI_FRAME_MS) { S.t_frame = t; frame_begin(t); }
+        // Never draw into the framebuffer while DMA is still sending it.
+        if ((int32_t)(t - S.t_frame) >= (int32_t)UI_FRAME_MS && !st7735_busy()) {
+            S.t_frame = t;
+            frame_begin(t);
+        }
         break;
     case PH_FLUSH:
-        if (ssd1331_flush(gfx_fb())) S.phase = PH_IDLE;
+        if (st7735_flush(gfx_fb())) S.phase = PH_IDLE;
         break;
     default:
         break;   // job still working
