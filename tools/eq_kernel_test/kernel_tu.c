@@ -26,6 +26,7 @@
 #define dsp_cascade_block           K(dsp_cascade_block)
 
 #include "dsp_pipeline.c"
+#include "dsp_pair_runs.c"   // out-of-line pair runs dsp_cascade_block calls
 
 void K(svf1)(Filter *f, float *s, uint32_t n)             { dsp_svf_first_order(f, s, n); }
 void K(svf2)(Filter *f, float *s, uint32_t n)             { dsp_svf_second_order(f, s, n); }

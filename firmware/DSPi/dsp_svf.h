@@ -119,29 +119,41 @@ SVF_KERNEL void dsp_svf_second_order(Filter * __restrict f, float * __restrict s
 // both sections in registers, and stored once.  Callers must pair sections of
 // equal dsp_svf_arm_class; each section runs its single-kernel arm verbatim, so
 // a fused sweep is bit-identical to two sequential single sweeps.
-SVF_KERNEL void dsp_svf_second_order_x2(Filter * __restrict f0, Filter * __restrict f1,
-                                           float * __restrict samples, uint32_t count) {
-    SVF_LOAD(f0, 0);
-    SVF_LOAD(f1, 1);
-    float *sp = samples;
-    float x, y, z;
+#define SVF_X2(f0, f1, ...) do { \
+    SVF_LOAD(f0, 0); SVF_LOAD(f1, 1); \
+    float *sp = samples; float x, y, z; \
+    __VA_ARGS__; \
+    SVF_STORE(f0, 0); SVF_STORE(f1, 1) \
+} while (0)
 
-    DspSvfArm arm0 = dsp_svf_arm_class(f0);
-    if (arm0 == DSP_SVF_ARM_PEAK) {
-        SVF_UNROLL4(SVF_S2, SVF_PEAK, SVF_PEAK);
-    } else if (arm0 == DSP_SVF_ARM_LPHP) {
-        bool hp0 = (f0->filter_type == FILTER_HIGHPASS);
-        bool hp1 = (f1->filter_type == FILTER_HIGHPASS);
+SVF_KERNEL void dsp_svf_x2_peak(Filter * __restrict f0, Filter * __restrict f1,
+                                float * __restrict samples, uint32_t count) {
+    SVF_X2(f0, f1, SVF_UNROLL4(SVF_S2, SVF_PEAK, SVF_PEAK));
+}
+
+SVF_KERNEL void dsp_svf_x2_lphp(Filter * __restrict f0, Filter * __restrict f1,
+                                float * __restrict samples, uint32_t count) {
+    bool hp0 = (f0->filter_type == FILTER_HIGHPASS);
+    bool hp1 = (f1->filter_type == FILTER_HIGHPASS);
+    SVF_X2(f0, f1,
         if (!hp0 && !hp1)     SVF_UNROLL4(SVF_S2, SVF_LP, SVF_LP);
         else if (!hp0)        SVF_UNROLL4(SVF_S2, SVF_LP, SVF_HP);
         else if (!hp1)        SVF_UNROLL4(SVF_S2, SVF_HP, SVF_LP);
-        else                  SVF_UNROLL4(SVF_S2, SVF_HP, SVF_HP);
-    } else {
-        SVF_UNROLL4(SVF_S2, SVF_SHELF, SVF_SHELF);
-    }
+        else                  SVF_UNROLL4(SVF_S2, SVF_HP, SVF_HP));
+}
 
-    SVF_STORE(f0, 0);
-    SVF_STORE(f1, 1);
+SVF_KERNEL void dsp_svf_x2_shelf(Filter * __restrict f0, Filter * __restrict f1,
+                                 float * __restrict samples, uint32_t count) {
+    SVF_X2(f0, f1, SVF_UNROLL4(SVF_S2, SVF_SHELF, SVF_SHELF));
+}
+
+// Arm dispatch for one pair. dsp_cascade_block calls the arms itself (see dsp_pair_runs.c).
+SVF_KERNEL void dsp_svf_second_order_x2(Filter * __restrict f0, Filter * __restrict f1,
+                                           float * __restrict samples, uint32_t count) {
+    DspSvfArm arm0 = dsp_svf_arm_class(f0);
+    if (arm0 == DSP_SVF_ARM_PEAK)      dsp_svf_x2_peak(f0, f1, samples, count);
+    else if (arm0 == DSP_SVF_ARM_LPHP) dsp_svf_x2_lphp(f0, f1, samples, count);
+    else                               dsp_svf_x2_shelf(f0, f1, samples, count);
 }
 
 #endif // PICO_RP2350

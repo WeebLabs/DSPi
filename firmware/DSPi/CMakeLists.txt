@@ -9,17 +9,23 @@ set_source_files_properties(
     PROPERTIES COMPILE_FLAGS "-O3"
 )
 
-# dsp_pipeline.c is the only TU emitting the EQ kernels (inlined into
-# dsp_cascade_block). -ffp-contract=off is a measured 14-24% win there; M33
+# dsp_pipeline.c and dsp_pair_runs.c are the only TUs emitting the EQ kernels
+# (dsp_cascade_block and its out-of-line pair runs). -ffp-contract=off is a measured 14-24% win there; M33
 # VFMA occupies the FPU ~2-2.5 cycles vs 1 for VMUL/VADD. subharm.c gets the
 # same flag on a static estimate (~9% fewer cycles, 25 -> 4 VMOVs); confirm on
 # the CPU meter. tube.c gets it on the same static-estimate basis (its shaper
 # is the same shape of short multiply-add chain); confirm on the CPU meter.
 # See "FP contraction" in Documentation/current_architecture.md.
 set_source_files_properties(
-    dsp_pipeline.c subharm.c tube.c
+    dsp_pipeline.c dsp_pair_runs.c subharm.c tube.c
     PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off"
 )
+# RP2350: cortex-m4 tuning gives the EQ loop scheduler FP latencies. Measured per kernel
+# with DSPI_EQ_PROF; see "FP contraction" in current_architecture.md before changing it.
+if (NOT PICO_PLATFORM STREQUAL "rp2040")
+    set_source_files_properties(dsp_pipeline.c dsp_pair_runs.c
+        PROPERTIES COMPILE_FLAGS "-O3 -ffp-contract=off -mtune=cortex-m4")
+endif()
 
 add_executable(DSPi
     adat_input.c
@@ -57,6 +63,7 @@ add_executable(DSPi
     dcp_inline.h
     dsp_biquad.h
     dsp_pipeline.c
+    dsp_pair_runs.c
     dsp_pipeline.h
     dsp_svf.h
     flash_clkdiv.c

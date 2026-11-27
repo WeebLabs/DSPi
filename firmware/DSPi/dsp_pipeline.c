@@ -447,15 +447,28 @@ void dsp_cascade_block(Filter * __restrict sections, uint32_t num_sections,
             Filter *fn = &sections[j];
             if (!fn->first_order && fn->use_svf == f->use_svf) {
                 if (!f->use_svf) {
-                    dsp_biquad_second_order_x2(f, fn, samples, count);
+                    if (f->filter_type == FILTER_PEAKING && fn->filter_type == FILTER_PEAKING) {
+                        dsp_biquad_x2_peak(f, fn, samples, count);
+                    } else if (dsp_biquad_is_lphp(f) && dsp_biquad_is_lphp(fn)) {
+                        dsp_biquad_x2_lphp(f, fn, samples, count);
+                    } else {
+                        i += dsp_biquad_x2_generic_run(f, num_sections - i, samples, count);
+                        continue;
+                    }
                     i = j + 1;
                     continue;
                 }
                 DspSvfArm arm = dsp_svf_arm_class(f);
                 if (arm == dsp_svf_arm_class(fn) &&
                     (DSPI_FUSE_GENERIC_SVF_PAIRS || arm != DSP_SVF_ARM_GENERIC)) {
-                    dsp_svf_second_order_x2(f, fn, samples, count);
-                    i = j + 1;
+                    if (arm == DSP_SVF_ARM_LPHP) {
+                        dsp_svf_x2_lphp(f, fn, samples, count);
+                        i = j + 1;
+                    } else if (arm == DSP_SVF_ARM_PEAK) {
+                        i += dsp_svf_x2_peak_run(f, num_sections - i, samples, count);
+                    } else {
+                        i += dsp_svf_x2_shelf_run(f, num_sections - i, samples, count);
+                    }
                     continue;
                 }
             }
